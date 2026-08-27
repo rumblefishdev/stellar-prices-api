@@ -2,7 +2,7 @@
 id: "0118"
 title: "§5.5 VWAP completion — min_volume_usd source threshold + per-request override"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0007"]
 related_tasks: ["0072", "0039", "0040", "0123", "0144", "0147", "0135"]
 tags: [layer-backend, layer-database, priority-high, effort-medium, milestone-M2, vwap, clickhouse, materialized-view, api]
@@ -21,6 +21,14 @@ history:
       breakdown and the inter-source median-outlier filter; this task covers
       the `min_volume_usd` inclusion threshold and its `?min_volume_usd=`
       request-level override.
+  - date: 2026-08-27
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Promoted to active — starting the threshold pass. Sequenced ahead of
+      [[0217]], which waits on this task because the threshold changes which
+      sources reach the §5.5 median. Evidence base for tuning landed
+      yesterday with [[0123]]'s reconciliation run.
 ---
 
 # §5.5 VWAP completion — min_volume_usd threshold
