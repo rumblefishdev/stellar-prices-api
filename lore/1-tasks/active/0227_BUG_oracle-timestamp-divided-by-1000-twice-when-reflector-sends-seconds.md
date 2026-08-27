@@ -843,11 +843,16 @@ out to be the only thing making a population separable.
       → **`soroban.rs:667` is exempt, on measurement.** 48,311 correct rows, zero
       corrupt, across 5.5 months. Only `oracle-worker` ships. Recorded in
       Implementation above.
-- [ ] New readings stop landing before the oracle window — verified on prod after
+- [x] New readings stop landing before the oracle window — verified on prod after
       deploy, not from the code.
-      🔴 **Read the dedup note below first: after this fix a correct POLL row is
-      no longer separately countable, so this must be captured WITHOUT `FINAL`,
-      promptly after deploy.**
+      → **Verified 2026-08-27, both directions.** POLL rows now land in the live
+      window (`{"symbol":"USDC"}` at 14:40:00 and 14:50:00 UTC — the first
+      correctly-stamped poll rows this writer has ever produced), and the
+      corrupt band did **not** advance: the 14:50 observation is epoch
+      1,787,842,200, which the old code would have filed at 1,787,842 =
+      `1970-01-21 16:37:22`, a NEW slot. `max(timestamp)` below 2020 is still
+      `16:37:21` and the count is unchanged at 6,578. The negative is therefore
+      decisive rather than merely quiet.
 - [x] The 6,372 existing rows are repaired or explicitly written off, with the
       decision recorded.
       → **Decision: DELETE.** All 3,264 per asset are exact `Decimal(38,14)` price
@@ -885,7 +890,9 @@ out to be the only thing making a population separable.
 - [ ] Partition `197001` stays empty after the fix, verified across a live
       oracle-watcher run — and the interaction with [[0083]]'s cleanup worker is
       settled before [[0200]] re-enables it.
-- [ ] Both writable assets confirmed clean (USDC 3, XLM 4).
+- [x] Both writable assets confirmed clean (USDC 3, XLM 4).
+      → Both wrote correct live-window rows in the same pass — asset 3
+      `{"symbol":"USDC"}` and asset 4 `{"symbol":"XLM"}` at 14:40 and 14:50.
       ⚠️ **Amended 2026-08-27 — USDT 111 is struck from this criterion.** Its
       absence is by design, not evidence lost to [[0196]]'s purge:
       `reflector_key_to_identity` has no USDT arm, removed by [[0172]] and gated on
@@ -935,6 +942,64 @@ out to be the only thing making a population separable.
 - [ ] Whether the 13-month retention should have dropped partition `197001` is
       answered. ⚠️ 0086 supplies the likely answer — it *was* being dropped and
       immediately recreated — so confirm that rather than re-deriving it.
+
+## ✅ Verified on prod — 2026-08-27, and the dedup arrived within minutes
+
+Deployed 14:44:08 UTC (EventBridge stack; `CodeSha256` `TW0SHR6L…`, was
+`9pFWYu5g…`). ⚠️ `prices-production-cleanup` was checked either side and stayed
+**DISABLED** — the [[0200]] hazard did not fire.
+
+| check | result |
+|---|---|
+| POLL rows in the live window | `{"symbol":"USDC"}` / `{"symbol":"XLM"}` at 14:40:00 and 14:50:00 |
+| new corrupt slot | **none** — `max(timestamp) < 2020` still `1970-01-21 16:37:21` |
+| corrupt row count | unchanged, 6,578 |
+| rejections logged | 0 (Reflector's unit has not changed; the guard is dormant, as intended) |
+
+🔑 **Why the negative is decisive and not just an absence.** The 14:50
+observation is epoch 1,787,842,200. Under the old code `/1000` files it at
+1,787,842 → `1970-01-21 16:37:22` — a slot that does not exist yet. It still
+does not exist. A quieter formulation ("no new rows appeared") would have been
+consistent with the worker simply not running.
+
+⚠️ **The row count is NOT a usable signal here and nearly misled this check.**
+The corrupt band is a 1000×-compressed image that saturates, so new corrupt rows
+mostly land on *existing* keys. 6,578 today against 3,264×2 = 6,528 measured
+earlier in the week is a difference that proves nothing either way. The slot
+frontier is the instrument; the count is not.
+
+### The RMT collision predicted in review is real, and it is fast
+
+At ~14:52 the 14:40:00 key read as `{"asset":…}` (EVENT). Minutes later the same
+key read as `{"symbol":…}` (POLL). Same row, different survivor, between two
+queries. A `HAVING poll_rows > 0 AND event_rows > 0` census over three hours
+returns **empty** — the two writers never coexist on a key long enough to be
+compared.
+
+So the `raw_data` discriminator that solved this task is gone, exactly as
+predicted, and it took under ten minutes rather than the days assumed when the
+warning was written.
+
+### ⏳ Handed to [[0226]]: the two writers may disagree on PRICE, not just on time
+
+Over 24 h on asset 3 (canonical USDC):
+
+| writer | rows | `price_usd = 1` exactly | range |
+|---|---|---|---|
+| event | 285 | 22 (7.7%) | 0.999900009999 … 1.00019049063001 |
+| poll | **2** | **2 (100%)** | 1 … 1 |
+
+Both surviving poll rows are exactly `1`, against a 7.7% base rate — ~0.6% under
+independence, which is suggestive and **worthless at n = 2**. It is not a
+rendering artefact of `Decimal(38,14)`: the same pass wrote XLM at
+`0.18879783845742`, full scale.
+
+This matters to [[0226]] specifically. That task asks whether the poll write is
+*wholly redundant*; if the two arms report different prices, the answer changes
+from "redundant" to "conflicting", and with the collision above the surviving
+value — the one `usd_rate` snapshots and the enrichment oracle tier prices
+candles from — is arbitrary. **Method to settle it:** re-run the distribution
+query once the poll path has a few dozen surviving rows.
 
 ## Out of scope
 
