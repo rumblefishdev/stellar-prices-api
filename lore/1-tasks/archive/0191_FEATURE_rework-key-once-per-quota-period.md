@@ -852,6 +852,11 @@ records it here rather than in the styling task.
     card's "Rotate once per month if needed". Both now restate decision 5 —
     deactivated at once, nothing issued until the next quota period, and
     "regenerate" rather than "rotate" — in `landing/Faq.tsx` and
-    `landing/DeveloperDashboard.tsx`. Recorded here because the words are
-    this task's, and the Figma frames still carry the old ones: a future
-    re-transcription must not bring them back.
+    `landing/DeveloperDashboard.tsx`. A third, found the same day while
+    driving the dashboard in a browser: the key card's yellow strip ("Key
+    rotation is limited to once per calendar month. Next rotation
+    available: …"), now "Regenerating is limited to once per quota period
+    and issues nothing now. A new key can be issued from: …" in `app.tsx`.
+    Recorded here because the words are this task's, and the Figma frames
+    still carry the old ones: a future re-transcription must not bring them
+    back.
