@@ -2,7 +2,7 @@
 id: "0225"
 title: "GET /ohlcv returns an empty 200 for actively-trading assets that do not trade against the default USDC quote — 12 of 13 remaining 0120 failures"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0120", "0170", "0128", "0210"]
 tags: ["priority-high", "effort-medium", "api", "read-surface", "data-correctness", "scf", "milestone-M2"]
@@ -43,6 +43,19 @@ history:
       regression gate. Close it on 0170's evidence, not on separate work.
       Design question below RESOLVED by ADR 0011: option 3 (convert through a USD
       denomination). Options 1 and 2 are not taken.
+  - date: 2026-08-27
+    status: completed
+    who: okarcz
+    note: >
+      CLOSED on [[0170]]'s implementation, as designed — this task carried the
+      consumer-facing verification and no separate code. Verified through the
+      deployed API after the 08-27 batch deploy: AUD 23 buckets, RON 14, BOL
+      12, EQL 11, `CBIJ…` 30, every priced bucket labelled `traded`. The
+      [[0120]] suite re-run shows no asset returning an empty window (13 did
+      before); all 27 remaining failures attributed to [[0229]], [[0230]] and
+      [[0178]]. ⚠️ EQL's one unpriced bucket is the arm this task exists for:
+      traded but not yet priceable, returned present with null prices —
+      a distinction an empty 200 cannot make.
 ---
 
 # `/ohlcv` reports "no candles" for assets that are trading right now
@@ -128,13 +141,32 @@ returns OHLC in the quote asset), because options 1 and 3 change that.
 
 ## Acceptance Criteria
 
-- [ ] Decision recorded with reasoning, including what the response is
+- [x] Decision recorded with reasoning, including what the response is
       denominated in
-- [ ] `GET /assets/{AUD}/ohlcv` over a recent window returns a non-empty,
+      → [[ADR-0011]], accepted 2026-08-25: `base_currency` **denominates**, it
+      does not filter a quote leg. The response echoes `base_currency`, and
+      every candle carries `method` and `derived` so a consumer can tell a
+      measured rate from a placeholder and an exact close from a derived
+      extreme.
+- [x] `GET /assets/{AUD}/ohlcv` over a recent window returns a non-empty,
       correctly-denominated series **through the deployed API**
-- [ ] The same verified for an asset with NO USDC pair at all (RON or EQL)
-- [ ] An asset that genuinely never traded is still distinguishable from this
+      → **23 buckets**, all `traded`, 30-day window, on
+      `AUD:GBBWRCJSZR…` — the issuer pinned, since 15 AUD issuers exist.
+      Denominated, not filtered: AUD has no USDC leg at all, so a pair filter
+      returns nothing here by construction.
+- [x] The same verified for an asset with NO USDC pair at all (RON or EQL)
+      → RON **14 buckets**, EQL **11** (10 priced + 1 unpriced), BOL **12**,
+      and the top soroban asset `CBIJ…` **30**, all through the deployed API.
+- [x] An asset that genuinely never traded is still distinguishable from this
       case — the whole point; assert both
+      → `ohlcv_never_traded_is_distinguishable_from_unrepresentable` and
+      `ohlcv_unpriced_bucket_is_returned_with_price_fields_absent` assert both
+      arms. Confirmed on prod from the other side: EQL's
+      `2026-08-25T11:00:00Z` bucket comes back **present with null prices and
+      `volume_base: 1`, `trade_count: 2`** — traded but not yet priceable,
+      which an empty series could never express. ⚠️ The prod half evidences the
+      *unrepresentable* arm; the never-traded arm rests on the tests, as no
+      never-traded asset is in the 0120 fixture set.
 - [x] ~~A normal USDC-quoted asset's response is byte-identical to today's~~ —
       **RESTATED, not ticked as written**, in step with [[0170]], which carries
       the same wording and the full reasoning.
@@ -147,8 +179,15 @@ returns OHLC in the quote asset), because options 1 and 3 change that.
       which is what makes this a restatement rather than a quiet pass. A
       shape change that broke existing readers would have made "no regression"
       false, and the criterion should then have FAILED rather than been reworded.
-- [ ] [[0120]]'s ohlcv failures drop to 0 on a re-run, or the remainder is
+- [x] [[0120]]'s ohlcv failures drop to 0 on a re-run, or the remainder is
       attributed to a named task
+      → Re-run 2026-08-27 against the deployed API: **893 pass, 27 fail, 8
+      skip**, and `window is non-empty for a liquid asset` passes for **all 20
+      assets** where 13 failed before. Every remaining failure is attributed:
+      17 × `decimal strings` → [[0230]] (the suite predates ADR 0011 §5's
+      unpriced buckets, and flakes with enrichment lag), 9 × `low <= open,close
+      <= high` → [[0229]] (real: derived extremes round past an exact close),
+      1 × `/price` 404 for USDC → [[0178]] (the third USDC surface).
 
 ## Notes
 

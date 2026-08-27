@@ -2,9 +2,9 @@
 id: "0170"
 title: "GET /assets/{id}/ohlcv returns an empty 200 for 20,481 assets — base_currency filters the quote leg instead of denominating, and blocks 0127's M2 acceptance criterion"
 type: BUG
-status: active
+status: completed
 related_adr: ["0011"]
-related_tasks: ["0165", "0127", "0167", "0168", "0139", "0061", "0040", "0120", "0225", "0178"]
+related_tasks: ["0165", "0127", "0167", "0168", "0139", "0061", "0040", "0120", "0225", "0178", "0229", "0230"]
 tags:
   ["priority-high", "effort-medium", "api", "data-correctness", "read-surface", "scf", "milestone-M2"]
 milestone: 2
@@ -139,6 +139,27 @@ history:
       no longer gated on a design question.
       ACs split below into the M2 gate and follow-on, so this can close on the
       evidence that matters rather than on all 19 at once.
+  - date: 2026-08-27
+    status: completed
+    who: okarcz
+    note: >
+      CLOSED. Shipped in the 08-27 batch deploy (the API Lambda had not been
+      deployed since 08-14) and verified through the deployed API:
+      **2,034 1d buckets for canonical USDC**, 2021-02-01 to 2026-08-27,
+      169 `oracle` / 1,865 `peg` — the split landing exactly where `usd_rate`
+      begins (2026-03-11), which is what separates a working ASOF from an
+      endpoint that merely returns numbers. Tolerance stated as **±0.5%**
+      against a largest measured deviation of **0.1107%**, over the measured
+      buckets only. All five 0120 majors non-empty in USD mode. The [[0120]]
+      suite re-run shows **no asset returning an empty window**, against 13
+      before. 🔴 It took two deploys: the first shipped
+      `SETTINGS join_use_nulls = 1`, which a read-only `prices_reader` may not
+      execute — CH refused it with code 164 and the endpoint answered 500 while
+      every local test passed. Fixed by a sentinel (PR #257) and guarded by a
+      test that runs the endpoint as a `readonly = 1` user. Gate 13/14; 0127's
+      AC 3+4 re-run deferred to [[0127]], which owns it. Spawned [[0229]]
+      (derived O/H/L rounds past an exact `close`) and [[0230]] (the suite
+      rejects ADR 0011 §5 unpriced buckets and flakes with enrichment lag).
 ---
 
 # `/assets/{USDC}/ohlcv` can never return candles
@@ -623,11 +644,20 @@ rather than holding this one open.
 
 ### Gate — blocks [[0127]] AC 3/AC 4 and [[0120]]
 
-- [ ] `GET /assets/{USDC}/ohlcv?timeframe=all` returns a non-empty 1d series
+- [x] `GET /assets/{USDC}/ohlcv?timeframe=all` returns a non-empty 1d series
       spanning the backfilled range, verified **through the deployed API**, not
       only in a test.
-- [ ] The returned USDC/USD closes sit within a stated tolerance of ~$1, and the
+      → **2,034 buckets, 2021-02-01 → 2026-08-27**, `HTTP 200`, through the
+      production API on 2026-08-27 (see "Verified on prod" below). Took two
+      deploys: the first shipped a query production refused.
+- [x] The returned USDC/USD closes sit within a stated tolerance of ~$1, and the
       tolerance is justified (not asserted as exactly `1.0`).
+      → **±0.5%**, measured. Over the **169** `oracle` buckets the extremes are
+      `0.99947311646448` and `1.00110725843914` — a largest deviation of
+      **0.1107%**, so the bound carries ~4.5× headroom. ⚠️ Stated over the
+      MEASURED buckets only: the 1,865 `peg` buckets are exactly `1` *by
+      construction* and cannot fail any tolerance, so including them would make
+      the criterion vacuous.
 - [x] `?base_currency=XLM` returns a non-empty, correctly-oriented series, with
       `volume_*` and `vwap` verified rather than assumed to invert.
       → **Derived, not inverted** (§6). `USDC_usd / XLM_usd` per bucket, so the
@@ -656,7 +686,9 @@ rather than holding this one open.
       differs only by the two additive provenance fields. Verified by
       `ohlcv_merges_sources_and_notes_backfill`, whose expected values are
       unchanged from the pre-0170 fixture.
-- [ ] [[0127]] AC 3 + AC 4 re-run and passing.
+- [ ] [[0127]] AC 3 + AC 4 re-run and passing. **(deferred to [[0127]],
+      which owns them)** — this fix is what unblocked them; the re-run is that
+      task's to schedule and its result is not evidence about this one.
 
 - [x] Response carries provenance distinguishing a measured rate from a
       placeholder.
@@ -668,11 +700,21 @@ rather than holding this one open.
       → **[[ADR-0011]] accepted 2026-08-25**, deciders okarcz + stkrolikiewicz.
       §4's open item (derived O/H/L provenance) settled 2026-08-26: a separate
       flag, `method` unchanged. No design question remains open.
-- [ ] A non-empty USD series for the five 0120 majors (`CBIJ…`, RON, EQL, BOL,
+- [x] A non-empty USD series for the five 0120 majors (`CBIJ…`, RON, EQL, BOL,
       AUD **with its issuer pinned** — 15 AUD issuers exist), through the
       deployed API.
-- [ ] O/H/L derivation documented as *derived, not measured*, and carried in the
+      → All five non-empty on a 30-day window, every priced bucket labelled
+      `traded`: `CBIJ…` 30, AUD (`GBBWRCJSZR…`) 23, RON 14, EQL 11, BOL 12.
+      EQL carries **1 unpriced bucket** (2026-08-25, `volume_base = 1`,
+      `trade_count = 2`) — the guard behaving as designed, a dust bucket
+      returned present-but-price-less rather than dropped.
+- [x] O/H/L derivation documented as *derived, not measured*, and carried in the
       response provenance rather than only in this file.
+      → `Candle::derived` ships in every response, and its doc comment
+      publishes to the OpenAPI document (verified out of
+      `extract_openapi`: *"Whether `open`/`high`/`low`/`vwap` were **derived**
+      rather than measured (ADR 0011 §3)"*). A separate axis from `method`, per
+      §4.
 - [x] `close = 0` guarded, with a test — the clean 30-day sample is not proof
       over all history.
       → `ohlcv_guards_a_zero_close`. Covered separately from `close_usd = 0`
@@ -687,8 +729,10 @@ rather than holding this one open.
       rate **1.25**, an ordinary-looking number no band check could reject.
       ⚠️ The exact threshold is a judgement; the measurement establishes that a
       floor is needed, not that 100 ticks is the uniquely right line.
-- [ ] [[0225]]'s acceptance criteria pass — it is this fix's consumer-facing
+- [x] [[0225]]'s acceptance criteria pass — it is this fix's consumer-facing
       verification and gets no separate implementation.
+      → Closed the same day on the same evidence: the [[0120]] suite re-run
+      shows **no asset returning an empty window**, where 13 did before.
 - [x] A test proves the conversion tracks a **moving** USDC rate, not a constant
       — the measurement below shows the rate genuinely wobbles, so asserting
       `1.0` would be asserting the wrong thing.
@@ -898,6 +942,104 @@ a `readonly = 1` user. Verified non-vacuous: restoring the `SETTINGS` clause
 makes it fail with the exact prod symptom (`500`, `ohlcv peg series failed`)
 while the other 17 tests in the file still pass — which is precisely why this
 reached production.
+
+## ✅ Verified on prod — 2026-08-27
+
+Shipped in the 08-27 batch deploy (the API Lambda had not been deployed since
+08-14), then re-deployed with the read-only fix above. `CodeSha256`
+`bvrPfpYRehco5lL04rEm4xvYVIPvDtuLgYKOszIai3o=`, 15:02 local.
+
+**The USDC self-pair — the defect this task is named for.**
+
+| | |
+|---|---|
+| buckets | **2,034** (1d) |
+| span | **2021-02-01 → 2026-08-27** |
+| `oracle` / `peg` | **169 / 1,865** |
+| measured range | `0.99947311646448` … `1.00110725843914` |
+| largest deviation | **0.1107%** |
+| `derived` | `true` on every bucket |
+
+🔑 **The 169/1,865 split is the load-bearing number, not the 2,034.** `usd_rate`
+begins 2026-03-11, and 03-11 → 08-27 is ~170 days: the boundary falls exactly
+where the observations start. A fallback that silently won everywhere, or one
+that never fired, would both still have produced a non-empty series — this is
+what distinguishes "the ASOF works" from "the endpoint returns numbers".
+
+**The five 0120 majors**, 30-day window, USD mode — the population the wider
+reading of this task serves (20,481 assets), all previously an empty `200`:
+
+| asset | buckets | methods |
+|---|---|---|
+| `CBIJBDNZNF…` (soroban) | 30 | 30 `traded` |
+| AUD `GBBWRCJSZR…` | 23 | 23 `traded` |
+| RON `GDE6EMCCVP…` | 14 | 14 `traded` |
+| BOL `GDOV2XVGNQ…` | 12 | 12 `traded` |
+| EQL `GBKIUHEKEC…` | 11 | 10 `traded` + **1 unpriced** |
+
+`traded` throughout is the expected label: these are XLM-quoted assets
+denominated from `close_usd`, so they never touch the peg path.
+
+⚠️ **Two measurement traps worth keeping**, both of which produced a wrong
+number before a right one:
+
+1. A tolerance computed over the whole series is **vacuous** — 92% of the
+   buckets are `peg`, exactly `1` by construction. Filter to `method = 'oracle'`
+   first.
+2. `jq`'s `//` yields *all truthy outputs of the left side* and only falls
+   through when there are none, so `[.data[].method // "unpriced"]` silently
+   **drops** null methods instead of relabelling them. EQL read as 10 methods
+   over 11 buckets; the missing one was the unpriced bucket.
+
+## Close-out — 2026-08-27
+
+**Gate met: 13 of 14, one deferred to the task that owns it.**
+
+### The verification that closed it
+
+The [[0120]] conformance suite, re-run against the deployed API after this
+shipped: **893 pass, 27 fail, 8 skip** — and the shape of the failures is the
+result, not the count. `window is non-empty for a liquid asset` passes for
+**all 20 assets**; before this fix, 13 failed it. Every remaining failure is a
+different defect, each now named:
+
+| failures | check | disposition |
+|---|---|---|
+| 17 | `all OHLCV values are decimal strings` | **[[0230]]** — the suite predates ADR 0011 §5's unpriced buckets, and flakes with enrichment lag |
+| 9 | `low <= open,close <= high` | **[[0229]]** — real: derived extremes round past an exact `close` |
+| 1 | `/price` returns 200 (got 404 for USDC) | **[[0178]]** — the third USDC surface, untouched here by design |
+
+### Issues encountered
+
+1. **The first prod deploy shipped a query production refuses.** Full account in
+   the section above: `SETTINGS join_use_nulls = 1` is inadmissible for a
+   read-only user, ClickHouse rejected it at `ExceptionBeforeStart` with code
+   164, and the endpoint answered `500`. Every local test passed because the
+   local user is not read-only. Fixed in PR **#257**; guarded by
+   `ohlcv_peg_series_answers_for_a_readonly_user`.
+2. **The second deploy was a no-op and reported success.** `make
+   deploy-production-compute` ships whatever is in `target/lambda/` and does not
+   build the Rust, so a skipped rebuild produced "no differences" — which reads
+   exactly like a clean deploy. Only `CodeSha256` distinguishes them.
+
+### Design decisions
+
+**Emerged**
+
+1. **Sentinel over setting.** The no-match test is `ifNull(r.meth, '') = ''`
+   rather than a NULL check under `join_use_nulls = 1`. Chosen over asking BE
+   for `readonly = 2` on `prices_reader`: that loosens a read-only user for one
+   query's convenience, needs their change and a restart on an XML-managed user,
+   and would leave this query depending on a permission we do not control. The
+   sentinel holds under either setting, so the query stops depending on a server
+   default at all.
+2. **Tolerance stated over the measured buckets only.** ±0.5% against a largest
+   observed deviation of 0.1107%. Including the 1,865 `peg` buckets — exactly
+   `1` by construction — would have made the criterion unfalsifiable.
+3. **The two new defects were spawned, not folded in.** [[0229]] and [[0230]]
+   were found by this task's own verification run, but neither is this defect
+   and both are independently testable. Holding 0170 open for them would repeat
+   the pattern the task's own AC split was written to avoid.
 
 ## Out of scope
 
