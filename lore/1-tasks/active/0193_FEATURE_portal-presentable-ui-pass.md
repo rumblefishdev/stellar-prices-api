@@ -44,7 +44,8 @@ this point; this slice is about it being legible.
 ## Context
 
 The rule that keeps this task honest: **it re-decides no copy.** The wording of
-the two eligibility refusals is [[0189]]'s, the `delete-key` modal is [[0191]]'s,
+the two eligibility refusals is [[0189]]'s, the `regenerate-key` modal is [[0191]]'s
+(phrase amended there on 2026-08-27, decision 41, after this slice changed it),
 the revoke confirmation and its "no replacement is issued" line are [[0191]]'s (0192 merged into it),
 the `GetUsage` lag line is [[0188]]'s. If this slice finds one of them wrong, fix
 it in the owning task rather than quietly here — otherwise the reason behind the
