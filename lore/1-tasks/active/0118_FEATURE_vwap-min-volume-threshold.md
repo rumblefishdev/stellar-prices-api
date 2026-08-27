@@ -29,6 +29,20 @@ history:
       [[0217]], which waits on this task because the threshold changes which
       sources reach the §5.5 median. Evidence base for tuning landed
       yesterday with [[0123]]'s reconciliation run.
+  - date: 2026-08-27
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Implementation complete on feat/0118_vwap-min-volume-threshold: MV
+      threshold (strict > $100, before the liveness window and the median) +
+      API `?min_volume_usd=` override via option (a). 4 new MV fixtures
+      (attack fixture verified to fail pre-threshold), 6 dto unit tests,
+      CH-less 400 tests, end-to-end override IT with byte-identical default
+      path. All suites green locally. Remaining before completion: PR review,
+      prod rollout per the 0118 runbook (blast-radius counterfactual +
+      post-apply verification, incl. the real-asset narrowing AC), and the
+      0123 reconcile-script note about threshold exclusions if 0128 wants a
+      fresh green run.
 ---
 
 # §5.5 VWAP completion — min_volume_usd threshold
@@ -114,20 +128,96 @@ threshold to the shape 0072 leaves behind. Sequencing them avoids two
 
 ## Acceptance Criteria
 
-- [ ] Sources with trailing-24h USD volume below the system default are excluded
-      from `vwap_24h` weighting and absent from the `sources` JSON object
-- [ ] `price_usd` and `volume_24h_usd` are demonstrably **unaffected** by the
-      threshold (regression test with a below-threshold source present)
+- [x] Sources with trailing-24h USD volume below the system default are excluded
+      from `vwap_24h` weighting and absent from the `sources` JSON object —
+      **`current.sql` per_source_kept + fixtures 17/18/20 in `current_mv_it.rs`**
+- [x] `price_usd` and `volume_24h_usd` are demonstrably **unaffected** by the
+      threshold (regression test with a below-threshold source present) —
+      **fixture 17 pins price_usd = the dust venue's own close; fixture 20 pins
+      the unfiltered volume total; the override IT re-checks both API-side**
 - [ ] `?min_volume_usd=` accepted on `GET /assets/{id}/price` and `GET /assets`;
       a higher value provably narrows the source set for at least one real
-      multi-source asset
-- [ ] Invalid `min_volume_usd` values return `400` with the standard error body
-- [ ] Default-path responses are byte-identical whether the param is omitted or
-      explicitly set to the system default
-- [ ] MV redeploy runbook step documented (DROP + re-CREATE, expected staleness
-      window, verification query)
-- [ ] Test proving a dust-volume source cannot move `vwap_24h` — the actual
-      defect this closes
+      multi-source asset — **code + seeded-row IT done
+      (`price_min_volume_override_narrows_sources_and_reweights`); the
+      real-asset proof is the runbook's post-apply step 3, at rollout**
+- [x] Invalid `min_volume_usd` values return `400` with the standard error body
+      — **`min_volume_error` (finite, ≥ 0, ≤ 1e15; serde rejects non-numeric);
+      CH-less tests on both routes prove the 400 fires before any DB call**
+- [x] Default-path responses are byte-identical whether the param is omitted or
+      explicitly set to the system default — **pass-through for
+      `threshold <= 100` never touches the strings; byte-compare in the IT**
+- [x] MV redeploy runbook step documented (DROP + re-CREATE, expected staleness
+      window, verification query) —
+      **`docs/runbooks/0118-min-volume-threshold-rollout.md`, delegating the
+      generic procedure to the 0072 runbook and adding the blast-radius
+      counterfactual**
+- [x] Test proving a dust-volume source cannot move `vwap_24h` — the actual
+      defect this closes — **fixture 18 ATK: two live dust venues that own the
+      unweighted median and evict the deep market pre-0118; verified to FAIL
+      against the pre-threshold SQL (vwap ~1.3615) and pass with it (1.00)**
+
+## Design Decisions
+
+### From Plan
+
+1. **Threshold before the median, producer-side, as a `WHERE` in
+   `per_source_kept`** — a literal `> 100` with a comment, no settings table
+   (the MV is redeployed by DDL anyway).
+2. **API override = option (a), recompute from `sources`** — the recorded
+   choice this task asked for. Reweighting happens in the handler from the
+   JSON the row already carries; the hottest endpoint gains zero ClickHouse
+   work, protecting the p95 SLO that motivated 0072's producer-side design.
+
+### Emerged
+
+3. **Effective threshold is `max(requested, 100)`.** A value at or below the
+   system default is a byte-identical pass-through: the MV already dropped
+   those sources and they cannot be re-admitted from the JSON. Documented in
+   the OpenAPI param description rather than rejected with a 400 — a caller
+   sending `min_volume_usd=0` gets exactly the documented default semantics.
+4. **Strict `>` on both sides** (MV and handler), per §5.5's literal
+   "volume_24h > threshold"; a volume exactly equal to the threshold is
+   excluded, and one unit test pins the strictness.
+5. **Threshold ordered before the `asset_has_live` window too**, not only
+   before the median: the liveness guard must not defend a venue the
+   threshold is about to erase. Fixture 19 THL discriminates the orders — a
+   live dust venue beside a stale real one must not evict it and then vanish.
+6. **The rule is unconditional, per spec.** An asset whose every source is at
+   or below $100 publishes `vwap_24h = 0` / `sources = '{}'` while keeping
+   `price_usd` and the untouched `volume_24h_usd` (fixture 20). The low-volume
+   tail therefore loses its vwap — deliberately: a "volume-weighted price"
+   over $50 of turnover is not one. Blast radius is measured at rollout by the
+   runbook's counterfactual query, not guessed at review time.
+7. **Handler recompute runs in f64** — deliberately the MV's own numeric
+   strategy (it computes the vwap over Float64 arrays before the Decimal
+   cast), so the override can never claim more precision than the value it
+   overrides; formatting mirrors ClickHouse's trailing-zero-trimmed Decimal
+   strings.
+8. **SCF scope check (2026-08-27):** the official submission page never
+   mentions `min_volume_usd` — the contractual hook is the "Full VWAP formula
+   (§5.5)" work item, and no reviewer AC tests the param directly. Recorded so
+   scope pressure lands on the producer side first if it ever has to.
+
+## Implementation Notes
+
+- `packages/prices-clickhouse/schema/current.sql` — the threshold predicate +
+  header note (order vs median and liveness window; weighting-rule-only).
+- `packages/prices-clickhouse/tests/current_mv_it.rs` — fixtures 17 DST /
+  18 ATK / 19 THL / 20 SUB; fixture 15's volumes raised to $200 and 16's
+  soroswap to $150 so both keep testing what they claim under the threshold.
+- `packages/prices-api/src/assets/dto.rs` — `SYSTEM_MIN_VOLUME_USD`,
+  `apply_min_volume`, `format_decimal` + 6 unit tests.
+- `packages/prices-api/src/assets/handlers.rs` — `PriceParams`, the
+  `min_volume_usd` field on `ListParams`, shared `min_volume_error`
+  validation, OpenAPI param docs on both routes.
+- `packages/prices-api/tests/{price,list}.rs` — CH-less 400 tests;
+  `tests/price_it.rs` — end-to-end override IT (byte-identical, narrowing,
+  all-excluded sentinels).
+- `docs/runbooks/0118-min-volume-threshold-rollout.md` — rollout + blast
+  radius + post-apply verification.
+- Side note recorded in [[0217]]: the weighted-median design input from this
+  task's kickoff (unweighted-median manipulation surface, `quantileExactWeighted`
+  candidate, the case against age-weighted votes).
 
 ## Notes
 
