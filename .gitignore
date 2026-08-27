@@ -101,3 +101,8 @@ docker-compose.override.yaml
 
 # 0120 conformance run reports (regenerable)
 conformance-0120-report-*.json
+
+# Per-developer MCP configuration — dev tooling, not shipped code. Keep
+# your own copy locally; a committed one auto-configures a third-party
+# server for everyone who opens the workspace (PR #249 review).
+.mcp.json
