@@ -43,6 +43,20 @@ history:
       post-apply verification, incl. the real-asset narrowing AC), and the
       0123 reconcile-script note about threshold exclusions if 0128 wants a
       fresh green run.
+  - date: 2026-08-27
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Pre-merge prod measurement flipped the design (Design Decision 6): the
+      unconditional threshold would have blanked vwap/sources on 2,960 of
+      3,068 priced assets (96.5%; 85% of the table maxes at <= $1 per venue,
+      largest casualty $124/day, 0120-list RON included). Reworked to the
+      conditional form mirroring the liveness bound — a below-threshold
+      source drops only when a funded source survives; the liveness window
+      now computes over the threshold's survivors (per_source_funded CTE).
+      Explicit ?min_volume_usd= stays strict, asymmetry documented. Fixture
+      20 flipped to pin the conditional arm; runbook rewritten (measurement
+      recorded, post-apply check is now "no threshold blanking").
 ---
 
 # §5.5 VWAP completion — min_volume_usd threshold
@@ -130,7 +144,9 @@ threshold to the shape 0072 leaves behind. Sequencing them avoids two
 
 - [x] Sources with trailing-24h USD volume below the system default are excluded
       from `vwap_24h` weighting and absent from the `sources` JSON object —
-      **`current.sql` per_source_kept + fixtures 17/18/20 in `current_mv_it.rs`**
+      **`current.sql` per_source_kept/per_source_funded + fixtures 17/18 in
+      `current_mv_it.rs`; conditionally, per Design Decision 6 — an all-dust
+      asset keeps its sources (fixture 20)**
 - [x] `price_usd` and `volume_24h_usd` are demonstrably **unaffected** by the
       threshold (regression test with a below-threshold source present) —
       **fixture 17 pins price_usd = the dust venue's own close; fixture 20 pins
@@ -182,12 +198,22 @@ threshold to the shape 0072 leaves behind. Sequencing them avoids two
    before the median: the liveness guard must not defend a venue the
    threshold is about to erase. Fixture 19 THL discriminates the orders — a
    live dust venue beside a stale real one must not evict it and then vanish.
-6. **The rule is unconditional, per spec.** An asset whose every source is at
-   or below $100 publishes `vwap_24h = 0` / `sources = '{}'` while keeping
-   `price_usd` and the untouched `volume_24h_usd` (fixture 20). The low-volume
-   tail therefore loses its vwap — deliberately: a "volume-weighted price"
-   over $50 of turnover is not one. Blast radius is measured at rollout by the
-   runbook's counterfactual query, not guessed at review time.
+6. **The system default is CONDITIONAL — reversed from the first draft by a
+   pre-merge prod measurement.** The unconditional form (spec-literal) was
+   implemented first and measured before merge: it would have blanked
+   `vwap_24h`/`sources` on **2,960 of 3,068 priced assets (96.5%)** — ~85% of
+   the table has a max per-venue volume of ≤ $1, the largest casualty traded
+   $124/day, and 0120-list assets like RON ($4/day) were in the blast radius.
+   That is the 2026-08-21 liveness-rollback shape, so the same conditional
+   argument applies: the defect needs a funded venue to victimise, and on an
+   all-dust asset dropping everything defends nothing. Decided with the team
+   2026-08-27 (options considered: unconditional $100 / unconditional $1 —
+   still 85% blanked / conditional). A below-threshold source is now dropped
+   only when a source above the threshold survives (fixture 20 pins the
+   conditional arm); §5.5's "$100" is an "e.g.", but the conditional shape is
+   a recorded deviation from its literal reading. The **explicit**
+   `?min_volume_usd=` still filters strictly — the caller asked for exactly
+   that cut — and the asymmetry is documented in the OpenAPI descriptions.
 7. **Handler recompute runs in f64** — deliberately the MV's own numeric
    strategy (it computes the vwap over Float64 arrays before the Decimal
    cast), so the override can never claim more precision than the value it

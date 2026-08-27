@@ -197,8 +197,9 @@ async fn current_prices_mv_computes_price_volume_and_market_cap() {
 ///  19 THL — live dust + stale real venue → the threshold runs BEFORE the
 ///           asset_has_live window, so the asset counts as all-quiet and the
 ///           stale venue is kept
-///  20 SUB — every venue below the threshold → vwap 0 and sources {} beside
-///           a real price_usd and an UNFILTERED volume_24h_usd
+///  20 SUB — every venue below the threshold → the CONDITIONAL threshold is
+///           a no-op (no funded venue to defend) and the dust venue is KEPT,
+///           exactly like the liveness bound's all-dead arm
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
@@ -365,9 +366,12 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         // a good price for.
         (19, 190, "2.00", "10000", "sdex"),
         (19, 5, "1.00", "50", "soroswap"),
-        // 20 SUB — every venue below the threshold: the documented "price with
-        // no sources beside it" shape, plus proof volume_24h_usd is a TOTAL
-        // the threshold never touches.
+        // 20 SUB — every venue below the threshold: the CONDITIONAL arm.
+        // There is no funded venue to defend, so the threshold must NOT fire
+        // and the $50 venue is kept — the same "nothing to defend, dropping
+        // is pure loss" argument as the liveness bound's all-dead arm.
+        // Measured on prod 2026-08-27: the unconditional form would have
+        // blanked 2,960 of 3,068 priced assets (96.5%).
         (20, 5, "3.00", "50", "sdex"),
     ];
     for (i, (asset, mins, cu, vol, src)) in rows.iter().enumerate() {
@@ -854,9 +858,10 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         "vwap must come from the kept stale venue (2.00), got {thl_vwap}"
     );
 
-    // Asset 20 — every venue below the threshold: vwap and sources empty by
-    // rule, while price_usd and volume_24h_usd publish untouched. This is the
-    // blast-radius shape the deploy runbook step measures on prod.
+    // Asset 20 — the threshold's CONDITIONAL arm: with no funded venue on the
+    // asset there is nothing to defend, so the $50 venue must be KEPT — its
+    // price is all we hold. An empty sources object here means the threshold
+    // went unconditional and just blanked 96.5% of prod (measured 2026-08-27).
     let sub_vwap = scalar_f64(&admin, &f("vwap_24h", 20)).await;
     let sub_srcs: String = admin
         .query(&s("sources", 20))
@@ -866,9 +871,9 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
     let sub_p = scalar_f64(&admin, &f("price_usd", 20)).await;
     let sub_vol = scalar_f64(&admin, &f("volume_24h_usd", 20)).await;
     assert!(
-        sub_vwap.abs() < 1e-9 && sub_srcs == "{}",
-        "an asset whose every source is below the threshold publishes vwap 0 \
-         and empty sources, got vwap {sub_vwap} sources {sub_srcs}"
+        (sub_vwap - 3.0).abs() < 1e-6 && sub_srcs.contains("sdex"),
+        "an all-below-threshold asset must keep its sources (conditional arm), \
+         got vwap {sub_vwap} sources {sub_srcs}"
     );
     assert!(
         (sub_p - 3.0).abs() < 1e-9 && (sub_vol - 50.0).abs() < 1e-9,

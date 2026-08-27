@@ -28,9 +28,11 @@ pub struct PriceResponse {
     /// price "as of" any single instant and never was.
     pub price_xlm: String,
     /// 24h USD volume-weighted average price. Weighted across sources with the
-    /// general-overview §5.5 `min_volume_usd` threshold (task 0118; system
-    /// default $100, raisable per-request via `?min_volume_usd=`) and the
-    /// inter-source median-outlier filter applied.
+    /// general-overview §5.5 `min_volume_usd` threshold (task 0118; the $100
+    /// system default applies *conditionally* — a below-threshold source is
+    /// kept when no source on the asset clears the threshold — and is
+    /// raisable per-request via `?min_volume_usd=`, which filters strictly)
+    /// and the inter-source median-outlier filter applied.
     pub vwap_24h: String,
     /// Trailing-24h USD volume across **all** sources — a traded total, never
     /// outlier- or threshold-filtered.
@@ -99,6 +101,13 @@ pub(crate) const MAX_MIN_VOLUME_USD: f64 = 1e15;
 /// producer-side (they are absent from the JSON), and §5.5 orders the volume
 /// threshold *before* the median — raising it can only shrink the mask's
 /// input population, never re-admit an outlier.
+///
+/// Deliberate asymmetry with the MV (task 0118 decision, 2026-08-27): the
+/// producer applies the system default *conditionally* (an all-dust asset
+/// keeps its sources — measured on prod, the unconditional form would have
+/// blanked 96.5% of priced assets), while an explicit request-level value
+/// filters strictly and CAN empty `sources` — the caller asked for exactly
+/// that cut.
 pub(crate) fn apply_min_volume(
     sources: &mut serde_json::Value,
     vwap_24h: &mut String,

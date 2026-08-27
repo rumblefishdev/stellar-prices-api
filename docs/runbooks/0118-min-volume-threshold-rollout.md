@@ -15,16 +15,24 @@ at create time, so the change is `DROP VIEW` + re-`CREATE`; `current_prices`
 keeps serving its last-written rows in the gap (≤ ~1 min + one refresh
 duration) — staleness, not an outage.
 
-## 0118-specific counterfactual (run BEFORE the DROP, read-only)
+## The counterfactual that changed the design (recorded, not to re-run)
 
-The threshold blanks `vwap_24h`/`sources` for every asset whose **every**
-priced source is at or below $100 of trailing-24h volume. Measure that
-population first, so the post-apply delta is a prediction checked rather than
-a surprise explained:
+The original (unconditional) form was measured on prod **2026-08-27, before
+merge**: it would have blanked `vwap_24h`/`sources` on **2,960 of 3,068
+priced assets (96.5%)** — ~85% of the table has a max per-venue 24h volume of
+≤ $1, and the largest casualty traded $124/day. That is the 2026-08-21
+liveness-guard rollback shape, caught by measurement instead of incident. The
+threshold is therefore **conditional**: a below-threshold source is dropped
+only when the asset still has a source above the threshold. Expected visible
+delta at rollout: **no asset loses all its sources to the threshold**; only
+mixed assets (dust venue beside a funded one) lose their dust entries.
+
+Query used (kept for re-measurement if the conditional decision is ever
+revisited):
 
 ```sql
 SELECT
-    countIf(max_vol <= 100)  AS will_blank,
+    countIf(max_vol <= 100)  AS would_blank_if_unconditional,
     count()                  AS priced_assets_today
 FROM (
     SELECT asset_id, max(src_volume) AS max_vol
@@ -39,13 +47,10 @@ FROM (
 )
 ```
 
-Record both numbers in the task. `will_blank` is expected to be a meaningful
-slice of the low-volume tail — that is the spec working as written (§5.5 is
-unconditional), not a defect. If the number looks wrong by an order of
-magnitude, stop and re-derive before applying.
+## Pre-apply capture (run BEFORE the DROP, read-only)
 
-Also capture one **multi-source asset with a sub-$100 venue** in today's
-`sources` (the verification subject for after):
+Count the population the conditional threshold WILL touch — assets with a
+dust venue beside a funded one — and capture a few as verification subjects:
 
 ```sql
 SELECT asset_id, sources FROM prices.current_prices FINAL
@@ -68,10 +73,10 @@ LIMIT 5
    subjects: the sub-$100 source must be absent from `sources`, `vwap_24h`
    non-zero, and `price_usd` / `volume_24h_usd` **unchanged** against the
    captured row (the threshold is a weighting rule only).
-2. **The blank population matches the prediction.** Count assets with
-   `sources = '{}'` and a non-zero `price_usd`; the delta against the same
-   count captured before the apply should be ≈ `will_blank` (modulo one
-   minute of market drift).
+2. **No threshold blanking.** Count assets with `sources = '{}'` and a
+   non-zero `price_usd` before and after: the delta must be ≈ 0 (the
+   conditional arm keeps all-dust assets' sources; any jump toward the
+   recorded 2,960 means the unconditional form shipped by mistake).
 3. **API override** (after the API deploy, over the gateway with a key):
    - default path stability: `GET /v1/assets/native/price` and the same with
      `?min_volume_usd=100` must return identical bodies;

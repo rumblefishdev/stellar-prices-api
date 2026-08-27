@@ -73,10 +73,14 @@ fn min_volume_error(v: Option<f64>) -> Option<Response> {
         ("min_volume_usd" = Option<f64>, Query, minimum = 0,
          description = "Exclude sources whose trailing-24h USD volume is at or \
                         below this value from `vwap_24h` weighting and from \
-                        `sources` (§5.5). The system default is 100; lower \
-                        values behave as the default, since sources excluded \
-                        producer-side cannot be re-admitted. Omit on the \
-                        common path to share the response cache entry."),
+                        `sources` (§5.5). An explicit value filters strictly — \
+                        it can empty `sources` — unlike the producer-side $100 \
+                        system default, which is conditional (a below-threshold \
+                        source is kept when no source on the asset clears the \
+                        threshold). Values at or below 100 behave as the \
+                        default, since sources excluded producer-side cannot \
+                        be re-admitted. Omit on the common path to share the \
+                        response cache entry."),
     ),
     responses(
         (status = 200, description = "Current price", body = PriceResponse),
@@ -211,9 +215,10 @@ pub struct ListParams {
         ("min_volume_usd" = Option<f64>, Query, minimum = 0,
          description = "Exclude sources whose trailing-24h USD volume is at or \
                         below this value from `vwap_24h` weighting and from \
-                        `sources` (§5.5). The system default is 100; lower \
-                        values behave as the default. Does not affect \
-                        `price_usd`, `volume_24h_usd`, or the sort."),
+                        `sources` (§5.5). An explicit value filters strictly, \
+                        unlike the conditional producer-side $100 default; \
+                        values at or below 100 behave as the default. Does not \
+                        affect `price_usd`, `volume_24h_usd`, or the sort."),
     ),
     responses(
         (status = 200, description = "Asset list page", body = AssetListResponse),
