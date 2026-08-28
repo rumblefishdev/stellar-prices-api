@@ -102,3 +102,130 @@ reading a green deploy.
 - [ ] The metric mapping is a pure function with unit tests, per the enrichment
       precedent.
 - [ ] Neither alarm false-fires on an idle environment.
+---
+
+## Implementation notes (2026-08-28)
+
+Two commits on `feat/0231_oracle-poll-rejection-metric-and-dark-feed-alarm`.
+
+### Worker — `packages/oracle-worker/`
+
+`src/metrics.rs` (new), copied in shape from `enrichment-worker/src/metrics.rs`
+rather than reinvented: a pure `pass_metrics` / `failure_metrics` mapping
+compiled into every build and unit-tested without the AWS SDK, plus a
+best-effort `publish` behind the `lambda` feature. Namespace `Prices/Oracle`.
+
+Seven metrics: `OracleRuns`, `OracleFailedRuns`, `OracleSymbolsQueried`,
+`OracleRowsWritten`, `OracleRowsSkipped`, `OracleTimestampRejected`,
+`OracleUsdRatesSnapshotted`.
+
+`OracleStats` gains `timestamp_rejected`, incremented alongside `skipped` at the
+0227 guard's rejection branch. Also threaded into the log line and the Lambda's
+JSON response.
+
+### Infra
+
+- `eventbridge-stack.ts` — `PutMetricData` on the oracle role, `*` scoped by a
+  `cloudwatch:namespace` condition to `Prices/Oracle`.
+- `observability-stack.ts` — `-oracle-dark-feed` (FILL, 3 x 10 min),
+  `-oracle-timestamp-rejected` (raw, 1/1), and the oracle worker added to the
+  0112 worker-health list, which gives it `-duration-near-timeout` and
+  `-no-invocations` as well.
+
+## Design decisions
+
+### From plan
+
+1. **`OracleTimestampRejected` is its own series, not read off
+   `OracleRowsSkipped`.** A Reflector unit change reaches the skip total as a
+   handful of extra skips among ordinary fetch failures and looks like nothing;
+   on its own series it is a step off a flat zero.
+2. **Two alarms, symptom and cause.** `-dark-feed` catches every cause including
+   ones not yet imagined; `-timestamp-rejected` fires sooner and says which one.
+   Neither replaces the other.
+3. **`FILL(m, 0)` sliding window, never evaluated at `1/1`,** per [[0222]].
+
+### Emerged
+
+4. **`timestamp_rejected` is a SUBSET of `skipped`, not a disjoint bucket.**
+   Confirmed with the operator. `skipped` already ships in the worker's log line
+   and its Lambda response; narrowing it there would silently change the meaning
+   of a number already in use, to save a count that is published separately
+   anyway.
+5. **The handler publishes on the `Err` path too** (`failure_metrics`). This is
+   [[0218]]'s lesson applied before it could cost a second incident: `Ok`-only
+   publishing makes a failed run indistinguishable from a run that never
+   happened, because both emit nothing.
+6. **No pass-duration metric.** The oracle Lambda does one thing per invocation,
+   so `AWS/Lambda` `Duration` already measures the pass with nothing else folded
+   in — unlike enrichment, where three stages share an invocation and splitting
+   them is the point.
+7. **The oracle worker joins the [[0112]] worker-health list.** It only now
+   qualifies by that list's own criterion: until it published `Prices/Oracle` it
+   had no custom-metric alarm that could go dark. Beyond the literal ACs, but it
+   is what makes "the schedule is off" distinguishable from "Reflector changed".
+8. **A synth-time guard on the poll cadence.** The 10-minute bucket assumes each
+   bucket spans a scheduled pass. If `scheduleExpressions.oracleWatcher` is a
+   `rate()` slower than the bucket, empty buckets become normal and the alarm
+   false-fires forever — worse than no alarm, because it trains people to ignore
+   it. The stack now throws at synth instead. A `cron()` schedule passes through
+   on the documented assumption; a general cron parser was not worth the risk in
+   a project with no infra test harness.
+9. **30-minute dark window (3 x 10 min), chosen with the operator.** Production
+   polls every 5 minutes, so a 10-minute bucket holds ~2 passes and cannot be
+   emptied by schedule jitter. Slower to fire than 15 minutes, and this is
+   5-minute-granularity non-critical data — half an hour dark is not much lost,
+   and a transient Reflector or RPC blip must not page anyone.
+
+## Induction plan — write this BEFORE deploying
+
+⚠️ [[0204]] and [[0218]] both show that deploying an alarm and *proving it
+fires* are different jobs, and the second is where the time goes. AC 5 is
+designed for here rather than discovered later.
+
+### `-oracle-timestamp-rejected` — induce on the real series
+
+One synthetic datapoint on the real metric and dimension:
+
+```
+aws cloudwatch put-metric-data --namespace Prices/Oracle \
+  --metric-name OracleTimestampRejected \
+  --dimensions Environment=production --value 1 --unit Count
+```
+
+Proves namespace + dimension + threshold + SNS route end to end. Expect ALARM
+within ~5-10 min, then OK on the next period. Cost: one explainable `1` in the
+metric history, recorded here. **Mutating AWS call — needs per-session
+approval.**
+
+### `-oracle-dark-feed` — induce on a throwaway clone, NOT the real series
+
+The real alarm cannot be induced by *adding* data: the live worker publishes a
+non-zero `OracleRowsWritten` every 5 minutes, so no bucket goes dark while it
+runs. Inducing it for real would mean stopping the feed for 30 minutes.
+
+So clone the shape onto a scratch metric instead — `OracleRowsWrittenProbe`
+under the same namespace, same `FILL(m, 0)` + 3 x 10 min + `LESS_THAN 1`
+geometry — publish one datapoint, stop, and let FILL extend past it. That tests
+the part actually in doubt: [[0222]]'s whole history is this shape failing to
+fire. Delete the clone afterwards.
+
+Then separately confirm the real alarm is bound to the real series: after
+deploy it must sit in **OK with datapoints**, never `INSUFFICIENT_DATA`. That is
+the check that would have caught 0204's 10-of-13 blind alarms.
+
+### AC 5 — idle-environment behaviour, and one open question
+
+- `-timestamp-rejected`: `NOT_BREACHING`, and the metric is only published by a
+  completed pass. An idle env stays OK. Settled.
+- `-dark-feed`: missing data is `BREACHING`. A worker that has never written a
+  row is genuinely dark, so this is right for a live env.
+
+⚠️ **Open, for the operator:** `BREACHING` also means that *deliberately*
+disabling the oracle EventBridge rule puts this alarm in ALARM and leaves it
+there until the rule is re-enabled. This project does disable rules for long
+stretches — `prices-production-cleanup` has been off for weeks (task 0200) — so
+this is not hypothetical. The alternatives are `NOT_BREACHING` (a deleted rule
+then goes unreported here, though `-no-invocations` still catches it) or leaving
+it as is and accepting that turning the oracle off is a thing you must silence
+the alarm for. Not decided; do not deploy until it is.
