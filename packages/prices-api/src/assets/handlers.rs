@@ -24,23 +24,70 @@ const OHLCV_MAX_POINTS: u64 = 5000;
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 200;
 
+/// Query parameters for `GET /assets/{id}/price` (task 0118).
+#[derive(Debug, Deserialize)]
+pub struct PriceParams {
+    pub min_volume_usd: Option<f64>,
+}
+
+/// Validate `?min_volume_usd=` (task 0118, coordinated with 0119's "every
+/// invalid input is a 400 in the standard envelope"). serde already rejects
+/// non-numeric text, but `f64::from_str` accepts `NaN`/`inf`, so finiteness is
+/// checked here, along with the sign and a sanity ceiling. Returns the 400 to
+/// send when the value is invalid, `None` when it is fine.
+fn min_volume_error(v: Option<f64>) -> Option<Response> {
+    match v {
+        Some(x)
+            if !(x.is_finite() && (0.0..=crate::assets::dto::MAX_MIN_VOLUME_USD).contains(&x)) =>
+        {
+            Some(errors::bad_request(
+                errors::INVALID_QUERY,
+                "min_volume_usd must be a finite number in 0..=1e15",
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// `GET /assets/{asset_identifier}/price` — current price for one asset.
 ///
 /// Parsing/validation runs before any DB call, so a malformed identifier 400s
 /// without touching ClickHouse. `price_xlm`, `change_24h_pct` and `sources` are
 /// materialized producer-side by `mv_current_prices` (task 0072) and pass
 /// straight through, so this stays a point lookup.
+///
+/// `?min_volume_usd=` (task 0118) re-weights `vwap_24h` from the row's own
+/// `sources` JSON in the handler — no extra ClickHouse round-trip, so the p95
+/// SLO that motivated the producer-side design is untouched. An explicit value
+/// always filters strictly at exactly that value: the MV's $100 default is
+/// applied *conditionally*, so on an all-dust asset a below-$100 venue is
+/// still in the JSON and a caller asking for 100 must not be handed it back.
+/// Omit the param on the common path — it is part of the API Gateway cache
+/// key (§6), and the cached entry is shared only when the param is absent.
 #[utoipa::path(
     get,
     path = "/assets/{asset_identifier}/price",
     tag = "prices",
     params(
         ("asset_identifier" = String, Path,
-         description = "native, CODE:ISSUER, or a C… contract address")
+         description = "native, CODE:ISSUER, or a C… contract address"),
+        ("min_volume_usd" = Option<f64>, Query, minimum = 0,
+         description = "Exclude sources whose trailing-24h USD volume is at or \
+                        below this value from `vwap_24h` weighting and from \
+                        `sources` (§5.5). An explicit value ALWAYS filters \
+                        strictly at exactly that value and can empty \
+                        `sources`, unlike the producer-side $100 system \
+                        default, which is conditional (a below-threshold \
+                        source is kept when no source on the asset clears the \
+                        threshold). On an asset with a funded venue the \
+                        producer has already applied the $100 cut, so a value \
+                        at or below 100 returns the same body as omitting the \
+                        param; on an all-dust asset it does not. Omit on the \
+                        common path to share the response cache entry."),
     ),
     responses(
         (status = 200, description = "Current price", body = PriceResponse),
-        (status = 400, description = "Invalid asset identifier", body = ErrorEnvelope),
+        (status = 400, description = "Invalid asset identifier or query parameter", body = ErrorEnvelope),
         (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
         (status = 403, description = "API key missing, invalid, or not authorized for this API"),
         (status = 404, description = "No current price for the asset", body = ErrorEnvelope),
@@ -51,15 +98,22 @@ const MAX_LIMIT: u32 = 200;
 pub async fn get_price(
     State(state): State<AppState>,
     ValidatedPath(raw): ValidatedPath<String>,
+    ValidatedQuery(q): ValidatedQuery<PriceParams>,
 ) -> Response {
     let id = match AssetIdentifier::parse(&raw) {
         Ok(id) => id,
         Err(e) => return errors::bad_request(errors::INVALID_ID, e.to_string()),
     };
+    if let Some(resp) = min_volume_error(q.min_volume_usd) {
+        return resp;
+    }
 
     match queries_ch::current_price(state.ch(), &id).await {
         Ok(Some(row)) => {
-            let body = PriceResponse::from_row(id.to_canonical(), row);
+            let mut body = PriceResponse::from_row(id.to_canonical(), row);
+            if let Some(t) = q.min_volume_usd {
+                crate::assets::dto::apply_min_volume(&mut body.sources, &mut body.vwap_24h, t);
+            }
             let mut resp = Json(body).into_response();
             cache_control::attach(&mut resp, cache_control::SHORT);
             resp
@@ -141,6 +195,7 @@ pub struct ListParams {
     pub order: Option<Order>,
     pub cursor: Option<String>,
     pub limit: Option<u32>,
+    pub min_volume_usd: Option<f64>,
 }
 
 /// `GET /assets` — paginated, sortable, filterable list of tracked assets.
@@ -160,6 +215,15 @@ pub struct ListParams {
         ("cursor" = Option<String>, Query, description = "opaque pagination cursor"),
         ("limit" = Option<u32>, Query, description = "1..=200 (default 50)",
          minimum = 1, maximum = 200),
+        ("min_volume_usd" = Option<f64>, Query, minimum = 0,
+         description = "Exclude sources whose trailing-24h USD volume is at or \
+                        below this value from `vwap_24h` weighting and from \
+                        `sources` (§5.5) — identical semantics to the \
+                        parameter on `GET /assets/{asset_identifier}/price`: \
+                        an explicit value ALWAYS filters strictly at exactly \
+                        that value and can empty `sources`, while the \
+                        producer-side $100 default is conditional. Does not \
+                        affect `price_usd`, `volume_24h_usd`, or the sort."),
     ),
     responses(
         (status = 200, description = "Asset list page", body = AssetListResponse),
@@ -203,6 +267,10 @@ pub async fn get_assets(
             format!("search must be at most {MAX_SEARCH_LEN} bytes"),
         );
     }
+    if let Some(resp) = min_volume_error(p.min_volume_usd) {
+        return resp;
+    }
+    let min_volume = p.min_volume_usd;
 
     let args = ListArgs {
         sort,
@@ -229,23 +297,32 @@ pub async fn get_assets(
 
     let data = rows
         .into_iter()
-        .map(|r| AssetListItem {
-            asset_type: if r.contract_address.is_empty() {
-                "classic".to_string()
-            } else {
-                "soroban".to_string()
-            },
-            asset_code: r.asset_code,
-            issuer_address: r.issuer_address,
-            contract_address: r.contract_address,
-            home_domain: r.home_domain,
-            price_usd: r.price_usd,
-            change_24h_pct: r.change_24h_pct,
-            change_7d_pct: r.change_7d_pct,
-            volume_24h_usd: r.volume_24h_usd,
-            vwap_24h: r.vwap_24h,
-            sources: crate::assets::dto::parse_sources(&r.sources),
-            updated_at: r.updated_at,
+        .map(|r| {
+            let mut sources = crate::assets::dto::parse_sources(&r.sources);
+            let mut vwap_24h = r.vwap_24h;
+            if let Some(t) = min_volume {
+                // 0118 override — reweights vwap_24h/sources only; the sort
+                // ran in ClickHouse on columns the threshold never touches.
+                crate::assets::dto::apply_min_volume(&mut sources, &mut vwap_24h, t);
+            }
+            AssetListItem {
+                asset_type: if r.contract_address.is_empty() {
+                    "classic".to_string()
+                } else {
+                    "soroban".to_string()
+                },
+                asset_code: r.asset_code,
+                issuer_address: r.issuer_address,
+                contract_address: r.contract_address,
+                home_domain: r.home_domain,
+                price_usd: r.price_usd,
+                change_24h_pct: r.change_24h_pct,
+                change_7d_pct: r.change_7d_pct,
+                volume_24h_usd: r.volume_24h_usd,
+                vwap_24h,
+                sources,
+                updated_at: r.updated_at,
+            }
         })
         .collect();
 

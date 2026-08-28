@@ -4,7 +4,7 @@ title: "SCF Milestone 2 verification package — evidence doc, form answers, vid
 type: DOCS
 status: backlog
 related_adr: []
-related_tasks: ["0102", "0117", "0120", "0121", "0122", "0123", "0124", "0125", "0126", "0127"]
+related_tasks: ["0102", "0117", "0120", "0121", "0122", "0123", "0124", "0125", "0126", "0127", "0237"]
 tags: [layer-docs, priority-high, effort-medium, milestone-M2, scf, submission, evidence]
 milestone: 2
 links:

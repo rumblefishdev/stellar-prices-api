@@ -28,17 +28,22 @@ pub struct PriceResponse {
     /// price "as of" any single instant and never was.
     pub price_xlm: String,
     /// 24h USD volume-weighted average price. Weighted across sources with the
-    /// general-overview §5.5 inter-source median-outlier filter applied.
+    /// general-overview §5.5 `min_volume_usd` threshold (task 0118; the $100
+    /// system default applies *conditionally* — a below-threshold source is
+    /// kept when no source on the asset clears the threshold — and is
+    /// overridable per-request via `?min_volume_usd=`, which always filters
+    /// strictly) and the inter-source median-outlier filter applied.
     pub vwap_24h: String,
     /// Trailing-24h USD volume across **all** sources — a traded total, never
-    /// outlier-filtered.
+    /// outlier- or threshold-filtered.
     pub volume_24h_usd: String,
     /// 24h percentage change (task 0072).
     pub change_24h_pct: String,
     /// Per-source (DEX) price/volume breakdown. A source is **absent** when
-    /// the §5.5 outlier filter excluded it OR it has no USD-priced close
-    /// within the 0135 carry bound (general-overview §3.3 / §4.2). `{}` means
-    /// no source qualified — the exotic-quote case, not an error.
+    /// the §5.5 `min_volume_usd` threshold or outlier filter excluded it OR it
+    /// has no USD-priced close within the 0135 carry bound (general-overview
+    /// §3.3 / §4.2). `{}` means no source qualified — the exotic-quote and
+    /// all-below-threshold cases, not an error.
     #[schema(value_type = Object)]
     pub sources: serde_json::Value,
     /// Timestamp of the snapshot (ISO-8601 UTC).
@@ -60,6 +65,88 @@ pub(crate) fn parse_sources(raw: &str) -> serde_json::Value {
         Ok(v) if v.is_object() => v,
         _ => serde_json::json!({}),
     }
+}
+
+/// Upper bound on `?min_volume_usd=` — far above any real 24h venue volume,
+/// present so a nonsense magnitude is a 400 instead of a silent all-excluded
+/// response.
+pub(crate) const MAX_MIN_VOLUME_USD: f64 = 1e15;
+
+/// Re-apply the §5.5 weighting rule at a caller-supplied threshold (task 0118,
+/// request-level override — option (a): recompute from the `sources` JSON the
+/// row already carries, no second ClickHouse round-trip).
+///
+/// **An explicit threshold always filters strictly**, at whatever value the
+/// caller sent, and it can empty `sources`. There is deliberately no
+/// pass-through band around the producer's $100 default: that default is
+/// applied *conditionally* by the MV (an all-dust asset keeps its sources —
+/// measured on prod, the unconditional form would have blanked 96.5% of priced
+/// assets), so on such an asset a below-$100 venue IS present in the JSON and
+/// a caller asking for `min_volume_usd=100` must not be handed it back.
+///
+/// Behaviour:
+/// - drop every source whose `volume_24h` is not strictly above the threshold
+///   (the MV's own comparison is strict too);
+/// - if nothing was dropped, the row passes through **untouched** — the MV's
+///   Decimal strings are never reformatted. On an asset with a funded venue
+///   the producer has already applied the $100 cut, so `min_volume_usd=100`
+///   is byte-identical to omitting the param;
+/// - otherwise recompute `vwap_24h = Σ(p×v)/Σ(v)` over the survivors **in
+///   f64** — deliberately the MV's own numeric strategy (it computes the vwap
+///   over Float64 arrays before the Decimal cast, see current.sql's
+///   numeric-strategy note), so the override can never claim more precision
+///   than the value it overrides. Nothing left → `"0"` + `{}`, the MV's own
+///   sentinels for that shape.
+///
+/// The outlier mask is NOT re-run here: it already excluded its venues
+/// producer-side (they are absent from the JSON), and §5.5 orders the volume
+/// threshold *before* the median — raising it can only shrink the mask's
+/// input population, never re-admit an outlier.
+pub(crate) fn apply_min_volume(
+    sources: &mut serde_json::Value,
+    vwap_24h: &mut String,
+    threshold: f64,
+) {
+    let Some(obj) = sources.as_object_mut() else {
+        return;
+    };
+    let vol = |v: &serde_json::Value| -> f64 {
+        v.get("volume_24h")
+            .and_then(|x| x.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+    };
+    let before = obj.len();
+    obj.retain(|_, v| vol(v) > threshold);
+    if obj.len() == before {
+        // Nothing dropped: leave the producer's Decimal strings exactly as
+        // they came out of ClickHouse rather than round-tripping them.
+        return;
+    }
+
+    let (mut pv, mut vsum) = (0.0_f64, 0.0_f64);
+    for v in obj.values() {
+        let p = v
+            .get("price")
+            .and_then(|x| x.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let w = vol(v);
+        pv += p * w;
+        vsum += w;
+    }
+    *vwap_24h = if vsum > 0.0 {
+        format_decimal(pv / vsum)
+    } else {
+        "0".to_string()
+    };
+}
+
+/// Format an f64 the way ClickHouse serialises `Decimal(38,14)` into the
+/// `sources` JSON: up to 14 fractional digits, trailing zeros trimmed.
+fn format_decimal(x: f64) -> String {
+    let s = format!("{x:.14}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 impl PriceResponse {
@@ -122,7 +209,9 @@ pub struct AssetListItem {
     pub change_7d_pct: String,
     pub volume_24h_usd: String,
     pub vwap_24h: String,
-    /// Per-source breakdown; outlier-excluded sources are absent (§3.3).
+    /// Per-source breakdown; sources excluded by the §5.5 `min_volume_usd`
+    /// threshold or by outlier detection are absent (§3.3). Same semantics as
+    /// `PriceResponse::sources`, including the `?min_volume_usd=` override.
     #[schema(value_type = Object)]
     pub sources: serde_json::Value,
     pub updated_at: String,
@@ -240,7 +329,103 @@ pub struct OhlcvResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_sources;
+    use super::{apply_min_volume, parse_sources};
+
+    fn three_sources() -> serde_json::Value {
+        serde_json::json!({
+            "sdex":     {"price": "1",    "volume_24h": "100000"},
+            "aquarius": {"price": "1.02", "volume_24h": "20000"},
+            "soroswap": {"price": "5",    "volume_24h": "150"},
+        })
+    }
+
+    #[test]
+    fn on_a_funded_asset_the_system_default_is_byte_identical() {
+        // AC: a funded asset's response must not change whether the param is
+        // omitted, equal to the $100 default, or below it — not by a
+        // pass-through band, but because the MV already applied that cut, so
+        // the strict filter finds nothing left to drop.
+        for t in [0.0, 50.0, 100.0] {
+            let mut s = three_sources();
+            let mut vwap = "1.00505050505051".to_string();
+            apply_min_volume(&mut s, &mut vwap, t);
+            assert_eq!(s, three_sources(), "threshold {t}");
+            assert_eq!(vwap, "1.00505050505051", "threshold {t}");
+        }
+    }
+
+    #[test]
+    fn an_explicit_default_still_cuts_an_all_dust_asset() {
+        // The MV's system default is CONDITIONAL, so an asset with no funded
+        // venue keeps its dust in `sources`. An explicit min_volume_usd=100
+        // must still apply the cut the caller asked for — there is no
+        // pass-through band that would hand a $50 venue back.
+        let mut s = serde_json::json!({
+            "sdex":     {"price": "3", "volume_24h": "50"},
+            "soroswap": {"price": "4", "volume_24h": "30"},
+        });
+        let mut vwap = "3.375".to_string();
+        apply_min_volume(&mut s, &mut vwap, 100.0);
+        assert_eq!(s, serde_json::json!({}), "got {s}");
+        assert_eq!(vwap, "0");
+    }
+
+    #[test]
+    fn a_higher_threshold_narrows_the_set_and_reweights() {
+        let mut s = three_sources();
+        let mut vwap = "1.00505050505051".to_string();
+        apply_min_volume(&mut s, &mut vwap, 1000.0);
+        assert!(s.get("soroswap").is_none(), "got {s}");
+        assert!(s.get("sdex").is_some() && s.get("aquarius").is_some());
+        // (1*100000 + 1.02*20000) / 120000
+        assert_eq!(vwap, "1.00333333333333");
+    }
+
+    #[test]
+    fn a_threshold_that_bites_nothing_leaves_the_row_untouched() {
+        // Above the default but below every venue: the MV's Decimal string
+        // must survive verbatim, not be reformatted through f64.
+        let mut s = three_sources();
+        let mut vwap = "1.00505050505051".to_string();
+        apply_min_volume(&mut s, &mut vwap, 120.0);
+        assert_eq!(s, three_sources());
+        assert_eq!(vwap, "1.00505050505051");
+    }
+
+    #[test]
+    fn excluding_everything_lands_on_the_mv_sentinels() {
+        let mut s = three_sources();
+        let mut vwap = "1.00505050505051".to_string();
+        apply_min_volume(&mut s, &mut vwap, 1e9);
+        assert_eq!(s, serde_json::json!({}));
+        assert_eq!(vwap, "0");
+    }
+
+    #[test]
+    fn the_comparison_is_strict_like_the_mv() {
+        // volume == threshold must be excluded: current.sql uses `>` per
+        // §5.5's "volume_24h > threshold".
+        let mut s = serde_json::json!({
+            "sdex":     {"price": "2", "volume_24h": "500"},
+            "soroswap": {"price": "9", "volume_24h": "150"},
+        });
+        let mut vwap = "x".to_string();
+        apply_min_volume(&mut s, &mut vwap, 150.0);
+        assert!(s.get("soroswap").is_none());
+        assert_eq!(vwap, "2");
+    }
+
+    #[test]
+    fn an_unparseable_volume_counts_as_zero_and_is_excluded() {
+        let mut s = serde_json::json!({
+            "sdex": {"price": "2", "volume_24h": "500"},
+            "odd":  {"price": "3", "volume_24h": "not a number"},
+        });
+        let mut vwap = "x".to_string();
+        apply_min_volume(&mut s, &mut vwap, 200.0);
+        assert!(s.get("odd").is_none(), "got {s}");
+        assert_eq!(vwap, "2");
+    }
 
     #[test]
     fn parses_a_well_formed_sources_object() {

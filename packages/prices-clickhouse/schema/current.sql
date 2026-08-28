@@ -40,9 +40,11 @@
 --   volume_24h_usd  — trailing-24h USD volume, ALL sources (a total, never filtered)
 --   market_cap_usd  — price_usd × circulating supply from prices.asset_supply
 --   vwap_24h        — USD volume-weighted close across sources, with the §5.5
---                     inter-source median-outlier filter applied
---   sources         — JSON per-source {price, volume_24h}; outlier-excluded
---                     sources are ABSENT from the object (general-overview §3.3)
+--                     min_volume_usd threshold (task 0118) and inter-source
+--                     median-outlier filter applied
+--   sources         — JSON per-source {price, volume_24h}; sources excluded by
+--                     min_volume_usd or outlier detection are ABSENT from the
+--                     object (general-overview §3.3)
 --
 -- ── Numeric strategy ────────────────────────────────────────────────────────
 -- Decimal×Decimal widens scale past Decimal(38,14)'s budget (14+14=28 scale
@@ -97,7 +99,7 @@
 -- never armed the mask. They now arrive with their carried prices, so the
 -- whole all-dead population — 65% of prod assets on 2026-08-25 — is newly
 -- routed through it. Pinned by fixture asset 15; whether interpolation is the
--- right median for an even count is 0217's call, not this file's.
+-- right median for an even count is 0238's call, not this file's.
 --
 -- OUTLIER_PCT = 0.20 (20%). A starting value, deliberately loose. The asymmetry
 -- matters: wrongly EXCLUDING a legitimate venue silently removes it from the
@@ -107,9 +109,44 @@
 -- percent between venues, so a tight threshold costs more than it saves. Tune
 -- against real multi-source assets — see task 0123's reconciliation.
 --
--- NOTE: the §5.5 `min_volume_usd` inclusion threshold is deliberately NOT here;
--- it is task 0118, which layers it on top of this filter (cheap sources are
--- dropped BEFORE the median is taken, so they cannot skew it either).
+-- ── §5.5 min_volume_usd inclusion threshold (task 0118) ─────────────────────
+-- "Only include sources where volume_24h > configurable_min_threshold_usd
+-- (e.g. $100)." MIN_VOLUME_USD = 100, the spec's own worked example. A literal
+-- in the WHERE below, not a settings table — the MV is redeployed by DDL
+-- anyway, so a second indirection buys nothing. The API-side `?min_volume_usd=`
+-- override (same task) re-weights from the `sources` JSON in the handler; this
+-- MV always computes at the system default.
+--
+-- ⚠️ THE THRESHOLD IS CONDITIONAL, exactly like the liveness bound one CTE
+-- down, and for the same measured reason. A below-threshold source is dropped
+-- ONLY when the asset still has a source ABOVE the threshold. The defect this
+-- rule closes — dust venues skewing the median and the weighting — needs a
+-- funded venue to victimise; on an asset whose every venue is dust there is
+-- nothing to defend, and dropping them all is pure loss. Measured on prod
+-- 2026-08-27 before rollout: the unconditional form would have blanked
+-- vwap_24h/sources on 2,960 of 3,068 priced assets (96.5%; ~85% of the table
+-- has a max per-venue 24h volume of <= $1) while the largest casualty traded
+-- $124/day — the same shape as the 2026-08-21 liveness-guard rollback, found
+-- by measurement instead of by incident this time. Decided with the team
+-- 2026-08-27; the spec's $100 is an "e.g.", the conditional form is ours,
+-- recorded in the task's Design Decisions.
+--
+-- ORDER MATTERS, twice:
+--   * threshold BEFORE the median — a dust venue must not be able to skew the
+--     vote it is not allowed to weight in;
+--   * threshold BEFORE the liveness window: `asset_has_live` is computed over
+--     the threshold's SURVIVORS (see per_source_funded), so the guard cannot
+--     defend a venue the threshold is about to erase. Concretely: a live $50
+--     venue beside a stale $10k venue must NOT evict the $10k one and then
+--     vanish itself — with the threshold first, the asset counts as all-quiet
+--     and keeps the stale-but-real price.
+--
+-- The threshold is a WEIGHTING rule only: `price_usd` and `volume_24h_usd`
+-- read from `unfiltered` and are untouched by construction.
+--
+-- NOTE the deliberate asymmetry with the API override: an EXPLICIT
+-- `?min_volume_usd=` filters strictly (the caller asked for exactly that);
+-- only this MV's ambient system default is conditional.
 
 DROP VIEW IF EXISTS prices.mv_current_prices;
 
@@ -226,6 +263,10 @@ WITH
     -- real price downstream, and the conditional form costs nothing by
     -- construction. Removing it is a two-line revert that changes none of the
     -- measured gains, which come from C2's carry rather than from the guard.
+    -- Population filter plus the CONDITIONAL §5.5 threshold's window (task
+    -- 0118, header note): `asset_has_funded` asks "does any priced venue on
+    -- this asset clear MIN_VOLUME_USD?". Strict >, per the spec's
+    -- "volume_24h > threshold".
     per_source_kept AS (
         SELECT
             asset_id,
@@ -233,9 +274,25 @@ WITH
             src_price,
             src_volume,
             src_is_live,
-            max(src_is_live) OVER (PARTITION BY asset_id) AS asset_has_live
+            max(src_volume > 100) OVER (PARTITION BY asset_id) AS asset_has_funded
         FROM per_source
         WHERE src_price > 0
+    ),
+
+    -- Apply the threshold, THEN compute the liveness window over its
+    -- survivors. The two-stage order is load-bearing: a dust venue must not
+    -- be able to arm the liveness guard and evict a funded-but-stale venue
+    -- before vanishing itself (the THL fixture in current_mv_it.rs).
+    per_source_funded AS (
+        SELECT
+            asset_id,
+            source,
+            src_price,
+            src_volume,
+            src_is_live,
+            max(src_is_live) OVER (PARTITION BY asset_id) AS asset_has_live
+        FROM per_source_kept
+        WHERE NOT asset_has_funded OR src_volume > 100
     ),
 
     -- Level 2 — collapse sources into per-asset arrays so the median filter can
@@ -249,7 +306,7 @@ WITH
             groupArray(src_volume)                AS vols_dec,
             groupArray(toFloat64(src_price))      AS prices_f,
             groupArray(toFloat64(src_volume))     AS vols_f
-        FROM per_source_kept
+        FROM per_source_funded
         WHERE NOT asset_has_live OR src_is_live
                                         -- explicit rule (0135 C2 + the
                                         -- conditional bound): a source with NO

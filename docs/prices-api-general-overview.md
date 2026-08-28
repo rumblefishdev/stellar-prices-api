@@ -378,6 +378,8 @@ CREATE TABLE prices.current_prices (
                                           -- preserve Decimal(38,14) precision; sources
                                           -- excluded by min_volume_usd or outlier
                                           -- detection are absent from the object
+                                          -- (the min_volume_usd system default is
+                                          -- applied CONDITIONALLY — see §5.5)
     updated_at       DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(updated_at)
@@ -895,6 +897,18 @@ Only include sources where volume_24h > configurable_min_threshold_usd (e.g. $10
 
 Volume threshold is configurable per-request via `?min_volume_usd=` query param or defaults to
 the system setting.
+
+> **As implemented (task 0118).** The system default is **$100**, and it is applied
+> **conditionally**: a below-threshold source is dropped only when the asset still has a source
+> _above_ the threshold. The rule exists to stop a dust venue skewing a real market, and on an
+> asset whose every venue is dust there is no real market to defend — dropping them all would
+> blank `vwap_24h`/`sources` while the row still carries a usable `price_usd`. This is a
+> deliberate deviation from the literal reading above, taken after a pre-merge production
+> measurement: the unconditional form would have blanked **2,960 of 3,068 priced assets (96.5%)**,
+> the same failure shape as the 2026-08-21 liveness-guard rollback. An **explicit**
+> `?min_volume_usd=` is different: it always filters strictly at exactly the value sent, and can
+> empty `sources` — the caller asked for that cut. The threshold is a **weighting rule only**;
+> `price_usd` and `volume_24h_usd` are never filtered by it.
 
 **Outlier detection:** before a source's price is included in the VWAP, it is compared against the
 inter-source median. Sources deviating by more than a configurable percentage are excluded from

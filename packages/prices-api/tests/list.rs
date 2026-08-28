@@ -152,3 +152,14 @@ async fn assets_cursor_over_long_token_is_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json["code"], "invalid_query");
 }
+
+/// Task 0118 — `?min_volume_usd=` on `GET /assets` shares `/price`'s
+/// validation; a bad value 400s before any CH call.
+#[tokio::test]
+async fn list_with_invalid_min_volume_is_400_without_touching_ch() {
+    for bad in ["abc", "-0.5", "NaN", "1e16"] {
+        let (status, _, json) = common::get(&format!("/v1/assets?min_volume_usd={bad}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "min_volume_usd={bad}");
+        assert_eq!(json["code"], "invalid_query", "min_volume_usd={bad}");
+    }
+}
