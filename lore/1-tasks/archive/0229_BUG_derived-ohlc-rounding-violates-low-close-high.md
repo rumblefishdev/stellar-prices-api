@@ -2,7 +2,7 @@
 id: "0229"
 title: "Derived O/H/L rounds to 14 decimals while `close` stays exact, so `/ohlcv` can return `close` BELOW `low` — a malformed candle"
 type: BUG
-status: active
+status: completed
 related_adr: ["0011"]
 related_tasks: ["0170", "0225", "0120", "0127"]
 tags: ["priority-medium", "effort-small", "api", "data-correctness", "read-surface", "ohlcv", "milestone-M2"]
@@ -11,6 +11,33 @@ links:
   - "../../../packages/prices-api/src/assets/queries_ch.rs"
   - "../../../tools/scripts/conformance-0120.mjs"
 history:
+  - date: 2026-08-28
+    status: completed
+    who: okarcz
+    note: >
+      CLOSED. Deployed 11:41:30 UTC (Compute only, `CodeSha256` confirmed
+      changed) and verified through the deployed API: `low <= open,close <= high`
+      is **0 failed / 40 run** against 9 failures the day before, and the three
+      assets that carried malformed buckets return 0 ordering and 0 vwap
+      violations over a 7-day 1h window.
+      🔑 The root cause as filed was WRONG and the correction decided the fix:
+      the crossing is **float64 precision** (0.92 of one ulp), not 14-decimal
+      rounding (~2,700x too small). That made the plan's second option — round
+      `close` to 14 decimals — a **no-op**, since `close` is already there. The
+      choice was never a trade-off, and [[ADR-0011]] §3 records it that way.
+      ✅ `vwap` was folded in after review: it carries a SECOND float round-trip
+      and escapes the band far more often (~8.8% of single-trade candles at BTC
+      scale) than `close` ever did. It needed clamping on the as-stored path too.
+      🔴 Two false negatives on the way, same shape: a one-source probe of the
+      as-stored MERGE aggregate read 0 violations in 200,000 where two sources
+      give 12,017; and the first XLM test seed PASSED against the unclamped
+      query, i.e. it was vacuous and read as proof. Both were caught only by
+      running the non-vacuity check rather than assuming it.
+      ⚠️ Nothing in [[0120]] asserts vwap in-band, so the larger defect has no
+      conformance coverage — its only prod evidence is the ad-hoc check recorded
+      here. Handed to [[0230]].
+      ⏳ Spawned [[0236]]: the clamp removes the accidental detector for
+      internally inconsistent stored rows, which belongs at the source anyway.
   - date: 2026-08-28
     status: active
     who: okarcz
@@ -318,6 +345,62 @@ It skips the zero sentinel — `0` there means "no weighted mean", not "a vwap o
 zero", and the as-stored arm's `isNull` branch preserves that rather than
 clamping a missing value up to `low`.
 
+## ✅ Verified on prod — 2026-08-28
+
+Deployed 11:41:30 UTC, `Prices-production-Compute` alone. `CodeSha256`
+**`NIK4GgUEkfC+/x08MY/11PYIqB5rxDJ5yh9fCjfT0x0=`**, was
+`bvrPfpYRehco5lL04rEm4xvYVIPvDtuLgYKOszIai3o=` — so the deploy is confirmed to
+have landed rather than shipping a stale `target/lambda/`, which is the failure
+mode that reads exactly like success (0170 hit it the day before).
+
+⚠️ **Compute only, deliberately.** `diff-production` showed
+`Prices-production-PortalHosting` carrying unrelated merged-but-undeployed
+changes — the portal SPA fallback routes, with two `CDKBucketDeployment`
+resources marked *may be replaced*. Shipping those alongside this fix would have
+destroyed the attribution the single-stack deploy exists to preserve. They remain
+pending and are somebody's deliberate deploy, not a side effect of this one.
+
+### The criterion
+
+`low <= open,close <= high on every bucket`: **0 failed / 40 run** — all 20
+assets, both granularities. It was **9 failures** on 2026-08-27.
+
+| suite | 2026-08-27 (pre-fix) | 2026-08-28 (post-fix) |
+|---|---|---|
+| pass | 893 | **910** |
+| fail | 27 | **4** |
+| skip | 8 | 10 |
+
+Remaining failures, all pre-existing and each already owned:
+
+| failure | owner |
+|---|---|
+| `/price` returns 404 for USDC | [[0178]] |
+| decimal strings — SCOP 1h, EQL 1h, EQL 1d | [[0230]] |
+
+⚠️ **The prediction was wrong, in the harmless direction, and the reason matters.**
+This task forecast ~18 remaining failures by treating [[0230]]'s 17 as a fixed
+quantity. It is 3 today. That check counts ADR 0011 §5 unpriced buckets, whose
+number depends on how far enrichment has caught up at the moment of the run — so
+0230's flakiness, not a stable defect count, is the dominant term. Anyone using
+27 → 4 as a delta for *this* fix would be over-crediting it: this fix accounts
+for exactly the 9 ordering failures.
+
+### The defect itself, on the assets that showed it
+
+7-day 1h window, the three assets that carried the malformed buckets:
+
+| asset | buckets | ordering violations | vwap violations |
+|---|---|---|---|
+| BTC | 168 | **0** | **0** |
+| sUSD | 168 | **0** | **0** |
+| XRP | 168 | **0** | **0** |
+
+🔑 **The vwap column is measured here and nowhere else.** The conformance suite
+does not assert vwap in-band at all, so this ad-hoc check is the only prod
+evidence for the larger of the two defects fixed in this task. Recorded as such
+rather than left implied — see the note under [[0230]].
+
 ## Acceptance Criteria
 
 - [x] A test seeds a bucket whose derived `low` rounds above its exact `close`
@@ -339,13 +422,14 @@ clamping a missing value up to `low`.
       `QuoteLeg` applies no rate, and the peg series emits one value into four
       fields. They pin the property against a future derivation being added
       there; neither was failing.
-- [ ] `low <= open,close <= high` passes for all 20 assets in the [[0120]]
+- [x] `low <= open,close <= high` passes for all 20 assets in the [[0120]]
       suite, at both granularities, against the deployed API.
-      ⏳ **Blocked on a deploy — the API Lambda has not shipped this yet.** The
-      pre-fix baseline is recorded: 9 failures of this check in the 2026-08-27
-      run (one bucket each on BTC, sUSD, XRP over a 7-day 1h window). Re-run
-      after deploy and expect 9 → 0; the other 27−9 failures are [[0230]] and
-      [[0178]] and must not be read as this fix falling short.
+      → **0 failed / 40 run**, against 9 failures on 2026-08-27. Verified through
+      the deployed API on 2026-08-28 after a Compute-only deploy whose
+      `CodeSha256` is confirmed changed. Suite overall 893/27/8 → **910/4/10**.
+      ⚠️ Do not read 27 → 4 as this fix's delta: it accounts for the 9 ordering
+      failures, and [[0230]]'s count moved from 17 to 3 on its own because that
+      check tracks enrichment lag. See "Verified on prod" below.
 - [x] The choice between clamping and re-rounding is recorded with its
       reasoning, in ADR 0011 §3 if it changes what that section states.
       → **[[ADR-0011]] §3 amended 2026-08-28.** It did change what §3 states —
