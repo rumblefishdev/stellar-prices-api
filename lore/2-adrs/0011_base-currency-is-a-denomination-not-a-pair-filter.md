@@ -203,6 +203,43 @@ high. This is defensible at `1d` and weaker at `1m`.
 are derived. The response must distinguish them; [[0128]]'s evidence must state
 it rather than presenting derived extremes as measured ones.
 
+#### ✅ AMENDED 2026-08-28 — the derived extremes are CLAMPED to bracket the exact close
+
+Task [[0229]]. Keeping `close` exact while deriving the extremes puts the two on
+different numeric scales, and they can cross: measured on prod at BTC 1h,
+`close` came back **below** `low` by 1.343e-11 — a malformed candle by the
+`low <= open,close <= high` rule every charting library assumes.
+
+🔑 **The mechanism is float precision, not decimal rounding**, and that rules out
+the obvious alternative. Derivation runs through `toFloat64`, whose 53-bit
+mantissa holds ~15-16 significant digits, while a five-figure price at
+`Decimal(38, 14)` carries 19. The observed gap is **0.92 of one float64 ulp** at
+that magnitude; a 14-decimal half-tick is 5e-15, ~2,700× too small to account for
+it. So "round `close` to the same 14-decimal scale" **cannot** fix this — `close`
+is already at 14 decimals, and that change is a no-op.
+
+**Decision: clamp, don't re-round.** `low = min(low_derived, close)` and
+`high = max(high_derived, close)`. This keeps the exactness §3 deliberately
+preserves, and moves an extreme by at most the ulp the derivation had already
+introduced — it cannot invent a value beyond the rounding error already present.
+
+**`vwap` is clamped into the published `[low, high]` on the same grounds**, and on
+**every** denomination — including the as-stored `base_currency=XLM` path, whose
+O/H/L cannot cross but whose merged vwap can. It carries a second float
+round-trip (`sum(vwap × volume) / sum(volume)`), so it escapes the band far more
+readily than the extremes do: ~8.8% of single-trade candles at BTC scale in USD
+mode, and 12,017-of-200,000 in each direction on the as-stored path with two
+sources. A volume-weighted mean of prices within a bucket must lie within that
+bucket's range, so this restates what `vwap` is rather than adjusting it.
+
+⚠️ **Consequence a consumer can observe:** on a candle that closed at its low or
+its high, `low` or `high` may now be *exactly* equal to `close` where it
+previously differed in the last picoseconds of precision; and `vwap` may sit
+exactly on `low` or `high` for the same reason. That is the intended outcome. `open` is unaffected and needs no clamp — it is scaled by the same rate
+as the extremes, and scaling by one positive factor is monotonic, so
+`low <= open <= high` holds within a row and survives `min`/`max` across rows.
+Only the exact/derived boundary was ever at risk.
+
 ### 4. Provenance reuses [[0165]]'s vocabulary
 
 `method` is propagated from the underlying `close_usd`, using the values 0165

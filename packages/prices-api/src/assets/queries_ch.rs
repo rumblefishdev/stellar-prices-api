@@ -585,6 +585,78 @@ pub struct OhlcvArgs {
     pub limit: u64,
 }
 
+/// The exact close, as one expression, because three output columns must agree
+/// on it. `c_x` is `close_usd` **as stored** — full `Decimal(38, 14)` — while
+/// `o_x`/`h_x`/`l_x`/`w_x` are derived through `toFloat64`, whose 53-bit mantissa
+/// holds only ~15-16 significant digits.
+///
+/// 🔑 **That is the whole of task 0229, and the mechanism is float precision, not
+/// decimal rounding.** A five-figure price carries 19 significant digits at
+/// `Decimal(38, 14)`, so the float product lands up to one ulp away — measured on
+/// prod at BTC scale as **1.343e-11 against a 1.455e-11 ulp (0.92 of one)**. A
+/// 14-decimal half-tick is 5e-15, roughly **2,700× too small** to explain it, so
+/// re-rounding `close` to 14 decimals cannot fix this: it is already there.
+///
+/// 🔴 **`least`/`greatest` IGNORE null arguments — they do not propagate them.**
+/// Verified on 26.3.10.60: `greatest(CAST(NULL AS Nullable(Decimal(38,14))), 2.5)`
+/// returns `2.5`, where `NULL + 2.5` returns `NULL`. This is the opposite of
+/// ClickHouse's usual behaviour and it matters here: `h_x`/`l_x` are
+/// `toDecimal128OrNull` and go NULL on `Decimal128(38, 14)` overflow, which is
+/// reachable because `rate` is unbounded above (a dust `close` at
+/// [`PRECISION_FLOOR`] against a large `close_usd` gives `rate = 1e22`). Left
+/// unguarded, an extreme the query **could not compute** would be reported as
+/// the close — asserting a value rather than admitting the gap. The `isNull`
+/// guards below keep the honest `null`, and
+/// `ohlcv_an_unrepresentable_extreme_stays_null_rather_than_becoming_the_close`
+/// pins it.
+///
+/// `least`/`greatest` therefore clamp the derived extremes over the exact close.
+/// This preserves `close`'s exactness, which ADR 0011 §3 keeps deliberately, and
+/// moves an extreme by at most the ulp the rounding already implied. `open` needs
+/// no clamp: it is derived through the same `rate` as `h_x`/`l_x`, and scaling by
+/// one positive factor is monotonic, so `l_x <= o_x <= h_x` holds within a row and
+/// survives `min`/`max` across rows. Only the exact/derived boundary breaks.
+const CLOSE_EXACT: &str = "argMaxIf(c_x, (volume_base, quote_asset_id), valid)";
+
+/// The published `high` / `low`, before rendering. Named because `vw` clamps
+/// against these rather than against the raw aggregates — the response has to be
+/// self-consistent, so vwap is bounded by the values the caller actually sees.
+///
+/// The `isNull` arms carry the guard described above: an aggregate that is NULL
+/// (every valid row overflowed) must publish as `null`, and `least`/`greatest`
+/// would otherwise swallow it into the close.
+///
+/// 🔑 That same NULL-swallowing is then *relied upon* one level up, and the
+/// asymmetry is deliberate rather than an accident of nesting. When a bound is
+/// NULL the whole expression is NULL, so `greatest(vwap, NULL)` leaves vwap
+/// unclamped on that side — which is correct: a bound we could not compute must
+/// not be used to move a value we could.
+const HIGH_PUBLISHED: &str = "if(isNull(maxIf(h_x, valid)), NULL, greatest(maxIf(h_x, valid), argMaxIf(c_x, (volume_base, quote_asset_id), valid)))";
+const LOW_PUBLISHED: &str = "if(isNull(minIf(l_x, valid)), NULL, least(minIf(l_x, valid), argMaxIf(c_x, (volume_base, quote_asset_id), valid)))";
+
+/// The volume-weighted mean before clamping — task 0229's review, finding 1.
+///
+/// 🔴 **`vwap` escapes `[low, high]` far more readily than the extremes do**, and
+/// by a compounding of the same cause. `w_x` is already a rounded float product,
+/// and this adds a *second* round-trip on top: `sum(w_x * volume) / sum(volume)`.
+/// `(x*v)/v != x` in IEEE754, and at 14-decimal scale that ulp is not absorbed.
+/// Measured on 26.3.10.60 over 300,000 single-trade candles at BTC scale
+/// (`open = high = low = close = vwap`, so the true vwap sits exactly on the
+/// bound): **26,395 rows returned `vwap > high` and 26,387 returned
+/// `vwap < low` — ~8.8% each**, against a far rarer close/extreme crossing.
+///
+/// ⚠️ Nothing was going to surface this on its own. [[0120]]'s conformance
+/// assertion is `low <= open,close <= high`; `vwap` appears there only in the
+/// "is a decimal string" check. It was found by reviewing this fix, not by the
+/// suite that found the defect this fix is for.
+///
+/// A volume-weighted mean of prices within a bucket must lie within that
+/// bucket's range, so clamping is a restatement of what vwap *is* rather than a
+/// correction applied to it.
+const VWAP_RAW: &str = "toDecimal128OrNull(toString( \
+                     sumIf(toFloat64(w_x) * toFloat64(volume_base), valid) \
+                     / nullIf(sumIf(toFloat64(volume_base), valid), 0)), 14)";
+
 /// Smallest `close` / `close_usd` a USD rate may be derived from — a
 /// **precision precondition**, not a plausibility band.
 ///
@@ -913,19 +985,23 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
                 // `countIf(valid) = 0` is what produces §5's price-less bucket:
                 // NULL across every price field, while the volume columns below
                 // still aggregate over all rows.
-                "if(countIf(valid) = 0, NULL, toString(argMaxIf(o_x, (volume_base, quote_asset_id), valid))) AS o, \
-                 if(countIf(valid) = 0, NULL, toString(maxIf(h_x, valid))) AS h, \
-                 if(countIf(valid) = 0, NULL, toString(minIf(l_x, valid))) AS l, \
-                 if(countIf(valid) = 0, NULL, toString(argMaxIf(c_x, (volume_base, quote_asset_id), valid))) AS c, \
+                // `c` is EXACT (`close_usd` as stored) while `h`/`l` are derived
+                // through `toFloat64`, so the two are on different scales and can
+                // cross — task 0229. `least`/`greatest` pull the derived extremes
+                // back over the exact close; see the CLOSE_EXACT note above.
+                format!(
+                    "if(countIf(valid) = 0, NULL, toString(argMaxIf(o_x, (volume_base, quote_asset_id), valid))) AS o, \
+                 if(countIf(valid) = 0, NULL, toString({HIGH_PUBLISHED})) AS h, \
+                 if(countIf(valid) = 0, NULL, toString({LOW_PUBLISHED})) AS l, \
+                 if(countIf(valid) = 0, NULL, toString({CLOSE_EXACT})) AS c, \
                  toString(sum(volume_base)) AS vb, \
                  toString(sum(volume_quote_usd)) AS vqu, \
-                 if(countIf(valid) = 0, NULL, toString(toDecimal128OrNull(toString( \
-                     sumIf(toFloat64(w_x) * toFloat64(volume_base), valid) \
-                     / nullIf(sumIf(toFloat64(volume_base), valid), 0)), 14))) AS vw, \
+                 if(countIf(valid) = 0 OR isNull({VWAP_RAW}), NULL, \
+                    toString(least(greatest({VWAP_RAW}, {LOW_PUBLISHED}), {HIGH_PUBLISHED}))) AS vw, \
                  toUInt64(sum(trade_count)) AS tc, \
                  nullIf(if(countIf(valid) = 0, NULL, argMaxIf(meth, (volume_base, quote_asset_id), valid)), '') AS meth, \
                  if(countIf(valid) = 0, NULL, toUInt8(1)) AS drv"
-                    .to_string(),
+                ),
             )
         }
         // As stored: no conversion, so nothing is derived and there is no USD
@@ -934,6 +1010,23 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
         Denomination::QuoteLeg(_) => (
             "timestamp, open, high, low, close, volume_base, volume_quote_usd, vwap, trade_count"
                 .to_string(),
+            // ⚠️ `vw` is clamped into `[min(low), max(high)]` here too — task 0229's
+            // review, finding 1. This arm applies no rate, so `o`/`h`/`l`/`c` are
+            // the stored decimals and cannot cross; the merged vwap still can,
+            // because it is a float weighted mean and `(x*v)/v != x`.
+            //
+            // 🔴 A single-source bucket reads CLEAN and that is a false negative
+            // — measured 0 violations in 200,000. With TWO sources at equal
+            // prices, the boundary case, the same expression gave **12,017 above
+            // `high` and 12,026 below `low` in 200,000 buckets**. The merge is
+            // the whole point of this aggregate, so a one-row probe tests the
+            // path that does not exist in production.
+            //
+            // The `isNull` arm preserves the pre-existing zero sentinel: no
+            // volume means no weighted mean, and that must stay `0` rather than
+            // being clamped up to `low`, which would assert a vwap the bucket
+            // does not have.
+            //
             // ⚠️ The price columns MUST be Nullable to match `Candle`'s
             // `Option<String>` fields. RowBinary is positional and carries no
             // types (the client does not use WithNamesAndTypes), so the
@@ -950,8 +1043,12 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
              toNullable(toString(argMax(close, volume_base))) AS c, \
              toString(sum(volume_base)) AS vb, \
              toString(sum(volume_quote_usd)) AS vqu, \
-             toNullable(toString(toDecimal128(ifNull(sum(toFloat64(vwap) * toFloat64(volume_base)) \
-                 / nullIf(sum(toFloat64(volume_base)), 0), 0), 14))) AS vw, \
+             toNullable(toString(if(isNull(toDecimal128OrNull(toString( \
+                 sum(toFloat64(vwap) * toFloat64(volume_base)) \
+                 / nullIf(sum(toFloat64(volume_base)), 0)), 14)), toDecimal128(0, 14), \
+                 least(greatest(toDecimal128OrNull(toString( \
+                     sum(toFloat64(vwap) * toFloat64(volume_base)) \
+                     / nullIf(sum(toFloat64(volume_base)), 0)), 14), min(low)), max(high))))) AS vw, \
              toUInt64(sum(trade_count)) AS tc, \
              CAST(NULL AS Nullable(String)) AS meth, \
              CAST(NULL AS Nullable(UInt8)) AS drv"
