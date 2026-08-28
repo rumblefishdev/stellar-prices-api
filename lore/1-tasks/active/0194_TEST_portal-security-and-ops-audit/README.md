@@ -133,6 +133,19 @@ history:
       Issues Encountered written up while the detail is fresh: the exposure, the
       wrong inert-objects prediction, Zig as an undocumented build prerequisite,
       and CI discarding the Lambda assets it builds.
+  - date: "2026-08-28"
+    status: active
+    who: akot
+    note: >
+      Two deletions with Adam's approval, both verified after the fact. The four
+      orphaned `api-tokens/*` objects are gone, so the previous portal no longer
+      answers — `/api-tokens/` and `/api-tokens/index.html` now `403` while
+      `/api/` stays `200`. And the one key created while the flag was off,
+      `smdesqkg5j`, is deleted: no `discord-*` key remains in the account and the
+      free plan holds only the CDK-managed `t61phbbhhj`. That closes the third
+      gate precondition. With [[0189]] met and blockers B1 and B2 closed, the
+      only preconditions still open are the two `(host)` checks, which wait on
+      the Explorer distribution.
 ---
 
 # Portal security and ops audit
@@ -360,8 +373,11 @@ api-tokens/assets/index-x1XGuNl0.css       1 B    2026-08-27
 ```
 
 `prune` is scoped to `destinationKeyPrefix`, so no deploy will ever remove them.
-Delete them before the portal opens — a URL that was the documented one until
-today should 404, not serve a broken copy.
+**Deleted 2026-08-28** with Adam's approval, prefix `api-tokens/` only. The
+bucket now holds the 13 `api/` objects and nothing else, and
+`https://dojr4epgxo2qp.cloudfront.net/api-tokens/` answers `403` — S3 masking
+the missing key, which is the honest answer for a path nothing serves — while
+`/api/` stays `200`.
 
 ## Hosting preconditions (new, 2026-08-28)
 
@@ -446,8 +462,13 @@ Preconditions, all of them:
 - [ ] The Discord OAuth secret exists and parses, and both eligibility SSM
       parameters are seeded (runbook §2, §2a) — 2026-08-28: **none of the three
       exists**, and the deploy that carries the flip must not run until they do
-- [ ] Keys created while the flag was off are enumerated (2026-08-28: one,
-      `smdesqkg5j`, listed in the report) and deleted. There is no
+- [x] ✅ **Done 2026-08-28.** Keys created while the flag was off are
+      enumerated (one, `smdesqkg5j`, `discord-1534…537-key`, created
+      2026-08-26T15:11:57Z, `ManagedBy=prices-portal`, 155 requests in August)
+      **and deleted** at 14:0xZ. A fresh listing confirms no `discord-*` key
+      remains and that the free plan `71t9im` holds only `t61phbbhhj`, the
+      CDK-managed key. The other two in the account are the Explorer partner
+      key and [[0121]]'s load-test key, neither of which is the portal's. There is no
       separate incubation plan (decided 2026-08-13), so those keys are real keys
       on the real free-tier plan and would otherwise survive into its accounting
       as anonymous strings. They come from local runs against production
