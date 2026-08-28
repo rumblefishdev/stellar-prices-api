@@ -35,7 +35,8 @@ history:
       Age-weighted votes considered and argued against — age is pipeline
       artifact, handled by the liveness guard + [[0216]]. See the new
       "Design input" section. [[0123]] is now completed, so the evidence-base
-      blocker is met; only [[0118]] remains.
+      blocker is met; only [[0118]] remains. **That section has since moved to
+      [[0233]] — see the 2026-08-28 split entry.**
   - date: 2026-08-28
     status: backlog
     who: stkrolikiewicz
@@ -48,6 +49,16 @@ history:
       section, with its strength stated honestly (an inference from two
       bullets sitting together, not a quotation). Raises the bar for the
       leave-as-is option: that choice now owes [[0128]] a written reason.
+  - date: 2026-08-28
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Split: the §5.5 median MECHANISM (weighted quantile, even-count
+      interpolation, argMaxIf tie sets) moved to [[0233]]. Three artifacts had
+      routed median questions here while this task's title, options and all
+      four ACs cover only `price_usd` — it could have been closed in full
+      without touching `median()`. Keeping the cheap product decision
+      unblocked by an expensive published-value change.
 ---
 
 # Is the headline price outlier-protected, or not?
@@ -108,66 +119,22 @@ so no consumer guard catches it.
   informative, largest API-surface change. Pairs naturally with [[0216]]'s
   age column: both answer "how much should I trust this number?".
 
-## Design input — volume-weighted median (2026-08-27, from 0118 planning)
+## The median mechanism is NOT this task ([[0233]])
 
-This task also owns the median mechanism itself (current.sql delegates the
-even-count-interpolation question here; 0123's close landed the tie-set
-question here too). Analysis from the 0118 kickoff discussion, recorded so
-the decision is made with it on the table:
+Three questions about the §5.5 median itself were routed here by other
+artifacts — `current.sql`'s even-count-interpolation note, [[0123]]'s
+tie-set finding, and [[0118]]'s kickoff analysis of the unweighted median as
+a manipulation surface. They are **split out into [[0233]]** as of
+2026-08-28, because this task's title, options and acceptance criteria cover
+only whether `price_usd` is outlier-protected: 0217 could be closed in full
+without touching `median()`, which made it a magnet for questions it did not
+own.
 
-**The unweighted median is an attack surface.** Every venue votes equally, so
-two dust venues can outvote and evict the deep market — and after eviction,
-100% of the vwap weight lands on the manipulated pools. Cost of the attack is
-moving two thin AMM pools >20%; 0118's $100 floor raises that bar only
-slightly.
-
-**Candidate fix: `quantileExactWeighted(0.5)(price, volume)`** — the
-reference becomes "the price where half the volume sits". One function swap,
-three properties:
-
-1. Dust cannot steer the reference — the attack now requires controlling
-   half the asset's 24h volume.
-2. No interpolation pathology: the weighted quantile returns a *real* venue
-   price, so the median-holder always has deviation 0 and survives — the
-   `[1,1,3,3] → sources = '{}'` case becomes impossible by construction.
-3. The >= 3 guard stops being load-bearing: at 2 sources the reference is
-   the deeper venue, turning the test into "does the thin venue agree with
-   the deep one?" — a defensible asymmetry (deep markets are expensive to
-   manipulate).
-
-Weights must be integer: `toUInt64(greatest(1, src_volume))` so a
-zero-volume source still counts as 1.
-
-**Deliberately NOT proposed: age-weighted votes.** Per-venue price age is
-today ~100% an artifact of the hourly enrichment cadence, not a market
-signal — folding it into vote weights would penalise venues for our own
-pipeline lag, re-introducing the defect 0135's carry removed, and would make
-the AC-4 hand-reconciliation (0123) substantially harder. Age is already
-handled at the right layers: the 2h conditional liveness guard, carry, and
-[[0216]]'s age column. The one residual gap (a >20% move inside 2h where the
-lagged majority evicts the first mover) is unobserved in practice — 0123
-measured max deviation 0.824% against the 20% band.
-
-**Also considered and rejected: evaluating every venue at a common
-timestamp** (snapshot-at-T, consolidated-tape style — take the laggard
-venue's newest priced minute and read every other venue as of that minute).
-Rejected 2026-08-27, four reasons: (1) a candle at the common T usually does
-not exist — candles are per traded minute, so sparse venues get an
-ASOF-backward read anyway and the skew merely moves its anchor into the
-past; (2) the hourly enrichment pass already synchronises priced tips to the
-pass boundary — residual cross-venue skew is trading sparsity, which no
-timestamp choice fixes; (3) it inverts failure isolation: today a lagging
-venue degrades only its own vote, synchronised it would pin the whole
-asset's freshness to the worst venue; (4) the defect it would close needs a
->20% move inside a <=2h skew window — unobserved (0123: max deviation
-0.824%). The residual concern (a fresh first-mover judged against a carried
-majority) is better served by the volume-weighted median above plus
-[[0216]]'s explicit age column.
-
-**Cost of any semantic change:** AC 4 (Tranche 2) was evidenced on the
-current semantics — changing the median invalidates that evidence, so the
-change requires a 0123-style re-run plus `current_mv_it.rs` fixture updates,
-and must be called out as a published-value change.
+The split matters for sequencing: deciding `price_usd` is a cheap product
+call, while replacing the median is a published-value change that needs a
+0123-style reconciliation re-run. Binding them together would block the cheap
+decision behind the expensive one. If this task chooses to filter `price_usd`,
+it inherits whatever mechanism 0233 settles.
 
 ## Design input — what the RFP actually asks of the headline price (2026-08-28)
 

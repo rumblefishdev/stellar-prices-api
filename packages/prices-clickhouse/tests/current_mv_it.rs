@@ -731,7 +731,7 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
     // 50%, so nothing survives — while price_usd still publishes. This is the
     // counterexample to "by construction": an asset CAN hold a price with no
     // sources and no VWAP beside it. Whether interpolation is the right median
-    // for an even count is task 0217's decision, not this test's.
+    // for an even count is task 0233's decision, not this test's.
     let evn_srcs: String = admin
         .query(&s("sources", 15))
         .fetch_one()
