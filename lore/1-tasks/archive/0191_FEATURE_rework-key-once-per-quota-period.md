@@ -4,7 +4,7 @@ title: "Replace my key — revoke now, re-issue next quota period (merged with 0
 type: FEATURE
 status: completed
 related_adr: ["0010"]
-related_tasks: ["0183", "0157", "0160", "0180", "0187", "0189", "0190", "0192", "0193", "0221"]
+related_tasks: ["0183", "0157", "0160", "0180", "0187", "0189", "0190", "0192", "0193", "0221", "0164"]
 tags: [layer-backend, priority-medium, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, security, slice-8, slice-9]
 milestone: 3
 links:
@@ -91,6 +91,14 @@ history:
       added (`apigateway:PATCH` on `/apikeys/*`, tag-scoped in its own sid).
       One acceptance criterion deferred, not dropped: the `MONTH` rollover
       confirmation needs 1 September 2026, spawned as [[0221]].
+  - date: "2026-08-27"
+    status: completed
+    who: akot
+    note: >
+      Amendment, written from [[0193]]: the phrase that arms the modal is
+      `regenerate-key`, not `delete-key` — decision 41 below. Status
+      unchanged; nothing else in this task is reopened. ADR 0010 §8 and
+      [[0164]]'s checklist re-pointed in the same change.
 ---
 
 # Rework — a new key, once a period
@@ -808,3 +816,47 @@ prices-api` 0 failed, `clippy --all-targets -D warnings` clean, portal 95/95,
 `into_service_error` was re-verified against the resolved
 `aws-smithy-runtime-api` 1.12.3 source (the non-`ServiceError` arm builds an
 unhandled error, it does not panic).
+
+## Amendment — 2026-08-27, via [[0193]]: the arming phrase is `regenerate-key`
+
+Decision 5 and the spec above say the confirm stays disabled **until the
+user types `delete-key`**. Since 2026-08-25 the dashboard control has said
+**Regenerate**, the dialog's heading is "Regenerate API key?" and its button
+"Regenerate" (the 0193 frame), and on 2026-08-26 Adam changed the phrase to
+follow the button. [[0193]] found the change during its review round and,
+under its own rule ("fix it in the owning task rather than quietly here"),
+records it here rather than in the styling task.
+
+41. **The arming phrase is `regenerate-key`.** A dialog headed "Regenerate"
+    that demands the word `delete` asks the visitor to agree to a different
+    sentence from the one they just read; the phrase follows the button so the
+    two say the same thing. **What does not change:** the REASON for a typed
+    phrase — this is destructive, it must not be reachable by one stray click
+    — and everything else decision 5 pins: the old key dies immediately, no
+    replacement is issued now, confirm disabled on submit, the refusal
+    renders a calendar date. The FAQ on the landing page is a second place
+    that copy lives (`web/portal/src/landing/Faq.tsx`); a future change to the
+    wording has two targets.
+
+    Re-pointed in the same change: ADR 0010 §8 ("the `regenerate-key` modal"),
+    [[0164]]'s quiet-failure check and acceptance criterion (a tester following
+    the old checklist would type `delete-key`, see confirm stay disabled, and
+    file the dialog as broken), and [[0193]]'s own context line. Code:
+    `REWORK_CONFIRM_PHRASE` in `web/portal/src/app/app.tsx`, with the spec
+    `keeps confirm disabled until the visitor types regenerate-key`.
+
+    **Second amendment, same day, same route.** [[0193]]'s review (PR #249)
+    found two landing-page sentences transcribed from the Figma file that
+    stated the model this task superseded: the FAQ's "The replacement is
+    issued straight away and the old key stops working" and the claims
+    card's "Rotate once per month if needed". Both now restate decision 5 —
+    deactivated at once, nothing issued until the next quota period, and
+    "regenerate" rather than "rotate" — in `landing/Faq.tsx` and
+    `landing/DeveloperDashboard.tsx`. A third, found the same day while
+    driving the dashboard in a browser: the key card's yellow strip ("Key
+    rotation is limited to once per calendar month. Next rotation
+    available: …"), now "Regenerating is limited to once per quota period
+    and issues nothing now. A new key can be issued from: …" in `app.tsx`.
+    Recorded here because the words are this task's, and the Figma frames
+    still carry the old ones: a future re-transcription must not bring them
+    back.

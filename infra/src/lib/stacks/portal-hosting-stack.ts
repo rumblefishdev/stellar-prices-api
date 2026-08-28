@@ -238,6 +238,36 @@ var REDIRECTS = {
   '/api-tokens/api': '/api-tokens/api/'
 };
 
+// The portal's client-side routes, served by the portal's own index.html.
+//
+// Without this, a hard refresh or a pasted link to one of them resolves
+// against S3, which grants s3:GetObject and NOT s3:ListBucket — so the missing
+// key comes back as 403 AccessDenied XML rather than a 404, and the visitor
+// gets a bare AWS error page instead of the app. The router cannot help,
+// because the bundle never loads.
+//
+// An ALLOW-LIST of literals, not a catch-all rewrite of every extension-less
+// path. A catch-all would answer 200-with-index.html for genuinely missing
+// objects too, which turns a broken deploy — a hashed chunk that did not
+// upload — into an app that silently renders the wrong thing. It also keeps
+// the open-redirect property the stack note above insists on: nothing from the
+// request is interpolated into a URI.
+//
+// Both slash forms, because the trailing-slash branch below would otherwise
+// rewrite '/api-tokens/login/' to '/api-tokens/login/index.html' and 403.
+//
+// WARNING: add a route to web/portal/src/landing/links.ts and you must add
+// it here too. Task 0195 is where this stops being a hand-maintained list and
+// becomes the per-prefix SPA fallback.
+var APP_ROUTES = {
+  '/api-tokens/login': '/api-tokens/index.html',
+  '/api-tokens/login/': '/api-tokens/index.html',
+  '/api-tokens/dashboard': '/api-tokens/index.html',
+  '/api-tokens/dashboard/': '/api-tokens/index.html',
+  '/api-tokens/quick-start': '/api-tokens/index.html',
+  '/api-tokens/quick-start/': '/api-tokens/index.html'
+};
+
 function handler(event) {
   var request = event.request;
   var uri = request.uri;
@@ -245,6 +275,12 @@ function handler(event) {
   // and 'constructor' is truthy.
   if (typeof REDIRECTS[uri] === 'string') {
     return redirect(REDIRECTS[uri]);
+  }
+  // Before the trailing-slash branch, which would otherwise append index.html
+  // to the directory form and miss.
+  if (typeof APP_ROUTES[uri] === 'string') {
+    request.uri = APP_ROUTES[uri];
+    return request;
   }
   if (uri.slice(-1) === '/') {
     request.uri = uri + 'index.html';

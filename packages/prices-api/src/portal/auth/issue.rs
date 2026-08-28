@@ -186,10 +186,13 @@ pub(super) fn refuse_issue_discord(
 /// `keys::RECONCILE_DEADLINE` is 10s and was sized for 0187, where the
 /// reconciliation was essentially the entire request: "10s leaves the handler
 /// ~5s of the function's budget". This path puts four more network calls in
-/// front of it — the token exchange (5s), two Parameters and Secrets reads
-/// (2s each) and two Discord reads (5s each) — so reusing that constant
-/// unchanged would let the worst case reach ~29s against
-/// `apiHandler.timeoutSeconds` of **15**. Lambda would kill the invocation
+/// front of it — the token exchange (4s), two Parameters and Secrets reads
+/// (2s, **joined**, so they cost one wait and not two) and two Discord reads
+/// (4s each) — so reusing that constant unchanged would let the worst case
+/// reach ~24s against `apiHandler.timeoutSeconds` of **15**. The
+/// `discord::REQUEST_TIMEOUT` docblock carries the sum that has to keep
+/// holding — `4 + 2 + 4 + 4 = 14s` — and `budget_arithmetic_fits_the_lambda`
+/// below pins it, so raising a term here fails a test rather than a visitor. Lambda would kill the invocation
 /// with no response at all: the visitor gets API Gateway's bare `502` instead
 /// of the designed `?issue=failed` redirect, an `Errors` datapoint is
 /// recorded, and a key may exist that was never attached — precisely the
@@ -312,21 +315,25 @@ pub(super) async fn complete_issue(
             tracing::error!("an issue callback arrived with no eligibility settings wired");
             None
         }
-        Some(settings) => match (
-            settings.guild_id().await,
-            settings.min_account_age_minutes().await,
-        ) {
-            (Ok(guild_id), Ok(min_age)) => Some((guild_id, min_age)),
-            (guild, age) => {
-                for error in [guild.err(), age.err()].into_iter().flatten() {
-                    tracing::error!(
-                        error = %error,
-                        "eligibility parameters could not be read; refusing without accusation"
-                    );
+        // Joined, as the sign-in path joins them (`auth/mod.rs`): read one
+        // after the other they cost two `PARAMETER_TIMEOUT`s in the worst
+        // case, and that is the 2s that put this callback at 16s against the
+        // 15s invocation — the Lambda killed, a bare API Gateway 502, and
+        // possibly a key created and never attached.
+        Some(settings) => {
+            match tokio::join!(settings.guild_id(), settings.min_account_age_minutes()) {
+                (Ok(guild_id), Ok(min_age)) => Some((guild_id, min_age)),
+                (guild, age) => {
+                    for error in [guild.err(), age.err()].into_iter().flatten() {
+                        tracing::error!(
+                            error = %error,
+                            "eligibility parameters could not be read; refusing without accusation"
+                        );
+                    }
+                    None
                 }
-                None
             }
-        },
+        }
     };
 
     // The membership call BORROWS the token; the identity read then consumes
@@ -406,50 +413,193 @@ pub(super) async fn complete_issue(
             );
             land(ISSUE_UNKNOWN_QUERY)
         }
-        Eligibility::Eligible => {
-            let Some(gateway) = state.issue.gateway.as_deref() else {
+        Eligibility::Eligible => match issue(state, &user.id, started).await {
+            // An explicit press lands on the welcome whether the key was
+            // minted or adopted — the visitor asked for a key and has one.
+            Issued { .. } => land(ISSUE_OK_QUERY),
+            Capped { next_eligible_date } => land(&capped_query(&next_eligible_date)),
+            Failed => land(ISSUE_FAILED_QUERY),
+            Unwired => {
                 tracing::error!("an eligible issue callback arrived with no control plane wired");
-                return land(ISSUE_FAILED_QUERY);
-            };
-
-            // What is left of the invocation, not a constant. Everything above
-            // — the exchange, both parameter reads, both Discord reads — has
-            // already been paid for out of the same budget.
-            let remaining = ISSUE_BUDGET.saturating_sub(started.elapsed());
-            if remaining < RECONCILE_FLOOR {
-                tracing::error!(
-                    remaining_ms = remaining.as_millis() as u64,
-                    "eligibility passed but the invocation's budget is spent; \
-                     refusing to start a reconciliation that cannot finish"
-                );
-                return land(ISSUE_FAILED_QUERY);
+                land(ISSUE_FAILED_QUERY)
             }
-            // `min`, so the configured deadline stays an upper bound and the
-            // `with_deadline` test seam keeps working.
-            let deadline = remaining.min(state.issue.deadline);
+        },
+    }
+}
 
-            match keys::issue_for(gateway, &user.id, deadline).await {
-                IssueOutcome::Issued => {
-                    // A key now exists, so a cached "no key" on the usage
-                    // route is false — same eviction the reveal performs,
-                    // for the page this redirect is about to land on.
-                    if let Some(cache) = &state.issue.usage_cache {
-                        cache.invalidate_no_key(&user.id);
-                    }
-                    land(ISSUE_OK_QUERY)
-                }
-                IssueOutcome::Capped { next_eligible_date } => {
-                    land(&capped_query(&next_eligible_date))
-                }
-                IssueOutcome::Failed => land(ISSUE_FAILED_QUERY),
+/// What [`issue`] settled on — [`IssueOutcome`] plus the one case that is the
+/// deployment's fault rather than the reconciler's, so each caller can land
+/// it in its own words.
+pub(super) enum Landing {
+    Issued {
+        created: bool,
+    },
+    Capped {
+        next_eligible_date: String,
+    },
+    Failed,
+    /// No control plane wired. Nothing was attempted.
+    Unwired,
+}
+use Landing::*;
+
+/// Run the reconciler for `user_id` inside what is left of the invocation.
+///
+/// The shared half of two callbacks: the explicit `action=issue` press
+/// ([`complete_issue`]) and, since 2026-08-26, the sign-in round-trip
+/// ([`after_sign_in`]). What each does with the answer differs; what it costs
+/// and how it is bounded does not, and it lives once.
+///
+/// `started` is stamped when the **request** arrived — see [`ISSUE_BUDGET`].
+async fn issue(state: &AuthState, user_id: &str, started: Instant) -> Landing {
+    let Some(gateway) = state.issue.gateway.as_deref() else {
+        return Unwired;
+    };
+
+    // What is left of the invocation, not a constant. Everything before this
+    // — the exchange, both parameter reads, both Discord reads — has already
+    // been paid for out of the same budget.
+    let remaining = ISSUE_BUDGET.saturating_sub(started.elapsed());
+    if remaining < RECONCILE_FLOOR {
+        tracing::error!(
+            remaining_ms = remaining.as_millis() as u64,
+            "eligibility passed but the invocation's budget is spent; \
+             refusing to start a reconciliation that cannot finish"
+        );
+        return Failed;
+    }
+    // `min`, so the configured deadline stays an upper bound and the
+    // `with_deadline` test seam keeps working.
+    let deadline = remaining.min(state.issue.deadline);
+
+    match keys::issue_for(gateway, user_id, deadline).await {
+        IssueOutcome::Issued { created } => {
+            // A key now exists, so a cached "no key" on the usage route is
+            // false — same eviction the reveal performs, for the page this
+            // redirect is about to land on.
+            if let Some(cache) = &state.issue.usage_cache {
+                cache.invalidate_no_key(user_id);
             }
+            Issued { created }
         }
+        IssueOutcome::Capped { next_eligible_date } => Capped { next_eligible_date },
+        IssueOutcome::Failed => Failed,
+    }
+}
+
+/// The key half of a **sign-in** callback (Adam, 2026-08-26): the landing
+/// query for a visitor who has just proved membership and identity.
+///
+/// **Why sign-in issues at all.** Task 0193's first acceptance criterion is
+/// "first sign-in lands on the dashboard with the key visible and copyable;
+/// returning shows the same key". Until this, sign-in proved identity and
+/// stopped, and a first-timer met an empty dashboard with a button that ran
+/// the whole round-trip again. This is that second round-trip folded into the
+/// first, with two differences from an explicit press, both about what the
+/// visitor is TOLD:
+///
+/// - An adopted key lands on the plain dashboard, not the welcome. `?issue=ok`
+///   says "Your API Key is ready · Just issued", which is false of a key that
+///   has existed for months; the dashboard's own reveal shows it.
+/// - A revoked key lands plain too. The explicit press lands `?issue=capped`
+///   because it is answering a request for a new key; a sign-in made no such
+///   request, and the dashboard's `GET /key` renders the revoked card, which
+///   is the screen for that account. And once the period has rolled the
+///   reconciler simply mints one — which is exactly what that card's footer
+///   promises ("sign in again to receive a new key automatically").
+///
+/// **Age is checked here, not at sign-in's gate.** Membership was proved
+/// before the session was written (a non-member gets no session); a too-young
+/// account IS signed in and lands `?issue=too_young`, because an account old
+/// enough once is old enough forever and it is entitled to read the dashboard
+/// while it waits. What it must not do is reach the reconciler: `issue_for`
+/// adopts without an age check, so skipping `decide` here would mint a key for
+/// exactly the account the threshold exists to refuse.
+///
+/// `Unwired` lands plain with an error line rather than `?issue=failed`: the
+/// session is the sign-in's deliverable and it exists; the dashboard's own
+/// issue control reaches `refuse_issue_start`, which reports the fault to the
+/// visitor in the state that means "our key service, not you".
+///
+/// **`Failed` lands plain too** — the sign-in made no request for a key, and
+/// `?issue=failed` on a returning member's dashboard sits next to the working
+/// key `GET /key` reveals a moment later: a banner saying our key service
+/// failed, over a key it plainly did not fail to keep. On a cold start the
+/// budget can already be spent by the exchange, the parameter reads and two
+/// Discord calls, which made this the common case, not the corner. A visitor
+/// with no key meets the no-key dashboard, whose issue control runs the
+/// explicit round-trip and reports its own `failed` when it earns one.
+///
+/// `min_age_minutes` is `None` when the parameter could not be read at
+/// sign-in: the session still exists, but without the threshold there is no
+/// safe verdict on age, so no key is issued and the landing is plain.
+pub(super) async fn after_sign_in(
+    state: &AuthState,
+    member: &MemberLookup,
+    user_id: &str,
+    min_age_minutes: Option<u64>,
+    started: Instant,
+) -> String {
+    let Some(min_age_minutes) = min_age_minutes else {
+        tracing::warn!(
+            "sign-in has no account-age threshold to check against; landing without a key"
+        );
+        return String::new();
+    };
+    match eligibility::decide(member, user_id, min_age_minutes, eligibility::now_ms()) {
+        Eligibility::TooYoung { wait_secs } => {
+            tracing::info!(outcome = "too_young", wait_secs, "sign-in issued no key");
+            too_young_query(wait_secs)
+        }
+        // Membership was decided before the session was written; `decide`
+        // re-derives the same answer from the same `MemberLookup`, so these
+        // two arms are unreachable. Land plain rather than panic — the
+        // dashboard's issue control will re-ask and land the real verdict.
+        Eligibility::NotMember | Eligibility::Unknown => {
+            tracing::warn!("sign-in passed membership but `decide` did not; landing without a key");
+            String::new()
+        }
+        Eligibility::Eligible => match issue(state, user_id, started).await {
+            Issued { created: true } => ISSUE_OK_QUERY.to_string(),
+            Issued { created: false } => String::new(),
+            Capped { .. } => String::new(),
+            Failed => {
+                tracing::warn!("sign-in could not issue or adopt a key; landing without one");
+                String::new()
+            }
+            Unwired => {
+                tracing::error!(
+                    "a sign-in callback arrived with no control plane wired; no key issued"
+                );
+                String::new()
+            }
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The slow-but-not-failing worst case of both callbacks — the token
+    /// exchange, the two parameter reads (joined, so one wait), the
+    /// membership read and the identity read — has to finish inside the
+    /// invocation timeout, or Lambda kills it and the browser gets API
+    /// Gateway's bare `502` in place of every screen this module lands on.
+    /// The 15 is `apiHandler.timeoutSeconds` in `infra/envs/production.json`;
+    /// raise either constant, or add a call, and this is what fails first.
+    #[test]
+    fn budget_arithmetic_fits_the_lambda() {
+        const LAMBDA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+        let worst = discord::REQUEST_TIMEOUT * 3 + crate::portal::eligibility::PARAMETER_TIMEOUT;
+        assert!(
+            worst < LAMBDA_TIMEOUT,
+            "worst case {worst:?} does not fit inside {LAMBDA_TIMEOUT:?}"
+        );
+        // And the reconciler's share is measured from arrival, so it cannot
+        // extend the callback past the same line.
+        assert!(ISSUE_BUDGET < LAMBDA_TIMEOUT);
+    }
 
     /// Every landing state is a distinct literal under the portal home,
     /// like `?signin=…` — extending `the_only_redirect_targets_are_the_portal

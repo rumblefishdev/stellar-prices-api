@@ -56,6 +56,13 @@ history:
       run order is now [[0194]] → [[0179]] → here, because evidence gathered
       against `stellar_test` is not evidence of a flow an outside developer can
       complete.
+  - date: 2026-08-27
+    status: backlog
+    who: akot
+    note: >
+      Checklist re-pointed: the rework modal arms on `regenerate-key`, not
+      `delete-key` ([[0191]] amendment, decision 41). A tester on the old
+      wording would have reported the dialog as broken.
 ---
 
 # Self-service flow — end-to-end verification
@@ -206,7 +213,8 @@ fails quietly:
 - Rework refused a second time within the period, returning `409` with the next
   eligible date. Verify the meeting's worked example: reworked on 3 August →
   refused until 1 September.
-- The rework modal will not confirm until `delete-key` is typed, and the old key
+- The rework modal will not confirm until `regenerate-key` is typed ([[0191]]
+  decision 41 — it was `delete-key` until 2026-08-26), and the old key
   returns `403` immediately after.
 
 **Evidence to keep:** the curl transcripts, the dashboard screenshots, the
@@ -224,7 +232,7 @@ omitted is a finding waiting for the reviewer.
 - [ ] If the SSM age threshold was temporarily raised to observe check 10, the
       restore is recorded and verified
 - [ ] The quiet-failure checks executed and recorded, including the reconciler
-      convergence and the `delete-key` rework path
+      convergence and the `regenerate-key` rework path
 - [ ] Run performed with two non-maintainer Discord accounts per the table
       above — one eligible, one exercising each refusal in isolation
 - [ ] The two refusals (not a member, account too young) each produce a

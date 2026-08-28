@@ -58,6 +58,29 @@ use super::auth::discord::MemberLookup;
 /// The high 42 bits of a snowflake are milliseconds since this instant.
 const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 
+/// How long one parameter read may take.
+///
+/// The reads go to the Parameters and Secrets extension on localhost, which
+/// answers from its own cache in microseconds when warm and makes a real SSM
+/// call when cold — and had no bound at all, so a cold, throttled read could
+/// sit inside the sign-in callback until the Lambda was killed. Two seconds is
+/// far above a warm read and below what the callback can afford: it is the
+/// `parameters` term in the arithmetic written out on `REQUEST_TIMEOUT` in
+/// `portal/auth/discord.rs`, which is what keeps the worst case under the 15s
+/// invocation timeout.
+///
+/// A read that exceeds it is [`EligibilityError::Fetch`], which every caller
+/// already renders as "could not verify" rather than as an accusation.
+/// Only the extension client can be slow — the `Direct` source is a value
+/// already in memory, and the build without the client fails immediately — so
+/// the constant lives with the code that can actually wait.
+///
+/// `pub(crate)` and unconditional so `auth::issue`'s budget test can add it
+/// up against the invocation timeout in every build, not only the one with
+/// the client that waits on it.
+#[cfg_attr(not(feature = "aws-mtls"), allow(dead_code))]
+pub(crate) const PARAMETER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Where one eligibility parameter's value comes from.
 #[derive(Debug, Clone)]
 pub enum ParamSource {
@@ -154,12 +177,27 @@ pub enum EligibilityError {
 /// per-action read does not call Systems Manager on a warm container.
 #[cfg(feature = "aws-mtls")]
 async fn fetch_parameter(name: &str) -> Result<String, EligibilityError> {
-    prices_clickhouse::mtls::fetch_parameter_string(name)
-        .await
-        .map_err(|e| EligibilityError::Fetch {
+    let fetch = prices_clickhouse::mtls::fetch_parameter_string(name);
+    match tokio::time::timeout(PARAMETER_TIMEOUT, fetch).await {
+        Ok(result) => result.map_err(|e| EligibilityError::Fetch {
             name: name.to_string(),
             message: e.to_string(),
-        })
+        }),
+        Err(_) => {
+            tracing::error!(
+                name,
+                timeout_secs = PARAMETER_TIMEOUT.as_secs(),
+                "eligibility parameter read timed out"
+            );
+            Err(EligibilityError::Fetch {
+                name: name.to_string(),
+                message: format!(
+                    "the parameter read did not answer within {}s",
+                    PARAMETER_TIMEOUT.as_secs()
+                ),
+            })
+        }
+    }
 }
 
 #[cfg(not(feature = "aws-mtls"))]

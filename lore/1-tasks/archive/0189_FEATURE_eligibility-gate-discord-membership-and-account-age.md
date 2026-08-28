@@ -111,8 +111,43 @@ Detail and reasoning: archived
 `0180_RESEARCH_.../notes/R-discord-member-endpoint-response-shape.md` and
 `notes/G-measurement-runbook.md`. Do not re-derive them.
 
+### Item 2 — measured 2026-08-27: **`pending` IS present**
+
+| # | Result | How | Date |
+| --- | --- | --- | --- |
+| 2 | **Present.** The REST member response carried `pending: false`. | Local `serve` (`scripts/measure-pending-absent.sh`), guild `1536303837785362432`, account `kotryba`, one full sign-in round-trip | 2026-08-27 |
+
+**The evidence is an absence, so the chain is written out.** The log
+(`/tmp/portal-pending-absent-20260827T164107.log`) carries
+`portal issued an API key key_id=smdesqkg5j created=false` at 14:42:28 and
+**zero WARN or ERROR lines of any kind** — no `pending_absent`, no
+"membership could not be verified", no `outcome = "unknown"`. Issuance on the
+sign-in path runs only from `issue::after_sign_in`, which `auth/mod.rs` reaches
+only after `match membership` falls through on `Membership::Member`, and
+`eligibility::membership` returns `Member` only for `pending == Some(false)`.
+So the field was present and false.
+
+**What this closes:** risk R1's worst case — "if the field turns out never to be
+sent, EVERY member is refused, indefinitely, and it looks exactly like a Discord
+outage". Discord does send it on this route. That was the fear behind
+[[0193]]'s review blocker (PR #249, karczuRF) and it is disproved.
+
+**What it does not close, and must not be read as closing:**
+
+- **This is one guild, and not the production one.** Production gates on the
+  real Stellar Developers guild (`897514728459468821`, [[0179]] step 4). Re-run
+  the script with `GUILD=897514728459468821` and an account that is a member.
+- **Item 4 is still open and is now the interesting one.** If the guild measured
+  here has Membership Screening **off**, then `pending: false` arrives without
+  screening at all — which is more than item 2 asked and would settle item 4 in
+  the same breath. Adam owns that server; confirming the setting (Server
+  Settings → Members) turns one measurement into two. Recorded as unconfirmed
+  rather than assumed.
+- Items 1, 3 and 5 remain unmeasured.
+
 > **Status 2026-08-20 — items 1–5 deferred to the operator (Adam), tables
-> deliberately left empty.** The archived result tables were checked before
+> deliberately left empty.** *(Item 2 measured 2026-08-27 — see the table
+> above. The rest of this note stands.)* The archived result tables were checked before
 > implementation and are **empty placeholders** (`status: seed`, "nothing
 > measured yet"); no dated results exist to carry in, and none are invented
 > here. Every prerequisite is operator-owned and unmet: the Discord app

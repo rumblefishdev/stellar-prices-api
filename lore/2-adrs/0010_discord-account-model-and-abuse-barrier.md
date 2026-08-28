@@ -3,7 +3,7 @@ id: "0010"
 title: "Discord identity is the account: one active key, gated on guild membership and account age"
 status: accepted
 deciders: [akot]
-related_tasks: ["0156", "0157", "0158", "0159", "0160", "0179", "0180", "0186", "0187", "0188", "0189", "0191", "0192"]
+related_tasks: ["0156", "0157", "0158", "0159", "0160", "0179", "0180", "0186", "0187", "0188", "0189", "0191", "0192", "0193"]
 related_adrs: ["0007", "0008"]
 tags: [discord, oauth, auth, abuse-prevention, account-model, api-keys, usage-plan, epic-self-service-onboarding]
 links:
@@ -54,6 +54,14 @@ history:
       previously state, settled at the re-slice: **revocation does not earn a
       replacement key** — the once-per-period cap governs re-issuance
       regardless of how the previous key ended ([[0192]]).
+  - date: 2026-08-27
+    status: accepted
+    who: akot
+    note: >
+      One word in §8 re-pointed: the rework confirmation's arming phrase is
+      `regenerate-key`, not `delete-key` — [[0191]] amendment (decision 41),
+      recorded from [[0193]]'s review. **No decision in this ADR changes**;
+      the confirm-then-re-auth order and the reasons for a typed phrase stand.
 ---
 
 # ADR 0010: Discord identity is the account
@@ -261,7 +269,8 @@ signed. The callback completes that action and nothing else.
 | Usage / dashboard | no | session only — works forever |
 | **Rework** | **yes** | membership, then the quota-period cap, then the swap |
 
-For rework the user confirms first (the `delete-key` modal in [[0162]]), and the
+For rework the user confirms first (the `regenerate-key` modal — [[0162]], phrase
+amended in [[0191]] decision 41), and the
 re-auth is the gate between confirming and executing.
 
 **Account age is only checked on issuance**, not on rework: an account old enough

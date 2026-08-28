@@ -1,0 +1,138 @@
+import Box from '@mui/material/Box';
+import Link from '@mui/material/Link';
+import Stack from '@mui/material/Stack';
+import Typography from '@mui/material/Typography';
+
+import authenticationIcon from '../assets/icons/docs-authentication.svg';
+import exampleRequestsIcon from '../assets/icons/docs-example-requests.svg';
+import openApiIcon from '../assets/icons/docs-openapi.svg';
+import quickStartIcon from '../assets/icons/docs-quick-start.svg';
+import rateLimitsIcon from '../assets/icons/docs-rate-limits.svg';
+import sdkExamplesIcon from '../assets/icons/docs-sdk-examples.svg';
+import { color, radius } from '../theme/tokens';
+import { OPENAPI_JSON, QUICKSTART, API_REFERENCE } from './links';
+import {
+  CardRail,
+  Section,
+  SectionHeading,
+  cardBorder,
+  cardSurface,
+} from './primitives';
+
+/**
+ * "Everything developers need" — six doors into the documentation.
+ *
+ * Every card is a LINK, not a panel of prose, and they all point at the same
+ * place today: the OpenAPI document, which is the only documentation artefact
+ * actually served (see `links.ts`). Task 0163 writes the quickstart and task
+ * 0195 mounts Swagger UI; when they land, the three constants in `links.ts`
+ * diverge and these cards start pointing at six real destinations.
+ *
+ * Cards rather than a list because that is what the design does, and links
+ * rather than `<div>`s because a card that describes a document and cannot open
+ * it is the kind of thing that makes a reviewer stop trusting the page.
+ */
+
+type Doc = {
+  icon: string;
+  title: string;
+  body: string;
+  href: string;
+};
+
+const DOCS: readonly Doc[] = [
+  {
+    icon: quickStartIcon,
+    title: 'Quick Start',
+    body: 'Get your first live response in under 5 minutes. Covers authentication and the most common endpoint.',
+    href: QUICKSTART,
+  },
+  {
+    icon: authenticationIcon,
+    title: 'Authentication',
+    body: 'How API keys work, where to pass them, and what to expect when a key is missing or rate-limited.',
+    href: API_REFERENCE,
+  },
+  {
+    icon: exampleRequestsIcon,
+    title: 'Example Requests',
+    body: 'Copy-ready curl commands for every endpoint. Test against the live API from your terminal.',
+    href: API_REFERENCE,
+  },
+  {
+    icon: openApiIcon,
+    title: 'OpenAPI Specification',
+    body: 'Full Swagger UI included. Explore, test and generate client code directly from the spec.',
+    href: OPENAPI_JSON,
+  },
+  {
+    icon: sdkExamplesIcon,
+    title: 'SDK Examples',
+    body: 'Working code snippets in four languages to copy into your project.',
+    href: API_REFERENCE,
+  },
+  {
+    icon: rateLimitsIcon,
+    title: 'Rate Limits',
+    body: 'How throttling works, what headers to watch, and how to handle 429 responses gracefully.',
+    href: API_REFERENCE,
+  },
+];
+
+export function Documentation() {
+  return (
+    <Section tone="base" id="docs">
+      <Stack spacing={{ xs: 4, md: 6 }}>
+        <SectionHeading
+          align="left"
+          label="Documentation"
+          title="Everything developers need"
+          subtitle="From your first curl to production deployment."
+        />
+
+        {/* A rail on a phone, like the feature grid — see `CardRail`. */}
+        <CardRail columns={{ sm: 'repeat(2, 1fr)', lg: 'repeat(3, 1fr)' }}>
+          {DOCS.map(({ icon, title, body, href }) => (
+            <Stack
+              key={title}
+              component={Link}
+              href={href}
+              underline="none"
+              spacing={1.5}
+              sx={{
+                p: 3,
+                height: '100%',
+                borderRadius: `${radius.lg}px`,
+                border: cardBorder,
+                backgroundColor: cardSurface('deep'),
+                color: 'inherit',
+                transition: 'border-color 120ms ease',
+                '&:hover': { borderColor: color.stroke.default },
+                '&:focus-visible': {
+                  outline: `2px solid ${color.stroke.action}`,
+                  outlineOffset: 2,
+                },
+              }}
+            >
+              {/* The exported Figma badge (Adam's `Documentations.zip`) —
+                  pale yellow disc, brown glyph, one file. */}
+              <Box
+                component="img"
+                src={icon}
+                alt=""
+                aria-hidden
+                sx={{ width: 32, height: 32, display: 'block' }}
+              />
+              <Typography variant="h5" component="h3" color="text.primary">
+                {title}
+              </Typography>
+              <Typography variant="body2" sx={{ color: color.text.tertiary }}>
+                {body}
+              </Typography>
+            </Stack>
+          ))}
+        </CardRail>
+      </Stack>
+    </Section>
+  );
+}
