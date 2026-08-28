@@ -180,6 +180,37 @@ carries **absolute** `/api-tokens/assets/…` URLs, which on that host match no
 behaviour, fall to the Explorer SPA bucket, and come back as Explorer's
 `index.html` with status `200`.
 
+### The target layout, and why the callback keeps the old prefix
+
+The bundle is synced to `s3://production-soroban-explorer-api-spa/api`, which is
+origin 2 of `EA2TLS5SS5M87` under behaviour `/api/*` with no `OriginPath`, so
+the S3 key `api/index.html` is the URL `/api/index.html`. That fixes the
+**bundle** prefix at `/api/`. It does not fix the **backend** prefix, and the
+two do not have to match — which is what makes one layout much cheaper than the
+other:
+
+| | bundle | backend | what changes |
+|---|---|---|---|
+| **A (minimal)** | `/api/` | `/api-tokens/api/` | `BASE_PATH` (web, 2 copies) and `PORTAL_HOME` (Rust). Nothing else in Rust, nothing in the gateway, nothing in `methodSettings`. The session cookie is already scoped `Path=/api-tokens/`, so it is still sent to every backend call and never to the bundle — which does not need it. `CALLBACK_PATH` is unchanged, so the secret loader's `ends_with` rule is satisfied by `https://sorobanscan.rumblefish.dev/api-tokens/api/auth/callback` |
+| **B (convention)** | `/api/` | `/api/api/` | [[0161]]'s `<app>/*` + `<app>/api/*` shape, but it moves `PORTAL_API_PREFIX`, `CALLBACK_PATH`, `PORTAL_HOME`, `SESSION_PATH`, `PENDING_PATH`, the gateway resource path `/api-tokens/api/{proxy+}` and its three `methodSettings` entries, plus the Discord registration. Every one of those is a deploy, and the gateway pair is the change [[0184]] records breaking production for twenty minutes |
+
+**A is the recommendation** and it is what the redirect URI below assumes. It is
+asymmetric on purpose; [[0161]]'s convention is worth re-deciding once, in 0195,
+rather than paid for during a cutover.
+
+Either way, these remain and are not solved by choosing a layout:
+
+- **Deep links and refresh.** With the bundle at `/api/`, the app's routes are
+  `/api/login`, `/api/dashboard`, `/api/quick-start`. On `EA2TLS5SS5M87` a
+  refresh on one resolves to a missing S3 key, and `CustomErrorResponses` turns
+  the 403 into **Explorer's** `index.html` with status `200` — the visitor gets
+  the block explorer, not the portal. `PortalHostingStack` solves this with the
+  `DirectoryIndexFn` allow-list; that function is on OUR distribution and does
+  not exist on Explorer's. This is [[0195]]'s per-prefix SPA fallback, and here
+  it is a requirement rather than a nicety
+- The four Explorer-side items listed below (origin, methods, basic-auth,
+  `CustomErrorResponses`)
+
 - [ ] The bundle is built for the prefix it is served from — `BASE_PATH` in
       `web/portal/src/base-path.ts` and its copy in `vite.config.mts`
       (`base-path.spec.ts` fails if they drift). Owner: [[0195]]
@@ -239,6 +270,34 @@ verified is the one 0195 delivers. The flag itself is still independent of both
 — it lives in the Lambda, which answers on either host — so the flip can be
 deployed as soon as the secret and the parameters are seeded. What waits for
 0195 is this task's sign-off, not the portal being open.
+
+## Design Decisions
+
+### Emerged
+
+1. **The gating guild is the test guild, and the landing page's copy is
+   knowingly wrong for it.** Decided by Adam, 2026-08-28.
+   `/prices/production/discord-guild-id` is seeded with
+   `1536303837785362432` (`stellar_test`), not `897514728459468821`
+   (`Stellar Developers`). The landing page states `discord.gg/stellardev` as
+   the membership prerequisite — [[0189]]'s copy, rendered by [[0193]] and
+   asserted by two tests — so with the portal open on a public URL, **every
+   visitor who follows the instruction on the page is refused as
+   `not_member`**; only people Adam invites to the test guild can get a key.
+
+   Accepted rather than fixed, deliberately: the alternative is editing
+   [[0189]]'s copy for a state that is meant to be temporary, and copy churn is
+   what the "re-decide no copy" rule of [[0193]] exists to prevent. The refusal
+   is also the honest one — the visitor really is not a member of the guild the
+   gate checks — and it is the arm that does not accuse
+   (`Eligibility::NotMember`, not `Unknown`).
+
+   ⚠️ **This is a dated, temporary state and needs an owner and a date.**
+   Switching to the production guild is `put-parameter --overwrite` and a ~5 min
+   extension cache — no deploy, no code change. It must happen before the portal
+   is advertised to anyone outside the demo, and before [[0164]] walks the
+   user-visible flow as a stranger would. Until then the public URL is a door
+   that says "join Stellar Developers" and then refuses Stellar Developers.
 
 ## Acceptance Criteria
 
