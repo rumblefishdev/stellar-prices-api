@@ -14,9 +14,15 @@ real Lambda concurrency + cross-cloud mTLS to ClickHouse all in play):
 ```sh
 k6 run packages/prices-api/loadtest/price_load.js \
   -e BASE_URL=https://<api-id>.execute-api.<region>.amazonaws.com/production \
-  -e API_KEY=<key on a plan that permits 100 req/s — see below> \
-  -e ASSET=native
+  -e API_KEY=<key on a plan that permits 100 req/s — see below>
 ```
+
+No `-e ASSET=` here, deliberately: that flag pins one asset and turns the run
+into a measurement of the **gateway cache**, not of the AC scenario (see the
+regime table below). The default 20-asset pool is the AC scenario. Copying a
+command that pins an asset and reporting its p95 as the milestone number is
+exactly the "configuration artefact as an SLO result" failure this file warns
+about two paragraphs down.
 
 Deploy-gated — requires the stack deployed (Phase 4 CDK) and a price row written
 by the ingest/current-prices path.
@@ -69,9 +75,11 @@ k6 run packages/prices-api/loadtest/price_load.js \
 | `ASSETS` | 0120's 20-asset list | path to a JSON id pool (ignored when `ASSET` is set) |
 | `API_KEY` | (none) | sent as `x-api-key` (required against the gateway) |
 | `RATE` | `100` | requests/second |
-| `WARMUP` | `30s` | low-rate phase before the measured window, excluded from thresholds |
+| `WARMUP` | `30s` | full-rate phase before the measured window, excluded from thresholds; `0` drops it |
 | `DURATION` | `5m` | sustained measured duration |
 | `VUS` / `MAX_VUS` | `50` / `200` | pre-allocated / max virtual users |
+| `SETUP_TIMEOUT` | `180s` | ceiling on the pool probe — raise it for pools well past 2000 |
+| `PROBE_BATCH` | `10` | concurrent probes per batch in `setup()` |
 
 Smoke first with `-e RATE=20 -e DURATION=20s` before the full 5-minute run.
 
@@ -85,7 +93,14 @@ asset can miss at most 30 times, which fixes the arithmetic:
 |------|----------|--------------------|------------------------------|
 | 1 asset | `-e ASSET=native` | ~30 (0.1 %) | the gateway cache |
 | 20 assets (default) | *(nothing — it is the default)* | ~600 (2 %) | the AC scenario, still cache-dominated |
-| 1000+ assets | `-e ASSETS=/path/pool.json` | 30 000 (100 %) | the real data path |
+| ≥ 2000 assets | `-e ASSETS=/path/pool.json` | 30 000 (100 %) | the real data path |
+
+⚠️ **The wide regime needs `pool ≫ RATE × TTL`, not "a big number".** Selection
+is deterministic round-robin, so a pool of exactly `RATE × TTL` — 1000 at
+100 req/s against the 10 s TTL — comes back to each asset every 10.0 s, right on
+the expiry boundary. Hit vs miss becomes a timing coin-flip and the p95 is
+neither number. 2000 gives 2× margin at 100 req/s; scale it if you change
+`RATE`.
 
 There is **no `X-Cache` header** on this API (verified 2026-08-20), so hit and
 miss percentiles cannot be tagged per request. Run the regimes separately and
