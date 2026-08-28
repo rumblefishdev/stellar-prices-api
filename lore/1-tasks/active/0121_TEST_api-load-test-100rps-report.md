@@ -37,7 +37,7 @@ history:
       no infra flag to lift a throttle. `price_load.js` extended rather than
       rewritten: warmup phase excluded from thresholds (Lambda cold starts
       would otherwise pollute p95 over 30k samples), asset pool from 0120's
-      list, `X-Request-Id` for a CH `log_comment` join, non-200 counted as
+      list, non-200 counted as
       failure, and `dropped_iterations` as a threshold so a run that failed
       to sustain the rate cannot be reported as one that did.
       **Three measured findings shaping the method:** (1) there is NO
@@ -54,6 +54,28 @@ history:
       mostly cache misses): p95 **83 ms**, zero failures — an early signal
       that the 200 ms AC is comfortable, though not a substitute for the
       5-minute run.
+  - date: 2026-08-28
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Addressed all ten findings from okarcz's PR #234 review. Three of them
+      shared one theme — the harness could report the SLO as met without
+      being able to know it: no `checks` threshold (k6 checks do not affect
+      the exit code, so the body validation was decorative), the
+      authoritative README command still pinning `-e ASSET=native` (which
+      measures the gateway cache), and a sequential `setup()` probe that
+      aborts the run before a measured request in the wide pool the README
+      recommends. Also: non-404 probe failures now abort naming the status
+      instead of reading a throttled key as dead assets, `dropped_iterations`
+      scoped to `phase:main`, `WARMUP=0` drops the phase (`0s` was rejected
+      at config validation — verified against the old script), warmup at full
+      rate, `SharedArray`, the wide-regime threshold restated as
+      `pool >> RATE x TTL`, and the `X-Request-Id` header removed along with
+      the claim of a ClickHouse `log_comment` join that does not exist.
+      Branch rebased onto develop first (it was 217 commits behind). Smoke
+      run on prod: 2/20 assets dropped on 404 (USDC per [[0178]], RON), all
+      four thresholds evaluated, p95 55.68 ms in `phase:main` against 670 ms
+      unscoped. The `X-Request-Id` claim is also removed from the note below.
 ---
 
 # Load test — 100 req/s on `GET /assets/{id}/price`
