@@ -36,6 +36,18 @@ history:
       artifact, handled by the liveness guard + [[0216]]. See the new
       "Design input" section. [[0123]] is now completed, so the evidence-base
       blocker is met; only [[0118]] remains.
+  - date: 2026-08-28
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Read the original SCF RFP against this question for the first time. It
+      never defines how Current Price is computed, but its only stated
+      aggregation rule is the weighted average across markets — so the
+      natural reading is that the headline price IS the aggregate, which is
+      the opposite of what we ship. Recorded as a second "Design input"
+      section, with its strength stated honestly (an inference from two
+      bullets sitting together, not a quotation). Raises the bar for the
+      leave-as-is option: that choice now owes [[0128]] a written reason.
 ---
 
 # Is the headline price outlier-protected, or not?
@@ -156,6 +168,44 @@ majority) is better served by the volume-weighted median above plus
 current semantics — changing the median invalidates that evidence, so the
 change requires a 0123-style re-run plus `current_mv_it.rs` fixture updates,
 and must be called out as a published-value change.
+
+## Design input — what the RFP actually asks of the headline price (2026-08-28)
+
+The original SCF RFP (`RFP 1: Prices API`) was read against this question for
+the first time on 2026-08-28. It bears on the decision more than expected,
+and in one direction.
+
+**The RFP never defines how the current price is computed.** Its entire
+statement of the field is one line under Asset Metadata Required:
+*"Current Price (float USD)"*. No "last trade", no "latest close", no
+freshness or venue rule. So none of the three options here is constrained by
+the RFP on its own terms — including the option to leave it as-is.
+
+**But the RFP's only stated aggregation rule is the weighted average.** Core
+Requirements list *"Price Aggregation: Weighted average across major markets
+(Soroswap, Aquarius, SDEX, Blend)"* as the method for producing normalized
+prices, and the same list names *"Current Price"* as the field a consumer
+reads. The natural reading of the pair is that the price a consumer sees IS
+the aggregate. Our shipped design does the opposite: the headline `price_usd`
+is the unfiltered latest priced close from a single venue, and the aggregate
+lives in the secondary `vwap_24h`.
+
+**Weight this honestly.** This is an inference from how the two bullets sit
+together, not a quotation — the RFP does not say "Current Price = the
+weighted average", and a reviewer may never join them. It does not settle the
+task. What it does is change the stakes of the asset-3 shape from an internal
+consistency nit to a plausible "does the headline number meet the Core
+Requirement" question, asked by someone reading the RFP rather than our code.
+That argues against the cheapest option (leave as-is, document) carrying the
+decision by default: if `price_usd` stays unaggregated, the reasoning for why
+the headline is deliberately *not* the §5.5 aggregate belongs in the
+[[0128]] evidence package, not only in this task.
+
+Related but out of scope here: the RFP types the field as a **float** while
+§3.3 serialises it as a string to preserve `Decimal(38,14)` (0123 measured
+prod prices at 7e-8, which a JSON float would destroy). That deviation needs
+a recorded answer for the evidence package; it is a serialization question,
+not an outlier-protection one, and does not belong to this task.
 
 ## Sequencing (why this is not startable today)
 

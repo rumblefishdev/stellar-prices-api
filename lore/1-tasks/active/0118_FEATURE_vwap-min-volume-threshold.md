@@ -232,10 +232,33 @@ threshold to the shape 0072 leaves behind. Sequencing them avoids two
    cast), so the override can never claim more precision than the value it
    overrides; formatting mirrors ClickHouse's trailing-zero-trimmed Decimal
    strings.
-8. **SCF scope check (2026-08-27):** the official submission page never
-   mentions `min_volume_usd` — the contractual hook is the "Full VWAP formula
-   (§5.5)" work item, and no reviewer AC tests the param directly. Recorded so
-   scope pressure lands on the producer side first if it ever has to.
+8. **SCF scope check — CORRECTED 2026-08-28 against the actual RFP.** The
+   first version of this note read the submission page only, found no mention
+   of `min_volume_usd`, concluded the sole contractual hook was the "Full VWAP
+   formula (§5.5)" work item, and recorded that scope pressure should hit the
+   API half first. **That is wrong, and the API half is committed work.**
+   - The binding text is **our own proposal**: general-overview §5.5 says the
+     threshold is *"configurable per-request via `?min_volume_usd=` query param
+     or defaults to the system setting"*. We wrote that, submitted it, and it
+     was awarded — so the request-level override is promised regardless of how
+     the RFP is read.
+   - The RFP (`RFP 1: Prices API`) does carry a Core Requirement of its own:
+     **"Adjustable Volume Threshold: VWAP with configurable USD-denominated
+     thresholds"**. State its strength honestly: the line never says
+     "per-request" or "query parameter", and "configurable" alone is
+     compatible with an operator-set constant. What tilts it consumer-ward is
+     the company it keeps — every other Core Requirement (Asset Coverage,
+     Oracle Coverage, Price Aggregation, Data Endpoints, timeframes,
+     availability) describes a capability the delivered API exposes, not a
+     deployment setting. That is a contextual argument, not a quotation, and
+     it must not be cited as if the RFP demanded the param outright. The
+     plural "thresholds" carries no weight either way and was over-read in a
+     draft of this note.
+   - Consequence for scope pressure: the producer side alone does **not**
+     discharge the commitment; "adjustable" is the part §5.5 sold. Both halves
+     ship. Also note Design Decision 3's fix matters here — a pass-through
+     band around the default would have made the parameter adjustable only
+     *above* $100, which is a thinner claim than the one we made.
 
 ## Implementation Notes
 
