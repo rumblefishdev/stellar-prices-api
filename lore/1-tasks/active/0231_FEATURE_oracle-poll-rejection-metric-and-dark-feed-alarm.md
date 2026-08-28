@@ -414,3 +414,99 @@ aws logs tail /aws/lambda/prices-production-oracle --since 10m \
 Expect `written` > 0, `timestamp_rejected` = 0, and `queried` matching
 `TRACKED_SYMBOLS`. That line, plus four OK alarms from step 6, is the deploy
 verified.
+
+---
+
+# ⏸️ SESSION END 2026-08-28 15:02 UTC — deployed, 3 of 5 ACs verified
+
+**PR #267 merged 14:15:25 UTC. Both stacks deployed to production.** Task stays
+`active`: two items below must be settled before it can be archived.
+
+## Deploy record
+
+| | |
+|---|---|
+| EventBridge deployed | 14:21:26 UTC — CodeSha256 `iPZJeb…` → **`lL4mT/k0AAruvkpxtTtlKK3bZstvBo3rWBLKy5E6Ed8=`** |
+| new binary confirmed running | the 14:22:38 pass is the first log line carrying `timestamp_rejected` |
+| Observability deployed | ~14:30 UTC — all four alarms created 14:30-14:31 |
+| `prices-production-cleanup` | still **DISABLED** after the EventBridge deploy ✅ |
+| metric publish failures | **0** in the logs |
+
+## Acceptance criteria
+
+- [x] **AC 1** — `OracleTimestampRejected` and `OracleRowsWritten` published by a
+      real pass and visible in CloudWatch. All 7 series present; first pass read
+      `Runs=1 FailedRuns=0 RowsWritten=2 TimestampRejected=0 RowsSkipped=0`.
+- [ ] **AC 2** — dark-feed alarm fires, verified by inducing. ⏳ **See loose end 1.**
+- [x] **AC 3** — rejection alarm fires, raw value reachable. Induced with one
+      synthetic datapoint at 14:42:00; `OK → ALARM` at **14:43:05**, self-cleared
+      at 14:48:05. Description carries the log filter and field names.
+- [x] **AC 4** — pure mapping with unit tests. 18 tests, non-vacuity checked.
+- [ ] **AC 5** — neither alarm false-fires on an idle environment. ⏳ Partially:
+      all four alarms sat OK from creation through session end, and
+      `-timestamp-rejected` returned to OK by itself. Completing AC 2 completes
+      this, since the real `-dark-feed` must have stayed OK while the clone fired.
+
+## ⛔ Loose end 1 — an induction alarm is LIVE ON PROD
+
+`prices-production-oracle-dark-feed-induction`, created 14:50 UTC. A throwaway
+clone of the dark-feed geometry on a scratch metric
+(`Prices/Oracle` / `OracleRowsWrittenProbe`, probe datapoint at 14:49). **No SNS
+action**, so it cannot page — but nothing will publish that probe again, so it
+latches in ALARM until removed.
+
+🔑 **Read its state first — that state IS AC 2.**
+
+```
+aws cloudwatch describe-alarms \
+  --alarm-names prices-production-oracle-dark-feed-induction prices-production-oracle-dark-feed \
+  --query 'MetricAlarms[].[AlarmName,StateValue,StateUpdatedTimestamp]' --output text
+```
+
+Expected: the **clone** in ALARM (breaching ~15:19 = 14:49 + three 10-minute
+periods) and the **real** `-dark-feed` still OK. That pair proves the geometry
+fires on a dark series and stays quiet on a live one — AC 2 and AC 5 together.
+⚠️ If the clone is still OK well past 15:20, that is a real finding, not a slow
+alarm: it would mean the `FILL(m,0)` shape does not breach, which is exactly
+what [[0222]] showed can happen silently.
+
+Then delete it:
+
+```
+aws cloudwatch delete-alarms --alarm-names prices-production-oracle-dark-feed-induction
+```
+
+## ⚠️ Loose end 2 — alarms fire but may not reach Slack (NOT a 0231 defect)
+
+The operator reported the last Slack alarm as **14:31**, yet
+`-oracle-timestamp-rejected` went ALARM at 14:43:05 and back to OK at 14:48:05.
+Everything AWS controls is green and measured:
+
+| link | evidence |
+|---|---|
+| alarm transitioned | `OK → ALARM` 14:43:05 on a real datapoint |
+| CloudWatch → SNS | "Successfully executed action" ×3 (14:31, 14:43, 14:48) |
+| SNS → Chatbot | `NumberOfNotificationsDelivered` = 1 in the 14:39 bucket, `Failed` = 0 |
+| subscription | confirmed, **no FilterPolicy**, `RawMessageDelivery` false |
+
+The gap is inside **Chatbot → Slack**, and only after 14:31 — the 14:31 burst of
+four alarm-creation notifications did arrive. The AWS Chatbot API was not
+reachable from the session's network, so its configuration was never inspected.
+
+🔴 **Not yet ruled out: the operator simply needed to refresh or search Slack.
+Ask before filing anything.** If real, spawn a separate task — this routing is
+[[0056]]'s wiring and nothing in 0231 touched it. It does not block these ACs;
+AC 3 asks only that the alarm fire with the raw value reachable, which it did.
+
+## Prod facts measured here — reuse rather than re-derive
+
+- The oracle polls **2 symbols** and writes **2 rows a pass**, not 30. The
+  dark-feed series therefore sits at ~4 per 10-minute bucket against `< 1`.
+- Oracle Lambda duration **8.8-10.0 s** against a 96 s threshold (80% of its
+  120 s timeout). Flat, because this Lambda does one thing per invocation.
+- 🔑 **CloudWatch alarm windows are query-anchored, not clock-aligned.** The
+  14:42 datapoint was attributed to a bucket labelled `14:38` and the alarm
+  fired at 14:43 — sooner than a clock-aligned estimate predicted.
+- 🔴 An alarm was called "did not fire" when the query window had simply closed
+  before the datapoint landed. **Wait for the period to close before
+  concluding.** Same family as [[0222]]'s query artefacts.
