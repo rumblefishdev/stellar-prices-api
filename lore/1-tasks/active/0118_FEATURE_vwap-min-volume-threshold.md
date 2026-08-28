@@ -57,6 +57,23 @@ history:
       Explicit ?min_volume_usd= stays strict, asymmetry documented. Fixture
       20 flipped to pin the conditional arm; runbook rewritten (measurement
       recorded, post-apply check is now "no threshold blanking").
+  - date: 2026-08-28
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Rolled out to production. MV applied (DROP + re-CREATE, refresh clean,
+      no exception); post-apply checks green — assets with empty `sources`
+      beside a price stayed at 0 (the conditional arm holds), 8 of 15 mixed
+      assets lost exactly their sub-$100 venue, and `price_usd` /
+      `volume_24h_usd` matched the unfiltered raw aggregates at a pinned tick
+      on four subjects. API deployed after a rebase onto develop (the branch
+      was 51 commits behind and would have regressed 0229 and the portal).
+      **A production defect surfaced during verification and was fixed in the
+      same PR:** API Gateway does not key its cache on the query string, so
+      the parameter shipped invisible to the cache and one filtered request
+      poisoned the default response for every other caller. `cacheKeyParameters`
+      now declares it on both routes; re-verified after redeploy. All seven
+      acceptance criteria are met.
 ---
 
 # §5.5 VWAP completion — min_volume_usd threshold
@@ -162,11 +179,16 @@ threshold to the shape 0072 leaves behind. Sequencing them avoids two
       threshold (regression test with a below-threshold source present) —
       **fixture 17 pins price_usd = the dust venue's own close; fixture 20 pins
       the unfiltered volume total; the override IT re-checks both API-side**
-- [ ] `?min_volume_usd=` accepted on `GET /assets/{id}/price` and `GET /assets`;
+- [x] `?min_volume_usd=` accepted on `GET /assets/{id}/price` and `GET /assets`;
       a higher value provably narrows the source set for at least one real
-      multi-source asset — **code + seeded-row IT done
-      (`price_min_volume_override_narrows_sources_and_reweights`); the
-      real-asset proof is the runbook's post-apply step 3, at rollout**
+      multi-source asset — **verified on production 2026-08-28 through the
+      gateway, all responses at one MV tick (`updated_at 13:32:00`) so the
+      deltas are the parameter's and not drift. XLM on `/price`: no param →
+      {aquarius, sdex, soroswap}; `=5000` → {aquarius, sdex}; `=200000` →
+      {aquarius}. `/assets` narrows the same way per row and EURC lands on the
+      all-excluded sentinel (`sources {}`, `vwap_24h 0`) at `=200000`.
+      `price_usd` identical across every threshold — the weighting rule holds
+      end to end**
 - [x] Invalid `min_volume_usd` values return `400` with the standard error body
       — **`min_volume_error` (finite, ≥ 0, ≤ 1e15; serde rejects non-numeric);
       CH-less tests on both routes prove the 400 fires before any DB call**
