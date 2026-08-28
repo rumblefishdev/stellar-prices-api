@@ -86,6 +86,20 @@ history:
       policy status spot-check clean but whose policy, OAC scoping and
       anonymous-GET behaviour are unaudited. Two carry ❌ — the absent secret
       and the two absent parameters, unchanged.
+  - date: "2026-08-28"
+    status: active
+    who: akot
+    note: >
+      Blocker B2 closed. Both eligibility parameters seeded by hand at 12:14Z
+      with Adam's approval — guild `1536303837785362432` (the test guild) and
+      `5` minutes — and check 10 flips to PASS: `LastModifiedUser` is the SSO
+      operator role rather than `AWSCloudFormation`, which is exactly what the
+      check is about, and the guild id is a 19-digit snowflake so the cold-start
+      probe's shape test will pass rather than turning every visitor into
+      `could not verify`. B1 (the OAuth secret) is still open and is Adam's to
+      run. Separately, PR #264 merged as `9c8a331`, so `develop` now carries
+      [[0235]]'s prefix move and the deploy is split in two: the prefix first
+      with the portal still closed, the flag second.
 ---
 
 # Portal security and ops audit
@@ -218,11 +232,17 @@ on 2026-08-28:
       [[0235]] rebuilds it. Report E9.
       The Discord client secret is in Secrets Manager and in no environment
       variable, and no secret is in the static bundle
-- [ ] ❌ **2026-08-28: FAIL — neither parameter exists.** `get-parameter` →
-      `ParameterNotFound` on both, and CloudTrail shows no `PutParameter` naming
-      either in 90 days. Blocker B2, owner [[0189]], runbook §2a — whose own
-      ticked criterion was true of the runbook, not of the account. The
-      restore-half PASSES: no `AWS::SSM::Parameter` for either name in any
+- [x] ✅ **2026-08-28: FAIL → PASS, seeded the same day.** Both parameters were
+      absent (`ParameterNotFound`, and no `PutParameter` naming either in 90
+      days of CloudTrail) — blocker B2, owner [[0189]], runbook §2a, whose own
+      ticked criterion had been true of the runbook and not of the account.
+      Seeded 2026-08-28T12:14Z by `AWSReservedSSO_AdministratorAccess/adam.kot`
+      — operator, not `AWSCloudFormation`, which is the property this check
+      asks for. `discord-guild-id` = the **test** guild (19-digit snowflake, so
+      it passes the cold-start shape probe; see the design decision on the
+      knowingly-wrong landing copy), `min-account-age-minutes` = `5`, matching
+      the Stellar guild's own `verification_level: 2` per ADR 0010 §3. The
+      restore-half still PASSES: no `AWS::SSM::Parameter` for either name in any
       template, and the Lambda receives only the parameter NAMES. Report E10.
       Both SSM parameters are operator-seeded; a `cdk deploy` does not restore a
       committed guild id
