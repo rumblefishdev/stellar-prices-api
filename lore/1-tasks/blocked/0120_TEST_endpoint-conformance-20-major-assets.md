@@ -3,7 +3,7 @@ id: "0120"
 title: "Endpoint conformance — all 7 route groups return correct, schema-valid responses for 20 major assets"
 type: TEST
 status: blocked
-by: ["0135", "0170", "0178"]
+by: ["0178"]
 related_adr: ["0008"]
 related_tasks: ["0072", "0118", "0119", "0124", "0128", "0135", "0170", "0178", "0225"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M2, api, testing, verification, acceptance]
@@ -66,6 +66,16 @@ history:
       pin both calls to the same `updated_at` or retry within the minute.
       That belongs to this task, not to a new one.
       Blockers now: [[0170]], [[0178]], [[0225]]. 0135 cleared.
+  - date: 2026-08-28
+    status: blocked
+    who: stkrolikiewicz
+    note: >
+      Blocker list corrected: `by` still named 0135 and 0170, both archived
+      since (0135 on 2026-08-25, 0170 on 2026-08-27), so the task read as
+      triple-blocked when only **0178** remains. Nothing about the work
+      changed — this is bookkeeping that was hiding how close Tranche 2 AC 1
+      is to being startable. [[0225]], the 12-failure class this task filed
+      during its own run, is also archived.
 ---
 
 # Endpoint conformance for 20 major assets
