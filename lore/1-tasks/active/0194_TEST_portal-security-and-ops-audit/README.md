@@ -8,8 +8,9 @@ related_tasks: ["0183", "0159", "0160", "0184", "0186", "0187", "0188", "0189", 
 tags: [layer-infra, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, security, audit, iam, slice-11]
 milestone: 3
 links:
-  - "../archive/0160_FEATURE_onboarding-backend-endpoints.md"
-  - "../archive/0159_FEATURE_discord-oauth-sign-in.md"
+  - "../../archive/0160_FEATURE_onboarding-backend-endpoints.md"
+  - "../../archive/0159_FEATURE_discord-oauth-sign-in.md"
+  - "./audit/2026-08-28-report.md"
 history:
   - date: "2026-08-13"
     status: backlog
@@ -29,6 +30,23 @@ history:
       this audit composes has now shipped, so the assembled `methodSettings`
       array, the `cacheEnabled` branch and the CloudFront policy can be read
       off a real synthesized template rather than predicted from source.
+  - date: "2026-08-28"
+    status: active
+    who: akot
+    note: >
+      First full audit run, read-only, against the deployed stacks and a synth
+      at `79dd55c` — `audit/2026-08-28-report.md`. Ten of twelve checks PASS
+      and the assembled gateway/CloudFront/IAM/bucket composition is
+      byte-identical between `develop` head and production. Two FAIL, both
+      operator steps the runbook lists that were never run: the Discord OAuth
+      secret does not exist in Secrets Manager (0186, runbook §2) and neither
+      eligibility SSM parameter exists (0189, §2a). With the flag on, either
+      absence fails Lambda init and takes `/v1` down, so the recommendation is
+      NO-GO until both are seeded and re-verified. One real portal key from a
+      local run sits on the free plan and is listed for deletion before the
+      flip. Checks 1 and 2 each keep a half that only the open portal can
+      close; the commands are in the report. Converted to a directory to hold
+      the evidence.
 ---
 
 # Portal security and ops audit
@@ -109,10 +127,12 @@ stack**, not against the source, and not by assumption:
 else — not as a side effect of anyone finishing their own slice. Preconditions,
 all of them:
 
-- [ ] [[0189]] has passed: a non-member is refused, and a Discord `429`/`5xx`
-      does not read as "not a member"
+- [x] [[0189]] has passed: a non-member is refused, and a Discord `429`/`5xx`
+      does not read as "not a member" — on the evidence available while closed
+      (2026-08-28 report, gate §1)
 - [ ] Every check in the list above passes
-- [ ] Keys created while the flag was off are enumerated and deleted. There is no
+- [ ] Keys created while the flag was off are enumerated (2026-08-28: one,
+      `smdesqkg5j`, listed in the report) and deleted. There is no
       separate incubation plan (decided 2026-08-13), so those keys are real keys
       on the real free-tier plan and would otherwise survive into its accounting
       as anonymous strings. They come from local runs against production
