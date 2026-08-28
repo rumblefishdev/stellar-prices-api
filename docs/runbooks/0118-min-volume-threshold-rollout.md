@@ -1,7 +1,8 @@
 # Runbook — rolling out the §5.5 `min_volume_usd` threshold (task 0118)
 
-What changes: the `mv_current_prices` SELECT only (a `src_volume > 100`
-predicate in `per_source_kept`, plus comments). No table schema change, no
+What changes: the `mv_current_prices` SELECT only (an `asset_has_funded`
+window in `per_source_kept` and the conditional `src_volume > 100` filter in
+the new `per_source_funded` CTE, plus comments). No table schema change, no
 read-surface view change. The API deploy adds `?min_volume_usd=` to
 `GET /assets/{id}/price` and `GET /assets` — a handler-side reweight of the
 row's own `sources` JSON, no new queries.
@@ -90,6 +91,8 @@ LIMIT 5
    - `?min_volume_usd=abc` → 400 with the standard envelope.
 
 ⚠️ Cache note (task 0122): `min_volume_usd` is part of the API Gateway cache
-key. The common path must send **no** param — `min_volume_usd=100` is a
-different cache entry with identical content. Nothing to operate here; just do
-not "helpfully" add the default to dashboards or examples.
+key. The common path must send **no** param — `min_volume_usd=100` buys a
+separate cache entry whose content merely happens to match on funded assets,
+and differs on all-dust ones (an explicit value filters strictly). Nothing to
+operate here; just do not "helpfully" add the default to dashboards or
+examples.
