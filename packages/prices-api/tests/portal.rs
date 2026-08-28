@@ -64,11 +64,11 @@ async fn send(portal_enabled: bool, uri: &str) -> (StatusCode, Vec<u8>) {
 /// The suite needs one, and the reason is worth stating: for as long as
 /// [`CONFIG_PATH`] is the *only* registered route under the prefix — and the
 /// gate deliberately skips it — every "closed" assertion against a path like
-/// `/api-tokens/api/key` observes an unrouted 404, not a refusal. Those
+/// `/api/api/key` observes an unrouted 404, not a refusal. Those
 /// assertions stay green with the gate deleted. Driving [`gate_portal`] over a
 /// route that really is there is what makes the difference observable, and it
 /// is why [`PortalGate::new`] is public.
-const PROBE: &str = "/api-tokens/api/__probe";
+const PROBE: &str = "/api/api/__probe";
 
 fn gated_probe(portal_enabled: bool) -> Router {
     Router::new().route(PROBE, get(|| async { "probe" })).layer(
@@ -80,7 +80,7 @@ fn gated_probe(portal_enabled: bool) -> Router {
 async fn portal_is_closed_by_default() {
     // The flag defaults to false in `AppConfig::from_env`, and this is the
     // behaviour that default buys.
-    let (status, _) = send(false, "/api-tokens/api/auth/login").await;
+    let (status, _) = send(false, "/api/api/auth/login").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -90,7 +90,7 @@ async fn portal_is_closed_by_default() {
 /// `fallback`, so that is exactly what a genuinely absent path returns.
 #[tokio::test]
 async fn a_closed_portal_route_is_byte_identical_to_an_absent_one() {
-    let (closed_status, closed_body) = send(false, "/api-tokens/api/key").await;
+    let (closed_status, closed_body) = send(false, "/api/api/key").await;
     let (absent_status, absent_body) = send(false, "/no-such-route-anywhere").await;
 
     assert_eq!(closed_status, absent_status);
@@ -122,7 +122,7 @@ async fn a_closed_portal_stays_indistinguishable_when_api_keys_are_armed() {
         )
     };
 
-    let (portal_status, portal_body) = drive(armed(), "/api-tokens/api/key").await;
+    let (portal_status, portal_body) = drive(armed(), "/api/api/key").await;
     let (absent_status, absent_body) = drive(armed(), "/no-such-route-anywhere").await;
 
     assert_eq!(
@@ -280,7 +280,7 @@ async fn the_gate_refuses_a_route_that_really_exists() {
 #[tokio::test]
 async fn the_gates_refusal_matches_an_unrouted_path_in_the_same_router() {
     let (refused, refused_body) = drive(gated_probe(false), PROBE).await;
-    let (unrouted, unrouted_body) = drive(gated_probe(false), "/api-tokens/api/never-built").await;
+    let (unrouted, unrouted_body) = drive(gated_probe(false), "/api/api/never-built").await;
     assert_eq!(refused, unrouted);
     assert_eq!(refused_body, unrouted_body);
 }
@@ -296,14 +296,14 @@ async fn config_is_exempt_from_the_gate_in_both_directions() {
     }
 }
 
-/// The bundle at `/api-tokens/*` is served by S3 and never reaches this Lambda.
-/// The gate must not claim it: `/api-tokens/api/` is ours, `/api-tokens/` is not.
+/// The bundle at `/api/*` is served by S3 and never reaches this Lambda.
+/// The gate must not claim it: `/api/api/` is ours, `/api/` is not.
 #[tokio::test]
 async fn the_gate_does_not_reach_beyond_its_prefix() {
     // Not a route this Lambda serves in either state — but it must 404 as a
     // plain miss, not because the gate decided to own it.
-    let (open, _) = send(true, "/api-tokens/dashboard").await;
-    let (closed, _) = send(false, "/api-tokens/dashboard").await;
+    let (open, _) = send(true, "/api/dashboard").await;
+    let (closed, _) = send(false, "/api/dashboard").await;
     assert_eq!(open, StatusCode::NOT_FOUND);
     assert_eq!(closed, StatusCode::NOT_FOUND);
 }

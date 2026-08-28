@@ -45,8 +45,8 @@ describe('dev proxy', () => {
     // `preview` is the only local way to run the BUILT bundle, so it is the
     // closest thing to a production rehearsal; without a proxy it could only
     // ever render the "could not reach the portal backend" branch.
-    expect(server?.proxy?.['/api-tokens/api']?.target).toBe(PROXY_TARGET);
-    expect(preview?.proxy?.['/api-tokens/api']?.target).toBe(PROXY_TARGET);
+    expect(server?.proxy?.['/api/api']?.target).toBe(PROXY_TARGET);
+    expect(preview?.proxy?.['/api/api']?.target).toBe(PROXY_TARGET);
     expect(preview?.proxy).toEqual(server?.proxy);
   });
 
@@ -57,7 +57,7 @@ describe('dev proxy', () => {
     // portal's own routes in dev would exercise a configuration production never
     // runs — and would hide a 403 that only appears for real users.
     expect(proxy['/v1']?.headers?.['x-api-key']).toBe('test-key-must-not-leak');
-    expect(proxy['/api-tokens/api']?.headers).toBeUndefined();
+    expect(proxy['/api/api']?.headers).toBeUndefined();
   });
 
   // NOT tested here: "no target configured → no proxy". `loadEnv` reads

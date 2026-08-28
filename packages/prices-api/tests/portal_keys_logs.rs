@@ -118,7 +118,7 @@ async fn no_key_value_ever_reaches_the_logs() {
         Some(eligibility(GUILD_ID, "5")),
     );
     let issued = issue_round_trip(&app).await;
-    assert_eq!(issued.location(), "/api-tokens/?issue=ok");
+    assert_eq!(issued.location(), "/api/?issue=ok");
     let body = reveal(&mock, USER_ID).await.json();
 
     let text = String::from_utf8_lossy(&logs.0.lock().unwrap()).to_string();

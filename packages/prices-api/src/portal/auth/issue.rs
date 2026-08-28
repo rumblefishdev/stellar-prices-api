@@ -618,7 +618,7 @@ mod tests {
         ];
         for (i, a) in fixed.iter().enumerate() {
             assert!(a.starts_with("?issue="));
-            assert!(format!("{PORTAL_HOME}{a}").starts_with("/api-tokens/?"));
+            assert!(format!("{PORTAL_HOME}{a}").starts_with("/api/?"));
             for b in &fixed[i + 1..] {
                 assert_ne!(a, b);
             }

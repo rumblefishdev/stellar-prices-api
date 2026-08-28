@@ -184,7 +184,7 @@ const GATEWAY_SKIPPED_METHODS = new Set(['options']);
  * in the document would be checked by neither direction, so the spec side
  * rejects it outright a few dozen lines down rather than passing over it.
  */
-const PORTAL_API_PREFIX = '/api-tokens/api/';
+const PORTAL_API_PREFIX = '/api/api/';
 
 const gatewayRoutes = new Set();
 /** Routes the prefix skip above swallowed — asserted non-empty further down. */
@@ -408,7 +408,7 @@ if (!/^\/[^/]+$/.test(String(winnerOrigin.OriginPath ?? ''))) {
       `${JSON.stringify(winnerOrigin.OriginPath ?? null)}, which is not a ` +
       `single stage segment.`,
     '  → an execute-api origin serves the REST API under `/{stage}` only. ' +
-      'Without it CloudFront forwards `/api-tokens/api/x` as `/api-tokens/' +
+      'Without it CloudFront forwards `/api/api/x` as `/api/' +
       'api/x`, the gateway maps nothing, and every portal call 403s. Set ' +
       '`originPath` on the HttpOrigin in ' +
       'infra/src/lib/stacks/portal-hosting-stack.ts.',
@@ -443,7 +443,7 @@ if (String(winner.OriginRequestPolicyId) !== ALL_VIEWER_EXCEPT_HOST_HEADER) {
       `Managed-AllViewerExceptHostHeader (${ALL_VIEWER_EXCEPT_HOST_HEADER}).`,
     '  → that policy is what forwards the portal session cookie to the origin ' +
       "and what withholds the viewer's Host from execute-api. Under any other " +
-      'managed policy the cookie is stripped, `/api-tokens/api/auth/me` reads ' +
+      'managed policy the cookie is stripped, `/api/api/auth/me` reads ' +
       'as signed-out for a visitor who just signed in, and nothing fails ' +
       'outside a browser. Set `originRequestPolicy: ' +
       'ALL_VIEWER_EXCEPT_HOST_HEADER` on the API behaviour in ' +
@@ -557,7 +557,7 @@ if (portalGatewayRoutes.length === 0) {
       `check's portal skip covers nothing.`,
     '  → the portal backend is unreachable in production: CloudFront forwards ' +
       'the request and the gateway answers 403 Missing Authentication Token. ' +
-      'Restore the `/api-tokens/api/{proxy+}` methods in ' +
+      'Restore the `/api/api/{proxy+}` methods in ' +
       'infra/src/lib/stacks/api-gateway-stack.ts.',
   );
 }
@@ -790,7 +790,7 @@ for (const httpMethod of ['GET', 'POST']) {
       `error: ${httpMethod} ${entry.ResourcePath} has CachingEnabled=` +
         `${JSON.stringify(entry.CachingEnabled ?? null)}.`,
       '  → the gateway cache has no cache-key parameters on this method, so ' +
-        'every caller shares one entry. A cached `GET /api-tokens/api/key` ' +
+        'every caller shares one entry. A cached `GET /api/api/key` ' +
         "serves one visitor another visitor's API key. Set " +
         '`cachingEnabled: false` in `portalSettings` in api-gateway-stack.ts.',
     );

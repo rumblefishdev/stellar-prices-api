@@ -23,10 +23,10 @@ import { LOGIN_ANCHOR } from './links';
  * rendered in place rather than on a route of its own.
  *
  * **In place, deliberately.** Task 0195 has not landed the per-prefix SPA
- * fallback, so a hard refresh on `/api-tokens/login` resolves against S3, which
+ * fallback, so a hard refresh on `/api/login` resolves against S3, which
  * grants `s3:GetObject` and not `s3:ListBucket` — a missing key comes back as
  * `403 AccessDenied`, which the router never sees and cannot handle. Every
- * redirect in the OAuth flow also lands back on `/api-tokens/`, so a login
+ * redirect in the OAuth flow also lands back on `/api/`, so a login
  * route would be a URL the flow returns *from* and never *to*. A section keeps
  * refresh, Back and the callback all working today; when 0195 lands, this is
  * the component a route would render.

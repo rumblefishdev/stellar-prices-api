@@ -12,7 +12,7 @@ import { BASE_PATH } from './base-path';
  * that the real entry point passes one. This mounts the actual entry point at
  * the actual URL the app is served from: with `basename` in place the `/` route
  * matches and the heading renders; without it `BrowserRouter` reads
- * `/api-tokens/` as a path it has no route for and renders an empty tree — which
+ * `/api/` as a path it has no route for and renders an empty tree — which
  * is precisely the production failure that is invisible everywhere else.
  */
 beforeEach(() => {

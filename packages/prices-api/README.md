@@ -57,7 +57,7 @@ In the [Discord Developer Portal](https://discord.com/developers/applications),
 **OAuth2 → Redirects → Add Redirect**, exactly:
 
 ```
-http://localhost:4200/api-tokens/api/auth/callback
+http://localhost:4200/api/api/auth/callback
 ```
 
 Port `4200`, not `8080`: the redirect URI must be the origin the **browser**
@@ -78,7 +78,7 @@ real client secret — check `git status` before committing anything.
 {
   "client_id": "000000000000000000",
   "client_secret": "REPLACE_ME_from_the_Developer_Portal",
-  "redirect_uri": "http://localhost:4200/api-tokens/api/auth/callback",
+  "redirect_uri": "http://localhost:4200/api/api/auth/callback",
   "session_signing_key": "REPLACE_ME_openssl_rand_hex_32"
 }
 ```
@@ -108,13 +108,13 @@ PORT=8080 RUST_LOG=info \
 ```
 
 ```bash
-# terminal 2 — the portal on :4200, proxying /api-tokens/api/* to :8080
+# terminal 2 — the portal on :4200, proxying /api/api/* to :8080
 echo "DEV_API_PROXY_TARGET=http://localhost:8080" > web/portal/.env.development
 npx nx dev portal
 ```
 
-Open **`http://localhost:4200/api-tokens/`** — not `:8080`, which serves no
-pages and answers `/api-tokens/` with the same empty `404` as any unrouted path.
+Open **`http://localhost:4200/api/`** — not `:8080`, which serves no
+pages and answers `/api/` with the same empty `404` as any unrouted path.
 
 Both ports move if they have to (`PORT=` on the API, `--port` on Vite), but the
 Vite one is part of the redirect URI, so changing it means changing
@@ -131,7 +131,7 @@ can see.
 ### 4. What you should see
 
 Click **Sign in with Discord** → Discord's consent screen (first time only;
-afterwards it is a bare redirect) → back at `/api-tokens/` showing your username
+afterwards it is a bare redirect) → back at `/api/` showing your username
 and Discord ID. **Sign out** clears the session.
 
 Without the UI, the same thing over HTTP:
@@ -139,8 +139,8 @@ Without the UI, the same thing over HTTP:
 ```bash
 curl -sL -c jar.txt -b jar.txt -o /dev/null \
      -w '%{url_effective} %{http_code}\n' \
-     http://localhost:4200/api-tokens/api/auth/login
-curl -s -b jar.txt http://localhost:4200/api-tokens/api/auth/me
+     http://localhost:4200/api/api/auth/login
+curl -s -b jar.txt http://localhost:4200/api/api/auth/me
 # → {"authenticated":true,"user_id":"...","username":"..."}
 ```
 
@@ -161,7 +161,7 @@ curl -s -b jar.txt http://localhost:4200/api-tokens/api/auth/me
 | `502 discord_unavailable`, log says `stage="identity read"` | the exchange worked, `GET /users/@me` did not |
 | `502` and the log names the granted scopes | Discord granted more than `identify`. Deliberate refusal — see ADR 0010 |
 | `serve` exits at startup with `NoSource` | `PORTAL_ENABLED=true` with no secret source. Fatal on purpose: better than a sign-in button that answers `503` |
-| `404` on `http://localhost:8080/api-tokens/` | expected — `:8080` is the API, the pages are on `:4200` |
+| `404` on `http://localhost:8080/api/` | expected — `:8080` is the API, the pages are on `:4200` |
 | `serve` exits with `failed to bind: AddrInUse` | something already holds the port, often a `serve` from an earlier session. `PORT=8081 … serve` plus `npx nx dev portal --port 4201`, and change `redirect_uri` **and the Discord registration** to match — the browser-facing port is part of the URI |
 
 ### 6. Without a Discord account
@@ -181,7 +181,7 @@ sign-in from their own machine.
 
 ## Running self-service key issuance locally (tasks 0187 + 0189)
 
-Since task 0189, `GET`/`POST /api-tokens/api/key` only **reveal** — the route is
+Since task 0189, `GET`/`POST /api/api/key` only **reveal** — the route is
 read-only by construction. Issuing runs through the eligibility round-trip:
 "Get my API key" navigates to `/auth/login?action=issue`, and the callback
 checks Stellar Discord membership and account age against a **fresh** Discord
@@ -242,7 +242,7 @@ trip refuses its own grant at the token exchange.
 
 ### 3. What you should see
 
-Sign in at <http://localhost:4200/api-tokens/>, press **Get my API key** — a
+Sign in at <http://localhost:4200/api/>, press **Get my API key** — a
 redirect through Discord and back (no second consent screen), landing on
 `?issue=ok` — and:
 
@@ -288,7 +288,7 @@ point of the design, and the reason the local seam is the exception.
 
 ### 3b. Usage against quota (task 0188)
 
-The same local run also serves `GET /api-tokens/api/usage`, and the page renders
+The same local run also serves `GET /api/api/usage`, and the page renders
 it under the key. The principal needs one more grant than the five above:
 `apigateway:GET` on `/usageplans/{id}/usage` (in the Lambda's role it lives in
 `ApiGatewayStack`'s standalone portal policy, next to the `/keys` attach).
@@ -312,7 +312,7 @@ and nobody else's.
 
 On the page, **Replace my key…** beside the key opens a confirmation; the
 confirm button arms only once you type `delete-key`. Pressing it **deactivates
-the key and issues nothing** — `POST /api-tokens/api/key/rework`,
+the key and issues nothing** — `POST /api/api/key/rework`,
 session-authenticated, no Discord round-trip. The control plane answers at
 once; the **data plane follows within about half a minute** (~25 s measured,
 0180 item 8), so treat the value as live until then — which is what the

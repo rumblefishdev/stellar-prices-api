@@ -306,10 +306,7 @@ async fn a_partial_revocation_is_reported_as_partial() {
     // reach the page — the backend cannot pretend this was a revocation, and
     // the visitor's next move is to press Replace again, not to wait for the
     // 1st.
-    assert_eq!(
-        issue_round_trip(&app).await.location(),
-        "/api-tokens/?issue=ok"
-    );
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
     assert_eq!(
         gateway.with(|s| s.create_calls),
         0,
@@ -373,10 +370,7 @@ async fn the_revocation_instant_comes_from_the_control_plane_not_our_clock() {
     );
     // And the cap agrees with it rather than with `now`: that period has
     // rolled, so a key is due immediately.
-    assert_eq!(
-        issue_round_trip(&app).await.location(),
-        "/api-tokens/?issue=ok"
-    );
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
 }
 
 /// A revoked record that cannot be deleted does not withhold the new key.
@@ -394,10 +388,7 @@ async fn an_undeletable_revoked_record_does_not_block_the_re_issue() {
     gateway.with(|s| s.fail_delete_of = vec![dead.clone()]);
     let app = app_with_discord(&discord, &gateway);
 
-    assert_eq!(
-        issue_round_trip(&app).await.location(),
-        "/api-tokens/?issue=ok"
-    );
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
     gateway.with(|s| {
         let live: Vec<_> = s.keys.iter().filter(|k| k.enabled).collect();
         assert_eq!(live.len(), 1, "the visitor got a working key");
@@ -554,7 +545,7 @@ async fn an_issue_after_a_revoke_in_the_same_period_is_capped_with_the_date() {
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
     assert_eq!(
         reply.location(),
-        format!("/api-tokens/?issue=capped&next_eligible_at={expected_date}")
+        format!("/api/?issue=capped&next_eligible_at={expected_date}")
     );
     assert_eq!(
         discord.member_calls(),
@@ -587,7 +578,7 @@ async fn revoked_on_the_3rd_refuses_until_the_1st_and_issues_once_it_has_passed(
     let app = app_with_discord(&discord, &gateway);
     assert_eq!(
         issue_round_trip(&app).await.location(),
-        format!("/api-tokens/?issue=capped&next_eligible_at={expected_date}")
+        format!("/api/?issue=capped&next_eligible_at={expected_date}")
     );
     assert_eq!(gateway.with(|s| s.create_calls), 0);
     let revealed = reveal_via(&app).await;
@@ -598,10 +589,7 @@ async fn revoked_on_the_3rd_refuses_until_the_1st_and_issues_once_it_has_passed(
     let gateway = MockGateway::start().await;
     let dead = seed_revoked(&gateway, the_3rd_of(first_of_month_offset(-1)));
     let app = app_with_discord(&discord, &gateway);
-    assert_eq!(
-        issue_round_trip(&app).await.location(),
-        "/api-tokens/?issue=ok"
-    );
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
     gateway.with(|s| {
         assert_eq!(
             s.deleted,
@@ -710,10 +698,7 @@ async fn an_undated_duplicate_does_not_lock_the_owner_out_forever() {
     // due: the reveal says "no key" and the round-trip issues.
     let revealed = reveal_via(&app).await;
     assert_eq!(revealed.json()["code"], "no_key");
-    assert_eq!(
-        issue_round_trip(&app).await.location(),
-        "/api-tokens/?issue=ok"
-    );
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
     assert_eq!(gateway.with(|s| s.create_calls), 1);
 }
 
@@ -731,7 +716,7 @@ async fn the_latest_revocation_governs_the_cap() {
         issue_round_trip(&app)
             .await
             .location()
-            .starts_with("/api-tokens/?issue=capped")
+            .starts_with("/api/?issue=capped")
     );
     assert_eq!(gateway.with(|s| s.create_calls), 0);
     assert_eq!(gateway.with(|s| s.deleted.len()), 0);
@@ -754,7 +739,7 @@ async fn membership_is_still_checked_before_the_cap() {
 
     assert_eq!(
         issue_round_trip(&app).await.location(),
-        "/api-tokens/?issue=not_member"
+        "/api/?issue=not_member"
     );
     assert_eq!(gateway.with(|s| s.list_calls), 0);
 }
@@ -772,10 +757,7 @@ async fn a_live_key_beside_a_revoked_one_is_the_current_key() {
 
     assert_eq!(reveal_via(&app).await.json()["key_id"], live);
 
-    assert_eq!(
-        issue_round_trip(&app).await.location(),
-        "/api-tokens/?issue=ok"
-    );
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
     gateway.with(|s| {
         assert_eq!(s.deleted, vec![dead.clone()]);
         assert_eq!(s.keys.len(), 1);
@@ -793,10 +775,7 @@ async fn a_live_key_is_adopted_as_before_the_cap_existed() {
     let key = seed_attached(&gateway, 1_000);
     let app = app_with_discord(&discord, &gateway);
 
-    assert_eq!(
-        issue_round_trip(&app).await.location(),
-        "/api-tokens/?issue=ok"
-    );
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
     assert_eq!(gateway.with(|s| s.create_calls), 0);
     assert_eq!(reveal_via(&app).await.json()["key_id"], key);
 }
@@ -811,10 +790,7 @@ async fn the_full_cycle_issue_revoke_wait_reissue() {
     let app = app_with_discord(&discord, &gateway);
     let session = session_cookie(USER_ID);
 
-    assert_eq!(
-        issue_round_trip(&app).await.location(),
-        "/api-tokens/?issue=ok"
-    );
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
     let first = gateway.with(|s| s.keys[0].clone());
 
     assert_eq!(revoke(&app, Some(&session)).await.status, StatusCode::OK);
@@ -822,17 +798,14 @@ async fn the_full_cycle_issue_revoke_wait_reissue() {
         issue_round_trip(&app)
             .await
             .location()
-            .starts_with("/api-tokens/?issue=capped")
+            .starts_with("/api/?issue=capped")
     );
 
     // The 1st arrives.
     gateway.with(|s| {
         s.keys[0].last_updated_at = Some(the_3rd_of(first_of_month_offset(-1)));
     });
-    assert_eq!(
-        issue_round_trip(&app).await.location(),
-        "/api-tokens/?issue=ok"
-    );
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
 
     gateway.with(|s| {
         assert_eq!(s.keys.len(), 1);
@@ -930,7 +903,7 @@ async fn the_reveal_and_the_issue_agree_on_the_cap_with_mixed_period_revocations
 
     assert_eq!(
         issue_round_trip(&app).await.location(),
-        format!("/api-tokens/?issue=capped&next_eligible_at={expected_date}")
+        format!("/api/?issue=capped&next_eligible_at={expected_date}")
     );
 
     // And the revoke's idempotent answer names the same instant.
@@ -1008,10 +981,7 @@ async fn a_stale_listing_after_the_roll_does_not_rank_the_deleted_record() {
     gateway.with(|s| s.list_resurrects_deleted = true);
     let app = app_with_discord(&discord, &gateway);
 
-    assert_eq!(
-        issue_round_trip(&app).await.location(),
-        "/api-tokens/?issue=ok"
-    );
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
     gateway.with(|s| {
         assert_eq!(s.keys.len(), 1);
         assert_ne!(s.keys[0].id, dead);
@@ -1036,16 +1006,13 @@ async fn a_lost_create_response_is_not_retried_into_duplicates() {
     let app = app_with_discord(&discord, &gateway);
 
     let reply = issue_round_trip(&app).await;
-    assert_eq!(reply.location(), "/api-tokens/?issue=failed");
+    assert_eq!(reply.location(), "/api/?issue=failed");
     assert_eq!(
         gateway.with(|s| s.create_calls),
         1,
         "one create request, however the SDK would like to retry it"
     );
     // The next press adopts the key that landed, as before.
-    assert_eq!(
-        issue_round_trip(&app).await.location(),
-        "/api-tokens/?issue=ok"
-    );
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
     assert_eq!(gateway.with(|s| s.create_calls), 1);
 }

@@ -29,7 +29,7 @@
 //!   distinction wanted. It is available at all only because [0184] put the
 //!   bundle and the API on one distribution — cross-origin, this would have had
 //!   to be `SameSite=None`, i.e. no CSRF protection from the cookie layer at all.
-//! - **`Path`** — the session is scoped to `/api-tokens/`, so it is not attached
+//! - **`Path`** — the session is scoped to `/api/`, so it is not attached
 //!   to `/v1/*` data requests, which have no use for it and are the highest-volume
 //!   route group on the distribution. The pending-login cookie is scoped tighter
 //!   still: it is only ever read by the callback.
@@ -52,13 +52,13 @@ pub const SESSION_COOKIE: &str = "portal_session";
 pub const PENDING_COOKIE: &str = "portal_oauth_pending";
 
 /// Path the session is scoped to: the portal, bundle and backend alike.
-pub const SESSION_PATH: &str = "/api-tokens/";
+pub const SESSION_PATH: &str = "/api/";
 
 /// Path the pending-login cookie is scoped to. Only `/auth/callback` ever reads
 /// it, so it is never attached to anything else — including [0187]'s key reveal,
 /// which is the request on this origin whose response is most worth not
 /// widening.
-pub const PENDING_PATH: &str = "/api-tokens/api/auth/";
+pub const PENDING_PATH: &str = "/api/api/auth/";
 
 /// Read a cookie value out of a request's `Cookie` header(s).
 ///
@@ -138,7 +138,7 @@ mod tests {
         let session = set(SESSION_COOKIE, "v", SESSION_PATH, 3600);
         assert_eq!(
             session,
-            "portal_session=v; Path=/api-tokens/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax"
+            "portal_session=v; Path=/api/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax"
         );
         for header in [session, clear(SESSION_COOKIE, SESSION_PATH)] {
             assert!(header.contains("HttpOnly"), "{header}");
@@ -161,7 +161,7 @@ mod tests {
     /// cookie must not ride along on anything but the callback.
     #[test]
     fn the_two_paths_are_scoped_as_narrowly_as_their_readers_need() {
-        assert!(SESSION_PATH.starts_with("/api-tokens/"));
+        assert!(SESSION_PATH.starts_with("/api/"));
         assert!(PENDING_PATH.starts_with(SESSION_PATH));
         assert!(!SESSION_PATH.starts_with("/v1"));
     }

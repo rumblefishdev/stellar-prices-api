@@ -27,9 +27,9 @@ without it serves nothing.
 | `GET /v1/oracles/{asset_identifier}`      | `x-api-key`   | 60 s              |
 | `GET /v1/backfill/status`                 | `x-api-key`   | 60 s              |
 | `POST /v1/prices/batch`                   | `x-api-key`   | uncached          |
-| `GET /api-tokens/api/{proxy+}`            | Anonymous²    | uncached          |
-| `POST /api-tokens/api/{proxy+}`           | Anonymous²    | uncached          |
-| `DELETE /api-tokens/api/{proxy+}`         | Anonymous²    | uncached          |
+| `GET /api/api/{proxy+}`                   | Anonymous²    | uncached          |
+| `POST /api/api/{proxy+}`                  | Anonymous²    | uncached          |
+| `DELETE /api/api/{proxy+}`                | Anonymous²    | uncached          |
 
 ¹ Gateway TTL. The handler sends `max-age=300` — see **Cache** below for why the
 two differ.
@@ -38,7 +38,7 @@ two differ.
 visitor signing in to obtain a key does not have one — the same argument that
 makes `/api-docs-json` anonymous. It is **not** open: while `PORTAL_ENABLED` is
 `false`, every path under it returns an empty `404`, byte-identical to a path
-that was never deployed (task 0183). `GET /api-tokens/api/config` is the one
+that was never deployed (task 0183). `GET /api/api/config` is the one
 exception and answers `{"enabled": false}` in both states. Deliberately absent
 from the OpenAPI document — the portal describes itself to its own bundle, not
 to integrators.
@@ -76,7 +76,7 @@ the table.
 
 ## Portal distribution — CloudFront (task 0184)
 
-**Portal:** `https://dojr4epgxo2qp.cloudfront.net/api-tokens/`
+**Portal:** `https://dojr4epgxo2qp.cloudfront.net/api/`
 
 Distribution `EU8O3ADXFZP5U`, deployed 2026-08-13. The domain is also published
 to SSM at `/prices/production/portal-distribution-domain`, which is where task
@@ -86,9 +86,9 @@ rather than copying it.
 > **Ahead of the deploy.** This section describes what task 0184's branch
 > synthesizes. Three of its properties are not live yet — the trailing-slash
 > redirect, CloudFront access logs, and `Cache-Control` on the uploaded objects
-> — so `/api-tokens` answers `403 AccessDenied` today rather than redirecting.
+> — so `/api` answers `403 AccessDenied` today rather than redirecting.
 > The gateway is a fourth case: it currently maps the portal as
-> `ANY /api-tokens/api/{proxy}` and `.../{proxy}/{sub}` with **no throttle**, an
+> `ANY /api/api/{proxy}` and `.../{proxy}/{sub}` with **no throttle**, an
 > intermediate state left by the 2026-08-14 deploy attempt (see task 0184).
 > Moving it to the `{proxy+}` above means replacing a path-parameter resource,
 > which API Gateway will not do in one update — deploy once with the portal
@@ -104,14 +104,14 @@ stage above. That is not a convenience — it is what makes every portal request
 Behaviours, in precedence order. CloudFront takes the **first** match, so the
 order is part of the configuration, not a presentation choice:
 
-| Path pattern        | Origin      | Notes                                   |
-| ------------------- | ----------- | --------------------------------------- |
-| `/api-tokens/api/*` | API Gateway | must precede the row below              |
-| `/api-tokens/*`     | S3          | the portal bundle                       |
-| `/v1/*`             | API Gateway | data routes                             |
-| `/api-docs-json`    | API Gateway | root-level, **not** under `/v1`         |
-| `/health`           | API Gateway | root-level                              |
-| _(default)_         | S3          | `/` redirects to `/api-tokens/` for now |
+| Path pattern     | Origin      | Notes                            |
+| ---------------- | ----------- | -------------------------------- |
+| `/api/api/*`     | API Gateway | must precede the row below       |
+| `/api/*`         | S3          | the portal bundle                |
+| `/v1/*`          | API Gateway | data routes                      |
+| `/api-docs-json` | API Gateway | root-level, **not** under `/v1`  |
+| `/health`        | API Gateway | root-level                       |
+| _(default)_      | S3          | `/` redirects to `/api/` for now |
 
 The convention, settled 2026-08-07 and meant for the frontends that follow:
 **`<app>/*` is that app's bundle, `<app>/api/*` is that app's backend.** A new
@@ -119,35 +119,35 @@ frontend adds two rows and invents nothing.
 
 That ordering is no longer a hand-checked property: `openapi:verify-routes`
 takes the first pattern that matches a portal backend path out of the
-synthesized distribution and fails CI unless it is `/api-tokens/api/*` pointing
+synthesized distribution and fails CI unless it is `/api/api/*` pointing
 at the execute-api origin. The same check asserts the prefix is identical in the
 handler (`PORTAL_API_PREFIX`), in the CDK routing table (`PORTAL_BACKEND`) and
 in the script itself, so moving it in one place cannot leave the other two
 behind.
 
-**Three paths redirect, and only three.** A pattern like `/api-tokens/*` does
-not match `/api-tokens`, so the bare prefix would fall to the default behaviour
+**Three paths redirect, and only three.** A pattern like `/api/*` does
+not match `/api`, so the bare prefix would fall to the default behaviour
 and S3 would answer `403 AccessDenied` XML — it grants `s3:GetObject` and not
 `s3:ListBucket`, so a missing key reads as forbidden rather than absent. A
 viewer-request function redirects the bare prefixes to their trailing-slash
 form, which is what a reviewer trimming the documented URL should get:
 
-| Request           | Result                                               |
-| ----------------- | ---------------------------------------------------- |
-| `/`               | `302` → `/api-tokens/` → the portal page             |
-| `/api-tokens`     | `302` → `/api-tokens/` → the portal page             |
-| `/api-tokens/api` | `302` → `/api-tokens/api/` → the gateway, **not** S3 |
+| Request    | Result                                        |
+| ---------- | --------------------------------------------- |
+| `/`        | `302` → `/api/` → the portal page             |
+| `/api`     | `302` → `/api/` → the portal page             |
+| `/api/api` | `302` → `/api/api/` → the gateway, **not** S3 |
 
 The targets are a fixed list rather than a rule like "any path with no file
 extension". That generalisation was written first and rejected twice over: it
 interpolates `request.uri` into `Location`, and CloudFront does not collapse a
 leading `//`, so `//evil.com/x` would have redirected to a **different origin**
 — an open redirect on the origin that will host task 0186's OAuth callback. It
-would also fight task 0185's router, rewriting `/api-tokens/keys` to a
+would also fight task 0185's router, rewriting `/api/keys` to a
 trailing-slash form in the address bar that task 0195's SPA fallback would then
 have to undo. A new frontend adds its prefix to the list.
 
-`/api-tokens/api/` reaches API Gateway but matches no method on the resource, so
+`/api/api/` reaches API Gateway but matches no method on the resource, so
 it answers `403 {"message":"Missing Authentication Token"}` — the gateway's
 standard response for an unmapped path, the same as `/v1`. It is deliberately
 **not** the empty `404` described below: that applies to paths _under_ the

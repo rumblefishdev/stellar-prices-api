@@ -25,7 +25,7 @@ import type { EnvironmentConfig } from '../types.js';
  *
  * This replaced task 0184's throwaway `assets/portal-placeholder/index.html`,
  * which said the portal was not yet available. The app now says that itself,
- * and says it on the authority of `GET /api-tokens/api/config` rather than of a
+ * and says it on the authority of `GET /api/api/config` rather than of a
  * hardcoded sentence that nobody would remember to delete.
  */
 const PORTAL_ASSET_DIR =
@@ -47,8 +47,8 @@ const PORTAL_ASSET_DIR =
  * `packages/prices-api/src/portal/mod.rs`, and is also the prefix the Discord
  * redirect URI (task 0186) is registered under — the three must agree.
  */
-const PORTAL_BACKEND = '/api-tokens/api/*';
-const PORTAL_BUNDLE = '/api-tokens/*';
+const PORTAL_BACKEND = '/api/api/*';
+const PORTAL_BUNDLE = '/api/*';
 
 export interface PortalHostingStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
@@ -81,7 +81,7 @@ export interface PortalHostingStackProps extends cdk.StackProps {
  *   session cookie be `SameSite=Lax` and keeps CORS out of portal traffic
  *   entirely. Both properties fail in a browser rather than in `curl`, so they
  *   are cheap now and expensive to discover later.
- * - **`/api-tokens/api/*` ordered before `/api-tokens/*`** — see the constants
+ * - **`/api/api/*` ordered before `/api/*`** — see the constants
  *   above.
  *
  * Deferred to task 0195 on purpose: Swagger UI at `/docs/*`, the per-prefix SPA
@@ -123,7 +123,7 @@ export class PortalHostingStack extends cdk.Stack {
     // On, because CloudFront cannot backfill: a distribution that was not
     // logging at the time of an incident has nothing to reconstruct it from,
     // and the two things most likely to need reconstructing both arrive here.
-    // `/api-tokens/api/*` is an anonymous entry point, and its throttle
+    // `/api/api/*` is an anonymous entry point, and its throttle
     // (`PORTAL_THROTTLE`, 10 req/s) is a global rate cap rather than a
     // per-caller one — it bounds the bill, not the behaviour, so what a flood
     // looked like is a question only the logs can answer. Task 0186 then puts
@@ -170,8 +170,8 @@ export class PortalHostingStack extends cdk.Stack {
     // Directory index rewrite (viewer request, S3 behaviours only).
     // ---------------------------------------------------------------
     // `defaultRootObject` applies to `/` alone — it is a property of the
-    // distribution, not of a behaviour — so it cannot make `/api-tokens/`
-    // resolve to `/api-tokens/index.html`. The other way to get per-directory
+    // distribution, not of a behaviour — so it cannot make `/api/`
+    // resolve to `/api/index.html`. The other way to get per-directory
     // index documents is an S3 *website* endpoint, which requires a public
     // bucket and would trade away the AC above. Hence six lines of function.
     //
@@ -180,13 +180,13 @@ export class PortalHostingStack extends cdk.Stack {
     // only appends `index.html` to a path that already ends in a slash, and
     // sends a path that is missing that slash to its canonical form.
     //
-    // The trailing-slash redirects are not cosmetic. `/api-tokens/*` does NOT
-    // match `/api-tokens`, so the bare prefix falls through to `defaultBehavior`
+    // The trailing-slash redirects are not cosmetic. `/api/*` does NOT
+    // match `/api`, so the bare prefix falls through to `defaultBehavior`
     // (S3) and — because the OAC policy grants `s3:GetObject` and not
     // `s3:ListBucket` — S3 masks the missing key as `403 AccessDenied` XML
     // rather than a 404. That is the same bare AccessDenied page the `/`
     // redirect exists to prevent, at a URL a reviewer reaches by trimming one
-    // character off the documented one. `/api-tokens/api` needs it too: it
+    // character off the documented one. `/api/api` needs it too: it
     // lands on S3 via the bundle behaviour for the same reason, and the
     // redirect puts it back on the API behaviour, where the gateway answers for
     // its own namespace instead of S3 answering for it.
@@ -203,7 +203,7 @@ export class PortalHostingStack extends cdk.Stack {
     //   0186's OAuth callback, that is the standard first link in a
     //   code-interception chain.
     // - It would **fight task 0185's router**. Once the SPA has real routes,
-    //   `/api-tokens/keys` would 302 to `/api-tokens/keys/`, resolve to a key
+    //   `/api/keys` would 302 to `/api/keys/`, resolve to a key
     //   that does not exist, and leave the address bar permanently rewritten —
     //   so task 0195's per-prefix SPA fallback would have to undo this branch
     //   instead of sitting alongside it.
@@ -233,9 +233,9 @@ function redirect(location) {
 var REDIRECTS = {
   // The distribution root has no app of its own yet. Task 0195 gives it one
   // when a second frontend joins; until then the only page here is the portal.
-  '/': '/api-tokens/',
-  '/api-tokens': '/api-tokens/',
-  '/api-tokens/api': '/api-tokens/api/'
+  '/': '/api/',
+  '/api': '/api/',
+  '/api/api': '/api/api/'
 };
 
 // The portal's client-side routes, served by the portal's own index.html.
@@ -254,18 +254,18 @@ var REDIRECTS = {
 // request is interpolated into a URI.
 //
 // Both slash forms, because the trailing-slash branch below would otherwise
-// rewrite '/api-tokens/login/' to '/api-tokens/login/index.html' and 403.
+// rewrite '/api/login/' to '/api/login/index.html' and 403.
 //
 // WARNING: add a route to web/portal/src/landing/links.ts and you must add
 // it here too. Task 0195 is where this stops being a hand-maintained list and
 // becomes the per-prefix SPA fallback.
 var APP_ROUTES = {
-  '/api-tokens/login': '/api-tokens/index.html',
-  '/api-tokens/login/': '/api-tokens/index.html',
-  '/api-tokens/dashboard': '/api-tokens/index.html',
-  '/api-tokens/dashboard/': '/api-tokens/index.html',
-  '/api-tokens/quick-start': '/api-tokens/index.html',
-  '/api-tokens/quick-start/': '/api-tokens/index.html'
+  '/api/login': '/api/index.html',
+  '/api/login/': '/api/index.html',
+  '/api/dashboard': '/api/index.html',
+  '/api/dashboard/': '/api/index.html',
+  '/api/quick-start': '/api/index.html',
+  '/api/quick-start/': '/api/index.html'
 };
 
 function handler(event) {
@@ -401,7 +401,7 @@ function handler(event) {
     // `index.html` from the previous deploy still requests the old chunk names,
     // and deleting them the moment a new build lands turns an open tab into a
     // blank page. They accumulate; if that ever matters, an S3 lifecycle rule on
-    // `api-tokens/assets/` is the answer, not pruning.
+    // `api/assets/` is the answer, not pruning.
     //
     // Only the entry-document deployment invalidates. New hashed assets are new
     // URLs and were never in the cache, so invalidating them costs money to
@@ -414,7 +414,7 @@ function handler(event) {
       {
         sources: [s3deploy.Source.asset(PORTAL_ASSET_DIR)],
         destinationBucket: this.bucket,
-        destinationKeyPrefix: 'api-tokens',
+        destinationKeyPrefix: 'api',
         exclude: ['*'],
         include: [HASHED_ASSETS],
         prune: false,
@@ -441,18 +441,18 @@ function handler(event) {
     const portalBundle = new s3deploy.BucketDeployment(this, 'PortalBundle', {
       sources: [s3deploy.Source.asset(PORTAL_ASSET_DIR)],
       destinationBucket: this.bucket,
-      destinationKeyPrefix: 'api-tokens',
+      destinationKeyPrefix: 'api',
       exclude: [HASHED_ASSETS],
       distribution: this.distribution,
-      // Enumerated, NOT `/api-tokens/*`. An invalidation path list is matched
+      // Enumerated, NOT `/api/*`. An invalidation path list is matched
       // against the cache key and knows nothing about this deployment's
       // `exclude`, so a wildcard here would purge the year-cached hashed assets
       // on every deploy — the exact cost the comment above says this design
       // avoids, and it would have been avoided in the upload only.
       //
-      // `/api-tokens/` is listed for belt and braces, not because it is known
+      // `/api/` is listed for belt and braces, not because it is known
       // to hold an entry. `DirectoryIndexFn` rewrites it to
-      // `/api-tokens/index.html` on VIEWER_REQUEST, which is BEFORE the cache
+      // `/api/index.html` on VIEWER_REQUEST, which is BEFORE the cache
       // lookup, so on the documented behaviour the cache key is only ever the
       // rewritten URI and this path clears nothing. It costs nothing to keep —
       // invalidation is billed per path and the first 1,000 a month are free —
@@ -467,11 +467,7 @@ function handler(event) {
       // `max-age=0, must-revalidate`, so the edge revalidates anyway; the
       // invalidation is what makes the switch immediate instead of merely
       // prompt).
-      distributionPaths: [
-        '/api-tokens/',
-        '/api-tokens/index.html',
-        '/api-tokens/favicon.ico',
-      ],
+      distributionPaths: ['/api/', '/api/index.html', '/api/favicon.ico'],
       prune: true,
       cacheControl: [
         s3deploy.CacheControl.setPublic(),
@@ -507,7 +503,7 @@ function handler(event) {
     });
 
     new cdk.CfnOutput(this, 'PortalUrl', {
-      value: `https://${this.distribution.distributionDomainName}/api-tokens/`,
+      value: `https://${this.distribution.distributionDomainName}/api/`,
       description: 'Onboarding portal URL',
     });
     new cdk.CfnOutput(this, 'DistributionDomainName', {

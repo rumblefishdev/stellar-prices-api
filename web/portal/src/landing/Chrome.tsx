@@ -321,7 +321,7 @@ export function Footer({ canOfferKey }: { canOfferKey: boolean }) {
     //
     // `to`, not `href`: `DASHBOARD_ROUTE` is a route relative to the router's
     // basename, and as a bare `href` the browser resolved it against the
-    // domain root — `/dashboard` rather than `/api-tokens/dashboard`, which is
+    // domain root — `/dashboard` rather than `/api/dashboard`, which is
     // a path the deployment does not serve. Every other in-app destination on
     // the page already goes through `RouterLink`; this one did not.
     ...(canOfferKey ? [{ label: 'Dashboard', to: DASHBOARD_ROUTE }] : []),

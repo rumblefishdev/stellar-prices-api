@@ -57,14 +57,14 @@ export const STELLAR_DISCORD_INVITE = 'https://discord.gg/stellardev';
 export const LOGIN_ANCHOR = 'login';
 
 /**
- * The login route, relative to the router's basename — so `/api-tokens/login`
+ * The login route, relative to the router's basename — so `/api/login`
  * once `ROUTER_BASENAME` is applied.
  *
  * ⚠️ This path only resolves on a hard refresh once the deployment answers it
  * with the portal's `index.html`. Until then S3 masks the missing key as
  * `403 AccessDenied` (the bucket grants `s3:GetObject`, not `s3:ListBucket`),
  * which is why `infra/.../portal-hosting-stack.ts` rewrites the app's known
- * routes to `/api-tokens/index.html` in `DirectoryIndexFn`. Add a route here
+ * routes to `/api/index.html` in `DirectoryIndexFn`. Add a route here
  * and you must add it there.
  */
 export const LOGIN_ROUTE = '/login';
