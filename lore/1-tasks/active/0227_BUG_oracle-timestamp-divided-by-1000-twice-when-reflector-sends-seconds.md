@@ -887,9 +887,21 @@ out to be the only thing making a population separable.
       1000" and wrong that the split is per-reading. Its "likely a fallback
       timestamp field" guess was also real but innocent — `soroban.rs:666`'s
       `ev.created_at * 1000` — and correctly handled.
-- [ ] Partition `197001` stays empty after the fix, verified across a live
+- [x] Partition `197001` stays empty after the fix, verified across a live
       oracle-watcher run — and the interaction with [[0083]]'s cleanup worker is
       settled before [[0200]] re-enables it.
+      → **Verified over 24 h and ~288 runs, not one instant.** 2026-08-28: the
+      count is unchanged to the row (6,578) and the slot frontier has not moved
+      from `1970-01-21 16:37:21`. See "Day-2 census" above for why the pair is
+      decisive where yesterday's single reading was not.
+      → **The cleanup interaction is settled, and there is nothing left to
+      fight over.** `cleanup-worker/src/lib.rs:63-73` drops any partition where
+      `toUInt32(partition) < toYYYYMM(now() - INTERVAL 13 MONTH)`; `197001` has
+      always satisfied that, so it was being dropped daily and recreated by the
+      next oracle run — confirming [[0086]]'s account from the code rather than
+      re-deriving it. Post-fix the poll path writes into the live window, so
+      once dropped the partition is never recreated and [[0200]] can re-enable
+      cleanup without the two colliding.
 - [x] Both writable assets confirmed clean (USDC 3, XLM 4).
       → Both wrote correct live-window rows in the same pass — asset 3
       `{"symbol":"USDC"}` and asset 4 `{"symbol":"XLM"}` at 14:40 and 14:50.
@@ -937,11 +949,28 @@ out to be the only thing making a population separable.
       path, which never carried the defect, so it holds no fossil of it. The only
       hard floor is **2026-07-06** ([[0086]]'s direct sighting). No onset is
       inferred.
-- [ ] Coverage queries that use `min(timestamp)` on `oracle_prices` are
+- [x] Coverage queries that use `min(timestamp)` on `oracle_prices` are
       re-checked — this defect already gave [[0167]] a wrong start date once.
-- [ ] Whether the 13-month retention should have dropped partition `197001` is
+      → **There are none in production code.** Every `min(timestamp)` in the
+      repo is against `price_ohlcv_*`, never `oracle_prices`. The single
+      reference is a doc comment on
+      `prices-ingest-core/tests/usd_rate_population_it.rs`, which was stale —
+      it called the defect "intermittent" and cited [[0086]] as open. Corrected
+      in this change; the test itself is sound and stays as a regression guard
+      on the snapshotter.
+      ⚠️ Scope: this is a repo grep. A coverage query someone ran by hand
+      against prod is not reachable from here, and the 1970 rows have now been
+      deleted anyway, so the naive query answers correctly from today on.
+- [x] Whether the 13-month retention should have dropped partition `197001` is
       answered. ⚠️ 0086 supplies the likely answer — it *was* being dropped and
       immediately recreated — so confirm that rather than re-deriving it.
+      → **Confirmed from the code, as instructed.** `oracle_prices` is in
+      `RETENTION` at `INTERVAL 13 MONTH` (`cleanup-worker/src/lib.rs:33`), and
+      the drop predicate is `toUInt32(partition) < toYYYYMM(now() - interval)`
+      — `197001` is below any value that expression can take, so the partition
+      was eligible on every pass ever run. It should have been dropped, it was
+      being dropped, and the oracle-watcher recreated it within minutes. 0086's
+      account holds.
 
 ## ✅ Verified on prod — 2026-08-27, and the dedup arrived within minutes
 
@@ -1000,6 +1029,69 @@ from "redundant" to "conflicting", and with the collision above the surviving
 value — the one `usd_rate` snapshots and the enrichment oracle tier prices
 candles from — is arbitrary. **Method to settle it:** re-run the distribution
 query once the poll path has a few dozen surviving rows.
+
+## ✅ Day-2 census — 2026-08-28, and the fix holds at 24 hours
+
+Taken before the partition drop, as its before-state.
+
+| | 2026-08-27 (post-deploy) | 2026-08-28 09:40 UTC |
+|---|---|---|
+| corrupt rows (assets 3 + 4) | 6,578 | **6,578** |
+| slot frontier `max(timestamp)` | `1970-01-21 16:37:21` | **`1970-01-21 16:37:21`** |
+
+🔑 **This is the confirmation yesterday's check could not give.** Yesterday the
+count and the frontier were read minutes after the deploy, when "nothing has
+changed yet" and "nothing will change" are indistinguishable. A full day and
+~288 oracle-watcher runs later, the count is unchanged **to the row** and the
+frontier has not advanced by a single slot. The writer has stopped producing
+1970 rows, measured over a real interval rather than an instant.
+
+⚠️ The count agreeing is only meaningful *alongside* the frontier, and only
+because the frontier is the saturating dimension — see the warning under
+"Verified on prod". Stated as a pair on purpose.
+
+### Reflector's live counts, for the collision record
+
+`reflector` reads **48,620** rows on each of assets 3 and 4, against 48,311 for
+asset 3 yesterday — **+309 in ~24 h on a 288/day cadence**. The ~21-row excess
+is unmerged POLL rows sitting on EVENT keys, which is precisely the
+ReplacingMergeTree collision predicted above. `first_seen` is unchanged at
+`2026-03-11 14:00`.
+
+## ✅ CLOSED 2026-08-28 — asset 111 has NO rows under ANY oracle_name
+
+The 2026-08-26 census measured `oracle_name = 'reflector'` only, and explicitly
+refused to generalise from it:
+
+> ⚠️ **Scope of the claim — do not overstate it.** This is measured for
+> `oracle_name = 'reflector'` only. Whether asset 111 has rows under a
+> *different* `oracle_name` was not checked and must be.
+
+Measured now, unfiltered, over the whole table outside partition `197001`:
+
+| oracle_name | asset_id | rows | first_seen | last_seen |
+|---|---|---|---|---|
+| `redstone` | **0** | 374,833 | 2025-09-08 16:39:52 | 2026-08-28 09:42:26 |
+| `reflector` | 3 | 48,620 | 2026-03-11 14:00:00 | 2026-08-28 09:40:00 |
+| `reflector` | 4 | 48,620 | 2026-03-11 14:00:00 | 2026-08-28 09:40:00 |
+
+**Three rows. Asset 111 is absent from all of them.** So the consequence this
+task hands to [[0173]] — *the oracle tier cannot price a USDT-quoted candle* —
+stands on a whole-table measurement rather than a reflector-only one. It is not
+an artefact of the census filter, and it is not [[0196]]'s purge.
+
+⚠️ **`redstone` is deliberate, and is NOT a third writer to worry about.**
+`soroban.rs:706-726` records one row per REDSTONE event with the reserved
+`ORACLE_FEED_NO_ASSET_ID = 0` sentinel, `price_usd = 0`, and the raw XDR payload
+kept for a byte-footprint measurement. An oracle feed is not a tradeable asset,
+so it is deliberately not interned into the `AssetRegistry` — the doc comment
+gives the reason (a consumer resolving a pool-leg contract could otherwise match
+an oracle feed as a token). It is never read by the `reflector` ASOF join and
+never reached partition `197001`.
+
+🔑 **It does mean this table is 87% redstone by row count** — 374,833 of 472,063
+— for a measurement the storage estimate has already made. Noted, not acted on;
+it is a cost question for [[0226]]'s neighbourhood, not a defect here.
 
 ## Out of scope
 

@@ -296,14 +296,21 @@ async fn a_collision_on_one_peg_writes_nothing_for_any_peg() {
     );
 }
 
-/// Task 0086 is an open bug: the oracle worker intermittently writes
-/// `oracle_prices` rows whose timestamp is the real epoch divided by ~1000,
-/// landing in 1970-01 with a *correct* price. Found in prod while sizing 0167 —
-/// `min(timestamp)` on `oracle_prices` reads `1970-01-21`.
+/// Task 0086 — folded into 0227 and FIXED 2026-08-27. Kept as a regression
+/// guard on the snapshotter, which is the layer that made the defect harmless.
+///
+/// The shape: the oracle worker's POLL path took `lastprice`'s SECONDS
+/// timestamp and divided it by 1000, landing every reading in 1970-01 with a
+/// *correct* price. Not intermittent, as 0086 inferred — 100% of that writer's
+/// readings, while the EVENT decoder (`soroban.rs`) stamped its own correctly
+/// throughout. Two writers, two units. Found in prod while sizing 0167, where
+/// `min(timestamp)` on `oracle_prices` read `1970-01-21`.
 ///
 /// Copying those into `usd_rate` would be worse than leaving them upstream:
 /// `oracle_prices` sheds them at 13 months, `usd_rate` is retained forever, so
-/// a known upstream defect would become permanent history.
+/// a known upstream defect would become permanent history. That reasoning is
+/// why the guard outlives the bug — the writer is fixed, but this test pins the
+/// property that a malformed upstream timestamp never reaches the forever-table.
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
 async fn does_not_snapshot_the_0086_junk_1970_timestamps() {
