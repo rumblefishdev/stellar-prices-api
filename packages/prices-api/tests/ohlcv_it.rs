@@ -1111,3 +1111,57 @@ async fn ohlcv_peg_series_keeps_ohlc_ordered() {
 
     teardown(db).await;
 }
+
+/// Task 0229 review finding 2 — an extreme the query cannot compute stays `null`.
+///
+/// 🔴 ClickHouse's `least`/`greatest` **ignore** null arguments rather than
+/// propagating them (verified on 26.3.10.60: `greatest(NULL, 2.5)` = `2.5`, while
+/// `NULL + 2.5` = `NULL`). `h_x` is `toDecimal128OrNull` and overflows
+/// `Decimal128(38, 14)` when `rate` is large — reachable here with a dust `close`
+/// at the precision floor against a ten-figure `close_usd`, giving `rate = 1e22`.
+///
+/// Unguarded, the clamp would report `high = close`: a value the query failed to
+/// compute, presented as if measured. The bucket is still returned; only the
+/// unrepresentable field is absent, per ADR 0011 §5.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_an_unrepresentable_extreme_stays_null_rather_than_becoming_the_close() {
+    let db = "it_ohlcv_overflow_null_0229";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    // close = 1e-12 (at PRECISION_FLOOR, so the row is `valid`), close_usd = 1e10
+    // → rate = 1e22, and high * rate = 1e25 overflows Decimal128(38, 14).
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-03-03 14:00:00', 3, 2, 'sdex', 1000, 1000, 1000, 0.000000000001, \
+              10, 10, 10000000000, 1000, 3, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/FOO:{}/ohlcv?granularity=1h&start=2026-03-03T14:00:00Z\
+         &end=2026-03-03T14:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let c = &json["data"].as_array().unwrap()[0];
+
+    assert!(
+        c["high"].is_null(),
+        "an unrepresentable high must stay null, not become the close; got {}",
+        c["high"]
+    );
+    assert_eq!(
+        c["close"].as_str().unwrap(),
+        "10000000000",
+        "the close itself is representable and must still be served"
+    );
+
+    teardown(db).await;
+}

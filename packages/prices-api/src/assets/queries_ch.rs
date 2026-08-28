@@ -597,6 +597,19 @@ pub struct OhlcvArgs {
 /// 14-decimal half-tick is 5e-15, roughly **2,700× too small** to explain it, so
 /// re-rounding `close` to 14 decimals cannot fix this: it is already there.
 ///
+/// 🔴 **`least`/`greatest` IGNORE null arguments — they do not propagate them.**
+/// Verified on 26.3.10.60: `greatest(CAST(NULL AS Nullable(Decimal(38,14))), 2.5)`
+/// returns `2.5`, where `NULL + 2.5` returns `NULL`. This is the opposite of
+/// ClickHouse's usual behaviour and it matters here: `h_x`/`l_x` are
+/// `toDecimal128OrNull` and go NULL on `Decimal128(38, 14)` overflow, which is
+/// reachable because `rate` is unbounded above (a dust `close` at
+/// [`PRECISION_FLOOR`] against a large `close_usd` gives `rate = 1e22`). Left
+/// unguarded, an extreme the query **could not compute** would be reported as
+/// the close — asserting a value rather than admitting the gap. The `isNull`
+/// guards below keep the honest `null`, and
+/// `ohlcv_an_unrepresentable_extreme_stays_null_rather_than_becoming_the_close`
+/// pins it.
+///
 /// `least`/`greatest` therefore clamp the derived extremes over the exact close.
 /// This preserves `close`'s exactness, which ADR 0011 §3 keeps deliberately, and
 /// moves an extreme by at most the ulp the rounding already implied. `open` needs
@@ -939,8 +952,10 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
                 // back over the exact close; see the CLOSE_EXACT note above.
                 format!(
                     "if(countIf(valid) = 0, NULL, toString(argMaxIf(o_x, (volume_base, quote_asset_id), valid))) AS o, \
-                 if(countIf(valid) = 0, NULL, toString(greatest(maxIf(h_x, valid), {CLOSE_EXACT}))) AS h, \
-                 if(countIf(valid) = 0, NULL, toString(least(minIf(l_x, valid), {CLOSE_EXACT}))) AS l, \
+                 if(countIf(valid) = 0 OR isNull(maxIf(h_x, valid)), NULL, \
+                    toString(greatest(maxIf(h_x, valid), {CLOSE_EXACT}))) AS h, \
+                 if(countIf(valid) = 0 OR isNull(minIf(l_x, valid)), NULL, \
+                    toString(least(minIf(l_x, valid), {CLOSE_EXACT}))) AS l, \
                  if(countIf(valid) = 0, NULL, toString({CLOSE_EXACT})) AS c, \
                  toString(sum(volume_base)) AS vb, \
                  toString(sum(volume_quote_usd)) AS vqu, \

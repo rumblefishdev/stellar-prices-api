@@ -196,6 +196,75 @@ digit is what establishes the mechanism, rather than merely fitting it.
 first test and leaves the mirror defect live — a fix that looks complete and is
 not.
 
+## Review findings — 2026-08-28
+
+Three findings on PR #263. All three verified independently before acting; two
+are addressed here, one is spawned and one claim in the review is corrected.
+
+### 🔴 Finding 2 — ACCEPTED and FIXED: `least`/`greatest` swallow NULL
+
+**This was a regression introduced by the clamp, and it is the important one.**
+
+Verified on 26.3.10.60:
+
+```
+greatest(CAST(NULL AS Nullable(Decimal(38,14))), 2.5)  ->  2.5
+NULL + 2.5                                             ->  NULL
+```
+
+🔑 **`least`/`greatest` IGNORE null arguments rather than propagating them** —
+the opposite of ClickHouse's usual behaviour, and of every other expression in
+this query. `h_x`/`l_x` are `toDecimal128OrNull` and go NULL on
+`Decimal128(38, 14)` overflow, which is reachable: `rate = close_usd / close` is
+unbounded above, so a dust `close` at `PRECISION_FLOOR` against a ten-figure
+`close_usd` gives `rate = 1e22` and `high * rate = 1e25`. Confirmed by direct
+query.
+
+So an extreme the query **could not compute** would have been reported as the
+close — a value asserted where the honest answer is absent. Fixed with `isNull`
+guards, documented at `CLOSE_EXACT`, and pinned by
+`ohlcv_an_unrepresentable_extreme_stays_null_rather_than_becoming_the_close`.
+**Non-vacuity verified**: with the guards removed the test fails.
+
+### 🟡 Finding 3 — ACCEPTED as real, NOT fixed here → [[0236]]
+
+The clamp is unbounded, so a genuinely corrupt source row (`high < close`) is
+silently rewritten into a well-formed candle. The review is right that this
+removes the only thing that was detecting such rows — [[0120]]'s conformance
+assertion, which is how 0229 was found at all.
+
+**Not addressed by bounding the clamp.** Bounding buys the signal by serving a
+malformed candle to every consumer whenever a source row is corrupt, which pays
+in the wrong currency: a read API's job is to return well-formed candles, and a
+consumer can do nothing with `high < close` except break.
+
+🔑 The actual defect is that source-row consistency was only ever checked *by
+accident*, downstream, by a suite run by hand against a deployed API on 20 assets
+over a 7-day window. That belongs at the source. Spawned as [[0236]], which
+measures the baseline before designing any alarm.
+
+### ⚠️ Finding 1 — REAL and reproduced, but its stated consequence is wrong
+
+`vwap` is outside the clamp and escapes `[low, high]` by the same mechanism, and
+worse: it carries a *second* float round-trip
+(`sumIf(toFloat64(w_x) * toFloat64(volume_base)) / sumIf(toFloat64(volume_base))`),
+and `(x*v)/v != x` in IEEE754. Reproduced through this file's literal expressions
+on 26.3.10.60 over 300,000 single-trade candles at BTC scale: **26,395 rows with
+`vwap > high` and 26,387 with `vwap < low`** — ~8.8% each, far above the review's
+own 523/511 and far above the OHLC crossing rate this task was filed for.
+
+🔴 **But the review's consequence — *"it will be the next thing a conformance
+check finds"* — is false, and it matters.** [[0120]]'s assertion is
+`l <= min(o, cl) && max(o, cl) <= h` (`conformance-0120.mjs:451`); `vwap` appears
+only in the "all OHLCV values are decimal strings" check. Nothing asserts vwap
+in-band, so this will **not** surface on its own. Recorded because a finding that
+overstates its own detectability argues for deferring it, when the truth argues
+the opposite.
+
+Not folded into this PR: `vwap` is a distinct output field with its own
+semantics, outside this task's ACs and outside the ADR 0011 §3 amendment, and
+changing it is a consumer-visible contract decision. Held for an explicit call.
+
 ## Acceptance Criteria
 
 - [x] A test seeds a bucket whose derived `low` rounds above its exact `close`
