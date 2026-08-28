@@ -160,8 +160,11 @@ threshold to the shape 0072 leaves behind. Sequencing them avoids two
       — **`min_volume_error` (finite, ≥ 0, ≤ 1e15; serde rejects non-numeric);
       CH-less tests on both routes prove the 400 fires before any DB call**
 - [x] Default-path responses are byte-identical whether the param is omitted or
-      explicitly set to the system default — **pass-through for
-      `threshold <= 100` never touches the strings; byte-compare in the IT**
+      explicitly set to the system default — **on an asset with a funded venue,
+      which is the whole population the default ever filtered: the producer
+      already made that cut, so the strict handler filter drops nothing and
+      never reformats the Decimal strings (byte-compare in the IT). On an
+      all-dust asset the two deliberately differ — see Design Decision 3**
 - [x] MV redeploy runbook step documented (DROP + re-CREATE, expected staleness
       window, verification query) —
       **`docs/runbooks/0118-min-volume-threshold-rollout.md`, delegating the
@@ -186,11 +189,21 @@ threshold to the shape 0072 leaves behind. Sequencing them avoids two
 
 ### Emerged
 
-3. **Effective threshold is `max(requested, 100)`.** A value at or below the
-   system default is a byte-identical pass-through: the MV already dropped
-   those sources and they cannot be re-admitted from the JSON. Documented in
-   the OpenAPI param description rather than rejected with a 400 — a caller
-   sending `min_volume_usd=0` gets exactly the documented default semantics.
+3. **An explicit `?min_volume_usd=` always filters strictly** at exactly the
+   value sent, with no pass-through band around the system default —
+   **corrected during code review after Design Decision 6 landed.** The first
+   draft short-circuited at `threshold <= 100` on the reasoning that "the MV
+   already dropped those sources and they cannot be re-admitted". Decision 6
+   made that false: the producer default is conditional, so an all-dust asset
+   *keeps* its sub-$100 venues, and the short circuit handed a $50 venue back
+   to a caller who explicitly asked for $100 — while `100.01` emptied the
+   object, a cliff at exactly the documented default. Byte-identity on the
+   default path survives as a *consequence* rather than a rule: on an asset
+   with a funded venue the producer already made that cut, so the strict
+   filter finds nothing to drop and never reformats the producer's Decimal
+   strings. Pinned by
+   `price_min_volume_cuts_an_all_dust_asset_at_the_system_default`, verified
+   to fail against the pre-fix handler.
 4. **Strict `>` on both sides** (MV and handler), per §5.5's literal
    "volume_24h > threshold"; a volume exactly equal to the threshold is
    excluded, and one unit test pins the strictness.

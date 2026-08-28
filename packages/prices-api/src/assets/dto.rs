@@ -31,8 +31,8 @@ pub struct PriceResponse {
     /// general-overview §5.5 `min_volume_usd` threshold (task 0118; the $100
     /// system default applies *conditionally* — a below-threshold source is
     /// kept when no source on the asset clears the threshold — and is
-    /// raisable per-request via `?min_volume_usd=`, which filters strictly)
-    /// and the inter-source median-outlier filter applied.
+    /// overridable per-request via `?min_volume_usd=`, which always filters
+    /// strictly) and the inter-source median-outlier filter applied.
     pub vwap_24h: String,
     /// Trailing-24h USD volume across **all** sources — a traded total, never
     /// outlier- or threshold-filtered.
@@ -67,13 +67,6 @@ pub(crate) fn parse_sources(raw: &str) -> serde_json::Value {
     }
 }
 
-/// System default for the §5.5 `min_volume_usd` weighting threshold — the
-/// value `mv_current_prices` is precomputed at (`schema/current.sql`, task
-/// 0118). The API-side override can only *raise* it: sources the MV already
-/// dropped are absent from the `sources` JSON and cannot be re-admitted, so
-/// the effective threshold is `max(requested, SYSTEM_MIN_VOLUME_USD)`.
-pub(crate) const SYSTEM_MIN_VOLUME_USD: f64 = 100.0;
-
 /// Upper bound on `?min_volume_usd=` — far above any real 24h venue volume,
 /// present so a nonsense magnitude is a 400 instead of a silent all-excluded
 /// response.
@@ -83,39 +76,37 @@ pub(crate) const MAX_MIN_VOLUME_USD: f64 = 1e15;
 /// request-level override — option (a): recompute from the `sources` JSON the
 /// row already carries, no second ClickHouse round-trip).
 ///
-/// Behaviour, in order:
-/// - `threshold <= SYSTEM_MIN_VOLUME_USD` — pass-through. The MV already
-///   computed exactly this, and not touching the strings keeps the default
-///   path byte-identical whether the param is omitted or set to the default.
-/// - otherwise drop every source whose `volume_24h` is not strictly above the
-///   threshold (the MV's own comparison is strict too). If nothing is dropped,
-///   the row again passes through untouched.
-/// - if sources were dropped, recompute `vwap_24h = Σ(p×v)/Σ(v)` over the
-///   survivors **in f64** — deliberately the MV's own numeric strategy (it
-///   computes the vwap over Float64 arrays before the Decimal cast, see
-///   current.sql's numeric-strategy note), so the override cannot be more
-///   precise than the value it overrides. Nothing left → `"0"` + `{}`, the
-///   MV's own sentinels for that shape.
+/// **An explicit threshold always filters strictly**, at whatever value the
+/// caller sent, and it can empty `sources`. There is deliberately no
+/// pass-through band around the producer's $100 default: that default is
+/// applied *conditionally* by the MV (an all-dust asset keeps its sources —
+/// measured on prod, the unconditional form would have blanked 96.5% of priced
+/// assets), so on such an asset a below-$100 venue IS present in the JSON and
+/// a caller asking for `min_volume_usd=100` must not be handed it back.
+///
+/// Behaviour:
+/// - drop every source whose `volume_24h` is not strictly above the threshold
+///   (the MV's own comparison is strict too);
+/// - if nothing was dropped, the row passes through **untouched** — the MV's
+///   Decimal strings are never reformatted. On an asset with a funded venue
+///   the producer has already applied the $100 cut, so `min_volume_usd=100`
+///   is byte-identical to omitting the param;
+/// - otherwise recompute `vwap_24h = Σ(p×v)/Σ(v)` over the survivors **in
+///   f64** — deliberately the MV's own numeric strategy (it computes the vwap
+///   over Float64 arrays before the Decimal cast, see current.sql's
+///   numeric-strategy note), so the override can never claim more precision
+///   than the value it overrides. Nothing left → `"0"` + `{}`, the MV's own
+///   sentinels for that shape.
 ///
 /// The outlier mask is NOT re-run here: it already excluded its venues
 /// producer-side (they are absent from the JSON), and §5.5 orders the volume
 /// threshold *before* the median — raising it can only shrink the mask's
 /// input population, never re-admit an outlier.
-///
-/// Deliberate asymmetry with the MV (task 0118 decision, 2026-08-27): the
-/// producer applies the system default *conditionally* (an all-dust asset
-/// keeps its sources — measured on prod, the unconditional form would have
-/// blanked 96.5% of priced assets), while an explicit request-level value
-/// filters strictly and CAN empty `sources` — the caller asked for exactly
-/// that cut.
 pub(crate) fn apply_min_volume(
     sources: &mut serde_json::Value,
     vwap_24h: &mut String,
     threshold: f64,
 ) {
-    if threshold <= SYSTEM_MIN_VOLUME_USD {
-        return;
-    }
     let Some(obj) = sources.as_object_mut() else {
         return;
     };
@@ -125,10 +116,13 @@ pub(crate) fn apply_min_volume(
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.0)
     };
-    if obj.values().all(|v| vol(v) > threshold) {
+    let before = obj.len();
+    obj.retain(|_, v| vol(v) > threshold);
+    if obj.len() == before {
+        // Nothing dropped: leave the producer's Decimal strings exactly as
+        // they came out of ClickHouse rather than round-tripping them.
         return;
     }
-    obj.retain(|_, v| vol(v) > threshold);
 
     let (mut pv, mut vsum) = (0.0_f64, 0.0_f64);
     for v in obj.values() {
@@ -215,7 +209,9 @@ pub struct AssetListItem {
     pub change_7d_pct: String,
     pub volume_24h_usd: String,
     pub vwap_24h: String,
-    /// Per-source breakdown; outlier-excluded sources are absent (§3.3).
+    /// Per-source breakdown; sources excluded by the §5.5 `min_volume_usd`
+    /// threshold or by outlier detection are absent (§3.3). Same semantics as
+    /// `PriceResponse::sources`, including the `?min_volume_usd=` override.
     #[schema(value_type = Object)]
     pub sources: serde_json::Value,
     pub updated_at: String,
@@ -333,7 +329,7 @@ pub struct OhlcvResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{SYSTEM_MIN_VOLUME_USD, apply_min_volume, parse_sources};
+    use super::{apply_min_volume, parse_sources};
 
     fn three_sources() -> serde_json::Value {
         serde_json::json!({
@@ -344,17 +340,34 @@ mod tests {
     }
 
     #[test]
-    fn at_or_below_the_system_default_is_a_byte_identical_pass_through() {
-        // AC: the default path must not change whether the param is omitted,
-        // equal to the default, or below it (the MV already applied the
-        // default; dropped sources cannot be re-admitted).
-        for t in [0.0, 50.0, SYSTEM_MIN_VOLUME_USD] {
+    fn on_a_funded_asset_the_system_default_is_byte_identical() {
+        // AC: a funded asset's response must not change whether the param is
+        // omitted, equal to the $100 default, or below it — not by a
+        // pass-through band, but because the MV already applied that cut, so
+        // the strict filter finds nothing left to drop.
+        for t in [0.0, 50.0, 100.0] {
             let mut s = three_sources();
             let mut vwap = "1.00505050505051".to_string();
             apply_min_volume(&mut s, &mut vwap, t);
             assert_eq!(s, three_sources(), "threshold {t}");
             assert_eq!(vwap, "1.00505050505051", "threshold {t}");
         }
+    }
+
+    #[test]
+    fn an_explicit_default_still_cuts_an_all_dust_asset() {
+        // The MV's system default is CONDITIONAL, so an asset with no funded
+        // venue keeps its dust in `sources`. An explicit min_volume_usd=100
+        // must still apply the cut the caller asked for — there is no
+        // pass-through band that would hand a $50 venue back.
+        let mut s = serde_json::json!({
+            "sdex":     {"price": "3", "volume_24h": "50"},
+            "soroswap": {"price": "4", "volume_24h": "30"},
+        });
+        let mut vwap = "3.375".to_string();
+        apply_min_volume(&mut s, &mut vwap, 100.0);
+        assert_eq!(s, serde_json::json!({}), "got {s}");
+        assert_eq!(vwap, "0");
     }
 
     #[test]

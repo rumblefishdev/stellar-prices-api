@@ -78,8 +78,12 @@ LIMIT 5
    conditional arm keeps all-dust assets' sources; any jump toward the
    recorded 2,960 means the unconditional form shipped by mistake).
 3. **API override** (after the API deploy, over the gateway with a key):
-   - default path stability: `GET /v1/assets/native/price` and the same with
-     `?min_volume_usd=100` must return identical bodies;
+   - default path stability **on a funded asset**: `GET /v1/assets/native/price`
+     and the same with `?min_volume_usd=100` must return identical bodies —
+     the producer already made that cut, so the strict filter drops nothing.
+     Do not run this check on an all-dust asset: there an explicit `=100`
+     correctly empties `sources` while the param-less call keeps them (the
+     conditional default), and the two bodies are _supposed_ to differ;
    - narrowing: on a captured multi-source subject, a high
      `?min_volume_usd=` (e.g. `10000`) returns strictly fewer `sources` keys
      and a reweighted `vwap_24h`;

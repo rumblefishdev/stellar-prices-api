@@ -58,11 +58,12 @@ fn min_volume_error(v: Option<f64>) -> Option<Response> {
 ///
 /// `?min_volume_usd=` (task 0118) re-weights `vwap_24h` from the row's own
 /// `sources` JSON in the handler — no extra ClickHouse round-trip, so the p95
-/// SLO that motivated the producer-side design is untouched. The MV is
-/// precomputed at the $100 system default, so the effective threshold is
-/// `max(requested, 100)`; omit the param on the common path — it is part of
-/// the API Gateway cache key (§6), and the cached entry is shared only when
-/// the param is absent.
+/// SLO that motivated the producer-side design is untouched. An explicit value
+/// always filters strictly at exactly that value: the MV's $100 default is
+/// applied *conditionally*, so on an all-dust asset a below-$100 venue is
+/// still in the JSON and a caller asking for 100 must not be handed it back.
+/// Omit the param on the common path — it is part of the API Gateway cache
+/// key (§6), and the cached entry is shared only when the param is absent.
 #[utoipa::path(
     get,
     path = "/assets/{asset_identifier}/price",
@@ -73,14 +74,16 @@ fn min_volume_error(v: Option<f64>) -> Option<Response> {
         ("min_volume_usd" = Option<f64>, Query, minimum = 0,
          description = "Exclude sources whose trailing-24h USD volume is at or \
                         below this value from `vwap_24h` weighting and from \
-                        `sources` (§5.5). An explicit value filters strictly — \
-                        it can empty `sources` — unlike the producer-side $100 \
-                        system default, which is conditional (a below-threshold \
+                        `sources` (§5.5). An explicit value ALWAYS filters \
+                        strictly at exactly that value and can empty \
+                        `sources`, unlike the producer-side $100 system \
+                        default, which is conditional (a below-threshold \
                         source is kept when no source on the asset clears the \
-                        threshold). Values at or below 100 behave as the \
-                        default, since sources excluded producer-side cannot \
-                        be re-admitted. Omit on the common path to share the \
-                        response cache entry."),
+                        threshold). On an asset with a funded venue the \
+                        producer has already applied the $100 cut, so a value \
+                        at or below 100 returns the same body as omitting the \
+                        param; on an all-dust asset it does not. Omit on the \
+                        common path to share the response cache entry."),
     ),
     responses(
         (status = 200, description = "Current price", body = PriceResponse),
@@ -215,9 +218,11 @@ pub struct ListParams {
         ("min_volume_usd" = Option<f64>, Query, minimum = 0,
          description = "Exclude sources whose trailing-24h USD volume is at or \
                         below this value from `vwap_24h` weighting and from \
-                        `sources` (§5.5). An explicit value filters strictly, \
-                        unlike the conditional producer-side $100 default; \
-                        values at or below 100 behave as the default. Does not \
+                        `sources` (§5.5) — identical semantics to the \
+                        parameter on `GET /assets/{asset_identifier}/price`: \
+                        an explicit value ALWAYS filters strictly at exactly \
+                        that value and can empty `sources`, while the \
+                        producer-side $100 default is conditional. Does not \
                         affect `price_usd`, `volume_24h_usd`, or the sort."),
     ),
     responses(

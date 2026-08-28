@@ -313,9 +313,13 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         // claim (PR #241 review, finding 2). Reachable only because C2's carry
         // brings all-dead assets into the mask at all; before it they arrived
         // with zero kept sources and it never armed.
-        // Volumes 200, not 100: MIN_VOLUME_USD (0118) would drop $100 venues
-        // before the mask and this fixture would pass vacuously, testing the
-        // threshold instead of the mask-clears-everything path it pins.
+        // Volumes 200, not 100: kept ABOVE MIN_VOLUME_USD (0118) so the
+        // threshold is provably not what clears this fixture. At $100 the
+        // conditional arm would keep every venue anyway (nothing here is
+        // funded), so the mask would still be the cause — but only by
+        // accident of the conditional rule, and a later move back to an
+        // unconditional threshold would silently empty this fixture and make
+        // its mask assertions vacuous.
         (15, 200, "1.00", "200", "sdex"),
         (15, 210, "1.00", "200", "soroswap"),
         (15, 220, "3.00", "200", "aquarius"),
