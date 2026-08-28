@@ -2,7 +2,7 @@
 id: "0229"
 title: "Derived O/H/L rounds to 14 decimals while `close` stays exact, so `/ohlcv` can return `close` BELOW `low` — a malformed candle"
 type: BUG
-status: backlog
+status: active
 related_adr: ["0011"]
 related_tasks: ["0170", "0225", "0120", "0127"]
 tags: ["priority-medium", "effort-small", "api", "data-correctness", "read-surface", "ohlcv", "milestone-M2"]
@@ -11,6 +11,14 @@ links:
   - "../../../packages/prices-api/src/assets/queries_ch.rs"
   - "../../../tools/scripts/conformance-0120.mjs"
 history:
+  - date: 2026-08-28
+    status: active
+    who: okarcz
+    note: >
+      ACTIVATED. Picked up the morning after [[0227]] closed, as the one
+      consumer-facing defect among the three tasks [[0170]]'s verification run
+      spawned. It is 9 of the 27 remaining [[0120]] failures, and the only one
+      of them that is a real defect rather than a suite-vs-ADR mismatch.
   - date: 2026-08-27
     status: backlog
     who: okarcz
