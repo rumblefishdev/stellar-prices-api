@@ -2,7 +2,7 @@
 id: "0194"
 title: "Portal security and ops audit — caching, IAM, throttles, logs, against Tranche 3 AC 6"
 type: TEST
-status: backlog
+status: active
 related_adr: ["0007", "0010"]
 related_tasks: ["0183", "0159", "0160", "0184", "0186", "0187", "0188", "0189", "0191", "0192", "0164"]
 tags: [layer-infra, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, security, audit, iam, slice-11]
@@ -11,7 +11,7 @@ links:
   - "../archive/0160_FEATURE_onboarding-backend-endpoints.md"
   - "../archive/0159_FEATURE_discord-oauth-sign-in.md"
 history:
-  - date: 2026-08-13
+  - date: "2026-08-13"
     status: backlog
     who: akot
     note: >
@@ -21,6 +21,14 @@ history:
       This task exists because those requirements are spread across seven
       slices and one of them is a wholesale-assigned array: the audit is of the
       **assembled** result, which no individual slice can see.
+  - date: "2026-08-28"
+    status: active
+    who: akot
+    note: >
+      Activated by Adam once [[0193]] merged (PR #249, `d53cfc2`). Every slice
+      this audit composes has now shipped, so the assembled `methodSettings`
+      array, the `cacheEnabled` branch and the CloudFront policy can be read
+      off a real synthesized template rather than predicted from source.
 ---
 
 # Portal security and ops audit

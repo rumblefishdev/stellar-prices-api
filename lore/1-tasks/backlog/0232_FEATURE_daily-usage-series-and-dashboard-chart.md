@@ -8,7 +8,7 @@ related_tasks: ["0188", "0193", "0194"]
 tags: [layer-backend, layer-frontend, priority-medium, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, dashboard]
 milestone: 3
 links:
-  - "../active/0193_FEATURE_portal-presentable-ui-pass.md"
+  - "../archive/0193_FEATURE_portal-presentable-ui-pass.md"
 history:
   - date: "2026-08-25"
     status: backlog

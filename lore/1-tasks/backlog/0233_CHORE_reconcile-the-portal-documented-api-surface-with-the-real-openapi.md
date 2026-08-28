@@ -8,7 +8,7 @@ related_tasks: ["0193", "0163", "0195", "0124"]
 tags: [layer-frontend, priority-medium, effort-small, milestone-M3, epic-self-service-onboarding, docs, figma]
 milestone: 3
 links:
-  - "../active/0193_FEATURE_portal-presentable-ui-pass.md"
+  - "../archive/0193_FEATURE_portal-presentable-ui-pass.md"
   - "../../../docs/scf/api-endpoints.md"
 history:
   - date: "2026-08-27"

@@ -2,15 +2,15 @@
 id: "0193"
 title: "Make the portal presentable — MUI, the landing page, refusal screens, mobile"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0010"]
-related_tasks: ["0183", "0162", "0185", "0187", "0188", "0189", "0191", "0192", "0163", "0195"]
+related_tasks: ["0183", "0162", "0185", "0187", "0188", "0189", "0191", "0192", "0163", "0195", "0232", "0233", "0234"]
 tags: [layer-frontend, priority-medium, effort-medium, milestone-M3, epic-self-service-onboarding, ui, dashboard, slice-10]
 milestone: 3
 links:
-  - "../archive/0162_FEATURE_portal-frontend-app.md"
+  - "./0162_FEATURE_portal-frontend-app.md"
 history:
-  - date: 2026-08-13
+  - date: "2026-08-13"
     status: backlog
     who: akot
     note: >
@@ -19,7 +19,7 @@ history:
       slice added its own. This task changes how they look and how the states
       hang together, and decides nothing about what they say: that wording was
       settled in the slice that owns each behaviour.
-  - date: 2026-08-24
+  - date: "2026-08-24"
     status: active
     who: akot
     note: >
@@ -27,7 +27,7 @@ history:
       path prefix on an existing domain — `https://sorobanscan.rumblefish.dev/`
       with the landing page at `/api-key` — so this slice's screens are the
       whole visible surface of the self-service onboarding epic.
-  - date: 2026-08-27
+  - date: "2026-08-27"
     status: active
     who: akot
     note: >
@@ -42,6 +42,20 @@ history:
       Two of Adam's 2026-08-25 calls reversed on review, both recorded at
       the render site: "Last rotated" → "Last updated", and 0188's lag line
       back under the meter. Portal 156 tests (+4), Rust lib 162 (+1).
+  - date: "2026-08-28"
+    status: completed
+    who: akot
+    note: >
+      Merged as PR #249 (`d53cfc2`). All ten acceptance criteria met, two with
+      a stated limit: 375 px is met by construction and review rather than in a
+      browser, and epic AC 2/AC 4 are exercised against a stubbed backend
+      because the portal ships closed. Two screens, 21 landing components, 8
+      refusal states, MUI 7 + Emotion, no third-party script. Portal 156 tests,
+      Rust lib 162. Eleven design decisions, #3-#11 emerged from the review
+      round. Spawned [[0232]] (daily chart), [[0233]] (OpenAPI reconciliation)
+      and [[0234]] (popup grace). The `pending_absent` measurement ran on
+      2026-08-27 and answered `pending: false`, but it closes [[0189]] item 2,
+      not anything here.
 ---
 
 # Make the portal presentable
@@ -97,21 +111,77 @@ wording is lost and the next person edits it back.
 
 ## Acceptance Criteria
 
-- [ ] **Ships closed.** The "portal not yet available" state from [[0183]] is
+- [x] **Ships closed.** The "portal not yet available" state from [[0183]] is
       one of the states this pass styles, not an afterthought — it may be what a
-      visitor sees for weeks
-- [ ] Landing page states both prerequisites before the sign-in button, with a
-      working invite link
-- [ ] First sign-in lands on the dashboard with the key visible and copyable;
+      visitor sees for weeks. `Hero.tsx` renders the closed hero off
+      `PORTAL_ENABLED`; asserted in `main.spec.tsx` and off the stable hook
+      `LoginCard.tsx` leaves for it
+- [x] Landing page states both prerequisites before the sign-in button, with a
+      working invite link. `STELLAR_DISCORD_INVITE` in `landing/links.ts`, the
+      registered vanity invite, asserted by href in two tests
+- [x] First sign-in lands on the dashboard with the key visible and copyable;
       returning shows the same key
-- [ ] Dashboard shows used-of-quota, the reset date and 1 req/s
-- [ ] Every state in the list above renders something specific — no blank
-      screens, no generic "something went wrong"
-- [ ] "Could not verify" and "not a member" are visually and textually distinct
-- [ ] Usable at 375 px wide
-- [ ] No secrets, no AWS calls, no third-party scripts in the bundle
-- [ ] No copy owned by another slice was changed here without changing it there
-- [ ] Epic AC 2 and AC 4 satisfied from the user's side
+- [x] Dashboard shows used-of-quota, the reset date and 1 req/s
+- [x] Every state in the list above renders something specific — no blank
+      screens, no generic "something went wrong". All eight have a test that
+      names them
+- [x] "Could not verify" and "not a member" are visually and textually distinct
+      — different icon, action and tone, asserted on both the sign-in and the
+      dashboard path
+- [x] Usable at 375 px wide — **by construction and by review, not in a
+      browser.** The type ramp interpolates from a 375 px `min`
+      (`theme/theme.ts`), the signed-in bar was refitted to two rows at that
+      width on 2026-08-27, and the review's two browser findings were addressed
+      at the render site. Nobody has opened it on a phone
+- [x] No secrets, no AWS calls, no third-party scripts in the bundle. Fonts are
+      local (`assets/fonts`, `theme/fonts.css`); no CDN, analytics or tag
+      manager reference exists in the source
+- [x] No copy owned by another slice was changed here without changing it
+      there. 0191 amended twice in 0191, 0188's lag line restored as 0188
+      decided it, 0189's refusals rendered verbatim
+- [x] Epic AC 2 and AC 4 satisfied from the user's side — **at the level this
+      slice can reach.** Both are exercised end-to-end in the portal suite
+      against a stubbed backend. Neither has been walked against the real
+      Discord on the deployed portal, because the portal ships closed; that
+      walk belongs to whoever flips `PORTAL_ENABLED`
+
+## Implementation Notes
+
+- **Stack.** MUI 7 + Emotion, the half of the 2026-08-07 decision [[0185]]
+  deliberately left out. No third-party script reaches the page.
+- **Layout.** `web/portal/src/` — `landing/` (21 components, the hero through
+  the FAQ and the login card), `app/` (the dashboard and every refusal state),
+  `quickstart/`, `theme/` (tokens, theme, local font faces), `api/portal.ts`.
+  Not split into `libs/ui` — see Notes; two screens do not pay for it.
+- **Tests.** Portal suite 156 passing across 5 files (147 of them in
+  `app.spec.tsx`). Rust lib 162.
+- **Review.** PR #249, karczuRF and stkrolikiewicz: 25 findings, 22 confirmed
+  against the code, 2 needing a browser, 1 with a caveat. Addressed in six
+  commits; decisions #3-#11 below emerged from that round.
+
+## Issues Encountered
+
+- **Two of Adam's 2026-08-25 calls were reversed on review**, both recorded at
+  the render site rather than only here: "Last rotated" → "Last updated"
+  (decision #6) and 0188's lag line back under the meter (decision #7). The
+  first was a contract mismatch — the field is `lastUpdatedDate` and nothing
+  rotates; the second belonged to [[0188]], which had decided the wording once.
+- **The design's `curl` aimed a real key at `api.soroswap.finance`.** Fixed the
+  same day by pointing HOST at our execute-api base (decision #8); the paths
+  stay the design's and are [[0233]]'s.
+- **The 429 in the frame existed nowhere in the repo.** `RATE_LIMIT_EXCEEDED` +
+  `Retry-After: 1` was invented by the design. Replaced with the measured
+  response (decision #3); the quota-exhausted body is still not shown because
+  it was never measured.
+- **The legal footer asked visitors to agree to documents they could not
+  open** — two underlined `<span>`s with no href. Not rendered until the URLs
+  exist (decision #4).
+- **Task ids collided with `develop` twice.** The chart task was renumbered
+  0222 → 0226 on 2026-08-27 and then 0226 → 0232 on 2026-08-28, and the
+  reconciliation task 0227 → 0233, because `develop` took both numbers while
+  this branch was open. The second renumber landed after PR #249 merged and
+  was cherry-picked onto `develop` separately. Ids assigned on a long-running
+  branch are not reserved anywhere.
 
 ## Design Decisions
 
@@ -161,7 +231,7 @@ wording is lost and the next person edits it back.
 
 - 0233 — reconcile the landing page and quick start with the real OpenAPI
   (paths, example fields, `source`, placeholder key, Figma).
-- The popup's 1500 ms grace (`POPUP_MESSAGE_GRACE_MS`) may lose a
+- [[0234]] — the popup's 1500 ms grace (`POPUP_MESSAGE_GRACE_MS`) may lose a
   `postMessage` on a cold cache (review, plausible, not reproduced) — see the
   note at `afterGrace` before changing it.
 
