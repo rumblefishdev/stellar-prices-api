@@ -3346,7 +3346,7 @@ function Usage({
    * 2026-08-25: the "Quota resets on the 1st of each month, 00:00 UTC — next
    * reset …" sentence and the "Last updated … AWS reports usage with a delay"
    * line, along with the Refresh button beside them. The frame has none of the
-   * three, and the space they occupied is where task [[0226]]'s daily chart
+   * three, and the space they occupied is where task [[0232]]'s daily chart
    * goes.
    *
    * What is lost with them is 0188's lag disclosure — the panel no longer says
@@ -3446,7 +3446,7 @@ function Usage({
             />
             {/* ⚠️ Task 0188's lag line, **back since 2026-08-27**. It was cut
                 on 2026-08-25 with the reset-rule sentence and the Refresh
-                button ("tutaj będą wykresy" — task 0226's chart takes the
+                button ("tutaj będą wykresy" — task 0232's chart takes the
                 space), and PR #249's review sent it back: 0188 decided this
                 wording once and says this slice "restyles it but does not
                 re-decide it", `as_of` was still served and no longer read,

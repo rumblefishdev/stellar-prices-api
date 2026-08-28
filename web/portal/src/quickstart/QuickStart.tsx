@@ -41,7 +41,7 @@ import { panelBorder } from '../landing/DashboardPanel';
  *
  * The PATHS are the DESIGN's, not this repo's OpenAPI document's — the same
  * gap `landing/Endpoints.tsx` notes. Reconciling them is a product decision
- * about the public surface, tracked as task 0227 rather than remembered; this
+ * about the public surface, tracked as task 0233 rather than remembered; this
  * page renders what the frame says so that the two do not diverge into a
  * third answer, and keeps the paths in one place so the reconciliation is a
  * small diff.

@@ -1,5 +1,5 @@
 ---
-id: "0227"
+id: "0233"
 title: "Reconcile the portal's documented API surface with the real OpenAPI — paths, example fields, the source name, the placeholder key"
 type: CHORE
 status: backlog
@@ -22,6 +22,15 @@ history:
       `api.soroswap.finance` — was fixed in 0193 the same day by pointing
       the HOST at our execute-api base; everything else below is design
       content and changes when the Figma file does.
+  - date: "2026-08-28"
+    status: backlog
+    who: akot
+    note: >
+      Renumbered 0227 -> 0233. `develop` had taken 0227 for the oracle
+      timestamp-unit bug (PRs #256, #259) before this branch merged it in;
+      found when `develop` was merged into [[0193]]'s branch ahead of PR #249.
+      The two code comments (`landing/Terminal.tsx`, `quickstart/QuickStart.tsx`)
+      and [[0193]]'s three references re-pointed in the same change.
 ---
 
 # Reconcile the portal's documented API surface with the real OpenAPI

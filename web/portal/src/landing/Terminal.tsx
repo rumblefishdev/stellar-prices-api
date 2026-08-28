@@ -65,7 +65,7 @@ export function Terminal() {
             {/* Our host, not the frame's `api.soroswap.finance` — the same
                 reasoning as `quickstart/QuickStart.tsx`'s `BASE_URL`: a page
                 that renders a credential must not aim it at another domain.
-                The path stays the design's; task 0227 reconciles it. */}
+                The path stays the design's; task 0233 reconciles it. */}
             <Tok c={NUM}>
               https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/prices
             </Tok>

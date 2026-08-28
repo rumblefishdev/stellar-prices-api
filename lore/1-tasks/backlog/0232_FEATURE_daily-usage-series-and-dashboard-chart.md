@@ -1,5 +1,5 @@
 ---
-id: "0226"
+id: "0232"
 title: "Daily requests chart — expose the per-day series /usage already reads, and draw it"
 type: FEATURE
 status: backlog
@@ -27,6 +27,15 @@ history:
       no-invocations alarm bug (PR #250) before this branch merged it in;
       found by [[0193]]'s review round. The two code comments that cited it
       (`app.tsx`, `app.spec.tsx`) re-pointed in the same change.
+  - date: "2026-08-28"
+    status: backlog
+    who: akot
+    note: >
+      Renumbered 0226 -> 0232. The id collided a second time: `develop` had
+      meanwhile taken 0226 for the oracle-worker registry-load bug, found when
+      `develop` was merged into [[0193]]'s branch ahead of PR #249. The two
+      code comments that cite it (`app.tsx`, `app.spec.tsx`) re-pointed in the
+      same change.
 ---
 
 # Daily requests chart

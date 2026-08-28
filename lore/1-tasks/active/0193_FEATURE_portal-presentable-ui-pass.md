@@ -37,7 +37,7 @@ history:
       `pending_absent` at sign-in, which needs the Discord Developer Portal
       scope and a local run against the real guild (runbook §1 step 3, §5)
       and is Adam's to do before merge. Decisions #3-#9 below emerged from
-      it; 0227 spawned for the design-vs-OpenAPI reconciliation; 0191
+      it; 0233 spawned for the design-vs-OpenAPI reconciliation; 0191
       amended a second time (the landing restated the superseded model).
       Two of Adam's 2026-08-25 calls reversed on review, both recorded at
       the render site: "Last rotated" → "Last updated", and 0188's lag line
@@ -147,7 +147,7 @@ wording is lost and the next person edits it back.
    2026-08-25's removal. 0188 owns the decision and this slice restyles it.
 8. **The quick start's HOST is ours** (the execute-api base
    `docs/scf/api-endpoints.md` documents); the design's paths stay and are
-   0227's. A page that renders a credential does not aim it at another domain.
+   0233's. A page that renders a credential does not aim it at another domain.
 9. **`SWAGGER_UI` → `API_REFERENCE`.** The constant names what it opens; 0195
    re-points it.
 10. **`.mcp.json` is not committed.** Dev tooling that auto-configures a
@@ -159,7 +159,7 @@ wording is lost and the next person edits it back.
 
 ## Future Work
 
-- 0227 — reconcile the landing page and quick start with the real OpenAPI
+- 0233 — reconcile the landing page and quick start with the real OpenAPI
   (paths, example fields, `source`, placeholder key, Figma).
 - The popup's 1500 ms grace (`POPUP_MESSAGE_GRACE_MS`) may lose a
   `postMessage` on a cold cache (review, plausible, not reproduced) — see the

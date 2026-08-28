@@ -2708,7 +2708,7 @@ describe('usage against quota', () => {
     expect(screen.getByText(/request per second/i)).toBeTruthy();
     // ⚠️ The reset RULE sentence ("the 1st of each month, 00:00 UTC") was cut
     // from this card on 2026-08-25 at Adam's instruction, along with the lag
-    // line and the Refresh button — the frame has none of them and task 0226's
+    // line and the Refresh button — the frame has none of them and task 0232's
     // chart takes the space. What survives is the date itself, as the caption
     // under the bar, which is the half a visitor acts on.
     expect(screen.getByText('Resets 1 September')).toBeTruthy();
