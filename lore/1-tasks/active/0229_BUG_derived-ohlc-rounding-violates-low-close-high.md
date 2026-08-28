@@ -15,6 +15,23 @@ history:
     status: active
     who: okarcz
     note: >
+      CODE MERGED (PR #263) and the task stays ACTIVE deliberately. Three of four
+      criteria are met; the fourth is verification through the DEPLOYED API and
+      cannot be met from the repo. ⏳ Owed: deploy the API Lambda, then re-run the
+      [[0120]] suite and expect the `low <= open,close <= high` check to go
+      **9 -> 0**. ⚠️ The remaining ~18 failures are [[0230]] (17) and [[0178]] (1)
+      and must not be read as this fix falling short. ⚠️ Deploy trap from the
+      08-27 session: `make deploy-production-compute` ships whatever sits in
+      `target/lambda/` and does not build the Rust, so a skipped rebuild is a
+      silent no-op that reads as success — check `CodeSha256`, nothing else
+      distinguishes them. 🔴 Note that NOTHING in the conformance suite asserts
+      `vwap` in-band, so the larger of the two defects fixed here has no prod
+      verification path; it rests on the integration tests until [[0230]] reworks
+      the suite.
+  - date: 2026-08-28
+    status: active
+    who: okarcz
+    note: >
       ACTIVATED. Picked up the morning after [[0227]] closed, as the one
       consumer-facing defect among the three tasks [[0170]]'s verification run
       spawned. It is 9 of the 27 remaining [[0120]] failures, and the only one
