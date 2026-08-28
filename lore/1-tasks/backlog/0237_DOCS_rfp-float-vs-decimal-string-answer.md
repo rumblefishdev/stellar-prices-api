@@ -1,5 +1,5 @@
 ---
-id: "0232"
+id: "0237"
 title: "The RFP types Current Price as a float and we ship a string — record the answer before a reviewer asks"
 type: DOCS
 status: backlog
@@ -20,6 +20,15 @@ history:
       serialises every Decimal as a JSON string. Noted in [[0217]] as
       deliberately out of that task's scope (it is serialization, not outlier
       protection) and left without an owner until now.
+  - date: 2026-08-28
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Renumbered 0232 -> 0237 after syncing with `develop`, which had
+      already taken 0232 (0193's renumbering of its own spawns). Same
+      collision 0193 hit twice: the shared id sequence is allocated from a
+      local view of the tree, so two branches in flight pick the same next
+      free number. Nothing references the old id outside this branch.
 ---
 
 # "Current Price (float USD)" vs our Decimal strings

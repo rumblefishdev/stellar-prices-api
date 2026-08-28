@@ -99,7 +99,7 @@
 -- never armed the mask. They now arrive with their carried prices, so the
 -- whole all-dead population — 65% of prod assets on 2026-08-25 — is newly
 -- routed through it. Pinned by fixture asset 15; whether interpolation is the
--- right median for an even count is 0233's call, not this file's.
+-- right median for an even count is 0238's call, not this file's.
 --
 -- OUTLIER_PCT = 0.20 (20%). A starting value, deliberately loose. The asymmetry
 -- matters: wrongly EXCLUDING a legitimate venue silently removes it from the

@@ -36,7 +36,7 @@ history:
       artifact, handled by the liveness guard + [[0216]]. See the new
       "Design input" section. [[0123]] is now completed, so the evidence-base
       blocker is met; only [[0118]] remains. **That section has since moved to
-      [[0233]] — see the 2026-08-28 split entry.**
+      [[0238]] — see the 2026-08-28 split entry.**
   - date: 2026-08-28
     status: backlog
     who: stkrolikiewicz
@@ -54,7 +54,7 @@ history:
     who: stkrolikiewicz
     note: >
       Split: the §5.5 median MECHANISM (weighted quantile, even-count
-      interpolation, argMaxIf tie sets) moved to [[0233]]. Three artifacts had
+      interpolation, argMaxIf tie sets) moved to [[0238]]. Three artifacts had
       routed median questions here while this task's title, options and all
       four ACs cover only `price_usd` — it could have been closed in full
       without touching `median()`. Keeping the cheap product decision
@@ -119,12 +119,12 @@ so no consumer guard catches it.
   informative, largest API-surface change. Pairs naturally with [[0216]]'s
   age column: both answer "how much should I trust this number?".
 
-## The median mechanism is NOT this task ([[0233]])
+## The median mechanism is NOT this task ([[0238]])
 
 Three questions about the §5.5 median itself were routed here by other
 artifacts — `current.sql`'s even-count-interpolation note, [[0123]]'s
 tie-set finding, and [[0118]]'s kickoff analysis of the unweighted median as
-a manipulation surface. They are **split out into [[0233]]** as of
+a manipulation surface. They are **split out into [[0238]]** as of
 2026-08-28, because this task's title, options and acceptance criteria cover
 only whether `price_usd` is outlier-protected: 0217 could be closed in full
 without touching `median()`, which made it a magnet for questions it did not
@@ -134,7 +134,7 @@ The split matters for sequencing: deciding `price_usd` is a cheap product
 call, while replacing the median is a published-value change that needs a
 0123-style reconciliation re-run. Binding them together would block the cheap
 decision behind the expensive one. If this task chooses to filter `price_usd`,
-it inherits whatever mechanism 0233 settles.
+it inherits whatever mechanism 0238 settles.
 
 ## Design input — what the RFP actually asks of the headline price (2026-08-28)
 
@@ -172,7 +172,7 @@ Related but out of scope here: the RFP types the field as a **float** while
 §3.3 serialises it as a string to preserve `Decimal(38,14)` (0123 measured
 prod prices at 7e-8, which a JSON float would destroy). That deviation needs
 a recorded answer for the evidence package; it is a serialization question,
-not an outlier-protection one, and is owned by [[0232]].
+not an outlier-protection one, and is owned by [[0237]].
 
 ## Sequencing (why this is not startable today)
 

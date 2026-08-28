@@ -1,5 +1,5 @@
 ---
-id: "0233"
+id: "0238"
 title: "The §5.5 median mechanism itself — volume-weighted quantile, even-count interpolation, and argMaxIf tie sets"
 type: FEATURE
 status: backlog
@@ -23,6 +23,15 @@ history:
       protection. 0217 could be closed in full without touching `median()`.
       Splitting keeps that cheap product decision unblocked by this expensive
       published-value change.
+  - date: 2026-08-28
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Renumbered 0233 -> 0238 after syncing with `develop`, which had
+      already taken 0233 (0193's renumbering of its own spawns). Same
+      collision 0193 hit twice: the shared id sequence is allocated from a
+      local view of the tree, so two branches in flight pick the same next
+      free number. Nothing references the old id outside this branch.
 ---
 
 # The median mechanism itself
