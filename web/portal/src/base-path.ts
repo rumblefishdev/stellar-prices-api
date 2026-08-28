@@ -2,14 +2,14 @@
  * The prefix this app is served from — one definition, two consumers.
  *
  * Task 0184's CloudFront table routes `<app>/*` to that app's bundle, so this
- * bundle only ever answers under `/api-tokens/`. Getting there takes two
+ * bundle only ever answers under `/api/`. Getting there takes two
  * settings that must agree: Vite's `base` covers ASSETS, react-router's
  * `basename` covers ROUTES, and either one alone leaves the app broken on the
  * only URL it is served from.
  *
  * They differ by exactly one character and that difference is load-bearing, not
  * a copy-paste mistake — Vite treats a `base` without a trailing slash as a
- * prefix to concatenate and emits `/api-tokensassets/…`, while react-router
+ * prefix to concatenate and emits `/apiassets/…`, while react-router
  * strips a trailing `basename` and warns if given one. So `ROUTER_BASENAME` is
  * DERIVED rather than typed out a second time.
  *
@@ -24,7 +24,7 @@
  */
 
 /** Vite's `base`. Trailing slash required. */
-export const BASE_PATH = '/api-tokens/';
+export const BASE_PATH = '/api/';
 
 /** react-router's `basename`. Same prefix, no trailing slash. */
 export const ROUTER_BASENAME = BASE_PATH.replace(/\/$/, '');

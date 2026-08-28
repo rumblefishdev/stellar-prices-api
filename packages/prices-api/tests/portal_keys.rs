@@ -56,7 +56,7 @@ async fn both_key_routes_are_an_empty_404_while_the_portal_is_closed() {
     let nowhere = build_app(false, None)
         .oneshot(
             Request::builder()
-                .uri("/api-tokens/api/no-such-route")
+                .uri("/api/api/no-such-route")
                 .body(Body::empty())
                 .unwrap(),
         )

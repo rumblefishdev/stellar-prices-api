@@ -110,7 +110,7 @@ import {
  * been taken from task 0193, where MUI arrives.
  *
  * What this page is for is the pipeline behind it — a change to this file
- * reaches `/api-tokens/` — plus two properties that are expensive to prove any
+ * reaches `/api/` — plus two properties that are expensive to prove any
  * later: that a relative `fetch` from this bundle reaches the API
  * **same-origin** through task 0184's distribution, and now that the session
  * cookie survives that round-trip in a real browser.
@@ -119,7 +119,7 @@ import {
  * A hard refresh on a sub-path resolves against S3, which grants `s3:GetObject`
  * and not `s3:ListBucket`, so a missing key reads as `403 AccessDenied` rather
  * than a 404. Sign-in does not need one: every redirect in the flow lands back
- * on `/api-tokens/`, which is a real object.
+ * on `/api/`, which is a real object.
  */
 
 type Probe =
@@ -334,7 +334,7 @@ function useSession(enabled: boolean): {
  * The `/login` view — the Figma login frame (`778:2499`) and nothing else.
  *
  * A route of its own since the portal grew a second page. The OAuth callback
- * still lands on `/api-tokens/`, exactly as `portal/auth/mod.rs` says it will
+ * still lands on `/api/`, exactly as `portal/auth/mod.rs` says it will
  * ("when the portal grows a second page, the page it lands on decides where to
  * go next; this handler still will not") — so `RootRoute` is what forwards a
  * `?signin=…` landing here, carrying the query with it. That is why the
@@ -3884,7 +3884,7 @@ function PortalStatus({ probe }: { probe: Probe }) {
   // answer a visitor gets when there is nothing to click — still asking, shut,
   // or unreachable.
   //
-  // Task 0185's `Reached /api-tokens/api/config successfully — same-origin, no
+  // Task 0185's `Reached /api/api/config successfully — same-origin, no
   // API key, no CORS` line used to live here and is **deliberately gone**: it
   // was that slice's evidence that the bundle could reach its own backend,
   // written when this page had nothing else to show for it. The page now has
@@ -3957,7 +3957,7 @@ function PortalStatus({ probe }: { probe: Probe }) {
  * portal panel embedded in it as one more section.
  *
  * **Embedded, not a second route.** Task 0195 has not landed the per-prefix SPA
- * fallback yet, so a hard refresh on `/api-tokens/anything` resolves against S3
+ * fallback yet, so a hard refresh on `/api/anything` resolves against S3
  * — which grants `s3:GetObject` and not `s3:ListBucket`, so a missing key comes
  * back as `403 AccessDenied` rather than a 404 the router could handle. Until
  * then this app has exactly one URL, and "go to the dashboard" is a scroll.
@@ -4081,7 +4081,7 @@ type Gate = {
 /**
  * `/` — the landing page, and the junction the OAuth callback lands on.
  *
- * `portal/auth/mod.rs` redirects to `/api-tokens/` in **every** outcome and
+ * `portal/auth/mod.rs` redirects to `/api/` in **every** outcome and
  * says why: "when the portal grows a second page, the page it lands on decides
  * where to go next; this handler still will not." This is that page, and these
  * are the two decisions it makes.
@@ -4221,7 +4221,7 @@ function LoginRoute({ gate }: { gate: Gate }) {
 /**
  * `/dashboard` — the key and the usage panel.
  *
- * A visitor who is not signed in goes to `/api-tokens/`, per the brief. It
+ * A visitor who is not signed in goes to `/api/`, per the brief. It
  * waits for `settled` first: redirecting while `/auth/me` is still in flight
  * would bounce every arrival from the OAuth callback straight back to the
  * landing page, which is the one journey this route exists to complete.

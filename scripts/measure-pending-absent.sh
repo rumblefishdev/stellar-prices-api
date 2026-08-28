@@ -95,11 +95,11 @@ PORT="$PORT" RUST_LOG="${RUST_LOG:-info}" \
   cargo run -q -p prices-api --features local-server --bin serve >"$LOG" 2>&1 &
 SERVE=$!
 for _ in $(seq 1 60); do
-  curl -sf -m 2 "http://localhost:$PORT/api-tokens/api/config" >/dev/null && break
+  curl -sf -m 2 "http://localhost:$PORT/api/api/config" >/dev/null && break
   kill -0 $SERVE 2>/dev/null || { echo "serve died at start:"; tail -20 "$LOG"; exit 1; }
   sleep 1
 done
-curl -sf -m 2 "http://localhost:$PORT/api-tokens/api/config" >/dev/null || {
+curl -sf -m 2 "http://localhost:$PORT/api/api/config" >/dev/null || {
   echo "serve never answered /config:"; tail -20 "$LOG"; kill $SERVE; exit 1; }
 echo "serve up on :$PORT (pid $SERVE)"
 
@@ -107,7 +107,7 @@ say "3/4  now sign in, once, in the browser"
 cat <<EOF
 
     Make sure the portal dev server is running:  npx nx dev portal
-    Then open:   http://localhost:4200/api-tokens/login
+    Then open:   http://localhost:4200/api/login
     Sign in with a Discord account that IS a member of guild $GUILD.
 
 Waiting up to ${TIMEOUT_SECS}s for the callback to reach a verdict…

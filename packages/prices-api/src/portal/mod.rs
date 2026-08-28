@@ -65,12 +65,12 @@ use crate::config::AppConfig;
 /// table: `<app>/*` is an app's bundle and `<app>/api/*` is its backend, with
 /// the `/api/*` behaviour ordered **first**. The OAuth redirect URI registered
 /// with Discord ([0186]) must live **under** this prefix — it is a concrete
-/// callback path such as `/api-tokens/api/auth/callback`, and Discord matches
+/// callback path such as `/api/api/auth/callback`, and Discord matches
 /// the whole URI, so registering the bare prefix would fail at callback time.
-pub const PORTAL_API_PREFIX: &str = "/api-tokens/api/";
+pub const PORTAL_API_PREFIX: &str = "/api/api/";
 
 /// The one portal route that answers while the portal is closed.
-pub const CONFIG_PATH: &str = "/api-tokens/api/config";
+pub const CONFIG_PATH: &str = "/api/api/config";
 
 /// What the portal frontend needs before it can render anything.
 ///
@@ -251,11 +251,11 @@ mod tests {
     #[test]
     fn portal_paths_are_recognised_by_prefix() {
         assert!(is_portal_path(CONFIG_PATH));
-        assert!(is_portal_path("/api-tokens/api/auth/login"));
-        assert!(is_portal_path("/api-tokens/api/key"));
-        assert!(is_portal_path("/api-tokens/api/usage"));
+        assert!(is_portal_path("/api/api/auth/login"));
+        assert!(is_portal_path("/api/api/key"));
+        assert!(is_portal_path("/api/api/usage"));
         // Routes that do not exist yet still match — that is the point.
-        assert!(is_portal_path("/api-tokens/api/nothing-here"));
+        assert!(is_portal_path("/api/api/nothing-here"));
     }
 
     #[test]
@@ -265,21 +265,21 @@ mod tests {
         assert!(!is_portal_path("/v1/prices/batch"));
     }
 
-    /// The bundle lives at `/api-tokens/*` and is served by S3, never by this
+    /// The bundle lives at `/api/*` and is served by S3, never by this
     /// Lambda. Gating it here would be gating something that never arrives —
     /// and worse, would suggest the bundle is protected when it is public.
     #[test]
     fn the_static_bundle_prefix_is_not_ours() {
-        assert!(!is_portal_path("/api-tokens/"));
-        assert!(!is_portal_path("/api-tokens/dashboard"));
-        assert!(!is_portal_path("/api-tokens/assets/index.js"));
+        assert!(!is_portal_path("/api/"));
+        assert!(!is_portal_path("/api/dashboard"));
+        assert!(!is_portal_path("/api/assets/index.js"));
     }
 
-    /// `/api-tokens/api` with no trailing slash is not a route we serve, and
+    /// `/api/api` with no trailing slash is not a route we serve, and
     /// must not be mistaken for one — the prefix carries its slash on purpose.
     #[test]
     fn the_prefix_carries_its_trailing_slash() {
         assert!(PORTAL_API_PREFIX.ends_with('/'));
-        assert!(!is_portal_path("/api-tokens/api"));
+        assert!(!is_portal_path("/api/api"));
     }
 }

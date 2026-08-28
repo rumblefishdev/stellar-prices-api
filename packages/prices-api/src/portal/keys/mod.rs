@@ -7,8 +7,8 @@
 //!
 //! | route | does |
 //! | --- | --- |
-//! | `GET`/`POST /api-tokens/api/key` | reveal — the lookup, plus the value. **Never creates.** A revoked key answers `404 key_revoked` with the date a new one can be issued |
-//! | `POST /api-tokens/api/key/rework` | **revoke** (task 0191): deactivate the caller's key now, issue nothing. Session-authorized, deliberately — see below |
+//! | `GET`/`POST /api/api/key` | reveal — the lookup, plus the value. **Never creates.** A revoked key answers `404 key_revoked` with the date a new one can be issued |
+//! | `POST /api/api/key/rework` | **revoke** (task 0191): deactivate the caller's key now, issue nothing. Session-authorized, deliberately — see below |
 //!
 //! Issuance itself is [`issue_for`], reachable **only** from the OAuth
 //! callback completing an `action=issue` round-trip
@@ -116,13 +116,13 @@ use naming::{
 };
 
 /// The reveal, on both verbs — see [`key`] for why `POST` answers identically.
-pub const KEY_PATH: &str = "/api-tokens/api/key";
+pub const KEY_PATH: &str = "/api/api/key";
 
 /// The revocation (task 0191). `POST` only — the verb is the CSRF guard, see
 /// the module docs — and the path keeps the task's name for the action the
 /// dashboard calls "Replace my key": the key is replaced, just not until the
 /// next period.
-pub const REWORK_PATH: &str = "/api-tokens/api/key/rework";
+pub const REWORK_PATH: &str = "/api/api/key/rework";
 
 /// Error code for a caller with no valid session.
 const NOT_SIGNED_IN: &str = "not_signed_in";
@@ -1292,7 +1292,7 @@ mod tests {
         assert!(KEY_PATH.starts_with(super::super::PORTAL_API_PREFIX));
     }
 
-    /// Depth 3 under `/api-tokens/api/`, like sign-in: the currently-deployed
+    /// Depth 3 under `/api/api/`, like sign-in: the currently-deployed
     /// gateway maps depth 1-2 only, which is [0205]'s to fix. Asserted so that
     /// nobody moves this route deeper without noticing it makes the release
     /// dependency worse.

@@ -2,7 +2,7 @@ import react from '@vitejs/plugin-react';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 
 /**
- * `base` is what makes Vite emit asset URLs under `/api-tokens/`; without it
+ * `base` is what makes Vite emit asset URLs under `/api/`; without it
  * every `<script src>` and `<link href>` points at the domain root and the app
  * 403s on its own JavaScript the moment it is not served from `/`. The router's
  * `basename` is the other half — this one covers assets, that one covers routes,
@@ -21,9 +21,9 @@ import { defineConfig, loadEnv, type Plugin } from 'vite';
  *
  * The trailing slash is required. Vite treats a `base` without one as a path
  * prefix to concatenate rather than a directory, which produces
- * `/api-tokensassets/…`.
+ * `/apiassets/…`.
  */
-const BASE_PATH = '/api-tokens/';
+const BASE_PATH = '/api/';
 
 /**
  * Dev-server proxy targets, mirroring `soroban-block-explorer`'s pattern.
@@ -52,7 +52,7 @@ const PROXIED_PATHS = [
   // `PORTAL_OAUTH_SECRET_FILE`), not at the CloudFront distribution — production
   // runs with the portal closed, so proxying there gets an empty 404 from the
   // gate. See docs/runbooks/portal-oauth-deploy-prep.md § 4.
-  '/api-tokens/api',
+  '/api/api',
   // The data routes, for when a portal page needs to show a real API response.
   '/v1',
   '/health',
@@ -116,7 +116,7 @@ export default defineConfig(({ mode }) => {
             // Injected SERVER-SIDE, per path, and only where a key is actually
             // required. The portal's own routes are keyless on purpose (a
             // visitor signing in to get a key does not have one yet), so
-            // sending a key to `/api-tokens/api/*` in dev would test a
+            // sending a key to `/api/api/*` in dev would test a
             // configuration production never runs.
             ...(devApiKey && KEYED_PATHS.includes(path)
               ? { headers: { 'x-api-key': devApiKey } }

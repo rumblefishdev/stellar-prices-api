@@ -127,7 +127,7 @@ async fn portal_paths_are_exempt_when_the_portal_is_open() {
 async fn portal_paths_are_not_exempt_when_the_portal_is_closed() {
     let portal = send(
         Request::builder()
-            .uri("/api-tokens/api/key")
+            .uri("/api/api/key")
             .body(Body::empty())
             .unwrap(),
     )

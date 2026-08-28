@@ -133,7 +133,7 @@ const API_DOCS_THROTTLE = { rate: 10, burst: 20 } as const;
  * A change set accepts every one of the rejected forms, so this fails on apply
  * and only on apply. Do not read a clean `cdk diff` as evidence here.
  */
-const PORTAL_API_RESOURCE_PATH = '/api-tokens/api/{proxy+}';
+const PORTAL_API_RESOURCE_PATH = '/api/api/{proxy+}';
 
 /**
  * The verbs mapped under the portal prefix, enumerated because `ANY` cannot
@@ -149,7 +149,7 @@ const PORTAL_API_RESOURCE_PATH = '/api-tokens/api/{proxy+}';
  * which the greedy `{proxy+}` above covers and the intermediate
  * `{proxy}` + `{proxy}/{sub}` pair that is CURRENTLY DEPLOYED does not — see
  * task 0205, which ships this file's committed shape. Until that deploy runs,
- * `/api-tokens/api/auth/login` answers the gateway's own
+ * `/api/api/auth/login` answers the gateway's own
  * `403 Missing Authentication Token` rather than reaching the handler. That is a
  * deployment gap, not a defect in either task: the flag keeps the handler dark
  * regardless, and `/config` at depth 1 is unaffected.
@@ -164,7 +164,7 @@ const PORTAL_API_RESOURCE_PATH = '/api-tokens/api/{proxy+}';
 const PORTAL_API_METHODS = ['GET', 'POST', 'DELETE'] as const;
 
 /**
- * Method-level throttle for the portal's backend (`/api-tokens/api/...`).
+ * Method-level throttle for the portal's backend (`/api/api/...`).
  *
  * Same argument as `API_DOCS_THROTTLE` above, and the same reason it cannot be
  * left to the default. These routes are anonymous by design — a visitor signing
@@ -228,7 +228,7 @@ const PORTAL_THROTTLE = { rate: 10, burst: 40 } as const;
  *   monthly quota (task 0157, overriding the design doc's §2.1/§7 100 req/s).
  *   `GET /health` stays a keyless mock (cheapest liveness probe), and
  *   `GET /api-docs-json` is a keyless proxy to the handler (task 0124 — public
- *   documentation). `GET`/`POST`/`DELETE` on `/api-tokens/api/{proxy+}` are the
+ *   documentation). `GET`/`POST`/`DELETE` on `/api/api/{proxy+}` are the
  *   onboarding portal's backend (task 0184), keyless for the same reason, gated
  *   in the handler by `PORTAL_ENABLED` (task 0183) and carrying their own
  *   method-level throttle since they sit outside the usage plan.
@@ -343,7 +343,7 @@ export class ApiGatewayStack extends cdk.Stack {
     });
 
     // ---------------------------------------------------------------
-    // /api-tokens/api/{proxy+} — the onboarding portal's backend (0184).
+    // /api/api/{proxy+} — the onboarding portal's backend (0184).
     // ---------------------------------------------------------------
     // Without these resources the portal's routes are unreachable in production
     // no matter what the handler does: CloudFront forwards the request, the
@@ -377,7 +377,7 @@ export class ApiGatewayStack extends cdk.Stack {
     // below — declared outside the `cacheEnabled` branch, because with the stage
     // cache off is exactly when an unbounded anonymous route costs the most.
     const portalProxy = this.api.root
-      .addResource('api-tokens')
+      .addResource('api')
       .addResource('api')
       .addResource('{proxy+}');
     for (const httpMethod of PORTAL_API_METHODS) {

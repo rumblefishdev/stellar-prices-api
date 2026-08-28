@@ -7,14 +7,14 @@
  * reason it survives a popup is that cookies are scoped to an ORIGIN, not to a
  * window. The sequence is
  *
- *   1. the popup navigates to `/api-tokens/api/auth/login` — same-origin, so
+ *   1. the popup navigates to `/api/api/auth/login` — same-origin, so
  *      the backend's short-lived `pending` cookie (the PKCE verifier, see
  *      `portal/auth/state_token.rs`) is set normally;
- *   2. Discord sends the popup back to `/api-tokens/api/auth/callback` — a
+ *   2. Discord sends the popup back to `/api/api/auth/callback` — a
  *      cross-site TOP-LEVEL GET, which is precisely the case `Lax` permits, so
  *      the pending cookie is sent and the exchange completes;
  *   3. the callback sets the session cookie and 303s the popup to
- *      `/api-tokens/`, where the bridge below posts the outcome to the opener
+ *      `/api/`, where the bridge below posts the outcome to the opener
  *      and closes the window.
  *
  * Step 2 is why this cannot be a `fetch` and why the control stays an `<a>`

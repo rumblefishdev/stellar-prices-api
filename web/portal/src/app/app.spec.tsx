@@ -75,15 +75,15 @@ function stubRoutes(
   return fetchMock;
 }
 
-const CONFIG_URL = '/api-tokens/api/config';
-const ME_URL = '/api-tokens/api/auth/me';
-const LOGOUT_URL = '/api-tokens/api/auth/logout';
-const USAGE_URL = '/api-tokens/api/usage';
-const KEY_URL = '/api-tokens/api/key';
+const CONFIG_URL = '/api/api/config';
+const ME_URL = '/api/api/auth/me';
+const LOGOUT_URL = '/api/api/auth/logout';
+const USAGE_URL = '/api/api/usage';
+const KEY_URL = '/api/api/key';
 /** The revocation — "Replace my key" (task 0191). */
-const REWORK_URL = '/api-tokens/api/key/rework';
+const REWORK_URL = '/api/api/key/rework';
 /** Where both "get my API key" and every retry link point (task 0189). */
-const ISSUE_HREF = '/api-tokens/api/auth/login?action=issue';
+const ISSUE_HREF = '/api/api/auth/login?action=issue';
 
 /**
  * `/config` for an open portal (task 0183) carrying the free plan's rate limit
@@ -179,14 +179,14 @@ function portalPanel() {
  *
  * These exist because the routes are a CONTRACT with the backend, not a
  * cosmetic split. `portal/auth/mod.rs` sends every OAuth outcome to
- * `/api-tokens/` and says so deliberately — "when the portal grows a second
+ * `/api/` and says so deliberately — "when the portal grows a second
  * page, the page it lands on decides where to go next; this handler still will
  * not". `/` is that page. If these forwards break, a completed sign-in ends on
  * the marketing page and the visitor never reaches the key they just proved
  * they are entitled to, with nothing on screen to say why.
  *
  * They also pin the guard the brief asks for in the other direction: a visitor
- * with no session who arrives at `/dashboard` goes to `/api-tokens/`.
+ * with no session who arrives at `/dashboard` goes to `/api/`.
  */
 describe('routes', () => {
   beforeEach(() => {
@@ -392,7 +392,7 @@ describe('routes', () => {
     // exists under one — a bare `href="/dashboard"` and a router link resolve
     // to the same string when the app is mounted at the root, and to
     // different ones on the deployment, where the bundle lives under
-    // `/api-tokens/`.
+    // `/api/`.
     render(
       <MemoryRouter
         basename={ROUTER_BASENAME}
@@ -516,7 +516,7 @@ describe('portal home', () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('/api-tokens/api/config');
+    expect(url).toBe('/api/api/config');
     // An absolute URL here would reintroduce CORS and break task 0186's
     // SameSite=Lax cookie — both of which fail in a browser, not in curl.
     expect(url.startsWith('http')).toBe(false);
@@ -533,8 +533,8 @@ describe('portal home', () => {
     expect(screen.queryByText(/Checking whether/i)).toBeNull();
   });
 
-  // A `200` carrying HTML is what CloudFront returns if the `/api-tokens/api/*`
-  // behaviour ever stops winning over `/api-tokens/*` — the regression
+  // A `200` carrying HTML is what CloudFront returns if the `/api/api/*`
+  // behaviour ever stops winning over `/api/*` — the regression
   // `portal-hosting-stack.ts` fails CI to prevent. Unwrapped, `response.json()`
   // throws a bare SyntaxError about an unexpected `<`, which names neither the
   // URL nor the status and reads like a bug in this app.
@@ -552,9 +552,7 @@ describe('portal home', () => {
     // The reason must name the URL and carry the status, which a bare
     // SyntaxError does neither of.
     expect(
-      await screen.findByText(
-        /\/api-tokens\/api\/config answered 200, not JSON/i,
-      ),
+      await screen.findByText(/\/api\/api\/config answered 200, not JSON/i),
     ).toBeTruthy();
   });
 
@@ -590,9 +588,7 @@ describe('portal home', () => {
     // the connection and then said nothing, which points at the gateway or the
     // origin rather than at the viewer's own network.
     expect(
-      await screen.findByText(
-        /\/api-tokens\/api\/config did not answer within 10s/i,
-      ),
+      await screen.findByText(/\/api\/api\/config did not answer within 10s/i),
     ).toBeTruthy();
   });
 
@@ -600,7 +596,7 @@ describe('portal home', () => {
     stubFetch({ json: async () => ({ enabled: true }) });
     renderApp();
 
-    // Task 0185's `Reached /api-tokens/api/config successfully — same-origin…`
+    // Task 0185's `Reached /api/api/config successfully — same-origin…`
     // line is gone (task 0193: the page must not read as a debug harness), so
     // what this test guards has moved to the control that ACTS on the answer.
     // The property is the same one and it is the one that matters: the page
@@ -676,7 +672,7 @@ describe('sign in with Discord', () => {
     const link = await screen.findByRole('link', {
       name: /sign in with discord/i,
     });
-    expect(link.getAttribute('href')).toBe('/api-tokens/api/auth/login');
+    expect(link.getAttribute('href')).toBe('/api/api/auth/login');
     // Relative. An absolute URL would make the whole flow cross-site and the
     // Lax cookie would never be sent back to the callback.
     expect(link.getAttribute('href')?.startsWith('http')).toBe(false);
@@ -896,7 +892,7 @@ describe('sign in with Discord', () => {
         screen
           .getByRole('link', { name: /try again with discord/i })
           .getAttribute('href'),
-      ).toBe('/api-tokens/api/auth/login');
+      ).toBe('/api/api/auth/login');
       // And it never reads as a refusal about who the visitor is.
       expect(screen.queryByTestId('signin-not-member')).toBeNull();
     },
@@ -1016,7 +1012,7 @@ describe('sign in with Discord', () => {
       screen
         .getByRole('link', { name: /try signing in again/i })
         .getAttribute('href'),
-    ).toBe('/api-tokens/api/auth/login');
+    ).toBe('/api/api/auth/login');
   });
 
   /**
@@ -1078,7 +1074,7 @@ describe('sign in with Discord', () => {
     fireEvent.click(button);
 
     // Signing out empties the session, and `/dashboard` sends a visitor with
-    // no session to `/api-tokens/` — so the observable result is the landing
+    // no session to `/api/` — so the observable result is the landing
     // page with its way back in, not the "you are not signed in" line, which
     // belongs to `/login`. The property this test exists for is unchanged and
     // asserted below: the request was a POST, and the session was re-read
@@ -1178,7 +1174,7 @@ describe('sign in with Discord', () => {
 
     await screen.findByText(/could not check your sign-in status/i);
     const link = screen.getByRole('link', { name: /sign in with discord/i });
-    expect(link.getAttribute('href')).toBe('/api-tokens/api/auth/login');
+    expect(link.getAttribute('href')).toBe('/api/api/auth/login');
   });
 
   /**
@@ -1280,13 +1276,13 @@ describe('the sign-in popup', () => {
     // The URL is the backend's own login route, relative — the popup goes
     // through `/auth/login` so the PKCE `pending` cookie is set same-origin,
     // exactly as the full-page flow does.
-    expect(open.mock.calls[0][0]).toBe('/api-tokens/api/auth/login');
+    expect(open.mock.calls[0][0]).toBe('/api/api/auth/login');
     expect(await screen.findByText(/redirecting to discord/i)).toBeTruthy();
     expect(screen.getByText(/waiting for discord/i)).toBeTruthy();
     // And the escape hatch the copy promises actually points somewhere.
     expect(
       screen.getByRole('link', { name: /click here/i }).getAttribute('href'),
-    ).toBe('/api-tokens/api/auth/login');
+    ).toBe('/api/api/auth/login');
   });
 
   it('falls back to navigating this tab when the popup is blocked', async () => {
@@ -1301,7 +1297,7 @@ describe('the sign-in popup', () => {
     // "Waiting for Discord…" spinner here would be a lie about a window that
     // never opened.
     expect(screen.queryByText(/waiting for discord/i)).toBeNull();
-    expect(link.getAttribute('href')).toBe('/api-tokens/api/auth/login');
+    expect(link.getAttribute('href')).toBe('/api/api/auth/login');
     // Still the signed-out card, identified by the control it offers.
     expect(
       screen.getByRole('heading', { name: /get your api key/i }),

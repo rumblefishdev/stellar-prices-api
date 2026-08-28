@@ -77,15 +77,15 @@ use session::Session;
 use state_token::{Action, StateError};
 
 /// Where the visitor starts.
-pub const LOGIN_PATH: &str = "/api-tokens/api/auth/login";
+pub const LOGIN_PATH: &str = "/api/api/auth/login";
 /// Where Discord sends them back. **This exact suffix is what is registered in
 /// the Discord Developer Portal**, and `secret.rs` refuses a `redirect_uri` that
 /// does not end in it.
-pub const CALLBACK_PATH: &str = "/api-tokens/api/auth/callback";
+pub const CALLBACK_PATH: &str = "/api/api/auth/callback";
 /// Who am I?
-pub const ME_PATH: &str = "/api-tokens/api/auth/me";
+pub const ME_PATH: &str = "/api/api/auth/me";
 /// Sign out.
-pub const LOGOUT_PATH: &str = "/api-tokens/api/auth/logout";
+pub const LOGOUT_PATH: &str = "/api/api/auth/logout";
 
 /// Where the callback sends the browser when it is done, in every outcome.
 ///
@@ -96,7 +96,7 @@ pub const LOGOUT_PATH: &str = "/api-tokens/api/auth/logout";
 /// `infra/src/lib/stacks/portal-hosting-stack.ts`. When the portal grows a
 /// second page, the page it lands on decides where to go next; this handler
 /// still will not.
-const PORTAL_HOME: &str = "/api-tokens/";
+const PORTAL_HOME: &str = "/api/";
 
 /// Appended to [`PORTAL_HOME`] when the visitor declined at Discord's consent
 /// screen, so [0185]'s page can say "sign-in cancelled" instead of silently
@@ -996,7 +996,7 @@ mod tests {
             &serde_json::json!({
                 "client_id": "client-1",
                 "client_secret": "shh",
-                "redirect_uri": "https://portal.example/api-tokens/api/auth/callback",
+                "redirect_uri": "https://portal.example/api/api/auth/callback",
                 "session_signing_key": "0123456789abcdef0123456789abcdef0123456789abcdef",
             })
             .to_string(),
@@ -1037,7 +1037,7 @@ mod tests {
         assert_eq!(get("client_id"), "client-1");
         assert_eq!(
             get("redirect_uri"),
-            "https://portal.example/api-tokens/api/auth/callback"
+            "https://portal.example/api/api/auth/callback"
         );
         // Exactly the pair — not a superset, and never `guilds` or `email`.
         assert_eq!(get("scope"), "identify guilds.members.read");
@@ -1112,7 +1112,7 @@ mod tests {
             vec!["a=1; Path=/".into(), "b=2; Path=/".into()],
         );
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(response.headers().get(LOCATION).unwrap(), "/api-tokens/");
+        assert_eq!(response.headers().get(LOCATION).unwrap(), "/api/");
         assert_eq!(response.headers().get_all(SET_COOKIE).iter().count(), 2);
         assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
     }
@@ -1201,7 +1201,7 @@ mod tests {
         assert_ne!(CANCELLED_QUERY, FAILED_QUERY);
         assert_eq!(ERROR_ACCESS_DENIED, "access_denied");
         for query in [CANCELLED_QUERY, FAILED_QUERY] {
-            assert!(format!("{PORTAL_HOME}{query}").starts_with("/api-tokens/?"));
+            assert!(format!("{PORTAL_HOME}{query}").starts_with("/api/?"));
         }
     }
 
@@ -1211,7 +1211,7 @@ mod tests {
     /// delete this to do it.
     #[test]
     fn the_only_redirect_targets_are_the_portal_itself() {
-        assert_eq!(PORTAL_HOME, "/api-tokens/");
+        assert_eq!(PORTAL_HOME, "/api/");
         assert!(PORTAL_HOME.starts_with('/'));
         assert!(!PORTAL_HOME.starts_with("//"));
         for query in [
@@ -1229,7 +1229,7 @@ mod tests {
             &issue::too_young_query(173),
             &issue::capped_query("2026-09-01"),
         ] {
-            assert!(format!("{PORTAL_HOME}{query}").starts_with("/api-tokens/?"));
+            assert!(format!("{PORTAL_HOME}{query}").starts_with("/api/?"));
         }
     }
 
