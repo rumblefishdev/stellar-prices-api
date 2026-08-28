@@ -2,7 +2,7 @@
 id: "0231"
 title: "Nothing alarms when the oracle poll feed goes dark — 0227's guard turns silently-wrong rows into a silently-absent feed"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0227", "0226", "0086", "0199", "0056", "0167"]
 tags: ["priority-medium", "effort-medium", "observability", "oracle", "infra", "milestone-M2"]
@@ -23,6 +23,18 @@ history:
       `oracle-worker`'s `skipped`, its ERROR logs, or `written == 0` anywhere in
       `observability-stack.ts` / `lambda-baseline.ts`. Recorded as owed rather
       than quietly dropped.
+  - date: 2026-08-28
+    status: active
+    who: okarcz
+    note: >
+      Activated. Picked as the next real task off the backlog: the operator's
+      only other open item is [[0220]]'s daily soak, and every other active
+      task belongs to another developer. This is the honest completion of
+      [[0227]], which shipped this morning — that guard rejects and logs, never
+      rejects and alarms. Plan for the induction first: AC 5 (no false-fire on
+      an idle environment) is the criterion that cost [[0204]] and [[0218]]
+      their attended windows, and [[0222]]'s `FILL(m, 0)` sliding window is the
+      shape to start from rather than rediscover.
 ---
 
 # The guard is silent, and silence is what 0227 was about
