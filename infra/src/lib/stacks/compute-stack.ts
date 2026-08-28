@@ -703,16 +703,26 @@ export class ComputeStack extends cdk.Stack {
         MTLS_SECRET_NAME: this.apiHandlerMtlsSecretName,
         // Build the mTLS CH client eagerly at cold start (primes the pool).
         CH_ENABLED: 'true',
-        // Onboarding portal kept dark (task 0183). There is one environment and
-        // it is production — `envName` is typed 'production' and `infra/envs/`
-        // holds only production.json — so every portal slice (0184-0195) is
-        // publicly reachable the moment it deploys unless this says otherwise.
-        // Set explicitly rather than omitted: the Rust side defaults to false
-        // either way, but spelling it here makes opening the portal a one-word
-        // diff that shows up in a deploy review. Flipped by task 0194, after
-        // 0189's eligibility gate passes — never as a side effect of finishing
-        // some other slice.
-        PORTAL_ENABLED: 'false',
+        // Onboarding portal OPEN (task 0194, 2026-08-28). Task 0183 shipped it
+        // dark and this is the one-word diff that flag was designed to be:
+        // there is one environment and it is production — `envName` is typed
+        // 'production' and `infra/envs/` holds only production.json — so every
+        // portal slice (0184-0195) became publicly reachable the moment this
+        // changed. Reversing it is the same one word plus a deploy; nothing
+        // opening creates has to be unwound to close it again.
+        //
+        // ⚠️ **This value is a deploy gate, not just a flag.** With it true the
+        // handler resolves the portal's configuration AT COLD START, and each
+        // of the three reads is fatal if it fails — `load_portal_oauth`
+        // (`config.rs:149`) on the Discord OAuth secret, and the eligibility
+        // probe (`portal/eligibility.rs:135`) on
+        // `/prices/{env}/discord-guild-id` and
+        // `/prices/{env}/min-account-age-minutes`. A missing one is an `Init
+        // Errors` event on the api-handler, and this Lambda also serves `/v1`,
+        // so deploying this ahead of the operator steps takes the DATA API down
+        // with the portal. Runbook `portal-oauth-deploy-prep.md` §2, §2a and §5
+        // are the steps; task 0194's audit is what verifies they were run.
+        PORTAL_ENABLED: 'true',
         // The NAME of the portal's Discord OAuth bundle, never its value
         // (task 0186; ADR 0007's precedent, audited by Tranche 3 AC 6). The
         // handler reads the value through the Parameters & Secrets extension

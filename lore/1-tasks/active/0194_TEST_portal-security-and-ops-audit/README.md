@@ -47,6 +47,27 @@ history:
       flip. Checks 1 and 2 each keep a half that only the open portal can
       close; the commands are in the report. Converted to a directory to hold
       the evidence.
+  - date: "2026-08-28"
+    status: active
+    who: akot
+    note: >
+      Two decisions by Adam, both recorded here rather than in the audit
+      report, which is a dated measurement and stays as taken. (1) **This task
+      signs off at `https://sorobanscan.rumblefish.dev/api/`, not at the
+      distribution domain** — the bundle is synced to the Explorer
+      distribution's `api-spa` bucket, so three of the twelve checks are now
+      properties of `EA2TLS5SS5M87` and must be re-run there. That couples this
+      task to [[0195]] and to a change in the `soroban-block-explorer` repo:
+      today that distribution has no origin for our API, allows `GET`/`HEAD`
+      only under `/api/*`, sits behind a basic-auth function, and rewrites 403
+      and 404 to `index.html` with status 200. A bare `s3 sync` of the current
+      bundle produces a blank page — its `index.html` carries absolute
+      `/api-tokens/assets/…` URLs. Written up as **Hosting preconditions**.
+      (2) **`PORTAL_ENABLED` flipped to `'true'`** in `compute-stack.ts`. The
+      commit is the one-word diff the flag was designed to be; the **deploy is
+      still gated**, because the OAuth secret and both eligibility parameters
+      do not exist and a missing one fails Lambda init on the function that
+      also serves `/v1`. The comment at the flag now says so.
 ---
 
 # Portal security and ops audit
@@ -80,22 +101,51 @@ Three failure modes are structural, not per-slice:
   key-reveal response would be served from the CDN to the next caller. Neither
   layer is checkable from the other.
 
+## The host this task closes against
+
+**`https://sorobanscan.rumblefish.dev/api/` — not the distribution domain.**
+Decided 2026-08-28 by Adam. The portal's bundle is synced to
+`s3://production-soroban-explorer-api-spa/api`, which is origin 2 of the
+**Explorer** distribution `EA2TLS5SS5M87` (alias `sorobanscan.rumblefish.dev`),
+behaviour `/api/*`. `dojr4epgxo2qp.cloudfront.net` — the distribution
+`PortalHostingStack` creates and the one the 2026-08-28 audit measured — is
+where the configuration was verified, and it is **not** where this task signs
+off.
+
+The consequence, stated so it is not discovered later: three of the twelve
+checks are properties of *the distribution that serves the portal*, so they must
+be re-run against `EA2TLS5SS5M87` before this task closes, and the assembled
+configuration they check does not exist there yet. That work is [[0195]]'s and
+it lives partly in the `soroban-block-explorer` repo — see **Hosting
+preconditions** below. This task does not do it and does not sign off without
+it.
+
 ## Checks
 
 Verify against the **synthesized CloudFormation template and the deployed
-stack**, not against the source, and not by assumption:
+stack**, not against the source, and not by assumption. Checks marked **(host)**
+are properties of the serving distribution and are answered against
+`EA2TLS5SS5M87`; the rest are answered against our own stacks and were settled
+on 2026-08-28:
 
 - [ ] Every portal method has `cachingEnabled: false`, and every portal response
-      carries `Cache-Control: no-store`
-- [ ] The portal prefix's CloudFront behaviour disables caching **and** forwards
-      the session cookie; a signed-in request reaches the origin signed in
+      carries `Cache-Control: no-store` — the gateway half is settled; the
+      response half is **(host)**, because `EA2TLS5SS5M87` maps 403 and 404 to
+      `/index.html` with status `200` (`CustomErrorResponses`), which today
+      would swallow the portal's JSON errors and [[0183]]'s gate `404`
+- [ ] **(host)** The portal prefix's CloudFront behaviour on `EA2TLS5SS5M87`
+      disables caching **and** forwards the session cookie; a signed-in request
+      reaches the origin signed in. Today that distribution has **no origin
+      pointing at our API at all**, `/api/*` is `GET`/`HEAD` only and sits
+      behind the `production-soroban-explorer-basic-auth` function
 - [ ] The full `methodSettings` array contains every portal route in **both**
       arms of the `cacheEnabled` branch — flip `apiGatewayCacheEnabled` off in a
       synth and diff
 - [ ] Anonymous sign-in routes carry their own method-level throttle and are not
       behind `apiKeyRequired`
-- [ ] `/api-tokens/api/*` precedes `/api-tokens/*` in the deployed distribution's
-      behaviour order
+- [ ] **(host)** The portal's API behaviour precedes its bundle behaviour in
+      `EA2TLS5SS5M87`'s order, whatever the two prefixes end up being — the
+      ordering rule of [[0161]], not the literal `/api-tokens/` pair
 - [ ] The assembled IAM policy names specific resources — no wildcard on
       `apigateway:*` — and the un-narrowable `POST /apikeys` is documented in the
       code as an accepted limit with its mitigation (tagging + attachment to the
@@ -121,16 +171,58 @@ stack**, not against the source, and not by assumption:
       cheaper remedies before any storage is considered: de-duplicate the shared
       listing, and give the reveal the cache the usage route already has
 
+## Hosting preconditions (new, 2026-08-28)
+
+None of these is this task's to build; all of them gate its sign-off. A plain
+`aws s3 sync` of `web/portal/dist` to `s3://production-soroban-explorer-api-spa/api`
+satisfies none of them and produces a blank page — the built `index.html`
+carries **absolute** `/api-tokens/assets/…` URLs, which on that host match no
+behaviour, fall to the Explorer SPA bucket, and come back as Explorer's
+`index.html` with status `200`.
+
+- [ ] The bundle is built for the prefix it is served from — `BASE_PATH` in
+      `web/portal/src/base-path.ts` and its copy in `vite.config.mts`
+      (`base-path.spec.ts` fails if they drift). Owner: [[0195]]
+- [ ] The portal's backend is reachable **same-origin** on
+      `sorobanscan.rumblefish.dev`: a second origin for
+      `02mabge71l.execute-api.eu-central-1.amazonaws.com` and a behaviour ahead
+      of the bundle row, with `ALLOW_ALL` methods, `CachingDisabled` and
+      `AllViewerExceptHostHeader`. Same-origin is not a preference — [[0186]]'s
+      session cookie is `SameSite=Lax` and the design keeps CORS out of portal
+      traffic entirely. Owner: `soroban-block-explorer` repo, requested by [[0195]]
+- [ ] `POST` and `DELETE` reach the portal's backend there — the current
+      `/api/*` behaviour allows `GET`/`HEAD` only, so key issue, rework, revoke
+      and sign-out cannot work. Owner: same
+- [ ] The basic-auth CloudFront function does not intercept the portal's routes.
+      Owner: same
+- [ ] `CustomErrorResponses` does not rewrite the portal's error responses (see
+      the first check). Owner: same — and it is distribution-wide, so it affects
+      the Explorer SPA too
+- [ ] The prefix change is carried through every place it is baked in:
+      `PORTAL_API_PREFIX` and `CALLBACK_PATH` (Rust), the gateway resource path
+      and its `methodSettings` entries, the session cookie's `Path`, and the
+      Discord redirect URI. Owner: [[0195]] with [[0161]] for the convention
+
 ## Opening the portal
 
-**This task owns the flip.** `PORTAL_ENABLED` goes to `'true'` in `compute-stack.ts` here and nowhere
-else — not as a side effect of anyone finishing their own slice. Preconditions,
-all of them:
+**This task owns the flip.** `PORTAL_ENABLED` goes to `'true'` in
+`compute-stack.ts` here and nowhere else — not as a side effect of anyone
+finishing their own slice. **The one-word diff is committed** (2026-08-28); what
+remains gated is the deploy that carries it, because with the flag true the
+handler resolves the secret and both parameters at cold start and a missing one
+is an `Init Errors` event on the Lambda that also serves `/v1`.
+
+Preconditions, all of them:
 
 - [x] [[0189]] has passed: a non-member is refused, and a Discord `429`/`5xx`
       does not read as "not a member" — on the evidence available while closed
       (2026-08-28 report, gate §1)
-- [ ] Every check in the list above passes
+- [ ] Every check in the list above passes, the three **(host)** ones against
+      `EA2TLS5SS5M87`
+- [ ] Every hosting precondition above is met
+- [ ] The Discord OAuth secret exists and parses, and both eligibility SSM
+      parameters are seeded (runbook §2, §2a) — 2026-08-28: **none of the three
+      exists**, and the deploy that carries the flip must not run until they do
 - [ ] Keys created while the flag was off are enumerated (2026-08-28: one,
       `smdesqkg5j`, listed in the report) and deleted. There is no
       separate incubation plan (decided 2026-08-13), so those keys are real keys
@@ -138,17 +230,31 @@ all of them:
       as anonymous strings. They come from local runs against production
       credentials, not from the closed portal — the flag lives in the Lambda
 
-Note what the flip is **not** gated on: [[0193]] (looks presentable) and
-[[0195]] (custom domain) can both land after it. Opening a plain-looking portal
-that works is a smaller risk than leaving a finished one closed.
+**Amended 2026-08-28.** The original text here said the flip was not gated on
+[[0193]] or [[0195]], on the reasoning that opening a plain-looking portal that
+works beats leaving a finished one closed. [[0193]] has since merged, and the
+decision to sign off at `sorobanscan.rumblefish.dev/api/` rather than at the
+distribution domain **couples this task to [[0195]]**: the host that must be
+verified is the one 0195 delivers. The flag itself is still independent of both
+— it lives in the Lambda, which answers on either host — so the flip can be
+deployed as soon as the secret and the parameters are seeded. What waits for
+0195 is this task's sign-off, not the portal being open.
 
 ## Acceptance Criteria
 
-- [ ] Every check above passes against the deployed production stack, with the
-      evidence captured in a form [[0164]] can cite
-- [ ] `PORTAL_ENABLED` is flipped to `'true'` here, with every precondition
-      above met and recorded — and the flip is reversible by the same one-word
-      diff plus a deploy
+- [ ] Every check above passes against the deployed production stack — the
+      three **(host)** checks against `EA2TLS5SS5M87`, serving
+      `https://sorobanscan.rumblefish.dev/api/` — with the evidence captured in
+      a form [[0164]] can cite. The 2026-08-28 report is the first half of that
+      evidence and is explicitly **not** sufficient on its own: it measured
+      `dojr4epgxo2qp.cloudfront.net`
+- [ ] `PORTAL_ENABLED` is flipped to `'true'` here **and deployed**, with every
+      precondition above met and recorded — and the flip is reversible by the
+      same one-word diff plus a deploy. (Committed 2026-08-28; deploy still
+      gated on the secret and the two parameters)
+- [ ] A complete sign-in and key issue is walked at
+      `https://sorobanscan.rumblefish.dev/api/`, in a browser, signed out —
+      the check that no configuration reading can replace
 - [ ] Any failure is fixed in the slice that owns it, and the fix is re-verified
       here rather than patched locally
 - [ ] Tranche 3 AC 6 ("no secrets in env vars", least-privilege IAM) is
