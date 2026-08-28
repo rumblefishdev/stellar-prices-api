@@ -32,19 +32,58 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         prices_clickhouse::env::env_or("SOROBAN_RPC_URL", oracle_worker::DEFAULT_SOROBAN_RPC);
     let contract =
         prices_clickhouse::env::env_or("REFLECTOR_CONTRACT", oracle_worker::REFLECTOR_CEX_DEX);
-    tracing::info!(%rpc_url, %contract, "oracle-worker cold start ready");
+
+    // CloudWatch client for the task 0231 metrics. Built once at cold start;
+    // publish is best-effort per invocation, so a CloudWatch failure never fails
+    // the poll — oracle_prices is the deliverable, the metric is the witness.
+    //
+    // `ENV_NAME` becomes the `Environment` dimension and is therefore part of
+    // the metric's identity: if it disagrees with what `infra/` declares, the
+    // alarms watch a series that does not exist and return 0 datapoints rather
+    // than an error (task 0204). Logged at cold start so that mismatch is
+    // visible without guessing.
+    let env_name = Arc::new(prices_clickhouse::env::env_or("ENV_NAME", "unknown"));
+    let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .load()
+        .await;
+    let cw = Arc::new(aws_sdk_cloudwatch::Client::new(&aws_cfg));
+    tracing::info!(
+        %rpc_url,
+        %contract,
+        env_name = %env_name,
+        metric_namespace = oracle_worker::metrics::METRIC_NAMESPACE,
+        "oracle-worker cold start ready"
+    );
 
     run(service_fn(move |_event: LambdaEvent<serde_json::Value>| {
         let writer = writer.clone();
         let http = http.clone();
         let rpc_url = rpc_url.clone();
         let contract = contract.clone();
+        let cw = cw.clone();
+        let env_name = env_name.clone();
         async move {
-            let stats = oracle_worker::run_oracle(&writer, &http, &rpc_url, &contract).await?;
+            // Deliberately NOT `?` on the pass: a run that fails before
+            // producing stats must still publish `OracleRuns=1` +
+            // `OracleFailedRuns=1`, or a failed run is indistinguishable from an
+            // invocation that never happened — both emit nothing (task 0218's
+            // lesson, applied here before it could cost a second incident).
+            let outcome = oracle_worker::run_oracle(&writer, &http, &rpc_url, &contract).await;
+
+            let metrics = match &outcome {
+                Ok(stats) => oracle_worker::metrics::pass_metrics(stats),
+                Err(_) => oracle_worker::metrics::failure_metrics(),
+            };
+            if let Err(e) = oracle_worker::metrics::publish(&cw, &env_name, &metrics).await {
+                tracing::warn!(error = %e, "cloudwatch metric publish failed (non-fatal)");
+            }
+
+            let stats = outcome?;
             tracing::info!(
                 queried = stats.queried,
                 written = stats.written,
                 skipped = stats.skipped,
+                timestamp_rejected = stats.timestamp_rejected,
                 rates_snapshotted = stats.rates_snapshotted,
                 "oracle-worker run complete"
             );
@@ -52,6 +91,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 "queried": stats.queried,
                 "written": stats.written,
                 "skipped": stats.skipped,
+                "timestamp_rejected": stats.timestamp_rejected,
                 "rates_snapshotted": stats.rates_snapshotted,
             }))
         }

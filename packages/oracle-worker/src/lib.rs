@@ -11,6 +11,8 @@
 //! `i128` (SEP-40 `decimals()`), matching `OracleSample.price_usd` and
 //! `oracle_prices.price_usd Decimal(38,14)`.
 
+pub mod metrics;
+
 use base64::Engine;
 use prices_ingest_core::{
     AssetIdentity, AssetRegistry, OhlcvWriter, OracleSample, reflector_key_to_identity,
@@ -346,7 +348,17 @@ pub async fn fetch_lastprice(
 pub struct OracleStats {
     pub queried: usize,
     pub written: usize,
+    /// Every reading that produced no row, for **any** reason: no Reflector
+    /// price, a failed fetch, or a timestamp refused by the 0227 guard. A
+    /// superset of [`Self::timestamp_rejected`], not a disjoint bucket.
     pub skipped: usize,
+    /// Readings refused by [`reflector_timestamp_to_epoch_seconds`] — a subset
+    /// of [`Self::skipped`], counted apart because it is the one skip reason
+    /// that means *the feed's contract changed under us* rather than *a fetch
+    /// went wrong*. Buried in the general skip total, a Reflector unit change
+    /// arrives as a handful of extra skips and looks like nothing; on its own it
+    /// is a step off a flat zero (task 0231).
+    pub timestamp_rejected: usize,
     /// Rows written into `prices.usd_rate` by this pass (task 0167). Zero is
     /// normal on a steady-state run — the snapshot only copies observations it
     /// does not already hold. It is NOT normal for it to be zero forever while
@@ -368,6 +380,7 @@ pub async fn run_oracle(
     let known_before = registry.assets().count();
     let mut samples = Vec::new();
     let mut skipped = 0usize;
+    let mut timestamp_rejected = 0usize;
     // Read once per pass, not per symbol: the plausibility window must not move
     // underneath a batch, or the same reading could be accepted for one symbol
     // and refused for the next.
@@ -401,7 +414,13 @@ pub async fn run_oracle(
                         // Loud, and NOT written. A rejected reading costs one
                         // 5-minute sample; a written one is indistinguishable
                         // from a real observation for as long as it is stored.
+                        //
+                        // Counted twice on purpose: in the general skip total,
+                        // and again on its own so the dedicated
+                        // `OracleTimestampRejected` alarm (task 0231) sees a
+                        // unit change instead of a rounding error in the skips.
                         skipped += 1;
+                        timestamp_rejected += 1;
                         tracing::error!(
                             symbol,
                             raw = pd.timestamp,
@@ -479,6 +498,7 @@ pub async fn run_oracle(
         queried: TRACKED_SYMBOLS.len(),
         written,
         skipped,
+        timestamp_rejected,
         rates_snapshotted,
     })
 }
