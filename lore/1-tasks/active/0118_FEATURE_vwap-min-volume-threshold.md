@@ -134,11 +134,22 @@ threshold to the shape 0072 leaves behind. Sequencing them avoids two
     shape for the base path.
 - Validate the param: non-negative finite number, sane upper bound, `400` on
   anything else (coordinate with [[0119]]).
-- **Cache-key impact:** API Gateway caches on query params (§6), so
-  `min_volume_usd` becomes part of the key. Confirm this does not shred the hit
-  rate for the default path — the param must be *absent* (not
-  `min_volume_usd=100`) on the common request for the cached entry to be shared.
-  Flag to [[0122]].
+- **Cache-key impact — the original note here was WRONG and cost a production
+  defect; corrected 2026-08-28.** It read: *"API Gateway caches on query params
+  (§6), so `min_volume_usd` becomes part of the key"*, and worried only about
+  diluting the hit rate. API Gateway does **not** key on the query string: it
+  keys on the parameters declared as `cacheKeyParameters` on the method, and
+  collapses every value of an undeclared one onto a single entry. `/price`
+  declared only the path id and `/assets` its pre-0118 list, so shipping the
+  parameter made a filtered request **poison the default response for every
+  other caller** for the TTL — measured on prod right after the deploy: one
+  `?min_volume_usd=200000` on `native` made the next param-less request serve
+  the narrowed `sources` and reweighted `vwap_24h`. Fixed by declaring
+  `qs('min_volume_usd')` on both routes in `api-gateway-stack.ts`, with the
+  rule written into the file so the next query param does not repeat it. The
+  original hit-rate point still stands on top of the fix: the common request
+  must omit the param (not send `min_volume_usd=100`) to share the cached
+  entry. Flag to [[0122]].
 
 ## Acceptance Criteria
 

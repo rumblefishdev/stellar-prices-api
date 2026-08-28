@@ -389,6 +389,16 @@ export class ApiGatewayStack extends cdk.Stack {
 
     const v1 = this.api.root.addResource('v1');
 
+    // ⚠️ EVERY query parameter that changes the response body must be listed
+    // here. API Gateway does NOT key the cache on the query string — it keys on
+    // the parameters declared as `cacheKeyParameters`, and collapses every value
+    // of an undeclared one onto a single entry. The failure is not a diluted hit
+    // rate, it is cross-caller poisoning: measured on production 2026-08-28,
+    // one `GET /v1/assets/native/price?min_volume_usd=200000` made the *next*
+    // param-less request serve that caller's narrowed `sources` and reweighted
+    // `vwap_24h` for the whole TTL. Task 0118 shipped the parameter believing
+    // the gateway keyed on query params automatically; it does not.
+    //
     // /v1/assets (list) + /v1/assets/{asset_identifier} (+ /price, /ohlcv)
     const assets = v1.addResource('assets');
     addGet(assets, [
@@ -398,10 +408,11 @@ export class ApiGatewayStack extends cdk.Stack {
       qs('order'),
       qs('cursor'),
       qs('limit'),
+      qs('min_volume_usd'),
     ]);
     const assetId = assets.addResource('{asset_identifier}');
     addGet(assetId, [PATH_ID]);
-    addGet(assetId.addResource('price'), [PATH_ID]);
+    addGet(assetId.addResource('price'), [PATH_ID, qs('min_volume_usd')]);
     addGet(assetId.addResource('ohlcv'), [
       PATH_ID,
       qs('timeframe'),
