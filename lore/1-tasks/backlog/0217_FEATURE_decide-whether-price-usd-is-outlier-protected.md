@@ -205,7 +205,7 @@ Related but out of scope here: the RFP types the field as a **float** while
 §3.3 serialises it as a string to preserve `Decimal(38,14)` (0123 measured
 prod prices at 7e-8, which a JSON float would destroy). That deviation needs
 a recorded answer for the evidence package; it is a serialization question,
-not an outlier-protection one, and does not belong to this task.
+not an outlier-protection one, and is owned by [[0232]].
 
 ## Sequencing (why this is not startable today)
 
