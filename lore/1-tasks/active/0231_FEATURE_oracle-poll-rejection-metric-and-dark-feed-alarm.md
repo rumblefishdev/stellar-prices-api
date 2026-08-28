@@ -286,3 +286,131 @@ Four findings from `/code-review`, all accepted and fixed.
    Subsumed by fix 4, which removes the special case entirely. Recorded because
    a plausible-sounding cross-file claim is the kind of thing the next editor
    builds on.
+
+---
+
+# 📕 DEPLOY RUNBOOK — read this before deploying 0231
+
+> **This is the runbook.** When the operator asks for deploy instructions for
+> 0231, point here rather than re-deriving them.
+
+## 🔴 Order is load-bearing: EventBridge FIRST, Observability SECOND
+
+`-oracle-dark-feed` treats missing data as `BREACHING` (decided 2026-08-28). The
+metric it watches does not exist until the **new** oracle binary has run a pass.
+So if Observability lands first, the alarm goes to ALARM the moment it is
+created and **cannot clear** until EventBridge is deployed and a pass runs — a
+self-inflicted page on a feed that is perfectly healthy.
+
+Nothing enforces this: there is no `addDependency` between the two stacks in
+`infra/src/lib/app.ts`, and the Makefile deploys them individually. It is on the
+operator.
+
+## Steps
+
+### 1. [local machine, repo root] Build the Lambda bootstraps
+
+⚠️ `make -C infra deploy-production-*` does **NOT** build the Rust —
+`build-production` is CDK + portal bundle only. Skipping this deploys the
+**previous** binary and every metric below stays absent.
+
+Both the `--features lambda` flag and the explicit `-p` are required; without
+the feature the build produces nothing and still exits 0.
+
+```
+cargo lambda build --release --arm64 --features lambda -p oracle-worker
+tools/scripts/verify-lambda-assets.sh
+```
+
+**Checkpoint:** the verifier must pass before going on.
+
+### 2. [local machine] Record the pre-deploy `CodeSha256`
+
+`CodeSha256` is the only proof a deploy actually landed — not the deploy's exit
+status, and not the CDK output.
+
+```
+aws lambda get-function-configuration \
+  --function-name prices-production-oracle \
+  --query CodeSha256 --output text
+```
+
+### 3. [local machine] Deploy EventBridge — the worker and its IAM grant
+
+```
+make -C infra deploy-production-eventbridge
+```
+
+**Checkpoint:** re-run step 2. The `CodeSha256` **must have changed**. If it has
+not, the bootstrap was stale — go back to step 1.
+
+⚠️ Also confirm the cleanup rule did not get re-enabled as a side effect: CDK
+asserts `prices-production-cleanup` ENABLED while production reality is
+DISABLED, so every EventBridge deploy can silently flip it. `describe-rule`
+before *and* after. See [[cleanup-rule-shreds-backfill-output]].
+
+### 4. [local machine] Wait for one pass, then confirm the metric exists
+
+The schedule is `rate(5 minutes)`. Do not go on until `Prices/Oracle` actually
+has data — this is the step that would have caught task [[0204]]'s 10-of-13
+blind alarms.
+
+```
+aws cloudwatch list-metrics --namespace Prices/Oracle \
+  --query 'Metrics[].MetricName' --output text
+```
+
+**Checkpoint:** `OracleRowsWritten` and `OracleTimestampRejected` must both
+appear. If the namespace is empty, the publish is failing — check the worker
+logs for `cloudwatch metric publish failed`, and check the grant's
+`cloudwatch:namespace` condition against `METRIC_NAMESPACE`.
+
+### 5. [local machine] Deploy Observability — the alarms
+
+```
+make -C infra deploy-production-observability
+```
+
+⚠️ Deploy the **whole** Observability stack, never a subset — task 0204 left 10
+of 13 alarms blind exactly that way.
+
+⚠️ If `cdk diff` reports "no differences" alongside *"Omitted N changes because
+they are likely mangled non-ASCII characters"*, re-run it with `--strict`. These
+descriptions are full of non-ASCII, so that line will appear.
+
+### 6. [local machine] Confirm the alarms are BOUND, not merely created
+
+```
+aws cloudwatch describe-alarms \
+  --alarm-names prices-production-oracle-dark-feed \
+                prices-production-oracle-timestamp-rejected \
+                prices-production-oracle-no-invocations \
+                prices-production-oracle-duration-near-timeout \
+  --query 'MetricAlarms[].[AlarmName,StateValue]' --output text
+```
+
+**Checkpoint:** every one must read **OK**. `INSUFFICIENT_DATA` on
+`-dark-feed` or `-timestamp-rejected` means the alarm is watching a series that
+does not exist — almost always an `Environment` dimension that disagrees with
+the Lambda's `ENV_NAME`. Fix that before believing any of this works.
+
+### 7. Induce both alarms
+
+Deploying an alarm and proving it fires are different jobs, and the second is
+where the time goes ([[0204]], [[0218]]). See **Induction plan** above for the
+two procedures — the rejection alarm takes one `put-metric-data`; the dark-feed
+alarm needs the throwaway-clone approach, because the live worker keeps every
+real bucket non-empty.
+
+## Final test command
+
+One pass's worth of real data, straight from the worker:
+
+```
+aws logs tail /aws/lambda/prices-production-oracle --since 10m \
+  --filter-pattern '"oracle-worker run complete"'
+```
+
+Expect `written` > 0, `timestamp_rejected` = 0, and `queried` matching
+`TRACKED_SYMBOLS`. That line, plus four OK alarms from step 6, is the deploy
+verified.
