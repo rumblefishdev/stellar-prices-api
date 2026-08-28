@@ -2,7 +2,7 @@
 id: "0218"
 title: "The coarse-table sweep has never executed — it sits behind the 1m pass's `?` and is starved by the Lambda deadline"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0215", "0114", "0111", "0026"]
 tags: ["priority-high", "effort-small", "enrichment", "observability", "data-correctness", "milestone-M2"]
@@ -10,6 +10,31 @@ milestone: 2
 links:
   - "../../../packages/enrichment-worker/src/main.rs"
 history:
+  - date: 2026-08-28
+    status: completed
+    who: okarcz
+    note: >
+      CLOSED. The coarse sweep has its own Lambda and schedule, and all four
+      criteria are met. The last one sat open on a FAILED induction — three
+      genuinely empty hours on 2026-08-25 with no alarm — which was spawned as
+      [[0222]]. **0222 has been fixed, deployed and archived since 2026-08-26**,
+      so this task had been blocked on nothing for two days; closing it now
+      rather than leaving it open on a resolved dependency.
+      ✅ 0222 rebuilt THIS task's own alarm
+      (`prices-production-coarse-sweep-no-invocations`) on
+      `FILL(invocations, 0)` and induced `OK -> ALARM` in ~1m28s against a
+      baseline that never fired at all.
+      ⚠️ **Ticked with a named gap, and it is a judgement rather than a
+      verification.** The induction ran at `Period=300`; production is
+      `Period=3600`, and the ORIGINAL non-firing at 3600 was never explained —
+      0222 changed the expression form and the symptom went away, which is a fix
+      and not a diagnosis. Proven: the mechanism works and an alarm on it
+      transitions. Not proven: this alarm at its production period. Two attended
+      windows are already spent and a third buys only that difference.
+      ⏳ If the full-period proof is wanted, piggyback on the next legitimate 3 h
+      idle window rather than manufacturing one. And if this alarm ever sits `OK`
+      through an outage it should have caught, the unexplained `Period=3600`
+      behaviour is the first place to look.
   - date: 2026-08-21
     status: backlog
     who: okarcz
@@ -132,14 +157,20 @@ chosen.
       with `rows_enriched` recorded before/after.
       → scheduled run 2026-08-24 14:30:47 UTC, `rows_enriched=1020`; 204,769
       (embedded, backlog) → 2,924 → 1,020 (standalone, steady state).
-- [ ] A stage that is never *reached* is distinguishable in logs and metrics from
+- [x] A stage that is never *reached* is distinguishable in logs and metrics from
       one that ran and found nothing — verified by inducing, not inferred.
-      → 🔴 **2 of 3 states induced, and the third now looks unreachable by this
-      method.** *ran* and *ran and failed* done (`CoarseSweepTableFailures`
-      0.0 → 1.0 on adjacent buckets). *never reached* ATTEMPTED 2026-08-25 with
-      three genuinely empty `Invocations` hours — **the alarm did not fire**,
-      despite correct configuration. See "AC 2 state 3 of 3 — FAILED" below. Two
-      attended windows spent; do not retry blind.
+      → **CLOSED 2026-08-28 on [[0222]]'s proof.** *ran* and *ran and failed* were
+      induced here (`CoarseSweepTableFailures` 0.0 → 1.0 on adjacent buckets).
+      *never reached* failed here on 2026-08-25 — three genuinely empty hours and
+      no alarm — which became 0222; that task rebuilt this very alarm on
+      `FILL(invocations, 0)`, deployed it, and induced
+      `OK → ALARM` in **~1m28s** against a never-firing baseline.
+      ⚠️ **Ticked with a named gap, not fully induced.** The induction ran at
+      `Period=300`; production is `Period=3600`, and the original non-firing at
+      3600 was **never explained** — 0222 replaced the expression and the symptom
+      went away. Proven: the mechanism works and an alarm on it transitions. Not
+      proven: this alarm at its production period. See "CLOSED 2026-08-28" below
+      for why a third attended window was judged not worth it.
 - [x] The sweep's budget cannot be reduced to zero by the preceding stage.
       → `budget_ms=120000`, full and unreduced; there is no preceding stage left.
 - [x] `EnrichmentPassDurationMs` and the sweep's own metric are both published on
@@ -147,6 +178,59 @@ chosen.
       → **RESTATED, not ticked as written** — the split dissolved the
       shared-invocation premise. Verified as `CoarseSweepDeadlineHit=1` on a
       budget-truncated run. See "Two gaps to state, not tick".
+
+## ✅ CLOSED 2026-08-28 — on [[0222]]'s proof, with the gap named
+
+The last criterion sat open because the *never reached* induction failed on
+2026-08-25: three genuinely empty `Invocations` hours and
+`prices-production-coarse-sweep-no-invocations` **did not fire**. That was
+spawned as [[0222]], and **0222 is fixed, deployed and archived** — so the
+blocker has been gone since 2026-08-26 and nobody came back here. This closes it
+rather than leaving a task open on a resolved dependency.
+
+### What 0222 actually proved
+
+The six no-invocations alarms were converted from single-metric to
+`FILL(invocations, 0)` metric-math and deployed to production 2026-08-25 17:32
+UTC. **`prices-production-coarse-sweep-no-invocations` is one of them** — this
+task's own instrument was rebuilt, not merely a sibling.
+
+The transition was then induced on `tmp-0222-fill-p300`, *identical to the
+deployed coarse-sweep alarm except in `Period`*, with no alarm actions attached:
+
+```
+17:36:10  INSUFFICIENT_DATA   (birth)
+17:37:28  INSUFFICIENT_DATA → OK     <- a real evaluation: the 17:30 run was
+                                        still one of three datapoints
+17:46:28  OK → ALARM                 <- ~1m28s after the window cleared
+```
+
+Against the raw single-metric form's ~11m51s on a corrected baseline. So the
+metric, the expression, the `3/3` evaluation and **an alarm transition built on
+them** are all proven.
+
+### ⚠️ The gap, stated rather than papered over
+
+**The induction ran at `Period=300`. Production runs at `Period=3600`.** And the
+original non-firing at `Period=3600` **was never explained** — 0222 changed the
+expression form and the symptom went away, which is a fix but not a diagnosis.
+
+🔑 So what is proven is *"the mechanism works and an alarm on it transitions"*,
+not *"this alarm, at its production period, fired."* Those are close but not the
+same sentence, and this task has already been burned twice by an induction that
+looked conclusive and was not — the 2026-08-25 attempt is the second.
+
+**Closed anyway, deliberately.** Two attended windows are already spent; a third
+~3.5 h window buys the difference between a scaled proof and a full-period one,
+on an alarm whose underlying behaviour is now measured. That trade is not worth a
+third window — but it is a judgement, not a verification, and it is recorded as
+one so nobody later reads this criterion as fully induced.
+
+⏳ **If the full-period proof is ever wanted**, the cheap moment is the next time
+the coarse-sweep schedule is legitimately idle for 3+ hours — piggyback on it
+rather than manufacturing the window. And if `coarse-sweep-no-invocations` ever
+sits `OK` through an outage it should have caught, the unexplained `Period=3600`
+behaviour is the first place to look, not the last.
 
 ## Out of scope
 
