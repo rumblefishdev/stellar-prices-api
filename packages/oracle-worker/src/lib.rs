@@ -366,6 +366,33 @@ pub struct OracleStats {
     pub rates_snapshotted: u64,
 }
 
+/// A pass that failed, carrying the counts it had already measured.
+///
+/// Exists because the rejections happen in the per-symbol loop, **ahead** of
+/// the ClickHouse writes that are the likely reason a pass dies. So a pass can
+/// genuinely refuse a Reflector reading and then fail on `write_oracle`, and a
+/// bare error would drop the one signal task 0231 exists to produce — on
+/// exactly the invocation that had something to say.
+#[derive(Debug)]
+pub struct OracleFailure {
+    pub error: OracleError,
+    /// Readings refused by [`reflector_timestamp_to_epoch_seconds`] before the
+    /// failure. Zero when the pass died before the loop ran at all.
+    pub timestamp_rejected: usize,
+}
+
+impl std::fmt::Display for OracleFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
+
+impl std::error::Error for OracleFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// Poll Reflector for each tracked symbol and write the prices to
 /// `oracle_prices`. Best-effort: per-symbol failures are skipped; only a CH
 /// write failure fails the run.
@@ -374,13 +401,31 @@ pub async fn run_oracle(
     http: &reqwest::Client,
     rpc_url: &str,
     contract: &str,
+) -> Result<OracleStats, OracleFailure> {
+    // The count lives out here so a failure inside can still report it. The
+    // inner function keeps `OracleError` as its error type, so every `?` on a
+    // ClickHouse call converts as before.
+    let mut timestamp_rejected = 0usize;
+    run_oracle_inner(writer, http, rpc_url, contract, &mut timestamp_rejected)
+        .await
+        .map_err(|error| OracleFailure {
+            error,
+            timestamp_rejected,
+        })
+}
+
+async fn run_oracle_inner(
+    writer: &OhlcvWriter,
+    http: &reqwest::Client,
+    rpc_url: &str,
+    contract: &str,
+    timestamp_rejected: &mut usize,
 ) -> Result<OracleStats, OracleError> {
     let existing = writer.load_assets().await?;
     let mut registry = AssetRegistry::from_existing(existing);
     let known_before = registry.assets().count();
     let mut samples = Vec::new();
     let mut skipped = 0usize;
-    let mut timestamp_rejected = 0usize;
     // Read once per pass, not per symbol: the plausibility window must not move
     // underneath a batch, or the same reading could be accepted for one symbol
     // and refused for the next.
@@ -420,7 +465,7 @@ pub async fn run_oracle(
                         // `OracleTimestampRejected` alarm (task 0231) sees a
                         // unit change instead of a rounding error in the skips.
                         skipped += 1;
-                        timestamp_rejected += 1;
+                        *timestamp_rejected += 1;
                         tracing::error!(
                             symbol,
                             raw = pd.timestamp,
@@ -498,7 +543,7 @@ pub async fn run_oracle(
         queried: TRACKED_SYMBOLS.len(),
         written,
         skipped,
-        timestamp_rejected,
+        timestamp_rejected: *timestamp_rejected,
         rates_snapshotted,
     })
 }

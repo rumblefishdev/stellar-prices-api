@@ -72,7 +72,10 @@ async fn main() -> Result<(), lambda_runtime::Error> {
 
             let metrics = match &outcome {
                 Ok(stats) => oracle_worker::metrics::pass_metrics(stats),
-                Err(_) => oracle_worker::metrics::failure_metrics(),
+                // A failed pass still reports the rejections it had already
+                // counted: they happen in the per-symbol loop, ahead of the
+                // ClickHouse writes that are the likely reason it died.
+                Err(failure) => oracle_worker::metrics::failure_metrics(failure.timestamp_rejected),
             };
             if let Err(e) = oracle_worker::metrics::publish(&cw, &env_name, &metrics).await {
                 tracing::warn!(error = %e, "cloudwatch metric publish failed (non-fatal)");

@@ -533,22 +533,26 @@ export class ObservabilityStack extends cdk.Stack {
     // (`infra/envs/production.json` → `scheduleExpressions.oracleWatcher`), so a 10-minute
     // bucket holds ~2 passes and cannot be emptied by jitter alone.
     const darkFeedBucketMinutes = 10;
-    const darkFeedRatePasses = /^rate\((\d+)\s+minutes?\)$/.exec(
-      config.scheduleExpressions.oracleWatcher.trim(),
+    const oracleCadenceMinutes = rateExpressionMinutes(
+      config.scheduleExpressions.oracleWatcher,
     );
     if (
-      darkFeedRatePasses &&
-      Number(darkFeedRatePasses[1]) > darkFeedBucketMinutes
+      oracleCadenceMinutes !== undefined &&
+      oracleCadenceMinutes * 2 > darkFeedBucketMinutes
     ) {
-      // Fail at SYNTH, loudly. A cadence slower than the bucket makes empty
-      // buckets normal and the alarm false-fires forever — the one outcome
-      // worse than no alarm, because it trains people to ignore it. Only
-      // thrown when the schedule is a `rate(N minutes)` we can actually read;
-      // a cron schedule passes through on the documented assumption above.
+      // Fail at SYNTH, loudly. A cadence that does not fit twice in the bucket
+      // makes an empty bucket reachable by ordinary schedule jitter, and the
+      // alarm then false-fires forever on a healthy feed — the one outcome
+      // worse than no alarm, because it trains people to ignore it.
+      //
+      // The 2x is the real invariant, not a safety margin: at exactly one pass
+      // per bucket, two passes drifting into the same bucket leave the next one
+      // empty. Enforced as stated, so the check and its message agree.
       throw new Error(
-        `oracle-watcher cadence ${config.scheduleExpressions.oracleWatcher} is slower than the ` +
-          `${darkFeedBucketMinutes}-minute dark-feed bucket; raise darkFeedBucketMinutes ` +
-          `to at least 2x the cadence in observability-stack.ts or the alarm will false-fire.`,
+        `oracle-watcher cadence ${config.scheduleExpressions.oracleWatcher} (${oracleCadenceMinutes} min) ` +
+          `does not fit twice in the ${darkFeedBucketMinutes}-minute dark-feed bucket; raise ` +
+          `darkFeedBucketMinutes to at least 2x the cadence in observability-stack.ts, ` +
+          `or the alarm will false-fire on a healthy feed.`,
       );
     }
 
@@ -570,7 +574,7 @@ export class ObservabilityStack extends cdk.Stack {
       'OracleDarkFeedAlarm',
       {
         alarmName: `prices-${config.envName}-oracle-dark-feed`,
-        alarmDescription: `The Reflector oracle poll wrote ZERO rows to prices.oracle_prices for 30 minutes (OracleRowsWritten = 0 across 3 consecutive 10-minute buckets) while the Lambda kept reporting success. The feed is dark. Most likely: Reflector changed lastprice units or started returning 0, so the task 0227 plausibility guard is correctly refusing every reading — check prices-${config.envName}-oracle-timestamp-rejected, which names that cause directly, and the worker ERROR logs for "reflector timestamp rejected" with the raw value. Otherwise: Soroban RPC unreachable, the contract moved, or every symbol lost its Stellar identity. Oracle data is non-critical (§2.2) and degrades to last-known value, so this is not an outage — but close_usd enrichment stops advancing while it lasts, and 0227 showed this failing silently for five months.`,
+        alarmDescription: `The Reflector oracle poll wrote ZERO rows to prices.oracle_prices for 30 minutes (OracleRowsWritten = 0 across 3 consecutive 10-minute buckets) while the Lambda kept reporting success. The feed is dark. Most likely: Reflector changed lastprice units or started returning 0, so the task 0227 plausibility guard is correctly refusing every reading — check prices-${config.envName}-oracle-timestamp-rejected, which names that cause directly, and the worker ERROR logs for "reflector timestamp rejected" with the raw value. Otherwise: Soroban RPC unreachable, or the contract moved. If oracle_prices IS gaining rows, suspect the metric path rather than the feed — the publish only logs a warning on failure, so a mis-scoped namespace grant, or deploying Observability ahead of EventBridge, reads identically here. Non-critical (§2.2): the feed degrades to last-known value, but close_usd enrichment stops advancing, and 0227 showed this failing silently for five months.`,
         metric: new cloudwatch.MathExpression({
           expression: 'FILL(written, 0)',
           usingMetrics: {
@@ -1386,6 +1390,43 @@ export class ObservabilityStack extends cdk.Stack {
     cdk.Tags.of(this).add('Environment', config.envName);
 
     assertAlarmDescriptionsFitCloudWatch(this);
+  }
+}
+
+/**
+ * Cadence of an EventBridge schedule expression, in minutes, or `undefined`
+ * for a `cron(...)` expression whose cadence cannot be read off the string.
+ *
+ * ⚠️ Throws on a `rate(...)` it cannot parse rather than returning `undefined`.
+ * That distinction is the whole point: silently treating an unreadable *rate*
+ * as "unknown cadence" is how a guard passes a schedule it was written to
+ * catch. `rate(1 hour)` is not hypothetical — it is the idiom already used for
+ * `assetSupply`, `assetDiscovery` and `enrichment` in the same
+ * `production.json`, so it is exactly how someone would slow a poll down. An
+ * earlier version of this matched only `minutes?` and would have let every
+ * hour- and day-valued rate through as if it were a cron.
+ *
+ * EventBridge `rate()` accepts minute(s), hour(s) and day(s) only.
+ */
+function rateExpressionMinutes(expression: string): number | undefined {
+  const trimmed = expression.trim();
+  if (!trimmed.startsWith('rate(')) return undefined;
+  const parsed = /^rate\((\d+)\s+(minute|hour|day)s?\)$/.exec(trimmed);
+  if (!parsed) {
+    throw new Error(
+      `unreadable EventBridge rate expression "${expression}"; expected ` +
+        `rate(N minutes|hours|days). Fix the schedule, or the cadence-dependent ` +
+        `alarm guards in observability-stack.ts cannot check it.`,
+    );
+  }
+  const value = Number(parsed[1]);
+  switch (parsed[2]) {
+    case 'hour':
+      return value * 60;
+    case 'day':
+      return value * 60 * 24;
+    default:
+      return value;
   }
 }
 

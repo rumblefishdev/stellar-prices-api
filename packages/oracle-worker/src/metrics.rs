@@ -108,20 +108,21 @@ pub fn pass_metrics(stats: &OracleStats) -> Vec<Metric> {
     ]
 }
 
-/// Metrics for a pass that failed **before** producing an [`OracleStats`] —
-/// i.e. [`crate::run_oracle`] returned `Err`, so there are no per-symbol
-/// numbers to report.
+/// Metrics for a pass that failed before producing an [`OracleStats`] — i.e.
+/// [`crate::run_oracle`] returned [`crate::OracleFailure`], so the per-symbol
+/// totals were never assembled.
 ///
 /// `OracleRowsWritten` is published as an explicit `0` rather than omitted: a
 /// failed pass genuinely wrote nothing, and the dark-feed alarm must see it as
 /// a breaching datapoint instead of as missing data it might treat as
 /// `notBreaching`.
 ///
-/// `OracleTimestampRejected` is deliberately **not** published here. A run that
-/// died on a ClickHouse write says nothing about Reflector's units, and
-/// emitting a `0` would let a stream of failed passes hold that alarm's average
-/// down while the guard's real signal was never measured.
-pub fn failure_metrics() -> Vec<Metric> {
+/// `OracleTimestampRejected` carries `rejected` — the count the failed pass had
+/// **already measured**, since rejections happen in the per-symbol loop, ahead
+/// of the ClickHouse writes that are the likely reason a pass dies. Publishing
+/// it here is the same principle as publishing at all on the error path: the
+/// signal was measured, so it must not be lost because something later broke.
+pub fn failure_metrics(rejected: usize) -> Vec<Metric> {
     let count = |name: &'static str, value: f64| Metric {
         name,
         value,
@@ -131,6 +132,7 @@ pub fn failure_metrics() -> Vec<Metric> {
         count("OracleRuns", 1.0),
         count("OracleFailedRuns", 1.0),
         count("OracleRowsWritten", 0.0),
+        count("OracleTimestampRejected", rejected as f64),
     ]
 }
 
@@ -271,18 +273,25 @@ mod tests {
     /// indistinguishable from an invocation that never happened.
     #[test]
     fn a_failed_run_is_a_datapoint_not_silence() {
-        let m = failure_metrics();
+        let m = failure_metrics(0);
         assert_eq!(by(&m, "OracleRuns").value, 1.0);
         assert_eq!(by(&m, "OracleFailedRuns").value, 1.0);
         // It wrote nothing, and the dark-feed alarm must see that as a breach.
         assert_eq!(by(&m, "OracleRowsWritten").value, 0.0);
-        // But it says nothing about Reflector's units, so it must not publish a
-        // zero that would dilute the rejection alarm.
-        assert!(
-            !m.iter().any(|x| x.name == "OracleTimestampRejected"),
-            "a failed run must not report a rejection count it never measured"
-        );
-        assert_eq!(m.len(), 3);
+        assert_eq!(m.len(), 4);
+    }
+
+    /// A pass that refused a reading and THEN died must still report the
+    /// rejection. The rejections happen in the per-symbol loop, ahead of the
+    /// ClickHouse writes that are the likely failure — so this is a real
+    /// ordering, not a hypothetical, and dropping the count would lose the one
+    /// signal task 0231 exists to produce on exactly the invocation that had
+    /// something to say.
+    #[test]
+    fn a_failed_run_still_reports_rejections_it_had_already_measured() {
+        let m = failure_metrics(2);
+        assert_eq!(by(&m, "OracleTimestampRejected").value, 2.0);
+        assert_eq!(by(&m, "OracleFailedRuns").value, 1.0);
     }
 
     /// Both mappings must agree on the two series that carry the three-state
@@ -290,7 +299,7 @@ mod tests {
     /// another from failure.
     #[test]
     fn both_mappings_publish_runs_and_failed_runs() {
-        for m in [pass_metrics(&OracleStats::default()), failure_metrics()] {
+        for m in [pass_metrics(&OracleStats::default()), failure_metrics(0)] {
             assert_eq!(by(&m, "OracleRuns").value, 1.0);
             assert!(m.iter().any(|x| x.name == "OracleFailedRuns"));
             assert!(m.iter().any(|x| x.name == "OracleRowsWritten"));

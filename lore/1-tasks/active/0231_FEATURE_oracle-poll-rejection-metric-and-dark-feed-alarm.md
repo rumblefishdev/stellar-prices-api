@@ -245,3 +245,44 @@ there until it is re-enabled. That is intended, not a double-page bug. Note the
 precedent that raised the question — `prices-production-cleanup` has sat
 deliberately disabled for weeks (task [[0200]]) — so if the oracle is ever
 parked the same way, silencing these two is part of parking it.
+
+## Review fixes (PR #267, 2026-08-28)
+
+Four findings from `/code-review`, all accepted and fixed.
+
+1. 🔴 **The synth cadence guard only matched `rate(N minutes)`.** Every other
+   unit fell through as if it were a cron expression — and `rate(1 hour)` is
+   the idiom `assetSupply`, `assetDiscovery` and `enrichment` already use in the
+   same `production.json`, so it is precisely how someone would slow this poll
+   down. The guard would have waved through the exact change it exists to
+   catch. Now `rateExpressionMinutes` normalises minute/hour/day and **throws on
+   any `rate(...)` it cannot read**, rather than returning "unknown".
+2. ⚠️ **The guard's message and its condition disagreed.** It said "at least 2x
+   the cadence" while checking `cadence > bucket`, so `rate(6 minutes)` passed
+   while violating the stated rule. The 2x is the real invariant — at one pass
+   per bucket, two passes drifting into the same bucket leave the next empty —
+   so the check now enforces what it says.
+3. ⚠️ **`-dark-feed` cannot tell a dark feed from a broken metric path.** The
+   publish only logs a warning, so a mis-scoped namespace grant, a
+   `METRIC_NAMESPACE` typo, or deploying Observability ahead of EventBridge all
+   page as a data outage while `oracle_prices` fills normally. Kept `BREACHING`
+   (decided above), but the runbook description now names the metric path as a
+   candidate cause — it previously listed four causes, none of them this one.
+   ⏳ **Deploy-order consequence, still owed:** on first rollout this alarm
+   enters ALARM the moment ObservabilityStack lands and cannot clear until the
+   new oracle binary from EventBridgeStack has run a pass. **Deploy EventBridge
+   first, then Observability.** There is no `addDependency` between them and the
+   Makefile deploys stacks individually, so nothing enforces this.
+4. 🔴 **A failed pass dropped the rejection count it had already measured.**
+   Rejections happen in the per-symbol loop, ahead of the ClickHouse writes that
+   are the likely failure — so a pass could refuse a reading and then die, and
+   the one metric this task exists to produce was discarded on exactly the
+   invocation that had something to say. `run_oracle` now returns
+   `OracleFailure { error, timestamp_rejected }`; `failure_metrics` takes the
+   count and publishes it. New test covers it.
+5. ⚠️ **A comment asserted a reason that was not true.** The old
+   `failure_metrics` doc claimed omitting a `0` avoided "holding that alarm's
+   average down" — but the alarm is `Sum` with `>= 1`, where zeros are inert.
+   Subsumed by fix 4, which removes the special case entirely. Recorded because
+   a plausible-sounding cross-file claim is the kind of thing the next editor
+   builds on.
