@@ -68,6 +68,24 @@ history:
       still gated**, because the OAuth secret and both eligibility parameters
       do not exist and a missing one fails Lambda init on the function that
       also serves `/v1`. The comment at the flag now says so.
+  - date: "2026-08-28"
+    status: active
+    who: akot
+    note: >
+      Checkbox state synchronised with the audit's own findings, which had
+      lived only in the report's table — the task read as though nothing had
+      been done. Four checks are now ticked, and only those that are settled
+      AND survive both [[0235]] and the host change: IAM (6), the collection
+      grant (7), the key-leak sweep (8) and the control-plane costing (12).
+      Six carry ⏳ with what was measured and why it does not close: checks 1,
+      3 and 4 passed but on `/api-tokens/api/{proxy+}` paths that [[0235]]
+      moves, so they need re-measuring after the deploy; checks 2 and 5 were
+      verified on our distribution and have to be re-run against
+      `EA2TLS5SS5M87`; check 11 passed on OUR bucket while the sign-off bucket
+      is `production-soroban-explorer-api-spa`, whose public-access block and
+      policy status spot-check clean but whose policy, OAC scoping and
+      anonymous-GET behaviour are unaudited. Two carry ❌ — the absent secret
+      and the two absent parameters, unchanged.
 ---
 
 # Portal security and ops audit
@@ -128,38 +146,103 @@ are properties of the serving distribution and are answered against
 `EA2TLS5SS5M87`; the rest are answered against our own stacks and were settled
 on 2026-08-28:
 
-- [ ] Every portal method has `cachingEnabled: false`, and every portal response
+- [ ] ⏳ **2026-08-28: gateway half PASS, response half BLOCKED + invalidated
+      by [[0235]].** The three portal `methodSettings` entries read
+      `cachingEnabled: false` on the deployed stage, and `/config` carries
+      `no-store` through both layers; every other route is [[0183]]'s empty
+      `404`, so its `no-store` is unobservable while closed. The entries were
+      measured at `/api-tokens/api/{proxy+}` and move to `/api/api/{proxy+}` —
+      re-measure after the deploy. Report E1.
+      Every portal method has `cachingEnabled: false`, and every portal response
       carries `Cache-Control: no-store` — the gateway half is settled; the
       response half is **(host)**, because `EA2TLS5SS5M87` maps 403 and 404 to
       `/index.html` with status `200` (`CustomErrorResponses`), which today
       would swallow the portal's JSON errors and [[0183]]'s gate `404`
-- [ ] **(host)** The portal prefix's CloudFront behaviour on `EA2TLS5SS5M87`
+- [ ] ⏳ **2026-08-28: not started at the sign-off host.** Verified on
+      `dojr4epgxo2qp.cloudfront.net` (report E2): `Managed-CachingDisabled` +
+      `Managed-AllViewerExceptHostHeader` (`CookieBehavior: all`), and 13 of 13
+      probe requests reached the origin — nothing served from the edge. None of
+      that transfers.
+      **(host)** The portal prefix's CloudFront behaviour on `EA2TLS5SS5M87`
       disables caching **and** forwards the session cookie; a signed-in request
       reaches the origin signed in. Today that distribution has **no origin
       pointing at our API at all**, `/api/*` is `GET`/`HEAD` only and sits
       behind the `production-soroban-explorer-basic-auth` function
-- [ ] The full `methodSettings` array contains every portal route in **both**
+- [ ] ⏳ **2026-08-28: PASS, invalidated by [[0235]].** Synth with the flag
+      both ways: 13 entries vs 5, and all three portal entries byte-identical in
+      both arms; the `ON ONLY` set is exactly the cache TTL table, which carries
+      no throttle. Re-run the two-arm diff on the new paths. Report E3.
+      The full `methodSettings` array contains every portal route in **both**
       arms of the `cacheEnabled` branch — flip `apiGatewayCacheEnabled` off in a
       synth and diff
-- [ ] Anonymous sign-in routes carry their own method-level throttle and are not
+- [ ] ⏳ **2026-08-28: PASS, invalidated by [[0235]].** `get-resources`:
+      `apiKeyRequired=False` on all three verbs, with throttle 10/40 from
+      `get-stage`. Measured on the old resource path. Report E4.
+      Anonymous sign-in routes carry their own method-level throttle and are not
       behind `apiKeyRequired`
-- [ ] **(host)** The portal's API behaviour precedes its bundle behaviour in
+- [ ] ⏳ **2026-08-28: not started at the sign-off host.** Correct on our
+      distribution (report E5) and on the post-[[0235]] synth; `EA2TLS5SS5M87`
+      has no API behaviour at all yet.
+      **(host)** The portal's API behaviour precedes its bundle behaviour in
       `EA2TLS5SS5M87`'s order, whatever the two prefixes end up being — the
       ordering rule of [[0161]], not the literal `/api-tokens/` pair
-- [ ] The assembled IAM policy names specific resources — no wildcard on
+- [x] ✅ **2026-08-28: PASS, and unaffected by [[0235]] or the host change.**
+      Two inline policies plus `AWSLambdaBasicExecutionRole`; the only
+      `apigateway:` actions in any deployed template are `GET`, `POST`,
+      `DELETE`, `PATCH`, the string `"apigateway:*"` occurs nowhere, `PATCH` is
+      tag-conditioned, and synth == deployed. `POST /apikeys` is documented as
+      limit 1 of 3 with its mitigation at `compute-stack.ts`. Report E6 — which
+      also records the `GET`/`DELETE` condition decision this task was left.
+      The assembled IAM policy names specific resources — no wildcard on
       `apigateway:*` — and the un-narrowable `POST /apikeys` is documented in the
       code as an accepted limit with its mitigation (tagging + attachment to the
       self-service plan only)
-- [ ] The collection-level `GET /apikeys` is present; without it the reconciler
+- [x] ✅ **2026-08-28: PASS, unaffected.** `PortalCreateAndListApiKeys` grants
+      `apigateway:GET` on the collection ARN. Report E7.
+      The collection-level `GET /apikeys` is present; without it the reconciler
       fails at runtime with `AccessDenied` and only under concurrency
-- [ ] No API key value appears in any CloudWatch log group or X-Ray trace —
+- [x] ✅ **2026-08-28: PASS, unaffected.** Live key values held in memory only
+      and compared against: Logs Insights over all 11 groups for 31 days
+      (3 586 940 records, 1.57 GB, 0 matched the 40-char prefilter), 471 X-Ray
+      traces / 1 392 segments, 47 CloudFront log lines, and the CloudTrail
+      bodies of 2 054 control-plane events. No API Gateway execution logs exist
+      — `dataTraceEnabled` is false on every method. Report E8.
+      No API key value appears in any CloudWatch log group or X-Ray trace —
       grepped, including error paths
-- [ ] The Discord client secret is in Secrets Manager and in no environment
+- [ ] ❌ **2026-08-28: FAIL — the secret does not exist.**
+      `describe-secret prices/production/portal-discord-oauth` →
+      `ResourceNotFoundException`, in `eu-central-1` and `us-east-1` alike.
+      Blocker B1, owner [[0186]], runbook §2. The other two halves PASS: every
+      secret-shaped env var across 11 live functions and 6 templates is a NAME,
+      and the deployed bundle carries no secret — re-scan the bundle after
+      [[0235]] rebuilds it. Report E9.
+      The Discord client secret is in Secrets Manager and in no environment
       variable, and no secret is in the static bundle
-- [ ] Both SSM parameters are operator-seeded; a `cdk deploy` does not restore a
+- [ ] ❌ **2026-08-28: FAIL — neither parameter exists.** `get-parameter` →
+      `ParameterNotFound` on both, and CloudTrail shows no `PutParameter` naming
+      either in 90 days. Blocker B2, owner [[0189]], runbook §2a — whose own
+      ticked criterion was true of the runbook, not of the account. The
+      restore-half PASSES: no `AWS::SSM::Parameter` for either name in any
+      template, and the Lambda receives only the parameter NAMES. Report E10.
+      Both SSM parameters are operator-seeded; a `cdk deploy` does not restore a
       committed guild id
-- [ ] The portal bucket has no public access and is reachable only through OAC
-- [ ] Control-plane call volume per dashboard load is known and bounded.
+- [ ] ⏳ **(host)** **2026-08-28: PASS on our bucket, and the sign-off bucket
+      is a different one.** `prices-production-portalhosti-portalbucket…`:
+      `BLOCK_ALL`, `IsPublic false`, `BucketOwnerEnforced`, OAC sigv4 scoped to
+      this distribution by `AWS:SourceArn`, anonymous GET → `403`. Report E11.
+      The bundle now also lands in `production-soroban-explorer-api-spa`, whose
+      public-access block and policy status were spot-checked clean on
+      2026-08-28 but whose policy, OAC scoping and anonymous-GET behaviour have
+      NOT been audited — do that before sign-off.
+      The portal bucket has no public access and is reachable only through OAC
+- [x] ✅ **2026-08-28: PASS, unaffected.** Measured 4 calls ≈ 1.3 s cold, 2 ≈
+      0.64 s warm, against 2 054 CloudTrail events in 14 days (peak 12/s, 37/min,
+      no throttling) and 43-423 `/v1` requests per day. Costed: at
+      `PORTAL_THROTTLE`'s ceiling the portal alone would consume 100 % of the
+      account's non-adjustable 10 rps control-plane budget, which is a ceiling
+      no guild-gated portal will approach. [[0190]]'s two remedies recorded
+      ahead of any storage. Report E12.
+      Control-plane call volume per dashboard load is known and bounded.
       **Corrected 2026-08-20 by [[0190]]'s measurement — it is four calls, not
       two:** `GetApiKeys` + `GetApiKey` on the reveal (`keys::lookup`) and
       `GetApiKeys` + `GetUsage` on the usage route (`usage::fetch`), the two
