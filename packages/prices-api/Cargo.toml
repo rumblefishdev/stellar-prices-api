@@ -97,3 +97,8 @@ lambda_http = { workspace = true, optional = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# Task 0229's invariant is violated by ~1e-12 at five-figure prices, which is
+# far below f64's resolution there — the existing `approx` helper (1e-6) cannot
+# see it and a test built on it would pass against the bug. Exact decimal
+# comparison is the only way to make that assertion non-vacuous.
+rust_decimal = { workspace = true }

@@ -203,6 +203,34 @@ high. This is defensible at `1d` and weaker at `1m`.
 are derived. The response must distinguish them; [[0128]]'s evidence must state
 it rather than presenting derived extremes as measured ones.
 
+#### ✅ AMENDED 2026-08-28 — the derived extremes are CLAMPED to bracket the exact close
+
+Task [[0229]]. Keeping `close` exact while deriving the extremes puts the two on
+different numeric scales, and they can cross: measured on prod at BTC 1h,
+`close` came back **below** `low` by 1.343e-11 — a malformed candle by the
+`low <= open,close <= high` rule every charting library assumes.
+
+🔑 **The mechanism is float precision, not decimal rounding**, and that rules out
+the obvious alternative. Derivation runs through `toFloat64`, whose 53-bit
+mantissa holds ~15-16 significant digits, while a five-figure price at
+`Decimal(38, 14)` carries 19. The observed gap is **0.92 of one float64 ulp** at
+that magnitude; a 14-decimal half-tick is 5e-15, ~2,700× too small to account for
+it. So "round `close` to the same 14-decimal scale" **cannot** fix this — `close`
+is already at 14 decimals, and that change is a no-op.
+
+**Decision: clamp, don't re-round.** `low = min(low_derived, close)` and
+`high = max(high_derived, close)`. This keeps the exactness §3 deliberately
+preserves, and moves an extreme by at most the ulp the derivation had already
+introduced — it cannot invent a value beyond the rounding error already present.
+
+⚠️ **Consequence a consumer can observe:** on a candle that closed at its low or
+its high, `low` or `high` may now be *exactly* equal to `close` where it
+previously differed in the last picoseconds of precision. That is the intended
+outcome. `open` is unaffected and needs no clamp — it is scaled by the same rate
+as the extremes, and scaling by one positive factor is monotonic, so
+`low <= open <= high` holds within a row and survives `min`/`max` across rows.
+Only the exact/derived boundary was ever at risk.
+
 ### 4. Provenance reuses [[0165]]'s vocabulary
 
 `method` is propagated from the underlying `close_usd`, using the values 0165

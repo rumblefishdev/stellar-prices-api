@@ -8,6 +8,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use clickhouse::Client;
 use prices_api::{AppConfig, AppState, app};
+use rust_decimal::Decimal;
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -891,6 +892,221 @@ async fn ohlcv_usdc_in_xlm_nulls_provenance_when_the_denominator_is_unpriced() {
     assert!(
         c["method"].is_null() && c["derived"].is_null(),
         "provenance must vanish with the price it describes: {c}"
+    );
+
+    teardown(db).await;
+}
+
+/// Assert `low <= open,close <= high` on one candle, **exactly**.
+///
+/// ⚠️ Deliberately NOT built on [`approx`]. Task 0229's violation is ~1e-12 at
+/// five-figure prices; `approx` tolerates 1e-6 and f64 cannot even represent the
+/// difference there, so an assertion routed through either would pass against the
+/// bug and prove nothing. The comparison is exact decimal or it is vacuous.
+fn assert_ohlc_ordered(c: &Value, label: &str) {
+    let d = |k: &str| -> Decimal {
+        Decimal::from_str_exact(
+            c[k].as_str()
+                .unwrap_or_else(|| panic!("{label}: {k} absent")),
+        )
+        .unwrap_or_else(|e| panic!("{label}: {k} unparseable: {e}"))
+    };
+    let (o, h, l, cl) = (d("open"), d("high"), d("low"), d("close"));
+    assert!(l <= o, "{label}: low {l} > open {o}");
+    assert!(l <= cl, "{label}: low {l} > close {cl}  (gap {})", l - cl);
+    assert!(o <= h, "{label}: open {o} > high {h}");
+    assert!(cl <= h, "{label}: close {cl} > high {h}  (gap {})", cl - h);
+}
+
+/// Task 0229 — the derived `low` rounds ABOVE the exact `close`.
+///
+/// The candle closes at its low (`low == close`), so the true derived low is
+/// exactly `close_usd`; `toFloat64(low) * rate` then lands one ulp on the wrong
+/// side of it. `68421.98765432109876` is chosen because it reproduces: the float
+/// product renders as `68421.98765432110000`, **1.24e-12 above** the exact close.
+///
+/// 🔑 Non-vacuous by construction — against the pre-fix query this returns
+/// `low > close` and the assertion fires. The magnitude matters: at three
+/// figures the float has precision to spare and nothing crosses.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_derived_low_cannot_round_above_the_exact_close() {
+    let db = "it_ohlcv_low_above_close_0229";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-03-03 10:00:00', 3, 2, 'sdex', 1.1, 1.2, 1.0, 1.0, \
+              10, 10, 68421.98765432109876, 1.05, 3, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/FOO:{}/ohlcv?granularity=1h&start=2026-03-03T10:00:00Z\
+         &end=2026-03-03T10:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let c = &json["data"].as_array().unwrap()[0];
+
+    assert_ohlc_ordered(c, "derived low vs exact close");
+
+    // The exactness ADR 0011 §3 keeps is not sacrificed to get there.
+    assert_eq!(
+        c["close"].as_str().unwrap(),
+        "68421.98765432109876",
+        "close must stay EXACT — clamping moves the extremes, never the close"
+    );
+    assert_eq!(c["derived"], true);
+
+    teardown(db).await;
+}
+
+/// Task 0229, the mirror — the derived `high` rounds BELOW the exact `close`.
+///
+/// The candle closes at its high, and `76943.51350417596657` (the value measured
+/// on prod, BTC 1h) renders through the float product as `76943.51350417596`:
+/// **6.57e-12 below** the exact close. Both directions are covered because a
+/// clamp on only one of them is a fix that looks complete and is not.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_derived_high_cannot_round_below_the_exact_close() {
+    let db = "it_ohlcv_high_below_close_0229";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-03-03 11:00:00', 3, 2, 'sdex', 0.9, 1.0, 0.8, 1.0, \
+              10, 10, 76943.51350417596657, 0.95, 3, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/FOO:{}/ohlcv?granularity=1h&start=2026-03-03T11:00:00Z\
+         &end=2026-03-03T11:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let c = &json["data"].as_array().unwrap()[0];
+
+    assert_ohlc_ordered(c, "derived high vs exact close");
+    assert_eq!(
+        c["close"].as_str().unwrap(),
+        "76943.51350417596657",
+        "close must stay EXACT"
+    );
+
+    teardown(db).await;
+}
+
+/// The invariant holds on the `base_currency=XLM` path too (0229 AC 2).
+///
+/// ⚠️ This path is structurally incapable of the defect — [`Denomination::QuoteLeg`]
+/// emits the stored columns with no rate applied, so nothing is derived and
+/// nothing is on a second scale. The test exists to PIN that, not to catch a
+/// live bug: if the as-stored arm ever grows a conversion, this fails.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_xlm_denomination_keeps_ohlc_ordered() {
+    let db = "it_ohlcv_xlm_ordered_0229";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    // FOO/XLM (quote_asset_id = 1), same awkward magnitude in the stored columns.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-03-03 12:00:00', 3, 1, 'sdex', \
+              68421.98765432109876, 68421.98765432109876, 68421.98765432109876, \
+              68421.98765432109876, 10, 10, 68421.98765432109876, \
+              68421.98765432109876, 3, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/FOO:{}/ohlcv?granularity=1h&start=2026-03-03T12:00:00Z\
+         &end=2026-03-03T12:00:00Z&base_currency=XLM",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let c = &json["data"].as_array().unwrap()[0];
+
+    assert_ohlc_ordered(c, "xlm denomination");
+    assert_eq!(
+        c["close"].as_str().unwrap(),
+        "68421.98765432109876",
+        "as-stored means as stored — no rate, no rounding"
+    );
+
+    teardown(db).await;
+}
+
+/// The synthesized USDC self-pair series keeps the invariant (0229 AC 2).
+///
+/// ⚠️ Also structurally safe: [`ohlcv_peg_series`] emits `o AS h, o AS l, o AS c`,
+/// one value in four fields, so `low <= open,close <= high` is satisfied by
+/// identity. Pinned rather than assumed, because ADR 0011 §6 could later give the
+/// extremes their own derivation and the equality would stop being free.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_peg_series_keeps_ohlc_ordered() {
+    let db = "it_ohlcv_peg_ordered_0229";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    // An XLM/USDC market to anchor the buckets, plus one awkward measured rate.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-03-03 13:00:00', 1, 2, 'sdex', 0.2, 0.21, 0.19, 0.2, \
+              100, 20, 0.2, 0.2, 5, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (timestamp, asset_kind, asset_code, issuer_address, contract_address, \
+              usd_rate, method, version) VALUES \
+             ('2026-03-03 13:00:00', 'credit', 'USDC', '{i}', '', \
+              0.99987654321098, 'oracle', 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2026-03-03T13:00:00Z\
+         &end=2026-03-03T13:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let c = &json["data"].as_array().unwrap()[0];
+
+    assert_ohlc_ordered(c, "usdc self-pair");
+    assert_eq!(
+        c["method"], "oracle",
+        "the measured rate must win, not the peg"
     );
 
     teardown(db).await;

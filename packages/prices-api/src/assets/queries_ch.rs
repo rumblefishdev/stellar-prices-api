@@ -585,6 +585,26 @@ pub struct OhlcvArgs {
     pub limit: u64,
 }
 
+/// The exact close, as one expression, because three output columns must agree
+/// on it. `c_x` is `close_usd` **as stored** — full `Decimal(38, 14)` — while
+/// `o_x`/`h_x`/`l_x`/`w_x` are derived through `toFloat64`, whose 53-bit mantissa
+/// holds only ~15-16 significant digits.
+///
+/// 🔑 **That is the whole of task 0229, and the mechanism is float precision, not
+/// decimal rounding.** A five-figure price carries 19 significant digits at
+/// `Decimal(38, 14)`, so the float product lands up to one ulp away — measured on
+/// prod at BTC scale as **1.343e-11 against a 1.455e-11 ulp (0.92 of one)**. A
+/// 14-decimal half-tick is 5e-15, roughly **2,700× too small** to explain it, so
+/// re-rounding `close` to 14 decimals cannot fix this: it is already there.
+///
+/// `least`/`greatest` therefore clamp the derived extremes over the exact close.
+/// This preserves `close`'s exactness, which ADR 0011 §3 keeps deliberately, and
+/// moves an extreme by at most the ulp the rounding already implied. `open` needs
+/// no clamp: it is derived through the same `rate` as `h_x`/`l_x`, and scaling by
+/// one positive factor is monotonic, so `l_x <= o_x <= h_x` holds within a row and
+/// survives `min`/`max` across rows. Only the exact/derived boundary breaks.
+const CLOSE_EXACT: &str = "argMaxIf(c_x, (volume_base, quote_asset_id), valid)";
+
 /// Smallest `close` / `close_usd` a USD rate may be derived from — a
 /// **precision precondition**, not a plausibility band.
 ///
@@ -913,10 +933,15 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
                 // `countIf(valid) = 0` is what produces §5's price-less bucket:
                 // NULL across every price field, while the volume columns below
                 // still aggregate over all rows.
-                "if(countIf(valid) = 0, NULL, toString(argMaxIf(o_x, (volume_base, quote_asset_id), valid))) AS o, \
-                 if(countIf(valid) = 0, NULL, toString(maxIf(h_x, valid))) AS h, \
-                 if(countIf(valid) = 0, NULL, toString(minIf(l_x, valid))) AS l, \
-                 if(countIf(valid) = 0, NULL, toString(argMaxIf(c_x, (volume_base, quote_asset_id), valid))) AS c, \
+                // `c` is EXACT (`close_usd` as stored) while `h`/`l` are derived
+                // through `toFloat64`, so the two are on different scales and can
+                // cross — task 0229. `least`/`greatest` pull the derived extremes
+                // back over the exact close; see the CLOSE_EXACT note above.
+                format!(
+                    "if(countIf(valid) = 0, NULL, toString(argMaxIf(o_x, (volume_base, quote_asset_id), valid))) AS o, \
+                 if(countIf(valid) = 0, NULL, toString(greatest(maxIf(h_x, valid), {CLOSE_EXACT}))) AS h, \
+                 if(countIf(valid) = 0, NULL, toString(least(minIf(l_x, valid), {CLOSE_EXACT}))) AS l, \
+                 if(countIf(valid) = 0, NULL, toString({CLOSE_EXACT})) AS c, \
                  toString(sum(volume_base)) AS vb, \
                  toString(sum(volume_quote_usd)) AS vqu, \
                  if(countIf(valid) = 0, NULL, toString(toDecimal128OrNull(toString( \
@@ -925,7 +950,7 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
                  toUInt64(sum(trade_count)) AS tc, \
                  nullIf(if(countIf(valid) = 0, NULL, argMaxIf(meth, (volume_base, quote_asset_id), valid)), '') AS meth, \
                  if(countIf(valid) = 0, NULL, toUInt8(1)) AS drv"
-                    .to_string(),
+                ),
             )
         }
         // As stored: no conversion, so nothing is derived and there is no USD

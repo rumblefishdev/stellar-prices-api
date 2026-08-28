@@ -96,14 +96,139 @@ recorded either way, since it is a contract detail consumers will see.
 the synthesized peg series, where all fields come from one rate and the
 invariant is trivially satisfied today.
 
+## 🔑 Root cause CORRECTED 2026-08-28 — float64 precision, not 14-decimal rounding
+
+The filing said the extremes are *"multiplied by the bucket's single rate and
+rounded to 14 decimals"*, and read the crossing as a rounding artefact. **The
+rounding is real but is three orders of magnitude too small to explain it.**
+
+Measured against the prod values in the summary:
+
+| quantity | value |
+|---|---|
+| observed gap (`low − close`) | **1.343e-11** |
+| one float64 ulp at 76,943.5 | 1.455e-11 |
+| **gap ÷ ulp** | **0.92 — inside a single ulp** |
+| half-tick of 14-decimal rounding | 5e-15 |
+| **gap ÷ half-tick** | **2,686×** |
+
+The derivation runs through `toFloat64` (`queries_ch.rs`: `toFloat64(low) * rate`),
+and a 53-bit mantissa carries ~15-16 significant digits. A five-figure price at
+`Decimal(38, 14)` carries **19**. So the float product lands up to one ulp from
+the true value, and at BTC scale one ulp is ~1.5e-11 — exactly the size of the
+crossing.
+
+### ⚠️ This kills option 2 outright — it is a no-op, not a trade-off
+
+The plan offered *"round `close` to the same 14-decimal scale as the derived
+fields"* as the alternative to clamping, at the cost of discarding precision.
+**There is no cost because there is no effect.** `close_usd` is `Decimal(38, 14)`
+— `close` is *already* rendered at exactly 14 decimals
+(`76943.51350417596657` has 14 places after the point). Rounding it to 14
+decimals returns it unchanged, and the crossing survives.
+
+🔑 Worth recording rather than quietly dropping: the option looked like the
+conservative choice and would have shipped as a fix that changes nothing. The
+decision between the two was never a matter of taste — one of them does not work.
+
+### The third option, considered and not taken
+
+Doing the derivation in Decimal arithmetic instead of float would fix the cause
+rather than the symptom, and would satisfy the invariant on its own: with exact
+arithmetic `low * (close_usd/close) <= close * (close_usd/close) = close_usd`.
+Not taken here — `rate` is itself a division needing a chosen scale, ClickHouse
+decimal multiplication grows scale and can overflow `Decimal128`, and the
+practical error float introduces is ~1.8e-16 *relative*, which is meaningless for
+a price. The invariant was the only real harm, and clamping addresses it in one
+expression. ⚠️ If the derived values themselves ever need to be exact — not just
+ordered — this is the change to make, and it is a larger one.
+
+## Implementation — shipped 2026-08-28
+
+`queries_ch.rs`, `Denomination::Usd` arm only:
+
+```
+h = greatest(maxIf(h_x, valid), CLOSE_EXACT)
+l = least(   minIf(l_x, valid), CLOSE_EXACT)
+c =                             CLOSE_EXACT
+```
+
+`CLOSE_EXACT` is a named constant because three output columns must agree on it,
+and it carries the ulp measurement above so the next reader does not re-derive it.
+
+- **`open` needs no clamp, and this is not an oversight.** `o_x`, `h_x` and `l_x`
+  are scaled by the *same* `rate`; multiplication by one positive factor is
+  monotonic, and so is rounding to a fixed scale. So `l_x <= o_x <= h_x` holds
+  within a row, and `min`/`max` across rows only widens the bracket. The
+  exact/derived boundary is the only place the ordering can break.
+- **The other two paths are structurally incapable of the defect**, and both are
+  now pinned anyway. `Denomination::QuoteLeg` emits the stored columns with no
+  rate applied — nothing derived, nothing on a second scale. `ohlcv_peg_series`
+  emits `o AS h, o AS l, o AS c`: one value in four fields, so the invariant is
+  satisfied by identity. Tests exist to catch a *future* derivation being added
+  there, not a present bug.
+
+### The tests, and why they could not use the existing helper
+
+🔴 **`approx()` — the file's own comparison helper — tolerates 1e-6 and routes
+through `f64`.** The violation is ~1e-12 at five-figure prices, which f64 cannot
+even represent there. A test built on `approx` would have passed against the bug
+and read as proof. `rust_decimal` was added as a **dev-dependency** and
+`assert_ohlc_ordered` compares exactly; the reasoning is recorded in
+`Cargo.toml` beside the dependency, because a stray-looking dev-dep is exactly
+what a later cleanup removes.
+
+**Non-vacuity is verified, not asserted.** With the fix stashed, both crossing
+tests fail — and they fail at the *predicted* magnitudes, which is the stronger
+result:
+
+| test | predicted gap | observed on failure |
+|---|---|---|
+| derived `low` above exact `close` | 1.24e-12 | **1.24e-12** |
+| derived `high` below exact `close` | 6.57e-12 | **6.57e-12** |
+
+The seeds were found by simulating ClickHouse's own arithmetic
+(`toFloat64` → `toString` shortest-roundtrip → `toDecimal128OrNull(…, 14)`) in
+`Decimal`, then confirmed against a live 26.3.10.60. That the two agree to the
+digit is what establishes the mechanism, rather than merely fitting it.
+
+⚠️ **Both directions are covered on purpose.** A clamp on `low` alone passes the
+first test and leaves the mirror defect live — a fix that looks complete and is
+not.
+
 ## Acceptance Criteria
 
-- [ ] A test seeds a bucket whose derived `low` rounds above its exact `close`
+- [x] A test seeds a bucket whose derived `low` rounds above its exact `close`
       and asserts the response satisfies `low <= open,close <= high`. Verified
       non-vacuous: it must fail against today's code.
-- [ ] The fix holds for `base_currency=XLM` and for the peg path, each with a
+      → `ohlcv_derived_low_cannot_round_above_the_exact_close`, plus the mirror
+      `ohlcv_derived_high_cannot_round_below_the_exact_close` — a clamp on one
+      side only would pass the first and leave the second live.
+      **Non-vacuity verified by running them against the stashed fix**: both
+      fail, at the magnitudes the ClickHouse-arithmetic simulation predicted
+      (1.24e-12 and 6.57e-12, to the digit). ⚠️ They compare with `rust_decimal`,
+      not the file's `approx` helper — at 1e-6 tolerance through `f64` the
+      assertion would have passed against the bug.
+- [x] The fix holds for `base_currency=XLM` and for the peg path, each with a
       test.
+      → `ohlcv_xlm_denomination_keeps_ohlc_ordered` and
+      `ohlcv_peg_series_keeps_ohlc_ordered`. ⚠️ **Both paths are structurally
+      incapable of the defect** and the tests say so in their own doc comments:
+      `QuoteLeg` applies no rate, and the peg series emits one value into four
+      fields. They pin the property against a future derivation being added
+      there; neither was failing.
 - [ ] `low <= open,close <= high` passes for all 20 assets in the [[0120]]
       suite, at both granularities, against the deployed API.
-- [ ] The choice between clamping and re-rounding is recorded with its
+      ⏳ **Blocked on a deploy — the API Lambda has not shipped this yet.** The
+      pre-fix baseline is recorded: 9 failures of this check in the 2026-08-27
+      run (one bucket each on BTC, sUSD, XRP over a 7-day 1h window). Re-run
+      after deploy and expect 9 → 0; the other 27−9 failures are [[0230]] and
+      [[0178]] and must not be read as this fix falling short.
+- [x] The choice between clamping and re-rounding is recorded with its
       reasoning, in ADR 0011 §3 if it changes what that section states.
+      → **[[ADR-0011]] §3 amended 2026-08-28.** It did change what §3 states —
+      not by contradicting it, but by adding a guarantee a consumer can observe
+      (an extreme may now be exactly equal to `close`). ⚠️ **The recorded
+      reasoning is that the choice was never a trade-off: re-rounding is a
+      no-op**, because `close` is already at 14 decimals and the crossing is
+      float-ulp sized, ~2,700× larger than a 14-decimal half-tick.
