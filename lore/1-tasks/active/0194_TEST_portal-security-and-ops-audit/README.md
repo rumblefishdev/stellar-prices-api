@@ -119,6 +119,20 @@ history:
       the default behaviour and `DirectoryIndexFn`'s trailing-slash rewrite,
       and that stale app then 403s on its own backend.** Four objects to delete
       before opening.
+  - date: "2026-08-28"
+    status: active
+    who: akot
+    note: >
+      Blocker B1 closed — the Discord OAuth secret was created at 13:53Z with
+      [[0235]]'s callback and validated by shape without reading its values, and
+      the api-handler's IAM grant matches the generated ARN suffix. Check 9
+      flips to PASS. ⚠️ The `client_secret` reached a chat transcript on the way
+      in, so it is recorded as compromised and needs rotating in the Developer
+      Portal followed by `put-secret-value`; the flip is not blocked on that,
+      but Tranche 3 sign-off should not claim the secret was never exposed.
+      Issues Encountered written up while the detail is fresh: the exposure, the
+      wrong inert-objects prediction, Zig as an undocumented build prerequisite,
+      and CI discarding the Lambda assets it builds.
 ---
 
 # Portal security and ops audit
@@ -256,10 +270,17 @@ on 2026-08-28:
       — `dataTraceEnabled` is false on every method. Report E8.
       No API key value appears in any CloudWatch log group or X-Ray trace —
       grepped, including error paths
-- [ ] ❌ **2026-08-28: FAIL — the secret does not exist.**
-      `describe-secret prices/production/portal-discord-oauth` →
-      `ResourceNotFoundException`, in `eu-central-1` and `us-east-1` alike.
-      Blocker B1, owner [[0186]], runbook §2. The other two halves PASS: every
+- [x] ✅ **2026-08-28: FAIL → PASS, created the same day.** Was absent
+      (`ResourceNotFoundException` in `eu-central-1` and `us-east-1` alike) —
+      blocker B1, owner [[0186]], runbook §2. Created 2026-08-28T13:53Z as
+      `…:secret:prices/production/portal-discord-oauth-s5Qz1H`, carrying all
+      four fields, a `redirect_uri` that ends in `CALLBACK_PATH`
+      (`…/api/api/auth/callback`, [[0235]]'s value) and a 64-character signing
+      key. The api-handler's `ReadPortalOauthSecret` grant names
+      `…portal-discord-oauth-*`, which matches. ⚠️ **The `client_secret` was
+      pasted into a chat transcript during this task and must be rotated in the
+      Discord Developer Portal, then updated with `put-secret-value`** — see
+      the note in Issues Encountered. The other two halves PASS: every
       secret-shaped env var across 11 live functions and 6 templates is a NAME,
       and the deployed bundle carries no secret. **Re-scanned 2026-08-28 after
       [[0235]] rebuilt it** (13 files under `api/`): zero real API key values,
@@ -441,6 +462,32 @@ verified is the one 0195 delivers. The flag itself is still independent of both
 — it lives in the Lambda, which answers on either host — so the flip can be
 deployed as soon as the secret and the parameters are seeded. What waits for
 0195 is this task's sign-off, not the portal being open.
+
+## Issues Encountered
+
+- **The Discord `client_secret` was exposed in a chat transcript.** On
+  2026-08-28 the value was pasted into the working session rather than typed
+  into a terminal, so it exists outside Secrets Manager in at least one
+  conversation log. The secret was created with it to unblock the flip, and the
+  value must be treated as compromised: reset it in the Developer Portal and
+  replace the stored copy with `put-secret-value`, passing all four fields and
+  **keeping `session_signing_key` unchanged** (rotating that one signs every
+  visitor out). Rotating `client_secret` breaks nothing in flight — it is used
+  only during the token exchange, so it takes effect on the next sign-in. Until
+  it is rotated, anyone holding the transcript can impersonate the application
+  against Discord.
+- **The orphaned bundle objects were predicted inert and are not** — see the
+  section above; `/api-tokens/` still serves the previous portal.
+- **The local build needs Zig and nothing said so.** `cargo lambda build
+  --arm64` cross-compiles through Zig on an x86_64 host; CI never hits this
+  because it runs on a native ARM runner, and the comment on
+  `API_HANDLER_ASSET_DIR` gives the command without the prerequisite. Cost an
+  hour of the flip.
+- **Nothing publishes the built Lambda assets.** CI builds all eleven natively
+  and discards them, so a deploy ships whatever happens to be on the operator's
+  disk. On 2026-08-28 that disk held binaries from 2026-08-13, and a `Compute`
+  deploy would have regressed both the api-handler and the ledger-processor by
+  two weeks while reporting success — the [[0141]] footgun, live.
 
 ## Design Decisions
 
