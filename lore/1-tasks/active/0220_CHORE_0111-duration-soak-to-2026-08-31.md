@@ -58,6 +58,86 @@ sweep ~21 s. Peak Lambda memory **52-54 MB of 512 MB**.
 
 ## Daily log
 
+### 2026-08-28 09:5x UTC — days 4 AND 5 of 8, clean — and `Duration` stepped 6× without breaching
+
+⚠️ **Day 4 (2026-08-27) was not checked on the day** — the batch-release session
+displaced it. Both days are recorded here from a 48 h window rather than
+back-dated as if two separate checks happened. CloudWatch retains the data, so
+nothing is lost; the gap is in the process, not the evidence.
+
+| metric | 48 h reading | criterion |
+|---|---|---|
+| alarm state | `OK`, `StateUpdatedTimestamp` still **2026-08-24T08:31:25** | no transition since hand-off ✅ |
+| `Duration` max | **6,341 – 63,295 ms** | ≪ 240,000 ms — peak is **26.4%** of threshold |
+| `Invocations` | **1.0/hour, all 48, no gaps** | 1/hour ✅ |
+| `Errors` | **empty** | 0/hour ✅ |
+| `Throttles` | **empty** | — |
+| peak memory | **51 – 54 MB of 512 MB** | unchanged |
+
+### 🔑 The 6× step at 2026-08-27 15:02 UTC is the historical sweep starting work
+
+`Duration` ran 6-11 s for two days, then jumped to 53-63 s at a single bucket and
+has drifted up ~0.3 s/h since. **It is not a deploy** —
+`prices-production-enrichment` reads `LastModified 2026-08-24T14:11:52Z`, three
+days before the step. The cause is in the data, and the logs name it:
+
+| | 08-27 14:17 | 08-27 15:17 | 08-28 09:17 |
+|---|---|---|---|
+| sweep frontier month | 202205 | **202206** | 202206 |
+| sweep state | `exhausted` | **`pending`** | `pending` |
+| rows enriched by sweep | **0** | **200,000** | **200,000** |
+| live 1m pass `duration_ms` | 9,208 | 11,438 | **7,964** |
+| Lambda `Duration` | 13,976 | 57,190 | 62,934 |
+
+[[0111]]'s frontier advanced off an exhausted month onto one with real backlog.
+**The live pass is unchanged** (9.2 s → 8.0 s); every added second is the sweep.
+
+🔑 **And it is bounded twice over, which is what settles the soak.**
+`enriched: 200000` every pass is exactly `max_batches: 20 × batch_size: 10,000` —
+the **batch cap**, not free-running. `deadline_hit: false` on every invocation, so
+it never reaches its 120 s budget either. Worst case the config permits is live
+pass (~10 s) + a full 120 s sweep ≈ **130 s**, against `Threshold 240,000`,
+`Statistic Maximum`, `Period 3600`, `EvaluationPeriods 2`. ~1.8× headroom at the
+configured worst case; 3.8× at today's actual.
+
+Progress is exactly on cadence: 202206 remaining fell **8,382,402 → 4,782,402** in
+18 h — 200 k/hour, one full pass per hour, no misses. ~1 more day on that month,
+**49 months pending** after it.
+
+### ⚠️ The worker's own duration metric does not see the sweep
+
+`EnrichmentPassDurationMs` (`Prices/Enrichment`, `Environment=production`) reads
+**5,504 – 11,438 ms** across the same 48 h — flat, no step at all — while Lambda
+`Duration` reads up to 63,295 ms. The custom metric times the **live 1m pass
+only**.
+
+🔴 **So an operator watching the worker's own metric would not have seen this at
+all**, and the alarm that protects the timeout is the Lambda one. That is fine
+today because the alarm is on the right metric, but the two series answer
+different questions and the ~55 s difference between them is the sweep. Worth
+knowing before anyone reads `EnrichmentPassDurationMs` as "how long the worker
+takes".
+
+### Write load, days 4-5
+
+`EnrichmentRowsEnriched` totals **210,586 rows** over the 48 h (1,266 – 8,960 per
+hour, all 48 datapoints present) — and that counts the **live pass only**. The
+sweep added a further ~200,000 per hour from 15:17 on 08-27, so real throughput
+across the window is several million rows. AC 4's demonstrated-write-load
+condition, already met on day 3, is met far more strongly here.
+
+⚠️ Dimension `Environment=production` passed explicitly, per day 3's method note.
+
+### What this means for the remaining checks
+
+Days 1-3 measured an **idle** sweep; days 4-5 measure a **working** one. The
+soak is now exercising the configuration it was actually written to test, and the
+elevated `Duration` will persist for **weeks** (49 months at ~200 k rows/pass).
+🔑 A later reader will see a plateau, not a spike — it must not be mistaken for a
+regression, and a check on 08-29/30/31 that reads ~60 s is **passing**, not
+degrading.
+
+
 ### 2026-08-26 16:1x UTC — day 3 of 8, clean AND under real write load
 
 24 consecutive hourly datapoints, no gaps.
@@ -169,6 +249,13 @@ No code deploy needed: set `ENRICH_LIVE_PARTITIONS=0` on
 - [ ] Hourly `Duration` maximum stays **well under 240,000 ms** across that week
       — baseline is ~27,000 ms, so anything above ~100,000 ms warrants a look
       before the threshold is reached.
+      ⚠️ **The baseline moved on 2026-08-27 and the trigger figure still holds.**
+      From 15:02 that day the historical sweep began working a non-exhausted
+      month, taking the hourly maximum from ~10,000 ms to **~63,000 ms**. That is
+      26.4% of the threshold and still below the ~100,000 ms look-at line, so no
+      action is due — but a check on 08-29/30/31 reading ~60,000 ms is **passing**,
+      not degrading. The sweep is capped at 20 batches and a 120 s budget, so the
+      configured worst case is ~130,000 ms. See the days 4-5 log entry.
 - [ ] `Invocations` stays at **1/hour** and `Errors` at **0/hour**.
 - [x] At least one check falls in a window with **demonstrated write load**,
       evidenced by the `query_log` insert count, not assumed.
