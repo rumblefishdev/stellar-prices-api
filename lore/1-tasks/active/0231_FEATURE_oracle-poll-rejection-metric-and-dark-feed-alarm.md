@@ -35,6 +35,19 @@ history:
       an idle environment) is the criterion that cost [[0204]] and [[0218]]
       their attended windows, and [[0222]]'s `FILL(m, 0)` sliding window is the
       shape to start from rather than rediscover.
+  - date: 2026-08-28
+    status: active
+    who: okarcz
+    note: >
+      Worker + infra implemented, nothing deployed. `Prices/Oracle` metrics
+      published by a pure, unit-tested mapping; `PutMetricData` granted with a
+      namespace condition; `-oracle-dark-feed` (FILL, 3 x 10 min = 30 min) and
+      `-oracle-timestamp-rejected` (1/1) added, plus the worker joins the 0112
+      health list so it finally has `-no-invocations`. Operator decisions this
+      session: `timestamp_rejected` stays a SUBSET of `skipped`; the dark window
+      is 30 minutes, not 15; missing data on `-dark-feed` stays `BREACHING`.
+      Induction plan written before the deploy, deliberately - ACs 1/2/3/5 are
+      all still owed and only prod can close them.
 ---
 
 # The guard is silent, and silence is what 0227 was about
@@ -221,11 +234,14 @@ the check that would have caught 0204's 10-of-13 blind alarms.
 - `-dark-feed`: missing data is `BREACHING`. A worker that has never written a
   row is genuinely dark, so this is right for a live env.
 
-⚠️ **Open, for the operator:** `BREACHING` also means that *deliberately*
-disabling the oracle EventBridge rule puts this alarm in ALARM and leaves it
-there until the rule is re-enabled. This project does disable rules for long
-stretches — `prices-production-cleanup` has been off for weeks (task 0200) — so
-this is not hypothetical. The alternatives are `NOT_BREACHING` (a deleted rule
-then goes unreported here, though `-no-invocations` still catches it) or leaving
-it as is and accepting that turning the oracle off is a thing you must silence
-the alarm for. Not decided; do not deploy until it is.
+✅ **DECIDED 2026-08-28 by the operator: keep `BREACHING`.** There is no plan to
+disable `prices-production-oracle`, so "no data at all" should be read as bad
+news. The alternative — `NOT_BREACHING`, leaning on `-no-invocations` to catch a
+stopped schedule — was considered and rejected.
+
+Consequence to know rather than rediscover: if that rule ever *is* disabled,
+**both** `-oracle-dark-feed` and `-oracle-no-invocations` go to ALARM and stay
+there until it is re-enabled. That is intended, not a double-page bug. Note the
+precedent that raised the question — `prices-production-cleanup` has sat
+deliberately disabled for weeks (task [[0200]]) — so if the oracle is ever
+parked the same way, silencing these two is part of parking it.
