@@ -404,7 +404,7 @@ export class EventBridgeStack extends cdk.Stack {
     // public Soroban-RPC egress (no S3, no VPC). Polls the Reflector SEP-40
     // oracle and writes prices.oracle_prices. Non-critical (§2.2).
     // -----------------------------------------------------------------
-    this.oracleFunction = createWorkerLambda(this, {
+    const oracle = createWorkerLambda(this, {
       config,
       accountId,
       mtlsSecretName: discoveryMtlsSecretName,
@@ -422,7 +422,33 @@ export class EventBridgeStack extends cdk.Stack {
       alarmDescription:
         'Oracle Lambda invocation errors (informational; oracle is non-critical — §2.2 — and degrades to last-known value).',
       alarmPeriod: cdk.Duration.minutes(5),
-    }).function;
+    });
+    this.oracleFunction = oracle.function;
+
+    // The worker publishes its pass metrics (OracleRuns, OracleFailedRuns,
+    // OracleSymbolsQueried, OracleRowsWritten, OracleRowsSkipped,
+    // OracleTimestampRejected, OracleUsdRatesSnapshotted) under the
+    // `Prices/Oracle` namespace (task 0231). PutMetricData has no
+    // resource-level scoping, so it is `*` constrained to that namespace, as
+    // the enrichment role below already is. The ObservabilityStack's
+    // `-dark-feed` and `-timestamp-rejected` alarms read these.
+    //
+    // ⚠️ The namespace here, the `METRIC_NAMESPACE` constant in
+    // `oracle-worker/src/metrics.rs`, and the alarms' `namespace` must agree
+    // exactly. A mismatch is invisible at deploy time: the publish fails closed
+    // at runtime (logged as a non-fatal warning) and the alarms read a series
+    // that never appears, which CloudWatch reports as 0 datapoints rather than
+    // as an error (task 0204).
+    oracle.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'PublishOracleMetrics',
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: { 'cloudwatch:namespace': 'Prices/Oracle' },
+        },
+      }),
+    );
 
     new cdk.CfnOutput(this, 'OracleFunctionName', {
       value: this.oracleFunction.functionName,
