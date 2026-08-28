@@ -100,6 +100,25 @@ history:
       run. Separately, PR #264 merged as `9c8a331`, so `develop` now carries
       [[0235]]'s prefix move and the deploy is split in two: the prefix first
       with the portal still closed, the flag second.
+  - date: "2026-08-28"
+    status: active
+    who: akot
+    note: >
+      Prefix deploy went out at 13:16-13:31Z (all six stacks), portal still
+      closed. Re-ran every check [[0235]] had invalidated, against the deployed
+      stack: check 3 and check 4 now PASS on `/api/api/{proxy+}` and are ticked;
+      check 1's gateway half passes with the three entries at 10/40 and caching
+      off and no old-prefix entry surviving, while its response half stays
+      blocked by the closed portal. Check 9's bundle half re-scanned on the 13
+      newly deployed files — zero real key values, zero third-party references,
+      the only suspicious strings being base64 slices and [[0233]]'s design
+      placeholder. Check 11's host half fully audited on
+      `production-soroban-explorer-api-spa` and PASSES. **One prediction was
+      wrong and is corrected in the body: the orphaned `api-tokens/*` objects
+      are NOT inert — `/api-tokens/` still returns 200 with the old bundle via
+      the default behaviour and `DirectoryIndexFn`'s trailing-slash rewrite,
+      and that stale app then 403s on its own backend.** Four objects to delete
+      before opening.
 ---
 
 # Portal security and ops audit
@@ -160,8 +179,15 @@ are properties of the serving distribution and are answered against
 `EA2TLS5SS5M87`; the rest are answered against our own stacks and were settled
 on 2026-08-28:
 
-- [ ] ⏳ **2026-08-28: gateway half PASS, response half BLOCKED + invalidated
-      by [[0235]].** The three portal `methodSettings` entries read
+- [ ] ⏳ **2026-08-28, RE-RUN after the prefix deploy: gateway half PASS on the
+      new paths.** `get-stage` after 13:30Z: 13 entries, the three
+      `api/api/{proxy+}` verbs all `cachingEnabled: false`, rate 10, burst 40,
+      and **no entry naming the old prefix survives**. `/api/api/config` carries
+      `cache-control: no-store` through CloudFront and the gateway alike. The
+      response half stays BLOCKED — the other routes are still [[0183]]'s empty
+      `404`, and they carry **no** `Cache-Control` at all (the [[0183]] note
+      below). Earlier reading, now superseded: **gateway half PASS, response
+      half BLOCKED + invalidated by [[0235]].** The three portal `methodSettings` entries read
       `cachingEnabled: false` on the deployed stage, and `/config` carries
       `no-store` through both layers; every other route is [[0183]]'s empty
       `404`, so its `no-store` is unobservable while closed. The entries were
@@ -182,14 +208,21 @@ on 2026-08-28:
       reaches the origin signed in. Today that distribution has **no origin
       pointing at our API at all**, `/api/*` is `GET`/`HEAD` only and sits
       behind the `production-soroban-explorer-basic-auth` function
-- [ ] ⏳ **2026-08-28: PASS, invalidated by [[0235]].** Synth with the flag
-      both ways: 13 entries vs 5, and all three portal entries byte-identical in
+- [x] ✅ **2026-08-28, RE-RUN after the prefix deploy: PASS on the new paths.**
+      Synth both ways at `develop`: 13 entries vs 5, and all three
+      `/api/api/{proxy+}` entries byte-identical in both arms
+      (`CachingEnabled: false`, 10/40). Nothing portal-shaped is missing from
+      the `cacheEnabled: false` arm. Earlier reading: PASS, then invalidated by
+      [[0235]]. Synth with the flag both ways: 13 entries vs 5, and all three portal entries byte-identical in
       both arms; the `ON ONLY` set is exactly the cache TTL table, which carries
       no throttle. Re-run the two-arm diff on the new paths. Report E3.
       The full `methodSettings` array contains every portal route in **both**
       arms of the `cacheEnabled` branch — flip `apiGatewayCacheEnabled` off in a
       synth and diff
-- [ ] ⏳ **2026-08-28: PASS, invalidated by [[0235]].** `get-resources`:
+- [x] ✅ **2026-08-28, RE-RUN after the prefix deploy: PASS on the new paths.**
+      `get-resources` after 13:30Z: `/api/api/{proxy+}` carries `GET`, `POST`
+      and `DELETE`, every one `apiKeyRequired=False`, `authorizationType=NONE`,
+      with throttle 10/40 from `get-stage`. Earlier reading: `get-resources`:
       `apiKeyRequired=False` on all three verbs, with throttle 10/40 from
       `get-stage`. Measured on the old resource path. Report E4.
       Anonymous sign-in routes carry their own method-level throttle and are not
@@ -228,8 +261,11 @@ on 2026-08-28:
       `ResourceNotFoundException`, in `eu-central-1` and `us-east-1` alike.
       Blocker B1, owner [[0186]], runbook §2. The other two halves PASS: every
       secret-shaped env var across 11 live functions and 6 templates is a NAME,
-      and the deployed bundle carries no secret — re-scan the bundle after
-      [[0235]] rebuilds it. Report E9.
+      and the deployed bundle carries no secret. **Re-scanned 2026-08-28 after
+      [[0235]] rebuilt it** (13 files under `api/`): zero real API key values,
+      zero third-party or CDN references. Three 40-character runs are slices of
+      an inline base64 asset, and `sf_live_k8mN…Sw4` is the design's placeholder
+      key that [[0233]] owns — neither is a credential. Report E9.
       The Discord client secret is in Secrets Manager and in no environment
       variable, and no secret is in the static bundle
 - [x] ✅ **2026-08-28: FAIL → PASS, seeded the same day.** Both parameters were
@@ -251,9 +287,13 @@ on 2026-08-28:
       `BLOCK_ALL`, `IsPublic false`, `BucketOwnerEnforced`, OAC sigv4 scoped to
       this distribution by `AWS:SourceArn`, anonymous GET → `403`. Report E11.
       The bundle now also lands in `production-soroban-explorer-api-spa`, whose
-      public-access block and policy status were spot-checked clean on
-      2026-08-28 but whose policy, OAC scoping and anonymous-GET behaviour have
-      NOT been audited — do that before sign-off.
+      public-access block, policy status, **policy, OAC scoping and anonymous
+      GET were all audited on 2026-08-28 and PASS**: `BLOCK_ALL` on all four
+      flags, `IsPublic false`, a single `s3:GetObject` grant to
+      `cloudfront.amazonaws.com` conditioned on
+      `AWS:SourceArn = …distribution/EA2TLS5SS5M87`, and an anonymous GET on
+      `api/index.html` answering `403`. What remains for this check at sign-off
+      is only that the bundle actually served from there is the portal's.
       The portal bucket has no public access and is reachable only through OAC
 - [x] ✅ **2026-08-28: PASS, unaffected.** Measured 4 calls ≈ 1.3 s cold, 2 ≈
       0.64 s warm, against 2 054 CloudTrail events in 14 days (peak 12/s, 37/min,
@@ -273,6 +313,34 @@ on 2026-08-28:
       still costs two. Cost it here against real traffic, and note [[0190]]'s two
       cheaper remedies before any storage is considered: de-duplicate the shared
       listing, and give the reveal the cache the usage route already has
+
+## ⚠️ Found after the prefix deploy: the old portal is still served
+
+**Corrected prediction.** [[0235]] and this task both recorded that the
+`api-tokens/*` objects left in the bundle bucket would be inert because
+"nothing routes to them". That is wrong, and it was measured wrong: probing
+`https://dojr4epgxo2qp.cloudfront.net/api-tokens/` on 2026-08-28 after the
+deploy returns **`200` with the OLD bundle**.
+
+The path no longer matches any behaviour, so it falls to `DefaultCacheBehavior`
+— which is the S3 origin. `DirectoryIndexFn`'s trailing-slash branch rewrites
+`/api-tokens/` to `/api-tokens/index.html`, that key still exists, and S3 serves
+it. The stale app then calls `/api-tokens/api/config`, which **is** unmapped and
+answers `403`, so a visitor holding the old bookmark gets the previous portal
+stuck on its "could not reach the backend" state.
+
+Four objects, all disposable and all re-creatable by a deploy:
+
+```
+api-tokens/index.html                    556 B    2026-08-27
+api-tokens/favicon.ico                15 086 B    2026-08-27
+api-tokens/assets/index-BDDTU4A6.js  248 284 B    2026-08-27
+api-tokens/assets/index-x1XGuNl0.css       1 B    2026-08-27
+```
+
+`prune` is scoped to `destinationKeyPrefix`, so no deploy will ever remove them.
+Delete them before the portal opens — a URL that was the documented one until
+today should 404, not serve a broken copy.
 
 ## Hosting preconditions (new, 2026-08-28)
 
