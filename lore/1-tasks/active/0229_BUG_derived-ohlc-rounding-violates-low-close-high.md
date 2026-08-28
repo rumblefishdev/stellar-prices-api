@@ -261,9 +261,45 @@ in-band, so this will **not** surface on its own. Recorded because a finding tha
 overstates its own detectability argues for deferring it, when the truth argues
 the opposite.
 
-Not folded into this PR: `vwap` is a distinct output field with its own
-semantics, outside this task's ACs and outside the ADR 0011 §3 amendment, and
-changing it is a consumer-visible contract decision. Held for an explicit call.
+### ✅ Finding 1 — FIXED 2026-08-28 on an explicit call, and it was worse than measured
+
+Folded in after the decision. `vwap` is now clamped into the **published**
+`[low, high]` — the values the caller sees, not the raw aggregates — so the
+response is self-consistent. A volume-weighted mean of prices inside a bucket
+must lie inside that bucket's range, so this restates what vwap *is* rather than
+correcting it.
+
+#### 🔴 The as-stored path has it too, and a one-row probe said otherwise
+
+`Denomination::QuoteLeg` applies no rate, so `o`/`h`/`l`/`c` are stored decimals
+and genuinely cannot cross — the earlier "structurally incapable" note holds for
+*those*. It does not hold for `vw`, which is a float weighted mean on every path.
+
+⚠️ **The first measurement of that arm was a FALSE NEGATIVE and nearly closed the
+question.** One source per bucket: **0 violations in 200,000**. Two sources at
+equal prices — the boundary case, and the case the aggregate exists for:
+**12,017 above `high` and 12,026 below `low` in 200,000 buckets**.
+
+🔑 A one-row probe of a MERGE aggregate tests a path production does not have.
+The same mistake then repeated in the test itself: the first XLM seed passed
+against the unclamped query, i.e. it was vacuous, and only a search over that
+arm's own expression produced a seed that actually crosses (2.048e-11 below the
+low). Recorded because both errors had the same shape — a clean result from a
+probe that could not have been dirty.
+
+#### Non-vacuity, all three
+
+| test | fails unclamped, gap |
+|---|---|
+| `ohlcv_vwap_cannot_round_above_the_high` | 1.0e-11 |
+| `ohlcv_vwap_cannot_round_below_the_low` | 1.0e-11 |
+| `ohlcv_xlm_merged_vwap_stays_inside_the_band` | 2.048e-11 |
+
+`assert_ohlc_ordered` now checks vwap on **every** candle it is applied to, so all
+26 integration tests carry the bound rather than only the three that target it.
+It skips the zero sentinel — `0` there means "no weighted mean", not "a vwap of
+zero", and the as-stored arm's `isNull` branch preserves that rather than
+clamping a missing value up to `low`.
 
 ## Acceptance Criteria
 

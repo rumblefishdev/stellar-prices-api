@@ -223,10 +223,19 @@ is already at 14 decimals, and that change is a no-op.
 preserves, and moves an extreme by at most the ulp the derivation had already
 introduced — it cannot invent a value beyond the rounding error already present.
 
+**`vwap` is clamped into the published `[low, high]` on the same grounds**, and on
+**every** denomination — including the as-stored `base_currency=XLM` path, whose
+O/H/L cannot cross but whose merged vwap can. It carries a second float
+round-trip (`sum(vwap × volume) / sum(volume)`), so it escapes the band far more
+readily than the extremes do: ~8.8% of single-trade candles at BTC scale in USD
+mode, and 12,017-of-200,000 in each direction on the as-stored path with two
+sources. A volume-weighted mean of prices within a bucket must lie within that
+bucket's range, so this restates what `vwap` is rather than adjusting it.
+
 ⚠️ **Consequence a consumer can observe:** on a candle that closed at its low or
 its high, `low` or `high` may now be *exactly* equal to `close` where it
-previously differed in the last picoseconds of precision. That is the intended
-outcome. `open` is unaffected and needs no clamp — it is scaled by the same rate
+previously differed in the last picoseconds of precision; and `vwap` may sit
+exactly on `low` or `high` for the same reason. That is the intended outcome. `open` is unaffected and needs no clamp — it is scaled by the same rate
 as the extremes, and scaling by one positive factor is monotonic, so
 `low <= open <= high` holds within a row and survives `min`/`max` across rows.
 Only the exact/derived boundary was ever at risk.
