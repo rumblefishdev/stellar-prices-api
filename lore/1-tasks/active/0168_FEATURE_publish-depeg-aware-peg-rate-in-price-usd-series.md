@@ -2,7 +2,7 @@
 id: "0168"
 title: "Publish the real peg rate in price_usd_series instead of a hardcoded $1"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0165", "0167", "0154", "0151", "0150", "0172", "0196", "0173"]
 tags:
@@ -38,6 +38,21 @@ history:
       for the measured rate" is safe as designed. The restriction survives as a
       standing condition on ADDING peg members, now guarded by two pinning
       tests rather than by prose.
+  - date: 2026-08-31
+    status: active
+    who: okarcz
+    note: >
+      Activated straight after [[0178]] closed, because 0178 CREATED an
+      inconsistency this task resolves: the tip surface now publishes canonical
+      USDC at the MEASURED rate tagged method='oracle' (prod, $1.00005447313041),
+      while price_usd_series still publishes the hardcoded 1 tagged 'peg'. Our
+      two surfaces disagree about the same asset. 0178 also built the read
+      pattern this needs - prices.usd_rate, ASOF at-or-before, method='oracle',
+      refused past a staleness window, and allowlisted to USDC BY NAME because
+      Reflector prices the USDT TICKER at par while the Stellar issuer's token
+      is worth ~$0.13 (widening stays gated on [[0173]]). Transplant that shape;
+      do not re-derive it. Note 0178 emitted 'oracle' first, ahead of the
+      vocabulary reservation in views.sql:179.
 ---
 
 # ✅ HOLD LIFTED 2026-08-13 — this task is unblocked
