@@ -1050,3 +1050,313 @@ async fn price_xlm_lands_on_the_sentinel_when_the_xlm_divisor_is_missing() {
 
     teardown(db).await;
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Task 0178 — the quote-leg surface: USDC's row, both-leg volume, provenance.
+// ───────────────────────────────────────────────────────────────────────────
+
+const USDC_ISSUER: &str = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
+/// Stands in for the canonical Stellar USDT (GCQTGZQQ…TG6V) — the identity the
+/// oracle prices at par while the token itself trades at a deep discount.
+const USDT_ISSUER: &str = "GCQTGZQQTG6VZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZTG6V";
+
+fn insert_asset(db: &str, id: u32, code: &str, issuer: &str) -> String {
+    format!(
+        "INSERT INTO {db}.assets \
+         (asset_id, asset_code, asset_type, issuer_address, contract_address, \
+          sac_address, home_domain, is_active, created_at, updated_at) \
+         VALUES ({id}, '{code}', 'classic', '{issuer}', '', '', '', 1, now(), now())"
+    )
+}
+
+/// A candle for `base` quoted in `quote`, carrying `vol_usd` of USD value.
+fn insert_pair(db: &str, base: u32, quote: u32, close_usd: &str, vol_usd: &str) -> String {
+    format!(
+        "INSERT INTO {db}.price_ohlcv_1m \
+         (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+          volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+         VALUES (now() - INTERVAL 5 MINUTE, {base}, {quote}, 'sdex', {close_usd}, {close_usd}, \
+          {close_usd}, {close_usd}, 50, {vol_usd}, {vol_usd}, {close_usd}, {close_usd}, 1, 1)"
+    )
+}
+
+fn insert_rate(db: &str, code: &str, issuer: &str, rate: &str) -> String {
+    format!(
+        "INSERT INTO {db}.usd_rate \
+         (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+          usd_rate, method, reference_asset, hops, version) \
+         VALUES ('credit', '{code}', '{issuer}', '', now() - INTERVAL 5 MINUTE, \
+          {rate}, 'oracle', '', 0, 1)"
+    )
+}
+
+/// SYSTEM REFRESH is asynchronous, so every caller must WAIT for the write to
+/// land. Polling on a row COUNT rather than sleeping keeps the test honest on a
+/// slow machine and fast on a quick one.
+async fn refresh(admin: &Client, db: &str, expect_rows: u64) {
+    admin
+        .query(&format!("SYSTEM REFRESH VIEW {db}.mv_current_prices"))
+        .execute()
+        .await
+        .expect("refresh view");
+    for _ in 0..30 {
+        let n: u64 = admin
+            .query(&format!("SELECT count() FROM {db}.current_prices FINAL"))
+            .fetch_one()
+            .await
+            .expect("count current_prices");
+        if n >= expect_rows {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    panic!("MV did not write {expect_rows} row(s) to {db}.current_prices in time");
+}
+
+async fn method_of(admin: &Client, db: &str, asset: u32) -> String {
+    admin
+        .query(&format!(
+            "SELECT method FROM {db}.current_prices FINAL WHERE asset_id = {asset}"
+        ))
+        .fetch_one::<String>()
+        .await
+        .unwrap_or_else(|e| panic!("method for {asset}: {e}"))
+}
+
+/// The headline defect: canonical USDC never trades as a BASE leg, so every
+/// base-keyed aggregate skipped it and `/price` returned 404. It must now
+/// publish a row, priced from the measured rate rather than a $1 placeholder,
+/// and tagged so a consumer can tell the two apart.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn usdc_publishes_a_row_from_the_measured_rate_and_is_tagged_oracle() {
+    let db = "it_current_mv_0178_usdc";
+    let admin = setup(db).await;
+
+    for q in [
+        insert_asset(db, 1, "XLM", ""),
+        insert_asset(db, 2, "USDC", USDC_ISSUER),
+        insert_asset(db, 4, "TKN", "GTKN"),
+        // USDC appears ONLY as a quote leg, exactly as on prod.
+        insert_pair(db, 1, 2, "0.5", "10000"),
+        insert_pair(db, 4, 2, "2.0", "2000"),
+        insert_rate(db, "USDC", USDC_ISSUER, "0.9993"),
+    ] {
+        admin.query(&q).execute().await.expect("fixture");
+    }
+    refresh(&admin, db, 3).await;
+
+    let w = format!("FROM {db}.current_prices FINAL WHERE asset_id = 2");
+    let price = scalar_f64(&admin, &format!("SELECT toFloat64(price_usd) {w}")).await;
+    assert!(
+        (price - 0.9993).abs() < 1e-9,
+        "USDC must carry the MEASURED rate, not a $1 placeholder — got {price}"
+    );
+    assert_eq!(method_of(&admin, db, 2).await, "oracle");
+
+    // Volume counts the quote leg: 10,000 + 2,000. Base-only summed an empty
+    // set and published 0, which is the bug.
+    let vol = scalar_f64(&admin, &format!("SELECT toFloat64(volume_24h_usd) {w}")).await;
+    assert!(
+        (vol - 12_000.0).abs() < 1e-6,
+        "USDC volume must sum its quote-leg trades — got {vol}"
+    );
+
+    // Derived columns land on documented sentinels rather than fabrications:
+    // there is no 24h baseline for an asset that does not trade as a base.
+    let chg = scalar_f64(&admin, &format!("SELECT toFloat64(change_24h_pct) {w}")).await;
+    assert_eq!(chg, 0.0, "no fabricated 24h change for a synthesised row");
+    let vwap = scalar_f64(&admin, &format!("SELECT toFloat64(vwap_24h) {w}")).await;
+    assert_eq!(
+        vwap, 0.0,
+        "vwap is a per-venue statistic; USDC has no venues"
+    );
+    let srcs: String = admin
+        .query(&format!("SELECT sources {w}"))
+        .fetch_one()
+        .await
+        .expect("sources");
+    assert_eq!(srcs, "{}", "no venues → empty sources object, not an error");
+
+    // price_xlm IS derivable and must be real: 0.9993 / 0.5.
+    let pxlm = scalar_f64(&admin, &format!("SELECT toFloat64(price_xlm) {w}")).await;
+    assert!(
+        (pxlm - 1.9986).abs() < 1e-9,
+        "price_xlm is a real quotient here — got {pxlm}"
+    );
+
+    teardown(db).await;
+}
+
+/// 🔴 The regression this task must never cause. Reflector prices the TICKER
+/// "USDT" at par, and `usd_rate` files that under the Stellar issuer's address
+/// — whose token really is worth ~$0.13 since it depegged in June 2022 (task
+/// 0172, not a defect). Reading the oracle for that identity would republish a
+/// ~7.4x error wearing the MORE authoritative label. The allowlist is USDC by
+/// name; widening it is gated on task 0173.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn the_oracle_allowlist_is_usdc_only_and_never_repegs_stellar_usdt() {
+    let db = "it_current_mv_0178_usdt";
+    let admin = setup(db).await;
+
+    for q in [
+        insert_asset(db, 1, "XLM", ""),
+        insert_asset(db, 3, "USDT", USDT_ISSUER),
+        // USDT trades as a base at its real, depegged value.
+        insert_pair(db, 3, 1, "0.13", "65"),
+        // The trap: a par rate filed under the depegged issuer's identity.
+        insert_rate(db, "USDT", USDT_ISSUER, "1.0"),
+    ] {
+        admin.query(&q).execute().await.expect("fixture");
+    }
+    refresh(&admin, db, 1).await;
+
+    let w = format!("FROM {db}.current_prices FINAL WHERE asset_id = 3");
+    let price = scalar_f64(&admin, &format!("SELECT toFloat64(price_usd) {w}")).await;
+    assert!(
+        (price - 0.13).abs() < 1e-9,
+        "Stellar USDT must keep its MARKET value; the oracle's par reading for \
+         the ticker must not reach it — got {price}"
+    );
+    assert_eq!(
+        method_of(&admin, db, 3).await,
+        "traded",
+        "a market-priced asset is 'traded'; tagging it 'oracle' would assert \
+         authority this price does not have"
+    );
+
+    teardown(db).await;
+}
+
+/// `method` must follow the ARM that produced the row, not the asset's
+/// identity. Caught by this fixture during 0178's implementation: an earlier
+/// revision keyed on `asset_id = usdc_asset_id`, so the moment USDC gained a
+/// base candle it served a real TRADED close tagged 'oracle'.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn usdc_with_a_base_candle_is_traded_not_oracle_and_never_doubles() {
+    let db = "it_current_mv_0178_arm";
+    let admin = setup(db).await;
+
+    for q in [
+        insert_asset(db, 1, "XLM", ""),
+        insert_asset(db, 2, "USDC", USDC_ISSUER),
+        insert_pair(db, 1, 2, "0.5", "10000"),
+        insert_rate(db, "USDC", USDC_ISSUER, "0.9993"),
+        // USDC now ALSO trades as a base — the synthesised arm must stand down.
+        insert_pair(db, 2, 1, "1.01", "50"),
+    ] {
+        admin.query(&q).execute().await.expect("fixture");
+    }
+    refresh(&admin, db, 2).await;
+
+    let rows: u64 = admin
+        .query(&format!(
+            "SELECT count() FROM {db}.current_prices FINAL WHERE asset_id = 2"
+        ))
+        .fetch_one()
+        .await
+        .expect("count");
+    assert_eq!(
+        rows, 1,
+        "the synthesised arm and the traded row must be mutually exclusive — \
+         two rows would let the ReplacingMergeTree coin-flip between them"
+    );
+
+    let price = scalar_f64(
+        &admin,
+        &format!("SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = 2"),
+    )
+    .await;
+    assert!(
+        (price - 1.01).abs() < 1e-9,
+        "a real traded close outranks the synthesised rate — got {price}"
+    );
+    assert_eq!(
+        method_of(&admin, db, 2).await,
+        "traded",
+        "the label follows the producing arm; a traded price tagged 'oracle' \
+         is worse than either alone"
+    );
+
+    teardown(db).await;
+}
+
+/// Both legs, one rule for every asset — and the per-venue weighting stays
+/// base-only. Asserted together so a later edit cannot quietly re-base one
+/// without the other.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn volume_counts_both_legs_while_per_source_weighting_stays_base_only() {
+    let db = "it_current_mv_0178_vol";
+    let admin = setup(db).await;
+
+    for q in [
+        insert_asset(db, 1, "XLM", ""),
+        insert_asset(db, 2, "USDC", USDC_ISSUER),
+        insert_asset(db, 3, "USDT", USDT_ISSUER),
+        // XLM as a BASE: $10,000.
+        insert_pair(db, 1, 2, "0.5", "10000"),
+        // XLM as a QUOTE: $65 more.
+        insert_pair(db, 3, 1, "0.13", "65"),
+    ] {
+        admin.query(&q).execute().await.expect("fixture");
+    }
+    refresh(&admin, db, 2).await;
+
+    let w = format!("FROM {db}.current_prices FINAL WHERE asset_id = 1");
+    let vol = scalar_f64(&admin, &format!("SELECT toFloat64(volume_24h_usd) {w}")).await;
+    assert!(
+        (vol - 10_065.0).abs() < 1e-6,
+        "volume_24h_usd counts BOTH legs (10,000 base + 65 quote) — got {vol}"
+    );
+
+    // The per-venue figure inside `sources` feeds the §5.5 threshold and the
+    // VWAP weighting, where the base leg is the right unit. It must NOT move.
+    let srcs: String = admin
+        .query(&format!("SELECT sources {w}"))
+        .fetch_one()
+        .await
+        .expect("sources");
+    assert!(
+        srcs.contains("\"volume_24h\":\"10000\""),
+        "per-source volume must stay BASE-only — got {srcs}"
+    );
+
+    teardown(db).await;
+}
+
+/// An asset whose candles are all un-enriched has `price_usd = 0` and no
+/// method that applies. It must carry the '' sentinel, not 'traded' — labelling
+/// a missing price as a real aggregate is the ambiguity this column removes.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn an_unpriced_asset_carries_the_empty_sentinel_not_traded() {
+    let db = "it_current_mv_0178_sentinel";
+    let admin = setup(db).await;
+
+    for q in [
+        insert_asset(db, 1, "XLM", ""),
+        insert_asset(db, 5, "RAW", "GRAW"),
+        // close_usd = 0: ingested but never enriched.
+        insert_pair(db, 5, 1, "0", "0"),
+    ] {
+        admin.query(&q).execute().await.expect("fixture");
+    }
+    refresh(&admin, db, 1).await;
+
+    let price = scalar_f64(
+        &admin,
+        &format!("SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = 5"),
+    )
+    .await;
+    assert_eq!(price, 0.0, "no priced candle → the 0 sentinel");
+    assert_eq!(
+        method_of(&admin, db, 5).await,
+        "",
+        "no method applies to a missing price"
+    );
+
+    teardown(db).await;
+}

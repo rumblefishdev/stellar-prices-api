@@ -232,12 +232,12 @@ mod tests {
         // enrichment_frontier) + 7 close_usd ALTERs (one per OHLCV grain) + 1
         // assets.sac_address ALTER (task 0061) + 2 backfill_progress ALTERs
         // (earliest_data_available [0073 half → 0053] + newest_data_available
-        // [0053]) = 31 statements.
+        // [0053]) + 1 current_prices.method ALTER (task 0178) = 32 statements.
         // (+discovery_state task 0054, +asset_supply task 0039, +unresolved_pools
         // + pool_registry task 0053, +asset_metadata task 0067, +ingest_cursor
         // task 0064, +usd_rate task 0167, +enrichment_frontier task 0111.)
         let stmts = split_statements(INIT_SQL);
-        assert_eq!(stmts.len(), 31, "got {}", stmts.len());
+        assert_eq!(stmts.len(), 32, "got {}", stmts.len());
     }
 
     #[test]

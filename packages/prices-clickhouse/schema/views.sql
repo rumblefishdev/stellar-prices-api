@@ -528,10 +528,16 @@ WHERE sac_address != '';
 -- named them, `sources` / `price_xlm` / `change_*_pct` / `vwap_24h` were
 -- unreachable to that consumer no matter what the MV wrote.
 --
+-- Task 0178 appends `method` (14 columns) — the same provenance vocabulary
+-- price_usd_series carries, now on the tip. `'oracle'` marks the canonical-USDC
+-- row, whose price comes from prices.usd_rate rather than from candles; `''` is
+-- the unavailable sentinel. See init.sql's block on prices.current_prices for
+-- the full vocabulary and why it is NOT usd_rate.method.
+--
 -- ⚠️ NEW COLUMNS ARE APPENDED, NEVER INSERTED — which protects column ORDER,
 -- not ARITY. The first six keep the positions they shipped with (hence
 -- `updated_at` sitting mid-list rather than last), so nothing is re-ordered
--- underneath a consumer; but every consumer now gets 13 columns where it got 6.
+-- underneath a consumer; but every consumer now gets 14 columns where it got 6.
 -- Anything decoding POSITIONALLY off `SELECT *` — a fixed-arity tuple fetch, a
 -- clickhouse-crate row struct, `INSERT INTO t SELECT * FROM …` — breaks on the
 -- extra columns. In-cluster consumers (BE's 0199 contract) should pin an
@@ -561,6 +567,7 @@ SELECT
     c.volume_24h_usd   AS volume_24h_usd,
     c.market_cap_usd   AS market_cap_usd,
     c.vwap_24h         AS vwap_24h,
-    c.sources          AS sources
+    c.sources          AS sources,
+    c.method           AS method
 FROM prices.current_prices AS c FINAL
 INNER JOIN prices.assets AS a FINAL ON a.asset_id = c.asset_id;
