@@ -1031,7 +1031,16 @@ sign-in and key issue, which is this task's remaining acceptance criterion.
   matches no behaviour and serves Explorer directly. Requirements for the owning
   repo: `audit/2026-08-31-explorer-distribution-requirements.md`.
 
-- **Production and `develop` disagree about the flag.** `PORTAL_ENABLED` is
+- **Production and `develop` disagree — no longer about the flag, but about
+  everything after it.** Amended 2026-08-31 (Adam): `PORTAL_ENABLED` is
+  `'true'` on `origin/develop` too (`7e73dc5` merged), so a deploy from
+  `develop` would NOT close the portal. It would break it differently:
+  `develop` still has the gateway at `/api/api/{proxy+}`, no custom domain,
+  no CORS, no `PORTAL_WEB_ORIGIN` and no tag-on-create grant — so
+  `cdk deploy` from there deletes the domain, certificate and records, moves
+  the resource back, and every call from the bundle on the shared host
+  fails again. Merging this branch is still what fixes it. The original
+  note — `PORTAL_ENABLED` is
   `'true'` on this branch and live in production, and **`'false'` on
   `origin/develop`** — the flip was deployed from an unmerged branch. Nothing is
   wrong today, but the first `cdk deploy` run from `develop`, by CI or by anyone
