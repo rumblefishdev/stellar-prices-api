@@ -124,6 +124,108 @@ transplants, but `current_prices` is materially different:
 traded reading, per 0165's requirement 2. `current_prices` has no `method`
 column today, so adding one is part of this task.
 
+# 📕 DEPLOY RUNBOOK — the DROP + recreate
+
+Written 2026-08-31, BEFORE any schema work, per AC 6.
+
+## First: the 0095 comparison in this task's header OVERSTATES the danger
+
+The header says this is "the operation that wiped the coarse tables in [[0095]]".
+The statement form is the same; **the failure mechanism is not**, and the
+difference decides how much ceremony this needs.
+
+0095's rollup MVs wrote into tables holding YEARS of history, in replace mode,
+from a SELECT windowed to 2 hours — so a refresh replaced the whole table with
+2 hours and the history was gone. `mv_current_prices` is also replace-mode, but
+`current_prices` **holds no history at all**: it is one row per asset, fully
+recomputed from `price_ohlcv_1m` every minute. There is nothing in it that
+cannot be rebuilt by the next successful refresh. `current.sql:20-24` says so
+outright — "the MV fully recomputes every row on each refresh".
+
+**So the realistic worst case is not data loss. It is a SILENT FREEZE.**
+
+## 🔴 The actual risk: a failed recreate is invisible
+
+Measured 2026-08-31: **no alarm covers `current_prices` freshness.**
+`rollup-freshness-probe` watches the `price_ohlcv_*` tiers only, and no
+Observability construct references `current_prices`.
+
+So if the `DROP` succeeds and the `CREATE` fails, the table keeps its last rows
+and serves them **indefinitely**, and nothing pages. `/price` returns HTTP 200
+with a plausible price that silently stops moving. This is worse than an outage
+because every consumer-side health check passes.
+
+⚠️ Second failure mode, ranked ABOVE the first for damage: the recreate
+SUCCEEDS with a `TO (...)` / SELECT ordering mismatch. The MV inserts
+POSITIONALLY (`current.sql:26-30`), so a mismatch writes every column into the
+wrong slot — publishing confident garbage rather than stale truth.
+
+## Sequence
+
+Run as the DDL-capable user, not `prices_reader` (it is READ-ONLY — a
+`SETTINGS` clause alone is refused, code 164). CH password from AWS Secrets
+Manager, never typed. SQL goes through the operator's `CHQ <<'SQL'` heredoc.
+
+**Step 0 — capture, before touching anything.** All three, to files:
+
+```sql
+SHOW CREATE VIEW prices.mv_current_prices;   -- verbatim, this IS the rollback
+SHOW CREATE TABLE prices.current_prices;
+SELECT count() AS rows, max(updated_at) AS tip,
+       countIf(price_usd > 0) AS priced
+FROM prices.current_prices FINAL;
+```
+
+Record `rows` / `tip` / `priced` in this task file. They are the baseline every
+later check compares against.
+
+**Step 1 — `ALTER TABLE prices.current_prices ADD COLUMN method ...`.**
+Additive and independent of the MV. Safe to land on its own and safe to LEAVE
+in place on rollback — an unwritten column with a default harms nothing. Doing
+it first keeps the risky window as short as possible.
+
+**Step 2 — DROP + CREATE the MV, as ONE pasted block, not two statements.**
+Minimises the window in which the table has no writer.
+
+**Step 3 — verify within 2 refresh cycles (~2 min).** Not one: a single cycle
+can be mid-write.
+
+```sql
+SELECT count() AS rows, max(updated_at) AS tip,
+       countIf(price_usd > 0) AS priced,
+       countIf(method = 'oracle') AS oracle_rows
+FROM prices.current_prices FINAL;
+```
+
+Pass conditions, ALL of them:
+- `rows` within a percent or two of baseline — a large drop means the new SELECT
+  lost assets;
+- `tip` **advancing** between two runs a minute apart — this is the freeze check
+  and the one that matters most;
+- `priced` not below baseline;
+- `oracle_rows` = exactly 1 (USDC and nothing else) — the allowlist assertion;
+- spot-check three identities by hand: **USDC** (non-zero, `method='oracle'`),
+  **USDT @ `GCQTGZQQ…TG6V`** (still ~$0.13, NOT `'oracle'`), **XLM**
+  (`volume_24h_usd` risen, per Design Decision 1 — an unchanged XLM volume means
+  the both-legs change did not take).
+
+**Step 4 — rollback, if any check fails.** Re-apply the Step 0 definition
+verbatim. One statement. Leave the `method` column in place; it is inert
+without the MV writing it. Then re-verify `tip` advances.
+
+## Deploy-order note
+
+Nothing here needs the API deployed first — `method` is additive, and the
+existing handlers pin explicit column lists rather than `SELECT *`
+(`queries_ch.rs:195,252,340`). Confirm that before deploying, not after.
+
+## Owed follow-up
+
+The absence of a `current_prices` freshness alarm is a real gap this task
+UNCOVERED but should not absorb. Spawn a backlog task for it — the probe
+already has the shape (`rollup-freshness-probe`), and the check is
+`max(updated_at)` against wall clock. Cf. [[task-0137-rollup-freshness-alarm-live]].
+
 ## Acceptance Criteria
 
 - [ ] `GET /price` (and `current_price_usd`) returns a row for USDC at the
