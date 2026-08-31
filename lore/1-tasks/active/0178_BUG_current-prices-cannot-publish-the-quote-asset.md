@@ -136,14 +136,86 @@ column today, so adding one is part of this task.
       documented "unavailable" sentinel. **No fabricated `change_*` values.**
 - [ ] USDT and the other peg identities are not flattened from their market
       value — 0165's regression, re-tested here.
-      ⚠️ **Sequencing: [[0172]] must land first or this control is unreadable**,
-      because USDT's market value is currently wrong (~$0.14).
+      ✅ **Sequencing cleared 2026-08-31.** [[0172]] closed + archived
+      2026-08-18, and its finding INVERTS this note: USDT at `GCQTGZQQ…` really
+      did depeg, the candles were right, and the ~$0.14 was never our bug. So
+      the control is readable now — and its pass condition is that USDT KEEPS
+      its real market value. A peg arm that drags USDT to $1.00 is the
+      regression this AC catches.
+- [ ] `volume_24h_usd` counts both legs for every asset, and USDC reports a
+      non-zero figure matching its real quote-side volume. Per-venue
+      `src_volume` unchanged (base-only) — assert both in one test so a future
+      edit cannot quietly re-base the weighting too.
+- [ ] The `GET /assets` default-sort change is asserted, not discovered:
+      a test pins that USDC appears in the first page of the default
+      (`SortCol::Volume24h`) listing where it previously could not.
+- [ ] BE re-confirmed as a non-consumer of `volume_24h_usd` — one line, before
+      the deploy, per the shelf-life warning above.
 - [ ] A rollback plan written **before** the DROP, given [[0095]]. At minimum:
       the current definition captured verbatim, and the `TO` table's row count
       recorded immediately before and after.
 - [ ] Regression test on the 26.3.10.60 pin.
 - [ ] BE told — `/price` is a surface they consume, and "USDC pricing is fixed"
       is currently only true of the series views.
+
+## Design Decisions
+
+### Emerged
+
+Settled with the operator on 2026-08-31, before any schema work.
+
+1. **`volume_24h_usd` counts BOTH legs, for every asset** — not base-only, and
+   not a second column beside the old one.
+
+   *How it works today* (`current.sql:424-432`): `sum(volume_quote_usd)
+   GROUP BY asset_id` over the 24 h window. It groups on the **base** leg and
+   never mentions `quote_asset_id`. Canonical USDC has essentially no rows where
+   it is the base, so the sum runs over an empty set and returns `0` — the same
+   base-only assumption that hides the price, showing up in a second column.
+
+   *Why not leave USDC at `0`* — rejected outright by the operator: USDC has
+   large real volume and `0` is simply a wrong number, not a missing one.
+
+   *Why not a new column beside it* (the third option) — a new
+   `volume_24h_total_usd` leaves `volume_24h_usd` at `0` for USDC, which is the
+   field `/price` serves. It publishes the fix next to the bug and only helps
+   consumers who migrate. Since `0` for USDC is the thing being rejected, this
+   option is rejected with it.
+
+   *Cost, accepted knowingly*: XLM and USDT change value, because they trade
+   heavily on both sides. The resulting column means "total 24 h USD volume this
+   asset participated in", which is the ordinary reading of per-asset volume on
+   a price API — and crucially it is ONE rule for every asset, which is what
+   keeps this out of the [[0144]] "one value meaning several things" class.
+
+2. **The change is confined to the `unfiltered` CTE.** `per_source.src_volume`
+   (`current.sql:221`) stays base-only. That figure drives the §5.5
+   `min_volume_usd` threshold and the VWAP weighting — both are per-venue
+   *weighting* judgments, where the base leg is the right unit. Only
+   `volume_24h_usd`, which reads from `unfiltered`, changes.
+
+3. **The `GET /assets` default sort order will change, and that is intended.**
+   `handlers.rs:241` — `sort = p.sort.unwrap_or(SortCol::Volume24h)` — makes
+   volume the DEFAULT sort of the listing. Re-basing the column reorders the
+   first page of `/assets`; USDC rises from unsortable-at-zero to near the top.
+   Correct, but visible. Recorded here so [[0120]]'s conformance run reads it as
+   an intended change rather than a regression.
+
+## Consumer exposure — measured 2026-08-31
+
+`volume_24h_usd` is a PUBLIC field on three endpoints: `GET /assets/{id}/price`,
+`GET /assets`, and `POST /batch` (`prices-api/src/assets/dto.rs:39,210`;
+`batch/handlers.rs:84`).
+
+**BE is not a consumer.** Confirmed by BE against their merged code on
+2026-08-19: they read `price_usd_series` / `price_usd_series_1h` and only the
+identity triple, the bucket, and `close_usd` — never `current_prices`, never a
+volume column. See [[be-reads-close-usd-only-not-volume-columns]]. So the
+affected consumers are our own published API: the portal, and API-token holders.
+
+⚠️ **Re-confirm before relying on it.** We stated a BE exposure claim once that
+was true when written and false by the time they deployed. One line to BE, not a
+re-derivation from their repo.
 
 ## Notes
 
