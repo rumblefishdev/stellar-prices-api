@@ -29,7 +29,7 @@
 -- EVERY new column must be added to BOTH the TO(...) list and the SELECT, in
 -- matching order.
 --
--- Columns (task 0072 completes the set; all ten are now written):
+-- Columns (0072 completed the original ten; 0178 appends `method` for eleven):
 --   price_usd       — latest PRICED close in the 24h window (argMaxIf, 0135);
 --                     NOT age-bounded — see the unfiltered CTE for why. The
 --                     per-venue pipeline IS bounded, but conditionally: see 1b
@@ -37,7 +37,9 @@
 --   change_24h_pct  — vs the oldest close inside the 24h window
 --   change_7d_pct   — vs the oldest priced close in the [7d, 5d] band of
 --                     price_ohlcv_1h (a real ~7-day baseline or the sentinel)
---   volume_24h_usd  — trailing-24h USD volume, ALL sources (a total, never filtered)
+--   volume_24h_usd  — trailing-24h USD volume, ALL sources (a total, never
+--                     filtered). Counts BOTH legs since 0178 — see `vol_all`
+--   method          — price provenance: 'traded' / 'oracle' / '' (0178)
 --   market_cap_usd  — price_usd × circulating supply from prices.asset_supply
 --   vwap_24h        — USD volume-weighted close across sources, with the §5.5
 --                     min_volume_usd threshold (task 0118) and inter-source
@@ -154,7 +156,7 @@ CREATE MATERIALIZED VIEW prices.mv_current_prices
 REFRESH EVERY 1 MINUTE
 TO prices.current_prices
    (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct,
-    volume_24h_usd, market_cap_usd, vwap_24h, sources, updated_at) AS
+    volume_24h_usd, market_cap_usd, vwap_24h, sources, updated_at, method) AS
 WITH
     -- XLM's own USD close, as a scalar. Resolved by natural key exactly the way
     -- the enrichment worker's resolve_reference_ids() does (ch_enrich.rs:447):
@@ -172,6 +174,58 @@ WITH
               )
           AND timestamp >= now() - INTERVAL 24 HOUR
     ) AS xlm_usd,
+
+    -- ── Task 0178: the canonical-USDC identity and its measured USD rate ─────
+    -- USDC NEVER trades as a base leg (0 candles, by construction — see
+    -- views.sql's peg-set block), so it is absent from every base-keyed CTE
+    -- below and `/price` returned 404 for it. These two scalars are what let
+    -- the `usdc_tip` arm synthesise its row.
+    --
+    -- 🔴 ALLOWLISTED TO USDC BY NAME. Do NOT generalise this to "the peg set",
+    -- to "stablecoins", or to "any asset with a usd_rate row". Reflector prices
+    -- the TICKER "USDT" — Tether's own token, genuinely at par — and we file
+    -- that rate under the Stellar issuer's address, whose token really is worth
+    -- ~$0.13 since it depegged in June 2022 (task 0172, not a defect). Widening
+    -- this lookup would publish ~$1.00 for that identity tagged 'oracle', a
+    -- label that reads as MORE authoritative than the guess it replaced —
+    -- strictly worse than the bug this task fixes. The symbol→issuer mapping
+    -- that makes widening safe is TASK 0173. Same fence as views.sql:102-107.
+    -- ⚠️ This address is duplicated from prices_clickhouse::USDC_ISSUER (Rust),
+    -- which is the single source of truth; a SQL literal cannot reference it.
+    -- views.sql carries the same copy under the same rule — keep all three in
+    -- step.
+    (
+        SELECT asset_id FROM prices.assets FINAL
+        WHERE asset_code = 'USDC'
+          AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+          AND contract_address = ''
+        LIMIT 1
+    ) AS usdc_asset_id,
+
+    -- The rate itself: ASOF at-or-before `now()`, never averaged (task 0167's
+    -- resolution rule), and REFUSED past a staleness window — an unbounded
+    -- forward-fill would present a three-day-old reading as the live price.
+    --
+    -- `method = 'oracle'` selects a MEASURED reading. usd_rate keys on
+    -- (identity, timestamp, method) precisely so a 0154 'pivot' row cannot
+    -- silently replace a measurement; the consumer chooses, and this consumer
+    -- chooses measured or nothing.
+    --
+    -- 24 HOUR matches this MV's own window. If the oracle goes quiet for longer
+    -- the scalar is 0, `usdc_tip` emits NO ROW, and behaviour degrades to
+    -- exactly what it is today (USDC absent from the table) rather than to a
+    -- confident zero. Absent is honest; 0 tagged 'oracle' would not be.
+    (
+        SELECT argMax(usd_rate, timestamp)
+        FROM prices.usd_rate FINAL
+        WHERE asset_kind = 'credit'
+          AND asset_code = 'USDC'
+          AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+          AND contract_address = ''
+          AND method = 'oracle'
+          AND timestamp <= now()
+          AND timestamp >= now() - INTERVAL 24 HOUR
+    ) AS usdc_rate,
 
     -- Level 1 — one row per (asset, source) over the trailing 24h.
     --
@@ -421,14 +475,102 @@ WITH
     --
     -- An asset with NO priced candle in the 24h window reads 0, the documented
     -- "unavailable" value.
-    unfiltered AS (
+    -- ⚠️ TASK 0178 SPLIT THIS CTE IN TWO, and the split is load-bearing.
+    --
+    -- It used to compute price_usd, open_24h AND volume_24h_usd in one pass
+    -- keyed on the BASE leg. Volume now counts both legs (see `vol_all`), but
+    -- price MUST NOT: `close_usd` is the USD price of the row's BASE asset, so
+    -- feeding quote-leg rows into these argMax/argMin would hand every quote
+    -- asset the price of whatever it was traded against — USDC would inherit
+    -- XLM's price. Price and open stay strictly base-keyed. Do not re-merge.
+    base_tip AS (
         SELECT
             asset_id                          AS asset_id,
             argMaxIf(close_usd, timestamp, close_usd > 0) AS price_usd,
             argMinIf(close_usd, timestamp, close_usd > 0) AS open_24h,
-            sum(volume_quote_usd)             AS volume_24h_usd
+            toUInt8(0)                        AS is_oracle
         FROM prices.price_ohlcv_1m FINAL
         WHERE timestamp >= now() - INTERVAL 24 HOUR
+        GROUP BY asset_id
+    ),
+
+    -- The synthesised canonical-USDC row (task 0178). Emits AT MOST one row,
+    -- and none at all when the rate is stale or the identity is unknown.
+    --
+    -- `open_24h` is deliberately the 0 sentinel, NOT the rate: it feeds
+    -- change_24h_pct, and there is no measured 24h-ago baseline for an asset
+    -- that does not trade as a base. A zero denominator routes through the
+    -- existing nullIf guard to the documented 0 sentinel, which is the whole
+    -- point — a fabricated `change_24h_pct` beside a real price would be a new
+    -- instance of the -100% defect task 0138 removed. NEVER set this to
+    -- `usdc_rate` to make the arithmetic "work": that publishes a measured 0%
+    -- change that was never measured.
+    --
+    -- The NOT IN guard keeps this arm mutually exclusive with base_tip. USDC
+    -- has no base candles today, but if it ever gains one the union would emit
+    -- the asset twice and the ReplacingMergeTree (ORDER BY asset_id) would keep
+    -- whichever row merged last — a silent coin-flip between a measured rate
+    -- and a traded close. Cheap guard, unbounded downside without it.
+    usdc_tip AS (
+        SELECT
+            usdc_asset_id                     AS asset_id,
+            usdc_rate                         AS price_usd,
+            toDecimal128(0, 14)               AS open_24h,
+            toUInt8(1)                        AS is_oracle
+        WHERE usdc_asset_id > 0
+          AND usdc_rate > 0
+          AND usdc_asset_id NOT IN (SELECT asset_id FROM base_tip)
+    ),
+
+    unfiltered AS (
+        SELECT asset_id, price_usd, open_24h, is_oracle FROM base_tip
+        UNION ALL
+        SELECT asset_id, price_usd, open_24h, is_oracle FROM usdc_tip
+    ),
+
+    -- ── volume_24h_usd counts BOTH legs (task 0178) ──────────────────────────
+    -- `volume_quote_usd` is the USD value of the trade, and that same dollar
+    -- figure is true of both sides of it: an XLM/USDC trade moves $5,000 of XLM
+    -- AND $5,000 of USDC. Summing the asset over both legs therefore reads
+    -- "total 24h USD volume this asset participated in", which is the ordinary
+    -- meaning of per-asset volume on a price API.
+    --
+    -- Before this, the sum grouped on the base leg alone, so canonical USDC —
+    -- which never IS a base leg — summed an empty set and published 0. The
+    -- arithmetic was never wrong; there was simply nothing to add up.
+    --
+    -- ⚠️ ONE RULE FOR EVERY ASSET, deliberately. XLM and USDT trade heavily on
+    -- both sides and their reported volume ROSE when this shipped. That is the
+    -- intended consequence, not drift: a rule that counted both legs for USDC
+    -- only would make the column mean different things in different rows — the
+    -- 0144 defect class. Two visible effects, both signed off 2026-08-31:
+    --   * `GET /assets` sorts on this column BY DEFAULT
+    --     (prices-api handlers.rs, SortCol::Volume24h), so the first page of
+    --     the listing reorders and USDC rises into it;
+    --   * one trade counts toward BOTH of its assets. Standard for per-asset
+    --     volume, and not double counting within any single asset.
+    --
+    -- ⚠️ Bounded by task 0242: a SAC minted as a second identity holds the same
+    -- token under two asset_ids, so for those 11 assets the total is still
+    -- split across both rows whichever legs are counted. USDC is NOT among
+    -- them; do not claim this column is correct for those identities.
+    --
+    -- NOT run through the §5.5 outlier mask, unchanged from before: this is an
+    -- actual traded total, and the mask protects vwap_24h only.
+    vol_all AS (
+        SELECT
+            asset_id                          AS asset_id,
+            sum(volume_quote_usd)             AS volume_24h_usd
+        FROM
+        (
+            SELECT asset_id AS asset_id, volume_quote_usd AS volume_quote_usd
+            FROM prices.price_ohlcv_1m FINAL
+            WHERE timestamp >= now() - INTERVAL 24 HOUR
+            UNION ALL
+            SELECT quote_asset_id AS asset_id, volume_quote_usd AS volume_quote_usd
+            FROM prices.price_ohlcv_1m FINAL
+            WHERE timestamp >= now() - INTERVAL 24 HOUR
+        )
         GROUP BY asset_id
     )
 SELECT
@@ -490,7 +632,12 @@ SELECT
                 0))),
         4)                                                  AS change_7d_pct,
 
-    u.volume_24h_usd                                        AS volume_24h_usd,
+    -- volume_24h_usd — from vol_all (BOTH legs, task 0178), not from u.
+    -- ⚠️ prod runs join_use_nulls = 0, so an unmatched LEFT JOIN yields the
+    -- column DEFAULT (0), never NULL. That is the right sentinel here and needs
+    -- no ifNull — but it is also why no `IS NOT NULL` test may be written
+    -- against this join: it would be dead code.
+    v.volume_24h_usd                                        AS volume_24h_usd,
 
     ifNull(
         accurateCastOrNull(
@@ -521,8 +668,34 @@ SELECT
         )
     )                                                       AS sources,
 
-    now()                                                   AS updated_at
+    now()                                                   AS updated_at,
+
+    -- method — price provenance (task 0178). APPENDED LAST, and it must occupy
+    -- the same position in the TO(...) list above: this MV inserts POSITIONALLY
+    -- and a mismatch writes every column into the wrong slot. See the
+    -- POSITIONAL-INSERT FOOTGUN note in this file's header.
+    --
+    -- '' is the unavailable SENTINEL, not a vocabulary word — an asset with no
+    -- priced candle in the window has `price_usd = 0` and no method applies.
+    -- Labelling that 'traded' would assert an aggregate that does not exist,
+    -- which is the very ambiguity this column was added to remove. Full
+    -- vocabulary and the usd_rate.method distinction: init.sql's block on
+    -- prices.current_prices.
+    -- ⚠️ Keys on WHICH ARM produced the row (`is_oracle`), never on the asset's
+    -- identity. An earlier revision tested `u.asset_id = usdc_asset_id` and was
+    -- caught by the duplicate-guard fixture: the moment USDC gains a base
+    -- candle, `usdc_tip` is correctly suppressed and base_tip supplies a real
+    -- TRADED close — which that expression still tagged 'oracle'. A traded
+    -- price wearing an oracle label is worse than either alone, because
+    -- 'oracle' reads as the more authoritative of the two.
+    CAST(
+        multiIf(
+            u.is_oracle = 1, 'oracle',
+            u.price_usd > 0, 'traded',
+            ''),
+        'LowCardinality(String)')                           AS method
 FROM unfiltered AS u
+LEFT JOIN vol_all AS v  ON v.asset_id   = u.asset_id
 LEFT JOIN kept   AS k   ON k.asset_id   = u.asset_id
 LEFT JOIN ref_7d AS r   ON r.asset_id   = u.asset_id
 LEFT JOIN (

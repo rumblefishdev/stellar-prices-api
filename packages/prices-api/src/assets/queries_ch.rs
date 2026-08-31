@@ -23,6 +23,10 @@ pub struct CurrentPriceRow {
     /// Parsed into a `serde_json::Value` at the DTO boundary, not here.
     pub sources: String,
     pub updated_at: String,
+    /// Price provenance (task 0178): `traded` / `oracle` / `""`. Decoded
+    /// POSITIONALLY by `clickhouse::Row`, so this field's position must match
+    /// the SELECT's — append to both together or the row silently misparses.
+    pub method: String,
 }
 
 /// One `assets` row, for the detail endpoint.
@@ -56,6 +60,8 @@ pub struct AssetListRow {
     /// Raw JSON string from the MV; parsed at the DTO boundary.
     pub sources: String,
     pub updated_at: String,
+    /// Price provenance (task 0178). Positional — see [`CurrentPriceRow::method`].
+    pub method: String,
     /// String form of the sort-column value for this row (cursor payload).
     pub sort_key: String,
 }
@@ -191,6 +197,7 @@ pub async fn list_assets(
            toString(c.vwap_24h) AS vwap_24h, \
            c.sources AS sources, \
            formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at, \
+           c.method AS method, \
            {sort_key_expr} AS sort_key \
          FROM current_prices AS c FINAL \
          INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
@@ -248,7 +255,8 @@ pub async fn current_price(
            toString(c.volume_24h_usd) AS volume_24h_usd, \
            toString(c.change_24h_pct) AS change_24h_pct, \
            c.sources AS sources, \
-           formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at \
+           formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at, \
+           c.method AS method \
          FROM current_prices AS c FINAL \
          INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
          WHERE {where_sql} \
@@ -277,6 +285,8 @@ pub struct BatchPriceRow {
     /// with [`CurrentPriceRow`] so `/price` and `/prices/batch` cannot drift.
     pub sources: String,
     pub updated_at: String,
+    /// Price provenance (task 0178). Positional — see [`CurrentPriceRow::method`].
+    pub method: String,
 }
 
 /// A natural-identity lookup key shared by a requested [`AssetIdentifier`] and a
@@ -336,7 +346,8 @@ pub async fn current_prices_batch(
            toString(c.volume_24h_usd) AS volume_24h_usd, \
            toString(c.change_24h_pct) AS change_24h_pct, \
            c.sources AS sources, \
-           formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at \
+           formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at, \
+           c.method AS method \
          FROM current_prices AS c FINAL \
          INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
          WHERE {where_clause}",

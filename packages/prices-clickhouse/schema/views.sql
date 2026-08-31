@@ -523,15 +523,34 @@ WHERE sac_address != '';
 -- current_prices, which is written by the Current Price Updater (task 0039) —
 -- this view is the read surface; it is empty until that writer runs.
 --
--- Task 0072 forwards the remaining current_prices columns. BE reads this surface
--- IN-CLUSTER (named views, no HTTP — see their 0199 contract), so until the view
--- named them, `sources` / `price_xlm` / `change_*_pct` / `vwap_24h` were
--- unreachable to that consumer no matter what the MV wrote.
+-- Task 0072 forwards the remaining current_prices columns, so `sources` /
+-- `price_xlm` / `change_*_pct` / `vwap_24h` are reachable to an in-cluster
+-- consumer at all.
+--
+-- ⚠️ CORRECTED 2026-08-31 (task 0178). This block used to assert "BE reads this
+-- surface IN-CLUSTER (see their 0199 contract)". **They do not, and they never
+-- have.** Verified by reading their repo at origin/develop, not by asking: the
+-- only prices objects their code queries are `price_usd_series` and
+-- `price_usd_series_1h`, for the identity triple, `bucket` and `close_usd`
+-- (crates/api/src/liquidity_pools/queries.rs:573, :1572, :2413). Both mentions
+-- of `current_price_usd` in their tree are COMMENTS explaining why they avoid
+-- it — box-measured 2026-08-04, `price_usd = 0` for native XLM, so every
+-- XLM-leg pool would have read a NULL TVL.
+--
+-- The stale claim mattered: it is why 0178 nearly sent BE a question about a
+-- surface they do not consume. Re-verify against their code before writing a
+-- sentence about what any consumer reads.
+--
+-- Task 0178 appends `method` (14 columns) — the same provenance vocabulary
+-- price_usd_series carries, now on the tip. `'oracle'` marks the canonical-USDC
+-- row, whose price comes from prices.usd_rate rather than from candles; `''` is
+-- the unavailable sentinel. See init.sql's block on prices.current_prices for
+-- the full vocabulary and why it is NOT usd_rate.method.
 --
 -- ⚠️ NEW COLUMNS ARE APPENDED, NEVER INSERTED — which protects column ORDER,
 -- not ARITY. The first six keep the positions they shipped with (hence
 -- `updated_at` sitting mid-list rather than last), so nothing is re-ordered
--- underneath a consumer; but every consumer now gets 13 columns where it got 6.
+-- underneath a consumer; but every consumer now gets 14 columns where it got 6.
 -- Anything decoding POSITIONALLY off `SELECT *` — a fixed-arity tuple fetch, a
 -- clickhouse-crate row struct, `INSERT INTO t SELECT * FROM …` — breaks on the
 -- extra columns. In-cluster consumers (BE's 0199 contract) should pin an
@@ -561,6 +580,7 @@ SELECT
     c.volume_24h_usd   AS volume_24h_usd,
     c.market_cap_usd   AS market_cap_usd,
     c.vwap_24h         AS vwap_24h,
-    c.sources          AS sources
+    c.sources          AS sources,
+    c.method           AS method
 FROM prices.current_prices AS c FINAL
 INNER JOIN prices.assets AS a FINAL ON a.asset_id = c.asset_id;
