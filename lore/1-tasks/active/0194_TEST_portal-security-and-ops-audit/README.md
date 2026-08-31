@@ -726,8 +726,14 @@ backend is open; the door it opens onto is not built yet.
       the check that no configuration reading can replace
 - [ ] Any failure is fixed in the slice that owns it, and the fix is re-verified
       here rather than patched locally
-- [ ] Tranche 3 AC 6 ("no secrets in env vars", least-privilege IAM) is
-      answerable from this task's output alone
+- [x] ✅ **2026-08-31: answerable.** Tranche 3 AC 6 ("no secrets in env vars",
+      least-privilege IAM) is carried by checks 6, 7 and 9, all PASS and all
+      independent of the sign-off host. The env-var half was **re-verified on
+      the deployed function after the flip**, not just at synth: all 14
+      variables on `prices-production-api-handler` hold names or paths —
+      `PORTAL_OAUTH_SECRET_NAME` and `MTLS_SECRET_NAME` are Secrets Manager
+      names, the three `PORTAL_*_PARAM` are SSM paths, and no value is a
+      credential. Report E6/E7/E9 plus this re-scan.
 
 ## Notes
 
