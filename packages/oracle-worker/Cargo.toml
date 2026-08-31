@@ -16,7 +16,12 @@ required-features = ["lambda"]
 [features]
 default = []
 aws-mtls = ["prices-clickhouse/aws-mtls"]
-lambda = ["aws-mtls", "dep:lambda_runtime"]
+lambda = [
+    "aws-mtls",
+    "dep:lambda_runtime",
+    "dep:aws-config",
+    "dep:aws-sdk-cloudwatch",
+]
 
 [dependencies]
 prices-clickhouse = { path = "../prices-clickhouse" }
@@ -37,3 +42,7 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 
 lambda_runtime = { workspace = true, optional = true }
+# Task 0231 metrics publish. Behind `lambda` only — the default build and
+# the unit tests exercise the pure mapping in `metrics` without the AWS SDK.
+aws-config = { workspace = true, optional = true }
+aws-sdk-cloudwatch = { workspace = true, optional = true }

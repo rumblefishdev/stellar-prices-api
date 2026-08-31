@@ -312,6 +312,16 @@ export class ObservabilityStack extends cdk.Stack {
   /** Live ledger-processor total-halt alarm — zero invocations (finding B / halt gap). */
   public readonly ledgerProcessorNoInvocationsAlarm: cloudwatch.Alarm;
   /**
+   * The oracle poll feed wrote nothing for 30 minutes (task 0231). The symptom
+   * alarm: it catches every cause, including ones not yet imagined.
+   */
+  public readonly oracleDarkFeedAlarm: cloudwatch.Alarm;
+  /**
+   * A Reflector reading was refused by the 0227 plausibility guard (task 0231).
+   * The cause alarm: it names *why* the feed is going dark.
+   */
+  public readonly oracleTimestampRejectedAlarm: cloudwatch.Alarm;
+  /**
    * Platform-metric health alarms for the scheduled workers whose only other
    * alarm reads a metric the worker itself publishes (task 0112). Keyed by
    * worker name: `errors`, `duration`, `noInvocations`.
@@ -495,6 +505,155 @@ export class ObservabilityStack extends cdk.Stack {
     // it to the ops topic now that 0056 owns the alarm-routing.
     this.enrichmentBacklogAlarm.addAlarmAction(snsAction);
     this.enrichmentBacklogAlarm.addOkAction(snsAction);
+
+    // -----------------------------------------------------------------
+    // Oracle poll feed — dark-feed + timestamp-rejection alarms (task 0231).
+    //
+    // Task 0227 made the worker REFUSE an implausible Reflector timestamp
+    // instead of writing it. Correct, and only half the job: the rejection logs
+    // at `error` and `run_oracle` still returns Ok, so the Lambda is green. If
+    // Reflector changes `lastprice`'s unit again, every reading is refused —
+    // correctly — and the poll feed goes 100% dark behind a healthy Lambda.
+    // Five months of silently WRONG rows would become an indefinite silently
+    // ABSENT feed. These two alarms are what make that visible.
+    //
+    // The pair is deliberate: `-dark-feed` is the SYMPTOM (catches any cause,
+    // including causes nobody has thought of), `-timestamp-rejected` is the
+    // CAUSE (fires sooner, and says which one). Neither replaces the other.
+    //
+    // Both read `Prices/Oracle`, published by the worker at the end of every
+    // pass. The `Environment` dimension is part of the metric's identity: it
+    // must match the `ENV_NAME` the Lambda runs with, or these alarms watch a
+    // series that does not exist and CloudWatch reports 0 datapoints rather
+    // than an error — which is how task 0204 shipped 10 of 13 alarms blind.
+    // -----------------------------------------------------------------
+
+    // Each bucket must span at least one scheduled pass, or an empty bucket is
+    // schedule jitter rather than a dark feed. Production polls every 5 minutes
+    // (`infra/envs/production.json` → `scheduleExpressions.oracleWatcher`), so a 10-minute
+    // bucket holds ~2 passes and cannot be emptied by jitter alone.
+    const darkFeedBucketMinutes = 10;
+    const oracleCadenceMinutes = rateExpressionMinutes(
+      config.scheduleExpressions.oracleWatcher,
+    );
+    if (
+      oracleCadenceMinutes !== undefined &&
+      oracleCadenceMinutes * 2 > darkFeedBucketMinutes
+    ) {
+      // Fail at SYNTH, loudly. A cadence that does not fit twice in the bucket
+      // makes an empty bucket reachable by ordinary schedule jitter, and the
+      // alarm then false-fires forever on a healthy feed — the one outcome
+      // worse than no alarm, because it trains people to ignore it.
+      //
+      // The 2x is the real invariant, not a safety margin: at exactly one pass
+      // per bucket, two passes drifting into the same bucket leave the next one
+      // empty. Enforced as stated, so the check and its message agree.
+      throw new Error(
+        `oracle-watcher cadence ${config.scheduleExpressions.oracleWatcher} (${oracleCadenceMinutes} min) ` +
+          `does not fit twice in the ${darkFeedBucketMinutes}-minute dark-feed bucket; raise ` +
+          `darkFeedBucketMinutes to at least 2x the cadence in observability-stack.ts, ` +
+          `or the alarm will false-fire on a healthy feed.`,
+      );
+    }
+
+    // FILL(written, 0) rather than the raw metric. The worker publishes an
+    // explicit 0 on a pass that wrote nothing, so raw data normally exists —
+    // but a pass that is invoked and then dies hard (OOM, timeout, or a killed
+    // container) never reaches its publish and emits NO datapoint. That is a
+    // genuine dark feed the `-no-invocations` alarm cannot see, because the
+    // invocations are happening. FILL turns that absence into breaching zeros
+    // (task 0222); see the `FILL(invocations, 0)` block above for the two
+    // properties that were verified by measurement before relying on it.
+    //
+    // Three periods, never 1/1: the trailing bucket is always partially filled
+    // and reads low, so a single-datapoint alarm would fire on a healthy feed
+    // every time it evaluated. Three consecutive fully-dark buckets is 30
+    // minutes, which also absorbs a deploy window.
+    this.oracleDarkFeedAlarm = new cloudwatch.Alarm(
+      this,
+      'OracleDarkFeedAlarm',
+      {
+        alarmName: `prices-${config.envName}-oracle-dark-feed`,
+        alarmDescription: `The Reflector oracle poll wrote ZERO rows to prices.oracle_prices for 30 minutes (OracleRowsWritten = 0 across 3 consecutive 10-minute buckets) while the Lambda kept reporting success. The feed is dark. Most likely: Reflector changed lastprice units or started returning 0, so the task 0227 plausibility guard is correctly refusing every reading — check prices-${config.envName}-oracle-timestamp-rejected, which names that cause directly, and the worker ERROR logs for "reflector timestamp rejected" with the raw value. Otherwise: Soroban RPC unreachable, or the contract moved. If oracle_prices IS gaining rows, suspect the metric path rather than the feed — the publish only logs a warning on failure, so a mis-scoped namespace grant, or deploying Observability ahead of EventBridge, reads identically here. Non-critical (§2.2): the feed degrades to last-known value, but close_usd enrichment stops advancing, and 0227 showed this failing silently for five months.`,
+        metric: new cloudwatch.MathExpression({
+          expression: 'FILL(written, 0)',
+          usingMetrics: {
+            written: new cloudwatch.Metric({
+              namespace: 'Prices/Oracle',
+              metricName: 'OracleRowsWritten',
+              dimensionsMap: { Environment: config.envName },
+              statistic: 'Sum',
+              period: cdk.Duration.minutes(darkFeedBucketMinutes),
+            }),
+          },
+          period: cdk.Duration.minutes(darkFeedBucketMinutes),
+          label: 'OracleRowsWrittenFilled',
+        }),
+        threshold: 1,
+        evaluationPeriods: 3,
+        datapointsToAlarm: 3,
+        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        // Backstop, not the mechanism — FILL yields zeros only where the metric
+        // has published at some point. A worker that has NEVER published still
+        // produces no series, and BREACHING is right there too: a feed that has
+        // never written a row is also dark. An environment with the schedule
+        // disabled is covered by prices-{env}-oracle-no-invocations instead.
+        treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      },
+    );
+    this.oracleDarkFeedAlarm.addAlarmAction(snsAction);
+    this.oracleDarkFeedAlarm.addOkAction(snsAction);
+
+    // The cause alarm. Fires on a SINGLE rejected reading, at 1/1, and that is
+    // deliberate on both counts:
+    //
+    //   * No FILL, so 1/1 is safe here. The 1/1 hazard is a partially-filled
+    //     trailing bucket reading LOW; this alarm compares `>= 1`, so a partial
+    //     bucket can only under-report and delay the alarm by one period. It
+    //     can never fabricate one.
+    //   * One rejection is already signal. The 0227 guard decides from the
+    //     magnitude of the reading, and Reflector's real seconds-valued
+    //     timestamps sit nowhere near the threshold — the dead zone between the
+    //     two units is checked by a unit test. So a rejection is not a near-miss
+    //     that might drift back; it means a reading arrived in a shape this feed
+    //     has never produced. Waiting for a second one only buys 5 minutes of
+    //     silence.
+    //
+    // Missing data is NOT_BREACHING: this metric is only published by a pass
+    // that completed, and "no passes are completing" is the dark-feed alarm's
+    // job, not this one's. That is also what keeps it OK on an idle environment.
+    this.oracleTimestampRejectedAlarm = new cloudwatch.Alarm(
+      this,
+      'OracleTimestampRejectedAlarm',
+      {
+        alarmName: `prices-${config.envName}-oracle-timestamp-rejected`,
+        alarmDescription: `The oracle worker REFUSED a Reflector reading whose timestamp failed the task 0227 plausibility guard (OracleTimestampRejected >= 1). The row was not written — this is the guard working, not data loss — but it means Reflector sent a timestamp in a shape this feed has never produced, most likely a units change on lastprice (0227 was seconds being divided by 1000 and landing every row in 1970). The raw value is in the worker logs: filter /aws/lambda/prices-${config.envName}-oracle for the ERROR "reflector timestamp rejected; row not written", whose fields carry symbol, raw and error. If every symbol is being refused the feed is now dark and prices-${config.envName}-oracle-dark-feed follows within 30 minutes. Fix the unit handling in reflector_timestamp_to_epoch_seconds; do NOT widen the guard to let the readings through.`,
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Oracle',
+          metricName: 'OracleTimestampRejected',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.oracleTimestampRejectedAlarm.addAlarmAction(snsAction);
+    this.oracleTimestampRejectedAlarm.addOkAction(snsAction);
+
+    new cdk.CfnOutput(this, 'OracleDarkFeedAlarmName', {
+      value: this.oracleDarkFeedAlarm.alarmName,
+      description: `Oracle dark-feed alarm for ${config.envName}`,
+    });
+    new cdk.CfnOutput(this, 'OracleTimestampRejectedAlarmName', {
+      value: this.oracleTimestampRejectedAlarm.alarmName,
+      description: `Oracle timestamp-rejection alarm for ${config.envName}`,
+    });
 
     // SDEX push freshness (§5.6 / Tranche-1 AC #5). The backfill-freshness-probe
     // republishes `sdex_archive`'s push age (seconds) as Prices/Backfill
@@ -1164,6 +1323,22 @@ export class ObservabilityStack extends cdk.Stack {
           'The coarse OHLCV rollups (_15m … _1M) stop having close_usd / volume_quote_usd filled in, so long-range charts serve 0 for any candle the rollup MVs captured before enrichment reached it. This ran silently unfixed for months (task 0218).',
       },
       {
+        // Task 0231. The oracle worker only qualifies for this list now: until
+        // it published `Prices/Oracle`, it had no custom-metric alarm that could
+        // go dark, so task 0112 left it out. Its two new alarms both read
+        // metrics the worker itself publishes, which is exactly the dependency
+        // this list exists to backstop — if the function stops being invoked,
+        // -dark-feed still fires (missing data is BREACHING there), but only
+        // -no-invocations says the schedule is the reason rather than Reflector.
+        name: 'oracle',
+        idPrefix: 'Oracle',
+        functionName: workerFunctionName(config.envName, 'oracle'),
+        timeout: cdk.Duration.minutes(2),
+        cadence: cdk.Duration.minutes(5),
+        impact:
+          'The Reflector poll stops entirely, so prices.oracle_prices gains no new rows and close_usd enrichment degrades to the last known value (non-critical per §2.2). Task 0227 showed this path can be wrong — and now silent — for five months without anyone noticing.',
+      },
+      {
         name: 'backfill-freshness-probe',
         idPrefix: 'BackfillFreshness',
         functionName: workerFunctionName(
@@ -1215,6 +1390,43 @@ export class ObservabilityStack extends cdk.Stack {
     cdk.Tags.of(this).add('Environment', config.envName);
 
     assertAlarmDescriptionsFitCloudWatch(this);
+  }
+}
+
+/**
+ * Cadence of an EventBridge schedule expression, in minutes, or `undefined`
+ * for a `cron(...)` expression whose cadence cannot be read off the string.
+ *
+ * ⚠️ Throws on a `rate(...)` it cannot parse rather than returning `undefined`.
+ * That distinction is the whole point: silently treating an unreadable *rate*
+ * as "unknown cadence" is how a guard passes a schedule it was written to
+ * catch. `rate(1 hour)` is not hypothetical — it is the idiom already used for
+ * `assetSupply`, `assetDiscovery` and `enrichment` in the same
+ * `production.json`, so it is exactly how someone would slow a poll down. An
+ * earlier version of this matched only `minutes?` and would have let every
+ * hour- and day-valued rate through as if it were a cron.
+ *
+ * EventBridge `rate()` accepts minute(s), hour(s) and day(s) only.
+ */
+function rateExpressionMinutes(expression: string): number | undefined {
+  const trimmed = expression.trim();
+  if (!trimmed.startsWith('rate(')) return undefined;
+  const parsed = /^rate\((\d+)\s+(minute|hour|day)s?\)$/.exec(trimmed);
+  if (!parsed) {
+    throw new Error(
+      `unreadable EventBridge rate expression "${expression}"; expected ` +
+        `rate(N minutes|hours|days). Fix the schedule, or the cadence-dependent ` +
+        `alarm guards in observability-stack.ts cannot check it.`,
+    );
+  }
+  const value = Number(parsed[1]);
+  switch (parsed[2]) {
+    case 'hour':
+      return value * 60;
+    case 'day':
+      return value * 60 * 24;
+    default:
+      return value;
   }
 }
 

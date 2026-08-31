@@ -639,12 +639,26 @@ export class ApiGatewayStack extends cdk.Stack {
     // value and every holder is cut off. Deliberate here; touch neither line
     // casually.
     //
-    // This is the ONLY key on the plan that CloudFormation manages, and it is
-    // ours — the one verification curls authenticate with. Task 0160 mints a key
-    // per Discord user onto the same plan via the SDK at runtime; those never
-    // appear in this template and no deploy can touch them. So "a key on
-    // pricing-api-free" is not the same thing as "this key", and only this one
-    // has no owning row in 0158's registry.
+    // This is the ONLY key on the plan that CloudFormation manages. Task 0160
+    // mints a key per Discord user onto the same plan via the SDK at runtime;
+    // those never appear in this template and no deploy can touch them. So "a
+    // key on pricing-api-free" is not the same thing as "this key", and only
+    // this one has no owning row in 0158's registry.
+    //
+    // ⚠️ An earlier revision added "and it is ours — the one verification curls
+    // authenticate with". **That was false, and it cost an hour on 2026-08-28.**
+    // The key our tooling actually carried (`.env.local`, the 0120 conformance
+    // suite, the 0121 load test) was `smdesqkg5j`, a key created outside this
+    // template; the CloudFormation-managed one was `t61phbbhhj`. When
+    // `smdesqkg5j` was deleted by hand at 14:00 UTC, every keyed route began
+    // answering 403 and this comment sent the investigation at the deploy that
+    // had run 30 minutes earlier — which had touched no key at all (CloudTrail
+    // settled it; `cdk diff` had shown only method and deployment changes).
+    //
+    // So do not assume the key in anyone's environment is this one. The
+    // authority is the stack's own `ApiKeyId` output:
+    //   aws cloudformation describe-stacks --stack-name Prices-<env>-ApiGateway \
+    //     --query "Stacks[0].Outputs[?OutputKey=='ApiKeyId'].OutputValue"
     const apiKey = this.api.addApiKey('PricingApiFreeApiKey', {
       apiKeyName: `pricing-api-free-${config.envName}-key`,
     });
