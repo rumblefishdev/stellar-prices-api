@@ -124,7 +124,57 @@ transplants, but `current_prices` is materially different:
 traded reading, per 0165's requirement 2. `current_prices` has no `method`
 column today, so adding one is part of this task.
 
-# 📕 DEPLOY RUNBOOK — the DROP + recreate
+## ✅ DEPLOYED + VERIFIED ON PROD — 2026-08-31
+
+Applied via the runbook below; every step clean, rollback never needed.
+
+**Baseline (before):** rows 3,882 / priced 3,536 / tip 15:59:00 (79 s old, healthy).
+**After:** rows 3,898 / priced 3,530 / tip advancing 16:05 → 16:06 / `oracle_rows` = **1**.
+
+⚠️ `priced` moves DOWN slightly with normal churn — `blank_rows` climbed 362 → 368
+in a single minute as new un-enriched assets arrived. A "priced must not fall
+below baseline" check is WRONG; it was in the first draft of this runbook. The
+load-bearing check is `tip` ADVANCING.
+
+### The defect, quantified over one 24h window
+
+| asset | base-only (old) | both legs (new) | ratio |
+|---|---|---|---|
+| **USDC** | **0** | **44,034,001.05** | `NULL` — division by zero IS the proof |
+| XLM | 402,449.24 | 586,420.11 | 1.46 |
+| USDT | 9.48 | 22.91 | 2.42 |
+
+USDC's `NULL` ratio is the whole bug in one cell: it never had ANY base-leg
+volume, so the old column could only ever publish 0.
+
+**Magnitude sanity-checked:** total network notional over the same window is
+44,217,399.69, so USDC is the quote leg for **99.6%** of it. The figure is real —
+those rows were always in the table; only the attribution changed.
+
+### Prod spot checks
+
+| identity | price | volume | method |
+|---|---|---|---|
+| USDC @ `GA5ZSEJY…` | 1.00025849298526 | 44,035,620.56 | **`oracle`** |
+| USDT @ `GCQTGZQQ…` | 0.15303042643706 | 22.91 | `traded` ✅ trap held |
+| native XLM | 0.17612712003792 | 588,652.23 | `traded` |
+
+### End-to-end through the public API
+
+`GET /v1/assets/USDC:GA5ZSEJY…/price` → **HTTP 200** (was **404**):
+`price_usd 1.00005447313041`, `volume_24h_usd 52,099,651.99`, `price_xlm
+5.68274545027279`, `vwap_24h 0`, `change_24h_pct 0`, `sources {}`. Every derived
+column on its decided sentinel.
+
+⏳ **`method` is NOT yet on the wire** — the API Lambda still runs the pre-merge
+build. The DTO change is merged (PR #272); it ships with the next API deploy.
+Nothing is broken: the old handler pins explicit column lists.
+
+🔎 **Noted, not ours:** the largest single 1m candle in the window carries
+13,414,181.36 — 30% of the day's notional in one row. Pre-existing; this task
+only re-attributed existing rows. Worth its own look.
+
+## 📕 DEPLOY RUNBOOK — the DROP + recreate
 
 Written 2026-08-31, BEFORE any schema work, per AC 6.
 
@@ -228,15 +278,17 @@ failed recreate and a silent freeze — do not skip it.
 
 ## Acceptance Criteria
 
-- [ ] `GET /price` (and `current_price_usd`) returns a row for USDC at the
-      canonical issuer, with a plausible USD value.
-- [ ] Provenance is expressible — a consumer can tell a measured `1.0000` from a
-      filled one. Requires adding the column; follow `views.sql:273` (append
+- [x] `GET /price` (and `current_price_usd`) returns a row for USDC at the
+      canonical issuer, with a plausible USD value. **HTTP 200 on prod
+      2026-08-31, $1.00005447313041 — was 404.**
+- [~] Provenance is expressible — a consumer can tell a measured `1.0000` from a
+      filled one. **Done in ClickHouse** (`oracle_rows = 1` on prod); ⏳ NOT yet
+      on the wire — needs the API Lambda deployed. Requires adding the column; follow `views.sql:273` (append
       last) and 0165's `'traded'`/`'peg'`/`'oracle'` vocabulary.
-- [ ] The derived columns are decided explicitly, not left to fall out of the
+- [x] The derived columns are decided explicitly, not left to fall out of the
       arithmetic — each is either populated meaningfully or lands on its
       documented "unavailable" sentinel. **No fabricated `change_*` values.**
-- [ ] USDT and the other peg identities are not flattened from their market
+- [x] USDT and the other peg identities are not flattened from their market
       value — 0165's regression, re-tested here.
       ✅ **Sequencing cleared 2026-08-31.** [[0172]] closed + archived
       2026-08-18, and its finding INVERTS this note: USDT at `GCQTGZQQ…` really
@@ -244,26 +296,28 @@ failed recreate and a silent freeze — do not skip it.
       the control is readable now — and its pass condition is that USDT KEEPS
       its real market value. A peg arm that drags USDT to $1.00 is the
       regression this AC catches.
-- [ ] `volume_24h_usd` counts both legs for every asset, and USDC reports a
-      non-zero figure matching its real quote-side volume. Per-venue
+- [x] `volume_24h_usd` counts both legs for every asset, and USDC reports a
+      non-zero figure matching its real quote-side volume. **0 → 44,034,001 on
+      prod; XLM ×1.46.** Per-venue
       `src_volume` unchanged (base-only) — assert both in one test so a future
       edit cannot quietly re-base the weighting too.
-- [ ] The `GET /assets` default-sort change is asserted, not discovered:
+- [x] The `GET /assets` default-sort change is asserted, not discovered:
       a test pins that USDC appears in the first page of the default
       (`SortCol::Volume24h`) listing where it previously could not.
 - [x] BE re-confirmed as a non-consumer of `volume_24h_usd` — done 2026-08-31 by
       READING their repo at `origin/develop` rather than asking, which is the
       stronger check. See the re-verification section above.
-- [ ] The oracle allowlist is USDC-only and PROVEN so: a test asserts USDT at
+- [x] The oracle allowlist is USDC-only and PROVEN so — **and confirmed on
+      PROD: USDT @ `GCQTGZQQ…` reads $0.15303, `traded`:** a test asserts USDT at
       `GCQTGZQQ…TG6V` still reports its market value and is NOT tagged
       `'oracle'`. This is AC 4's other half.
-- [ ] `method` is present and correct on all three layers — table, MV
+- [x] `method` is present and correct on all three layers — table, MV
       (`TO (...)` list AND SELECT), and `current_price_usd` — with a
       positional-decode note in the PR body.
-- [ ] A rollback plan written **before** the DROP, given [[0095]]. At minimum:
+- [x] A rollback plan written **before** the DROP, given [[0095]]. At minimum:
       the current definition captured verbatim, and the `TO` table's row count
       recorded immediately before and after.
-- [ ] Regression test on the 26.3.10.60 pin.
+- [x] Regression test on the 26.3.10.60 pin. **8 tests in `current_mv_it`.**
 - [ ] BE told — `/price` is a surface they consume, and "USDC pricing is fixed"
       is currently only true of the series views.
 
