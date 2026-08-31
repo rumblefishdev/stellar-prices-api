@@ -206,7 +206,13 @@ are properties of the serving distribution and are answered against
 `EA2TLS5SS5M87`; the rest are answered against our own stacks and were settled
 on 2026-08-28:
 
-- [ ] ⏳ **2026-08-31, AFTER THE FLIP: origin half now fully PASS; only the
+- [ ] ⏳ **Amended 2026-08-31 (decision A): the (host) half changes shape.**
+      The portal's responses no longer pass through `EA2TLS5SS5M87` at all —
+      the bundle calls `prices-api.sorobanscan.rumblefish.dev` directly, so
+      `CustomErrorResponses` cannot touch a portal `403`/`404` and the
+      `no-store` measured on execute-api is the `no-store` the browser sees.
+      Re-measure once on the new hostname after the ApiGateway deploy; then
+      this closes. Earlier reading — **2026-08-31, AFTER THE FLIP: origin half now fully PASS; only the
       (host) half is left.** With the portal open the routes finally emit real
       responses, so `no-store` is observable for the first time — and every one
       of them carries it, on success and error paths alike, measured on
@@ -252,7 +258,15 @@ on 2026-08-28:
       response half is **(host)**, because `EA2TLS5SS5M87` maps 403 and 404 to
       `/index.html` with status `200` (`CustomErrorResponses`), which today
       would swallow the portal's JSON errors and [[0183]]'s gate `404`
-- [ ] ⏳ **2026-08-31: MEASURED at the sign-off host, and it FAILS — there is
+- [ ] ⏳ **Amended 2026-08-31 (decision A): moot as written, replaced by a
+      CORS check.** There is no CloudFront behaviour in front of the portal's
+      backend any more, so "disables caching and forwards the cookie" has no
+      subject. What stands in for it: on `prices-api…`, `GET /api/auth/me`
+      with `Origin: https://sorobanscan.rumblefish.dev` and a session cookie
+      answers signed-in with `Access-Control-Allow-Origin` naming that origin
+      and `Allow-Credentials: true`; with any other `Origin` it carries
+      neither. Both asserted in `tests/portal.rs`; measure once live after the
+      deploy. Earlier reading — **2026-08-31: MEASURED at the sign-off host, and it FAILS — there is
       no API origin at all.** `get-distribution-config` on `EA2TLS5SS5M87`
       returns two origins and **both are S3** (`…-spa`, `…-api-spa`); nothing
       points at `02mabge71l.execute-api…`. Behaviour `/api/*` targets the S3
@@ -291,7 +305,10 @@ on 2026-08-28:
       `get-stage`. Measured on the old resource path. Report E4.
       Anonymous sign-in routes carry their own method-level throttle and are not
       behind `apiKeyRequired`
-- [ ] ⏳ **2026-08-31: MEASURED, FAILS — there is no API behaviour to order.**
+- [ ] ⏳ **Amended 2026-08-31 (decision A): no longer applies.** There is no
+      API behaviour on `EA2TLS5SS5M87` to order and there will not be one;
+      the only rows under `/api` are the bundle's. Closes with the deploy as
+      "not applicable, by decision". Earlier reading — **2026-08-31: MEASURED, FAILS — there is no API behaviour to order.**
       `EA2TLS5SS5M87`'s table is `/assets/*`, `/static/*`, `/api/*`, then
       default; all three named behaviours target S3. The ordering rule cannot be
       satisfied until the `/api/api/*` behaviour exists, and it must be inserted
@@ -491,8 +508,13 @@ Either way, these remain and are not solved by choosing a layout:
       `s3://production-soroban-explorer-api-spa/api/` — 13 objects at 09:43Z,
       and it is the right one (`api/index.html` carries the portal's title and
       `/api/assets/…` URLs). This closes the sync half of the first item above.
-- [ ] The portal's backend is reachable **same-origin** on
-      `sorobanscan.rumblefish.dev`: a second origin for
+> **Amended 2026-08-31 (decision A):** the four Explorer-side items below —
+> origin, methods, basic-auth, `CustomErrorResponses` — reduce to **one**:
+> basic-auth off. The backend is reachable on its own hostname and the bundle
+> calls it there; see "The backend on its own host".
+
+- [ ] ~~The portal's backend is reachable **same-origin** on
+      `sorobanscan.rumblefish.dev`~~ — superseded: a second origin for
       `02mabge71l.execute-api.eu-central-1.amazonaws.com` and a behaviour ahead
       of the bundle row, with `ALLOW_ALL` methods, `CachingDisabled` and
       `AllViewerExceptHostHeader`. Same-origin is not a preference — [[0186]]'s
@@ -824,6 +846,76 @@ distribution alike:
 Developer Portal. Until then a sign-in started anywhere is refused by Discord at
 the authorize step with its own error page — nothing in our logs.
 
+## The backend on its own host — 2026-08-31
+
+**Decision A, Adam, 2026-08-31 ("A, rób dalej").** The API gets a hostname —
+`prices-api.sorobanscan.rumblefish.dev`, a REGIONAL custom domain on the
+REST API mapped at the root to the `production` stage — and the bundle at
+`https://sorobanscan.rumblefish.dev/api/` calls it **directly**: cross-origin,
+same-site. The Explorer distribution stays exactly as PR #437 left it (static
+`/api/*` SPA + routing function); it needs no API origin, and the
+requirements document in `audit/` is superseded (banner added there).
+
+### Why this and not the CloudFront proxy
+
+The measured failure ("`/api/config` answered `200`, not JSON") is #437's
+routing function rewriting `/api/config` → `/api/index.html`. The proxy
+layout needed four changes in the other repo, all still open; this one needs
+none. It is also the block explorer's own pattern — its SPA on
+`sorobanscan.rumblefish.dev` calls its API on `api-sorobanscan.rumblefishdev.com`
+with `allowOrigins: [domainName]` — so the host now carries two apps built
+the same way. Option B (custom domain on our own distribution, zero code) was
+on the table and lost because it moves the page off the host decided on
+2026-08-28.
+
+### What "same-site" buys and what it costs
+
+`sorobanscan.rumblefish.dev` and `prices-api.sorobanscan.rumblefish.dev`
+share the registrable domain, so `SameSite=Lax` **does** send the session
+cookie on a `fetch` between them — provided the request asks
+(`credentials: 'include'`) and the answer allows it. That is the whole
+arrangement:
+
+| side | change |
+|---|---|
+| gateway | `addCorsPreflight` on `/api/{proxy+}` — one origin (`portalWebOrigin`), credentials, `X-Requested-With`, max-age 1h; MOCK, no Lambda. `OPTIONS` joins `portalSettings` (both arms — check 3's count is now 14 vs 6). `DEFAULT_4XX/5XX` gateway responses carry the same CORS headers, so a `429` reads as a `429` in the browser and not as a network error |
+| handler | `PORTAL_WEB_ORIGIN`: `CorsLayer` on the portal routes only (`AllowOrigin::list([ours])` + credentials predicate — `exact` would stamp our origin on every answer); `AuthState.home` = `{origin}/api/` so every landing is absolute; `is_same_origin_write` accepts `Sec-Fetch-Site: same-site` **only** with `Origin == PORTAL_WEB_ORIGIN` — the page is a sibling host now, and so is every other subdomain |
+| bundle | `API_ORIGIN` from `VITE_PORTAL_API_ORIGIN` (empty → relative, as before: dev, preview and our distribution unchanged); `credentials: 'include'` on every call; `OPENAPI_JSON` → `https://prices-api…/api-docs-json` on that build |
+| cookies | unchanged — `Path=/api/`, no `Domain`, set on the API host by the callback |
+| infra | own DNS-validated certificate (the wildcard in eu-central-1 is `InUseBy: []`, renewal `INELIGIBLE`, expires 2026-12-06 — nobody's), A + AAAA in `Z10396861CRMUIWWA8TL9`, `make sync-portal-explorer` formalises the hand sync |
+
+Cost, stated: the CSRF story now has three legs instead of two (marker
+header, fetch metadata, **and** the origin allow-list), and they are
+configured in two places that must agree — `portalWebOrigin` in
+`production.json` feeds both. The redirect URI moves to the API host, which
+is a Discord registration and a `put-secret-value`, both Adam's.
+
+Verified: Rust 416 passed / 0 failed (new: CORS answers name one origin and
+no other, no header without configuration, preflight allows the marker, the
+layer stops at the prefix, a closed portal answers a preflight `404`; the
+landing is absolute with an origin configured; a same-site revoke is
+accepted from the configured origin and refused from a sibling, without
+`Origin`, or without the marker); portal 159/159; lint, typecheck, clippy
+`-D warnings`, `openapi:verify-routes` green.
+
+### Deploy order
+
+1. `make -C infra deploy-production-apigateway` — certificate (DNS validation,
+   ~3–5 min), domain, records, `OPTIONS`, gateway responses. Nothing the
+   bundle uses yet; `/v1` unaffected.
+2. `make -C infra deploy-production-compute` — `PORTAL_WEB_ORIGIN` + the
+   rebuilt api-handler. From here every landing is absolute; sign-in still
+   fails at Discord until step 4.
+3. `make -C infra sync-portal-explorer` — the absolute build to the Explorer
+   bucket + `/api/*` invalidation.
+4. **Adam:** Discord redirect URI →
+   `https://prices-api.sorobanscan.rumblefish.dev/api/auth/callback`, then
+   `put-secret-value` with the same `redirect_uri` (other three fields
+   unchanged; `ends_with(CALLBACK_PATH)` still holds, so the code accepts old
+   and new alike — no cold-start window).
+5. **Explorer repo:** `enableApiSpaBasicAuth: false` before the portal is
+   public. Until then `/api/` answers `401` to strangers.
+
 ## Issues Encountered
 
 - **The Discord `client_secret` was exposed in a chat transcript.** On
@@ -945,6 +1037,16 @@ the authorize step with its own error page — nothing in our logs.
    prefix, flattened". The OpenAPI document is mounted a second time at
    `/api/api-docs-json` as a pure alias, exempt from gate and key check like
    `/config`, and deliberately absent from the OpenAPI document itself.
+
+3. **The backend has a hostname of its own and the bundle calls it
+   cross-origin.** Decided by Adam, 2026-08-31 (option A over B). Supersedes
+   the "same-origin, no CORS" property [[0184]] and [[0186]] were built on,
+   and the `audit/` requirements for the Explorer distribution. Emerged in
+   implementation: the CORS answer is a **list** with a credentials
+   predicate, never a reflection and never `exact`; the CSRF check gains an
+   origin leg rather than dropping the fetch-metadata one; the bundle's API
+   origin is a build-time variable with an empty default, so only the
+   Explorer-bound build is absolute. See "The backend on its own host".
 
 ## Acceptance Criteria
 

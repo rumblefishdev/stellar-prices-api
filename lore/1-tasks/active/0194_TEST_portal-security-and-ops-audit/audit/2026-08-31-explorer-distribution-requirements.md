@@ -1,3 +1,14 @@
+> ⚠️ **Superseded 2026-08-31, later the same day — decision A in the task
+> README ("The backend on its own host").** The Prices API now has a hostname
+> of its own, `prices-api.sorobanscan.rumblefish.dev`, and the bundle at
+> `/api/` calls it directly (cross-origin, same-site, CORS answered by the
+> API). So `EA2TLS5SS5M87` needs **no API origin, no `/api/*` method change,
+> no `CustomErrorResponses` change** — the static `/api/*` SPA behaviour PR
+> #437 built is exactly right as it is. The one item that still belongs to the
+> explorer repo is the basic-auth gate on `/api/*` (`enableApiSpaBasicAuth`),
+> which has to be off before the portal is public. Kept as the record of what
+> was measured and asked for.
+
 # CloudFront changes needed on `EA2TLS5SS5M87` to serve the Prices API portal
 
 **For:** the `soroban-block-explorer` repo — the distribution
