@@ -2,7 +2,7 @@
 id: "0178"
 title: "current_prices / current_price_usd cannot publish USDC either — the MV groups on the base leg, so /price has the same structural hole 0165 fixed in the series views"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0165", "0072", "0095", "0139", "0150", "0170", "0061"]
 tags:
@@ -34,6 +34,18 @@ history:
       purpose: that fix was an atomic plain-view replace, whereas this one is a
       refreshable-MV DROP + recreate - the operation that wiped the coarse tables
       in 0095 - so it needs its own rollback plan and its own task.
+  - date: 2026-08-31
+    status: active
+    who: okarcz
+    note: >
+      Activated. Picked as the next piece of work because it is the sole
+      remaining blocker on [[0120]], an M2 conformance criterion, and it is the
+      second surface of the defect [[0165]] closed in the series views. Starting
+      with the "Design question to settle first" section - provenance of a
+      measured 1.0000 versus a peg placeholder, and whether the peg identities
+      keep their market price - before any schema change, since the fix is a
+      refreshable-MV DROP + recreate and needs its rollback plan written first
+      per [[0095]].
 ---
 
 # `/price` cannot return USDC — same defect, harder fix
