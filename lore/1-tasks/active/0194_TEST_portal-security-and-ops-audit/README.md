@@ -402,7 +402,18 @@ other:
 | **A (minimal)** | `/api/` | `/api-tokens/api/` | `BASE_PATH` (web, 2 copies) and `PORTAL_HOME` (Rust). Nothing else in Rust, nothing in the gateway, nothing in `methodSettings`. The session cookie is already scoped `Path=/api-tokens/`, so it is still sent to every backend call and never to the bundle — which does not need it. `CALLBACK_PATH` is unchanged, so the secret loader's `ends_with` rule is satisfied by `https://sorobanscan.rumblefish.dev/api-tokens/api/auth/callback` |
 | **B (convention)** | `/api/` | `/api/api/` | [[0161]]'s `<app>/*` + `<app>/api/*` shape, but it moves `PORTAL_API_PREFIX`, `CALLBACK_PATH`, `PORTAL_HOME`, `SESSION_PATH`, `PENDING_PATH`, the gateway resource path `/api-tokens/api/{proxy+}` and its three `methodSettings` entries, plus the Discord registration. Every one of those is a deploy, and the gateway pair is the change [[0184]] records breaking production for twenty minutes |
 
-**A is the recommendation** and it is what the redirect URI below assumes. It is
+**Superseded 2026-08-28: B is what shipped, not A.** The code now reads
+`BASE_PATH = '/api/'` (`web/portal/src/base-path.ts` and `vite.config.mts`),
+`PORTAL_API_PREFIX = "/api/api/"` and `PORTAL_HOME = "/api/"`
+(`portal/mod.rs`, `portal/auth/mod.rs`), `CALLBACK_PATH =
+"/api/api/auth/callback"` and the gateway resource `/api/api/{proxy+}`
+(`api-gateway-stack.ts`) — [[0235]]'s prefix deploy, and the paths the re-run
+checks above were measured on. The recommendation below is kept as the record
+of why it was a live choice; it is no longer the plan. The Discord redirect URI
+must therefore be registered as
+`https://sorobanscan.rumblefish.dev/api/api/auth/callback`.
+
+**A was the recommendation** and it is what the redirect URI below assumed. It is
 asymmetric on purpose; [[0161]]'s convention is worth re-deciding once, in 0195,
 rather than paid for during a cutover.
 
@@ -419,9 +430,11 @@ Either way, these remain and are not solved by choosing a layout:
 - The four Explorer-side items listed below (origin, methods, basic-auth,
   `CustomErrorResponses`)
 
-- [ ] The bundle is built for the prefix it is served from — `BASE_PATH` in
-      `web/portal/src/base-path.ts` and its copy in `vite.config.mts`
-      (`base-path.spec.ts` fails if they drift). Owner: [[0195]]
+- [x] ✅ **Done ([[0235]], 2026-08-28).** The bundle is built for the prefix it
+      is served from — `BASE_PATH = '/api/'` in `web/portal/src/base-path.ts`
+      and its copy in `vite.config.mts` (`base-path.spec.ts` fails if they
+      drift). What is NOT done is the sync of that bundle to
+      `s3://production-soroban-explorer-api-spa/api`
 - [ ] The portal's backend is reachable **same-origin** on
       `sorobanscan.rumblefish.dev`: a second origin for
       `02mabge71l.execute-api.eu-central-1.amazonaws.com` and a behaviour ahead
@@ -437,10 +450,15 @@ Either way, these remain and are not solved by choosing a layout:
 - [ ] `CustomErrorResponses` does not rewrite the portal's error responses (see
       the first check). Owner: same — and it is distribution-wide, so it affects
       the Explorer SPA too
-- [ ] The prefix change is carried through every place it is baked in:
-      `PORTAL_API_PREFIX` and `CALLBACK_PATH` (Rust), the gateway resource path
-      and its `methodSettings` entries, the session cookie's `Path`, and the
-      Discord redirect URI. Owner: [[0195]] with [[0161]] for the convention
+- [x] ✅ **Done in code ([[0235]], 2026-08-28), one item outstanding.** The
+      prefix change is carried through `PORTAL_API_PREFIX` and `CALLBACK_PATH`
+      (Rust), the gateway resource path and its three `methodSettings` entries,
+      and the session cookie's `Path` — layout B, [[0161]]'s convention.
+      ⚠️ **The Discord redirect URI is the one place it is not carried
+      through**: it is registered in the Developer Portal, not in this repo, and
+      it must read `https://sorobanscan.rumblefish.dev/api/api/auth/callback`
+      before the first sign-in. Owner: Adam, at the same time as the
+      `client_secret` rotation
 
 ## Opening the portal
 
@@ -448,8 +466,13 @@ Either way, these remain and are not solved by choosing a layout:
 `compute-stack.ts` here and nowhere else — not as a side effect of anyone
 finishing their own slice. **The one-word diff is committed** (2026-08-28); what
 remains gated is the deploy that carries it, because with the flag true the
-handler resolves the secret and both parameters at cold start and a missing one
-is an `Init Errors` event on the Lambda that also serves `/v1`.
+handler resolves **four** sources at cold start and a missing one is an `Init
+Errors` event on the Lambda that also serves `/v1`. Three are the ones this list
+already tracked; the fourth is `PORTAL_FREE_PLAN_PARAM` —
+`/prices/{env}/pricing-api-free-plan-id`, published by `ApiGatewayStack`, which
+deploys *after* `ComputeStack`. It is the only one of the four no operator
+seeds, so it is the one that goes missing on a fresh environment or a replaced
+usage plan. All four are verified below.
 
 Preconditions, all of them:
 
@@ -459,9 +482,15 @@ Preconditions, all of them:
 - [ ] Every check in the list above passes, the three **(host)** ones against
       `EA2TLS5SS5M87`
 - [ ] Every hosting precondition above is met
-- [ ] The Discord OAuth secret exists and parses, and both eligibility SSM
-      parameters are seeded (runbook §2, §2a) — 2026-08-28: **none of the three
-      exists**, and the deploy that carries the flip must not run until they do
+- [x] ✅ **2026-08-28: all three now exist** — created the same day after this
+      line was first written, when none of them did. The OAuth secret at
+      `…:secret:prices/production/portal-discord-oauth-s5Qz1H` (13:53Z, four
+      fields, parsed — check 9), `/prices/production/discord-guild-id` and
+      `/prices/production/min-account-age-minutes` (12:14Z, operator-seeded —
+      check 10). ⚠️ **The deploy that carries the flip is still gated**, on the
+      `client_secret` rotation recorded in Issues Encountered — the stored value
+      is the one that leaked into a transcript. Rotate, `put-secret-value` all
+      four fields with `session_signing_key` unchanged, then deploy
 - [x] ✅ **Done 2026-08-28.** Keys created while the flag was off are
       enumerated (one, `smdesqkg5j`, `discord-1534…537-key`, created
       2026-08-26T15:11:57Z, `ManagedBy=prices-portal`, 155 requests in August)
@@ -473,6 +502,68 @@ Preconditions, all of them:
       on the real free-tier plan and would otherwise survive into its accounting
       as anonymous strings. They come from local runs against production
       credentials, not from the closed portal — the flag lives in the Lambda
+
+### Deploy readiness — measured 2026-08-31
+
+The deploy itself is now **technically unblocked**; what still gates it is the
+`client_secret` rotation, which is a security decision, not a missing piece.
+
+**All four cold-start sources exist in production** (`eu-central-1`, account
+`750702271865`):
+
+| # | source | value | seeded |
+|---|---|---|---|
+| 1 | `prices/production/portal-discord-oauth` | 4 fields, `client_secret` 32 ch, `session_signing_key` 64 ch | operator, 2026-08-28 |
+| 2 | `/prices/production/pricing-api-free-plan-id` | `71t9im` | `ApiGatewayStack`, v1, 2026-08-12 |
+| 3 | `/prices/production/discord-guild-id` | `1536303837785362432` (test guild) | operator, 2026-08-28 |
+| 4 | `/prices/production/min-account-age-minutes` | `5` | operator, 2026-08-28 |
+
+Source 2 is the one the checks never covered, and it turns out to have been
+published two weeks before the portal work started — so the ordering hazard
+described above is real but not live in this environment.
+
+**The stored `redirect_uri` names the wrong host.** It reads
+`https://dojr4epgxo2qp.cloudfront.net/api/api/auth/callback`, not
+`sorobanscan.rumblefish.dev`. This does **not** block the deploy: `secret.rs`
+validates with `ends_with(CALLBACK_PATH)` only, which is host-agnostic by
+design, so the cold start succeeds. It does block the first real sign-in at the
+sign-off host, and it has to be changed in the same `put-secret-value` as the
+rotation — together with the Discord Developer Portal registration, which is the
+other copy of the same string.
+
+**Build assets are fresher than production, for the two functions that matter.**
+`target/lambda/prices-api/bootstrap` was rebuilt 2026-08-31 09:50 and carries
+`/api/api/auth/callback`; `prices-ledger-processor` is from 2026-08-28 14:32.
+Both deployed functions were last modified 2026-08-28 13:17, so `ComputeStack`
+ships forward, not backward — the [[0141]] footgun does not bite here.
+
+### ⚠️ Deploy `Prices-production-Compute` ALONE — never `deploy-production`
+
+    make deploy-production-compute     # ComputeStack + flush-production-cache
+
+`make deploy-production` deploys `--all` and would ship nine EventBridge
+functions off local disk. `target/lambda/oracle-worker` is from **2026-08-13**,
+while `prices-production-oracle` was deployed 2026-08-28 14:21 and now carries
+[[0231]]'s `metrics.rs` — so `--all` would regress the oracle worker by two
+weeks, remove the metrics [[0231]]'s alarms fire on, and report success. Exactly
+the [[0141]] shape, one stack over.
+
+This branch was also **5 commits behind `origin/develop`** until 2026-08-31, and
+in that state `cdk diff` proposed destroying four live Oracle alarms
+(`OracleDarkFeedAlarm`, `OracleTimestampRejectedAlarm`,
+`OracleWorkerDurationAlarm`, `OracleWorkerNoInvocationsAlarm`), their two
+outputs, and the `PublishOracleMetrics` IAM statement — none of it a decision,
+all of it staleness. Merged, and the diff is now:
+
+| stack | diff |
+|---|---|
+| Secrets, **ApiGateway**, **PortalHosting**, Observability | no differences |
+| **Compute** | `PORTAL_ENABLED: false → true` + 2 asset hashes — **this is the deploy** |
+| EventBridge | 9 asset hashes, all stale-local — **do not deploy** |
+
+`ApiGateway` and `PortalHosting` showing no differences is itself evidence:
+[[0235]]'s prefix work is fully deployed, so the flip does not carry a gateway
+change with it.
 
 **Amended 2026-08-28.** The original text here said the flip was not gated on
 [[0193]] or [[0195]], on the reasoning that opening a plain-looking portal that
@@ -499,6 +590,15 @@ deployed as soon as the secret and the parameters are seeded. What waits for
   against Discord.
 - **The orphaned bundle objects were predicted inert and are not** — see the
   section above; `/api-tokens/` still serves the previous portal.
+- **A stale task branch turns `cdk diff` into a demolition plan.** On
+  2026-08-31 this branch was 5 commits behind `origin/develop` and
+  `make diff-production` proposed destroying four live Oracle alarms and an IAM
+  statement — [[0231]]'s work, merged while this task was open. Nothing in the
+  diff marks such a removal as "you are behind" rather than "you decided this",
+  and the Makefile's own warning ("read it for removals rather than skimming it
+  for additions") is exactly right and exactly not enough: the removals looked
+  deliberate. Merging `develop` cleared all of them. **Merge before diffing,
+  and diff before every production deploy.**
 - **The local build needs Zig and nothing said so.** `cargo lambda build
   --arm64` cross-compiles through Zig on an x86_64 host; CI never hits this
   because it runs on a native ARM runner, and the comment on
