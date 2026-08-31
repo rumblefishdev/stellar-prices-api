@@ -74,14 +74,29 @@
 -- comment above price_usd_series for the case table and the three shapes that
 -- look simpler and are wrong.
 --
--- ⚠️ The `1` is a PLACEHOLDER, not the answer — task 0168 replaces it.
--- oracle_worker already polls Reflector for USDC, so a real depeg-aware rate
--- exists; task 0167 snapshots it into prices.usd_rate and 0168 swaps this
--- constant for it. A flat $1 is a ~0.1% systematic error (small depegs are
--- routine) and it CONTRADICTS OUR OWN CANDLES: the oracle enrichment tier
--- already prices a TF/USDC candle at `close × 0.9993` (ch_enrich.rs:20).
--- Read `method = 'peg'` as "no measured rate was available", never as "$1 is
--- correct" — that is exactly what the `method` column exists to disambiguate.
+-- ⚠️ The `1` is the FALLBACK, not the answer (task 0168, shipped). The
+-- placeholder carries the MEASURED rate from prices.usd_rate (task 0167, fed by
+-- oracle_worker's Reflector poll) wherever an observation exists in the bucket,
+-- and falls back to `1` only where none does — deep history before the oracle
+-- window (measured on prod: no reading before 2026-03-11), or a bucket the
+-- oracle sat out. The two cases are told apart by `method`: 'oracle' is
+-- measured, 'peg' means "no measured rate was available" and NEVER "$1 is
+-- correct". Without that column a consumer cannot tell a real 1.0000 from a
+-- fallback 1.0000 — the `close_usd = 0` mistake in a new surface.
+--
+-- Why it matters that the fallback is rare: a flat $1 is a ~0.1% systematic
+-- error, not a rare-depeg approximation (USDC measured 1.00066784838102 on
+-- prod 2026-08-10 — an ordinary Sunday, stable to four decimals across five
+-- consecutive readings). It also CONTRADICTED OUR OWN CANDLES: the oracle
+-- enrichment tier already prices a TF/USDC candle at `close × 0.9993`
+-- (ch_enrich.rs:20), so the same bucket read 0.9993 in the candles and 1.0000
+-- here. That disagreement is what this arm now closes.
+--
+-- ⚠️ STILL OPEN, deliberately: the enrichment PEG TIER bakes the same flat $1
+-- into `close_usd` itself for everything the oracle tier did not win (all deep
+-- history, plus anything outside its staleness bound). Fixing that is a
+-- write-path change plus re-enrichment, not a view swap — see task 0168's
+-- "Known adjacent gap".
 --
 -- ## Why USDC is the ONLY member of the peg set (task 0172)
 -- USDT was here until 2026-08-12. The canonical Stellar USDT
@@ -172,12 +187,17 @@
 --                        pricing tier already priced. The view cannot know
 --                        WHICH tier, which is why this is a distinct value and
 --                        not a reuse of task 0167's rate-provenance enum.
---             'peg'    — no traded candle existed for this identity in this
---                        bucket; the peg placeholder supplied the value. Read
---                        it as "no measured rate available", NOT as "$1 is
---                        correct".
---             'oracle' — RESERVED for task 0168, once a measured depeg-aware
---                        rate replaces the placeholder.
+--             'peg'    — the peg placeholder supplied the value AND no
+--                        measured rate existed for that identity in that
+--                        bucket, so it is the $1 FALLBACK. Read it as "no
+--                        measured rate available", NOT as "$1 is correct".
+--                        On prod this is deep history (before 2026-03-11) and
+--                        buckets the oracle sat out.
+--             'oracle' — the peg placeholder supplied the value from a MEASURED
+--                        depeg-aware reading in prices.usd_rate (task 0168):
+--                        the bucket's last observation, method = 'oracle'
+--                        there too. A row reading exactly 1.0000 under this
+--                        label is a measurement that happened to be at par.
 --   Without this column a consumer cannot tell a real 1.0000 from a fallback
 --   1.0000 — the `close_usd = 0` mistake (one value meaning several things) in
 --   a new surface. ⚠️ This is an APPENDED column: arity changed, order did not.
@@ -281,7 +301,8 @@ GROUP BY p.timestamp;
 --
 --   any non-peg asset ......... arm B contributes nothing → reduces to the
 --                               historical expression byte-identically
---   peg, quote-only bucket .... no arm-A rows → the fallback → 1
+--   peg, quote-only bucket .... no arm-A rows → the bucket's MEASURED rate
+--                               ('oracle'), or $1 where none exists ('peg')
 --   peg, also traded as base .. arm-A rows exist → market value wins; the
 --                               zero-weight row adds 0/0 and cannot shift it
 --
@@ -335,9 +356,11 @@ SELECT
     contract_address,
     bucket,
     if(max(is_peg) = 1 AND sum(w) = 0,
-       CAST(1 AS Decimal(38, 14)),
+       if(max(peg_rate) > 0, max(peg_rate), CAST(1 AS Decimal(38, 14))),
        CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))) AS close_usd,
-    CAST(if(max(is_peg) = 1 AND sum(w) = 0, 'peg', 'traded') AS LowCardinality(String)) AS method
+    CAST(if(max(is_peg) = 1 AND sum(w) = 0,
+            if(max(peg_rate) > 0, 'oracle', 'peg'),
+            'traded') AS LowCardinality(String)) AS method
 FROM
 (
     -- Arm A — every priced candle, keyed on the BASE leg.
@@ -352,14 +375,16 @@ FROM
         p.timestamp        AS bucket,
         toFloat64(p.close_usd) * toFloat64(p.volume_base) AS v,
         toFloat64(p.volume_base)                          AS w,
-        toUInt8(0)                                        AS is_peg
+        toUInt8(0)                                        AS is_peg,
+        CAST(0 AS Decimal(38, 14))                        AS peg_rate
     FROM prices.price_ohlcv_1d AS p FINAL
     INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
     WHERE p.close_usd > 0
 
     UNION ALL
 
-    -- Arm B — zero-weight peg placeholder, keyed on the QUOTE leg.
+    -- Arm B — zero-weight peg placeholder, keyed on the QUOTE leg, carrying
+    -- that identity's MEASURED USD rate for the bucket (task 0168; 0 = none).
     -- ⚠️ COST: this IS a second full FINAL pass over the candle table. An
     -- earlier comment claimed a cheap narrow projection; that was wrong and was
     -- corrected in review. The peg predicate sits on the JOINED `assets` side,
@@ -370,24 +395,111 @@ FROM
     -- WHERE …)` — quote_asset_id is the second ORDER BY column), or materialise
     -- the series per task 0150. NOT MEASURED at prod scale.
     SELECT
-        multiIf(
-            q.contract_address != '', 'contract',
-            q.asset_code = 'XLM' AND q.issuer_address = '', 'native',
-            'credit') AS asset_kind,
-        if(q.contract_address != '', '', q.asset_code)     AS asset_code,
-        if(q.contract_address != '', '', q.issuer_address) AS issuer_address,
-        q.contract_address AS contract_address,
-        p.timestamp        AS bucket,
-        toFloat64(0)       AS v,
-        toFloat64(0)       AS w,
-        toUInt8(1)         AS is_peg
-    FROM prices.price_ohlcv_1d AS p FINAL
-    INNER JOIN prices.assets AS q FINAL ON q.asset_id = p.quote_asset_id
-    WHERE q.contract_address = ''
-      -- USDC only. USDT was removed here by task 0172: the canonical Stellar
-      -- USDT depegged in June 2022 and trades at ~$0.13, so the $1 placeholder
-      -- published a 7.4x overstatement. It is priced by measurement instead.
-      AND (q.asset_code = 'USDC' AND q.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN')
+        b.asset_kind,
+        b.asset_code,
+        b.issuer_address,
+        b.contract_address,
+        b.bucket,
+        toFloat64(0) AS v,
+        toFloat64(0) AS w,
+        toUInt8(1)   AS is_peg,
+        -- 0 = "no measured rate for this identity in this bucket" -> the $1
+        -- fallback, flagged method = 'peg'. ⚠️ NOT NULL: prod runs
+        -- join_use_nulls = 0, so an unmatched LEFT JOIN yields the column
+        -- DEFAULT (0 for a Decimal), never NULL. A coalesce()/IS NULL form here
+        -- would be DEAD CODE on prod. ifNull() only covers a session that sets
+        -- join_use_nulls = 1; the `> 0` test in the outer SELECT is the real
+        -- discriminator, and it reads the same under both settings.
+        ifNull(r.usd_rate, CAST(0 AS Decimal(38, 14))) AS peg_rate
+    FROM
+    (
+        SELECT
+            multiIf(
+                q.contract_address != '', 'contract',
+                q.asset_code = 'XLM' AND q.issuer_address = '', 'native',
+                'credit') AS asset_kind,
+            if(q.contract_address != '', '', q.asset_code)     AS asset_code,
+            if(q.contract_address != '', '', q.issuer_address) AS issuer_address,
+            q.contract_address AS contract_address,
+            p.timestamp        AS bucket
+        FROM prices.price_ohlcv_1d AS p FINAL
+        INNER JOIN prices.assets AS q FINAL ON q.asset_id = p.quote_asset_id
+        WHERE q.contract_address = ''
+          -- USDC only. USDT was removed here by task 0172: the canonical Stellar
+          -- USDT depegged in June 2022 and trades at ~$0.13, so the $1 placeholder
+          -- published a 7.4x overstatement. It is priced by measurement instead.
+          -- ⚠️ THIS PREDICATE IS THE PEG SET. The rate join below follows
+          -- whatever identity passes it, so adding a member here is a claim that
+          -- the oracle prices THAT ISSUER — see the fence at the top of this file
+          -- and `peg_identities_is_exactly_canonical_usdc` (oracle-worker).
+          AND (q.asset_code = 'USDC' AND q.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN')
+    ) AS b
+    -- Task 0168 — the measured rate, one row per (identity, bucket).
+    --
+    -- This IS task 0167's resolution rule (newest observation at or before the
+    -- bucket's END, never an average), written as an argMax inside the bucket
+    -- rather than as an ASOF JOIN. The two are the same value: the newest
+    -- observation <= bucket end that is not older than the bucket start IS the
+    -- bucket's last observation. Writing it this way makes the STALENESS WINDOW
+    -- the bucket itself and costs nothing — the right side collapses ~87k
+    -- observations to one row per bucket before the join, instead of ASOF-ing
+    -- every candle row on the left. An unbounded ASOF would forward-fill a dead
+    -- oracle's last reading across years of buckets; this cannot.
+    --
+    -- argMax is a LAST, not a mean — averaging is forbidden by 0167 (it does not
+    -- compose across the six grains; a daily close must equal the last hourly
+    -- close, and it does here because both are the last observation in the span).
+    --
+    -- method = 'oracle' selects a MEASURED reading. usd_rate keys on
+    -- (identity, timestamp, method) precisely so a task 0154 'pivot' row cannot
+    -- silently replace a measurement; the consumer chooses, and this consumer
+    -- chooses measured or nothing. Same choice as current.sql's tip surface.
+    --
+    -- Flooring uses toStartOfInterval, the SAME function the rollup MVs use to
+    -- build these buckets (rollups.sql) — so the two agree under any server
+    -- timezone rather than only under UTC.
+    --
+    -- ⚠️ TWO PROPERTIES OF THE BUCKET-WIDTH STALENESS WINDOW, both deliberate:
+    --   * A bucket the oracle sat out entirely falls back to $1/'peg' rather
+    --     than carrying the previous bucket's rate forward. Honest and labelled;
+    --     the alternative is an unbounded forward-fill that would publish a dead
+    --     oracle's last reading as a measurement for years.
+    --   * The NEWEST bucket reads 'peg' until the first poll lands inside it —
+    --     up to ~5 minutes (the oracle cadence) at the top of each hour for the
+    --     _1h grain, and at the top of each UTC day for the daily one. It then
+    --     flips to 'oracle'. That is a ~0.07% step on a partial bucket, and it
+    --     is visible in `method`, so a consumer that cares can wait for it.
+    --
+    -- ⚠️ `/v1/assets/{id}/ohlcv`'s USDC peg series (task 0170,
+    -- queries_ch.rs::ohlcv_peg_series) reads the same table and reaches a
+    -- DIFFERENT value for the same bucket. It ASOFs at the bucket's START and
+    -- applies NO staleness bound, so (a) its daily "close" is the previous day's
+    -- last reading, and (b) after an oracle outage it forward-fills the last
+    -- known rate indefinitely, still labelled 'oracle'. This view follows the
+    -- rule init.sql states for this consumer by name ("T is the BUCKET'S END"),
+    -- which is also the only one under which a daily close equals the last
+    -- hourly close of that day. The two surfaces therefore disagree by the
+    -- intraday drift in normal operation and by the whole staleness gap after an
+    -- outage. Reconciling them is its own task — NOT fixed here, because it is a
+    -- change to a shipped endpoint's published values.
+    LEFT JOIN
+    (
+        SELECT
+            CAST(asset_kind AS String) AS asset_kind,
+            asset_code,
+            issuer_address,
+            contract_address,
+            toStartOfInterval(timestamp, INTERVAL 1 DAY) AS bucket,
+            argMax(usd_rate, timestamp)                  AS usd_rate
+        FROM prices.usd_rate FINAL
+        WHERE method = 'oracle'
+        GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket
+    ) AS r
+        ON  r.asset_kind       = b.asset_kind
+        AND r.asset_code       = b.asset_code
+        AND r.issuer_address   = b.issuer_address
+        AND r.contract_address = b.contract_address
+        AND r.bucket           = b.bucket
 )
 GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
 
@@ -426,9 +538,11 @@ SELECT
     contract_address,
     bucket,
     if(max(is_peg) = 1 AND sum(w) = 0,
-       CAST(1 AS Decimal(38, 14)),
+       if(max(peg_rate) > 0, max(peg_rate), CAST(1 AS Decimal(38, 14))),
        CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))) AS close_usd,
-    CAST(if(max(is_peg) = 1 AND sum(w) = 0, 'peg', 'traded') AS LowCardinality(String)) AS method
+    CAST(if(max(is_peg) = 1 AND sum(w) = 0,
+            if(max(peg_rate) > 0, 'oracle', 'peg'),
+            'traded') AS LowCardinality(String)) AS method
 FROM
 (
     SELECT
@@ -442,14 +556,16 @@ FROM
         p.timestamp        AS bucket,
         toFloat64(p.close_usd) * toFloat64(p.volume_base) AS v,
         toFloat64(p.volume_base)                          AS w,
-        toUInt8(0)                                        AS is_peg
+        toUInt8(0)                                        AS is_peg,
+        CAST(0 AS Decimal(38, 14))                        AS peg_rate
     FROM prices.price_ohlcv_1h AS p FINAL
     INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
     WHERE p.close_usd > 0
 
     UNION ALL
 
-    -- Arm B — zero-weight peg placeholder, keyed on the QUOTE leg.
+    -- Arm B — zero-weight peg placeholder, keyed on the QUOTE leg, carrying
+    -- that identity's MEASURED USD rate for the bucket (task 0168; 0 = none).
     -- ⚠️ COST: this IS a second full FINAL pass over the candle table. An
     -- earlier comment claimed a cheap narrow projection; that was wrong and was
     -- corrected in review. The peg predicate sits on the JOINED `assets` side,
@@ -460,24 +576,111 @@ FROM
     -- WHERE …)` — quote_asset_id is the second ORDER BY column), or materialise
     -- the series per task 0150. NOT MEASURED at prod scale.
     SELECT
-        multiIf(
-            q.contract_address != '', 'contract',
-            q.asset_code = 'XLM' AND q.issuer_address = '', 'native',
-            'credit') AS asset_kind,
-        if(q.contract_address != '', '', q.asset_code)     AS asset_code,
-        if(q.contract_address != '', '', q.issuer_address) AS issuer_address,
-        q.contract_address AS contract_address,
-        p.timestamp        AS bucket,
-        toFloat64(0)       AS v,
-        toFloat64(0)       AS w,
-        toUInt8(1)         AS is_peg
-    FROM prices.price_ohlcv_1h AS p FINAL
-    INNER JOIN prices.assets AS q FINAL ON q.asset_id = p.quote_asset_id
-    WHERE q.contract_address = ''
-      -- USDC only. USDT was removed here by task 0172: the canonical Stellar
-      -- USDT depegged in June 2022 and trades at ~$0.13, so the $1 placeholder
-      -- published a 7.4x overstatement. It is priced by measurement instead.
-      AND (q.asset_code = 'USDC' AND q.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN')
+        b.asset_kind,
+        b.asset_code,
+        b.issuer_address,
+        b.contract_address,
+        b.bucket,
+        toFloat64(0) AS v,
+        toFloat64(0) AS w,
+        toUInt8(1)   AS is_peg,
+        -- 0 = "no measured rate for this identity in this bucket" -> the $1
+        -- fallback, flagged method = 'peg'. ⚠️ NOT NULL: prod runs
+        -- join_use_nulls = 0, so an unmatched LEFT JOIN yields the column
+        -- DEFAULT (0 for a Decimal), never NULL. A coalesce()/IS NULL form here
+        -- would be DEAD CODE on prod. ifNull() only covers a session that sets
+        -- join_use_nulls = 1; the `> 0` test in the outer SELECT is the real
+        -- discriminator, and it reads the same under both settings.
+        ifNull(r.usd_rate, CAST(0 AS Decimal(38, 14))) AS peg_rate
+    FROM
+    (
+        SELECT
+            multiIf(
+                q.contract_address != '', 'contract',
+                q.asset_code = 'XLM' AND q.issuer_address = '', 'native',
+                'credit') AS asset_kind,
+            if(q.contract_address != '', '', q.asset_code)     AS asset_code,
+            if(q.contract_address != '', '', q.issuer_address) AS issuer_address,
+            q.contract_address AS contract_address,
+            p.timestamp        AS bucket
+        FROM prices.price_ohlcv_1h AS p FINAL
+        INNER JOIN prices.assets AS q FINAL ON q.asset_id = p.quote_asset_id
+        WHERE q.contract_address = ''
+          -- USDC only. USDT was removed here by task 0172: the canonical Stellar
+          -- USDT depegged in June 2022 and trades at ~$0.13, so the $1 placeholder
+          -- published a 7.4x overstatement. It is priced by measurement instead.
+          -- ⚠️ THIS PREDICATE IS THE PEG SET. The rate join below follows
+          -- whatever identity passes it, so adding a member here is a claim that
+          -- the oracle prices THAT ISSUER — see the fence at the top of this file
+          -- and `peg_identities_is_exactly_canonical_usdc` (oracle-worker).
+          AND (q.asset_code = 'USDC' AND q.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN')
+    ) AS b
+    -- Task 0168 — the measured rate, one row per (identity, bucket).
+    --
+    -- This IS task 0167's resolution rule (newest observation at or before the
+    -- bucket's END, never an average), written as an argMax inside the bucket
+    -- rather than as an ASOF JOIN. The two are the same value: the newest
+    -- observation <= bucket end that is not older than the bucket start IS the
+    -- bucket's last observation. Writing it this way makes the STALENESS WINDOW
+    -- the bucket itself and costs nothing — the right side collapses ~87k
+    -- observations to one row per bucket before the join, instead of ASOF-ing
+    -- every candle row on the left. An unbounded ASOF would forward-fill a dead
+    -- oracle's last reading across years of buckets; this cannot.
+    --
+    -- argMax is a LAST, not a mean — averaging is forbidden by 0167 (it does not
+    -- compose across the six grains; a daily close must equal the last hourly
+    -- close, and it does here because both are the last observation in the span).
+    --
+    -- method = 'oracle' selects a MEASURED reading. usd_rate keys on
+    -- (identity, timestamp, method) precisely so a task 0154 'pivot' row cannot
+    -- silently replace a measurement; the consumer chooses, and this consumer
+    -- chooses measured or nothing. Same choice as current.sql's tip surface.
+    --
+    -- Flooring uses toStartOfInterval, the SAME function the rollup MVs use to
+    -- build these buckets (rollups.sql) — so the two agree under any server
+    -- timezone rather than only under UTC.
+    --
+    -- ⚠️ TWO PROPERTIES OF THE BUCKET-WIDTH STALENESS WINDOW, both deliberate:
+    --   * A bucket the oracle sat out entirely falls back to $1/'peg' rather
+    --     than carrying the previous bucket's rate forward. Honest and labelled;
+    --     the alternative is an unbounded forward-fill that would publish a dead
+    --     oracle's last reading as a measurement for years.
+    --   * The NEWEST bucket reads 'peg' until the first poll lands inside it —
+    --     up to ~5 minutes (the oracle cadence) at the top of each hour for the
+    --     _1h grain, and at the top of each UTC day for the daily one. It then
+    --     flips to 'oracle'. That is a ~0.07% step on a partial bucket, and it
+    --     is visible in `method`, so a consumer that cares can wait for it.
+    --
+    -- ⚠️ `/v1/assets/{id}/ohlcv`'s USDC peg series (task 0170,
+    -- queries_ch.rs::ohlcv_peg_series) reads the same table and reaches a
+    -- DIFFERENT value for the same bucket. It ASOFs at the bucket's START and
+    -- applies NO staleness bound, so (a) its daily "close" is the previous day's
+    -- last reading, and (b) after an oracle outage it forward-fills the last
+    -- known rate indefinitely, still labelled 'oracle'. This view follows the
+    -- rule init.sql states for this consumer by name ("T is the BUCKET'S END"),
+    -- which is also the only one under which a daily close equals the last
+    -- hourly close of that day. The two surfaces therefore disagree by the
+    -- intraday drift in normal operation and by the whole staleness gap after an
+    -- outage. Reconciling them is its own task — NOT fixed here, because it is a
+    -- change to a shipped endpoint's published values.
+    LEFT JOIN
+    (
+        SELECT
+            CAST(asset_kind AS String) AS asset_kind,
+            asset_code,
+            issuer_address,
+            contract_address,
+            toStartOfInterval(timestamp, INTERVAL 1 HOUR) AS bucket,
+            argMax(usd_rate, timestamp)                  AS usd_rate
+        FROM prices.usd_rate FINAL
+        WHERE method = 'oracle'
+        GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket
+    ) AS r
+        ON  r.asset_kind       = b.asset_kind
+        AND r.asset_code       = b.asset_code
+        AND r.issuer_address   = b.issuer_address
+        AND r.contract_address = b.contract_address
+        AND r.bucket           = b.bucket
 )
 GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
 

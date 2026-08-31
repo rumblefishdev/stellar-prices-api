@@ -660,12 +660,15 @@ async fn views_sql_replaces_every_existing_view() {
 ///   3. A non-peg asset is **unchanged** — same close_usd, and `method` does not
 ///      relabel it.
 ///
-/// ⚠️ The assertions are written against FALLBACK SEMANTICS, not the literal 1.
-/// `PEG_FALLBACK` is the value the view currently substitutes when no measured
-/// rate exists; task 0168 replaces the constant with a real depeg-aware rate
-/// from `prices.usd_rate`. When it does, only this constant and the
-/// rate-available case move — the shape of the test survives. A test asserting
-/// "peg asset → exactly 1.0" would have to be rewritten instead.
+/// ⚠️ The assertions are written against FALLBACK SEMANTICS, not the literal 1,
+/// and task 0168 has now shipped — so this fixture seeds NO `usd_rate` rows and
+/// exercises exactly the no-measured-rate half. That is why it still passes
+/// unchanged: `PEG_FALLBACK` is what the view substitutes when no observation
+/// exists, which is still `$1` (and still `method = 'peg'`). The rate-available
+/// half lives in
+/// `peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one`.
+/// A test asserting "peg asset → exactly 1.0" would have had to be rewritten
+/// here instead of surviving 0168 untouched.
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
 async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
@@ -673,7 +676,8 @@ async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
     let client = setup_scratch(db).await;
 
     /// The value the view substitutes when NO measured rate is available.
-    /// Task 0168 sources this from `prices.usd_rate` instead of a constant.
+    /// Since task 0168 a bucket WITH an observation publishes that instead;
+    /// this fixture deliberately seeds none.
     const PEG_FALLBACK: f64 = 1.0;
 
     // 2 = USDC (top-preference quote → never a base, the defect).
@@ -1127,6 +1131,326 @@ async fn usdt_quote_only_gets_no_peg_fallback_but_usdc_still_does() {
     assert_eq!(
         peg_rows, 1,
         "exactly one peg-filled row, and it must be USDC"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0168 — the peg placeholder publishes the MEASURED rate, not `$1`.
+///
+/// `price_usd_series*` used to emit a flat `1` for every peg-filled row. USDC
+/// does not sit at exactly `$1` — measured on prod 2026-08-10 it was
+/// `1.00066784838102`, stable to four decimals across five consecutive
+/// 5-minute readings — so the constant was a ~0.07% systematic error on EVERY
+/// published row, permanently, and it contradicted our own candles: the oracle
+/// enrichment tier already prices a USDC-quoted candle off the same Reflector
+/// feed, so the same bucket read 0.9993 there and 1.0000 here.
+///
+/// Five properties, each of which a plausible implementation gets wrong:
+///
+///   1. **Observation in the bucket → that rate, tagged `oracle`.** Asserted on
+///      the exact decimal string, not a float epsilon: a `toFloat64` round-trip
+///      would hide precision loss at the 14th place, which is the whole point of
+///      the `Decimal(38, 14)` column.
+///   2. **The bucket's LAST observation wins.** Two readings in the same day;
+///      an implementation that averaged them (forbidden by task 0167 — averages
+///      do not compose across the six grains) or took the first would differ.
+///   3. **No observation → `$1`, tagged `peg`, and NO FORWARD-FILL.** The day
+///      after the readings has none of its own and must fall back rather than
+///      carry yesterday's rate forward. An unbounded `ASOF` would publish a dead
+///      oracle's last reading across years of buckets.
+///   4. **`method = 'pivot'` rows are ignored.** `usd_rate` keys on
+///      (identity, timestamp, method) exactly so a task 0154 pivot row cannot
+///      replace a measurement; this consumer chooses measured or nothing. The
+///      fixture plants a wildly wrong pivot value at the end of the day — if it
+///      leaked it would win case 2's "last observation" test.
+///   5. **The grains compose.** The daily close equals the LAST hourly close of
+///      the same day (task 0167's stated reason for a close rather than an
+///      average). Both are the last observation in their span, so this holds by
+///      construction — and breaks the moment someone reaches for an average.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one() {
+    let db = "it_views_0168_measured_peg_rate";
+    let client = setup_scratch(db).await;
+
+    /// The last reading of 2026-08-10, and the value both grains must publish
+    /// for that day. Prod's actual measurement for that date.
+    const MEASURED: &str = "1.00066784838102";
+    /// An earlier reading the same day — case 2's loser.
+    const EARLIER: &str = "1.00050000000000";
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // FOO/USDC in three day buckets, so USDC is a quote-only peg leg in each and
+    // arm B emits a placeholder for all three:
+    //   2026-03-01 — BEFORE the oracle window (prod's first reading is
+    //                2026-03-11), the permanent deep-history fallback case;
+    //   2026-08-10 — the day that has readings;
+    //   2026-08-11 — the day AFTER, which has none of its own.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (toDateTime('2026-03-01 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
+             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
+             (toDateTime('2026-08-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // The hourly grain gets the same three buckets plus two INSIDE 2026-08-10 —
+    // 09:00 (the hour holding the earlier reading) and 23:00 (the hour holding
+    // the last one). Those two are what make case 5 a real test: the day's close
+    // must equal the 23:00 hour's close, not the 09:00 one.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h SELECT * FROM {db}.price_ohlcv_1d"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (toDateTime('2026-08-10 09:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
+             (toDateTime('2026-08-10 23:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // Two measured readings on 2026-08-10, plus a `pivot` row planted LAST in
+    // the day at a value no peg asset could hold. Only the two 'oracle' rows may
+    // be seen, and only the later of them may win.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, hops, version) VALUES \
+             ('credit','USDC','{USDC_ISSUER}','',toDateTime('2026-08-10 09:00:00'),{EARLIER},'oracle','',0,1), \
+             ('credit','USDC','{USDC_ISSUER}','',toDateTime('2026-08-10 23:55:00'),{MEASURED},'oracle','',0,1), \
+             ('credit','USDC','{USDC_ISSUER}','',toDateTime('2026-08-10 23:59:00'),0.50000000000000,'pivot','XLM',1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // Read the exact decimal, NOT toFloat64 — see the doc comment on case 1.
+    let usdc_at = |view: &'static str, bucket: &'static str| {
+        let client = client.clone();
+        let db = db.to_string();
+        async move {
+            client
+                .query(&format!(
+                    "SELECT toString(close_usd), method FROM {db}.{view} \
+                     WHERE asset_code = ? AND issuer_address = ? AND bucket = toDateTime(?)"
+                ))
+                .bind("USDC")
+                .bind(USDC_ISSUER)
+                .bind(bucket)
+                .fetch_one::<(String, String)>()
+                .await
+                .unwrap()
+        }
+    };
+
+    for (view, bucket) in [
+        ("price_usd_series", "2026-08-10 00:00:00"),
+        ("price_usd_series_1h", "2026-08-10 23:00:00"),
+    ] {
+        // CASES 1, 2 and 4 — the measured rate, the LAST one, and not the pivot.
+        let (close, method) = usdc_at(view, bucket).await;
+        assert_eq!(
+            close, MEASURED,
+            "{view} @ {bucket}: must publish the bucket's last MEASURED rate. \
+             `1` means the constant is still there; `{EARLIER}` means the first \
+             reading won instead of the last; `0.5` means a task 0154 'pivot' \
+             row was accepted as a measurement."
+        );
+        assert_eq!(
+            method, "oracle",
+            "{view} @ {bucket}: a measured rate must be labelled 'oracle' — a \
+             consumer cannot otherwise tell it from the $1 fallback"
+        );
+    }
+
+    // CASE 3 — the two buckets with no reading of their own. Deep history is the
+    // permanent case (no oracle reading exists before 2026-03-11 on prod); the
+    // day AFTER the readings is the forward-fill guard.
+    for (view, bucket, why) in [
+        (
+            "price_usd_series",
+            "2026-03-01 00:00:00",
+            "deep history, before the oracle window",
+        ),
+        (
+            "price_usd_series",
+            "2026-08-11 00:00:00",
+            "the day after — yesterday's rate must NOT forward-fill",
+        ),
+        (
+            "price_usd_series_1h",
+            "2026-08-10 00:00:00",
+            "an hour of the measured day that itself holds no reading",
+        ),
+    ] {
+        let (close, method) = usdc_at(view, bucket).await;
+        assert_eq!(
+            close, "1",
+            "{view} @ {bucket}: expected the $1 fallback ({why})"
+        );
+        assert_eq!(
+            method, "peg",
+            "{view} @ {bucket}: the fallback must be labelled 'peg' ({why})"
+        );
+    }
+
+    // CASE 5 — the grains compose: the daily close IS the last hourly close of
+    // the same day. Asserted against the views rather than against the constant,
+    // so it still means something if the fixture's numbers change.
+    let (daily, _) = usdc_at("price_usd_series", "2026-08-10 00:00:00").await;
+    let (last_hour, _) = usdc_at("price_usd_series_1h", "2026-08-10 23:00:00").await;
+    assert_eq!(
+        daily, last_hour,
+        "the daily close must equal the last hourly close of the same day — \
+         task 0167's reason for a close rather than an average"
+    );
+
+    // The earlier reading is not lost, it is just not the day's close: the hour
+    // that holds it publishes it. This is what makes case 2 a choice of rule
+    // rather than a choice of row.
+    let (nine, nine_method) = usdc_at("price_usd_series_1h", "2026-08-10 09:00:00").await;
+    assert_eq!(nine, "1.0005", "the 09:00 hour publishes its own reading");
+    assert_eq!(nine_method, "oracle");
+
+    // Unchanged invariants from task 0165: one row per (identity, bucket), and
+    // nothing publishes a non-positive close_usd.
+    let dupes: u64 = client
+        .query(&format!(
+            "SELECT count() FROM (SELECT count() AS c FROM {db}.price_usd_series \
+             GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket \
+             HAVING c > 1)"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(dupes, 0, "the rate join must not multiply rows");
+
+    let garbage: u64 = client
+        .query(&format!(
+            "SELECT countIf(toFloat64(close_usd) <= 0) FROM {db}.price_usd_series"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(garbage, 0, "no row may publish a non-positive close_usd");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0168 — a measured rate of exactly `1.0000…` is still `oracle`.
+///
+/// This is the acceptance criterion that the fallback must be DISTINGUISHABLE
+/// from a measurement that happens to land on par, and it is the one property
+/// no value-based check can cover: both rows read `1`. If `method` ever went
+/// away, or were derived from the value (`if(close_usd = 1, 'peg', …)`), this
+/// test would be the only thing to notice — and the surface would have
+/// reproduced the `close_usd = 0` defect class, one value meaning two things.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_measured_rate_at_exactly_par_is_labelled_oracle_not_peg() {
+    let db = "it_views_0168_par_is_still_measured";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // Two identical buckets, distinguished only by whether a reading exists.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
+             (toDateTime('2026-08-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // A real reading, at exactly par.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, hops, version) VALUES \
+             ('credit','USDC','{USDC_ISSUER}','',toDateTime('2026-08-10 12:00:00'),1.00000000000000,'oracle','',0,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let row = |bucket: &'static str| {
+        let client = client.clone();
+        let db = db.to_string();
+        async move {
+            client
+                .query(&format!(
+                    "SELECT toString(close_usd), method FROM {db}.price_usd_series \
+                     WHERE asset_code = 'USDC' AND bucket = toDateTime(?)"
+                ))
+                .bind(bucket)
+                .fetch_one::<(String, String)>()
+                .await
+                .unwrap()
+        }
+    };
+
+    let (measured, measured_method) = row("2026-08-10 00:00:00").await;
+    let (fallback, fallback_method) = row("2026-08-11 00:00:00").await;
+
+    assert_eq!(
+        measured, fallback,
+        "fixture precondition: both buckets must read the same value, otherwise \
+         this test proves nothing about the discriminator"
+    );
+    assert_eq!(
+        measured_method, "oracle",
+        "a measurement that lands on par is still a measurement"
+    );
+    assert_eq!(
+        fallback_method, "peg",
+        "the bucket with no reading is the fallback and must say so"
     );
 
     client
