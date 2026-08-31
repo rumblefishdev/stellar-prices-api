@@ -783,6 +783,47 @@ variable child" rule is not touched, because `/api/{proxy+}` and the departing
 `/api/api` are a variable and a literal under the same parent, and [[0235]]
 made the same-shaped move in one deploy.
 
+### Deployed — 2026-08-31, 10:06–10:11Z
+
+Compute 10:06Z (22 s), then ApiGateway (27 s) and PortalHosting (198 s,
+CloudFront propagation) at 10:08–10:11Z, then the stage cache flushed. **Not in
+one command, and the gap was a bad state** — see Issues Encountered:
+`--require-approval broadening` stopped after Compute, so for ~90 s the new
+Lambda (routes at `/api/*`) sat behind the old gateway (`/api/api/{proxy+}`)
+and every portal call was a `404`. `/v1` was unaffected throughout; `Errors` 0
+over the window (8 invocations, all of them this task's probes).
+
+Secret: `redirect_uri` → `https://sorobanscan.rumblefish.dev/api/auth/callback`,
+version `bcea66cb…` is `AWSCURRENT`, the rotated-but-old-path `3ff8ea37…` is
+`AWSPREVIOUS`; the other three fields carried through unchanged (`client_id`
+19, `client_secret` 32, `session_signing_key` 64). Bundle re-synced to
+`s3://production-soroban-explorer-api-spa/api/` (new `index-B30WO_hN.js`; the
+previous chunk left in place on purpose — no `--delete`, a visitor holding the
+old `index.html` still resolves) and `/api/*` invalidated on `EA2TLS5SS5M87`
+(`I4I30TL0ID0ZRUMEN9SMA157FN`, completed).
+
+Measured after, on `02mabge71l.execute-api…/production` and on our own
+distribution alike:
+
+| probe | result |
+|---|---|
+| `GET /api/config` | `200` JSON `{"enabled":true,…}`, `no-store` |
+| `GET /api/api-docs-json` | `200` JSON, byte-identical to `/api-docs-json` |
+| `GET /api/auth/login` | `303`, `redirect_uri=…/api/auth/callback` |
+| `GET /api/key`, `GET /api/usage` | `401` JSON, `no-store` |
+| `POST /api/key/rework` | `403` JSON, `no-store` |
+| `POST /api/auth/logout` | `204` |
+| `GET /api/api/config`, `/api/api/auth/login` (old) | `404` JSON |
+| `/api/`, `/api/index.html`, `/api/favicon.ico`, `/api/assets/*`, `/api/login`, `/api/dashboard/`, `/api/quick-start` (our CDN) | `200` from S3 — the carve-outs |
+| `GET /api` (our CDN) | `302` → `/api/` |
+| `GET /api/nope` (our CDN) | `404` JSON — the loud failure, as designed |
+| `/api-docs-json`, `/health`, `/v1/assets` | `200`, `200`, `403` — unchanged |
+
+⚠️ **Still owed, and only Adam can do it:** register
+`https://sorobanscan.rumblefish.dev/api/auth/callback` in the Discord
+Developer Portal. Until then a sign-in started anywhere is refused by Discord at
+the authorize step with its own error page — nothing in our logs.
+
 ## Issues Encountered
 
 - **The Discord `client_secret` was exposed in a chat transcript.** On
@@ -827,6 +868,16 @@ made the same-shaped move in one deploy.
   of view `false` is the intended state. Merging this branch is what fixes it;
   no second deploy is needed.
 
+- **`cdk deploy A B C --require-approval broadening` deployed A and stopped.**
+  The ApiGateway diff adds `Lambda::Permission` resources for the moved methods
+  — an IAM change, so cdk asks for approval, and without a TTY it aborts
+  silently after the first stack. My grep for `✅|❌|FAILED` hid the lowercase
+  message. The result was the one intermediate state this task had reasoned
+  about and meant to avoid: new Lambda under old gateway, ~90 s of portal-wide
+  `404`. Recovered with `--require-approval never` for the remaining two,
+  having already read the diff. **When a multi-stack deploy touches IAM, run
+  it with `never` after reading the diff, or run the stacks one at a time and
+  read every exit.**
 - **`cdk diff` said "no differences" for Compute after a Rust change.** The
   api-handler asset is packaged off `target/lambda/prices-api/bootstrap`,
   which was the pre-change build from 09:50; the diff was honest about the
