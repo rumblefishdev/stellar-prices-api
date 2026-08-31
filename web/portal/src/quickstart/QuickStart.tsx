@@ -9,6 +9,7 @@ import Typography from '@mui/material/Typography';
 import { alpha } from '@mui/material/styles';
 import { useEffect, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
+import { PUBLIC_API_BASE_URL } from '../landing/links';
 
 /* The three "What's next" badges, exported from the file (Adam's
    `Designs.zip`, `Layout/251`) — a pale-yellow disc with a brown glyph, one
@@ -39,25 +40,23 @@ import { panelBorder } from '../landing/DashboardPanel';
  * the visitor copies, which is why the one interactive thing here is the
  * copy button.
  *
- * The PATHS are the DESIGN's, not this repo's OpenAPI document's — the same
- * gap `landing/Endpoints.tsx` notes. Reconciling them is a product decision
- * about the public surface, tracked as task 0233 rather than remembered; this
- * page renders what the frame says so that the two do not diverge into a
- * third answer, and keeps the paths in one place so the reconciliation is a
- * small diff.
+ * The PATHS, the fields and the error bodies are this repo's OpenAPI
+ * document's, since 2026-08-31 (task 0194, Adam's call) — every value below
+ * was read off the live API that day. Until then the page rendered the
+ * DESIGN's surface (`/assets/native/price`, `/pools`, `/history`, a `liquidity`
+ * field, a `source: "soroswap"`), which this API never served: a reader who
+ * copied "First request" with a freshly issued key got API Gateway's
+ * `403 Missing Authentication Token`, on the page whose whole promise is a
+ * response in under five minutes. Task 0233 tracked the reconciliation; the
+ * portal's half of it is done here.
  *
- * The HOST is ours, since 2026-08-27, and is not the design's. The frame
- * shows `api.soroswap.finance`, and this page told a reader to paste their
- * real key into a `curl` aimed at it — a credential, sent to a domain that
- * is not this API's, from the page that issued it. The base below is the
- * execute-api origin `docs/scf/api-endpoints.md` documents as the public one
- * until task 0195's custom domain lands; a request to it with a design-only
- * path answers our `404`, which is a wrong path and not a leaked key.
+ * The HOST is ours — `PUBLIC_API_BASE_URL`, the API's own hostname — and not
+ * the frame's `api.soroswap.finance`: a page that renders a credential must
+ * not aim it at another domain.
  */
 
-const BASE_URL =
-  'https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/v1';
-const PLACEHOLDER_KEY = 'sf_live_YOUR_KEY_HERE';
+const BASE_URL = PUBLIC_API_BASE_URL;
+const PLACEHOLDER_KEY = 'YOUR_API_KEY';
 
 /** The sections, in page order. Doubles as the left-hand table of contents. */
 const SECTIONS = [
@@ -506,22 +505,22 @@ type FirstRequestLang = (typeof FIRST_REQUEST_LANGS)[number]['key'];
 
 const FIRST_REQUEST: Record<FirstRequestLang, Snippet> = {
   curl: {
-    text: `curl ${BASE_URL}/prices/XLM-USDC \\\n  -H "x-api-key: ${PLACEHOLDER_KEY}"`,
+    text: `curl ${BASE_URL}/assets/native/price \\\n  -H "x-api-key: ${PLACEHOLDER_KEY}"`,
     view: (
       <>
         <Tok c={MUTED}>curl </Tok>
-        <Tok c={NUM}>{BASE_URL}/prices/XLM-USDC</Tok>
+        <Tok c={NUM}>{BASE_URL}/assets/native/price</Tok>
         {' \\\n  -H '}
         <Tok c={STR}>&quot;x-api-key: {PLACEHOLDER_KEY}&quot;</Tok>
       </>
     ),
   },
   js: {
-    text: `const res = await fetch("${BASE_URL}/prices/XLM-USDC", {\n  headers: { "x-api-key": "${PLACEHOLDER_KEY}" }\n});\nconst price = await res.json();`,
+    text: `const res = await fetch("${BASE_URL}/assets/native/price", {\n  headers: { "x-api-key": "${PLACEHOLDER_KEY}" }\n});\nconst price = await res.json();`,
     view: (
       <>
         <Tok c={KEY}>const</Tok> res = <Tok c={KEY}>await</Tok> fetch(
-        <Tok c={STR}>&quot;{BASE_URL}/prices/XLM-USDC&quot;</Tok>
+        <Tok c={STR}>&quot;{BASE_URL}/assets/native/price&quot;</Tok>
         {', {\n  headers: { '}
         <Tok c={STR}>&quot;x-api-key&quot;</Tok>
         {': '}
@@ -532,12 +531,12 @@ const FIRST_REQUEST: Record<FirstRequestLang, Snippet> = {
     ),
   },
   python: {
-    text: `import requests\n\nres = requests.get(\n    "${BASE_URL}/prices/XLM-USDC",\n    headers={"x-api-key": "${PLACEHOLDER_KEY}"},\n)\nprice = res.json()`,
+    text: `import requests\n\nres = requests.get(\n    "${BASE_URL}/assets/native/price",\n    headers={"x-api-key": "${PLACEHOLDER_KEY}"},\n)\nprice = res.json()`,
     view: (
       <>
         <Tok c={KEY}>import</Tok> requests{'\n\n'}res = requests.get(
         {'\n    '}
-        <Tok c={STR}>&quot;{BASE_URL}/prices/XLM-USDC&quot;</Tok>
+        <Tok c={STR}>&quot;{BASE_URL}/assets/native/price&quot;</Tok>
         {',\n    headers={'}
         <Tok c={STR}>&quot;x-api-key&quot;</Tok>
         {': '}
@@ -547,11 +546,12 @@ const FIRST_REQUEST: Record<FirstRequestLang, Snippet> = {
     ),
   },
   go: {
-    text: `req, _ := http.NewRequest("GET", "${BASE_URL}/prices/XLM-USDC", nil)\nreq.Header.Set("x-api-key", "${PLACEHOLDER_KEY}")\nres, err := http.DefaultClient.Do(req)`,
+    text: `req, _ := http.NewRequest("GET", "${BASE_URL}/assets/native/price", nil)\nreq.Header.Set("x-api-key", "${PLACEHOLDER_KEY}")\nres, err := http.DefaultClient.Do(req)`,
     view: (
       <>
         req, _ := http.NewRequest(<Tok c={STR}>&quot;GET&quot;</Tok>,{' '}
-        <Tok c={STR}>&quot;{BASE_URL}/prices/XLM-USDC&quot;</Tok>, nil){'\n'}
+        <Tok c={STR}>&quot;{BASE_URL}/assets/native/price&quot;</Tok>, nil)
+        {'\n'}
         req.Header.Set(<Tok c={STR}>&quot;x-api-key&quot;</Tok>,{' '}
         <Tok c={STR}>&quot;{PLACEHOLDER_KEY}&quot;</Tok>){'\n'}res, err :=
         http.DefaultClient.Do(req)
@@ -577,59 +577,72 @@ const RESPONSE_FIELDS: readonly {
 }[] = [
   {
     key: 'asset',
-    value: <Tok c={STR}>&quot;XLM-USDC&quot;</Tok>,
-    raw: '"XLM-USDC"',
+    value: <Tok c={STR}>&quot;native&quot;</Tok>,
+    raw: '"native"',
     dot: KEY,
-    meaning: 'Asset pair identifier',
-  },
-  {
-    key: 'price',
-    value: <Tok c={NUM}>0.0812</Tok>,
-    raw: '0.0812',
-    dot: NUM,
-    meaning: 'Current price in quote asset (USDC)',
+    meaning:
+      'The identifier you asked for — native, CODE:ISSUER, or a C… contract',
   },
   {
     key: 'price_usd',
-    value: <Tok c={NUM}>0.0812</Tok>,
-    raw: '0.0812',
+    value: <Tok c={STR}>&quot;0.17735783908195&quot;</Tok>,
+    raw: '"0.17735783908195"',
     dot: NUM,
-    meaning: 'Price expressed in USD',
+    meaning: 'Current price in USD. A decimal string, never a float',
   },
   {
-    key: 'change_24h',
-    value: <Tok c={NUM}>+2.14</Tok>,
-    raw: '+2.14',
+    key: 'price_xlm',
+    value: <Tok c={STR}>&quot;1&quot;</Tok>,
+    raw: '"1"',
     dot: NUM,
-    meaning: '% change over last 24 hours',
+    meaning: 'The same price in XLM (1 for XLM itself)',
   },
   {
-    key: 'volume_24h',
-    value: <Tok c={NUM}>142891.50</Tok>,
-    raw: '142891.50',
+    key: 'vwap_24h',
+    value: <Tok c={STR}>&quot;0.17729898377938&quot;</Tok>,
+    raw: '"0.17729898377938"',
     dot: NUM,
-    meaning: '24h trading volume in USD',
+    meaning: 'Volume-weighted average price over the last 24 hours',
   },
   {
-    key: 'liquidity',
-    value: <Tok c={NUM}>2400000</Tok>,
-    raw: '2400000',
+    key: 'volume_24h_usd',
+    value: <Tok c={STR}>&quot;383736.40419055725213&quot;</Tok>,
+    raw: '"383736.40419055725213"',
     dot: NUM,
-    meaning: 'Total pool liquidity in USD',
+    meaning: '24h traded volume in USD, all venues combined',
   },
   {
-    key: 'source',
-    value: <Tok c={STR}>&quot;soroswap&quot;</Tok>,
-    raw: '"soroswap"',
+    key: 'change_24h_pct',
+    value: <Tok c={STR}>&quot;-1.6635&quot;</Tok>,
+    raw: '"-1.6635"',
+    dot: NUM,
+    meaning: '% change over the last 24 hours',
+  },
+  {
+    key: 'sources',
+    value: (
+      <>
+        {'{ '}
+        <Tok c={KEY}>&quot;aquarius&quot;</Tok>: {'{ '}
+        <Tok c={KEY}>&quot;price&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;0.1774&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;volume_24h&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;277436.70&quot;</Tok>
+        {' }, '}
+        <Tok c={KEY}>&quot;sdex&quot;</Tok>: {'{…}, '}
+        <Tok c={KEY}>&quot;soroswap&quot;</Tok>: {'{…} }'}
+      </>
+    ),
+    raw: '{ "aquarius": { "price": "0.1774", "volume_24h": "277436.70" }, "sdex": { … }, "soroswap": { … } }',
     dot: STR,
-    meaning: 'Always "soroswap" — data source',
+    meaning: 'Per-venue price and 24h volume: aquarius, sdex, soroswap',
   },
   {
     key: 'updated_at',
-    value: <Tok c={STR}>&quot;2026-04-13T14:23:51Z&quot;</Tok>,
-    raw: '"2026-04-13T14:23:51Z"',
+    value: <Tok c={STR}>&quot;2026-08-31T12:22:00Z&quot;</Tok>,
+    raw: '"2026-08-31T12:22:00Z"',
     dot: STR,
-    meaning: 'ISO 8601 timestamp of last update',
+    meaning: 'When this price was last computed (ISO 8601, UTC)',
   },
 ];
 
@@ -639,93 +652,175 @@ const RESPONSE_TEXT = `{\n${RESPONSE_FIELDS.map(
 ).join('\n')}\n}`;
 
 /** The route list, each with the example response its row unfolds to. */
+type Method = 'GET' | 'POST';
+
 const ENDPOINTS: readonly {
+  method: Method;
   path: string;
   summary: string;
   example: ReactNode;
 }[] = [
   {
-    path: '/prices',
-    summary: 'All asset prices',
-    example: (
-      <>
-        <Tok c={MUTED}>{'// Returns array of all available asset prices'}</Tok>
-        {'\n[{ '}
-        <Tok c={KEY}>&quot;asset&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;XLM-USDC&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;price&quot;</Tok>: <Tok c={NUM}>0.0812</Tok>, ...{' '}
-        {'},\n { '}
-        <Tok c={KEY}>&quot;asset&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;XLM-EURC&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;price&quot;</Tok>: <Tok c={NUM}>0.0751</Tok>, ...{' '}
-        {'}]'}
-      </>
-    ),
-  },
-  {
-    path: '/prices/{asset}',
-    summary: 'Single asset',
+    method: 'GET',
+    path: '/assets',
+    summary: 'Assets, by volume',
     example: (
       <>
         <Tok c={MUTED}>
-          {'// Returns one asset — the object described above'}
+          {
+            '// Paginated by cursor. ?type=classic|soroban ?search=USDC ?limit=200 ?min_volume_usd='
+          }
         </Tok>
         {'\n{ '}
-        <Tok c={KEY}>&quot;asset&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;XLM-USDC&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;price&quot;</Tok>: <Tok c={NUM}>0.0812</Tok>,{' '}
-        <Tok c={KEY}>&quot;change_24h&quot;</Tok>: <Tok c={NUM}>+2.14</Tok>, ...{' '}
-        {'}'}
+        <Tok c={KEY}>&quot;data&quot;</Tok>: [{'{ '}
+        <Tok c={KEY}>&quot;asset_code&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;USDC&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;issuer_address&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;GA5Z…KZVN&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;price_usd&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;1.0002&quot;</Tok>, ... {'}],\n  '}
+        <Tok c={KEY}>&quot;cursor&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;eyJ2…&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;has_more&quot;</Tok>: <Tok c={NUM}>true</Tok> {'}'}
       </>
     ),
   },
   {
-    path: '/pools',
-    summary: 'Liquidity pools',
-    example: (
-      <>
-        <Tok c={MUTED}>{'// Returns array of liquidity pools'}</Tok>
-        {'\n[{ '}
-        <Tok c={KEY}>&quot;id&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;CB7X…Q4A&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;pair&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;XLM-USDC&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;liquidity&quot;</Tok>: <Tok c={NUM}>2400000</Tok>,
-        ... {'}]'}
-      </>
-    ),
-  },
-  {
-    path: '/pools/{id}/stats',
-    summary: 'Pool statistics',
+    method: 'GET',
+    path: '/assets/{id}',
+    summary: 'One asset',
     example: (
       <>
         <Tok c={MUTED}>
-          {'// Returns volume and fee statistics for one pool'}
+          {
+            '// GET /assets/USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+          }
         </Tok>
         {'\n{ '}
-        <Tok c={KEY}>&quot;id&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;CB7X…Q4A&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;volume_24h&quot;</Tok>: <Tok c={NUM}>142891.50</Tok>,{' '}
-        <Tok c={KEY}>&quot;fees_24h&quot;</Tok>: <Tok c={NUM}>428.67</Tok>, ...{' '}
-        {'}'}
+        <Tok c={KEY}>&quot;asset&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;USDC:GA5Z…KZVN&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;asset_kind&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;credit&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;code&quot;</Tok>: <Tok c={STR}>&quot;USDC&quot;</Tok>
+        , <Tok c={KEY}>&quot;issuer&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;GA5Z…KZVN&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;is_active&quot;</Tok>: <Tok c={NUM}>true</Tok> {'}'}
       </>
     ),
   },
   {
-    path: '/history/{asset}',
-    summary: 'Historical prices',
+    method: 'GET',
+    path: '/assets/{id}/price',
+    summary: 'Price and 24h stats',
     example: (
       <>
-        <Tok c={MUTED}>{'// Returns array of price points, oldest first'}</Tok>
-        {'\n[{ '}
-        <Tok c={KEY}>&quot;t&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;2026-04-13T14:00:00Z&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;price&quot;</Tok>: <Tok c={NUM}>0.0809</Tok>{' '}
-        {'},\n { '}
-        <Tok c={KEY}>&quot;t&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;2026-04-13T15:00:00Z&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;price&quot;</Tok>: <Tok c={NUM}>0.0812</Tok> {'}]'}
+        <Tok c={MUTED}>
+          {'// The object described above. ?min_volume_usd= drops thin venues'}
+        </Tok>
+        {'\n{ '}
+        <Tok c={KEY}>&quot;asset&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;native&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;price_usd&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;0.1774&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;vwap_24h&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;0.1773&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;sources&quot;</Tok>: {'{…}'}, ... {'}'}
+      </>
+    ),
+  },
+  {
+    method: 'GET',
+    path: '/assets/{id}/ohlcv',
+    summary: 'Candles, 1m to 1M',
+    example: (
+      <>
+        <Tok c={MUTED}>
+          {
+            '// ?timeframe=1h|24h|7d|30d|1y|all ?granularity=1m|15m|1h|4h|1d|1w|1M ?start= ?end= ?base_currency=USD|XLM'
+          }
+        </Tok>
+        {'\n{ '}
+        <Tok c={KEY}>&quot;asset&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;native&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;granularity&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;15m&quot;</Tok>, <Tok c={KEY}>&quot;data&quot;</Tok>:
+        [{'{ '}
+        <Tok c={KEY}>&quot;timestamp&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;2026-08-30T12:30:00Z&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;open&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;0.1806&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;high&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;0.1807&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;low&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;0.1801&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;close&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;0.1806&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;volume_quote_usd&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;1491.51&quot;</Tok>, ... {'}, ...] }'}
+      </>
+    ),
+  },
+  {
+    method: 'GET',
+    path: '/oracles/{id}',
+    summary: 'Oracle cross-check',
+    example: (
+      <>
+        <Tok c={MUTED}>
+          {'// What on-chain oracles say, next to the market'}
+        </Tok>
+        {'\n{ '}
+        <Tok c={KEY}>&quot;asset&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;native&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;oracles&quot;</Tok>: [{'{ '}
+        <Tok c={KEY}>&quot;name&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;reflector&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;price_usd&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;0.1770&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;updated_at&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;2026-08-31T12:20:00Z&quot;</Tok> {'}] }'}
+      </>
+    ),
+  },
+  {
+    method: 'GET',
+    path: '/backfill/status',
+    summary: 'History coverage',
+    example: (
+      <>
+        <Tok c={MUTED}>
+          {
+            '// How far back candles go, per source — check before a long ?start='
+          }
+        </Tok>
+        {'\n{ '}
+        <Tok c={KEY}>&quot;realtime_tip_ledger&quot;</Tok>:{' '}
+        <Tok c={NUM}>63795749</Tok>, <Tok c={KEY}>&quot;sdex&quot;</Tok>: {'{ '}
+        <Tok c={KEY}>&quot;status&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;completed&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;earliest_data_available&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;2015-11-18T03:47:00Z&quot;</Tok>, ... {'}, '}
+        <Tok c={KEY}>&quot;soroban_amm&quot;</Tok>: {'{…} }'}
+      </>
+    ),
+  },
+  {
+    method: 'POST',
+    path: '/prices/batch',
+    summary: 'Many prices at once',
+    example: (
+      <>
+        <Tok c={MUTED}>
+          {
+            '// Body: { "assets": ["native", "USDC:GA5Z…KZVN", "C…"] } — the same object as /price, per asset'
+          }
+        </Tok>
+        {'\n{ '}
+        <Tok c={KEY}>&quot;prices&quot;</Tok>: [{'{ '}
+        <Tok c={KEY}>&quot;asset&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;native&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;price_usd&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;0.1774&quot;</Tok>, ... {'}, ...] }'}
       </>
     ),
   },
@@ -738,10 +833,22 @@ const ERROR_CODES: readonly {
   fix: string;
 }[] = [
   {
+    status: 400,
+    tone: 'muted',
+    when: 'Malformed identifier or query — body { "code": "invalid_id" | "invalid_query", "message": … }',
+    fix: 'The message names the parameter. Identifiers are native, CODE:ISSUER (uppercase code, G… issuer) or a C… contract; limit is 1–200; timeframe is one of 1h, 24h, 7d, 30d, 1y, all.',
+  },
+  {
     status: 403,
     tone: 'error',
-    when: 'Missing or invalid x-api-key header',
-    fix: 'Check that your key is correct and the header name matches exactly.',
+    when: 'Missing or invalid x-api-key header — body { "message": "Forbidden" }, from the gateway',
+    fix: 'Check that your key is correct and the header name matches exactly. A 403 with "Missing Authentication Token" means the PATH is wrong, not the key.',
+  },
+  {
+    status: 404,
+    tone: 'muted',
+    when: 'No such asset, or no price for it yet — body { "code": "not_found", "message": … }',
+    fix: 'List /assets (with ?search=) to find the identifier; an asset with no recent trades has no current price.',
   },
   {
     status: 429,
@@ -751,12 +858,6 @@ const ERROR_CODES: readonly {
     // telling a reader to wait for a header that never comes is worse than
     // no advice. Measured — see `RATE_LIMIT_BODY`.
     fix: 'Slow down to 1 request per second and retry after a short pause — the response carries no Retry-After header. Monitor quota on your dashboard.',
-  },
-  {
-    status: 404,
-    tone: 'muted',
-    when: 'Asset pair or pool ID not found',
-    fix: 'Check the asset identifier format — use uppercase, e.g. XLM-USDC.',
   },
   {
     status: 500,
@@ -796,45 +897,47 @@ type SdkLang = (typeof SDK_LANGS)[number]['key'];
 
 const SDK: Record<SdkLang, Snippet> = {
   js: {
-    text: `const API_KEY = "${PLACEHOLDER_KEY}";\nconst BASE = "${BASE_URL}";\n\nasync function getPrices() {\n  const res = await fetch(\`\${BASE}/prices\`, {\n    headers: { "x-api-key": API_KEY }\n  });\n  if (!res.ok) throw new Error(\`HTTP \${res.status}\`);\n  return res.json();\n}\n\nconst prices = await getPrices();\nconsole.log(prices);`,
+    text: `const API_KEY = "${PLACEHOLDER_KEY}";\nconst BASE = "${BASE_URL}";\n\nasync function getPrice() {\n  const res = await fetch(\`\${BASE}/assets/native/price\`, {\n    headers: { "x-api-key": API_KEY }\n  });\n  if (!res.ok) throw new Error(\`HTTP \${res.status}\`);\n  return res.json();\n}\n\nconst price = await getPrice();\nconsole.log(price);`,
     view: (
       <>
         <Tok c={KEY}>const</Tok> API_KEY ={' '}
         <Tok c={STR}>&quot;{PLACEHOLDER_KEY}&quot;</Tok>;{'\n'}
         <Tok c={KEY}>const</Tok> BASE ={' '}
         <Tok c={STR}>&quot;{BASE_URL}&quot;</Tok>;{'\n\n'}
-        <Tok c={KEY}>async function</Tok> getPrices() {'{\n  '}
+        <Tok c={KEY}>async function</Tok> getPrice() {'{\n  '}
         <Tok c={KEY}>const</Tok> res = <Tok c={KEY}>await</Tok> fetch(
-        <Tok c={STR}>`$&#123;BASE&#125;/prices`</Tok>, {'{\n    headers: { '}
+        <Tok c={STR}>`$&#123;BASE&#125;/assets/native/price`</Tok>,{' '}
+        {'{\n    headers: { '}
         <Tok c={STR}>&quot;x-api-key&quot;</Tok>: API_KEY {'}\n  });\n  '}
         <Tok c={KEY}>if</Tok> (!res.ok) <Tok c={KEY}>throw new</Tok> Error(
         <Tok c={STR}>`HTTP $&#123;res.status&#125;`</Tok>);{'\n  '}
         <Tok c={KEY}>return</Tok> res.json();{'\n}\n\n'}
-        <Tok c={KEY}>const</Tok> prices = <Tok c={KEY}>await</Tok> getPrices();
+        <Tok c={KEY}>const</Tok> prices = <Tok c={KEY}>await</Tok> getPrice();
         {'\n'}
-        console.log(prices);
+        console.log(price);
       </>
     ),
   },
   python: {
-    text: `import requests\n\nAPI_KEY = "${PLACEHOLDER_KEY}"\nBASE = "${BASE_URL}"\n\n\ndef get_prices():\n    res = requests.get(f"{BASE}/prices", headers={"x-api-key": API_KEY})\n    res.raise_for_status()\n    return res.json()\n\n\nprices = get_prices()\nprint(prices)`,
+    text: `import requests\n\nAPI_KEY = "${PLACEHOLDER_KEY}"\nBASE = "${BASE_URL}"\n\n\ndef get_price():\n    res = requests.get(f"{BASE}/assets/native/price", headers={"x-api-key": API_KEY})\n    res.raise_for_status()\n    return res.json()\n\n\nprice = get_price()\nprint(price)`,
     view: (
       <>
         <Tok c={KEY}>import</Tok> requests{'\n\n'}API_KEY ={' '}
         <Tok c={STR}>&quot;{PLACEHOLDER_KEY}&quot;</Tok>
         {'\n'}BASE = <Tok c={STR}>&quot;{BASE_URL}&quot;</Tok>
         {'\n\n\n'}
-        <Tok c={KEY}>def</Tok> get_prices():{'\n    res = requests.get('}
-        <Tok c={STR}>f&quot;&#123;BASE&#125;/prices&quot;</Tok>, headers={'{'}
+        <Tok c={KEY}>def</Tok> get_price():{'\n    res = requests.get('}
+        <Tok c={STR}>f&quot;&#123;BASE&#125;/assets/native/price&quot;</Tok>,
+        headers={'{'}
         <Tok c={STR}>&quot;x-api-key&quot;</Tok>: API_KEY
         {'})\n    res.raise_for_status()\n    '}
-        <Tok c={KEY}>return</Tok> res.json(){'\n\n\n'}prices = get_prices()
-        {'\n'}print(prices)
+        <Tok c={KEY}>return</Tok> res.json(){'\n\n\n'}price = get_price()
+        {'\n'}print(price)
       </>
     ),
   },
   rust: {
-    text: `use reqwest::blocking::Client;\n\nconst API_KEY: &str = "${PLACEHOLDER_KEY}";\nconst BASE: &str = "${BASE_URL}";\n\nfn main() -> Result<(), reqwest::Error> {\n    let prices: serde_json::Value = Client::new()\n        .get(format!("{BASE}/prices"))\n        .header("x-api-key", API_KEY)\n        .send()?\n        .error_for_status()?\n        .json()?;\n    println!("{prices}");\n    Ok(())\n}`,
+    text: `use reqwest::blocking::Client;\n\nconst API_KEY: &str = "${PLACEHOLDER_KEY}";\nconst BASE: &str = "${BASE_URL}";\n\nfn main() -> Result<(), reqwest::Error> {\n    let price: serde_json::Value = Client::new()\n        .get(format!("{BASE}/assets/native/price"))\n        .header("x-api-key", API_KEY)\n        .send()?\n        .error_for_status()?\n        .json()?;\n    println!("{price}");\n    Ok(())\n}`,
     view: (
       <>
         <Tok c={KEY}>use</Tok> reqwest::blocking::Client;{'\n\n'}
@@ -846,18 +949,18 @@ const SDK: Record<SdkLang, Snippet> = {
         {'{\n    '}
         <Tok c={KEY}>let</Tok> prices: serde_json::Value = Client::new()
         {'\n        .get(format!('}
-        <Tok c={STR}>&quot;&#123;BASE&#125;/prices&quot;</Tok>))
+        <Tok c={STR}>&quot;&#123;BASE&#125;/assets/native/price&quot;</Tok>))
         {'\n        .header('}
         <Tok c={STR}>&quot;x-api-key&quot;</Tok>, API_KEY)
         {
           '\n        .send()?\n        .error_for_status()?\n        .json()?;\n    println!('
         }
-        <Tok c={STR}>&quot;&#123;prices&#125;&quot;</Tok>);{'\n    Ok(())\n}'}
+        <Tok c={STR}>&quot;&#123;price&#125;&quot;</Tok>);{'\n    Ok(())\n}'}
       </>
     ),
   },
   go: {
-    text: `package main\n\nimport (\n\t"fmt"\n\t"io"\n\t"net/http"\n)\n\nconst apiKey = "${PLACEHOLDER_KEY}"\nconst base = "${BASE_URL}"\n\nfunc main() {\n\treq, _ := http.NewRequest("GET", base+"/prices", nil)\n\treq.Header.Set("x-api-key", apiKey)\n\tres, err := http.DefaultClient.Do(req)\n\tif err != nil {\n\t\tpanic(err)\n\t}\n\tdefer res.Body.Close()\n\tbody, _ := io.ReadAll(res.Body)\n\tfmt.Println(string(body))\n}`,
+    text: `package main\n\nimport (\n\t"fmt"\n\t"io"\n\t"net/http"\n)\n\nconst apiKey = "${PLACEHOLDER_KEY}"\nconst base = "${BASE_URL}"\n\nfunc main() {\n\treq, _ := http.NewRequest("GET", base+"/assets/native/price", nil)\n\treq.Header.Set("x-api-key", apiKey)\n\tres, err := http.DefaultClient.Do(req)\n\tif err != nil {\n\t\tpanic(err)\n\t}\n\tdefer res.Body.Close()\n\tbody, _ := io.ReadAll(res.Body)\n\tfmt.Println(string(body))\n}`,
     view: (
       <>
         <Tok c={KEY}>package</Tok> main{'\n\n'}
@@ -876,7 +979,8 @@ const SDK: Record<SdkLang, Snippet> = {
         {'\n\n'}
         <Tok c={KEY}>func</Tok> main() {'{\n\treq, _ := http.NewRequest('}
         <Tok c={STR}>&quot;GET&quot;</Tok>, base+
-        <Tok c={STR}>&quot;/prices&quot;</Tok>, nil){'\n\treq.Header.Set('}
+        <Tok c={STR}>&quot;/assets/native/price&quot;</Tok>, nil)
+        {'\n\treq.Header.Set('}
         <Tok c={STR}>&quot;x-api-key&quot;</Tok>, apiKey)
         {'\n\tres, err := http.DefaultClient.Do(req)\n\t'}
         <Tok c={KEY}>if</Tok> err != nil {'{\n\t\tpanic(err)\n\t}\n\t'}
@@ -1085,7 +1189,7 @@ function FirstRequest() {
     <DocSection
       id="first-request"
       title="First request"
-      lede="Fetch the current XLM/USDC price. Replace the key with your own from the dashboard."
+      lede="Fetch the current XLM price in USD. Replace the key with your own from the dashboard; the identifier is native, CODE:ISSUER or a contract address."
     >
       <SnippetTabs
         id="first-request-lang"
@@ -1105,7 +1209,7 @@ function Response() {
       lede="A successful request returns HTTP 200 with a JSON body. Here is what each field means."
     >
       <DocCard
-        title="GET /v1/prices/XLM-USDC — 200 OK"
+        title="GET /v1/assets/native/price — 200 OK"
         copy={{ text: RESPONSE_TEXT, label: 'example response' }}
       >
         <Box
@@ -1179,8 +1283,9 @@ function Response() {
   );
 }
 
-/** The `Get` pill — the same chip `landing/Endpoints.tsx` draws. */
-function MethodBadge() {
+/** The verb pill — the same chip `landing/Endpoints.tsx` draws. */
+function MethodBadge({ method }: { method: Method }) {
+  const post = method === 'POST';
   return (
     <Box
       component="span"
@@ -1189,14 +1294,14 @@ function MethodBadge() {
         px: 1,
         py: 0.25,
         borderRadius: `${radius.chip}px`,
-        backgroundColor: color.accent.emerald[100],
-        color: color.accent.emerald[900],
+        backgroundColor: post ? color.primary[100] : color.accent.emerald[100],
+        color: post ? color.primary[900] : color.accent.emerald[900],
         fontFamily: font.secondary,
         fontWeight: 700,
         fontSize: '0.75rem',
       }}
     >
-      Get
+      {post ? 'Post' : 'Get'}
     </Box>
   );
 }
@@ -1213,7 +1318,7 @@ function Endpoints() {
       lede="All endpoints require the x-api-key header. Click any endpoint to see an example response."
     >
       <Stack spacing={1.5}>
-        {ENDPOINTS.map(({ path, summary, example }) => {
+        {ENDPOINTS.map(({ method, path, summary, example }) => {
           const expanded = open === path;
           const panelId = `endpoint-${path.replace(/[^a-z]+/gi, '-')}`;
           return (
@@ -1250,7 +1355,7 @@ function Endpoints() {
                   },
                 }}
               >
-                <MethodBadge />
+                <MethodBadge method={method} />
                 <Box
                   component="code"
                   sx={{

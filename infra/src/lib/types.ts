@@ -80,11 +80,17 @@ export interface EnvironmentConfig {
    * Public base URL of the deployed API, passed to the api-handler as
    * `API_BASE_URL` and stamped into the OpenAPI `servers` block (task 0124).
    *
-   * MUST include the stage path. API Gateway serves the REST API at
+   * Since 2026-08-31 this is the API's own hostname (`apiDomain`, task 0194),
+   * whose base path mapping is the root — so NO stage path. The execute-api
+   * form is still accepted, and then it MUST include the stage path: API
+   * Gateway serves the REST API at
    * `https://{id}.execute-api.{region}.amazonaws.com/{stage}`, so a value
    * without `/production` advertises a base that 403s on every route — the same
    * stage-prefix trap that made `AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH=true`
-   * necessary for `/v1` (task 0089).
+   * necessary for `/v1` (task 0089). `validateConfig` checks whichever form
+   * is used. The portal's snippets carry the same value as
+   * `PUBLIC_API_BASE_URL` (`web/portal/src/landing/links.ts`), asserted by
+   * `links.spec.ts`.
    *
    * Configured rather than derived because ComputeStack (which owns the
    * function's environment) is a *dependency* of ApiGatewayStack (which owns

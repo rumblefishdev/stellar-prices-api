@@ -5,14 +5,18 @@ posture, and its cache TTL. Kept current as M2 tasks land so the Milestone 2
 package (task 0128) can cite it instead of re-deriving the surface from the CDK
 source at submission time.
 
-**Production base:**
-`https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production`
+**Production base:** `https://prices-api.sorobanscan.rumblefish.dev`
+(since 2026-08-31, task 0194 — the API's own hostname, a REGIONAL custom
+domain on the REST API mapped at the root, so there is no stage path). The
+execute-api origin
+`https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production` still
+answers and is no longer the documented base.
 
 The base URL is configured once, in `infra/envs/production.json`
-(`apiBaseUrl`), and flows from there to two places: the api-handler Lambda's
-`API_BASE_URL` environment variable, and the `servers` block of the published
-OpenAPI document. It includes the `/production` stage path — an execute-api URL
-without it serves nothing.
+(`apiBaseUrl`), and flows from there to three places: the api-handler Lambda's
+`API_BASE_URL` environment variable, the `servers` block of the published
+OpenAPI document, and — asserted equal by `web/portal/src/landing/links.spec.ts`
+— the portal's snippets (`PUBLIC_API_BASE_URL`).
 
 ## Routes
 
@@ -224,9 +228,9 @@ npm run openapi:extract   # → target/openapi.json, servers stamped from config
 
 ## Pending
 
-- **Custom domain** (task 0126) — when it lands, `apiBaseUrl` in
-  `infra/envs/production.json` changes and `servers` follows automatically. This
-  file's base URL must be updated in the same change.
+- ~~**Custom domain** (task 0126)~~ — landed 2026-08-31 (task 0194):
+  `prices-api.sorobanscan.rumblefish.dev`, `apiBaseUrl` and `servers` updated
+  in the same change as this file.
 - **Swagger UI** (task 0195) — served from the portal distribution at `/docs/*`,
   rendering the live `/api-docs-json` rather than a checked-in copy. Lands with
   the custom domain and the per-prefix SPA fallback.

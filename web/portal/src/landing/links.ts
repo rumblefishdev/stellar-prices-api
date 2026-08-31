@@ -17,6 +17,22 @@ import { API_ORIGIN } from '../api-origin';
 import { ROUTER_BASENAME } from '../base-path';
 
 /**
+ * The public base of the data API, `/v1` included — what every snippet on the
+ * landing and the quick start tells a reader to call.
+ *
+ * The API's own hostname (task 0194), not the execute-api origin the pages
+ * carried until 2026-08-31. A literal rather than something derived from
+ * `API_ORIGIN`: that value is empty on every build but the shared-host one,
+ * and a snippet must name the same host wherever the page is served from.
+ * `links.spec.ts` asserts it equals `apiBaseUrl` in
+ * `infra/envs/production.json` — the value the OpenAPI `servers` block
+ * advertises — so a reader following the quick start and a reader following
+ * the spec are sent to the same place.
+ */
+export const PUBLIC_API_BASE_URL =
+  'https://prices-api.sorobanscan.rumblefish.dev/v1';
+
+/**
  * The OpenAPI document. Real, served, and the only docs artefact today.
  *
  * Same-origin, the alias under the portal prefix (`portal::OPENAPI_PATH` in

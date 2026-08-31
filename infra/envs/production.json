@@ -7,7 +7,7 @@
   "pricingApiFreePlanBurstLimit": 5,
   "pricingApiFreePlanMonthlyQuota": 100000,
   "apiGatewayCacheEnabled": true,
-  "apiBaseUrl": "https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production",
+  "apiBaseUrl": "https://prices-api.sorobanscan.rumblefish.dev",
   "apiDomain": {
     "domainName": "prices-api.sorobanscan.rumblefish.dev",
     "hostedZoneId": "Z10396861CRMUIWWA8TL9",
