@@ -916,6 +916,34 @@ accepted from the configured origin and refused from a sibling, without
 5. **Explorer repo:** `enableApiSpaBasicAuth: false` before the portal is
    public. Until then `/api/` answers `401` to strangers.
 
+### Deployed — 2026-08-31, 11:41–11:48Z
+
+Steps 1–3 run by Adam's command, in order. `deploy-production-apigateway`
+deployed **Compute first** (22 s, 11:41:57Z — cdk follows the cross-stack
+dependency), then ApiGateway (203 s: certificate `CREATE_COMPLETE` 11:44:57Z,
+domain 11:45:01Z, A/AAAA 11:45:35Z). `deploy-production-compute` afterwards
+was "no changes" plus the stage cache flush. `sync-portal-explorer` at
+11:48Z: new chunk `index-BFiUxyFn.js` carrying the API origin, invalidation
+`I2V92N568S0479E2BCEPK5UIL2`. `Errors` 0 on the api-handler over the window.
+
+Measured on `prices-api.sorobanscan.rumblefish.dev`:
+
+| probe | result |
+|---|---|
+| `GET /api/config`, `Origin: https://sorobanscan.rumblefish.dev` | `200`, `ACAO` = that origin, `Allow-Credentials: true`, `Vary: origin`, `no-store` |
+| same, `Origin: https://evil.example` / no `Origin` | `200`, **no** CORS header |
+| `OPTIONS /api/key/rework` (POST + `x-requested-with`) | `204` from the gateway MOCK: `GET,POST,DELETE`, `Content-Type,Accept,X-Requested-With`, `max-age: 3600`, credentials |
+| `GET /api/key` + Origin | `401 not_signed_in` **with** CORS |
+| `GET /nope` + Origin | gateway `403` **with** CORS (gateway responses work) |
+| `GET /api/auth/login` | `303` → Discord, `redirect_uri` still the **old** host — step 4 pending |
+| `/v1/assets` keyless / `/api-docs-json` / `/health` | `403` / `200` / `200`, unchanged |
+
+Check 1's (host) half and check 2's replacement are therefore **measured
+and PASS**; check 5 is not applicable by decision. Still open: step 4
+(Discord redirect URI + `put-secret-value`, Adam) and step 5 (Explorer's
+`enableApiSpaBasicAuth: false`) — until 4, a sign-in is refused at Discord's
+authorize step; until 5, `/api/` answers `401` to strangers.
+
 ## Issues Encountered
 
 - **The Discord `client_secret` was exposed in a chat transcript.** On
