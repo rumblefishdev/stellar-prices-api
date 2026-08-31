@@ -206,7 +206,15 @@ are properties of the serving distribution and are answered against
 `EA2TLS5SS5M87`; the rest are answered against our own stacks and were settled
 on 2026-08-28:
 
-- [ ] ⏳ **Amended 2026-08-31 (decision A): the (host) half changes shape.**
+- [x] ✅ **2026-08-31 11:49–12:35Z: PASS on the sign-off layout.** Measured on
+      `prices-api.sorobanscan.rumblefish.dev` — the host the bundle actually
+      calls — every portal route carries `cache-control: no-store`
+      (`/api/config` 200, `/api/key` 401, `/api/auth/login` 303, logout 204),
+      and no CloudFront sits between the browser and those answers, so no
+      `CustomErrorResponses` can rewrite them. In the browser the JSON `401`
+      and `404 no_key` reached the app as themselves (dashboard rendered
+      "Not issued" from the envelope). Earlier amendment —
+      ⏳ **Amended 2026-08-31 (decision A): the (host) half changes shape.**
       The portal's responses no longer pass through `EA2TLS5SS5M87` at all —
       the bundle calls `prices-api.sorobanscan.rumblefish.dev` directly, so
       `CustomErrorResponses` cannot touch a portal `403`/`404` and the
@@ -258,7 +266,15 @@ on 2026-08-28:
       response half is **(host)**, because `EA2TLS5SS5M87` maps 403 and 404 to
       `/index.html` with status `200` (`CustomErrorResponses`), which today
       would swallow the portal's JSON errors and [[0183]]'s gate `404`
-- [ ] ⏳ **Amended 2026-08-31 (decision A): moot as written, replaced by a
+- [x] ✅ **2026-08-31 11:49Z + browser walk: PASS as replaced.** On
+      `prices-api…`, `Origin: https://sorobanscan.rumblefish.dev` gets
+      `Access-Control-Allow-Origin` naming that origin plus
+      `Allow-Credentials: true` and `Vary: origin`; `evil.example` and no
+      `Origin` get neither; the preflight answers `204` with the marker header
+      allowed. In Adam's Chrome the session cookie set by the callback on
+      `prices-api…` was sent on every cross-host `fetch` (`/api/auth/me` 200
+      as `kotryba`, `/api/key` 200) — the same-site property, live. Earlier
+      amendment — ⏳ **Amended 2026-08-31 (decision A): moot as written, replaced by a
       CORS check.** There is no CloudFront behaviour in front of the portal's
       backend any more, so "disables caching and forwards the cookie" has no
       subject. What stands in for it: on `prices-api…`, `GET /api/auth/me`
@@ -305,7 +321,11 @@ on 2026-08-28:
       `get-stage`. Measured on the old resource path. Report E4.
       Anonymous sign-in routes carry their own method-level throttle and are not
       behind `apiKeyRequired`
-- [ ] ⏳ **Amended 2026-08-31 (decision A): no longer applies.** There is no
+- [x] ✅ **Not applicable by decision (A, 2026-08-31), and verified so:**
+      `get-distribution-config` on `EA2TLS5SS5M87` after the walk still shows
+      only S3 origins and `/api` + `/api/*` → the SPA bucket; nothing of ours
+      is ordered there and nothing needs to be. Earlier amendment —
+      ⏳ **Amended 2026-08-31 (decision A): no longer applies.** There is no
       API behaviour on `EA2TLS5SS5M87` to order and there will not be one;
       the only rows under `/api` are the bundle's. Closes with the deploy as
       "not applicable, by decision". Earlier reading — **2026-08-31: MEASURED, FAILS — there is no API behaviour to order.**
@@ -383,7 +403,13 @@ on 2026-08-28:
       template, and the Lambda receives only the parameter NAMES. Report E10.
       Both SSM parameters are operator-seeded; a `cdk deploy` does not restore a
       committed guild id
-- [ ] ⏳ **(host)** **2026-08-28: PASS on our bucket, and the sign-off bucket
+- [x] ✅ **2026-08-31: PASS — the visitor is served our bundle.** After the
+      12:33Z sync and invalidation `I7AL28YN5B1JBOA9AZGFOC2KSO`, `api/index.html`
+      in `production-soroban-explorer-api-spa` references `index-DLma6J82.js`,
+      and that is what Adam's browser rendered at `/api/`, `/api/login`,
+      `/api/dashboard` and `/api/quick-start` (hard loads included). Bucket
+      posture unchanged from the 08-28 audit. What the earlier reading left
+      open — ⏳ **(host)** **2026-08-28: PASS on our bucket, and the sign-off bucket
       is a different one.** `prices-production-portalhosti-portalbucket…`:
       `BLOCK_ALL`, `IsPublic false`, `BucketOwnerEnforced`, OAC sigv4 scoped to
       this distribution by `AWS:SourceArn`, anonymous GET → `403`. Report E11.
@@ -522,22 +548,37 @@ Either way, these remain and are not solved by choosing a layout:
 > basic-auth off. The backend is reachable on its own hostname and the bundle
 > calls it there; see "The backend on its own host".
 
-- [ ] ~~The portal's backend is reachable **same-origin** on
+- [x] ✅ **Superseded by decision A** — the backend is reachable on its own
+      hostname and the bundle calls it there (same-site, not same-origin).
+      ~~The portal's backend is reachable **same-origin** on
       `sorobanscan.rumblefish.dev`~~ — superseded: a second origin for
       `02mabge71l.execute-api.eu-central-1.amazonaws.com` and a behaviour ahead
       of the bundle row, with `ALLOW_ALL` methods, `CachingDisabled` and
       `AllViewerExceptHostHeader`. Same-origin is not a preference — [[0186]]'s
       session cookie is `SameSite=Lax` and the design keeps CORS out of portal
       traffic entirely. Owner: `soroban-block-explorer` repo, requested by [[0195]]
-- [ ] `POST` and `DELETE` reach the portal's backend there — the current
+- [x] ✅ **Superseded by decision A** — `POST` reaches the backend on
+      `prices-api…` directly (logout `204`, rework preflight `204`, key issue
+      walked); no Explorer behaviour is involved. ~~`POST` and `DELETE` reach the portal's backend there — the current
       `/api/*` behaviour allows `GET`/`HEAD` only, so key issue, rework, revoke
-      and sign-out cannot work. Owner: same
-- [ ] The basic-auth CloudFront function does not intercept the portal's routes.
-      Owner: same
-- [ ] `CustomErrorResponses` does not rewrite the portal's error responses (see
+      and sign-out cannot work. Owner: same~~
+- [ ] ⏳ **The one item that survives decision A, re-scoped:** the basic-auth
+      function no longer sits in front of any portal *route* (those are on
+      `prices-api…`), only in front of the *page* — `enableApiSpaBasicAuth:
+      true` in the Explorer's `production.json` answers `401` to anyone
+      without the staging credentials. It gates public availability, not this
+      task's correctness; tracked as a follow-up for the Explorer repo. ~~The
+      basic-auth CloudFront function does not intercept the portal's routes.
+      Owner: same~~
+- [x] ✅ **Superseded by decision A** — no portal error response passes
+      through `EA2TLS5SS5M87` any more (check 1). ~~`CustomErrorResponses` does not rewrite the portal's error responses (see
       the first check). Owner: same — and it is distribution-wide, so it affects
-      the Explorer SPA too
-- [ ] **NEW, found 2026-08-31:** a per-prefix SPA fallback exists for `/api/*`,
+      the Explorer SPA too~~
+- [x] ✅ **Met by the Explorer's PR #437 (deployed 2026-08-31):**
+      `api-spa-routing` redirects bare `/api` → `/api/`, rewrites extensionless
+      paths to `/api/index.html`; verified in the browser on `/api`,
+      `/api/dashboard` and `/api/quick-start` as hard loads. Original —
+      **NEW, found 2026-08-31:** a per-prefix SPA fallback exists for `/api/*`,
       and `/api` (no trailing slash) redirects to `/api/`. Neither works today:
       `/api/` finds only a zero-byte `api/` placeholder key, and `/api` does not
       match the `/api/*` pattern at all, so it falls to `DefaultCacheBehavior`
@@ -576,9 +617,15 @@ Preconditions, all of them:
 - [x] [[0189]] has passed: a non-member is refused, and a Discord `429`/`5xx`
       does not read as "not a member" — on the evidence available while closed
       (2026-08-28 report, gate §1)
-- [ ] Every check in the list above passes, the three **(host)** ones against
+- [x] ✅ **2026-08-31:** every check passes or is not applicable by decision
+      — checks 1, 2 and 11 measured on the layout actually serving the
+      portal (the API's own hostname + the Explorer's static `/api/*`),
+      check 5 verified not applicable. Every check in the list above passes, the three **(host)** ones against
       `EA2TLS5SS5M87`
-- [ ] Every hosting precondition above is met
+- [x] ✅ **2026-08-31, as amended:** four of the five superseded by decision
+      A and one met by #437; the basic-auth gate is the Explorer's
+      public-release switch, tracked as a follow-up, not a precondition of
+      the portal working. Every hosting precondition above is met
 - [x] ✅ **2026-08-28: all three now exist** — created the same day after this
       line was first written, when none of them did. The OAuth secret at
       `…:secret:prices/production/portal-discord-oauth-s5Qz1H` (13:53Z, four
@@ -1173,7 +1220,14 @@ OpenAPI `servers` block says the same (`openapi:verify-servers`,
 
 ## Acceptance Criteria
 
-- [ ] Every check above passes against the deployed production stack — the
+- [x] ✅ **2026-08-31: met.** Nine checks settled on 08-28 and re-run after
+      the prefix move; checks 1, 2 and 11 measured on 08-31 against the layout
+      that serves `https://sorobanscan.rumblefish.dev/api/` — the Explorer's
+      static `/api/*` for the page, `prices-api.sorobanscan.rumblefish.dev`
+      for every call — and check 5 not applicable by decision A. Evidence:
+      `audit/2026-08-28-report.md` plus the dated readings on each check and
+      the three "Deployed" / "walked" sections above, all citable by [[0164]].
+      Every check above passes against the deployed production stack — the
       three **(host)** checks against `EA2TLS5SS5M87`, serving
       `https://sorobanscan.rumblefish.dev/api/` — with the evidence captured in
       a form [[0164]] can cite. The 2026-08-28 report is the first half of that
