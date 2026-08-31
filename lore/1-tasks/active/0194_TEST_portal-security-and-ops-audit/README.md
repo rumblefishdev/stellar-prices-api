@@ -464,8 +464,9 @@ Either way, these remain and are not solved by choosing a layout:
 
 **This task owns the flip.** `PORTAL_ENABLED` goes to `'true'` in
 `compute-stack.ts` here and nowhere else — not as a side effect of anyone
-finishing their own slice. **The one-word diff is committed** (2026-08-28); what
-remains gated is the deploy that carries it, because with the flag true the
+finishing their own slice. **Committed 2026-08-28 and DEPLOYED 2026-08-31
+10:43Z** — see "The flip is live" below. The gate mattered because with the flag
+true the
 handler resolves **four** sources at cold start and a missing one is an `Init
 Errors` event on the Lambda that also serves `/v1`. Three are the ones this list
 already tracked; the fourth is `PORTAL_FREE_PLAN_PARAM` —
@@ -575,6 +576,49 @@ verified is the one 0195 delivers. The flag itself is still independent of both
 deployed as soon as the secret and the parameters are seeded. What waits for
 0195 is this task's sign-off, not the portal being open.
 
+## The flip is live — 2026-08-31
+
+Deployed with `make deploy-production-compute` at 10:43Z after the
+`client_secret` rotation. `ComputeStack` only, for the reason recorded above;
+`cdk diff` immediately before the deploy was byte-identical to the one taken
+after the `develop` merge — `PORTAL_ENABLED: false → true` plus two asset
+hashes, no removals, no IAM change.
+
+**The secret was rotated first.** New version `3ff8ea37…` is `AWSCURRENT`, the
+leaked `42a83ae9…` is `AWSPREVIOUS` and is now inert — Discord invalidated that
+value at rotation, so the transcript exposure is closed. `session_signing_key`
+carried through unchanged (64 ch), so no session was invalidated;
+`redirect_uri` was corrected to the sign-off host in the same write. All four
+rules in `secret.rs::parse` were checked against the stored value before the
+deploy, not after.
+
+**Cold start passed all four reads.** `Errors` 0 / `Invocations` 4 on
+`prices-production-api-handler` over the deploy window — the failure mode this
+task spent its length worrying about did not occur.
+
+Measured on `02mabge71l.execute-api…/production` immediately after:
+
+| probe | before | after |
+|---|---|---|
+| `/api/api/config` | `{"enabled":false,…}` | `{"enabled":true,…}`, still `cache-control: no-store` |
+| `/api-docs-json` (`/v1` router canary) | `200` | `200`, 0.17-0.19 s |
+| `/v1/assets` keyless | `403` | `403` |
+| `/api/api/auth/login` | [[0183]]'s empty `404` | **`303`** to `discord.com/oauth2/authorize` |
+| `/api/api/key`, `/api/api/usage` | [[0183]]'s empty `404` | **`401`** (no session) |
+
+The `303` carries `client_id=1537116138427781190`, `scope=identify
+guilds.members.read`, `response_type=code`, a `state`, and
+`redirect_uri=https://sorobanscan.rumblefish.dev/api/api/auth/callback` — so the
+rotated secret is wired end to end.
+
+**Consequence, stated so it is not discovered later:** because `redirect_uri`
+now names the sign-off host, the flow can **no longer** be walked on
+`dojr4epgxo2qp.cloudfront.net`. Discord will bounce every callback to
+`sorobanscan.rumblefish.dev`, which has no backend behaviour until [[0195]]
+lands. That is the intended end state, not a regression — but it means there is
+now **no host on which a full sign-in can be tested** until 0195 delivers. The
+backend is open; the door it opens onto is not built yet.
+
 ## Issues Encountered
 
 - **The Discord `client_secret` was exposed in a chat transcript.** On
@@ -646,10 +690,10 @@ deployed as soon as the secret and the parameters are seeded. What waits for
       a form [[0164]] can cite. The 2026-08-28 report is the first half of that
       evidence and is explicitly **not** sufficient on its own: it measured
       `dojr4epgxo2qp.cloudfront.net`
-- [ ] `PORTAL_ENABLED` is flipped to `'true'` here **and deployed**, with every
-      precondition above met and recorded — and the flip is reversible by the
-      same one-word diff plus a deploy. (Committed 2026-08-28; deploy still
-      gated on the secret and the two parameters)
+- [x] ✅ **2026-08-31: deployed.** `PORTAL_ENABLED` is `'true'` and live —
+      `Prices-production-Compute` updated 10:43Z, 22 s, `Errors` 0 over the
+      window. Reversible by the same one-word diff plus a deploy; the secret's
+      previous version is retained as `AWSPREVIOUS`.
 - [ ] A complete sign-in and key issue is walked at
       `https://sorobanscan.rumblefish.dev/api/`, in a browser, signed out —
       the check that no configuration reading can replace
