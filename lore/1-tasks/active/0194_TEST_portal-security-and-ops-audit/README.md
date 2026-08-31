@@ -964,6 +964,41 @@ Still open: step 5 (Explorer's `enableApiSpaBasicAuth: false`) — until then
 `/api/` answers `401` to strangers — and the browser walk-through of a full
 sign-in and key issue, which is this task's remaining acceptance criterion.
 
+### Every function walked — 2026-08-31, 12:05–12:35Z
+
+After the key issue, the rest of the portal in Adam's Chrome on the sign-off
+host, plus the shell measurements the browser cannot make:
+
+| function | result |
+|---|---|
+| the issued key on `/v1` (value kept in the shell) | `assets`, `assets/native`, `…/price`, `backfill/status` → `200`, 0.19–0.45 s; keyless `403`; a burst of 8 → 6×`200` then `429` (plan 1 rps / burst 5) |
+| dashboard after issue | Key ID, Issued/Last updated, Discord account, the once-per-period cap naming `1 September 2026`; Monthly Usage `0 / 100 000`, Resets 1 September (`GetUsage` still 0 after 13 calls — AWS's delay, as the panel says) |
+| Quick start chrome | TOC anchors, cURL/JS/Python/Go tabs, Copy buttons — all work |
+| OpenAPI Docs link | `https://prices-api…/api-docs-json`, opens |
+| deep links on the Explorer host | `/api/dashboard` hard load, bare `/api`, `/api/login` while signed in → dashboard; #437's routing function + the SPA's redirects |
+| sign out → landing; `/api/dashboard` signed out → landing; `/api/quick-start` signed out → public page | ✅ (`POST /auth/logout` shown as `503` by the extension once — gateway `5XXError` 0, Lambda `Errors` 0, `curl` → `204` with the cookie cleared, UI behaved as success; an extension artefact, not reproduced) |
+| second sign-in | adopted the existing key `31z25psyn7` (Issued 31 August) — no second key, as designed |
+| "Copy key" | click accepted; the "Copied" confirmation was not captured under automation — not a finding |
+| api-handler, 4 h | 217 invocations, `Errors` 0, `Throttles` 0, p50 1.4 ms, p95 422 ms, max 1.25 s, 10 cold starts (init 261–467 ms) |
+
+**Not walked: "Regenerate".** With a key issued today it revokes and issues
+nothing until 1 September; the walk stopped short of leaving Adam keyless.
+The write path it uses (`POST /api/key/rework`, same-site + `Origin`) is
+covered by `tests/portal_rework.rs` and by the live preflight measurement.
+
+**Content finding, fixed the same day (`64e22da`, deployed 12:33Z, bundle
+synced, invalidation `I7AL28YN5B1JBOA9AZGFOC2KSO`).** The hero, the landing
+endpoints section and the whole quick start rendered the DESIGN's API —
+`GET /v1/prices/XLM-USDC`, `/pools`, `/history`, `liquidity`,
+`source: "soroswap"` — on the execute-api origin. With a freshly issued key
+the quick start's own "First request" answered `403 Missing Authentication
+Token`. Every example now reads off the live API on
+`https://prices-api.sorobanscan.rumblefish.dev/v1`: the seven real routes
+with their query parameters, `/assets/native/price`'s fields (decimal
+strings), the real error bodies, and `apiBaseUrl` → the hostname so the
+OpenAPI `servers` block says the same (`openapi:verify-servers`,
+`links.spec.ts`). Task 0233's portal half is closed by this.
+
 ## Issues Encountered
 
 - **The api-handler had never been able to create a key in production, and
