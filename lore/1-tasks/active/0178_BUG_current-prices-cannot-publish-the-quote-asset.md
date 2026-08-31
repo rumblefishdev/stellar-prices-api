@@ -251,8 +251,9 @@ failed recreate and a silent freeze — do not skip it.
 - [ ] The `GET /assets` default-sort change is asserted, not discovered:
       a test pins that USDC appears in the first page of the default
       (`SortCol::Volume24h`) listing where it previously could not.
-- [ ] BE re-confirmed as a non-consumer of `volume_24h_usd` — one line, before
-      the deploy, per the shelf-life warning above.
+- [x] BE re-confirmed as a non-consumer of `volume_24h_usd` — done 2026-08-31 by
+      READING their repo at `origin/develop` rather than asking, which is the
+      stronger check. See the re-verification section above.
 - [ ] The oracle allowlist is USDC-only and PROVEN so: a test asserts USDT at
       `GCQTGZQQ…TG6V` still reports its market value and is NOT tagged
       `'oracle'`. This is AC 4's other half.
@@ -369,9 +370,32 @@ identity triple, the bucket, and `close_usd` — never `current_prices`, never a
 volume column. See [[be-reads-close-usd-only-not-volume-columns]]. So the
 affected consumers are our own published API: the portal, and API-token holders.
 
-⚠️ **Re-confirm before relying on it.** We stated a BE exposure claim once that
-was true when written and false by the time they deployed. One line to BE, not a
-re-derivation from their repo.
+## ✅ RE-VERIFIED 2026-08-31 — by reading their code, not by asking
+
+The August answer HOLDS. Checked against `soroban-block-explorer` at
+`origin/develop` (fetched, current). Their complete set of reads:
+
+| site | object | columns |
+|---|---|---|
+| `crates/api/src/liquidity_pools/queries.rs:573` | `price_usd_series_1h` | `asset_kind, asset_code, issuer_address, close_usd` |
+| `queries.rs:1572` (chart) | `price_usd_series{,_1h}` | `bucket, close_usd` |
+| `queries.rs:2413` | `price_usd_series_1h` | health check, `SELECT 1` |
+
+**No volume column. No `current_prices` / `current_price_usd`.** Both mentions of
+`current_price_usd` in their tree are COMMENTS explaining why they avoid it:
+box-measured 2026-08-04, `price_usd = 0` for native XLM, so every XLM-leg pool
+would have read a NULL TVL. Neither of this task's changes reaches them.
+
+They are independently defended against the arity risk — `queries.rs:229` carries
+their own rule never to decode a `prices.*` view positionally or via `SELECT *`,
+noting these views went 6 → 13 columns.
+
+🔴 **Our own `views.sql` was WRONG about this and nearly cost a pointless
+question.** It asserted "BE reads this surface IN-CLUSTER (see their 0199
+contract)" about `current_price_usd`. Corrected in this task's branch. The
+lesson generalises: **re-verify against the consumer's code before writing a
+sentence about what they read** — the shelf-life warning above applies to
+statements in our own tree, not only to theirs.
 
 ## Notes
 
