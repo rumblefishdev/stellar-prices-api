@@ -200,3 +200,76 @@ Questions to Adam (this repo). The portal's own configuration — gateway
 throttles, IAM, secrets, the `PORTAL_ENABLED` flag — is all deployed and
 audited; the evidence lives in
 `lore/1-tasks/active/0194_TEST_portal-security-and-ops-audit/`.
+
+---
+
+## Minimal patch — the three changes that fix the button
+
+Items 4–6 above are needed for our sign-off. These three are what make the
+"Get my API key" control appear at all. Written against CDK, mirroring the
+configuration already proven on `dojr4epgxo2qp.cloudfront.net`.
+
+```ts
+// 1. The API as an origin on this distribution.
+//    `originPath` is load-bearing: API Gateway serves a REST API only under
+//    /{stage}, so without it every proxied request arrives one segment short
+//    and the gateway answers 403.
+const pricesApiOrigin = new origins.HttpOrigin(
+  '02mabge71l.execute-api.eu-central-1.amazonaws.com',
+  {
+    originPath: '/production',
+    protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+  },
+);
+
+// 2. The behaviour. All four settings are load-bearing and each fails silently.
+const pricesApiBehaviour: cloudfront.BehaviorOptions = {
+  origin: pricesApiOrigin,
+  viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+  // GET/HEAD (the default) makes CloudFront answer POST with a 403 of its own,
+  // never reaching the API. Key issue, rework, revoke and sign-out are POSTs.
+  allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+  // A cached /auth/me is one visitor's identity served to the next.
+  cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+  // Two jobs: (a) an execute-api endpoint authenticates against its own
+  // hostname, so forwarding the viewer's Host turns every call into a 403;
+  // (b) it FORWARDS COOKIES — every other policy strips them, and the portal's
+  // session is an HttpOnly cookie, so without this every signed-in visitor
+  // reads as signed out. That failure appears only in a browser, never in curl.
+  originRequestPolicy:
+    cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+  // 3. Deliberately NO functionAssociations — the basic-auth function must not
+  //    be attached here. A fetch() that receives 401 cannot prompt for
+  //    credentials, so the portal breaks even for a visitor who authenticated
+  //    for the page. The portal has its own auth (Discord OAuth + guild gate)
+  //    and its own per-method throttle at the gateway.
+};
+
+// Insertion order IS precedence in CDK — /api/api/* must come first, or the
+// backend calls keep matching /api/* and reaching S3.
+additionalBehaviors: {
+  '/api/api/*': pricesApiBehaviour,
+  '/api/*':     <the existing api-spa behaviour, unchanged>,
+  // …the rest unchanged
+}
+```
+
+### The one probe that tells you it worked
+
+```
+curl -u <basic-auth> https://sorobanscan.rumblefish.dev/api/api/config
+```
+
+- **`200` + `application/json` + `{"enabled":true,…}`** → done, the button appears.
+- **`200` + `text/html`** → still reaching S3; the behaviour is not ordered
+  ahead of `/api/*`.
+- **`401`** → the basic-auth function is still attached to the new behaviour.
+- **`403`** → `originPath` is missing or wrong.
+
+The same call against our own distribution returns the JSON today, which is the
+reference for what "working" looks like:
+
+```
+curl https://dojr4epgxo2qp.cloudfront.net/api/api/config
+{"enabled":true,"rate_limit_per_second":1}
+```
