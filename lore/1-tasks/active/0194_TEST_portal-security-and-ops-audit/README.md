@@ -252,7 +252,17 @@ on 2026-08-28:
       response half is **(host)**, because `EA2TLS5SS5M87` maps 403 and 404 to
       `/index.html` with status `200` (`CustomErrorResponses`), which today
       would swallow the portal's JSON errors and [[0183]]'s gate `404`
-- [ ] ⏳ **2026-08-28: not started at the sign-off host.** Verified on
+- [ ] ⏳ **2026-08-31: MEASURED at the sign-off host, and it FAILS — there is
+      no API origin at all.** `get-distribution-config` on `EA2TLS5SS5M87`
+      returns two origins and **both are S3** (`…-spa`, `…-api-spa`); nothing
+      points at `02mabge71l.execute-api…`. Behaviour `/api/*` targets the S3
+      bucket with `GET`/`HEAD` only and carries the
+      `production-soroban-explorer-basic-auth` function, which answers `401` to
+      every unauthenticated request under the prefix. So the check's subject —
+      a behaviour that disables caching and forwards the session cookie — does
+      not exist to be measured. Full requirement written up for the owning repo
+      in `audit/2026-08-31-explorer-distribution-requirements.md`. Earlier
+      reading — **2026-08-28: not started at the sign-off host.** Verified on
       `dojr4epgxo2qp.cloudfront.net` (report E2): `Managed-CachingDisabled` +
       `Managed-AllViewerExceptHostHeader` (`CookieBehavior: all`), and 13 of 13
       probe requests reached the origin — nothing served from the edge. None of
@@ -281,9 +291,13 @@ on 2026-08-28:
       `get-stage`. Measured on the old resource path. Report E4.
       Anonymous sign-in routes carry their own method-level throttle and are not
       behind `apiKeyRequired`
-- [ ] ⏳ **2026-08-28: not started at the sign-off host.** Correct on our
-      distribution (report E5) and on the post-[[0235]] synth; `EA2TLS5SS5M87`
-      has no API behaviour at all yet.
+- [ ] ⏳ **2026-08-31: MEASURED, FAILS — there is no API behaviour to order.**
+      `EA2TLS5SS5M87`'s table is `/assets/*`, `/static/*`, `/api/*`, then
+      default; all three named behaviours target S3. The ordering rule cannot be
+      satisfied until the `/api/api/*` behaviour exists, and it must be inserted
+      **ahead of** `/api/*`. Earlier reading — **2026-08-28: not started at the
+      sign-off host.** Correct on our distribution (report E5) and on the
+      post-[[0235]] synth; `EA2TLS5SS5M87` has no API behaviour at all yet.
       **(host)** The portal's API behaviour precedes its bundle behaviour in
       `EA2TLS5SS5M87`'s order, whatever the two prefixes end up being — the
       ordering rule of [[0161]], not the literal `/api-tokens/` pair
@@ -354,7 +368,13 @@ on 2026-08-28:
       `cloudfront.amazonaws.com` conditioned on
       `AWS:SourceArn = …distribution/EA2TLS5SS5M87`, and an anonymous GET on
       `api/index.html` answering `403`. What remains for this check at sign-off
-      is only that the bundle actually served from there is the portal's.
+      is only that the bundle actually served from there is the portal's —
+      and **as of 2026-08-31 the object half PASSES**: the bucket holds 13
+      objects under `api/`, synced 09:43Z, and `api/index.html` is ours
+      (`<title>Stellar Prices API — API keys</title>`, assets at
+      `/api/assets/…`, and no Google Tag Manager — Explorer's document has
+      one). The check stays open because what a *visitor* is served at `/api/`
+      today is still Explorer's `index.html`, not this object.
       The portal bucket has no public access and is reachable only through OAC
 - [x] ✅ **2026-08-28: PASS, unaffected.** Measured 4 calls ≈ 1.3 s cold, 2 ≈
       0.64 s warm, against 2 054 CloudTrail events in 14 days (peak 12/s, 37/min,
@@ -462,6 +482,10 @@ Either way, these remain and are not solved by choosing a layout:
       and its copy in `vite.config.mts` (`base-path.spec.ts` fails if they
       drift). What is NOT done is the sync of that bundle to
       `s3://production-soroban-explorer-api-spa/api`
+- [x] ✅ **Done 2026-08-31.** The bundle is synced to
+      `s3://production-soroban-explorer-api-spa/api/` — 13 objects at 09:43Z,
+      and it is the right one (`api/index.html` carries the portal's title and
+      `/api/assets/…` URLs). This closes the sync half of the first item above.
 - [ ] The portal's backend is reachable **same-origin** on
       `sorobanscan.rumblefish.dev`: a second origin for
       `02mabge71l.execute-api.eu-central-1.amazonaws.com` and a behaviour ahead
@@ -477,6 +501,13 @@ Either way, these remain and are not solved by choosing a layout:
 - [ ] `CustomErrorResponses` does not rewrite the portal's error responses (see
       the first check). Owner: same — and it is distribution-wide, so it affects
       the Explorer SPA too
+- [ ] **NEW, found 2026-08-31:** a per-prefix SPA fallback exists for `/api/*`,
+      and `/api` (no trailing slash) redirects to `/api/`. Neither works today:
+      `/api/` finds only a zero-byte `api/` placeholder key, and `/api` does not
+      match the `/api/*` pattern at all, so it falls to `DefaultCacheBehavior`
+      and serves **Explorer's** SPA at `200`. Owner: same. Our own distribution
+      solves both with `DirectoryIndexFn`, which does not exist on
+      `EA2TLS5SS5M87`
 - [x] ✅ **Done in code ([[0235]], 2026-08-28), one item outstanding.** The
       prefix change is carried through `PORTAL_API_PREFIX` and `CALLBACK_PATH`
       (Rust), the gateway resource path and its three `methodSettings` entries,
@@ -661,6 +692,35 @@ backend is open; the door it opens onto is not built yet.
   against Discord.
 - **The orphaned bundle objects were predicted inert and are not** — see the
   section above; `/api-tokens/` still serves the previous portal.
+- **The open portal looks shut at the sign-off host, and the cause is a `200`.**
+  Reported 2026-08-31: `https://sorobanscan.rumblefish.dev/api/index.html`
+  renders the portal shell with no sign-in control, indistinguishable from
+  `PORTAL_ENABLED=false`. The flag is `true` and the API answers
+  `{"enabled":true,…}` directly. The chain: the page's relative
+  `fetch('/api/api/config')` matches behaviour `/api/*`, which targets **S3**
+  (there is no API origin on that distribution); S3 has no such key and answers
+  `403`; `CustomErrorResponses` turns that into `/index.html` at status **`200`**
+  on the *default* origin, i.e. Explorer's SPA. So the probe receives HTML with
+  a success status — `!response.ok` passes, the JSON parse fails, and the app
+  renders its "cannot reach the backend" state.
+
+  Two things worth keeping. First, `portal.ts:220` **predicted this exact
+  failure** in a comment ("a `200` that is not JSON is the signature of the most
+  likely routing regression there is here") and wraps it with the status and URL
+  rather than leaking a bare `SyntaxError` — the diagnosis took minutes because
+  of that comment. Second, the reporter reached it via `/api/index.html`;
+  `/api` alone is a *different* failure with the same appearance, because it
+  matches no behaviour and serves Explorer directly. Requirements for the owning
+  repo: `audit/2026-08-31-explorer-distribution-requirements.md`.
+
+- **Production and `develop` disagree about the flag.** `PORTAL_ENABLED` is
+  `'true'` on this branch and live in production, and **`'false'` on
+  `origin/develop`** — the flip was deployed from an unmerged branch. Nothing is
+  wrong today, but the first `cdk deploy` run from `develop`, by CI or by anyone
+  on the team, silently closes the portal again, because from `develop`'s point
+  of view `false` is the intended state. Merging this branch is what fixes it;
+  no second deploy is needed.
+
 - **A stale task branch turns `cdk diff` into a demolition plan.** On
   2026-08-31 this branch was 5 commits behind `origin/develop` and
   `make diff-production` proposed destroying four live Oracle alarms and an IAM
