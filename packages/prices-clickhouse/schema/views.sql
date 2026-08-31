@@ -523,10 +523,23 @@ WHERE sac_address != '';
 -- current_prices, which is written by the Current Price Updater (task 0039) —
 -- this view is the read surface; it is empty until that writer runs.
 --
--- Task 0072 forwards the remaining current_prices columns. BE reads this surface
--- IN-CLUSTER (named views, no HTTP — see their 0199 contract), so until the view
--- named them, `sources` / `price_xlm` / `change_*_pct` / `vwap_24h` were
--- unreachable to that consumer no matter what the MV wrote.
+-- Task 0072 forwards the remaining current_prices columns, so `sources` /
+-- `price_xlm` / `change_*_pct` / `vwap_24h` are reachable to an in-cluster
+-- consumer at all.
+--
+-- ⚠️ CORRECTED 2026-08-31 (task 0178). This block used to assert "BE reads this
+-- surface IN-CLUSTER (see their 0199 contract)". **They do not, and they never
+-- have.** Verified by reading their repo at origin/develop, not by asking: the
+-- only prices objects their code queries are `price_usd_series` and
+-- `price_usd_series_1h`, for the identity triple, `bucket` and `close_usd`
+-- (crates/api/src/liquidity_pools/queries.rs:573, :1572, :2413). Both mentions
+-- of `current_price_usd` in their tree are COMMENTS explaining why they avoid
+-- it — box-measured 2026-08-04, `price_usd = 0` for native XLM, so every
+-- XLM-leg pool would have read a NULL TVL.
+--
+-- The stale claim mattered: it is why 0178 nearly sent BE a question about a
+-- surface they do not consume. Re-verify against their code before writing a
+-- sentence about what any consumer reads.
 --
 -- Task 0178 appends `method` (14 columns) — the same provenance vocabulary
 -- price_usd_series carries, now on the tip. `'oracle'` marks the canonical-USDC
