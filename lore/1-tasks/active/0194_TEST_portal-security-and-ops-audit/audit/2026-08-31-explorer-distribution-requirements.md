@@ -244,3 +244,75 @@ Questions to Adam (this repo). The portal's own side — gateway resource
 `/api/{proxy+}` with its throttles, IAM, secrets, `PORTAL_ENABLED` — is
 deployed and audited; evidence in
 `lore/1-tasks/active/0194_TEST_portal-security-and-ops-audit/`.
+
+---
+
+## CDK patch, in your idiom
+
+Your distribution is the L2 `cloudfront.Distribution` (`Distribution830FAC52`
+in `Explorer-production-Delivery`, with `BasicAuthFunction3DE306AB` beside it).
+Names of your existing variables are guesses — `apiSpaOrigin` is whatever holds
+the `production-soroban-explorer-api-spa` origin, `basicAuthFn` the function.
+
+```ts
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
+
+// 1. The Prices API as an origin. `originPath` is load-bearing.
+const pricesApiOrigin = new origins.HttpOrigin(
+  '02mabge71l.execute-api.eu-central-1.amazonaws.com',
+  { originPath: '/production', protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY },
+);
+
+// 2. The index/route rewrite for the bundle rows — the function body is in
+//    the section above. Viewer request, S3 rows only.
+const portalIndexFn = new cloudfront.Function(this, 'PortalIndexFn', {
+  runtime: cloudfront.FunctionRuntime.JS_2_0,
+  code: cloudfront.FunctionCode.fromInline(PORTAL_INDEX_FN_SOURCE),
+});
+
+// Bundle rows: S3, GET/HEAD, cached like the Explorer SPA. Keep basicAuthFn
+// here if you want the PAGE gated; it must not be on the API row.
+const portalBundle: cloudfront.BehaviorOptions = {
+  origin: apiSpaOrigin,
+  viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+  functionAssociations: [
+    { function: portalIndexFn, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
+    // { function: basicAuthFn, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
+  ],
+};
+
+// 3. The API row. All four settings load-bearing; NO basic-auth function.
+const portalBackend: cloudfront.BehaviorOptions = {
+  origin: pricesApiOrigin,
+  viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+  allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+  cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+  originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+};
+
+const PORTAL_APP_ROUTES = ['login', 'dashboard', 'quick-start'];
+const PORTAL_BUNDLE_PATHS = [
+  '/api/', '/api/index.html', '/api/favicon.ico', '/api/assets/*',
+  ...PORTAL_APP_ROUTES.flatMap((r) => [`/api/${r}`, `/api/${r}/`]),
+];
+
+// Insertion order IS precedence: bundle rows first, then the /api/* catch-all.
+additionalBehaviors: {
+  '/assets/*': /* unchanged */,
+  '/static/*': /* unchanged */,
+  ...Object.fromEntries(PORTAL_BUNDLE_PATHS.map((p) => [p, portalBundle])),
+  '/api/*': portalBackend,          // ← was: api-spa origin + basic auth
+},
+```
+
+`/api` (no slash) is handled by the same function IF it runs on the row that
+`/api` falls into — which is your default behaviour. Either attach
+`portalIndexFn` to the default behaviour too (it only acts on `/api`; every
+other URI passes through untouched), or add a literal `/api` row to the bundle
+set. The former is what we do.
+
+Then `cdk diff` — expect: one new origin, eleven behaviour changes, one new
+function, and NO change to `/assets/*`, `/static/*` or the default — and
+deploy. Verify with the table above; the first probe (`/api/config` as JSON)
+is the one that matters.
