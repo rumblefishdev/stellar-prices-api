@@ -206,8 +206,35 @@ are properties of the serving distribution and are answered against
 `EA2TLS5SS5M87`; the rest are answered against our own stacks and were settled
 on 2026-08-28:
 
-- [ ] ⏳ **2026-08-28, RE-RUN after the prefix deploy: gateway half PASS on the
-      new paths.** `get-stage` after 13:30Z: 13 entries, the three
+- [ ] ⏳ **2026-08-31, AFTER THE FLIP: origin half now fully PASS; only the
+      (host) half is left.** With the portal open the routes finally emit real
+      responses, so `no-store` is observable for the first time — and every one
+      of them carries it, on success and error paths alike, measured on
+      `02mabge71l.execute-api…/production`:
+
+      | route | method | status | `Cache-Control` |
+      |---|---|---|---|
+      | `/api/api/config` | GET | 200 | `no-store` |
+      | `/api/api/auth/login` | GET | 303 | `no-store` |
+      | `/api/api/auth/callback` | GET | 400 | `no-store` |
+      | `/api/api/auth/logout` | POST | 204 | `no-store` |
+      | `/api/api/key` | GET / POST | 401 | `no-store` |
+      | `/api/api/key/rework` | POST | 403 | `no-store` |
+      | `/api/api/usage` | GET | 401 | `no-store` |
+      | `/api/api/does-not-exist` | GET | 404 | **none** — axum's fallback, not a portal response |
+
+      Note the path: revoke is `/api/api/key/rework` (`keys/mod.rs:125`), not
+      `/key/revoke` as the prose above and [[0192]] call it.
+
+      ⚠️ **`/key/rework` answering `403` is the (host) risk made concrete.**
+      `EA2TLS5SS5M87`'s `CustomErrorResponses` maps 403 to `/index.html` with
+      status `200`, so on the sign-off host that revoke refusal would reach the
+      browser as Explorer's SPA reporting success. That is no longer a
+      hypothetical about [[0183]]'s gate `404` — it is a live status on a live
+      route.
+
+      Earlier reading — **2026-08-28, RE-RUN after the prefix deploy: gateway
+      half PASS on the new paths.** `get-stage` after 13:30Z: 13 entries, the three
       `api/api/{proxy+}` verbs all `cachingEnabled: false`, rate 10, burst 40,
       and **no entry naming the old prefix survives**. `/api/api/config` carries
       `cache-control: no-store` through CloudFront and the gateway alike. The
