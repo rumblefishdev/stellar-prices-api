@@ -1055,10 +1055,11 @@ async fn price_xlm_lands_on_the_sentinel_when_the_xlm_divisor_is_missing() {
 // Task 0178 — the quote-leg surface: USDC's row, both-leg volume, provenance.
 // ───────────────────────────────────────────────────────────────────────────
 
-const USDC_ISSUER: &str = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
-/// Stands in for the canonical Stellar USDT (GCQTGZQQ…TG6V) — the identity the
-/// oracle prices at par while the token itself trades at a deep discount.
-const USDT_ISSUER: &str = "GCQTGZQQTG6VZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZTG6V";
+// The REAL canonical issuers, from the crate's single source of truth — not
+// local literals. The USDT trap below is only meaningful against the identity
+// the oracle actually misprices, and `views.sql`/`current.sql` embed the same
+// USDC address as a SQL literal that cannot reference a Rust const.
+use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 
 fn insert_asset(db: &str, id: u32, code: &str, issuer: &str) -> String {
     format!(

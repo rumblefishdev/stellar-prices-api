@@ -190,6 +190,10 @@ WITH
     -- label that reads as MORE authoritative than the guess it replaced —
     -- strictly worse than the bug this task fixes. The symbol→issuer mapping
     -- that makes widening safe is TASK 0173. Same fence as views.sql:102-107.
+    -- ⚠️ This address is duplicated from prices_clickhouse::USDC_ISSUER (Rust),
+    -- which is the single source of truth; a SQL literal cannot reference it.
+    -- views.sql carries the same copy under the same rule — keep all three in
+    -- step.
     (
         SELECT asset_id FROM prices.assets FINAL
         WHERE asset_code = 'USDC'

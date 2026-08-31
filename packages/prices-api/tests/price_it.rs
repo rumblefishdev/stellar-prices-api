@@ -59,11 +59,11 @@ async fn setup(db: &str) -> Client {
         .query(&format!(
             "INSERT INTO {db}.current_prices \
              (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct, \
-              vwap_24h, volume_24h_usd, sources, updated_at) VALUES \
+              vwap_24h, volume_24h_usd, sources, updated_at, method) VALUES \
              (1, 0.5, 1.25, -2.5, 7.25, 0.51, 1234.5, \
               '{{\"sdex\":{{\"price\":\"0.5\",\"volume_24h\":\"1000\"}}}}', \
-              '2026-02-10 12:00:30'), \
-             (2, 1.0001, 0, 0, 0, 1.0002, 999999.25, '', '2026-02-10 12:00:30')"
+              '2026-02-10 12:00:30', 'traded'), \
+             (2, 1.0001, 0, 0, 0, 1.0002, 999999.25, '', '2026-02-10 12:00:30', '')"
         ))
         .execute()
         .await
@@ -369,6 +369,69 @@ async fn price_min_volume_cuts_an_all_dust_asset_at_the_system_default() {
     // Untouched by the threshold, which is a weighting rule only.
     approx(&j1["price_usd"], 3.0);
     approx(&j1["volume_24h_usd"], 80.0);
+
+    teardown(db).await;
+}
+
+/// Task 0178 — `method` must reach the wire on `/price`, and it must be the
+/// SEEDED value rather than anything the handler invents. Without this column a
+/// consumer cannot tell a measured 1.0000 from a filled one, which is the whole
+/// reason it exists.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn price_surfaces_the_provenance_method() {
+    let db = "it_price_method_0178";
+    let client = setup(db).await;
+
+    // A third asset priced from the oracle arm, as canonical USDC is on prod.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) \
+             VALUES (3, 'ORC', 'credit', '{issuer}', '')",
+            issuer = prices_clickhouse::USDC_ISSUER
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.current_prices \
+             (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct, \
+              vwap_24h, volume_24h_usd, sources, updated_at, method) VALUES \
+             (3, 0.9993, 0, 0, 0, 0, 12000, '{{}}', '2026-02-10 12:00:30', 'oracle')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // A traded asset reports 'traded'.
+    let (status, json) = get(client.clone(), "/v1/assets/native/price").await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["method"], "traded");
+
+    // The oracle-priced asset reports 'oracle' — distinguishable from a real
+    // aggregate at the same price.
+    // Identity is (code, issuer), so ORC at this issuer is a distinct asset from
+    // USDC at the same one — a real strkey is required, the handler validates.
+    let (status, json) = get(
+        client.clone(),
+        &format!("/v1/assets/ORC:{}/price", prices_clickhouse::USDC_ISSUER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["method"], "oracle");
+    approx(&json["price_usd"], 0.9993);
+
+    // The producer has written no method: the '' sentinel must survive to the
+    // wire as an empty string, never as null and never coerced to 'traded'.
+    let (status, json) = get(
+        client,
+        &format!("/v1/assets/USDC:{}/price", prices_clickhouse::USDC_ISSUER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["method"], "");
 
     teardown(db).await;
 }

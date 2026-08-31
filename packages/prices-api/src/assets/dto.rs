@@ -48,6 +48,19 @@ pub struct PriceResponse {
     pub sources: serde_json::Value,
     /// Timestamp of the snapshot (ISO-8601 UTC).
     pub updated_at: String,
+    /// How `price_usd` was arrived at (task 0178) — the same vocabulary
+    /// `price_usd_series.method` uses, so the tip and the series read alike:
+    ///
+    /// * `"traded"` — a real aggregate of candles some pricing tier priced.
+    /// * `"oracle"` — a measured depeg-aware rate from `prices.usd_rate`,
+    ///   used for assets that never trade as a base leg and so have no candle
+    ///   of their own. Canonical USDC is currently the only one.
+    /// * `""` — the "unavailable" sentinel, shared with `price_usd`'s `"0"`:
+    ///   no priced candle in the window, so no method applies.
+    ///
+    /// ⚠️ Never read `"oracle"` as "more accurate than traded" — it means the
+    /// price came from a rate rather than from this asset's own trades.
+    pub method: String,
 }
 
 /// Parse the MV's `sources` JSON string into a value for the response.
@@ -169,6 +182,7 @@ impl PriceResponse {
             change_24h_pct: row.change_24h_pct,
             sources: parse_sources(&row.sources),
             updated_at: row.updated_at,
+            method: row.method,
         }
     }
 }
@@ -215,6 +229,9 @@ pub struct AssetListItem {
     #[schema(value_type = Object)]
     pub sources: serde_json::Value,
     pub updated_at: String,
+    /// Price provenance; same vocabulary and caveats as
+    /// [`PriceResponse::method`].
+    pub method: String,
 }
 
 /// `GET /assets` paginated response.

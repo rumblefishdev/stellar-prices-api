@@ -85,6 +85,7 @@ pub async fn post_batch(
                     change_24h_pct: row.change_24h_pct.clone(),
                     sources: row.sources.clone(),
                     updated_at: row.updated_at.clone(),
+                    method: row.method.clone(),
                 },
             )),
             None => not_found.push(id.to_canonical()),
