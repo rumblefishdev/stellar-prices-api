@@ -279,6 +279,53 @@ a ~7× error on 102 live pools. Fix the order-of-magnitude problem first.
   That is a data-availability fact, not a gap to close, and the same shape as the
   pre-Soroban tail having no USD reference at all.
 
+  ## ⚠️ "But the candles know the real rate" — they do not. MEASURED on prod 2026-08-31.
+
+  Raised as a challenge to the fallback and worth settling permanently, because
+  it is the obvious objection and it is wrong for a non-obvious reason.
+
+  **Half 1 — there is no USDC candle to read.** Canonical USDC as a BASE:
+
+  ```
+  SELECT count() FROM prices.price_ohlcv_1d FINAL WHERE asset_id = <canonical USDC>
+  -> 0
+  ```
+
+  It is our top-preference quote, so canonicalisation makes it the quote on every
+  pair it appears in. That is the whole reason [[0165]] needed a peg arm.
+
+  **Half 2 — the quote-side candles cannot price it either, because the
+  derivation is CIRCULAR.** Getting USDC's dollar price out of an XLM/USDC candle
+  needs XLM's dollar price, and before the oracle window that is *defined* as
+  XLM's price in USDC (`ch_enrich.rs`, `pivot_sql`):
+
+  ```sql
+  SELECT timestamp, sum(close * volume_base) / sum(volume_base) AS usd
+  FROM price_ohlcv_1m WHERE asset_id = <XLM> AND quote_asset_id = <USDC>
+  ```
+
+  So `USDC = $1` is baked into the definition of the reference asset. Measured,
+  over every USDC-quoted candle before 2026-03-11:
+
+  | implied rate (`close_usd / close`) | candles |
+  |---|---|
+  | **1.00000000** | **654,291** |
+
+  **One distinct value.** Not clustered near par — a single value, because the
+  enrichment peg tier multiplied every one of them by a literal `$1`. Deriving a
+  rate from these returns the assumption that produced them, and would arrive
+  labelled `'traded'`/`'oracle'` instead of `'peg'` — the same number wearing a
+  badge that says "measured". Strictly worse than the honest fallback.
+
+  **Where the objection IS right, and what would actually fix it.** Real USDC did
+  deviate — ~$0.88 over the SVB weekend in March 2023 — and our deep history
+  shows `$1.0000` for those days. That is real missing information, and it is
+  unrecoverable *from inside our data*: during a depeg, "XLM rose 13%" and "USDC
+  fell 12%" are the same candle. Breaking the circle needs an anchor OUTSIDE the
+  USDC-denominated system — an external historical price feed, or an oracle
+  backfill (Reflector's does not reach back). File that if deep history in real
+  dollars is ever wanted; the candles cannot supply it.
+
 
 ---
 
