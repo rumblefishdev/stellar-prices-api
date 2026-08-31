@@ -807,19 +807,36 @@ export class ApiGatewayStack extends cdk.Stack {
     });
 
     // CORS on the gateway's OWN error answers (task 0194): a `429` from the
-    // throttle above, a `403 Missing Authentication Token` for an unmapped
-    // verb, a `504` when the Lambda runs out of time. None of those reach the
-    // handler, so none carry its `Access-Control-Allow-Origin` — and to a
-    // browser on `portalWebOrigin` a cross-origin response without one is
-    // not a `429`, it is a network error. The bundle's `getJson` would then
-    // report "could not be reached", which points at the visitor's network
-    // when the cause is a throttle that has a status and a body. A static
-    // value rather than the request's `Origin`, because a gateway response
-    // cannot read one: this is the one origin the API serves a page to, and a
-    // browser on any other origin rejects the mismatch and shows the same
-    // opaque error it would have shown anyway.
+    // throttle above, a `504` when the Lambda runs out of time. Neither
+    // reaches the handler, so neither carries its `Access-Control-Allow-Origin`
+    // — and to a browser on `portalWebOrigin` a cross-origin response without
+    // one is not a `429`, it is a network error. The bundle's `getJson` would
+    // then report "could not be reached", which points at the visitor's
+    // network when the cause is a throttle that has a status and a body. A
+    // static value rather than the request's `Origin`, because a gateway
+    // response cannot read one: this is the one origin the API serves a page
+    // to, and a browser on any other origin rejects the mismatch and shows the
+    // same opaque error it would have shown anyway.
+    //
+    // ⚠️ **A gateway response is scopable by `ResponseType` and by nothing
+    // else** — there is no path, resource or stage dimension. So every entry
+    // here is API-WIDE, `/v1` included, and the header goes out even on a
+    // request that carried no `Origin` at all. That is why the 4xx half is
+    // `THROTTLED` and not `DEFAULT_4XX`, which 0194's review found stamping
+    // the portal's origin onto every keyless `/v1` `403` — a set of answers
+    // the portal never reads, on the far larger half of the API, for no gain.
+    // `THROTTLED` is the one 4xx the bundle has to be able to tell apart from
+    // a dead network, and it is the same `429` on `/v1`, so widening it there
+    // costs nothing: the body is API Gateway's own generic text and the header
+    // lets a page on OUR origin read a status it could already read by
+    // sending the request itself.
+    //
+    // `DEFAULT_5XX` stays broad on the same reasoning and cannot be narrowed
+    // usefully anyway — every 5xx here is ours (integration failure, timeout),
+    // there is no per-path form of it, and the alternative is enumerating
+    // response types that AWS may add to.
     for (const [id, type] of [
-      ['PortalCors4xx', apigateway.ResponseType.DEFAULT_4XX],
+      ['PortalCors4xx', apigateway.ResponseType.THROTTLED],
       ['PortalCors5xx', apigateway.ResponseType.DEFAULT_5XX],
     ] as const) {
       this.api.addGatewayResponse(id, {

@@ -654,6 +654,28 @@ export class ComputeStack extends cdk.Stack {
         // See limit 3 above: the revoke touches portal-made keys only, and
         // this condition is on the new verb ALONE — do not fold this statement
         // back into the one above.
+        //
+        // ⚠️ **What this condition is worth, stated so it is not over-read**
+        // (task 0194's review). It is a guard against THIS code disabling a
+        // key it did not make — a reconciler bug, a mis-parsed id, a future
+        // caller passing the wrong ARN — and it is a good one. It is not a
+        // containment boundary against a compromised handler, because
+        // `PortalTagApiKeysOnCreate` above lets this same role write
+        // `ManagedBy=prices-portal` onto a key of its choosing, and
+        // `aws:ResourceTag` is evaluated after that write. Two calls, and the
+        // guard is satisfied. IAM cannot close that: `apigateway:PUT` on
+        // `/tags/…/apikeys/*` has no condition key distinguishing tagging a
+        // key being created from tagging one that already exists, and the
+        // create itself cannot be scoped to a key that does not exist yet
+        // (limit 1). So the honest reading of the pair is: the portal's role
+        // can reach any API key in the account if it runs code we did not
+        // write. What bounds that is not this line — it is that `POST
+        // /apikeys` is limit 1 with its own mitigation, that the only keys
+        // worth reaching are on a plan this role cannot detach, and that a
+        // `PUT /tags` not preceded by a `CreateApiKey` is visible in
+        // CloudTrail. The detective control is the follow-up; the condition
+        // stays because a guard against our own mistakes is the failure mode
+        // that actually happens.
         conditions: {
           StringEquals: { 'aws:ResourceTag/ManagedBy': 'prices-portal' },
         },

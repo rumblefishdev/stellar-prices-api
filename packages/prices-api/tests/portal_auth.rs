@@ -469,12 +469,17 @@ async fn login_lands_an_unwired_issue_round_trip_on_failed() {
     assert!(refused.body.is_empty(), "{:?}", refused.body);
 }
 
-/// The same door on a deployment with **no OAuth credentials at all**: a
-/// sign-in still gets the `503` envelope its caller can read, while an issue
-/// navigation gets a landing. The two answers differ because the two callers
-/// do — one is `fetch` from the page, the other is the browser itself.
+/// The same door on a deployment with **no OAuth credentials at all**: both
+/// arms land, on the two different cards.
+///
+/// They used to differ, on the reasoning that a sign-in was `fetch`ed from the
+/// page and an issue round-trip was a navigation. Task 0194's review found the
+/// premise false — `/auth/login` is the URL the bundle opens as a popup in
+/// both cases — so the sign-in arm now lands too, on `?signin=not_open`
+/// rather than the issue arm's `?issue=failed`. The two literals still differ,
+/// because the two flows start from different pages.
 #[tokio::test]
-async fn an_issue_round_trip_with_no_credentials_lands_rather_than_503ing() {
+async fn neither_arm_503s_on_a_deployment_with_no_credentials() {
     let config = AppConfig {
         ch_enabled: false,
         base_url: None,
@@ -490,8 +495,8 @@ async fn an_issue_round_trip_with_no_credentials_lands_rather_than_503ing() {
     let router = app(&config, AppState::without_ch());
 
     let signin = fetch(&router, LOGIN_PATH, &[]).await;
-    assert_eq!(signin.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(signin.json()["code"], "sign_in_unconfigured");
+    assert_eq!(signin.status, StatusCode::SEE_OTHER);
+    assert_eq!(signin.location(), "/api/?signin=not_open");
 
     let issue = fetch(&router, &format!("{LOGIN_PATH}?action=issue"), &[]).await;
     assert_eq!(issue.status, StatusCode::SEE_OTHER);
@@ -1102,8 +1107,13 @@ async fn a_mismatched_state_is_rejected_and_issues_no_session() {
     )
     .await;
 
-    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
-    assert_eq!(reply.json()["code"], "invalid_state");
+    // A landing, not the `400 invalid_state` envelope this asserted before
+    // task 0194's review: the caller here is a browser following Discord's
+    // redirect, and the same shape reaches this branch from an ordinary stale
+    // tab. What the refusal is made of has not changed — no session, no
+    // exchange, the pending cookie untouched — only what the visitor is shown.
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.location(), "/api/?signin=failed");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
     // And it leaves the browser's pending login alone — see
     // `an_unverifiable_callback_cannot_cancel_someone_elses_sign_in`.
@@ -1123,7 +1133,8 @@ async fn a_callback_with_no_pending_cookie_is_rejected() {
     let state = start_login(&open).await.state;
     let reply = fetch(&open, &format!("{CALLBACK_PATH}?code=c&state={state}"), &[]).await;
 
-    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.location(), "/api/?signin=failed");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
     assert_eq!(mock.exchanges(), 0);
 }
@@ -1146,7 +1157,8 @@ async fn replaying_a_callback_url_after_the_cookie_is_cleared_is_rejected() {
 
     // The replay: same URL, and the browser no longer holds the cookie.
     let second = fetch(&open, &uri, &[]).await;
-    assert_eq!(second.status, StatusCode::BAD_REQUEST);
+    assert_eq!(second.status, StatusCode::SEE_OTHER);
+    assert_eq!(second.location(), "/api/?signin=failed");
     assert!(second.cookie(cookies::SESSION_COOKIE).is_none());
     assert_eq!(
         mock.exchanges(),
@@ -1173,7 +1185,8 @@ async fn a_forged_state_signed_with_another_key_is_rejected() {
         &[(cookies::PENDING_COOKIE, &pending)],
     )
     .await;
-    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.location(), "/api/?signin=failed");
     assert_eq!(mock.exchanges(), 0);
 }
 
@@ -1196,7 +1209,8 @@ async fn a_self_signed_pair_is_rejected() {
         &[(cookies::PENDING_COOKIE, &forged.pending_cookie)],
     )
     .await;
-    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.location(), "/api/?signin=failed");
     assert_eq!(mock.exchanges(), 0);
 }
 
@@ -1329,7 +1343,8 @@ async fn a_verified_callback_always_drops_the_pending_cookie() {
         &[(cookies::PENDING_COOKIE, &failed.pending)],
     )
     .await;
-    assert_eq!(upstream.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(upstream.status, StatusCode::SEE_OTHER);
+    assert_eq!(upstream.location(), "/api/?signin=failed");
     assert!(upstream.clears(cookies::PENDING_COOKIE));
 }
 
@@ -1438,13 +1453,19 @@ async fn the_error_value_never_reaches_the_redirect_target() {
     assert!(reply.headers.get("x-injected").is_none());
 }
 
-/// **A malformed callback is a `400`, not a `502`.**
+/// **A malformed callback stays an envelope, and stays a `400`.**
 ///
 /// These routes are keyless and throttled at 10 req/s, so anyone can call
 /// `/auth/login`, take the `state` it hands them and replay it here. Answering
 /// `502 discord_unavailable` let that manufacture 5xx on demand — polluting the
 /// alarms [0204] is building and making a real Discord outage indistinguishable
 /// from a script. Nothing upstream failed, so nothing upstream is blamed.
+///
+/// Task 0194's review turned the neighbouring refusals into landings because a
+/// browser reaches them; this one is deliberately left alone. Discord's
+/// callback always carries `code` or `error`, so an arrival with neither is not
+/// a visitor part-way through signing in — it is a caller hand-building the
+/// URL, and an envelope is the honest answer to one.
 #[tokio::test]
 async fn a_callback_with_no_code_and_no_error_is_a_client_error() {
     let open = signed_in_app(true);
@@ -1463,7 +1484,9 @@ async fn a_callback_with_no_code_and_no_error_is_a_client_error() {
         "an anonymous caller must not be able to manufacture a 5xx"
     );
     assert_eq!(reply.json()["code"], "invalid_query");
-    // Not Discord's fault, so not Discord's error code.
+    // Not Discord's fault, so not Discord's error code — a literal here rather
+    // than a constant, because since 0194's review no `discord_unavailable`
+    // exists in the handler for this to drift with.
     assert_ne!(reply.json()["code"], "discord_unavailable");
     // The cookie is still spent — `state` verified, so this callback is used up.
     assert!(reply.clears(cookies::PENDING_COOKIE));
@@ -1499,8 +1522,8 @@ async fn a_grant_that_is_not_exactly_the_two_scopes_is_refused() {
         )
         .await;
 
-        assert_eq!(reply.status, StatusCode::BAD_GATEWAY, "scope={drifted}");
-        assert_eq!(reply.json()["code"], "discord_unavailable", "{drifted}");
+        assert_eq!(reply.status, StatusCode::SEE_OTHER, "scope={drifted}");
+        assert_eq!(reply.location(), "/api/?signin=failed", "{drifted}");
         assert!(reply.cookie(cookies::SESSION_COOKIE).is_none(), "{drifted}");
     }
 
@@ -1515,13 +1538,21 @@ async fn a_grant_that_is_not_exactly_the_two_scopes_is_refused() {
     )
     .await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_ne!(reply.location(), "/api/?signin=failed");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
 }
 
-/// Discord having an incident must not read as a bug here, and must not leak
-/// Discord's response body to the visitor.
+/// Discord having an incident must not leak Discord's response body to the
+/// visitor.
+///
+/// It used to answer `502 discord_unavailable`; since task 0194's review it
+/// lands, for the reason the issue arm already did — the caller is a browser
+/// following Discord's redirect, and a JSON 5xx is a dead end with no link
+/// back. What an operator reads is the `warn` line, which still carries the
+/// stage and the upstream error; what the visitor reads is a landing that
+/// never contained the upstream body and still does not.
 #[tokio::test]
-async fn a_failed_token_exchange_is_a_502_with_no_upstream_detail() {
+async fn a_failed_token_exchange_lands_with_no_upstream_detail() {
     let mock = MockDiscord::start(GRANTED_SCOPE, Some(StatusCode::UNAUTHORIZED)).await;
     let open = app_against(&mock);
 
@@ -1534,7 +1565,8 @@ async fn a_failed_token_exchange_is_a_502_with_no_upstream_detail() {
     )
     .await;
 
-    assert_eq!(reply.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.location(), "/api/?signin=failed");
     let body = String::from_utf8(reply.body.clone()).unwrap();
     assert!(!body.contains("upstream said no"), "{body}");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
@@ -1650,8 +1682,13 @@ async fn logout_is_not_reachable_by_a_get() {
 /// silently 404s. `AppConfig::load_portal_oauth` fails at cold start on this
 /// combination, so reaching here means something bypassed it — the routes are
 /// still mounted and still honest.
+///
+/// Since task 0194's review it says so on the page: `/auth/login` is opened as
+/// a top-level navigation (a popup, in the bundle), so `503 JSON` was raw text
+/// in a window with no way back. `?signin=not_open` renders [0183]'s
+/// closed-portal card, which is exactly what this deployment is.
 #[tokio::test]
-async fn an_open_portal_with_no_credentials_answers_503_on_login() {
+async fn an_open_portal_with_no_credentials_lands_on_the_closed_card() {
     let config = AppConfig {
         ch_enabled: false,
         base_url: None,
@@ -1670,8 +1707,8 @@ async fn an_open_portal_with_no_credentials_answers_503_on_login() {
     let router = app(&config, AppState::without_ch());
 
     let login = fetch(&router, LOGIN_PATH, &[]).await;
-    assert_eq!(login.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(login.json()["code"], "sign_in_unconfigured");
+    assert_eq!(login.status, StatusCode::SEE_OTHER);
+    assert_eq!(login.location(), "/api/?signin=not_open");
 
     // `/auth/me` is the exception: "nobody is signed in" is true and lets the
     // page render.

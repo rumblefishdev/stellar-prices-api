@@ -78,6 +78,12 @@ describe('dev proxy', () => {
       '/api/config',
       '/api/auth/login',
       '/api/auth/callback?code=x',
+      // A query directly on a segment, with no slash between: the guard used to
+      // read `(/|$)`, so `/api/config?…` fell through to Vite and the dev server
+      // answered the app's own `index.html` with a `200` — the same silent
+      // wrong-`200` shape task 0194 spent a day diagnosing in production.
+      '/api/config?fresh=1',
+      '/api/usage?window=day',
       '/api/key',
       '/api/key/rework',
       '/api/usage',
@@ -95,7 +101,8 @@ describe('dev proxy', () => {
       '/api/assets/index.js',
       '/api/login',
       '/api/dashboard',
-      '/api/keys', // not `/api/key` — the `(/|$)` guard
+      '/api/keys', // not `/api/key` — the `(/|\?|$)` guard
+      '/api/configuration', // and the query arm did not widen it into a prefix match
     ]) {
       expect(rule.test(bundle), bundle).toBe(false);
     }

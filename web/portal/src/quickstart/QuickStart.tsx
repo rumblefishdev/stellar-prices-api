@@ -101,6 +101,16 @@ const Tok = ({ c = PLAIN, children }: { c?: string; children: ReactNode }) => (
  * plain string the copy button writes. Deriving one from the other would need
  * a tokenizer; keeping both next to each other in one object is what keeps
  * them from drifting.
+ *
+ * ⚠️ Proximity is NOT what kept them from drifting — task 0194's review found
+ * two snippets whose `view` declared `prices` and then used `price`, left by a
+ * rename applied to `text` and to only some of the JSX identifiers. The JS one
+ * threw `ReferenceError` for anyone who retyped what was on screen; the Rust
+ * one did not compile. Both copy buttons wrote correct code, so nothing on the
+ * page and nothing in the suite could see it. What keeps them together now is
+ * `SNIPPET_TABLES` below and the spec that renders every `view` and compares
+ * its text to `text` — the same shape as `base-path.spec.ts` over the two
+ * copies of `BASE_PATH`.
  */
 type Snippet = { text: string; view: ReactNode };
 
@@ -912,7 +922,7 @@ const SDK: Record<SdkLang, Snippet> = {
         <Tok c={KEY}>if</Tok> (!res.ok) <Tok c={KEY}>throw new</Tok> Error(
         <Tok c={STR}>`HTTP $&#123;res.status&#125;`</Tok>);{'\n  '}
         <Tok c={KEY}>return</Tok> res.json();{'\n}\n\n'}
-        <Tok c={KEY}>const</Tok> prices = <Tok c={KEY}>await</Tok> getPrice();
+        <Tok c={KEY}>const</Tok> price = <Tok c={KEY}>await</Tok> getPrice();
         {'\n'}
         console.log(price);
       </>
@@ -947,7 +957,7 @@ const SDK: Record<SdkLang, Snippet> = {
         <Tok c={STR}>&quot;{BASE_URL}&quot;</Tok>;{'\n\n'}
         <Tok c={KEY}>fn</Tok> main() -&gt; Result&lt;(), reqwest::Error&gt;{' '}
         {'{\n    '}
-        <Tok c={KEY}>let</Tok> prices: serde_json::Value = Client::new()
+        <Tok c={KEY}>let</Tok> price: serde_json::Value = Client::new()
         {'\n        .get(format!('}
         <Tok c={STR}>&quot;&#123;BASE&#125;/assets/native/price&quot;</Tok>))
         {'\n        .header('}
@@ -996,6 +1006,18 @@ const SDK_TITLE: Record<SdkLang, string> = {
   python: 'python — fetch all prices',
   rust: 'rust — fetch all prices',
   go: 'go — fetch all prices',
+};
+
+/**
+ * Every `Snippet` on this page, for the drift test — see the note on `Snippet`.
+ *
+ * Exported for the spec alone. A new snippet table that is not listed here is
+ * a snippet whose two halves nothing compares, so the list is the thing to
+ * extend when one is added.
+ */
+export const SNIPPET_TABLES: Record<string, Record<string, Snippet>> = {
+  FIRST_REQUEST,
+  SDK,
 };
 
 /* -------------------------------------------------------------------------- */

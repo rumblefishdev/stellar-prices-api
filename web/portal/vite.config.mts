@@ -53,7 +53,7 @@ const PORTAL_BACKEND_SEGMENTS = [
   'config',
   'api-docs-json',
 ];
-const PORTAL_BACKEND_PROXY = `^/api/(${PORTAL_BACKEND_SEGMENTS.join('|')})(/|$)`;
+const PORTAL_BACKEND_PROXY = `^/api/(${PORTAL_BACKEND_SEGMENTS.join('|')})(/|\\?|$)`;
 
 const PROXIED_PATHS = [
   // The portal's own backend (task 0183's gate, keyless by design). Covers

@@ -338,7 +338,29 @@ on 2026-08-28:
       **(host)** The portal's API behaviour precedes its bundle behaviour in
       `EA2TLS5SS5M87`'s order, whatever the two prefixes end up being — the
       ordering rule of [[0161]], not the literal `/api-tokens/` pair
-- [x] ✅ **Amended 2026-08-31: the 08-28 reading was a PASS on shape and a
+- [x] ✅ **Amended again 2026-08-31 by this task's own `/code-review`: the
+      PASS stands, and one sentence of it was over-read.**
+      `PortalDisableOwnApiKeys` is conditioned on `aws:ResourceTag/ManagedBy =
+      prices-portal`, and the fix above gave the same role
+      `PortalTagApiKeysOnCreate` — `apigateway:PUT` on `/tags/…/apikeys/*`
+      conditioned on `aws:RequestTag`, which is a condition on the value being
+      written, not on which key it is written to. So the two statements are
+      not independent: this role can tag any key in the account
+      `ManagedBy=prices-portal` and then satisfy the revoke's guard against
+      it. Two calls. **IAM cannot close it** — there is no condition key that
+      distinguishes tagging a key as it is created from tagging one that
+      already exists, and the create cannot name a key that does not exist yet
+      (limit 1). Recorded rather than fixed, in `compute-stack.ts` at the
+      statement itself: the `ResourceTag` guard is a guard against *our own*
+      code disabling a key it did not make — which is the failure mode that
+      actually happens — and not a containment boundary against a compromised
+      handler. What bounds that instead: limit 1's existing mitigation, a
+      free-tier plan this role cannot detach keys from, and the fact that a
+      `PUT /tags` not preceded by a `CreateApiKey` is visible in CloudTrail.
+      That last one is a detective control nobody has built; it is the
+      follow-up this check spawns, not a blocker on it — the check asks for
+      named resources and no `apigateway:*`, and both remain true.
+      Earlier amendment — **the 08-28 reading was a PASS on shape and a
       FAIL on function, and only the browser walk could tell.** The policy
       named specific resources, as the check asks — and could not create a
       key: `CreateApiKey` with `tags` needs `apigateway:PUT` on
@@ -1045,6 +1067,35 @@ with their query parameters, `/assets/native/price`'s fields (decimal
 strings), the real error bodies, and `apiBaseUrl` → the hostname so the
 OpenAPI `servers` block says the same (`openapi:verify-servers`,
 `links.spec.ts`). Task 0233's portal half is closed by this.
+
+## Code review of the whole branch — 2026-08-31
+
+Run after the walk, over everything this task and [[0235]] landed: the flat
+prefix, the custom domain, CORS, the tag-on-create IAM fix and the example
+rewrite. Six findings, all fixed in one commit; none of them changes a check's
+verdict, and one of them amends the *reasoning* under check 6 (recorded there).
+
+| # | where | what |
+|---|---|---|
+| 1 | `QuickStart.tsx` | Two snippets declared `prices` and used `price` — the JS one a `ReferenceError` for anyone who retyped what was on screen, the Rust one not compiling. Left by the 08-31 example rewrite: the rename reached `text` and only part of `view` |
+| 2 | `QuickStart.spec.tsx` (new) | Every snippet is authored **twice** — coloured JSX for the reader, a plain string for the Copy button — and nothing tied the two. Both Copy buttons wrote correct code, which is exactly why #1 could ship. The spec renders each `view` and compares its text to `text`; `SNIPPET_TABLES` is the list to extend when a snippet table is added |
+| 3 | `api-gateway-stack.ts` | The CORS gateway response was `DEFAULT_4XX`, and a gateway response is scopable by `ResponseType` and by nothing else — so it stamped `portalWebOrigin` onto every keyless `/v1` `403`, API-wide, and onto requests carrying no `Origin` at all. Narrowed to `THROTTLED`, which is the one 4xx the bundle must tell apart from a dead network. `DEFAULT_5XX` kept, with why written down |
+| 4 | `compute-stack.ts` | The revoke's `aws:ResourceTag` guard is not independent of the new tag-on-create grant — see check 6. Documented, not fixable in IAM; spawns the CloudTrail detective control as a follow-up |
+| 5 | `vite.config.mts` | The dev proxy's `(/|$)` guard did not match a query directly on a segment, so `/api/config?fresh=1` fell through to Vite and the dev server answered its own `index.html` with a `200` — the same silent wrong-`200` shape this task spent a day diagnosing in production. `(/|\?|$)`, with the case and its negative (`/api/configuration`) in `dev-proxy.spec.ts` |
+| 6 | `portal/auth/mod.rs` | Three refusals answered a **browser** with a JSON envelope: `unconfigured` `503`, `refuse_state` `400`, `refuse_discord` `502`. Every caller of all three is a top-level navigation — `/auth/login` is the URL the bundle opens as a popup, and `/auth/callback` is Discord returning — so the visitor got raw text in a window with no way back, and the popup never posted to its opener. All three now land: `?signin=not_open` for the unconfigured deployment, `?signin=failed` for the other two. The argument was already written down one function away and applied to half the traffic — the issue arm has redirected since [[0189]] because "`502` JSON is a dead end with no link back" |
+
+`refuse_query` was deliberately left an envelope: Discord's callback always
+carries `code` or `error`, so an arrival with neither is a hand-built URL, not
+a visitor part-way through anything.
+
+The three error-code constants the landings retired — `invalid_state`,
+`discord_unavailable`, `sign_in_unconfigured` — are gone from the handler, so
+no caller can be written against a code that no longer ships.
+
+Verified: Rust 416 passed / 0 failed, clippy `-D warnings` green; portal
+suite green including the two new specs; `synth-production` green with
+`THROTTLED` in the template. **Not deployed** — findings 3 and 6 are a
+production change and land with the merge.
 
 ## Issues Encountered
 
