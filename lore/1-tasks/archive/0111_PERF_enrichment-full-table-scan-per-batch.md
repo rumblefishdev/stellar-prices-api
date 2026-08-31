@@ -204,6 +204,24 @@ history:
       leg-scoped, because EnrichmentRowsRemainingRecent is ~100% floor and would
       have passed a starved pass. Still not deployed; the cdk diff blocker
       stands.
+  - date: 2026-08-31
+    status: completed
+    who: okarcz
+    note: >
+      AC 5 CLOSED - the last of the six. [[0220]]'s week-long soak
+      (2026-08-24 -> 2026-08-31) passed on every measure, so this task is now
+      complete on all criteria with nothing deferred. EnrichmentPassDurationMs
+      max 12,189 ms / min 5,220 ms = 4.1% of the 300 s the AC names, across 169
+      hourly buckets over a 169.13-hour span (no missing hour). The alarm
+      prices-production-enrichment-duration-near-timeout still carries
+      StateUpdatedTimestamp 2026-08-24T08:31:25Z, i.e. it never left OK for the
+      whole eight days, and describe-alarm-history shows no StateUpdate.
+      AWS/Lambda Duration hourly max 67,184 ms (28.0% of the 240,000 ms alarm
+      threshold), Invocations 1/hour, Errors 0/hour throughout. The ~5x gap
+      between the two duration figures is the historical sweep, which shares the
+      invocation but not the custom metric; from 2026-08-27 15:02 it took the
+      Lambda figure to a lasting plateau near 63,000 ms that must not be read as
+      a regression.
 ---
 
 > **Why this is queued ahead of its own cost case:** the perf argument for 0111
@@ -1009,11 +1027,31 @@ this lands.
       the count is recorded before/after." Wrong figure by ~78×, and it implied
       a zero residual that the design cannot reach.*</sub>
 
-- [ ] **(DEFERRED to [[0220]])** **0026's `EnrichmentPassDurationMs` stays well clear of 300 s for a week**
-      spanning active backfill, and
+- [x] **(VERIFIED via [[0220]], 2026-08-31)** **0026's `EnrichmentPassDurationMs`
+      stays well clear of 300 s for a week** spanning active backfill, and
       `prices-production-enrichment-duration-near-timeout` returns to OK and
       stays there. That alarm firing at **300,000 / 300,338 ms** on 2026-08-21
       is what re-opened this task.
+
+      Soak ran 2026-08-24 → 2026-08-31 and passed on every measure:
+
+      - `EnrichmentPassDurationMs` max **12,189 ms**, min 5,220 ms — **4.1%** of
+        the 300 s this criterion names, across **169 hourly buckets over a
+        169.13-hour span**, i.e. the whole soak with no missing hour.
+      - The alarm still carries `StateUpdatedTimestamp`
+        **2026-08-24T08:31:25Z** — it did not merely read OK at each daily
+        check, it **never left OK** for the entire eight days.
+      - `AWS/Lambda` `Duration` hourly max **67,184 ms** (28.0% of the
+        240,000 ms alarm threshold), `Invocations` 1/hour and `Errors` 0/hour
+        throughout.
+
+      ⚠️ The two duration figures differ by ~5× on purpose and neither is wrong:
+      `EnrichmentPassDurationMs` measures the **live 1m pass only**, while
+      `AWS/Lambda` `Duration` also contains the historical sweep sharing the
+      invocation. From 2026-08-27 15:02 the sweep began working a non-exhausted
+      month and took the Lambda figure to a **plateau** near 63,000 ms — it will
+      persist for weeks (49 months at ~200k rows/pass) and must not be read as a
+      regression. See [[0220]]'s days 4-5 and days 6-8 log entries.
 
 - [x] **The live window is not starved by the historical sweep.**
       `EnrichmentRowsRemainingRecent` stays at its floor. The sweep is

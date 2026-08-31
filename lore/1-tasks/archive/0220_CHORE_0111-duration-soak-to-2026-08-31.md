@@ -2,7 +2,7 @@
 id: "0220"
 title: "Daily soak — 0111's duration alarm must stay OK for a week spanning active backfill"
 type: CHORE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0111", "0026", "0112", "0214"]
 tags: ["priority-medium", "effort-small", "enrichment", "observability", "milestone-M2"]
@@ -19,6 +19,26 @@ history:
       only criterion that is time-gated rather than measurement-gated, and the
       reason 0111 would otherwise have sat active for a week. Alarm returned to
       OK at 2026-08-24 08:31:25 UTC after being in ALARM since 2026-08-21 16:18.
+  - date: 2026-08-31
+    status: completed
+    who: okarcz
+    note: >
+      Soak COMPLETE, all 5 ACs pass. Days 6-8 (08-29 weekend, 08-30 weekend,
+      08-31) reconstructed retrospectively from CloudWatch in one window
+      2026-08-28T09:00:00Z -> 2026-08-31T09:39:15Z, which begins at the hour of
+      the days 4-5 check so the series has no gap. Alarm
+      prices-production-enrichment-duration-near-timeout still carries
+      StateUpdatedTimestamp 2026-08-24T08:31:25Z - it never left OK across the
+      whole eight days - and describe-alarm-history returns no StateUpdate over
+      the window, ruling out an ALARM that self-cleared unobserved. Duration
+      hourly max 67,183.98 ms at 2026-08-28T15:00Z = 28.0% of the 240,000 ms
+      threshold, min 11,464.24 ms; Invocations min = max = 1.0 (total 73);
+      Errors min = max = 0.0 (total 0). All three series returned 73 hourly
+      buckets over a 72.65-hour window, so no pass was dropped - the coverage
+      count, not the maxima, is what proves that. The worst hour falls on 08-28
+      itself, not the weekend, and sits on the sweep plateau the days 4-5 entry
+      predicted. 0111's AC 5 ticked in its archived file; 0111 is now complete
+      on all 6 criteria and nothing is owed back to it.
 ---
 
 # 0111's duration soak — one week, checked daily
@@ -57,6 +77,42 @@ Stage split inside an invocation: 1m pass ~7.2 s, historical sweep ~0.5 s, coars
 sweep ~21 s. Peak Lambda memory **52-54 MB of 512 MB**.
 
 ## Daily log
+
+### 2026-08-31 09:39 UTC — days 6, 7 AND 8 of 8, clean — THE SOAK PASSES
+
+Days 6-8 (08-29, 08-30, 08-31) were not checked on the day — 08-29 and 08-30
+were a weekend. Reconstructed retrospectively from CloudWatch over a single
+window, `2026-08-28T09:00:00Z → 2026-08-31T09:39:15Z`, which starts at the hour
+of the days 4-5 check so there is **no gap** in the series.
+
+| measure | result | against |
+|---|---|---|
+| alarm `StateValue` | `OK`, `StateUpdatedTimestamp` **2026-08-24T08:31:25Z** | never transitioned since the soak began |
+| alarm history, `StateUpdate` | **empty** across the window | no ALARM that self-cleared over the weekend |
+| `Duration` hourly max | **67,183.98 ms** at 2026-08-28T15:00Z | **28.0%** of the 240,000 ms threshold |
+| `Duration` hourly min | 11,464.24 ms | |
+| `Invocations` | min = max = **1.0**, total **73** | 1/hour, every hour |
+| `Errors` | min = max = **0.0**, total **0** | |
+| hourly buckets returned | **73** on all three series | window spans 72.65 h → **every hour present** |
+
+🔑 **The coverage count is the load-bearing check, not the maxima.** A
+`sort_by(Datapoints,&Sum)[-1]` query returns the largest hour, so an hour in
+which the schedule stopped entirely reads as `1.0` and looks perfect. 73 buckets
+over a 72.65-hour window is what actually proves no pass was dropped — and
+`min == max == 1.0` proves it independently. Same family as [[0222]]'s query
+artefacts and [[cloudwatch-query-artefacts-look-like-outages]]: the statistic
+was fine, the window was the thing that could lie.
+
+The worst hour in the window falls on **08-28 itself**, not the weekend, so days
+6-8 were no worse than the day already logged. 67,184 ms sits on the sweep
+plateau the days 4-5 entry predicted (~63,000 ms) — passing, not degrading, and
+still well under the ~100,000 ms look-at line and the ~130,000 ms configured
+worst case.
+
+⚠️ **AC 4 was already satisfied on day 3**, so the `query_log` write-load probe
+was not re-run here. The soak's demonstrated-write-load requirement is met by
+the day 3 and days 4-5 entries; the elevated `Duration` plateau is itself
+continuing evidence the sweep is working rather than idle.
 
 ### 2026-08-28 09:5x UTC — days 4 AND 5 of 8, clean — and `Duration` stepped 6× without breaching
 
@@ -245,8 +301,13 @@ No code deploy needed: set `ENRICH_LIVE_PARTITIONS=0` on
 
 ## Acceptance Criteria
 
-- [ ] The alarm is OK on every daily check from 2026-08-24 to **2026-08-31**.
-- [ ] Hourly `Duration` maximum stays **well under 240,000 ms** across that week
+- [x] The alarm is OK on every daily check from 2026-08-24 to **2026-08-31**.
+      Stronger than the criterion asks: `StateUpdatedTimestamp` is still
+      **2026-08-24T08:31:25Z**, so the alarm did not merely read OK at each
+      check — it never left OK at all. Days 6-8 confirmed by an empty
+      `describe-alarm-history` over the window, which rules out an ALARM that
+      rose and self-cleared between checks.
+- [x] Hourly `Duration` maximum stays **well under 240,000 ms** across that week
       — baseline is ~27,000 ms, so anything above ~100,000 ms warrants a look
       before the threshold is reached.
       ⚠️ **The baseline moved on 2026-08-27 and the trigger figure still holds.**
@@ -256,11 +317,17 @@ No code deploy needed: set `ENRICH_LIVE_PARTITIONS=0` on
       action is due — but a check on 08-29/30/31 reading ~60,000 ms is **passing**,
       not degrading. The sweep is capped at 20 batches and a 120 s budget, so the
       configured worst case is ~130,000 ms. See the days 4-5 log entry.
-- [ ] `Invocations` stays at **1/hour** and `Errors` at **0/hour**.
+- [x] `Invocations` stays at **1/hour** and `Errors` at **0/hour**.
+      Verified by `min == max == 1.0` and `min == max == 0.0` respectively,
+      plus **73 hourly buckets over a 72.65-hour window** — the coverage count
+      is what proves no pass was dropped. A max-only query cannot see a
+      missing hour.
 - [x] At least one check falls in a window with **demonstrated write load**,
       evidenced by the `query_log` insert count, not assumed.
-- [ ] On success: record the result in [[0111]]'s archived file and tick its
+- [x] On success: record the result in [[0111]]'s archived file and tick its
       AC 5. On failure: reopen 0111 rather than patching around it here.
+      Done 2026-08-31 — 0111's AC 5 ticked and its history carries the soak
+      result, so 0111 is now complete on all 6 criteria.
 
 ## Out of scope
 
