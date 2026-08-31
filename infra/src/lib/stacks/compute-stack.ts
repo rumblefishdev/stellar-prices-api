@@ -578,11 +578,30 @@ export class ComputeStack extends cdk.Stack {
     //    whose name is not exactly the caller's — a guard in code, on a grant
     //    that is account-wide in IAM.
     //
-    // What is deliberately NOT here: `apigateway:*`, `PUT /tags/*` (the portal
-    // never re-tags a key), and any grant on `/usageplans` beyond the key
-    // attachment and the usage read — both of those need the plan id, so both
-    // live in `ApiGatewayStack`'s standalone policy (`POST …/keys` for 0187's
-    // attach, `GET …/usage` for 0188's `GetUsage`).
+    // 4. **Tagging on create is a fourth grant, and it was missing.** Found
+    //    2026-08-31 by task 0194's first real sign-in on the sign-off host:
+    //    `CreateApiKey` with `tags` is authorised as `apigateway:PUT` on
+    //    `/tags/<url-encoded /apikeys/*>`, separately from `POST /apikeys`, and
+    //    without it every issue attempt ended in `AccessDeniedException` —
+    //    the Lambda had never created a key in production; the one key that
+    //    existed came from a local run under operator credentials. An earlier
+    //    revision of this comment listed `PUT /tags/*` under "deliberately
+    //    NOT here (the portal never re-tags a key)": true of re-tagging, false
+    //    of creating, and the reason the audit's IAM check passed a policy
+    //    that could not do its job. Born narrow: `aws:RequestTag/ManagedBy`
+    //    must be `prices-portal` and the tag keys are the two the create
+    //    call sets (`TAG_MANAGED_BY`, `TAG_ISSUED_BY` in `keys/gateway.rs`).
+    //    What the condition does NOT do: IAM cannot tell tag-on-create from
+    //    tag-later on this action, so the grant also lets this role stamp
+    //    `ManagedBy=prices-portal` on an existing key — which is the tag limit
+    //    3's `PATCH` trusts. The handler has no `TagResource` call path, so
+    //    this is again exposure under code execution, not feature behaviour.
+    //
+    // What is deliberately NOT here: `apigateway:*`, `PUT /tags/*` on anything
+    // but API keys, and any grant on `/usageplans` beyond the key attachment
+    // and the usage read — both of those need the plan id, so both live in
+    // `ApiGatewayStack`'s standalone policy (`POST …/keys` for 0187's attach,
+    // `GET …/usage` for 0188's `GetUsage`).
     //
     // `DELETE` **is** here, and it is this slice's: the reconciler removes
     // duplicate keys after a double-submit ("keep the earliest createdDate,
@@ -601,6 +620,23 @@ export class ComputeStack extends cdk.Stack {
         sid: 'PortalCreateAndListApiKeys',
         actions: ['apigateway:POST', 'apigateway:GET'],
         resources: [`arn:aws:apigateway:${awsRegion}::/apikeys`],
+      }),
+    );
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalTagApiKeysOnCreate',
+        actions: ['apigateway:PUT'],
+        // The tagging resource for "any API key", in the URL-encoded form the
+        // service names in its own AccessDenied message (limit 4 above).
+        resources: [
+          `arn:aws:apigateway:${awsRegion}::/tags/arn%3Aaws%3Aapigateway%3A${awsRegion}%3A%3A%2Fapikeys%2F*`,
+        ],
+        conditions: {
+          StringEquals: { 'aws:RequestTag/ManagedBy': 'prices-portal' },
+          'ForAllValues:StringEquals': {
+            'aws:TagKeys': ['ManagedBy', 'IssuedBy'],
+          },
+        },
       }),
     );
     this.apiHandlerRole.addToPrincipalPolicy(
