@@ -239,9 +239,10 @@ impl Gateway {
     /// Build a client from the ambient AWS configuration — in the Lambda, the
     /// execution role's credentials from the environment.
     ///
-    /// Only ever called when the portal is open, so a production cold start with
-    /// `PORTAL_ENABLED=false` resolves no credentials and opens no connections
-    /// for this. See [`crate::AppConfig::load_portal_keys`].
+    /// Only ever called when the portal is open — which, since task 0194
+    /// flipped `PORTAL_ENABLED`, is every production cold start. With the flag
+    /// off (tests, or a reverted deploy) this resolves no credentials and opens
+    /// no connections. See [`crate::AppConfig::load_portal_keys`].
     pub async fn from_ambient_config(free_plan_id: String) -> Self {
         let shared =
             aws_config::load_defaults(aws_sdk_apigateway::config::BehaviorVersion::latest()).await;

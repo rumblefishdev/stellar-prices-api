@@ -134,10 +134,12 @@ impl AppConfig {
     /// async step because it performs I/O, and it is *conditional* on
     /// [`Self::portal_enabled`], which is the load-bearing part:
     ///
-    /// Production runs with `PORTAL_ENABLED=false` for the whole of the portal's
-    /// build (`compute-stack.ts`, flipped by task 0194). If a cold start read
-    /// this secret unconditionally it would fail on a deployment where nobody
-    /// has created it yet — and that failure is not confined to the portal.
+    /// Production ran with `PORTAL_ENABLED=false` for the whole of the portal's
+    /// build, until task 0194 flipped it in `compute-stack.ts` — so this read
+    /// now happens on every production cold start. The conditionality still
+    /// matters for tests and for any environment where the flag is off: if a
+    /// cold start read this secret unconditionally it would fail on a deployment
+    /// where nobody has created it yet — and that failure is not confined to the portal.
     /// `main.rs` builds one router for every route group (ADR 0008), so a panic
     /// in init takes out `/v1` as well, to protect four routes that answer an
     /// empty `404` either way.

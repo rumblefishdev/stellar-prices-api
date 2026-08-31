@@ -69,9 +69,9 @@ export interface PortalHostingStackProps extends cdk.StackProps {
  * depends on. No app, no auth, no API calls from the page.
  *
  * **This distribution is production.** There is no staging environment — see
- * `packages/prices-api/src/portal/mod.rs` — so the portal's backend routes ship
- * behind task 0183's `PORTAL_ENABLED` flag and answer with an empty `404` until
- * task 0194 opens them. The gate exists before the door.
+ * `packages/prices-api/src/portal/mod.rs` — so the portal's backend routes
+ * shipped behind task 0183's `PORTAL_ENABLED` flag, answering with an empty
+ * `404` until task 0194 flipped it. The gate existed before the door.
  *
  * Two things live here even though nothing yet uses them, because retrofitting
  * either would invalidate a decision made downstream:

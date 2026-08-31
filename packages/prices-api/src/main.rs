@@ -45,10 +45,14 @@ async fn main() {
     // usage-plan id from SSM through the same extension, and builds the API
     // Gateway control-plane client from the execution role's credentials.
     //
-    // A no-op while `PORTAL_ENABLED` is false, which does double duty: it keeps
-    // two operations off the cold-start path of `/v1`, and it means a closed
-    // portal has no control-plane client in the process at all — so no code path
-    // in this build can create or delete a production API key.
+    // Conditional on `PORTAL_ENABLED`. While it was false this was a no-op that
+    // did double duty: it kept two operations off the cold-start path of `/v1`,
+    // and it meant a closed portal had no control-plane client in the process at
+    // all. Task 0194 has flipped the flag, so NEITHER now holds — the client is
+    // built at every cold start, and the SSM read for the free-plan id
+    // (`PORTAL_FREE_PLAN_PARAM`) is one of four reads that panic init and take
+    // `/v1` down with them if their source is missing. See the deploy-gate note
+    // on `PORTAL_ENABLED` in `compute-stack.ts`.
     config
         .load_portal_keys()
         .await

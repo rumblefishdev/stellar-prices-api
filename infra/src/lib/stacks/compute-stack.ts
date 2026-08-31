@@ -482,9 +482,11 @@ export class ComputeStack extends cdk.Stack {
     // wider blast radius than it needs.
     //
     // The grant is on the by-name wildcard ARN, so it does not require the
-    // secret to exist at synth time — the operator creates it, and until they
-    // do, the Lambda simply never asks (`PORTAL_ENABLED=false` short-circuits
-    // the read; see `AppConfig::load_portal_oauth`).
+    // secret to exist at synth time. That WAS harmless because a closed portal
+    // never asked; with `PORTAL_ENABLED` true (task 0194) the read happens at
+    // every cold start and a missing or misnamed secret is an `Init Errors`
+    // event on the Lambda that also serves `/v1` — see the deploy-gate note on
+    // `PORTAL_ENABLED` below and `AppConfig::load_portal_oauth`.
     this.apiHandlerRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'ReadPortalOauthSecret',
@@ -713,15 +715,29 @@ export class ComputeStack extends cdk.Stack {
         //
         // ⚠️ **This value is a deploy gate, not just a flag.** With it true the
         // handler resolves the portal's configuration AT COLD START, and each
-        // of the three reads is fatal if it fails — `load_portal_oauth`
-        // (`config.rs:149`) on the Discord OAuth secret, and the eligibility
-        // probe (`portal/eligibility.rs:135`) on
-        // `/prices/{env}/discord-guild-id` and
-        // `/prices/{env}/min-account-age-minutes`. A missing one is an `Init
-        // Errors` event on the api-handler, and this Lambda also serves `/v1`,
-        // so deploying this ahead of the operator steps takes the DATA API down
-        // with the portal. Runbook `portal-oauth-deploy-prep.md` §2, §2a and §5
-        // are the steps; task 0194's audit is what verifies they were run.
+        // of FOUR reads is fatal if it fails:
+        //
+        // 1. `load_portal_oauth` (`config.rs`) on the Discord OAuth secret
+        //    named by `PORTAL_OAUTH_SECRET_NAME` — operator-created, runbook §2
+        // 2. `load_portal_keys` (`config.rs`) on the SSM parameter named by
+        //    `PORTAL_FREE_PLAN_PARAM`, i.e.
+        //    `/prices/{env}/pricing-api-free-plan-id`. This one is NOT
+        //    operator-seeded and is easy to miss: it is published by
+        //    `ApiGatewayStack`, which DEPENDS ON this stack and therefore
+        //    deploys AFTER it. On a fresh environment, or any time the usage
+        //    plan is replaced or renamed, this stack can be live with the flag
+        //    true while the parameter does not yet exist — and that is an init
+        //    panic, not a degraded portal. Deploy order matters here
+        // 3. + 4. the eligibility probe (`portal/eligibility.rs`) on
+        //    `/prices/{env}/discord-guild-id` and
+        //    `/prices/{env}/min-account-age-minutes` — operator-seeded,
+        //    runbook §2a
+        //
+        // A missing one is an `Init Errors` event on the api-handler, and this
+        // Lambda also serves `/v1`, so deploying this ahead of the operator
+        // steps takes the DATA API down with the portal. Runbook
+        // `portal-oauth-deploy-prep.md` §2, §2a and §5 are the steps; task
+        // 0194's audit is what verifies they were run.
         PORTAL_ENABLED: 'true',
         // The NAME of the portal's Discord OAuth bundle, never its value
         // (task 0186; ADR 0007's precedent, audited by Tranche 3 AC 6). The
@@ -729,20 +745,23 @@ export class ComputeStack extends cdk.Stack {
         // layer already attached above — the same mechanism, the same cache, the
         // same "no secret in an env var" rule as `MTLS_SECRET_NAME`.
         //
-        // Set unconditionally even though `PORTAL_ENABLED` is false, because the
-        // Rust side only performs the read when the portal is open. Wiring the
-        // name now means opening the portal stays the one-word diff the flag was
-        // designed to be, rather than a two-line change made under time pressure.
+        // Set unconditionally, which is what kept opening the portal to the
+        // one-word diff above rather than a two-line change made under time
+        // pressure. With the flag now true the read is no longer conditional:
+        // this name resolving to a missing secret is read 1 of the four fatal
+        // cold-start reads listed on `PORTAL_ENABLED`.
         PORTAL_OAUTH_SECRET_NAME: this.portalOauthSecretName,
         // The NAME of the SSM parameter holding the `pricing-api-free` usage
         // plan id (task 0187) — see `portalFreePlanParameterName` for why it is
         // a name, why it is not a cross-stack reference, and why it is not
-        // hard-coded. Read through the same extension layer, and only when the
-        // portal is open, so a closed portal has no control-plane client in the
-        // process at all.
+        // hard-coded. Read through the same extension layer, at cold start —
+        // with `PORTAL_ENABLED` now true the control-plane client IS built in
+        // every process, and this read is read 2 of the four listed on
+        // `PORTAL_ENABLED`, the one whose parameter `ApiGatewayStack` publishes
+        // after this stack deploys.
         //
         // Set unconditionally alongside `PORTAL_OAUTH_SECRET_NAME`, and for the
-        // same reason: opening the portal stays a one-word diff.
+        // same reason: opening the portal stayed a one-word diff.
         PORTAL_FREE_PLAN_PARAM: this.portalFreePlanParameterName,
         // The NAMES of the eligibility gate's two SSM parameters (task 0189):
         // which Discord guild membership is checked against, and the minimum

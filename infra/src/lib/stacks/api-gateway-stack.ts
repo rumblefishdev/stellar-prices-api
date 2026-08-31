@@ -357,9 +357,10 @@ export class ApiGatewayStack extends cdk.Stack {
     // has to hold at the gateway, or every slice pays for a CDK change and a
     // deploy. `{proxy+}` covers task 0186's `/auth/*`, task 0187's `/key`, task
     // 0188's `/usage` and task 0192's `/key/revoke` at any depth with no further
-    // work here. The axum router decides what actually exists — and while
-    // `PORTAL_ENABLED` is false, that answer is "nothing", byte-identical to a
-    // path that was never deployed.
+    // work here. The axum router decides what actually exists — which while
+    // `PORTAL_ENABLED` was false meant "nothing", byte-identical to a path that
+    // was never deployed. Task 0194 has since flipped the flag, so these verbs
+    // now reach real handlers.
     //
     // The verbs are listed rather than collapsed into `ANY` because `ANY` cannot
     // carry the throttle below, and that throttle is task 0186's acceptance
