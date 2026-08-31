@@ -939,13 +939,37 @@ Measured on `prices-api.sorobanscan.rumblefish.dev`:
 | `/v1/assets` keyless / `/api-docs-json` / `/health` | `403` / `200` / `200`, unchanged |
 
 Check 1's (host) half and check 2's replacement are therefore **measured
-and PASS**; check 5 is not applicable by decision. Still open: step 4
-(Discord redirect URI + `put-secret-value`, Adam) and step 5 (Explorer's
-`enableApiSpaBasicAuth: false`) — until 4, a sign-in is refused at Discord's
-authorize step; until 5, `/api/` answers `401` to strangers.
+and PASS**; check 5 is not applicable by decision.
+
+**Step 4 done, 11:50–11:55Z.** Adam registered
+`https://prices-api.sorobanscan.rumblefish.dev/api/auth/callback` in the
+Developer Portal; the secret was rewritten in one pipeline (`get` → `jq
+.redirect_uri` → `put` via stdin, no value on screen): version `e73d09a7…`
+is `AWSCURRENT`, `bcea66cb…` is `AWSPREVIOUS`, four fields, `client_secret`
+32 and `session_signing_key` 64 characters unchanged. The `303` carried the
+old URI for another three minutes — see Issues Encountered — and reads
+`redirect_uri=https://prices-api.sorobanscan.rumblefish.dev/api/auth/callback`
+since 11:55:39Z, with `Errors` 0 across the recycle.
+
+Still open: step 5 (Explorer's `enableApiSpaBasicAuth: false`) — until then
+`/api/` answers `401` to strangers — and the browser walk-through of a full
+sign-in and key issue, which is this task's remaining acceptance criterion.
 
 ## Issues Encountered
 
+- **A `put-secret-value` alone does not change what the api-handler sends.**
+  `load_portal_oauth` reads the secret ONCE, at cold start, into
+  `AppConfig::portal_oauth`; the Parameters-and-Secrets extension's cache is
+  not the reason (it holds values for minutes, not for the container's life)
+  — the value simply lives in memory. Three minutes after the write the
+  `303` still carried the previous `redirect_uri`, and with steady `/v1`
+  traffic a warm container can outlive any patience. Fix that leaves no
+  drift: `aws lambda update-function-configuration --environment` with the
+  function's **current** environment, verbatim — an update with identical
+  values still recycles the execution environments (`LastModified` moved,
+  `md5` of the variables did not). New value observed on the first request
+  after `function-updated`. The runbook's cutover ordering (§6) should say
+  this; a `cdk deploy` that shows "no changes" does NOT do it.
 - **The Discord `client_secret` was exposed in a chat transcript.** On
   2026-08-28 the value was pasted into the working session rather than typed
   into a terminal, so it exists outside Secrets Manager in at least one
