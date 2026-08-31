@@ -32,6 +32,7 @@ fn armed_config_with_portal(portal_enabled: bool) -> AppConfig {
         portal_keys: None,
         portal_eligibility: None,
         portal_rate_limit: None,
+        portal_web_origin: None,
     }
 }
 

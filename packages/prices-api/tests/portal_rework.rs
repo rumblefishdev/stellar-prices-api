@@ -1016,3 +1016,75 @@ async fn a_lost_create_response_is_not_retried_into_duplicates() {
     assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
     assert_eq!(gateway.with(|s| s.create_calls), 1);
 }
+
+/// The bundle on a host of its own (task 0194): the revoke arrives
+/// `Sec-Fetch-Site: same-site`, and is accepted from exactly the origin the
+/// deployment names — with the marker, as before — and from no other sibling
+/// host, and never without the `Origin` that proves which one it is.
+#[tokio::test]
+async fn a_same_site_revoke_is_accepted_from_the_configured_origin_only() {
+    const WEB_ORIGIN: &str = "https://sorobanscan.example";
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    seed_attached(&gateway, 1_000);
+    let app = build_app_on(
+        true,
+        Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
+        Endpoints {
+            api_base: discord.base.clone(),
+            ..Endpoints::default()
+        },
+        Some(eligibility(GUILD_ID, "5")),
+        Some(WEB_ORIGIN),
+    );
+    let session = session_cookie(USER_ID);
+
+    for (label, headers) in [
+        (
+            "same-site, no Origin",
+            vec![PORTAL_REQUEST_HEADER, ("sec-fetch-site", "same-site")],
+        ),
+        (
+            "same-site from another sibling",
+            vec![
+                PORTAL_REQUEST_HEADER,
+                ("sec-fetch-site", "same-site"),
+                ("origin", "https://other.sorobanscan.example"),
+            ],
+        ),
+        (
+            "cross-site claiming our origin",
+            vec![
+                PORTAL_REQUEST_HEADER,
+                ("sec-fetch-site", "cross-site"),
+                ("origin", WEB_ORIGIN),
+            ],
+        ),
+        (
+            "our origin without the marker",
+            vec![("sec-fetch-site", "same-site"), ("origin", WEB_ORIGIN)],
+        ),
+    ] {
+        let reply =
+            call_path_with(app.clone(), "POST", REWORK_PATH, Some(&session), &headers).await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{label}");
+        assert_eq!(reply.json()["code"], "cross_site_request", "{label}");
+    }
+    assert_eq!(gateway.with(|s| s.list_calls), 0, "refused before AWS");
+    assert!(gateway.with(|s| s.keys[0].enabled));
+
+    let reply = call_path_with(
+        app.clone(),
+        "POST",
+        REWORK_PATH,
+        Some(&session),
+        &[
+            PORTAL_REQUEST_HEADER,
+            ("sec-fetch-site", "same-site"),
+            ("origin", WEB_ORIGIN),
+        ],
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+    assert!(!gateway.with(|s| s.keys[0].enabled), "the key is off");
+}

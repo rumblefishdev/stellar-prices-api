@@ -13,16 +13,22 @@
  * `/api-docs-json` there opens the explorer's page, not the document.
  */
 
+import { API_ORIGIN } from '../api-origin';
 import { ROUTER_BASENAME } from '../base-path';
 
 /**
  * The OpenAPI document. Real, served, and the only docs artefact today.
  *
- * The alias under the portal prefix (`portal::OPENAPI_PATH` in the API), not
- * the root `/api-docs-json` that partners and the spec's `servers` block use —
- * the two are the same bytes from the same handler.
+ * Same-origin, the alias under the portal prefix (`portal::OPENAPI_PATH` in
+ * the API), not the root `/api-docs-json` that partners and the spec's
+ * `servers` block use — the two are the same bytes from the same handler. On
+ * the shared host (task 0194) the alias is a static-SPA path like every other
+ * `/api/*` there, so the link goes to the root copy on the API's own hostname
+ * instead — a document, opened by navigation, so no CORS is involved.
  */
-export const OPENAPI_JSON = '/api/api-docs-json';
+export const OPENAPI_JSON = API_ORIGIN
+  ? `${API_ORIGIN}/api-docs-json`
+  : '/api/api-docs-json';
 
 /**
  * The API reference — today the raw OpenAPI document, because that is the

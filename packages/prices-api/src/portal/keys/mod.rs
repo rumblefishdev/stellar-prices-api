@@ -149,15 +149,16 @@ const CROSS_SITE_REQUEST: &str = "cross_site_request";
 /// The header the portal's own `fetch` sets on the revoke, and its value.
 ///
 /// A custom header makes the request *non-simple*: a cross-origin page can
-/// only send it after a CORS preflight, and this API answers no preflight —
-/// so a browser never delivers such a request from anywhere but the portal's
-/// origin. This is the classic CSRF defence that does not depend on what the
-/// cookie's `SameSite` considers "the same site", which matters because
-/// `SameSite=Lax` is **site**-scoped: today `*.cloudfront.net` makes every
-/// distribution its own site, but after the custom-domain cutover ([0195])
-/// any sibling host under the registrable domain becomes same-site, and a
-/// form `POST` from it would carry the cookie. One request from such a host
-/// would then cost the victim their key for the rest of the month.
+/// only send it after a CORS preflight, and the only preflight this API
+/// answers names exactly one origin — the bundle's own
+/// (`AppConfig::portal_web_origin`; `super::cors_layer` here, the gateway's
+/// MOCK in production). So a browser never delivers such a request from
+/// anywhere but the portal's page. This is the classic CSRF defence that does
+/// not depend on what the cookie's `SameSite` considers "the same site", which
+/// matters because `SameSite=Lax` is **site**-scoped, and since task 0194 the
+/// bundle and this backend ARE sibling hosts under one registrable domain: a
+/// form `POST` from any other sibling would carry the cookie. One request from
+/// such a host would then cost the victim their key for the rest of the month.
 pub const PORTAL_REQUEST_HEADER: (&str, &str) = ("x-requested-with", "stellar-prices-portal");
 
 /// How many times the whole flow is re-run when the key it settled on turns out
@@ -211,6 +212,11 @@ pub struct KeysState {
     /// a stale dashboard section for up to that cache's TTL; see
     /// [`super::usage::UsageCache`] for why the eviction is this narrow.
     usage_cache: Option<super::usage::UsageCache>,
+    /// The bundle's origin when it is served from another host (task 0194),
+    /// so [`is_same_origin_write`] can tell that one same-site caller from
+    /// every other sibling host. `None` — the same-origin deployment — means
+    /// no same-site request is ever a write.
+    web_origin: Option<Arc<str>>,
 }
 
 impl KeysState {
@@ -220,7 +226,17 @@ impl KeysState {
             gateway: gateway.map(Arc::new),
             deadline: RECONCILE_DEADLINE,
             usage_cache: None,
+            web_origin: None,
         }
+    }
+
+    /// Name the bundle's origin, so a revoke from it — same-site, not
+    /// same-origin, once the bundle lives on its own host (task 0194) — is
+    /// accepted. Only that one origin; see [`is_same_origin_write`]. A
+    /// builder like [`Self::with_usage_cache`], for the same reason.
+    pub fn with_web_origin(mut self, origin: Option<&str>) -> Self {
+        self.web_origin = origin.map(Arc::from);
+        self
     }
 
     /// Wire task 0188's usage cache in, so issue and reveal can evict a
@@ -446,22 +462,35 @@ async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
 ///    request marker a cross-origin page cannot produce without a preflight.
 /// 2. `Sec-Fetch-Site`, when the browser sends it (every current browser
 ///    does), is `same-origin`. `none` (a typed URL, a bookmark) is accepted
-///    too — it cannot be a `POST` from another page. A request carrying
-///    `cross-site` or `same-site` is refused even with the header: the
-///    header guards against a preflight-less browser, the fetch metadata
-///    guards against a misconfigured CORS answer ever appearing in front of
-///    this API.
+///    too — it cannot be a `POST` from another page. `same-site` is accepted
+///    for exactly one caller: a request whose `Origin` is the bundle's own
+///    (`web_origin`, task 0194 — the page and this backend are sibling hosts
+///    now). Any other same-site sibling, and anything `cross-site`, is
+///    refused even with the header: the header guards against a
+///    preflight-less browser, the fetch metadata guards against a
+///    misconfigured CORS answer ever appearing in front of this API.
 ///
 /// Absence of `Sec-Fetch-Site` alone does not refuse — `curl` and older
 /// browsers omit it — which is why the header is the primary check.
-fn is_same_origin_write(headers: &HeaderMap) -> bool {
+fn is_same_origin_write(headers: &HeaderMap, web_origin: Option<&str>) -> bool {
     let marker = headers
         .get(PORTAL_REQUEST_HEADER.0)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.eq_ignore_ascii_case(PORTAL_REQUEST_HEADER.1));
     let fetch_site_ok = match headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
         None => true,
-        Some(site) => site.eq_ignore_ascii_case("same-origin") || site.eq_ignore_ascii_case("none"),
+        Some(site)
+            if site.eq_ignore_ascii_case("same-origin") || site.eq_ignore_ascii_case("none") =>
+        {
+            true
+        }
+        Some(site) if site.eq_ignore_ascii_case("same-site") => {
+            let origin = headers
+                .get(axum::http::header::ORIGIN)
+                .and_then(|v| v.to_str().ok());
+            matches!((origin, web_origin), (Some(from), Some(ours)) if from == ours)
+        }
+        Some(_) => false,
     };
     marker && fetch_site_ok
 }
@@ -554,7 +583,7 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
     };
     // Before the session is even read: the one write a session can cause
     // must come from the portal's own page. See `is_same_origin_write`.
-    if !is_same_origin_write(&headers) {
+    if !is_same_origin_write(&headers, state.web_origin.as_deref()) {
         tracing::warn!("a revoke arrived without the same-origin markers; refusing");
         return no_store(
             (
@@ -1284,6 +1313,69 @@ fn unconfigured() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn header_map(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.append(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        map
+    }
+
+    /// The marker is necessary in every configuration; `same-site` is
+    /// sufficient only alongside the one configured origin (task 0194).
+    #[test]
+    fn same_site_writes_need_the_configured_origin_and_the_marker() {
+        const OURS: &str = "https://sorobanscan.example";
+        let marker = PORTAL_REQUEST_HEADER;
+
+        // Unchanged: same-origin, none, and no metadata at all pass with the marker.
+        for site in [Some("same-origin"), Some("none"), None] {
+            let mut pairs = vec![marker];
+            if let Some(site) = site {
+                pairs.push(("sec-fetch-site", site));
+            }
+            assert!(is_same_origin_write(&header_map(&pairs), None), "{site:?}");
+            assert!(
+                is_same_origin_write(&header_map(&pairs), Some(OURS)),
+                "{site:?}"
+            );
+        }
+        // Unchanged: cross-site never; same-site never on a same-origin deployment.
+        assert!(!is_same_origin_write(
+            &header_map(&[marker, ("sec-fetch-site", "cross-site"), ("origin", OURS)]),
+            Some(OURS)
+        ));
+        assert!(!is_same_origin_write(
+            &header_map(&[marker, ("sec-fetch-site", "same-site"), ("origin", OURS)]),
+            None
+        ));
+        // New: same-site from OUR origin, with the marker.
+        assert!(is_same_origin_write(
+            &header_map(&[marker, ("sec-fetch-site", "same-site"), ("origin", OURS)]),
+            Some(OURS)
+        ));
+        // ...and only ours, only with the marker, only with an Origin to compare.
+        assert!(!is_same_origin_write(
+            &header_map(&[
+                marker,
+                ("sec-fetch-site", "same-site"),
+                ("origin", "https://x.sorobanscan.example"),
+            ]),
+            Some(OURS)
+        ));
+        assert!(!is_same_origin_write(
+            &header_map(&[marker, ("sec-fetch-site", "same-site")]),
+            Some(OURS)
+        ));
+        assert!(!is_same_origin_write(
+            &header_map(&[("sec-fetch-site", "same-site"), ("origin", OURS)]),
+            Some(OURS)
+        ));
+    }
 
     /// Both verbs, one path — and the path is under the portal prefix, so
     /// [0183]'s gate covers it without knowing it exists.

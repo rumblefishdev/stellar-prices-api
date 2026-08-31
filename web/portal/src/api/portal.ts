@@ -1,15 +1,30 @@
 /**
  * The portal's own backend calls.
  *
- * Every URL here is **relative and same-origin**, which is the property task
- * 0184 bought by putting the API on the same CloudFront distribution as this
- * bundle: no base URL to configure, no CORS preflight, and task 0186's session
- * cookie can be `SameSite=Lax`. Do not reintroduce an absolute base — an
- * absolute URL here would silently undo all three.
+ * Every URL here is **relative and same-origin by default** — the property
+ * task 0184 bought by putting the API on the same CloudFront distribution as
+ * this bundle: no base URL to configure, no CORS preflight, and task 0186's
+ * session cookie can be `SameSite=Lax`.
+ *
+ * The shared host (task 0194) cannot offer that: its `/api/*` behaviour is a
+ * static SPA with no route to any backend. So the bundle built for it carries
+ * the API's own hostname (`API_ORIGIN`, from `VITE_PORTAL_API_ORIGIN`) and the
+ * same URLs become absolute — cross-origin, but **same-site**, which is what
+ * keeps the `SameSite=Lax` cookie flowing: the browser sends it on a
+ * same-site `fetch` regardless of method, provided the request asks for
+ * credentials. Hence `credentials: 'include'` on every call below; it is a
+ * no-op on the relative layout and the whole point on the absolute one. The
+ * backend's side of the same arrangement is one allowed origin in its CORS
+ * answer and a sign-in that lands back here rather than on the API host.
  */
 
-/** Mirrors `PORTAL_API_PREFIX` in `packages/prices-api/src/portal/mod.rs`. */
-const PORTAL_API = '/api';
+import { API_ORIGIN } from '../api-origin';
+
+/**
+ * Mirrors `PORTAL_API_PREFIX` in `packages/prices-api/src/portal/mod.rs`,
+ * on whichever host the build was told the backend is.
+ */
+const PORTAL_API = `${API_ORIGIN}/api`;
 
 /**
  * What the backend tells the bundle before it renders anything.
@@ -183,6 +198,7 @@ async function getJson<T>(url: string): Promise<T> {
   try {
     response = await fetch(url, {
       headers: { accept: 'application/json' },
+      credentials: 'include',
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
   } catch (error) {
@@ -251,10 +267,11 @@ export const fetchPortalConfig = (): Promise<PortalConfig> =>
  *
  * No credential is passed here and none could be: the session is an `HttpOnly`
  * cookie, so this code cannot read it and does not need to. The browser attaches
- * it because the request is **same-origin** — the property task 0184 bought and
- * that `PORTAL_API` being a relative path preserves. An absolute URL here would
- * make it cross-site, at which point `SameSite=Lax` withholds the cookie and
- * every visitor reads as signed out.
+ * it because the request is same-origin, or — on the shared host — same-site
+ * with `credentials: 'include'`. What would break it is a backend on another
+ * **site**: `SameSite=Lax` withholds the cookie and every visitor reads as
+ * signed out. `API_ORIGIN` is a sibling host under the same registrable domain
+ * by design, and the backend refuses to name any other origin.
  */
 export const fetchSession = (): Promise<PortalSession> =>
   getJson<PortalSession>(`${PORTAL_API}/auth/me`);
@@ -321,8 +338,8 @@ export interface PortalRevocation {
  * rides on this same-origin `POST` — `SameSite=Lax` lets it, and `SameSite`
  * alone is NOT the guard (it is site-scoped, so a sibling host's form `POST`
  * would carry the cookie): the CSRF guard is the custom request header below,
- * which a cross-origin page cannot send without a preflight this API never
- * answers.
+ * which a cross-origin page cannot send without a preflight — one this API
+ * answers for this page's origin alone.
  *
  * The replacement is an ordinary `issueUrl()` round-trip — refused by the
  * backend until the quota period of the revocation has rolled, which the page
@@ -336,12 +353,14 @@ export async function revokeKey(): Promise<PortalRevocation> {
       method: 'POST',
       // The custom header is the CSRF guard: it makes this a non-simple
       // request, which a cross-origin page cannot send without a CORS
-      // preflight this API never answers. The backend refuses a revoke
-      // without it (`PORTAL_REQUEST_HEADER` in `portal/keys/mod.rs`).
+      // preflight — and the only preflight this API answers names this
+      // page's origin and no other. The backend refuses a revoke without it
+      // (`PORTAL_REQUEST_HEADER` in `portal/keys/mod.rs`).
       headers: {
         accept: 'application/json',
         'x-requested-with': 'stellar-prices-portal',
       },
+      credentials: 'include',
       signal: AbortSignal.timeout(KEY_TIMEOUT_MS),
     });
   } catch (error) {
@@ -412,6 +431,7 @@ export async function signOut(): Promise<void> {
   try {
     response = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
   } catch (error) {
@@ -518,6 +538,7 @@ export async function fetchUsage(): Promise<PortalUsage | null> {
   try {
     response = await fetch(url, {
       headers: { accept: 'application/json' },
+      credentials: 'include',
       signal: AbortSignal.timeout(USAGE_TIMEOUT_MS),
     });
   } catch (error) {
@@ -599,6 +620,7 @@ export async function fetchKey(): Promise<PortalKey | PortalKeyRevoked | null> {
   try {
     response = await fetch(url, {
       headers: { accept: 'application/json' },
+      credentials: 'include',
       signal: AbortSignal.timeout(KEY_TIMEOUT_MS),
     });
   } catch (error) {

@@ -48,13 +48,17 @@ pub mod keys;
 pub mod period;
 pub mod usage;
 
+use std::time::Duration;
+
 use axum::extract::{Request, State};
-use axum::http::StatusCode;
+use axum::http::header::{ACCEPT, CONTENT_TYPE};
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
+use tower_http::cors::{AllowCredentials, AllowOrigin, CorsLayer};
 
 use crate::common::cache_control;
 use crate::config::AppConfig;
@@ -205,7 +209,8 @@ pub fn apply(router: Router, config: &AppConfig) -> Router {
                 config.portal_keys.clone(),
                 Some(usage_cache.clone()),
                 config.portal_eligibility.clone(),
-            )),
+            ))
+            .with_web_origin(config.portal_web_origin.as_deref()),
     );
 
     // The key reveal (task 0187, read-only since task 0189), merged the same
@@ -217,15 +222,79 @@ pub fn apply(router: Router, config: &AppConfig) -> Router {
     // handle lets a successful reveal evict a cached "no key" (task 0188).
     let api_keys = keys::routes(
         keys::KeysState::new(config.portal_oauth.clone(), config.portal_keys.clone())
-            .with_usage_cache(usage_cache),
+            .with_usage_cache(usage_cache)
+            .with_web_origin(config.portal_web_origin.as_deref()),
     );
 
-    router
+    // The portal's routes as one group, so the CORS layer covers exactly them:
+    // the data routes and the OpenAPI copies stay outside it. The gate wraps
+    // the whole router as before and runs FIRST (outermost), so a closed
+    // portal answers a preflight with the same empty `404` as anything else
+    // under the prefix — a browser then reports a CORS failure, which is the
+    // honest reading of a door that is not open.
+    let portal = Router::new()
         .merge(routes)
         .merge(sign_in)
         .merge(api_keys)
         .merge(usage)
+        .layer(cors_layer(config.portal_web_origin.as_deref()));
+
+    router
+        .merge(portal)
         .layer(axum::middleware::from_fn_with_state(gate, gate_portal))
+}
+
+/// The CORS answer for the portal's routes: one origin, with credentials.
+///
+/// The bundle is served from another application's distribution
+/// (`AppConfig::portal_web_origin`) and calls this backend on a host of its
+/// own — cross-origin, same-site (task 0194). Same-site is what lets the
+/// `SameSite=Lax` session cookie ride on those calls at all; this layer is
+/// what lets the page read the answers. Three properties, each load-bearing:
+///
+/// - **Exactly one origin**, never a reflection of the request's. A
+///   credentialed answer cannot say `*`, and reflecting whatever `Origin`
+///   arrives would hand every site on the internet a readable, cookie-bearing
+///   `GET /api/key`. With nothing configured the allow-list is EMPTY: no
+///   `Access-Control-Allow-Origin` on any answer, which is the same-origin
+///   deployment's correct behaviour and what every existing test sees.
+/// - **`Access-Control-Allow-Credentials: true`**, because the session is a
+///   cookie and a `fetch` with `credentials: 'include'` is refused by the
+///   browser without it.
+/// - **The marker header is allowed** (`keys::PORTAL_REQUEST_HEADER`), or
+///   the revoke's preflight fails and the one write the portal has becomes
+///   unreachable — silently, from this side.
+///
+/// In production the preflight itself is answered by API Gateway's MOCK
+/// (`addCorsPreflight` in `api-gateway-stack.ts`, same origin, same
+/// headers, same `max-age`) and never reaches this code; this layer's job
+/// there is the headers on the actual responses. Locally, with `serve` and a
+/// bundle built for a different port, it answers both — one configuration,
+/// two callers.
+pub(crate) fn cors_layer(web_origin: Option<&str>) -> CorsLayer {
+    let Some(ours) = web_origin.and_then(|o| HeaderValue::from_str(o).ok()) else {
+        // Nothing allowed, nothing emitted: an empty list answers no origin.
+        return CorsLayer::new().allow_origin(AllowOrigin::list([]));
+    };
+    // `list`, not `exact`: `exact` writes its value on EVERY answer and leaves
+    // the comparison to the browser, which is correct for the browser and
+    // wrong for this API's tests and its logs — an answer to `evil.example`
+    // would carry our origin as if it had been granted. `list` compares, and
+    // so does the credentials predicate, so both headers appear together or
+    // not at all.
+    let granted = ours.clone();
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list([ours]))
+        .allow_credentials(AllowCredentials::predicate(move |origin, _| {
+            origin == granted
+        }))
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers([
+            CONTENT_TYPE,
+            ACCEPT,
+            HeaderName::from_static(keys::PORTAL_REQUEST_HEADER.0),
+        ])
+        .max_age(Duration::from_secs(3600))
 }
 
 /// Report whether the portal is open. Always answers, in both states — it is

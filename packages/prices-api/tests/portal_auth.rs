@@ -117,7 +117,14 @@ fn eligibility_settings() -> prices_api::portal::eligibility::EligibilitySetting
 }
 
 fn build_app(portal_enabled: bool, endpoints: Endpoints) -> Router {
+    build_app_on(portal_enabled, endpoints, None)
+}
+
+/// [`build_app`], with the bundle served from `web_origin` (task 0194): every
+/// landing is then that origin plus the same literal path.
+fn build_app_on(portal_enabled: bool, endpoints: Endpoints, web_origin: Option<&str>) -> Router {
     let config = AppConfig {
+        portal_web_origin: web_origin.map(str::to_string),
         ch_enabled: false,
         base_url: None,
         api_keys: vec![],
@@ -478,6 +485,7 @@ async fn an_issue_round_trip_with_no_credentials_lands_rather_than_503ing() {
         portal_keys: None,
         portal_eligibility: None,
         portal_rate_limit: None,
+        portal_web_origin: None,
     };
     let router = app(&config, AppState::without_ch());
 
@@ -614,6 +622,7 @@ fn app_with_keys_and(
         portal_keys: Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
         portal_eligibility: Some(eligibility),
         portal_rate_limit: None,
+        portal_web_origin: None,
     };
     app(&config, AppState::without_ch())
 }
@@ -975,6 +984,7 @@ async fn a_deployment_with_no_eligibility_settings_refuses_sign_in() {
         portal_keys: None,
         portal_eligibility: None,
         portal_rate_limit: None,
+        portal_web_origin: None,
     };
     let unwired = app(&config, AppState::without_ch());
 
@@ -1655,6 +1665,7 @@ async fn an_open_portal_with_no_credentials_answers_503_on_login() {
         portal_keys: None,
         portal_eligibility: None,
         portal_rate_limit: None,
+        portal_web_origin: None,
     };
     let router = app(&config, AppState::without_ch());
 
@@ -1689,6 +1700,7 @@ async fn sign_in_needs_no_api_key_even_when_the_key_gate_is_armed() {
         portal_keys: None,
         portal_eligibility: None,
         portal_rate_limit: None,
+        portal_web_origin: None,
     };
     let router = app(&config, AppState::without_ch());
 
@@ -1697,4 +1709,38 @@ async fn sign_in_needs_no_api_key_even_when_the_key_gate_is_armed() {
         StatusCode::SEE_OTHER
     );
     assert_eq!(fetch(&router, ME_PATH, &[]).await.status, StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// The bundle on a host of its own (task 0194)
+// ---------------------------------------------------------------------------
+
+/// With `PORTAL_WEB_ORIGIN` set, a round-trip lands on that origin — the page
+/// lives there, the callback (and its cookies) run here — and the path is
+/// the same literal it always was. The cancel branch is the cheapest one
+/// that reaches a landing: no Discord call, `state` verified, cookie dropped.
+#[tokio::test]
+async fn a_round_trip_lands_on_the_configured_web_origin() {
+    let router = build_app_on(
+        true,
+        Endpoints::default(),
+        Some("https://sorobanscan.example"),
+    );
+    let started = start_login(&router).await;
+    let reply = fetch(
+        &router,
+        &format!(
+            "{CALLBACK_PATH}?error=access_denied&state={}",
+            started.state
+        ),
+        &[(cookies::PENDING_COOKIE, &started.pending)],
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        reply.location(),
+        "https://sorobanscan.example/api/?signin=cancelled"
+    );
+    // The cookie work is unchanged by the host: still dropped on this host.
+    assert!(reply.set_cookies().iter().any(|c| c.contains("Max-Age=0")));
 }

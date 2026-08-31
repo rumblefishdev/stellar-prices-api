@@ -99,6 +99,7 @@ fn config() -> AppConfig {
         portal_keys: None,
         portal_eligibility: None,
         portal_rate_limit: None,
+        portal_web_origin: None,
     }
 }
 

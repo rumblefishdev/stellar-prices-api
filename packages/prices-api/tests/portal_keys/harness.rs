@@ -717,7 +717,20 @@ pub fn build_app_with(
     endpoints: prices_api::portal::auth::discord::Endpoints,
     eligibility: Option<prices_api::portal::eligibility::EligibilitySettings>,
 ) -> Router {
+    build_app_on(portal_enabled, gateway, endpoints, eligibility, None)
+}
+
+/// [`build_app_with`], with the bundle served from `web_origin` (task 0194):
+/// the one same-site origin a revoke is accepted from.
+pub fn build_app_on(
+    portal_enabled: bool,
+    gateway: Option<Gateway>,
+    endpoints: prices_api::portal::auth::discord::Endpoints,
+    eligibility: Option<prices_api::portal::eligibility::EligibilitySettings>,
+    web_origin: Option<&str>,
+) -> Router {
     let config = AppConfig {
+        portal_web_origin: web_origin.map(str::to_string),
         ch_enabled: false,
         base_url: None,
         api_keys: vec![],

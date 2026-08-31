@@ -94,6 +94,55 @@ pub struct AppConfig {
     /// both values once so a mis-seeded parameter fails the cold start rather
     /// than a visitor's click.
     pub portal_eligibility: Option<crate::portal::eligibility::EligibilitySettings>,
+    /// The origin the portal's bundle is served from, when that is not this
+    /// backend's own host (task 0194): `https://sorobanscan.rumblefish.dev`.
+    ///
+    /// Read from `PORTAL_WEB_ORIGIN`, which `compute-stack.ts` sets from
+    /// `portalWebOrigin` — the same value `api-gateway-stack.ts` names in the
+    /// preflight, so the two halves of the CORS answer cannot disagree. Two
+    /// things hang off it, and only these two: the one origin the portal
+    /// routes' `Access-Control-Allow-Origin` names (`portal::cors_layer`),
+    /// and the host a sign-in round-trip lands on after the callback
+    /// (`auth::AuthState::with_web_origin`) — the callback runs here, where
+    /// the session cookie is set, and the page lives there.
+    ///
+    /// `None` — unset or blank — is the same-origin deployment: every landing
+    /// is the bare `PORTAL_HOME` path and no CORS header is ever emitted,
+    /// which is what local `serve` and the tests want. Normalised by
+    /// [`web_origin_from`]; the shape is checked once, at synth, by
+    /// `validateConfig`.
+    pub portal_web_origin: Option<String>,
+}
+
+/// Normalise `PORTAL_WEB_ORIGIN`: trimmed, no trailing slash, blank is `None`.
+///
+/// An origin is compared byte-for-byte by the browser, so a trailing `/` —
+/// the most natural typo for a value that looks like a URL — would make every
+/// CORS answer a mismatch with nothing in any log to say why. Stripped here
+/// rather than refused: the value is a deploy-time literal, and a config error
+/// this small should not be a cold-start failure on the function that also
+/// serves `/v1`. A value with a path, a query, or no scheme IS refused, loudly,
+/// because there is no single right reading of it.
+pub fn web_origin_from(raw: Option<&str>) -> Option<String> {
+    let trimmed = raw?.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let authority = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"));
+    match authority {
+        Some(rest) if !rest.is_empty() && !rest.contains(['/', '?', '#']) => {
+            Some(trimmed.to_string())
+        }
+        _ => {
+            tracing::error!(
+                value = trimmed,
+                "PORTAL_WEB_ORIGIN is not a bare origin (scheme://host[:port]); ignoring it"
+            );
+            None
+        }
+    }
 }
 
 impl AppConfig {
@@ -124,6 +173,7 @@ impl AppConfig {
             portal_endpoints: crate::portal::auth::discord::Endpoints::from_env(),
             portal_keys: None,
             portal_eligibility: None,
+            portal_web_origin: web_origin_from(std::env::var("PORTAL_WEB_ORIGIN").ok().as_deref()),
         }
     }
 
@@ -380,4 +430,44 @@ async fn fetch_plan_id(name: &str) -> Result<String, PortalKeysError> {
                   `--features lambda`, or set PORTAL_FREE_PLAN_ID for a local run)"
             .into(),
     })
+}
+
+#[cfg(test)]
+mod web_origin_tests {
+    use super::web_origin_from;
+
+    #[test]
+    fn a_bare_origin_is_kept_and_a_trailing_slash_is_dropped() {
+        for raw in [
+            "https://sorobanscan.rumblefish.dev",
+            "https://sorobanscan.rumblefish.dev/",
+            "  https://sorobanscan.rumblefish.dev//  ",
+        ] {
+            assert_eq!(
+                web_origin_from(Some(raw)).as_deref(),
+                Some("https://sorobanscan.rumblefish.dev"),
+                "{raw:?}"
+            );
+        }
+        assert_eq!(
+            web_origin_from(Some("http://localhost:4200")).as_deref(),
+            Some("http://localhost:4200")
+        );
+    }
+
+    #[test]
+    fn unset_blank_and_malformed_values_are_none() {
+        for raw in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("/"),
+            Some("sorobanscan.rumblefish.dev"),
+            Some("https://sorobanscan.rumblefish.dev/api/"),
+            Some("https://sorobanscan.rumblefish.dev?x=1"),
+            Some("https://"),
+        ] {
+            assert_eq!(web_origin_from(raw), None, "{raw:?}");
+        }
+    }
 }

@@ -124,6 +124,38 @@ deploy-production-portal: build-production
 destroy-production-portal: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-PortalHosting --force
 
+# The portal on the shared host (task 0194). `https://sorobanscan.rumblefish.dev/api/`
+# is served by the block explorer's distribution (EA2TLS5SS5M87) from ITS
+# bucket, which nothing in this repo deploys — this sync is the only way a
+# build reaches it, and it has been done by hand twice. Built with the API's
+# own hostname baked in (`VITE_PORTAL_API_ORIGIN`, see
+# `web/portal/src/api-origin.ts`): on that host `/api/*` is a static SPA, so
+# the bundle must call the backend on `apiDomain.domainName` rather than
+# relatively. `--skip-nx-cache` because the variable is not an Nx input — a
+# cached build would hand back whichever variant ran last, and the relative
+# one is indistinguishable from this one until a visitor opens the page.
+#
+# ⚠️ This leaves the ABSOLUTE build in `web/portal/dist`. `deploy-production-portal`
+# rebuilds (relative) through `build-portal` first, so our own distribution
+# never ships it — but do not `cdk deploy` PortalHosting by hand after this.
+#
+# The two names are the explorer repo's (`ApiSpaBucket` and the distribution
+# of `Explorer-production-Delivery`); override on the command line if that
+# stack ever renames them.
+EXPLORER_PORTAL_BUCKET ?= production-soroban-explorer-api-spa
+EXPLORER_DISTRIBUTION_ID ?= EA2TLS5SS5M87
+PORTAL_API_ORIGIN ?= https://$(shell jq -r '.apiDomain.domainName' envs/production.json)
+
+build-portal-explorer:
+	cd .. && VITE_PORTAL_API_ORIGIN=$(PORTAL_API_ORIGIN) npx nx build portal --skip-nx-cache
+
+# No `--delete`: a visitor holding the previous `index.html` still resolves
+# its chunk. The invalidation covers the whole prefix because `index.html` is
+# the object that changes and the one a browser asks for by name.
+sync-portal-explorer: build-portal-explorer
+	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/api/
+	aws cloudfront create-invalidation --distribution-id $(EXPLORER_DISTRIBUTION_ID) --paths '/api/*'
+
 deploy-production-eventbridge: build-production
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-EventBridge --require-approval broadening
 

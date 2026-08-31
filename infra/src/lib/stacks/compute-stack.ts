@@ -805,6 +805,14 @@ export class ComputeStack extends cdk.Stack {
         // would close a Compute → Gateway → Compute cycle. Includes the stage
         // path — see the `apiBaseUrl` validation in types.ts.
         API_BASE_URL: config.apiBaseUrl,
+        // The origin the portal's bundle is served from (task 0194). The
+        // backend now has a hostname of its own (`apiDomain`, in
+        // `api-gateway-stack.ts`) and the bundle calls it cross-origin, so the
+        // handler needs to know the one origin to name in
+        // `Access-Control-Allow-Origin` and the host to send the sign-in
+        // round-trip back to — the callback runs here, the page lives there.
+        // Unset would mean a same-origin deployment; production is not one.
+        PORTAL_WEB_ORIGIN: config.portalWebOrigin,
       },
     });
 

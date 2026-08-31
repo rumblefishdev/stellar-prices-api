@@ -40,6 +40,7 @@ fn config_with_keys(portal_enabled: bool, api_keys: Vec<String>) -> AppConfig {
         // `None` is the shape a deployment that was not told the limit has, and
         // the tests that care set it explicitly.
         portal_rate_limit: None,
+        portal_web_origin: None,
     }
 }
 
@@ -331,4 +332,162 @@ async fn data_routes_are_unaffected_in_both_states() {
         let (status, _) = send(enabled, "/health").await;
         assert_eq!(status, StatusCode::OK, "portal_enabled={enabled}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// CORS — the bundle on a host of its own (task 0194)
+// ---------------------------------------------------------------------------
+
+const WEB_ORIGIN: &str = "https://sorobanscan.example";
+
+fn config_with_origin(origin: Option<&str>) -> AppConfig {
+    AppConfig {
+        portal_web_origin: origin.map(str::to_string),
+        ..config(true)
+    }
+}
+
+async fn send_with(
+    config: &AppConfig,
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> axum::http::Response<Body> {
+    let mut request = Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    app(config, AppState::without_ch())
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+/// With the bundle's origin configured, a portal answer names it — exactly
+/// it, with credentials — and any other origin gets no CORS header at all.
+/// Reflecting the request's `Origin` would hand every site a readable,
+/// cookie-bearing `GET /api/key`, which is why the second half is asserted
+/// as hard as the first.
+#[tokio::test]
+async fn portal_answers_name_the_one_configured_origin_and_no_other() {
+    let config = config_with_origin(Some(WEB_ORIGIN));
+
+    let ours = send_with(&config, "GET", "/api/config", &[("origin", WEB_ORIGIN)]).await;
+    assert_eq!(ours.status(), StatusCode::OK);
+    assert_eq!(ours.headers()["access-control-allow-origin"], WEB_ORIGIN);
+    assert_eq!(ours.headers()["access-control-allow-credentials"], "true");
+    assert!(
+        ours.headers()
+            .get("vary")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.to_ascii_lowercase().contains("origin")),
+        "a per-origin answer must vary on Origin"
+    );
+
+    for other in [
+        "https://evil.example",
+        "https://sorobanscan.example.evil",
+        "http://sorobanscan.example",
+    ] {
+        let theirs = send_with(&config, "GET", "/api/config", &[("origin", other)]).await;
+        assert_eq!(theirs.status(), StatusCode::OK, "{other}");
+        assert!(
+            theirs
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none(),
+            "{other} must not be allowed"
+        );
+    }
+}
+
+/// The same-origin deployment — nothing configured — emits no CORS header
+/// even to a request that names the origin production would allow.
+#[tokio::test]
+async fn without_a_configured_origin_no_answer_carries_a_cors_header() {
+    let config = config_with_origin(None);
+    let reply = send_with(&config, "GET", "/api/config", &[("origin", WEB_ORIGIN)]).await;
+    assert_eq!(reply.status(), StatusCode::OK);
+    assert!(reply.headers().get("access-control-allow-origin").is_none());
+    assert!(
+        reply
+            .headers()
+            .get("access-control-allow-credentials")
+            .is_none()
+    );
+}
+
+/// The revoke's preflight: `POST` with the marker header, from the bundle's
+/// origin. Answered locally by the layer (in production by the gateway's
+/// MOCK), and the answer has to allow the marker or the one write the portal
+/// has can never be sent.
+#[tokio::test]
+async fn the_revokes_preflight_allows_the_marker_header_from_the_configured_origin() {
+    use prices_api::portal::keys::{PORTAL_REQUEST_HEADER, REWORK_PATH};
+    let config = config_with_origin(Some(WEB_ORIGIN));
+    let reply = send_with(
+        &config,
+        "OPTIONS",
+        REWORK_PATH,
+        &[
+            ("origin", WEB_ORIGIN),
+            ("access-control-request-method", "POST"),
+            ("access-control-request-headers", PORTAL_REQUEST_HEADER.0),
+        ],
+    )
+    .await;
+    assert!(reply.status().is_success(), "{}", reply.status());
+    assert_eq!(reply.headers()["access-control-allow-origin"], WEB_ORIGIN);
+    assert_eq!(reply.headers()["access-control-allow-credentials"], "true");
+    let methods = reply.headers()["access-control-allow-methods"]
+        .to_str()
+        .unwrap()
+        .to_ascii_uppercase();
+    assert!(methods.contains("POST"), "{methods}");
+    let allowed = reply.headers()["access-control-allow-headers"]
+        .to_str()
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(allowed.contains(PORTAL_REQUEST_HEADER.0), "{allowed}");
+    assert!(reply.headers().contains_key("access-control-max-age"));
+}
+
+/// The CORS layer covers the portal's routes and nothing else: the data
+/// API and the root OpenAPI copy answer a cross-origin request as they
+/// always did, with no allow header — `/v1` is keyed, not cookied, and
+/// nothing on the bundle calls it.
+#[tokio::test]
+async fn the_cors_layer_stops_at_the_portal_prefix() {
+    let config = config_with_origin(Some(WEB_ORIGIN));
+    for uri in ["/api-docs-json", "/health"] {
+        let reply = send_with(&config, "GET", uri, &[("origin", WEB_ORIGIN)]).await;
+        assert!(
+            reply.headers().get("access-control-allow-origin").is_none(),
+            "{uri} is outside the portal"
+        );
+    }
+}
+
+/// A closed portal answers a preflight like everything else under the prefix:
+/// the gate's empty `404`, no CORS header. The browser then reports a CORS
+/// failure, which is the honest reading of a door that is not open.
+#[tokio::test]
+async fn a_closed_portal_answers_a_preflight_with_the_gates_404() {
+    use prices_api::portal::keys::REWORK_PATH;
+    let config = AppConfig {
+        portal_web_origin: Some(WEB_ORIGIN.to_string()),
+        ..config(false)
+    };
+    let reply = send_with(
+        &config,
+        "OPTIONS",
+        REWORK_PATH,
+        &[
+            ("origin", WEB_ORIGIN),
+            ("access-control-request-method", "POST"),
+        ],
+    )
+    .await;
+    assert_eq!(reply.status(), StatusCode::NOT_FOUND);
+    assert!(reply.headers().get("access-control-allow-origin").is_none());
 }

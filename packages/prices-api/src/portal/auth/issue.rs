@@ -66,11 +66,13 @@ use axum::response::Response;
 use super::super::eligibility::{self, Eligibility, EligibilitySettings};
 use super::super::keys::{self, IssueOutcome};
 use super::super::usage::UsageCache;
+#[cfg(test)]
+use super::PORTAL_HOME;
 use super::discord::{self, AccessToken, MemberLookup};
 use super::secret::OauthSecret;
 use super::session::{self, Session};
 use super::state_token;
-use super::{AuthState, PORTAL_HOME, cookies, redirect};
+use super::{AuthState, cookies, redirect};
 use crate::portal::keys::gateway::Gateway;
 
 /// See the module table. Literals, like `?signin=…` — the dynamic one is
@@ -131,14 +133,19 @@ pub(super) fn capped_query(next_eligible_date: &str) -> String {
 /// Loud in CloudWatch, because this is a deployment fault and nothing else
 /// reports it: the cold-start probes are supposed to make it unreachable, so
 /// one of these lines means a container came up in a state they did not catch.
-pub(super) fn refuse_issue_start(oauth: bool, gateway: bool, settings: bool) -> Response {
+pub(super) fn refuse_issue_start(
+    home: &str,
+    oauth: bool,
+    gateway: bool,
+    settings: bool,
+) -> Response {
     tracing::error!(
         oauth,
         gateway,
         settings,
         "an issue round-trip was started on a deployment that cannot complete one"
     );
-    redirect(&format!("{PORTAL_HOME}{ISSUE_FAILED_QUERY}"), Vec::new())
+    redirect(&format!("{home}{ISSUE_FAILED_QUERY}"), Vec::new())
 }
 
 /// Land a Discord failure that happened on an `action=issue` round-trip.
@@ -163,6 +170,7 @@ pub(super) fn refuse_issue_start(oauth: bool, gateway: bool, settings: bool) -> 
 ///   Discord not answering, which is precisely `?issue=unknown`: refuse
 ///   without saying anything about the visitor's membership.
 pub(super) fn refuse_issue_discord(
+    home: &str,
     stage: &str,
     error: discord::DiscordError,
     drop_pending: String,
@@ -177,7 +185,7 @@ pub(super) fn refuse_issue_discord(
         landing = query,
         "portal issue round-trip could not complete with Discord"
     );
-    redirect(&format!("{PORTAL_HOME}{query}"), vec![drop_pending])
+    redirect(&format!("{home}{query}"), vec![drop_pending])
 }
 
 /// The whole callback's I/O budget, measured from the moment the request
@@ -303,6 +311,7 @@ pub(super) async fn complete_issue(
     drop_pending: String,
     started: Instant,
 ) -> Response {
+    let home = state.home.as_ref();
     // Resolve the two operator knobs first — per action, so an SSM change is
     // honoured without a redeploy. Failure is `unknown`, not a 5xx: the
     // visitor is mid-navigation, the fault is ours, and "could not verify"
@@ -367,7 +376,7 @@ pub(super) async fn complete_issue(
         // can render rather than the sign-in arm's `502`: this visitor asked
         // for a key, and "we could not verify" is the honest thing to tell
         // someone whose Discord went quiet mid-check.
-        Err(error) => return refuse_issue_discord("identity read", error, drop_pending),
+        Err(error) => return refuse_issue_discord(home, "identity read", error, drop_pending),
     };
 
     // Identity is proven: from here on every outcome carries a fresh session,
@@ -381,7 +390,7 @@ pub(super) async fn complete_issue(
     );
     let land = |query: &str| {
         redirect(
-            &format!("{PORTAL_HOME}{query}"),
+            &format!("{home}{query}"),
             vec![drop_pending.clone(), session_cookie.clone()],
         )
     };

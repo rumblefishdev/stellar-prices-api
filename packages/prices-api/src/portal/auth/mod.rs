@@ -191,6 +191,11 @@ pub struct AuthState {
     /// What the `action=issue` round-trip needs beyond sign-in (task 0189).
     /// Defaults to unwired; [`super::apply`] wires it when the portal opens.
     issue: issue::IssueDeps,
+    /// Where every round-trip lands: [`PORTAL_HOME`], prefixed with the
+    /// bundle's origin when the bundle lives on another host (task 0194 —
+    /// see [`Self::with_web_origin`]). Still a literal, still never derived
+    /// from the request; the origin is deployment configuration.
+    pub(super) home: std::sync::Arc<str>,
 }
 
 impl AuthState {
@@ -200,7 +205,24 @@ impl AuthState {
             endpoints: std::sync::Arc::new(endpoints),
             http: discord::build_client(),
             issue: issue::IssueDeps::default(),
+            home: PORTAL_HOME.into(),
         }
+    }
+
+    /// Land round-trips on the bundle's own origin (task 0194).
+    ///
+    /// The callback runs on this backend's host, where the session cookie is
+    /// set; the page the visitor is sent back to lives on
+    /// `AppConfig::portal_web_origin`. A relative `Location` would keep them
+    /// on the API host, where `/api/` is nothing — the gateway's own `403`.
+    /// `None` keeps the bare path, which is the same-origin deployment and
+    /// what every existing test sees. A builder, like [`Self::with_issue`],
+    /// so every constructor and test stays valid.
+    pub fn with_web_origin(mut self, origin: Option<&str>) -> Self {
+        if let Some(origin) = origin {
+            self.home = format!("{origin}{PORTAL_HOME}").into();
+        }
+        self
     }
 
     /// Wire the issue round-trip's dependencies in. A builder, like
@@ -277,6 +299,7 @@ async fn login(
     // line, not the first.
     if action == Action::Issue && (state.oauth.is_none() || !state.issue.is_wired()) {
         return issue::refuse_issue_start(
+            &state.home,
             state.oauth.is_some(),
             state.issue.gateway.is_some(),
             state.issue.settings.is_some(),
@@ -406,6 +429,7 @@ async fn callback(
     // the end, so the clock that bounds the reconciliation has to start here
     // rather than where that work begins — see `issue::ISSUE_BUDGET`.
     let started = std::time::Instant::now();
+    let home = state.home.as_ref();
 
     let Some(oauth) = state.oauth.as_ref() else {
         return unconfigured();
@@ -470,7 +494,7 @@ async fn callback(
                 Action::TestOther => CANCELLED_QUERY,
                 Action::SignIn => CANCELLED_QUERY,
             };
-            return redirect(&format!("{PORTAL_HOME}{query}"), vec![drop_pending]);
+            return redirect(&format!("{home}{query}"), vec![drop_pending]);
         }
 
         // Everything else is a failure somebody has to know about, and the one
@@ -480,7 +504,7 @@ async fn callback(
         // a door that check never sees. Reported as "cancelled" and unlogged,
         // it presents as every visitor changing their mind forever, with
         // nothing in CloudWatch to contradict that reading.
-        return refuse_oauth_error(error, accepted.action, drop_pending);
+        return refuse_oauth_error(error, accepted.action, drop_pending, home);
     }
 
     let Some(code) = query.code.as_deref() else {
@@ -532,7 +556,7 @@ async fn callback(
         // here, `UnexpectedScope`, is a registration drift the issue flow has
         // a designed state for. See `issue::refuse_issue_discord`.
         Err(error) if accepted.action == Action::Issue => {
-            return issue::refuse_issue_discord("token exchange", error, drop_pending);
+            return issue::refuse_issue_discord(home, "token exchange", error, drop_pending);
         }
         Err(error) => return refuse_discord("token exchange", error, drop_pending),
     };
@@ -632,10 +656,7 @@ async fn callback(
         // 2026-08-27, the screen this lands on: see `NOT_OPEN_QUERY`.
         None => {
             tracing::error!("a sign-in callback arrived with no eligibility settings wired");
-            return redirect(
-                &format!("{PORTAL_HOME}{NOT_OPEN_QUERY}"),
-                vec![drop_pending],
-            );
+            return redirect(&format!("{home}{NOT_OPEN_QUERY}"), vec![drop_pending]);
         }
     };
     let membership = checked
@@ -647,10 +668,7 @@ async fn callback(
         eligibility::Membership::Member => {}
         eligibility::Membership::NotMember => {
             tracing::info!(outcome = "not_member", "portal sign-in refused");
-            return redirect(
-                &format!("{PORTAL_HOME}{NOT_MEMBER_QUERY}"),
-                vec![drop_pending],
-            );
+            return redirect(&format!("{home}{NOT_MEMBER_QUERY}"), vec![drop_pending]);
         }
         eligibility::Membership::Unknown => {
             // The load-bearing warns (which check could not answer, and why)
@@ -660,7 +678,7 @@ async fn callback(
                 outcome = "unknown",
                 "portal sign-in refused without accusation"
             );
-            return redirect(&format!("{PORTAL_HOME}{UNKNOWN_QUERY}"), vec![drop_pending]);
+            return redirect(&format!("{home}{UNKNOWN_QUERY}"), vec![drop_pending]);
         }
     }
 
@@ -681,7 +699,7 @@ async fn callback(
     };
 
     redirect(
-        &format!("{PORTAL_HOME}{landing}"),
+        &format!("{home}{landing}"),
         vec![
             drop_pending,
             cookies::set(
@@ -864,7 +882,7 @@ fn refuse_state(error: StateError) -> Response {
 /// green — the same shape of gap that let "every error is a cancellation" ship
 /// in the first place. A behaviour nothing can observe is a behaviour nothing
 /// protects.
-fn refuse_oauth_error(error: &str, action: Action, drop_pending: String) -> Response {
+fn refuse_oauth_error(error: &str, action: Action, drop_pending: String, home: &str) -> Response {
     tracing::warn!(
         error = %sanitise_error(error),
         ?action,
@@ -878,7 +896,7 @@ fn refuse_oauth_error(error: &str, action: Action, drop_pending: String) -> Resp
         Action::TestOther => FAILED_QUERY,
         Action::SignIn => FAILED_QUERY,
     };
-    redirect(&format!("{PORTAL_HOME}{query}"), vec![drop_pending])
+    redirect(&format!("{home}{query}"), vec![drop_pending])
 }
 
 /// Refuse a callback that is malformed on the caller's side.
@@ -1148,7 +1166,7 @@ mod tests {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            refuse_oauth_error("invalid_scope", Action::SignIn, String::new());
+            refuse_oauth_error("invalid_scope", Action::SignIn, String::new(), PORTAL_HOME);
         });
 
         let text = logs.text();
@@ -1231,6 +1249,28 @@ mod tests {
         ] {
             assert!(format!("{PORTAL_HOME}{query}").starts_with("/api/?"));
         }
+    }
+
+    /// With the bundle on a host of its own (task 0194) the landing is the
+    /// same literal, prefixed with that one configured origin — and with
+    /// nothing configured it is exactly the path it always was.
+    #[test]
+    fn the_landing_is_prefixed_with_the_configured_origin_and_nothing_else() {
+        let bare = AuthState::new(None, discord::Endpoints::default());
+        assert_eq!(&*bare.home, "/api/");
+
+        let kept = AuthState::new(None, discord::Endpoints::default()).with_web_origin(None);
+        assert_eq!(&*kept.home, "/api/");
+
+        let hosted = AuthState::new(None, discord::Endpoints::default())
+            .with_web_origin(Some("https://sorobanscan.example"));
+        assert_eq!(&*hosted.home, "https://sorobanscan.example/api/");
+
+        let response = redirect(&format!("{}{CANCELLED_QUERY}", hosted.home), vec![]);
+        assert_eq!(
+            response.headers()[LOCATION],
+            "https://sorobanscan.example/api/?signin=cancelled"
+        );
     }
 
     /// The registered redirect URI and the route that serves it are one string,
