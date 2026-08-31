@@ -2,7 +2,7 @@
 id: "0178"
 title: "current_prices / current_price_usd cannot publish USDC either — the MV groups on the base leg, so /price has the same structural hole 0165 fixed in the series views"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0165", "0072", "0095", "0139", "0150", "0170", "0061"]
 tags:
@@ -46,8 +46,21 @@ history:
       keep their market price - before any schema change, since the fix is a
       refreshable-MV DROP + recreate and needs its rollback plan written first
       per [[0095]].
+  - date: 2026-08-31
+    status: completed
+    who: okarcz
+    note: >
+      Closed 9 of 10 ACs; AC 2 deferred to [[0244]] rather than ticked half-met.
+      Deployed and verified on prod the same day: canonical USDC went from a 404
+      to HTTP 200 at $1.00005447313041, and its volume_24h_usd from 0 to
+      44,034,001 - the base-only sum had literally nothing to add up. XLM x1.46,
+      USDT held at $0.15303 tagged 'traded', so the USDC-only oracle allowlist
+      held against the par-rate trap on prod. tip advanced 16:05 -> 16:06,
+      oracle_rows = 1. PR #272, +630/-19 over 11 files, 6 new tests. One real
+      defect caught by its own fixture (method keyed on identity rather than the
+      producing arm). Spawned 0243, 0244, 0245. BE verified as a non-consumer by
+      reading their repo, which also disproved a false claim in our views.sql.
 ---
-
 # `/price` cannot return USDC — same defect, harder fix
 
 ## Summary
@@ -276,14 +289,80 @@ UNCOVERED but does not absorb. **Spawned as [[0243]]** on 2026-08-31. Until it
 ships, Step 3's "`tip` advancing" check is the ONLY thing standing between a
 failed recreate and a silent freeze — do not skip it.
 
+## Implementation Notes
+
+Six commits: three design/doc on `develop`, three code via PR **#272**
+(+630/-19, 11 files). Schema in `packages/prices-clickhouse/schema/`
+(`init.sql`, `current.sql`, `views.sql`), API in `packages/prices-api/src/`
+(`assets/dto.rs`, `assets/queries_ch.rs`, `assets/handlers.rs`,
+`batch/handlers.rs`).
+
+`unfiltered` was split into `base_tip` (price, base-keyed) + `usdc_tip`
+(synthesised, at most one row) + `vol_all` (volume, both legs). Tests: 5 new in
+`current_mv_it.rs`, 1 new in `price_it.rs`, 8 + 7 passing in those files, full
+workspace green.
+
+## Issues Encountered
+
+- 🔴 **`method` was keyed on the asset's IDENTITY, not on the arm that produced
+  the row.** Caught by the duplicate-guard fixture during implementation: the
+  moment USDC gains a base candle, `usdc_tip` correctly stands down and
+  `base_tip` supplies a real TRADED close — which the old expression still
+  tagged `'oracle'`. A traded price wearing the more authoritative label is
+  worse than either alone. Fixed by carrying `is_oracle` through the CTEs. **The
+  hand-run fixture found this; no amount of reading would have.**
+
+- ⚠️ **`SHOW CREATE VIEW` on a `TO`-table MV renders the MV's OWN derived column
+  types, not the target table's.** The capture showed `change_24h_pct
+  Decimal(18,4)` (what `toDecimal64(…,4)` produces) while the table really is
+  `Decimal(10,4)`. Briefly mis-reported as repo↔prod drift. `DESCRIBE TABLE` is
+  the authority; a `SHOW CREATE` capture is not.
+
+- ⚠️ **A "priced must not fall below baseline" check is WRONG** and was in the
+  first draft of this runbook. `priced` moves down with ordinary churn —
+  `blank_rows` rose 362 → 368 in a single minute during verification as
+  un-enriched assets arrived. The load-bearing check is `tip` ADVANCING.
+
+- ⚠️ **The first API smoke test returned three `null`s and looked like a
+  failure.** It was a 403: the route sets `apiKeyRequired: True` and `jq`
+  renders every missing key as `null`. **`jq` flattens every failure mode into
+  the same shape — read the raw body and status first.**
+
+- 🚫 **The deploy could not be finished, and correctly so.** `diff-production`
+  showed the Compute stack carrying another dev's `LedgerProcessorFunction`
+  asset, an IAM removal and env changes, with the ApiGateway stack set to
+  destroy the custom domain, its ACM cert and both Route53 records — [[0235]]
+  and [[0194]], merged but never rolled out. **A single-stack
+  `deploy-production-<stack>` still ships every merged change in that stack.**
+  Carried to [[0244]].
+
+**Broken/modified tests** — both intentional, neither bent to fit:
+- `views_it.rs` — `current_price_usd` arity pin 13 → 14, `method` appended.
+- `prices-clickhouse/src/lib.rs` — `init.sql` statement count 31 → 32 for the
+  new `ALTER TABLE`.
+
+## Future Work
+
+- **[[0244]]** — verify `method` on the wire after the next Compute deploy.
+  Carries this task's one unmet AC.
+- **[[0243]]** — nothing alarms on `current_prices` freshness. Uncovered while
+  writing this runbook; until it ships, the `tip`-advancing check is manual.
+- **[[0245]]** — one 1m candle holds 30% of the network's daily notional.
+- ⏳ **[[0168]]** still owes the SERIES surface; it inherits the `usd_rate` read
+  pattern from here rather than defining it, and 0178 emitted `'oracle'` first.
+- ⏳ Widening the oracle allowlist past USDC stays gated on **[[0173]]**.
+
 ## Acceptance Criteria
 
 - [x] `GET /price` (and `current_price_usd`) returns a row for USDC at the
       canonical issuer, with a plausible USD value. **HTTP 200 on prod
       2026-08-31, $1.00005447313041 — was 404.**
-- [~] Provenance is expressible — a consumer can tell a measured `1.0000` from a
-      filled one. **Done in ClickHouse** (`oracle_rows = 1` on prod); ⏳ NOT yet
-      on the wire — needs the API Lambda deployed. Requires adding the column; follow `views.sql:273` (append
+- [ ] Provenance is expressible — a consumer can tell a measured `1.0000` from a
+      filled one. **DONE in ClickHouse and verified on prod** (`oracle_rows = 1`,
+      USDC tagged `oracle`); the DTO change is merged in PR #272. NOT yet on the
+      wire — the api-handler still runs the pre-merge build.
+      **(deferred to [[0244]])** — deploying it was blocked on another dev's
+      undeployed infra work, see Issues Encountered. Requires adding the column; follow `views.sql:273` (append
       last) and 0165's `'traded'`/`'peg'`/`'oracle'` vocabulary.
 - [x] The derived columns are decided explicitly, not left to fall out of the
       arithmetic — each is either populated meaningfully or lands on its
@@ -318,8 +397,14 @@ failed recreate and a silent freeze — do not skip it.
       the current definition captured verbatim, and the `TO` table's row count
       recorded immediately before and after.
 - [x] Regression test on the 26.3.10.60 pin. **8 tests in `current_mv_it`.**
-- [ ] BE told — `/price` is a surface they consume, and "USDC pricing is fixed"
-      is currently only true of the series views.
+- [x] BE told — **premise FALSIFIED, so there was nothing to tell.** This AC
+      assumed `/price` is "a surface they consume"; verified 2026-08-31 against
+      their repo, it is not — they read only `price_usd_series{,_1h}` for the
+      identity triple, `bucket` and `close_usd`. Neither change in this task
+      reaches them. A draft message was written and then discarded once the code
+      answered the question. The second half still stands and is recorded in
+      Notes: "USDC pricing is fixed" is STILL not wholly true — [[0170]] closed
+      its surface, this closes the tip, and 0168 still owes the series.
 
 ## Design Decisions
 
