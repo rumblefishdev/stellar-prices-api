@@ -318,7 +318,16 @@ on 2026-08-28:
       **(host)** The portal's API behaviour precedes its bundle behaviour in
       `EA2TLS5SS5M87`'s order, whatever the two prefixes end up being — the
       ordering rule of [[0161]], not the literal `/api-tokens/` pair
-- [x] ✅ **2026-08-28: PASS, and unaffected by [[0235]] or the host change.**
+- [x] ✅ **Amended 2026-08-31: the 08-28 reading was a PASS on shape and a
+      FAIL on function, and only the browser walk could tell.** The policy
+      named specific resources, as the check asks — and could not create a
+      key: `CreateApiKey` with `tags` needs `apigateway:PUT` on
+      `/tags/<url-encoded /apikeys/*>`, a fourth grant the comment declared
+      deliberately absent. Now present, conditioned on
+      `aws:RequestTag/ManagedBy = prices-portal` and `aws:TagKeys ⊆
+      {ManagedBy, IssuedBy}`; limit 4 in the policy comment records what the
+      condition cannot promise. Still no `apigateway:*`, synth == deployed
+      (12:03:41Z). Earlier reading — **2026-08-28: PASS, and unaffected by [[0235]] or the host change.**
       Two inline policies plus `AWSLambdaBasicExecutionRole`; the only
       `apigateway:` actions in any deployed template are `GET`, `POST`,
       `DELETE`, `PATCH`, the string `"apigateway:*"` occurs nowhere, `PATCH` is
@@ -957,6 +966,24 @@ sign-in and key issue, which is this task's remaining acceptance criterion.
 
 ## Issues Encountered
 
+- **The api-handler had never been able to create a key in production, and
+  every reading of its policy said it could.** Found 2026-08-31 by the first
+  real sign-in on the sign-off host: `CreateApiKey` with `tags` is
+  authorised as `apigateway:PUT` on `arn:aws:apigateway:eu-central-1::/tags/
+  arn%3A…%2Fapikeys%2F*` — separate from `POST /apikeys` — and the role had
+  `POST` only. Three attempts, three `AccessDeniedException`s, three
+  "landing without one"; the dashboard rendered the honest `Not issued`
+  card with the visitor's Discord id. The policy comment listed `PUT
+  /tags/*` under "deliberately NOT here (the portal never re-tags a key)",
+  true of re-tagging and false of creating, and check 6 on 08-28 read that
+  sentence as the statement of intent it claims to be. The only portal key
+  that ever existed (`smdesqkg5j`, 08-26) came from a local run under
+  operator credentials, which is why nothing had noticed. Fix `a5c920e`,
+  deployed with `--require-approval never` after reading the diff (one IAM
+  statement, no asset change). **A per-resource IAM audit cannot replace one
+  real call**; the AC that demanded the browser walk is the one that caught
+  it.
+
 - **A `put-secret-value` alone does not change what the api-handler sends.**
   `load_portal_oauth` reads the secret ONCE, at cold start, into
   `AppConfig::portal_oauth`; the Parameters-and-Secrets extension's cache is
@@ -1112,10 +1139,30 @@ sign-in and key issue, which is this task's remaining acceptance criterion.
       `Prices-production-Compute` updated 10:43Z, 22 s, `Errors` 0 over the
       window. Reversible by the same one-word diff plus a deploy; the secret's
       previous version is retained as `AWSPREVIOUS`.
-- [ ] A complete sign-in and key issue is walked at
+- [x] ✅ **2026-08-31, 11:58–12:04Z, walked in Adam's Chrome, signed out
+      on the new host by construction (no cookie existed on `prices-api…`).**
+      Landing renders with "Get API Key" (config from `prices-api…` as JSON)
+      → `/api/login` → "Sign in with Discord" → popup: `prices-api…/api/auth/
+      login` → Discord (no re-consent) → callback on `prices-api…` sets the
+      cookie → lands on `sorobanscan…/api/` → `postMessage` → dashboard as
+      `kotryba`; `/api/auth/me` `200` across hosts. **The first sign-in
+      issued no key** — `AccessDeniedException` on tag-on-create, the finding
+      below — so the walk found exactly the kind of failure it exists to
+      find. After the IAM fix (`a5c920e`, deployed 12:03:41Z), "Generate API
+      Key" → `?issue=ok` → "Your API Key is ready — Just issued", `/api/key`
+      and `/api/usage` `200`, rate-limit panel 1 req/s. Control plane:
+      `31z25psyn7`, `discord-1534853384740540537-key`, enabled, tags
+      `ManagedBy=prices-portal` + `IssuedBy=task-0187`, on plan `71t9im`,
+      created 12:04:00Z, log `portal issued an API key`. The key value was
+      never displayed or read.
+      A complete sign-in and key issue is walked at
       `https://sorobanscan.rumblefish.dev/api/`, in a browser, signed out —
       the check that no configuration reading can replace
-- [ ] Any failure is fixed in the slice that owns it, and the fix is re-verified
+- [x] ✅ **2026-08-31: one failure, owned by [[0187]], fixed in its policy
+      and re-verified here.** `PortalTagApiKeysOnCreate` in
+      `compute-stack.ts` (`a5c920e`); re-verified by the walk above and by
+      `AccessDeniedException` count 0 in the handler's log after the deploy.
+      Any failure is fixed in the slice that owns it, and the fix is re-verified
       here rather than patched locally
 - [x] ✅ **2026-08-31: answerable.** Tranche 3 AC 6 ("no secrets in env vars",
       least-privilege IAM) is carried by checks 6, 7 and 9, all PASS and all
