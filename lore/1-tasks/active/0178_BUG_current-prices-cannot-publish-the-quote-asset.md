@@ -151,6 +151,12 @@ column today, so adding one is part of this task.
       (`SortCol::Volume24h`) listing where it previously could not.
 - [ ] BE re-confirmed as a non-consumer of `volume_24h_usd` — one line, before
       the deploy, per the shelf-life warning above.
+- [ ] The oracle allowlist is USDC-only and PROVEN so: a test asserts USDT at
+      `GCQTGZQQ…TG6V` still reports its market value and is NOT tagged
+      `'oracle'`. This is AC 4's other half.
+- [ ] `method` is present and correct on all three layers — table, MV
+      (`TO (...)` list AND SELECT), and `current_price_usd` — with a
+      positional-decode note in the PR body.
 - [ ] A rollback plan written **before** the DROP, given [[0095]]. At minimum:
       the current definition captured verbatim, and the `TO` table's row count
       recorded immediately before and after.
@@ -200,6 +206,54 @@ Settled with the operator on 2026-08-31, before any schema work.
    first page of `/assets`; USDC rises from unsortable-at-zero to near the top.
    Correct, but visible. Recorded here so [[0120]]'s conformance run reads it as
    an intended change rather than a regression.
+
+4. **The price comes from `prices.usd_rate`, not a `$1` placeholder.** [[0167]]
+   made a real depeg-aware rate available, and this is a TIP surface, so
+   `usd_rate`'s coverage starting 2026-03-11 is sufficient — it only ever needs
+   "now". Read with `ASOF` at-or-before, never averaging (0167's rule). This
+   skips the placeholder step [[0165]] had to take, so nothing on this surface
+   ever emits `method = 'peg'`.
+
+5. **`method` is EXTENDED to this surface, not invented.** The column and its
+   vocabulary already exist on `price_usd_series*` from [[0165]]
+   (`views.sql:169-183`): `'traded'` / `'peg'` / `'oracle'`. Existing rows get
+   `'traded'`; USDC gets `'oracle'`, which is the value that vocabulary RESERVED
+   for a measured depeg-aware rate. `'peg'` would be a false label here — it
+   means "no measured rate was available" and one is.
+
+   Consequence: **0178 is the first surface to emit `'oracle'`, arriving ahead
+   of [[0168]]**, which reserved it. 0168 stays open and still owes the series
+   surface; it inherits the `usd_rate` read pattern from here rather than
+   defining it.
+
+6. 🔴 **The oracle read is allowlisted to USDC BY NAME — never "the peg set",
+   never "any asset with a `usd_rate` row".**
+
+   Two different tokens are both called USDT. Tether's own is genuinely at par.
+   The canonical Stellar USDT at `GCQTGZQQ…TG6V` is a different asset that
+   depegged in June 2022 and has traded around **$0.13** ever since — real, not
+   a defect ([[0172]]). Reflector prices the TICKER, so `prices.usd_rate` files
+   **~$1.00 under this issuer's address**: the oracle is confidently wrong about
+   that identity by ~7.4x.
+
+   Nothing reads the oracle for USDT today, so the error is inert. A rule
+   phrased as "use the oracle for stablecoins" would activate it and publish
+   $1.00 tagged `'oracle'` — a label that reads as MORE authoritative than the
+   guess it replaced. Strictly worse than the bug being fixed here, and it would
+   fail AC 4 from the other side.
+
+   Already fenced in-tree at `views.sql:102-107`. Widening the allowlist is
+   gated on **[[0173]]** (the symbol→issuer mapping); the code comment must say
+   so.
+
+7. **Three places must change together**, or the column is broken:
+   `prices.current_prices` (`ALTER TABLE … ADD COLUMN`, non-nullable → carries a
+   sentinel, never NULL); `mv_current_prices` (**both** the `TO (...)` list and
+   the SELECT, in matching order — `current.sql:26-30`, the MV inserts
+   POSITIONALLY and a mismatch silently writes every column into the wrong
+   slot); and `prices.current_price_usd` (`CREATE OR REPLACE VIEW`, appended
+   last per `views.sql:181`). Arity changes, order does not — anything decoding
+   positionally off `SELECT *` gets an extra column.
 
 ## Consumer exposure — measured 2026-08-31
 
