@@ -222,9 +222,9 @@ existing handlers pin explicit column lists rather than `SELECT *`
 ## Owed follow-up
 
 The absence of a `current_prices` freshness alarm is a real gap this task
-UNCOVERED but should not absorb. Spawn a backlog task for it — the probe
-already has the shape (`rollup-freshness-probe`), and the check is
-`max(updated_at)` against wall clock. Cf. [[task-0137-rollup-freshness-alarm-live]].
+UNCOVERED but does not absorb. **Spawned as [[0243]]** on 2026-08-31. Until it
+ships, Step 3's "`tip` advancing" check is the ONLY thing standing between a
+failed recreate and a silent freeze — do not skip it.
 
 ## Acceptance Criteria
 
@@ -383,3 +383,10 @@ re-derivation from their repo.
   first it may supply a cleaner source for the tip than re-deriving from `_1m`.
 - ⚠️ [[0139]] is open, so any diagnostic here that resolves an identity to an
   `asset_id` and counts on it must check that id for collisions first.
+- ⚠️ **[[0242]] bounds how correct Design Decision 1 can be.** A SAC minted as a
+  second identity puts the same token in `prices.assets` twice, with candles on
+  both rows — so for the 11 affected assets (3 of them trading on both sides),
+  counting both legs still yields a volume split across two `asset_id`s.
+  Neither task blocks the other and **USDC is not among them**, so 0178's
+  headline fix is unaffected; but do not claim `volume_24h_usd` is correct for
+  those identities. Filed by stkrolikiewicz 2026-08-28 out of [[0210]].
