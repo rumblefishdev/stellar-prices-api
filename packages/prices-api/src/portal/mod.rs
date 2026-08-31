@@ -61,16 +61,39 @@ use crate::config::AppConfig;
 
 /// Path prefix owned by the portal's backend. Everything under it is gated.
 ///
-/// Both halves are load-bearing and are fixed by [0184]'s CloudFront behaviour
-/// table: `<app>/*` is an app's bundle and `<app>/api/*` is its backend, with
-/// the `/api/*` behaviour ordered **first**. The OAuth redirect URI registered
-/// with Discord ([0186]) must live **under** this prefix — it is a concrete
-/// callback path such as `/api/api/auth/callback`, and Discord matches
+/// `/api/` is the whole self-service portal on the shared host (task 0194,
+/// 2026-08-31): the bundle **and** the backend share this one prefix, with no
+/// sub-prefix for either. The CloudFront table makes the split, the other way
+/// round from how it used to: a short fixed list of bundle paths
+/// (`/api/`, `index.html`, `favicon.ico`, `assets/*`, the SPA routes) is
+/// carved out to S3, and everything else under `/api/*` reaches this Lambda.
+/// So from in here the prefix is simply ours — a bundle path that arrives
+/// (it should not) is a plain `404`, the same as any unrouted path.
+///
+/// Replaces [0161]'s `<app>/*` + `<app>/api/*` convention, which produced
+/// `/api/api/…` for an app that is itself called "api". The OAuth redirect URI
+/// registered with Discord ([0186]) must live **under** this prefix — it is a
+/// concrete callback path such as `/api/auth/callback`, and Discord matches
 /// the whole URI, so registering the bare prefix would fail at callback time.
-pub const PORTAL_API_PREFIX: &str = "/api/api/";
+pub const PORTAL_API_PREFIX: &str = "/api/";
 
 /// The one portal route that answers while the portal is closed.
-pub const CONFIG_PATH: &str = "/api/api/config";
+pub const CONFIG_PATH: &str = "/api/config";
+
+/// The OpenAPI document, under the portal prefix.
+///
+/// The same bytes as `GET /api-docs-json` (task 0124) — `lib.rs` mounts one
+/// handler at both paths. This alias exists because on the shared host the
+/// root belongs to another application, so the portal's "API reference" link
+/// has to stay under `/api/` to reach us at all. Exempt from the gate like
+/// [`CONFIG_PATH`] and from the API-key check like the root copy: an API
+/// description is public documentation, and hiding it while the portal is
+/// closed would serve nobody.
+///
+/// Not registered in the OpenAPI document itself — it is an alias of the
+/// route that is, and `tools/scripts/verify-openapi-routes.mjs` refuses any
+/// documented path under the prefix.
+pub const OPENAPI_PATH: &str = "/api/api-docs-json";
 
 /// What the portal frontend needs before it can render anything.
 ///
@@ -235,10 +258,11 @@ fn is_portal_path(path: &str) -> bool {
 /// Serve portal routes only when the portal is open; otherwise return the same
 /// empty `404` a nonexistent path would.
 ///
-/// [`CONFIG_PATH`] is exempt in both directions — see [`config_handler`].
+/// [`CONFIG_PATH`] and [`OPENAPI_PATH`] are exempt in both directions — see
+/// [`config_handler`] and the note on the latter.
 pub async fn gate_portal(State(gate): State<PortalGate>, req: Request, next: Next) -> Response {
     let path = req.uri().path();
-    if !is_portal_path(path) || path == CONFIG_PATH || gate.enabled {
+    if !is_portal_path(path) || path == CONFIG_PATH || path == OPENAPI_PATH || gate.enabled {
         return next.run(req).await;
     }
     StatusCode::NOT_FOUND.into_response()
@@ -246,16 +270,16 @@ pub async fn gate_portal(State(gate): State<PortalGate>, req: Request, next: Nex
 
 #[cfg(test)]
 mod tests {
-    use super::{CONFIG_PATH, PORTAL_API_PREFIX, is_portal_path};
+    use super::{CONFIG_PATH, OPENAPI_PATH, PORTAL_API_PREFIX, is_portal_path};
 
     #[test]
     fn portal_paths_are_recognised_by_prefix() {
         assert!(is_portal_path(CONFIG_PATH));
-        assert!(is_portal_path("/api/api/auth/login"));
-        assert!(is_portal_path("/api/api/key"));
-        assert!(is_portal_path("/api/api/usage"));
+        assert!(is_portal_path("/api/auth/login"));
+        assert!(is_portal_path("/api/key"));
+        assert!(is_portal_path("/api/usage"));
         // Routes that do not exist yet still match — that is the point.
-        assert!(is_portal_path("/api/api/nothing-here"));
+        assert!(is_portal_path("/api/nothing-here"));
     }
 
     #[test]
@@ -265,21 +289,33 @@ mod tests {
         assert!(!is_portal_path("/v1/prices/batch"));
     }
 
-    /// The bundle lives at `/api/*` and is served by S3, never by this
-    /// Lambda. Gating it here would be gating something that never arrives —
-    /// and worse, would suggest the bundle is protected when it is public.
+    /// The bundle shares the prefix and is carved out at the CDN, so as far
+    /// as this Lambda is concerned those paths are ours too. They should never
+    /// arrive; if one does, the gate treats it like any other unrouted portal
+    /// path — a `404` in both states, never a hint that the bundle is
+    /// protected (it is public).
     #[test]
-    fn the_static_bundle_prefix_is_not_ours() {
-        assert!(!is_portal_path("/api/"));
-        assert!(!is_portal_path("/api/dashboard"));
-        assert!(!is_portal_path("/api/assets/index.js"));
+    fn the_bundle_paths_are_inside_the_prefix() {
+        assert!(is_portal_path("/api/"));
+        assert!(is_portal_path("/api/dashboard"));
+        assert!(is_portal_path("/api/assets/index.js"));
     }
 
-    /// `/api/api` with no trailing slash is not a route we serve, and
+    /// The alias sits under the prefix (so it reaches us on the shared host)
+    /// while the root copy does not — both are served, only one is gated by
+    /// prefix and then exempted by name.
+    #[test]
+    fn the_openapi_alias_is_under_the_prefix_and_the_root_copy_is_not() {
+        assert!(is_portal_path(OPENAPI_PATH));
+        assert!(!is_portal_path("/api-docs-json"));
+        assert!(OPENAPI_PATH.starts_with(PORTAL_API_PREFIX));
+    }
+
+    /// `/api` with no trailing slash is not a route we serve, and
     /// must not be mistaken for one — the prefix carries its slash on purpose.
     #[test]
     fn the_prefix_carries_its_trailing_slash() {
         assert!(PORTAL_API_PREFIX.ends_with('/'));
-        assert!(!is_portal_path("/api/api"));
+        assert!(!is_portal_path("/api"));
     }
 }

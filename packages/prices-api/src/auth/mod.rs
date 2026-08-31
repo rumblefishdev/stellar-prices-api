@@ -76,6 +76,7 @@ pub fn apply(router: axum::Router, config: &AppConfig) -> axum::Router {
 fn is_exempt(path: &str, portal_open: bool) -> bool {
     matches!(path, "/health" | "/api-docs-json")
         || path == crate::portal::CONFIG_PATH
+        || path == crate::portal::OPENAPI_PATH
         || (portal_open && path.starts_with(crate::portal::PORTAL_API_PREFIX))
 }
 

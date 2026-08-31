@@ -67,18 +67,22 @@ pub fn app(config: &AppConfig, state: AppState) -> Router {
         spec.to_json()
             .expect("the OpenAPI document must serialize; it is built at startup"),
     );
-    let router = router.route(
-        "/api-docs-json",
-        get(move || {
-            let spec_json = spec_json.clone();
-            async move {
-                let mut resp =
-                    ([(CONTENT_TYPE, "application/json")], (*spec_json).clone()).into_response();
-                common::cache_control::attach(&mut resp, common::cache_control::DEPLOY_STATIC);
-                resp
-            }
-        }),
-    );
+    // Mounted twice: at the root, where partners and the OpenAPI `servers`
+    // block expect it, and under the portal prefix (`portal::OPENAPI_PATH`),
+    // which is the only place the portal's own "API reference" link can reach
+    // on a host whose root belongs to another application (task 0194).
+    let serve_spec = move || {
+        let spec_json = spec_json.clone();
+        async move {
+            let mut resp =
+                ([(CONTENT_TYPE, "application/json")], (*spec_json).clone()).into_response();
+            common::cache_control::attach(&mut resp, common::cache_control::DEPLOY_STATIC);
+            resp
+        }
+    };
+    let router = router
+        .route("/api-docs-json", get(serve_spec.clone()))
+        .route(portal::OPENAPI_PATH, get(serve_spec));
 
     // Portal routes before the key gate, and exempt from it: a visitor signing
     // in has no API key by definition (task 0183). The gate inside `portal`

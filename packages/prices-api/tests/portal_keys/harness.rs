@@ -695,7 +695,7 @@ pub fn oauth_secret() -> OauthSecret {
         &json!({
             "client_id": "a-client-id",
             "client_secret": "the-client-secret",
-            "redirect_uri": "https://portal.example/api/api/auth/callback",
+            "redirect_uri": "https://portal.example/api/auth/callback",
             "session_signing_key": SIGNING_KEY,
         })
         .to_string(),
@@ -938,7 +938,7 @@ async fn round_trip(router: &Router, action: &str) -> Reply {
     let login = call_path(
         router.clone(),
         "GET",
-        &format!("/api/api/auth/login?action={action}"),
+        &format!("/api/auth/login?action={action}"),
         None,
     )
     .await;
@@ -965,7 +965,7 @@ async fn round_trip(router: &Router, action: &str) -> Reply {
     call_path(
         router.clone(),
         "GET",
-        &format!("/api/api/auth/callback?code=an-auth-code&state={state}"),
+        &format!("/api/auth/callback?code=an-auth-code&state={state}"),
         Some(&format!("{}={pending}", cookies::PENDING_COOKIE)),
     )
     .await

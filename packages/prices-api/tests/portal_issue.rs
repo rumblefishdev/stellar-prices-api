@@ -95,8 +95,8 @@ async fn everything_including_issue_is_an_empty_404_while_the_portal_is_closed()
     );
 
     for path in [
-        "/api/api/auth/login?action=issue",
-        "/api/api/auth/callback?code=c&state=s",
+        "/api/auth/login?action=issue",
+        "/api/auth/callback?code=c&state=s",
     ] {
         let reply = call_path(closed.clone(), "GET", path, None).await;
         assert_eq!(reply.status, StatusCode::NOT_FOUND, "{path}");
@@ -517,10 +517,10 @@ async fn only_the_issue_round_trip_suppresses_the_consent_screen() {
             .map(|(_, v)| v.to_string())
     };
 
-    let issue = call_path(app.clone(), "GET", "/api/api/auth/login?action=issue", None).await;
+    let issue = call_path(app.clone(), "GET", "/api/auth/login?action=issue", None).await;
     assert_eq!(prompt_of(&issue.location()).as_deref(), Some("none"));
 
-    let signin = call_path(app, "GET", "/api/api/auth/login", None).await;
+    let signin = call_path(app, "GET", "/api/auth/login", None).await;
     assert_eq!(prompt_of(&signin.location()), None);
 }
 
@@ -613,7 +613,7 @@ async fn a_session_for_someone_else_is_replaced_by_the_re_auth_identity() {
 
     // Start the round-trip, then complete the callback while presenting a
     // session for somebody else alongside the pending cookie.
-    let login = call_path(app.clone(), "GET", "/api/api/auth/login?action=issue", None).await;
+    let login = call_path(app.clone(), "GET", "/api/auth/login?action=issue", None).await;
     let pending = login.cookie(cookies::PENDING_COOKIE).unwrap();
     let query = login.location().split_once('?').unwrap().1.to_string();
     let state = form_urlencoded::parse(query.as_bytes())
@@ -626,7 +626,7 @@ async fn a_session_for_someone_else_is_replaced_by_the_re_auth_identity() {
     let reply = call_path(
         app,
         "GET",
-        &format!("/api/api/auth/callback?code=c&state={state}"),
+        &format!("/api/auth/callback?code=c&state={state}"),
         Some(&format!("{}={pending}; {other}", cookies::PENDING_COOKIE)),
     )
     .await;

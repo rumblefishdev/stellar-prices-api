@@ -7,7 +7,7 @@
 //!
 //! | route | does |
 //! | --- | --- |
-//! | `GET /api/api/usage` | the caller's used / remaining / limit for the current period, from `GetUsage` |
+//! | `GET /api/usage` | the caller's used / remaining / limit for the current period, from `GetUsage` |
 //!
 //! # This route is read-only, and that is a safety property
 //!
@@ -94,7 +94,7 @@ use super::period::Period;
 
 /// The one route. `GET` only — reading a counter must not share a path shape
 /// with anything that writes.
-pub const USAGE_PATH: &str = "/api/api/usage";
+pub const USAGE_PATH: &str = "/api/usage";
 
 /// Error code for a caller with no valid session. Same constant as the key
 /// routes use, for the same audience.
@@ -683,7 +683,7 @@ mod tests {
         assert!(USAGE_PATH.starts_with(super::super::PORTAL_API_PREFIX));
     }
 
-    /// Depth 3 under `/api/api/`, like `/key`: one segment, no deeper.
+    /// One segment under `/api/`, like `/key`: no deeper.
     /// The currently-deployed gateway maps depth 1-2 only (task 0205 ships the
     /// greedy proxy), so this route works against production even before that
     /// deploy — asserted so nobody moves it deeper without noticing.

@@ -1,65 +1,72 @@
 # CloudFront changes needed on `EA2TLS5SS5M87` to serve the Prices API portal
 
 **For:** the `soroban-block-explorer` repo — the distribution
-`EA2TLS5SS5M87` (alias `sorobanscan.rumblefish.dev`) is defined there.
+`EA2TLS5SS5M87` (alias `sorobanscan.rumblefish.dev`) is
+`Distribution830FAC52` in your stack `Explorer-production-Delivery`, and so
+are the basic-auth function and the `api-spa` bucket. Nothing below can be
+done from our side: CloudFormation will not let another stack touch these, and
+a console edit would be reverted by your next `cdk deploy`.
 **From:** `stellar-prices-api`, task 0194 (portal security and ops audit).
 **Measured:** 2026-08-31, against the live distribution config and live probes.
-**Status of our side:** done. Nothing below requires a change in
-`stellar-prices-api`.
+**Layout:** revised the same day — the portal's backend no longer has a
+sub-prefix. If you saw an earlier version of this document asking for
+`/api/api/*`, this one replaces it.
 
 ---
 
+## The layout, in one rule
+
+**`/api/` is the whole self-service portal. Nothing of ours lives anywhere else
+on this host.**
+
+| path | what | origin |
+|---|---|---|
+| `/api/` | the portal page | S3 `production-soroban-explorer-api-spa`, key `api/index.html` |
+| `/api/index.html`, `/api/favicon.ico`, `/api/assets/*` | the bundle's files | S3, same bucket |
+| `/api/login`, `/api/dashboard`, `/api/quick-start` (with or without `/`) | the app's client-side routes — served as `api/index.html` | S3, same bucket |
+| **everything else under `/api/*`** | the portal's backend: `/api/config`, `/api/auth/*`, `/api/key`, `/api/key/rework`, `/api/usage`, `/api/api-docs-json` | **API Gateway** `02mabge71l.execute-api.eu-central-1.amazonaws.com`, stage `/production` |
+
+The bundle and the backend share the prefix, so the split is made by a short
+fixed list of bundle paths carved out to S3 **ahead of** an `/api/*` catch-all
+that goes to the API. The list is the whole first three rows; it changes only
+when the app gains a page.
+
 ## What is already true
 
-- The portal's static bundle **is synced** to
-  `s3://production-soroban-explorer-api-spa/api/` — 13 objects, and it is the
-  right bundle (`<title>Stellar Prices API — API keys</title>`, asset URLs
-  `/api/assets/…`, built for the `/api/` prefix).
-- The portal's backend **is deployed and open**. Directly against the API:
+- The bundle **is synced** to `s3://production-soroban-explorer-api-spa/api/`
+  and it is the right one (`<title>Stellar Prices API — API keys</title>`,
+  asset URLs `/api/assets/…`). We re-sync it after our own deploy of this
+  layout; the S3 keys do not change.
+- The backend **is deployed and open**, at the paths above. Directly against
+  the API:
 
-      GET https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/api/api/config
+      GET https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/api/config
       → 200  {"enabled":true,"rate_limit_per_second":1}
 
-- The bucket itself passes our security audit: `BLOCK_ALL` on all four
-  public-access flags, `IsPublic false`, a single `s3:GetObject` grant to
-  `cloudfront.amazonaws.com` conditioned on
+- The bucket passes our security audit: `BLOCK_ALL`, `IsPublic false`, a single
+  `s3:GetObject` grant to `cloudfront.amazonaws.com` conditioned on
   `AWS:SourceArn = …distribution/EA2TLS5SS5M87`, anonymous GET → `403`.
 
-## The symptom
+## The symptom this fixes
 
 Signed in through basic auth, `https://sorobanscan.rumblefish.dev/api/index.html`
-renders the portal shell but shows **no "Sign in with Discord" / "Get my API
-key" control**, exactly as if the portal were switched off. It is not off.
+renders the portal shell with **no "Sign in with Discord" / "Get my API key"
+control**, exactly as if the portal were switched off. It is not off: the
+page's `fetch('/api/config')` matches your `/api/*` row, which targets **S3**;
+S3 has no such key and answers `403`; `CustomErrorResponses` turns that into
+`/index.html` at **`200`** from the *default* origin — the Explorer SPA. The
+portal asks "are you enabled?" and receives the block explorer as
+`200 text/html`. Because the status is `200` the client's `!response.ok` guard
+passes and the JSON parse fails; the app hides its controls.
 
-## Why — the exact chain
-
-1. The page loads and its JS calls `fetch('/api/api/config')`, a **relative**
-   URL. It is relative on purpose: the session is an `HttpOnly`,
-   `SameSite=Lax` cookie, so the call must be same-origin or the browser
-   withholds it. An absolute URL to execute-api is not an option.
-2. `/api/api/config` matches cache behaviour `/api/*`, whose target origin is
-   the **S3 bucket**. There is no origin on this distribution pointing at the
-   API.
-3. S3 has no key `api/api/config`, so it answers `403`.
-4. `CustomErrorResponses` maps `403 → /index.html` with response code **`200`**.
-5. `/index.html` resolves on the *default* origin — the Explorer SPA bucket.
-
-So the portal asks "are you enabled?" and receives **the Explorer SPA as
-`200 text/html`**. Because the status is `200`, the client's `!response.ok`
-guard passes and the JSON parse fails instead; the app lands in its
-"could not reach the backend" state and hides the controls.
-
-Confirmed independently on a path with no basic auth:
-`GET /assets/nie-ma-takiego-pliku-xyz.js` → `200 text/html`, Explorer's
-document with Google Tag Manager in it.
+The fetch is a relative URL on purpose: the session is an `HttpOnly`,
+`SameSite=Lax` cookie, so the backend must be same-origin with the page. That
+is why the API has to be an origin on *this* distribution rather than called
+directly.
 
 ---
 
 ## Required changes
-
-Items 1–3 are what make the portal work at all. Items 4–6 are required before
-we can sign the portal off, and 5 is a distribution-wide correctness issue that
-affects the Explorer SPA too.
 
 ### Current configuration, for reference
 
@@ -77,199 +84,163 @@ affects the Explorer SPA too.
 
 ```
 DomainName:      02mabge71l.execute-api.eu-central-1.amazonaws.com
-OriginPath:      /production            ← load-bearing, see below
+OriginPath:      /production            ← load-bearing
 ProtocolPolicy:  https-only
 ```
 
 **`OriginPath` is not optional.** API Gateway serves a REST API only under
 `/{stage}`. Without it every proxied request arrives one path segment short and
-the gateway answers `403`. This is the most common way this setup is broken.
+the gateway answers `403`.
 
-### 2. Add a cache behaviour for `/api/api/*`, ORDERED BEFORE `/api/*`
+### 2. Carve the bundle out to S3 — ten rows, listed BEFORE `/api/*`
+
+All to Origin 2 (the `api-spa` bucket), `GET`/`HEAD`, cached as you cache the
+Explorer SPA. Keep basic auth on these if you want the *page* gated; the
+backend has its own authentication.
 
 ```
-PathPattern:          /api/api/*
-TargetOriginId:       <the new API origin>
-AllowedMethods:       ALL   (GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE)
-CachePolicy:          Managed-CachingDisabled
-OriginRequestPolicy:  Managed-AllViewerExceptHostHeader
-ViewerProtocolPolicy: redirect-to-https
+/api/
+/api/index.html
+/api/favicon.ico
+/api/assets/*
+/api/login        /api/login/
+/api/dashboard    /api/dashboard/
+/api/quick-start  /api/quick-start/
 ```
 
-Precedence matters: `/api/api/*` must win over `/api/*`, or backend calls keep
-hitting S3. All four settings are load-bearing and each fails silently:
+Both slash forms, because path patterns are literal and a viewer-request
+function runs only *after* a behaviour has matched — it cannot re-route.
 
-- **`AllViewerExceptHostHeader`** does two jobs. (a) An execute-api endpoint
-  authenticates against its own hostname, so forwarding the viewer's `Host`
-  (which `AllViewer` does) turns every API call into a `403`. (b) **It forwards
-  cookies.** The managed defaults — and every origin-request policy other than
-  the two `AllViewer*` ones — strip them, so the session cookie never reaches
-  the origin and every signed-in visitor reads as signed out. That failure
-  appears only in a browser, never in `curl`.
-- **`CachingDisabled`** is a requirement, not a default. A cached `/auth/me` is
-  one visitor's identity served to the next. `CachingOptimized` additionally
-  forwards no request headers, which strips `x-api-key`.
-- **`ALL` methods**: the default `GET`/`HEAD` makes CloudFront answer `POST`
-  with a `403` of its own, never reaching the API. Key issue, rework, revoke and
-  sign-out are all `POST`.
+These rows need one small **viewer-request CloudFront Function** to resolve to
+a key S3 actually holds (`api/` is a zero-byte placeholder, and
+`DefaultRootObject` applies to `/` only):
 
-This mirrors the behaviour already proven on our own distribution
-(`dojr4epgxo2qp.cloudfront.net`), where 13 of 13 probe requests reached the
-origin and nothing was served from the edge.
-
-### 3. Exempt the portal's backend prefix from basic auth
-
-`production-soroban-explorer-basic-auth` is attached to `/api/*` and currently
-answers `401` to everything underneath, including `/api/api/*`. A `fetch` that
-receives `401` cannot prompt for credentials, so the portal breaks even for a
-visitor who authenticated for the page.
-
-Either do not associate the function with the new `/api/api/*` behaviour, or
-have it pass that prefix through. Note the portal has its own authentication
-(Discord OAuth + guild-membership gate) and its own per-method throttle at the
-gateway, so it is not relying on basic auth for protection.
-
-### 4. Per-prefix SPA fallback for `/api/*`
-
-The portal's routes are `/api/login`, `/api/dashboard`, `/api/quick-start`. A
-refresh or deep link on one resolves to a missing S3 key, which today becomes
-Explorer's `index.html` at `200` (item 5) — the visitor gets the block explorer.
-
-Also `/api/` alone does not resolve: the bucket holds `api/index.html`, but the
-key `api/` is a zero-byte placeholder, and `DefaultRootObject` is a property of
-the distribution, not of a behaviour, so it cannot help here.
-
-Our distribution solves this with a small CloudFront Function that appends
-`index.html` to a path ending in `/` and redirects the canonical forms. Two
-warnings from our review, both found the hard way:
-
-- **Keep the redirect list fixed.** The obvious generalisation — redirect any
-  path whose last segment has no file extension — is an **open redirect**:
-  `request.uri` is attacker-controlled and CloudFront does not collapse a
-  leading `//`, so `//evil.com/x` yields `Location: //evil.com/x/`, a different
-  origin. A backslash form reaches the same place via browser normalisation.
-  This distribution will host an OAuth callback, where that is the standard
-  first link in a code-interception chain. Interpolate nothing into `Location`.
-- **Attach it to S3 behaviours only.** On an API behaviour it would rewrite
-  backend calls the moment one ended in a slash.
-
-### 5. `CustomErrorResponses` must not rewrite the portal's responses
-
-`403 → /index.html (200)` and `404 → /index.html (200)` are distribution-wide.
-For the portal they are actively harmful, and this is no longer hypothetical:
-
-    POST /api/api/key/rework  → 403   (a real refusal, on a live route)
-
-On this distribution that reaches the browser as **Explorer's SPA with status
-`200`** — a refusal rendered as success. Every portal error response is JSON and
-carries `Cache-Control: no-store`; we verified all of them at the origin on
-2026-08-31.
-
-Scoping the error responses so they do not apply to the portal's prefixes is the
-ask. It is worth reviewing for the Explorer SPA independently: turning every
-origin `403`/`404` into a `200` also hides genuine failures from monitoring.
-
-### 6. Redirect `/api` → `/api/`
-
-`/api` does not match `/api/*`, so it falls to the default behaviour and serves
-the Explorer SPA at `200`. A visitor who trims one character off the documented
-URL silently gets the wrong application — which is how this whole investigation
-started.
-
----
-
-## How to verify, from outside
-
-With basic-auth credentials, from a browser or `curl -u`:
-
-| probe | expected |
-|---|---|
-| `GET /api/api/config` | `200`, `application/json`, `{"enabled":true,…}`, `Cache-Control: no-store` |
-| `GET /api/api/auth/login` | `303` to `discord.com/oauth2/authorize` |
-| `POST /api/api/auth/logout` | `204` (not `403` — proves `ALL` methods) |
-| `GET /api/api/key` | `401` JSON (not `200 text/html` — proves error responses are not rewritten) |
-| `GET /api/` and `GET /api` | the portal's `index.html`, not Explorer's |
-| `GET /api/dashboard` | the portal's `index.html` (SPA fallback) |
-
-The single most diagnostic one is the first: if it returns `text/html`, the
-request is still reaching S3 rather than the API.
-
-## Contact
-
-Questions to Adam (this repo). The portal's own configuration — gateway
-throttles, IAM, secrets, the `PORTAL_ENABLED` flag — is all deployed and
-audited; the evidence lives in
-`lore/1-tasks/active/0194_TEST_portal-security-and-ops-audit/`.
-
----
-
-## Minimal patch — the three changes that fix the button
-
-Items 4–6 above are needed for our sign-off. These three are what make the
-"Get my API key" control appear at all. Written against CDK, mirroring the
-configuration already proven on `dojr4epgxo2qp.cloudfront.net`.
-
-```ts
-// 1. The API as an origin on this distribution.
-//    `originPath` is load-bearing: API Gateway serves a REST API only under
-//    /{stage}, so without it every proxied request arrives one segment short
-//    and the gateway answers 403.
-const pricesApiOrigin = new origins.HttpOrigin(
-  '02mabge71l.execute-api.eu-central-1.amazonaws.com',
-  {
-    originPath: '/production',
-    protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
-  },
-);
-
-// 2. The behaviour. All four settings are load-bearing and each fails silently.
-const pricesApiBehaviour: cloudfront.BehaviorOptions = {
-  origin: pricesApiOrigin,
-  viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-  // GET/HEAD (the default) makes CloudFront answer POST with a 403 of its own,
-  // never reaching the API. Key issue, rework, revoke and sign-out are POSTs.
-  allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
-  // A cached /auth/me is one visitor's identity served to the next.
-  cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-  // Two jobs: (a) an execute-api endpoint authenticates against its own
-  // hostname, so forwarding the viewer's Host turns every call into a 403;
-  // (b) it FORWARDS COOKIES — every other policy strips them, and the portal's
-  // session is an HttpOnly cookie, so without this every signed-in visitor
-  // reads as signed out. That failure appears only in a browser, never in curl.
-  originRequestPolicy:
-    cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
-  // 3. Deliberately NO functionAssociations — the basic-auth function must not
-  //    be attached here. A fetch() that receives 401 cannot prompt for
-  //    credentials, so the portal breaks even for a visitor who authenticated
-  //    for the page. The portal has its own auth (Discord OAuth + guild gate)
-  //    and its own per-method throttle at the gateway.
+```js
+// Every value is a literal. Nothing from the request is ever interpolated
+// into a Location or a URI — see the warning below.
+var REDIRECTS = { '/api': '/api/' };
+var INDEX = '/api/index.html';
+var APP_ROUTES = {
+  '/api/login': INDEX, '/api/login/': INDEX,
+  '/api/dashboard': INDEX, '/api/dashboard/': INDEX,
+  '/api/quick-start': INDEX, '/api/quick-start/': INDEX
 };
-
-// Insertion order IS precedence in CDK — /api/api/* must come first, or the
-// backend calls keep matching /api/* and reaching S3.
-additionalBehaviors: {
-  '/api/api/*': pricesApiBehaviour,
-  '/api/*':     <the existing api-spa behaviour, unchanged>,
-  // …the rest unchanged
+function handler(event) {
+  var request = event.request;
+  var uri = request.uri;
+  if (typeof REDIRECTS[uri] === 'string') {
+    return { statusCode: 302, statusDescription: 'Found',
+             headers: { location: { value: REDIRECTS[uri] } } };
+  }
+  if (typeof APP_ROUTES[uri] === 'string') { request.uri = APP_ROUTES[uri]; return request; }
+  if (uri.slice(-1) === '/') { request.uri = uri + 'index.html'; return request; }
+  return request;
 }
 ```
 
-### The one probe that tells you it worked
+(`typeof … === 'string'` rather than truthiness: a bare lookup also finds
+inherited members, and `'constructor'` is truthy.)
+
+⚠️ **Keep the lists fixed; do not generalise to "any path without an
+extension".** That generalisation is an **open redirect**: `request.uri` is
+attacker-controlled and CloudFront does not collapse a leading `//`, so
+`//evil.com/x` yields `Location: //evil.com/x/` — a different origin — and a
+backslash form reaches the same place through browser normalisation. This
+distribution hosts an OAuth callback, where that is the standard first link in
+a code-interception chain. Our own function was rewritten twice on review for
+exactly this; the version above interpolates nothing.
+
+### 3. Re-point `/api/*` at the API — the catch-all
 
 ```
-curl -u <basic-auth> https://sorobanscan.rumblefish.dev/api/api/config
+PathPattern:          /api/*             (unchanged pattern, new target)
+TargetOriginId:       <the new API origin>
+AllowedMethods:       ALL
+CachePolicy:          Managed-CachingDisabled
+OriginRequestPolicy:  Managed-AllViewerExceptHostHeader
+ViewerProtocolPolicy: redirect-to-https
+FunctionAssociations: NONE — remove the basic-auth function from this row
 ```
 
-- **`200` + `application/json` + `{"enabled":true,…}`** → done, the button appears.
-- **`200` + `text/html`** → still reaching S3; the behaviour is not ordered
-  ahead of `/api/*`.
-- **`401`** → the basic-auth function is still attached to the new behaviour.
-- **`403`** → `originPath` is missing or wrong.
+Each setting is load-bearing and fails silently when wrong:
 
-The same call against our own distribution returns the JSON today, which is the
-reference for what "working" looks like:
+- **`AllViewerExceptHostHeader`** — (a) execute-api authenticates against its
+  own hostname, so forwarding the viewer's `Host` turns every call into a
+  `403`; (b) **it forwards cookies** — every other managed policy strips them,
+  the session is a cookie, and without it every signed-in visitor reads as
+  signed out. Fails only in a browser, never in `curl`.
+- **`CachingDisabled`** — a cached `/auth/me` is one visitor's identity served
+  to the next.
+- **`ALL` methods** — the default `GET`/`HEAD` makes CloudFront answer `POST`
+  with its own `403`. Key issue, rework and sign-out are `POST`s.
+- **No basic-auth function** — a `fetch()` that receives `401` cannot prompt
+  for credentials, so the portal breaks even for a visitor who authenticated
+  for the page. The backend has Discord OAuth, a guild-membership gate and its
+  own 10 req/s throttle at the gateway.
+
+This mirrors the configuration proven on our own distribution
+(`dojr4epgxo2qp.cloudfront.net`), where the same layout serves the portal
+today.
+
+### 4. `CustomErrorResponses` must not rewrite the portal's responses
+
+`403 → /index.html (200)` and `404 → /index.html (200)` are distribution-wide,
+and they now apply to the API row too. Concretely:
+
+    POST /api/key/rework  → 403   (a real refusal, on a live route)
+
+reaches the browser as **Explorer's SPA with status `200`** — a refusal
+rendered as success. Every portal error response is JSON with
+`Cache-Control: no-store`.
+
+Custom error responses cannot be scoped per behaviour, so the ask is to remove
+the `403`/`404` mappings and give the Explorer SPA its own fallback the way
+item 2 does for ours (a viewer-request function on its S3 rows). That is worth
+doing for the Explorer SPA independently: turning every origin `403`/`404` into
+a `200` also hides genuine failures from monitoring.
+
+---
+
+## Ordering, and what goes wrong when it is wrong
+
+CloudFront takes the **first** matching behaviour. The ten carve-out rows must
+be listed before `/api/*`. If one is missing or listed after, that path reaches
+the API and gets a JSON `404` — loud, and visible in the browser's network tab.
+That asymmetry is deliberate: the old shape (backend rows ahead of a bundle
+catch-all) failed the other way round, with the silent `200 text/html` this
+document opened with.
+
+## How to verify, from outside
+
+With basic-auth credentials where you keep them:
+
+| probe | expected |
+|---|---|
+| `GET /api/config` | `200`, `application/json`, `{"enabled":true,…}`, `Cache-Control: no-store` |
+| `GET /api/api-docs-json` | `200`, `application/json`, the OpenAPI document |
+| `GET /api/auth/login` | `303` to `discord.com/oauth2/authorize` |
+| `POST /api/auth/logout` | `204` — proves `ALL` methods |
+| `GET /api/key` | `401` **JSON** — proves error responses are not rewritten |
+| `GET /api/`, `GET /api` | the portal's `index.html` (`/api` via a `302`) |
+| `GET /api/dashboard` | the portal's `index.html` — the carve-out |
+| `GET /api/assets/<any built file>` | `200` from S3 |
+
+The single most diagnostic one is the first: `text/html` means the request is
+still reaching S3.
 
 ```
-curl https://dojr4epgxo2qp.cloudfront.net/api/api/config
-{"enabled":true,"rate_limit_per_second":1}
+curl -u <basic-auth> https://sorobanscan.rumblefish.dev/api/config
 ```
+
+- `200` + JSON → done, the button appears.
+- `200` + `text/html` → `/api/*` still targets S3.
+- `401` → the basic-auth function is still on the `/api/*` row.
+- `403` → `originPath` missing or wrong.
+- `404` JSON → the API row works; a carve-out is missing for that path.
+
+## Contact
+
+Questions to Adam (this repo). The portal's own side — gateway resource
+`/api/{proxy+}` with its throttles, IAM, secrets, `PORTAL_ENABLED` — is
+deployed and audited; evidence in
+`lore/1-tasks/active/0194_TEST_portal-security-and-ops-audit/`.

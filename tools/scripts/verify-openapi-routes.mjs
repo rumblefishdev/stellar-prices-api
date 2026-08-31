@@ -184,7 +184,7 @@ const GATEWAY_SKIPPED_METHODS = new Set(['options']);
  * in the document would be checked by neither direction, so the spec side
  * rejects it outright a few dozen lines down rather than passing over it.
  */
-const PORTAL_API_PREFIX = '/api/api/';
+const PORTAL_API_PREFIX = '/api/';
 
 const gatewayRoutes = new Set();
 /** Routes the prefix skip above swallowed — asserted non-empty further down. */
@@ -408,11 +408,46 @@ if (!/^\/[^/]+$/.test(String(winnerOrigin.OriginPath ?? ''))) {
       `${JSON.stringify(winnerOrigin.OriginPath ?? null)}, which is not a ` +
       `single stage segment.`,
     '  → an execute-api origin serves the REST API under `/{stage}` only. ' +
-      'Without it CloudFront forwards `/api/api/x` as `/api/' +
-      'api/x`, the gateway maps nothing, and every portal call 403s. Set ' +
+      'Without it CloudFront forwards `/api/x` to the gateway as `/api/x` ' +
+      'instead of `/production/api/x`, the gateway maps nothing, and every ' +
+      'portal call 403s. Set ' +
       '`originPath` on the HttpOrigin in ' +
       'infra/src/lib/stacks/portal-hosting-stack.ts.',
   );
+}
+
+// The other half of the split (task 0194): the bundle shares the prefix and is
+// carved out to S3 by rows listed BEFORE the `/api/*` catch-all. A carve-out
+// that is missing, or listed after the catch-all, sends that path to the API —
+// a loud JSON 404 rather than the old silent 200-of-HTML, but still a broken
+// page. Probed the way CloudFront does: first match wins, and it must be S3.
+// The list mirrors `PORTAL_BUNDLE_PATHS` in portal-hosting-stack.ts; the SPA
+// routes mirror `PORTAL_APP_ROUTES` there and `links.ts` in the app.
+const BUNDLE_PROBES = [
+  '/api/',
+  '/api/index.html',
+  '/api/favicon.ico',
+  '/api/assets/index-abc123.js',
+  ...['login', 'dashboard', 'quick-start'].flatMap((r) => [
+    `/api/${r}`,
+    `/api/${r}/`,
+  ]),
+];
+for (const bundleProbe of BUNDLE_PROBES) {
+  const first = behaviours.find((b) =>
+    patternToRegExp(String(b.PathPattern)).test(bundleProbe),
+  );
+  const origin = first ? originsById.get(first.TargetOriginId) : undefined;
+  if (!first || origin?.CustomOriginConfig) {
+    fail(
+      `error: ${bundleProbe} is matched first by ` +
+        `\`${first?.PathPattern ?? '(nothing — DefaultCacheBehavior)'}\`, ` +
+        `which does not serve the bundle bucket.`,
+      '  → every bundle path must be carved out to S3 by a row listed BEFORE ' +
+        'the `/api/*` API catch-all. Add or reorder it in `PORTAL_BUNDLE_PATHS` ' +
+        'in infra/src/lib/stacks/portal-hosting-stack.ts.',
+    );
+  }
 }
 
 // The session cookie has to reach the origin, and the responses that carry it
@@ -443,7 +478,7 @@ if (String(winner.OriginRequestPolicyId) !== ALL_VIEWER_EXCEPT_HOST_HEADER) {
       `Managed-AllViewerExceptHostHeader (${ALL_VIEWER_EXCEPT_HOST_HEADER}).`,
     '  → that policy is what forwards the portal session cookie to the origin ' +
       "and what withholds the viewer's Host from execute-api. Under any other " +
-      'managed policy the cookie is stripped, `/api/api/auth/me` reads ' +
+      'managed policy the cookie is stripped, `/api/auth/me` reads ' +
       'as signed-out for a visitor who just signed in, and nothing fails ' +
       'outside a browser. Set `originRequestPolicy: ' +
       'ALL_VIEWER_EXCEPT_HOST_HEADER` on the API behaviour in ' +
@@ -557,7 +592,7 @@ if (portalGatewayRoutes.length === 0) {
       `check's portal skip covers nothing.`,
     '  → the portal backend is unreachable in production: CloudFront forwards ' +
       'the request and the gateway answers 403 Missing Authentication Token. ' +
-      'Restore the `/api/api/{proxy+}` methods in ' +
+      'Restore the `/api/{proxy+}` methods in ' +
       'infra/src/lib/stacks/api-gateway-stack.ts.',
   );
 }
@@ -790,7 +825,7 @@ for (const httpMethod of ['GET', 'POST']) {
       `error: ${httpMethod} ${entry.ResourcePath} has CachingEnabled=` +
         `${JSON.stringify(entry.CachingEnabled ?? null)}.`,
       '  → the gateway cache has no cache-key parameters on this method, so ' +
-        'every caller shares one entry. A cached `GET /api/api/key` ' +
+        'every caller shares one entry. A cached `GET /api/key` ' +
         "serves one visitor another visitor's API key. Set " +
         '`cachingEnabled: false` in `portalSettings` in api-gateway-stack.ts.',
     );

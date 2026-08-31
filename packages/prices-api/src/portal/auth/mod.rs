@@ -77,15 +77,15 @@ use session::Session;
 use state_token::{Action, StateError};
 
 /// Where the visitor starts.
-pub const LOGIN_PATH: &str = "/api/api/auth/login";
+pub const LOGIN_PATH: &str = "/api/auth/login";
 /// Where Discord sends them back. **This exact suffix is what is registered in
 /// the Discord Developer Portal**, and `secret.rs` refuses a `redirect_uri` that
 /// does not end in it.
-pub const CALLBACK_PATH: &str = "/api/api/auth/callback";
+pub const CALLBACK_PATH: &str = "/api/auth/callback";
 /// Who am I?
-pub const ME_PATH: &str = "/api/api/auth/me";
+pub const ME_PATH: &str = "/api/auth/me";
 /// Sign out.
-pub const LOGOUT_PATH: &str = "/api/api/auth/logout";
+pub const LOGOUT_PATH: &str = "/api/auth/logout";
 
 /// Where the callback sends the browser when it is done, in every outcome.
 ///
@@ -996,7 +996,7 @@ mod tests {
             &serde_json::json!({
                 "client_id": "client-1",
                 "client_secret": "shh",
-                "redirect_uri": "https://portal.example/api/api/auth/callback",
+                "redirect_uri": "https://portal.example/api/auth/callback",
                 "session_signing_key": "0123456789abcdef0123456789abcdef0123456789abcdef",
             })
             .to_string(),
@@ -1037,7 +1037,7 @@ mod tests {
         assert_eq!(get("client_id"), "client-1");
         assert_eq!(
             get("redirect_uri"),
-            "https://portal.example/api/api/auth/callback"
+            "https://portal.example/api/auth/callback"
         );
         // Exactly the pair — not a superset, and never `guilds` or `email`.
         assert_eq!(get("scope"), "identify guilds.members.read");

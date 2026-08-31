@@ -69,7 +69,7 @@ In the [Discord Developer Portal](https://discord.com/developers/applications):
 2. **OAuth2 → Redirects → Add Redirect**, and enter the callback URL exactly:
 
    ```
-   https://<portal-host>/api/api/auth/callback
+   https://<portal-host>/api/auth/callback
    ```
 
    ⚠️ **Assume the match is character-exact.** Discord's documentation states
@@ -129,7 +129,7 @@ aws secretsmanager create-secret \
     --secret-string "$(jq -n \
         --arg id "$CLIENT_ID" \
         --arg secret "$CLIENT_SECRET" \
-        --arg redirect "https://<portal-host>/api/api/auth/callback" \
+        --arg redirect "https://<portal-host>/api/auth/callback" \
         --arg key "$SIGNING_KEY" \
         '{client_id:$id, client_secret:$secret, redirect_uri:$redirect, session_signing_key:$key}')"
 ```
@@ -237,7 +237,7 @@ Two things that are **this runbook's**, because they are changes to the
 registration rather than to a developer's machine:
 
 1. **Add a second redirect URI** to the same Discord application, pointing at
-   `http://localhost:4200/api/api/auth/callback`. Discord accepts several
+   `http://localhost:4200/api/auth/callback`. Discord accepts several
    redirects per application, so this sits alongside the production one and
    neither disturbs the other.
 2. **Decide what happens to it afterwards.** Remove it once the flow is
@@ -318,7 +318,7 @@ host, at the new host, or both.
    `redirect_uri` still names the old host, and Discord matches whichever we
    send.
 2. **Verify the new hostname serves the portal** and that
-   `https://<new-host>/api/api/config` answers — i.e. the distribution and
+   `https://<new-host>/api/config` answers — i.e. the distribution and
    its behaviours are live on the new name. Sign-in still runs through the old
    host at this point.
 3. **Update the secret's `redirect_uri`** to the new host:
@@ -327,7 +327,7 @@ host, at the new host, or both.
    aws secretsmanager put-secret-value \
        --secret-id prices/production/portal-discord-oauth \
        --secret-string "$(jq -n --arg id "$CLIENT_ID" --arg secret "$CLIENT_SECRET" \
-            --arg redirect "https://<new-host>/api/api/auth/callback" \
+            --arg redirect "https://<new-host>/api/auth/callback" \
             --arg key "$SIGNING_KEY" \
             '{client_id:$id, client_secret:$secret, redirect_uri:$redirect, session_signing_key:$key}')"
    ```

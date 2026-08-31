@@ -3884,7 +3884,7 @@ function PortalStatus({ probe }: { probe: Probe }) {
   // answer a visitor gets when there is nothing to click — still asking, shut,
   // or unreachable.
   //
-  // Task 0185's `Reached /api/api/config successfully — same-origin, no
+  // Task 0185's `Reached /api/config successfully — same-origin, no
   // API key, no CORS` line used to live here and is **deliberately gone**: it
   // was that slice's evidence that the bundle could reach its own backend,
   // written when this page had nothing else to show for it. The page now has

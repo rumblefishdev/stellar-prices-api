@@ -449,6 +449,11 @@ other:
 | **A (minimal)** | `/api/` | `/api-tokens/api/` | `BASE_PATH` (web, 2 copies) and `PORTAL_HOME` (Rust). Nothing else in Rust, nothing in the gateway, nothing in `methodSettings`. The session cookie is already scoped `Path=/api-tokens/`, so it is still sent to every backend call and never to the bundle — which does not need it. `CALLBACK_PATH` is unchanged, so the secret loader's `ends_with` rule is satisfied by `https://sorobanscan.rumblefish.dev/api-tokens/api/auth/callback` |
 | **B (convention)** | `/api/` | `/api/api/` | [[0161]]'s `<app>/*` + `<app>/api/*` shape, but it moves `PORTAL_API_PREFIX`, `CALLBACK_PATH`, `PORTAL_HOME`, `SESSION_PATH`, `PENDING_PATH`, the gateway resource path `/api-tokens/api/{proxy+}` and its three `methodSettings` entries, plus the Discord registration. Every one of those is a deploy, and the gateway pair is the change [[0184]] records breaking production for twenty minutes |
 
+**Superseded again 2026-08-31: neither A nor B — the prefix is flat.** See
+"The prefix, flattened" below: bundle and backend both live directly under
+`/api/`, with no sub-prefix for either. The paragraph that follows is the
+2026-08-28 record.
+
 **Superseded 2026-08-28: B is what shipped, not A.** The code now reads
 `BASE_PATH = '/api/'` (`web/portal/src/base-path.ts` and `vite.config.mts`),
 `PORTAL_API_PREFIX = "/api/api/"` and `PORTAL_HOME = "/api/"`
@@ -516,7 +521,9 @@ Either way, these remain and are not solved by choosing a layout:
       through**: it is registered in the Developer Portal, not in this repo, and
       it must read `https://sorobanscan.rumblefish.dev/api/api/auth/callback`
       before the first sign-in. Owner: Adam, at the same time as the
-      `client_secret` rotation
+      `client_secret` rotation. **Amended 2026-08-31:** the callback is now
+      `…/api/auth/callback` (flat prefix, below) — registered once at
+      2026-08-31 with the old path, so it needs registering again
 
 ## Opening the portal
 
@@ -677,6 +684,105 @@ lands. That is the intended end state, not a regression — but it means there i
 now **no host on which a full sign-in can be tested** until 0195 delivers. The
 backend is open; the door it opens onto is not built yet.
 
+## The prefix, flattened — 2026-08-31
+
+**Decided by Adam, 2026-08-31, implemented here:** `/api/` is the whole
+self-service portal on the shared host, and there is no sub-prefix for the
+backend. `/api/login` is a page, `/api/auth/login` is the backend,
+`/api/api-docs-json` is the OpenAPI document. Nothing of ours lives at the root
+of `sorobanscan.rumblefish.dev`, because the root is the block explorer's.
+
+This is a `TEST` task writing code, against its own note. Adam's explicit call
+("zrób to teraz w tym tasku"), made with the timing argument in view: the
+Explorer repo had not yet built its behaviour for the old prefix, so this was
+the last moment a prefix change cost one deploy on our side rather than a
+coordinated change across two repos.
+
+### Why not a sub-prefix
+
+The rename started as "avoid `/api/api`", which [[0161]]'s `<app>/*` +
+`<app>/api/*` convention produced for an app that is itself called "api". Two
+layouts were on the table — a sibling `/portal-api/*` and a nested
+`/api/portal/*` — and both lost to a rule stated by Adam that decides more than
+this rename: **the prefix `/api` is the portal, and everything after it is
+just `/api/<rest>`.** A sibling takes a second top-level prefix in someone
+else's namespace; a nested sub-prefix is the thing being avoided under a
+different name.
+
+### What flat costs, and what it buys
+
+Bundle and backend now share a prefix, so **one side has to be enumerated**.
+The bundle is: `/api/`, `index.html`, `favicon.ico`, `assets/*`, and the three
+SPA routes in both slash forms — ten CloudFront rows, carved out to S3 **ahead
+of** an `/api/*` catch-all that goes to the API. That inverts the old table
+(backend row ahead of a bundle catch-all), and the inversion is the point:
+
+- the backend is the open-ended side (five slices added routes; none touched
+  the CloudFront table) and now needs no row at all;
+- a bundle path missing from the list reaches the API and fails **loud** — a
+  JSON `404` in the network tab — where the old shape's failure was the silent
+  `200 text/html` that took this task most of a day to diagnose.
+
+Costs, stated: the session cookie's `Path` can no longer be narrower than
+`/api/` (it rides on asset requests; `HttpOnly`, and S3 ignores it); the
+bundle list is maintained in `portal-hosting-stack.ts` (`PORTAL_APP_ROUTES`,
+which generates both the rows and `DirectoryIndexFn`'s allow-list),
+`verify-openapi-routes.mjs` (asserts every carve-out resolves to S3 and
+`/api/probe` to the API), and `links.ts`; and the Vite dev proxy becomes a
+regex over the backend's top-level segments, because a plain `/api` rule would
+swallow Vite's own `/api/@vite/…`.
+
+### What changed
+
+One substitution `/api/api` → `/api` across 27 files (the [[0235]] method; two
+escaped regexes in `app.spec.tsx` needed a second pass), then by hand:
+
+- **Rust** — `PORTAL_API_PREFIX = "/api/"`, every `*_PATH` under it,
+  `PENDING_PATH = "/api/auth/"`, `SESSION_PATH` unchanged at `/api/`. New
+  `OPENAPI_PATH = "/api/api-docs-json"`: `lib.rs` mounts the one spec handler
+  at both paths, `gate_portal` and `auth::is_exempt` exempt it by name like
+  `CONFIG_PATH`. Gateway resource is `/api/{proxy+}`, so the alias needs no
+  infra. Tests: the bundle paths are now *inside* the prefix (a plain `404`
+  in both states if one ever arrives), and the alias answers in both states
+  byte-identical to the root copy.
+- **Infra** — `api-gateway-stack.ts`: `/api/{proxy+}` with the same three
+  `methodSettings`. `portal-hosting-stack.ts`: `PORTAL_BUNDLE_PATHS` rows
+  before `PORTAL_BACKEND = '/api/*'`; `REDIRECTS` loses `/api/api`.
+- **Web** — `PORTAL_API = '/api'`, `OPENAPI_JSON = '/api/api-docs-json'`,
+  dev-proxy regex + a test that it proxies the backend segments and leaves
+  `/api/@vite/client`, `/api/src/…`, `/api/login` and `/api/keys` alone.
+- **Docs** — README, runbook, `docs/scf/api-endpoints.md`, the epic.
+  `lore/` records are not rewritten ([[0235]]'s rule); [[0195]]'s convention
+  text is now stale and is noted, not edited.
+
+Verified: Rust 405 passed / 0 failed; portal 157/157; lint + typecheck green;
+`openapi:verify-routes` green with the new carve-out check; `cdk diff`:
+Compute = one asset hash (the rebuilt api-handler — the disk binary was
+pre-change and diffed as "no differences" until rebuilt, [[0141]] again),
+ApiGateway = `/api/api/{proxy+}` → `/api/{proxy+}` plus the three
+`methodSettings`, PortalHosting = the ten rows + catch-all and the function.
+
+### Deploy order, and the suffix that makes it safe
+
+`secret.rs` validates `redirect_uri` with `ends_with(CALLBACK_PATH)`, and the
+stored `…/api/api/auth/callback` **ends with** the new
+`/api/auth/callback`. So the new binary accepts the old secret and the order
+is **code first, then secret + Discord** — no cold-start window in which
+`/v1` could go down. Until the secret is updated, sign-in starts with the old
+callback and lands on a `404`; nothing crashes.
+
+**The reverse is not true.** Old code with the new secret value fails
+`ends_with` at init and takes `/v1` down. A rollback of this deploy must
+revert the secret **before** the code.
+
+Stacks: `Compute`, `ApiGateway`, `PortalHosting` by name — never
+`deploy-production` (the EventBridge asset regression recorded above). The
+Explorer bucket is then re-synced from `web/portal/dist` (the bundle bakes
+`PORTAL_API` in). One resource moves in the gateway; [[0184]]'s "at most one
+variable child" rule is not touched, because `/api/{proxy+}` and the departing
+`/api/api` are a variable and a literal under the same parent, and [[0235]]
+made the same-shaped move in one deploy.
+
 ## Issues Encountered
 
 - **The Discord `client_secret` was exposed in a chat transcript.** On
@@ -721,6 +827,15 @@ backend is open; the door it opens onto is not built yet.
   of view `false` is the intended state. Merging this branch is what fixes it;
   no second deploy is needed.
 
+- **`cdk diff` said "no differences" for Compute after a Rust change.** The
+  api-handler asset is packaged off `target/lambda/prices-api/bootstrap`,
+  which was the pre-change build from 09:50; the diff was honest about the
+  disk and wrong about the source. Rebuilt with `cargo lambda build` and the
+  hash changed. [[0141]], third sighting in one task.
+- **A `/api/api` → `/api` substitution missed two regexes**, because the test
+  had escaped the slashes (`\/api\/api\/config`). Caught by the portal
+  suite, not by the grep that declared zero occurrences remaining.
+
 - **A stale task branch turns `cdk diff` into a demolition plan.** On
   2026-08-31 this branch was 5 commits behind `origin/develop` and
   `make diff-production` proposed destroying four live Oracle alarms and an IAM
@@ -763,11 +878,22 @@ backend is open; the door it opens onto is not built yet.
    (`Eligibility::NotMember`, not `Unknown`).
 
    ⚠️ **This is a dated, temporary state and needs an owner and a date.**
+   (See item 2 below for the prefix decision of 2026-08-31.)
    Switching to the production guild is `put-parameter --overwrite` and a ~5 min
    extension cache — no deploy, no code change. It must happen before the portal
    is advertised to anyone outside the demo, and before [[0164]] walks the
    user-visible flow as a stranger would. Until then the public URL is a door
    that says "join Stellar Developers" and then refuses Stellar Developers.
+
+2. **The portal owns `/api/*` flat, and the bundle is a CDN carve-out.**
+   Decided by Adam, 2026-08-31; the rule is "`/api` is the portal, then
+   `/api/<rest>`". Supersedes [[0161]]'s `<app>/*` + `<app>/api/*` convention
+   for this app. What emerged in implementation rather than in the decision:
+   which side to enumerate. The bundle was chosen because it is the small,
+   fixed side and because its failure mode is loud — full argument under "The
+   prefix, flattened". The OpenAPI document is mounted a second time at
+   `/api/api-docs-json` as a pure alias, exempt from gate and key check like
+   `/config`, and deliberately absent from the OpenAPI document itself.
 
 ## Acceptance Criteria
 

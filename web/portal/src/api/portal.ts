@@ -9,7 +9,7 @@
  */
 
 /** Mirrors `PORTAL_API_PREFIX` in `packages/prices-api/src/portal/mod.rs`. */
-const PORTAL_API = '/api/api';
+const PORTAL_API = '/api';
 
 /**
  * What the backend tells the bundle before it renders anything.
@@ -46,7 +46,7 @@ export interface PortalConfig {
 }
 
 /**
- * What `GET /api/api/auth/me` answers (task 0186).
+ * What `GET /api/auth/me` answers (task 0186).
  *
  * Mirrors `MeResponse` in `packages/prices-api/src/portal/auth/mod.rs`. Same
  * reason it is hand-written as `PortalConfig` above: the portal's routes are
@@ -218,10 +218,11 @@ async function getJson<T>(url: string): Promise<T> {
     return (await response.json()) as T;
   } catch {
     // A `200` that is not JSON is the signature of the most likely routing
-    // regression there is here: if the `/api/api/*` behaviour ever stops
-    // winning over `/api/*` (see `portal-hosting-stack.ts`, which fails
-    // CI on that ordering), CloudFront answers this call with the SPA bundle as
-    // `200 text/html`. Left unwrapped, that surfaces as a bare `SyntaxError`
+    // regression there is here: a CloudFront table that sends a backend path
+    // to the bundle bucket — on our distribution, a bundle carve-out row that
+    // is too broad (see `portal-hosting-stack.ts`, which fails CI on it); on a
+    // shared host, an `/api/*` row that still points at S3. Either way
+    // CloudFront answers this call with an SPA bundle as `200 text/html`. Left unwrapped, that surfaces as a bare `SyntaxError`
     // about an unexpected `<` — no status, no URL, and no hint that the cause is
     // a routing table. Carry the status so the page can say which URL lied.
     throw new PortalApiError(
@@ -232,21 +233,21 @@ async function getJson<T>(url: string): Promise<T> {
 }
 
 /**
- * `GET /api/api/config` — the one route that answers while the portal is
+ * `GET /api/config` — the one route that answers while the portal is
  * closed.
  *
  * Task 0183 gates the whole prefix to an empty `404`, byte-identical to a path
  * that was never deployed, and exempts exactly this path so the bundle can ask
  * whether to render the real UI or a "not yet available" page. That makes it the
  * only honest liveness probe this app has, and the reason the page below uses it
- * rather than the `/api/api/health` named in task 0185's criteria — that
+ * rather than the `/api/health` named in task 0185's criteria — that
  * route does not exist, and if it did the gate would answer `404` on it.
  */
 export const fetchPortalConfig = (): Promise<PortalConfig> =>
   getJson<PortalConfig>(`${PORTAL_API}/config`);
 
 /**
- * `GET /api/api/auth/me` — who the browser is talking as (task 0186).
+ * `GET /api/auth/me` — who the browser is talking as (task 0186).
  *
  * No credential is passed here and none could be: the session is an `HttpOnly`
  * cookie, so this code cannot read it and does not need to. The browser attaches
@@ -285,7 +286,7 @@ export const signInUrl = (): string => `${PORTAL_API}/auth/login`;
 export const issueUrl = (): string => `${PORTAL_API}/auth/login?action=issue`;
 
 /**
- * What `POST /api/api/key/rework` answers (task 0191): the revocation.
+ * What `POST /api/key/rework` answers (task 0191): the revocation.
  *
  * `next_eligible_at` is when a new key can be issued under OUR period rule
  * (not an AWS guarantee; see the backend's `portal/period.rs`) — the 1st of
@@ -311,7 +312,7 @@ export interface PortalRevocation {
 }
 
 /**
- * `POST /api/api/key/rework` — "Replace my key": revoke the key NOW,
+ * `POST /api/key/rework` — "Replace my key": revoke the key NOW,
  * issue nothing (task 0191).
  *
  * A `fetch`, not a navigation: unlike issuing, revoking needs no fresh Discord
@@ -397,7 +398,7 @@ export async function revokeKey(): Promise<PortalRevocation> {
 }
 
 /**
- * `POST /api/api/auth/logout` — clear the session.
+ * `POST /api/auth/logout` — clear the session.
  *
  * `POST`, because the backend only accepts that: a `GET` sign-out is triggerable
  * by any third-party page that can make the browser issue a request, which
@@ -437,7 +438,7 @@ export async function signOut(): Promise<void> {
 }
 
 /**
- * What `GET` (and `POST`) `/api/api/key` answer (task 0187, read-only
+ * What `GET` (and `POST`) `/api/key` answer (task 0187, read-only
  * since task 0189 — the route reveals and never creates).
  *
  * Mirrors `KeyResponse` in `packages/prices-api/src/portal/keys/mod.rs`, and
@@ -471,7 +472,7 @@ export interface PortalKey {
 }
 
 /**
- * What `GET /api/api/usage` answers (task 0188).
+ * What `GET /api/usage` answers (task 0188).
  *
  * Mirrors `UsageResponse` in `packages/prices-api/src/portal/usage/mod.rs`, and
  * hand-written for the same reason every type above is: the portal's routes are
@@ -500,7 +501,7 @@ export interface PortalUsage {
 }
 
 /**
- * `GET /api/api/usage` — the signed-in caller's usage against quota.
+ * `GET /api/usage` — the signed-in caller's usage against quota.
  *
  * Read-only by construction on the backend (it can never create, attach or
  * delete a key), which is why — like `fetchKey` above, and for the same reason

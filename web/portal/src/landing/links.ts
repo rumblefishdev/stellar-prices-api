@@ -8,15 +8,21 @@
  * the links exist and point at the one artefact that is actually served today,
  * the OpenAPI document. When 0195 lands its route, this file is the diff.
  *
- * All same-origin and root-relative. `/api-docs-json` is on task 0184's
- * distribution behind the same CloudFront behaviour as `/v1`, so it is not a
- * third-party request and does not widen the CSP.
+ * All same-origin and root-relative — and all under `/api/`, because on the
+ * shared host the root belongs to the block explorer (task 0194): a link to
+ * `/api-docs-json` there opens the explorer's page, not the document.
  */
 
 import { ROUTER_BASENAME } from '../base-path';
 
-/** The OpenAPI document. Real, served, and the only docs artefact today. */
-export const OPENAPI_JSON = '/api-docs-json';
+/**
+ * The OpenAPI document. Real, served, and the only docs artefact today.
+ *
+ * The alias under the portal prefix (`portal::OPENAPI_PATH` in the API), not
+ * the root `/api-docs-json` that partners and the spec's `servers` block use —
+ * the two are the same bytes from the same handler.
+ */
+export const OPENAPI_JSON = '/api/api-docs-json';
 
 /**
  * The API reference — today the raw OpenAPI document, because that is the

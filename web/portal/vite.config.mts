@@ -39,6 +39,22 @@ const BASE_PATH = '/api/';
  * the same shape this proxy forwards, whereas execute-api serves them under
  * `/{stage}` and would need a rewrite here that production does not perform.
  */
+/**
+ * The backend's top-level segments under `/api/`. The bundle shares the prefix
+ * (task 0194), so a plain `/api` proxy rule would swallow Vite's own
+ * `/api/@vite/…` and `/api/src/…` requests; instead the backend is enumerated
+ * as one regex key. Adding a backend route at a NEW top-level segment means
+ * adding it here — a missing one is a Vite 404 page, loud and local.
+ */
+const PORTAL_BACKEND_SEGMENTS = [
+  'auth',
+  'key',
+  'usage',
+  'config',
+  'api-docs-json',
+];
+const PORTAL_BACKEND_PROXY = `^/api/(${PORTAL_BACKEND_SEGMENTS.join('|')})(/|$)`;
+
 const PROXIED_PATHS = [
   // The portal's own backend (task 0183's gate, keyless by design). Covers
   // task 0186's `/auth/*` by prefix, which matters for more than reachability:
@@ -52,7 +68,10 @@ const PROXIED_PATHS = [
   // `PORTAL_OAUTH_SECRET_FILE`), not at the CloudFront distribution — production
   // runs with the portal closed, so proxying there gets an empty 404 from the
   // gate. See docs/runbooks/portal-oauth-deploy-prep.md § 4.
-  '/api/api',
+  //
+  // A regex key (Vite treats keys starting with `^` as RegExp) — see
+  // `PORTAL_BACKEND_SEGMENTS`.
+  PORTAL_BACKEND_PROXY,
   // The data routes, for when a portal page needs to show a real API response.
   '/v1',
   '/health',
@@ -116,7 +135,7 @@ export default defineConfig(({ mode }) => {
             // Injected SERVER-SIDE, per path, and only where a key is actually
             // required. The portal's own routes are keyless on purpose (a
             // visitor signing in to get a key does not have one yet), so
-            // sending a key to `/api/api/*` in dev would test a
+            // sending a key to `/api/*` in dev would test a
             // configuration production never runs.
             ...(devApiKey && KEYED_PATHS.includes(path)
               ? { headers: { 'x-api-key': devApiKey } }

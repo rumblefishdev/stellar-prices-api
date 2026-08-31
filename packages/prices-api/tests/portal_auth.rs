@@ -46,7 +46,7 @@ use prices_api::portal::keys::gateway::Gateway;
 // ---------------------------------------------------------------------------
 
 const SIGNING_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const REDIRECT_URI: &str = "https://portal.example/api/api/auth/callback";
+const REDIRECT_URI: &str = "https://portal.example/api/auth/callback";
 
 fn oauth_secret() -> OauthSecret {
     OauthSecret::parse(
@@ -399,7 +399,7 @@ async fn login_sets_a_short_lived_httponly_secure_lax_pending_cookie() {
         cookie.contains(&format!("Max-Age={}", state_token::PENDING_TTL_SECS)),
         "{cookie}"
     );
-    assert!(cookie.contains("Path=/api/api/auth/"), "{cookie}");
+    assert!(cookie.contains("Path=/api/auth/"), "{cookie}");
     assert_eq!(
         reply.headers.get(header::CACHE_CONTROL).unwrap(),
         "no-store"

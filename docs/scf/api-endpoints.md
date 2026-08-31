@@ -27,9 +27,9 @@ without it serves nothing.
 | `GET /v1/oracles/{asset_identifier}`      | `x-api-key`   | 60 s              |
 | `GET /v1/backfill/status`                 | `x-api-key`   | 60 s              |
 | `POST /v1/prices/batch`                   | `x-api-key`   | uncached          |
-| `GET /api/api/{proxy+}`                   | Anonymous²    | uncached          |
-| `POST /api/api/{proxy+}`                  | Anonymous²    | uncached          |
-| `DELETE /api/api/{proxy+}`                | Anonymous²    | uncached          |
+| `GET /api/{proxy+}`                       | Anonymous²    | uncached          |
+| `POST /api/{proxy+}`                      | Anonymous²    | uncached          |
+| `DELETE /api/{proxy+}`                    | Anonymous²    | uncached          |
 
 ¹ Gateway TTL. The handler sends `max-age=300` — see **Cache** below for why the
 two differ.
@@ -38,7 +38,7 @@ two differ.
 visitor signing in to obtain a key does not have one — the same argument that
 makes `/api-docs-json` anonymous. It is **not** open: while `PORTAL_ENABLED` is
 `false`, every path under it returns an empty `404`, byte-identical to a path
-that was never deployed (task 0183). `GET /api/api/config` is the one
+that was never deployed (task 0183). `GET /api/config` is the one
 exception and answers `{"enabled": false}` in both states. Deliberately absent
 from the OpenAPI document — the portal describes itself to its own bundle, not
 to integrators.
@@ -88,7 +88,7 @@ rather than copying it.
 > redirect, CloudFront access logs, and `Cache-Control` on the uploaded objects
 > — so `/api` answers `403 AccessDenied` today rather than redirecting.
 > The gateway is a fourth case: it currently maps the portal as
-> `ANY /api/api/{proxy}` and `.../{proxy}/{sub}` with **no throttle**, an
+> `ANY /api/{proxy}` and `.../{proxy}/{sub}` with **no throttle**, an
 > intermediate state left by the 2026-08-14 deploy attempt (see task 0184).
 > Moving it to the `{proxy+}` above means replacing a path-parameter resource,
 > which API Gateway will not do in one update — deploy once with the portal
@@ -106,7 +106,7 @@ order is part of the configuration, not a presentation choice:
 
 | Path pattern     | Origin      | Notes                            |
 | ---------------- | ----------- | -------------------------------- |
-| `/api/api/*`     | API Gateway | must precede the row below       |
+| `/api/*`         | API Gateway | must precede the row below       |
 | `/api/*`         | S3          | the portal bundle                |
 | `/v1/*`          | API Gateway | data routes                      |
 | `/api-docs-json` | API Gateway | root-level, **not** under `/v1`  |
@@ -119,7 +119,7 @@ frontend adds two rows and invents nothing.
 
 That ordering is no longer a hand-checked property: `openapi:verify-routes`
 takes the first pattern that matches a portal backend path out of the
-synthesized distribution and fails CI unless it is `/api/api/*` pointing
+synthesized distribution and fails CI unless it is `/api/*` pointing
 at the execute-api origin. The same check asserts the prefix is identical in the
 handler (`PORTAL_API_PREFIX`), in the CDK routing table (`PORTAL_BACKEND`) and
 in the script itself, so moving it in one place cannot leave the other two
@@ -132,11 +132,11 @@ and S3 would answer `403 AccessDenied` XML — it grants `s3:GetObject` and not
 viewer-request function redirects the bare prefixes to their trailing-slash
 form, which is what a reviewer trimming the documented URL should get:
 
-| Request    | Result                                        |
-| ---------- | --------------------------------------------- |
-| `/`        | `302` → `/api/` → the portal page             |
-| `/api`     | `302` → `/api/` → the portal page             |
-| `/api/api` | `302` → `/api/api/` → the gateway, **not** S3 |
+| Request | Result                                    |
+| ------- | ----------------------------------------- |
+| `/`     | `302` → `/api/` → the portal page         |
+| `/api`  | `302` → `/api/` → the portal page         |
+| `/api`  | `302` → `/api/` → the gateway, **not** S3 |
 
 The targets are a fixed list rather than a rule like "any path with no file
 extension". That generalisation was written first and rejected twice over: it
@@ -147,7 +147,7 @@ would also fight task 0185's router, rewriting `/api/keys` to a
 trailing-slash form in the address bar that task 0195's SPA fallback would then
 have to undo. A new frontend adds its prefix to the list.
 
-`/api/api/` reaches API Gateway but matches no method on the resource, so
+`/api/` reaches API Gateway but matches no method on the resource, so
 it answers `403 {"message":"Missing Authentication Token"}` — the gateway's
 standard response for an unmapped path, the same as `/v1`. It is deliberately
 **not** the empty `404` described below: that applies to paths _under_ the
