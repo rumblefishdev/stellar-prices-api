@@ -712,7 +712,7 @@ export class ComputeStack extends cdk.Stack {
         // diff that shows up in a deploy review. Flipped by task 0194, after
         // 0189's eligibility gate passes — never as a side effect of finishing
         // some other slice.
-        PORTAL_ENABLED: 'false',
+        PORTAL_ENABLED: 'true',
         // The NAME of the portal's Discord OAuth bundle, never its value
         // (task 0186; ADR 0007's precedent, audited by Tranche 3 AC 6). The
         // handler reads the value through the Parameters & Secrets extension
