@@ -4,7 +4,7 @@ title: "Publish the real peg rate in price_usd_series instead of a hardcoded $1"
 type: FEATURE
 status: active
 related_adr: []
-related_tasks: ["0165", "0167", "0154", "0151", "0150", "0172", "0196", "0173", "0170", "0246"]
+related_tasks: ["0165", "0167", "0154", "0151", "0150", "0172", "0196", "0173", "0170", "0246", "0247"]
 tags:
   ["priority-medium", "effort-small", "clickhouse", "read-surface", "be-interop", "data-correctness", "milestone-M2"]
 links:
@@ -324,7 +324,7 @@ a ~7× error on 102 live pools. Fix the order-of-magnitude problem first.
   fell 12%" are the same candle. Breaking the circle needs an anchor OUTSIDE the
   USDC-denominated system — an external historical price feed, or an oracle
   backfill (Reflector's does not reach back). File that if deep history in real
-  dollars is ever wanted; the candles cannot supply it.
+  dollars is ever wanted; the candles cannot supply it — **filed as [[0247]]**.
 
 
 ---
@@ -488,6 +488,9 @@ New tests:
 ## Future Work
 
 - [[0246]] — reconcile `/ohlcv`'s peg series with this view's resolution rule.
+- [[0247]] — fill the pre-2026-03-11 window from an external USD anchor. Does not
+  change this task's fallback, which stays correct either way; it shrinks the
+  span the fallback covers.
 
 ## Remaining before this task can close
 
