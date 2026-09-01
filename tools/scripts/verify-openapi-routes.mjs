@@ -421,17 +421,123 @@ if (!/^\/[^/]+$/.test(String(winnerOrigin.OriginPath ?? ''))) {
 // that is missing, or listed after the catch-all, sends that path to the API —
 // a loud JSON 404 rather than the old silent 200-of-HTML, but still a broken
 // page. Probed the way CloudFront does: first match wins, and it must be S3.
-// The list mirrors `PORTAL_BUNDLE_PATHS` in portal-hosting-stack.ts; the SPA
-// routes mirror `PORTAL_APP_ROUTES` there and `links.ts` in the app.
+//
+// The SPA's routes are READ, not listed. They live in two places that must
+// agree — `PORTAL_APP_ROUTES` in portal-hosting-stack.ts, which generates both
+// the carve-out rows and the `DirectoryIndexFn` allow-list, and the app's own
+// router in web/portal/src/app/app.tsx, which decides what a deep link renders
+// — and this check used to be a third hand-written copy of them. A fourth
+// route added to both then shipped with a row and a rewrite CI never probed,
+// while the claim "a reorder cannot pass CI" stood (PR review of task 0194).
+// Same technique as `PORTAL_API_PREFIX` above: the source is the artifact.
+const hostingStackPath = join(
+  repoRoot,
+  'infra',
+  'src',
+  'lib',
+  'stacks',
+  'portal-hosting-stack.ts',
+);
+const appRouterPath = join(repoRoot, 'web', 'portal', 'src', 'app', 'app.tsx');
+function readSource(path) {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (err) {
+    fail(`error: cannot read ${path}\n  ${err.message}`);
+  }
+}
+
+const stackRoutesLiteral =
+  /const PORTAL_APP_ROUTES = \[([^\]]*)\] as const;/.exec(
+    readSource(hostingStackPath),
+  )?.[1];
+if (stackRoutesLiteral === undefined) {
+  fail(
+    `error: could not find \`const PORTAL_APP_ROUTES = [...] as const\` in ${hostingStackPath}.`,
+    '  → this check reads the list to probe every SPA route the stack carves ' +
+      'out. Restore the constant, or update the pattern here.',
+  );
+}
+const stackRoutes = [...stackRoutesLiteral.matchAll(/'([^']+)'/g)]
+  .map((m) => m[1])
+  .sort();
+
+// `<Route path="/login" …>` — the root (`/`) and the catch-all (`*`) are not
+// pages with a URL of their own and are excluded by the character class.
+const appRoutes = [
+  ...readSource(appRouterPath).matchAll(/<Route path="\/([^"*]+)"/g),
+]
+  .map((m) => m[1])
+  .sort();
+if (appRoutes.length === 0) {
+  fail(
+    `error: found no \`<Route path="/…">\` in ${appRouterPath}.`,
+    '  → this check reads the router to know which deep links must be carved ' +
+      'out to S3. Update the pattern here if the router moved or changed shape.',
+  );
+}
+if (JSON.stringify(stackRoutes) !== JSON.stringify(appRoutes)) {
+  fail(
+    'error: the SPA routes disagree between the app and the hosting stack:',
+    `  ${appRouterPath}: ${appRoutes.join(', ')}`,
+    `  ${hostingStackPath} (PORTAL_APP_ROUTES): ${stackRoutes.join(', ')}`,
+    '  → a route in the app and not in the stack is a deep link that reaches ' +
+      'the API and 404s on a hard refresh; one in the stack and not in the app ' +
+      'is a carve-out for a page that does not exist. Add it to both.',
+  );
+}
+
+// The rewrite half: `DirectoryIndexFn` maps each route (both slash forms) to
+// `/api/index.html` on VIEWER_REQUEST. Read from the synthesized function
+// code, which is what CloudFront will run — a route with a row and no rewrite
+// is a `403` from S3 masking the missing key.
+const cfFunctions = Object.values(portalTemplate.Resources ?? {}).filter(
+  (r) => r.Type === 'AWS::CloudFront::Function',
+);
+const functionCode = cfFunctions
+  .map((f) => f.Properties?.FunctionCode)
+  .map((code) => (typeof code === 'string' ? code : JSON.stringify(code)))
+  .find((code) => code.includes('var APP_ROUTES = '));
+const appRoutesLiteral = /var APP_ROUTES = (\{[\s\S]*?\});/.exec(
+  functionCode ?? '',
+)?.[1];
+if (appRoutesLiteral === undefined) {
+  fail(
+    'error: no AWS::CloudFront::Function in the PortalHosting template carries ' +
+      '`var APP_ROUTES = {...};`.',
+    '  → this check reads the rewrite table from the synthesized function ' +
+      'code. Restore it in `DirectoryIndexFn` in ' +
+      'infra/src/lib/stacks/portal-hosting-stack.ts, or update the pattern here.',
+  );
+}
+let rewriteTable;
+try {
+  rewriteTable = JSON.parse(appRoutesLiteral);
+} catch (err) {
+  fail(
+    `error: the \`APP_ROUTES\` table in the synthesized DirectoryIndexFn is not JSON: ${err.message}`,
+  );
+}
+for (const route of stackRoutes) {
+  for (const path of [`/api/${route}`, `/api/${route}/`]) {
+    if (rewriteTable[path] !== '/api/index.html') {
+      fail(
+        `error: ${path} is not rewritten to /api/index.html by DirectoryIndexFn ` +
+          `(found ${JSON.stringify(rewriteTable[path] ?? null)}).`,
+        '  → a hard refresh on that page finds no S3 key and answers `403`. ' +
+          'The table is generated from `PORTAL_APP_ROUTES` in ' +
+          'infra/src/lib/stacks/portal-hosting-stack.ts; re-synth, or fix the generator.',
+      );
+    }
+  }
+}
+
 const BUNDLE_PROBES = [
   '/api/',
   '/api/index.html',
   '/api/favicon.ico',
   '/api/assets/index-abc123.js',
-  ...['login', 'dashboard', 'quick-start'].flatMap((r) => [
-    `/api/${r}`,
-    `/api/${r}/`,
-  ]),
+  ...stackRoutes.flatMap((r) => [`/api/${r}`, `/api/${r}/`]),
 ];
 for (const bundleProbe of BUNDLE_PROBES) {
   const first = behaviours.find((b) =>

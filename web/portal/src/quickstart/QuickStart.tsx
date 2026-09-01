@@ -577,8 +577,14 @@ const FIRST_REQUEST_TITLE: Record<FirstRequestLang, string> = {
   go: 'go',
 };
 
-/** The 200 response, and what each field means — the two columns of the frame. */
-const RESPONSE_FIELDS: readonly {
+/**
+ * The 200 response, and what each field means — the two columns of the frame.
+ *
+ * Exported for `QuickStart.spec.tsx`, which ties `value` to `raw` the way it
+ * ties every snippet's `view` to its `text`, and parses the assembled
+ * `RESPONSE_TEXT` as JSON — the two properties this table promises a reader.
+ */
+export const RESPONSE_FIELDS: readonly {
   key: string;
   value: ReactNode;
   raw: string;
@@ -629,21 +635,42 @@ const RESPONSE_FIELDS: readonly {
     meaning: '% change over the last 24 hours',
   },
   {
+    // All three venues spelled out, in `value` and `raw` alike. An earlier
+    // version elided two of them as `{…}` — fine on screen, but `raw` feeds
+    // the Copy button, and "Copy example response" then wrote a block no JSON
+    // parser accepts (task 0194's PR review). The per-venue volumes sum to
+    // `volume_24h_usd` above, as the real response's do.
     key: 'sources',
     value: (
       <>
-        {'{ '}
+        {'{\n    '}
         <Tok c={KEY}>&quot;aquarius&quot;</Tok>: {'{ '}
         <Tok c={KEY}>&quot;price&quot;</Tok>:{' '}
         <Tok c={STR}>&quot;0.1774&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;volume_24h&quot;</Tok>:{' '}
         <Tok c={STR}>&quot;277436.70&quot;</Tok>
-        {' }, '}
-        <Tok c={KEY}>&quot;sdex&quot;</Tok>: {'{…}, '}
-        <Tok c={KEY}>&quot;soroswap&quot;</Tok>: {'{…} }'}
+        {' },\n    '}
+        <Tok c={KEY}>&quot;sdex&quot;</Tok>: {'{ '}
+        <Tok c={KEY}>&quot;price&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;0.1773&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;volume_24h&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;98211.53&quot;</Tok>
+        {' },\n    '}
+        <Tok c={KEY}>&quot;soroswap&quot;</Tok>: {'{ '}
+        <Tok c={KEY}>&quot;price&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;0.1775&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;volume_24h&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;8088.17&quot;</Tok>
+        {' }\n  }'}
       </>
     ),
-    raw: '{ "aquarius": { "price": "0.1774", "volume_24h": "277436.70" }, "sdex": { … }, "soroswap": { … } }',
+    raw: [
+      '{',
+      '    "aquarius": { "price": "0.1774", "volume_24h": "277436.70" },',
+      '    "sdex": { "price": "0.1773", "volume_24h": "98211.53" },',
+      '    "soroswap": { "price": "0.1775", "volume_24h": "8088.17" }',
+      '  }',
+    ].join('\n'),
     dot: STR,
     meaning: 'Per-venue price and 24h volume: aquarius, sdex, soroswap',
   },
@@ -656,7 +683,7 @@ const RESPONSE_FIELDS: readonly {
   },
 ];
 
-const RESPONSE_TEXT = `{\n${RESPONSE_FIELDS.map(
+export const RESPONSE_TEXT = `{\n${RESPONSE_FIELDS.map(
   (f, i) =>
     `  "${f.key}": ${f.raw}${i < RESPONSE_FIELDS.length - 1 ? ',' : ''}`,
 ).join('\n')}\n}`;
