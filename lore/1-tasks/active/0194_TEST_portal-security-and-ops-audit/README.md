@@ -150,6 +150,17 @@ history:
     status: active
     who: akot
     note: >
+      Check 3 re-run a third time and still PASS — 14 entries vs 6, all four
+      `/api/{proxy+}` methods byte-identical in both arms of the
+      `cacheEnabled` branch. It needed re-running because `addCorsPreflight`
+      added `OPTIONS` to the wholesale-assigned array on 08-31, after the
+      08-28 reading: the failure mode this check exists for, arriving from
+      this task's own commit. Summary, H1, the "why an audit" rationale and
+      the sign-off-host section amended where decision A had made them false.
+  - date: "2026-09-01"
+    status: active
+    who: akot
+    note: >
       Retitled and given a "What this task actually shipped" section, because
       the title said `TEST` while seven commits carried code and three of them
       changed the portal's architecture: the flip (`PORTAL_ENABLED` true, in
@@ -164,7 +175,7 @@ history:
       did.
 ---
 
-# Portal security and ops audit
+# Portal security and ops audit — and the three changes it forced
 
 ## Summary
 
@@ -172,9 +183,24 @@ history:
 final assembled configuration is correct — not that each slice intended it to
 be.*
 
-Everything here is already required by an earlier slice. What is new is checking
-the composition, because three of these are properties of the whole array or the
-whole policy and are invisible from inside any one task.
+The story still holds and it is still what the checks answer. What the summary
+below promised about *scope* did not survive contact with the measurements, and
+the sentence is kept with its correction rather than quietly rewritten.
+
+⚠️ **Amended 2026-09-01: "everything here is already required by an earlier
+slice" is false.** It was true of the twelve checks and false of the task. The
+audit measured three things that could not pass as built, and Adam's answer in
+each case was to change the portal rather than to file a finding: the portal
+was **opened** (the flip is this task's by design), the URL layout was
+**flattened** to `/api/`, and the API was given **its own hostname** with CORS.
+No earlier slice required any of those — two of them supersede properties
+earlier slices were built on. A fourth, the tag-on-create IAM grant, was
+required by [[0187]] and had never worked. The full index is the next section;
+read it before the title.
+
+Original — everything here is already required by an earlier slice. What is new
+is checking the composition, because three of these are properties of the whole
+array or the whole policy and are invisible from inside any one task.
 
 ## What this task actually shipped — read this before the title
 
@@ -270,6 +296,21 @@ Three failure modes are structural, not per-slice:
   key-reveal response would be served from the CDN to the next caller. Neither
   layer is checkable from the other.
 
+⚠️ **Amended 2026-08-31 (decision A): the third one no longer exists, and the
+first two were right.** There is one caching layer in front of the portal's
+routes now, not two — the backend answers on its own hostname with no
+CloudFront between it and the browser, so cookie-stripping and CDN-cached key
+reveals are both out of reach by construction. What replaced that failure mode
+is CORS: a header that is right on our API and wrong at the edge is invisible
+from either side in exactly the same way, which is why check 2 became a CORS
+check rather than being dropped.
+
+The first two held up, and grew a fourth member: `OPTIONS` joined
+`portalSettings` with the preflight, so the two-arm `methodSettings` diff check
+counts 14 against 6 rather than 13 against 5. That is the shape this section
+predicted — a slice adding a route to a wholesale-assigned array — arriving one
+more time, from this task itself.
+
 ## The host this task closes against
 
 **`https://sorobanscan.rumblefish.dev/api/` — not the distribution domain.**
@@ -281,13 +322,26 @@ behaviour `/api/*`. `dojr4epgxo2qp.cloudfront.net` — the distribution
 where the configuration was verified, and it is **not** where this task signs
 off.
 
-The consequence, stated so it is not discovered later: three of the twelve
+⚠️ **Amended 2026-08-31 by decision A, and the sign-off host is now two
+hosts.** The *page* is still served by `EA2TLS5SS5M87` at
+`https://sorobanscan.rumblefish.dev/api/` and that is still where this task
+signs off. Every *call the page makes* now goes to
+`prices-api.sorobanscan.rumblefish.dev` — a REGIONAL custom domain on our own
+REST API — cross-origin and same-site. So the paragraph below is right about
+which host the visitor types and wrong about which distribution answers the
+portal's routes: none does. See "The backend on its own host".
+
+The consequence as it was stated, and how it resolved: three of the twelve
 checks are properties of *the distribution that serves the portal*, so they must
 be re-run against `EA2TLS5SS5M87` before this task closes, and the assembled
 configuration they check does not exist there yet. That work is [[0195]]'s and
 it lives partly in the `soroban-block-explorer` repo — see **Hosting
 preconditions** below. This task does not do it and does not sign off without
-it.
+it. **It resolved by removing the dependency rather than by waiting for it:**
+with the backend on its own hostname, check 1's `no-store` is measured where the
+browser reads it, check 2 became a CORS check on our own API, and check 5 is
+not applicable — none of the three needs anything from the Explorer repo, and
+[[0195]] is down to `enableApiSpaBasicAuth: false`.
 
 ## Checks
 
@@ -393,7 +447,18 @@ on 2026-08-28:
       reaches the origin signed in. Today that distribution has **no origin
       pointing at our API at all**, `/api/*` is `GET`/`HEAD` only and sits
       behind the `production-soroban-explorer-basic-auth` function
-- [x] ✅ **2026-08-28, RE-RUN after the prefix deploy: PASS on the new paths.**
+- [x] ✅ **2026-09-01, RE-RUN a third time — after the preflight, which this
+      task itself added to the array.** Synth both ways on this branch: **14
+      entries vs 6**, and all **four** `/api/{proxy+}` entries — `GET`, `POST`,
+      `DELETE` and now `OPTIONS` — byte-identical in both arms
+      (`CachingEnabled: false`, rate 10, burst 40). The `ON ONLY` set is still
+      exactly the cache TTL table plus `/api-docs-json`, none of which carries
+      a portal route. Worth stating why this re-run happened at all: the
+      08-28 reading was taken before decision A, and `addCorsPreflight` added
+      a method to the wholesale-assigned array three days later — the exact
+      failure this check exists for, arriving from the audit's own commit.
+      A PASS measured before the last change to the thing it measures is not
+      a PASS. Earlier reading — **2026-08-28, RE-RUN after the prefix deploy: PASS on the new paths.**
       Synth both ways at `develop`: 13 entries vs 5, and all three
       `/api/api/{proxy+}` entries byte-identical in both arms
       (`CachingEnabled: false`, 10/40). Nothing portal-shaped is missing from
