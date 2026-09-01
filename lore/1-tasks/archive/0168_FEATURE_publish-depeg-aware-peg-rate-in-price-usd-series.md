@@ -817,6 +817,20 @@ Compare the elapsed time against the same query on the captured old definition.
 A material regression is not a correctness problem — push the peg set onto the
 primary key as `views.sql` describes, or materialise per [[0150]].
 
+## ✅ MEASURED 2026-09-01 — the join is immaterial
+
+The 30-day count on the deployed view: **140 ms, 3.26 M rows read, 129 MiB**
+(`system.query_log`, 09:19:52, user `default`). `usd_rate` is ~87k rows, i.e.
+**2.7% of the rows read** — the join side is noise against the existing FINAL
+scan, as estimated. Nothing filed; re-check if [[0154]] starts writing
+`pivot`/`pivot2` rows for many identities.
+
+⚠️ **Read `query_log` by `event_time` AND `query`, not by `LIKE` alone.** The
+first attempt returned three rows spread 17× apart (140 ms / 470 ms / 1,378 ms)
+and looked like wild variance; they were three unrelated queries — a `dev_shared`
+probe from 2026-08-11 and a `WITH issuers AS (… accounts …)` query from
+2026-08-06 that matched the pattern by accident. Only one row was this view.
+
 ⚠️ **Measure the `usd_rate` side specifically, not just the total.** Code review
 (2026-09-01) confirmed by `EXPLAIN` that only `method = 'oracle'` reaches
 `ReadFromMergeTree (usd_rate)` — **no `timestamp` predicate is pushed down**. So
