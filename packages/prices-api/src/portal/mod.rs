@@ -48,29 +48,56 @@ pub mod keys;
 pub mod period;
 pub mod usage;
 
+use std::time::Duration;
+
 use axum::extract::{Request, State};
-use axum::http::StatusCode;
+use axum::http::header::{ACCEPT, CONTENT_TYPE};
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
+use tower_http::cors::{AllowCredentials, AllowOrigin, CorsLayer};
 
 use crate::common::cache_control;
 use crate::config::AppConfig;
 
 /// Path prefix owned by the portal's backend. Everything under it is gated.
 ///
-/// Both halves are load-bearing and are fixed by [0184]'s CloudFront behaviour
-/// table: `<app>/*` is an app's bundle and `<app>/api/*` is its backend, with
-/// the `/api/*` behaviour ordered **first**. The OAuth redirect URI registered
-/// with Discord ([0186]) must live **under** this prefix — it is a concrete
-/// callback path such as `/api/api/auth/callback`, and Discord matches
+/// `/api/` is the whole self-service portal on the shared host (task 0194,
+/// 2026-08-31): the bundle **and** the backend share this one prefix, with no
+/// sub-prefix for either. The CloudFront table makes the split, the other way
+/// round from how it used to: a short fixed list of bundle paths
+/// (`/api/`, `index.html`, `favicon.ico`, `assets/*`, the SPA routes) is
+/// carved out to S3, and everything else under `/api/*` reaches this Lambda.
+/// So from in here the prefix is simply ours — a bundle path that arrives
+/// (it should not) is a plain `404`, the same as any unrouted path.
+///
+/// Replaces [0161]'s `<app>/*` + `<app>/api/*` convention, which produced
+/// `/api/api/…` for an app that is itself called "api". The OAuth redirect URI
+/// registered with Discord ([0186]) must live **under** this prefix — it is a
+/// concrete callback path such as `/api/auth/callback`, and Discord matches
 /// the whole URI, so registering the bare prefix would fail at callback time.
-pub const PORTAL_API_PREFIX: &str = "/api/api/";
+pub const PORTAL_API_PREFIX: &str = "/api/";
 
 /// The one portal route that answers while the portal is closed.
-pub const CONFIG_PATH: &str = "/api/api/config";
+pub const CONFIG_PATH: &str = "/api/config";
+
+/// The OpenAPI document, under the portal prefix.
+///
+/// The same bytes as `GET /api-docs-json` (task 0124) — `lib.rs` mounts one
+/// handler at both paths. This alias exists because on the shared host the
+/// root belongs to another application, so the portal's "API reference" link
+/// has to stay under `/api/` to reach us at all. Exempt from the gate like
+/// [`CONFIG_PATH`] and from the API-key check like the root copy: an API
+/// description is public documentation, and hiding it while the portal is
+/// closed would serve nobody.
+///
+/// Not registered in the OpenAPI document itself — it is an alias of the
+/// route that is, and `tools/scripts/verify-openapi-routes.mjs` refuses any
+/// documented path under the prefix.
+pub const OPENAPI_PATH: &str = "/api/api-docs-json";
 
 /// What the portal frontend needs before it can render anything.
 ///
@@ -182,7 +209,8 @@ pub fn apply(router: Router, config: &AppConfig) -> Router {
                 config.portal_keys.clone(),
                 Some(usage_cache.clone()),
                 config.portal_eligibility.clone(),
-            )),
+            ))
+            .with_web_origin(config.portal_web_origin.as_deref()),
     );
 
     // The key reveal (task 0187, read-only since task 0189), merged the same
@@ -194,15 +222,79 @@ pub fn apply(router: Router, config: &AppConfig) -> Router {
     // handle lets a successful reveal evict a cached "no key" (task 0188).
     let api_keys = keys::routes(
         keys::KeysState::new(config.portal_oauth.clone(), config.portal_keys.clone())
-            .with_usage_cache(usage_cache),
+            .with_usage_cache(usage_cache)
+            .with_web_origin(config.portal_web_origin.as_deref()),
     );
 
-    router
+    // The portal's routes as one group, so the CORS layer covers exactly them:
+    // the data routes and the OpenAPI copies stay outside it. The gate wraps
+    // the whole router as before and runs FIRST (outermost), so a closed
+    // portal answers a preflight with the same empty `404` as anything else
+    // under the prefix — a browser then reports a CORS failure, which is the
+    // honest reading of a door that is not open.
+    let portal = Router::new()
         .merge(routes)
         .merge(sign_in)
         .merge(api_keys)
         .merge(usage)
+        .layer(cors_layer(config.portal_web_origin.as_deref()));
+
+    router
+        .merge(portal)
         .layer(axum::middleware::from_fn_with_state(gate, gate_portal))
+}
+
+/// The CORS answer for the portal's routes: one origin, with credentials.
+///
+/// The bundle is served from another application's distribution
+/// (`AppConfig::portal_web_origin`) and calls this backend on a host of its
+/// own — cross-origin, same-site (task 0194). Same-site is what lets the
+/// `SameSite=Lax` session cookie ride on those calls at all; this layer is
+/// what lets the page read the answers. Three properties, each load-bearing:
+///
+/// - **Exactly one origin**, never a reflection of the request's. A
+///   credentialed answer cannot say `*`, and reflecting whatever `Origin`
+///   arrives would hand every site on the internet a readable, cookie-bearing
+///   `GET /api/key`. With nothing configured the allow-list is EMPTY: no
+///   `Access-Control-Allow-Origin` on any answer, which is the same-origin
+///   deployment's correct behaviour and what every existing test sees.
+/// - **`Access-Control-Allow-Credentials: true`**, because the session is a
+///   cookie and a `fetch` with `credentials: 'include'` is refused by the
+///   browser without it.
+/// - **The marker header is allowed** (`keys::PORTAL_REQUEST_HEADER`), or
+///   the revoke's preflight fails and the one write the portal has becomes
+///   unreachable — silently, from this side.
+///
+/// In production the preflight itself is answered by API Gateway's MOCK
+/// (`addCorsPreflight` in `api-gateway-stack.ts`, same origin, same
+/// headers, same `max-age`) and never reaches this code; this layer's job
+/// there is the headers on the actual responses. Locally, with `serve` and a
+/// bundle built for a different port, it answers both — one configuration,
+/// two callers.
+pub(crate) fn cors_layer(web_origin: Option<&str>) -> CorsLayer {
+    let Some(ours) = web_origin.and_then(|o| HeaderValue::from_str(o).ok()) else {
+        // Nothing allowed, nothing emitted: an empty list answers no origin.
+        return CorsLayer::new().allow_origin(AllowOrigin::list([]));
+    };
+    // `list`, not `exact`: `exact` writes its value on EVERY answer and leaves
+    // the comparison to the browser, which is correct for the browser and
+    // wrong for this API's tests and its logs — an answer to `evil.example`
+    // would carry our origin as if it had been granted. `list` compares, and
+    // so does the credentials predicate, so both headers appear together or
+    // not at all.
+    let granted = ours.clone();
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list([ours]))
+        .allow_credentials(AllowCredentials::predicate(move |origin, _| {
+            origin == granted
+        }))
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers([
+            CONTENT_TYPE,
+            ACCEPT,
+            HeaderName::from_static(keys::PORTAL_REQUEST_HEADER.0),
+        ])
+        .max_age(Duration::from_secs(3600))
 }
 
 /// Report whether the portal is open. Always answers, in both states — it is
@@ -235,10 +327,11 @@ fn is_portal_path(path: &str) -> bool {
 /// Serve portal routes only when the portal is open; otherwise return the same
 /// empty `404` a nonexistent path would.
 ///
-/// [`CONFIG_PATH`] is exempt in both directions — see [`config_handler`].
+/// [`CONFIG_PATH`] and [`OPENAPI_PATH`] are exempt in both directions — see
+/// [`config_handler`] and the note on the latter.
 pub async fn gate_portal(State(gate): State<PortalGate>, req: Request, next: Next) -> Response {
     let path = req.uri().path();
-    if !is_portal_path(path) || path == CONFIG_PATH || gate.enabled {
+    if !is_portal_path(path) || path == CONFIG_PATH || path == OPENAPI_PATH || gate.enabled {
         return next.run(req).await;
     }
     StatusCode::NOT_FOUND.into_response()
@@ -246,16 +339,16 @@ pub async fn gate_portal(State(gate): State<PortalGate>, req: Request, next: Nex
 
 #[cfg(test)]
 mod tests {
-    use super::{CONFIG_PATH, PORTAL_API_PREFIX, is_portal_path};
+    use super::{CONFIG_PATH, OPENAPI_PATH, PORTAL_API_PREFIX, is_portal_path};
 
     #[test]
     fn portal_paths_are_recognised_by_prefix() {
         assert!(is_portal_path(CONFIG_PATH));
-        assert!(is_portal_path("/api/api/auth/login"));
-        assert!(is_portal_path("/api/api/key"));
-        assert!(is_portal_path("/api/api/usage"));
+        assert!(is_portal_path("/api/auth/login"));
+        assert!(is_portal_path("/api/key"));
+        assert!(is_portal_path("/api/usage"));
         // Routes that do not exist yet still match — that is the point.
-        assert!(is_portal_path("/api/api/nothing-here"));
+        assert!(is_portal_path("/api/nothing-here"));
     }
 
     #[test]
@@ -265,21 +358,33 @@ mod tests {
         assert!(!is_portal_path("/v1/prices/batch"));
     }
 
-    /// The bundle lives at `/api/*` and is served by S3, never by this
-    /// Lambda. Gating it here would be gating something that never arrives —
-    /// and worse, would suggest the bundle is protected when it is public.
+    /// The bundle shares the prefix and is carved out at the CDN, so as far
+    /// as this Lambda is concerned those paths are ours too. They should never
+    /// arrive; if one does, the gate treats it like any other unrouted portal
+    /// path — a `404` in both states, never a hint that the bundle is
+    /// protected (it is public).
     #[test]
-    fn the_static_bundle_prefix_is_not_ours() {
-        assert!(!is_portal_path("/api/"));
-        assert!(!is_portal_path("/api/dashboard"));
-        assert!(!is_portal_path("/api/assets/index.js"));
+    fn the_bundle_paths_are_inside_the_prefix() {
+        assert!(is_portal_path("/api/"));
+        assert!(is_portal_path("/api/dashboard"));
+        assert!(is_portal_path("/api/assets/index.js"));
     }
 
-    /// `/api/api` with no trailing slash is not a route we serve, and
+    /// The alias sits under the prefix (so it reaches us on the shared host)
+    /// while the root copy does not — both are served, only one is gated by
+    /// prefix and then exempted by name.
+    #[test]
+    fn the_openapi_alias_is_under_the_prefix_and_the_root_copy_is_not() {
+        assert!(is_portal_path(OPENAPI_PATH));
+        assert!(!is_portal_path("/api-docs-json"));
+        assert!(OPENAPI_PATH.starts_with(PORTAL_API_PREFIX));
+    }
+
+    /// `/api` with no trailing slash is not a route we serve, and
     /// must not be mistaken for one — the prefix carries its slash on purpose.
     #[test]
     fn the_prefix_carries_its_trailing_slash() {
         assert!(PORTAL_API_PREFIX.ends_with('/'));
-        assert!(!is_portal_path("/api/api"));
+        assert!(!is_portal_path("/api"));
     }
 }

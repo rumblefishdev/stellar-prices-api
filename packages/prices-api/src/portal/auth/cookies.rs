@@ -52,13 +52,19 @@ pub const SESSION_COOKIE: &str = "portal_session";
 pub const PENDING_COOKIE: &str = "portal_oauth_pending";
 
 /// Path the session is scoped to: the portal, bundle and backend alike.
+///
+/// It cannot be narrower: since task 0194 the backend has no sub-prefix of its
+/// own under `/api/`, so a `Path` that covers `/api/auth/*` and `/api/key`
+/// necessarily covers `/api/assets/*` too. The cookie is `HttpOnly` and the
+/// bundle is served by S3, which ignores it; the cost is bytes on asset
+/// requests, not exposure.
 pub const SESSION_PATH: &str = "/api/";
 
 /// Path the pending-login cookie is scoped to. Only `/auth/callback` ever reads
 /// it, so it is never attached to anything else — including [0187]'s key reveal,
 /// which is the request on this origin whose response is most worth not
 /// widening.
-pub const PENDING_PATH: &str = "/api/api/auth/";
+pub const PENDING_PATH: &str = "/api/auth/";
 
 /// Read a cookie value out of a request's `Cookie` header(s).
 ///

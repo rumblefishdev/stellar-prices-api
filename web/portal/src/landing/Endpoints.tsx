@@ -14,24 +14,45 @@ import {
 /**
  * "Clean REST API. Full OpenAPI spec." — the route list and one real response.
  *
- * The paths are the design's, not the OpenAPI document's, and that is worth
- * saying out loud: this repo serves `/v1/assets/{id}/price` and friends, while
- * the mock shows `/prices`, `/pools` and `/history`. Reconciling the two is a
- * product decision about the public surface, not a styling one, so this slice
- * renders what the design says and flags the difference rather than quietly
- * inventing a third answer. `links.ts` is where the real spec is linked from.
+ * The paths are the OpenAPI document's, since 2026-08-31 (task 0194, Adam's
+ * call). Until then they were the design's — `/prices`, `/pools`,
+ * `/history` — which this repo never served, and the difference was flagged
+ * here rather than resolved; a visitor who copied the hero's curl got a
+ * `403` for a route that did not exist. The list below is the seven routes
+ * `verify-openapi-routes` asserts the gateway maps, in the document's order,
+ * and the example beside it is the live `/v1/assets/native/price` shape.
+ * `links.ts` is where the spec itself is linked from.
  */
 
-const ENDPOINTS: readonly { path: string; summary: string }[] = [
-  { path: '/prices', summary: 'All asset prices' },
-  { path: '/prices/{asset}', summary: 'Single asset' },
-  { path: '/pools', summary: 'Liquidity pools' },
-  { path: '/pools/{id}/stats', summary: 'Pool statistics' },
-  { path: '/history/{asset}', summary: 'Historical prices' },
-];
+type Method = 'GET' | 'POST';
 
-/** The `Get` pill. One verb, so it is a constant rather than a prop. */
-function MethodBadge() {
+const ENDPOINTS: readonly { method: Method; path: string; summary: string }[] =
+  [
+    { method: 'GET', path: '/v1/assets', summary: 'Assets, by volume' },
+    { method: 'GET', path: '/v1/assets/{id}', summary: 'One asset' },
+    {
+      method: 'GET',
+      path: '/v1/assets/{id}/price',
+      summary: 'Price and 24h stats',
+    },
+    {
+      method: 'GET',
+      path: '/v1/assets/{id}/ohlcv',
+      summary: 'Candles, 1m to 1M',
+    },
+    { method: 'GET', path: '/v1/oracles/{id}', summary: 'Oracle cross-check' },
+    { method: 'GET', path: '/v1/backfill/status', summary: 'History coverage' },
+    {
+      method: 'POST',
+      path: '/v1/prices/batch',
+      summary: 'Many prices at once',
+    },
+  ];
+
+/** The verb pill. `Get` in emerald as the design draws it; `Post` in the
+ *  brand yellow, since the design had no second verb to draw. */
+function MethodBadge({ method }: { method: Method }) {
+  const post = method === 'POST';
   return (
     <Box
       component="span"
@@ -44,14 +65,14 @@ function MethodBadge() {
         // ~3px of arc, where `radius.pill` on a chip that height would be a
         // lozenge with no straight edge at all.
         borderRadius: `${radius.chip}px`,
-        backgroundColor: color.accent.emerald[100],
-        color: color.accent.emerald[900],
+        backgroundColor: post ? color.primary[100] : color.accent.emerald[100],
+        color: post ? color.primary[900] : color.accent.emerald[900],
         fontFamily: font.secondary,
         fontWeight: 700,
         fontSize: '0.75rem',
       }}
     >
-      Get
+      {post ? 'Post' : 'Get'}
     </Box>
   );
 }
@@ -85,7 +106,7 @@ export function Endpoints() {
             spacing={1.5}
             sx={{ m: 0, p: 0, listStyle: 'none', width: '100%' }}
           >
-            {ENDPOINTS.map(({ path, summary }) => (
+            {ENDPOINTS.map(({ method, path, summary }) => (
               <Stack
                 component="li"
                 key={path}
@@ -106,7 +127,7 @@ export function Endpoints() {
                   backgroundColor: cardSurface('sunken'),
                 }}
               >
-                <MethodBadge />
+                <MethodBadge method={method} />
                 <Typography
                   component="code"
                   sx={{
@@ -158,7 +179,6 @@ export function Endpoints() {
 function ExampleResponse() {
   const KEY = color.accent.violet[400];
   const STR = color.accent.emerald[400];
-  const NUM = color.primary[400];
   const tok = (c: string, text: string) => (
     <Box component="span" sx={{ color: c }}>
       {text}
@@ -182,15 +202,26 @@ function ExampleResponse() {
           }}
         >
           <code>
-            {tok(color.text.tertiary, '// GET /prices/XLM-USDC — 200 OK')}
+            {tok(
+              color.text.tertiary,
+              '// GET /v1/assets/native/price — 200 OK',
+            )}
             {'\n{\n'}
-            {tok(KEY, '"asset"')}: {tok(STR, '"XLM-USDC"')},{'\n'}
-            {tok(KEY, '"price"')}: {tok(NUM, '0.0812')},{'\n'}
-            {tok(KEY, '"change_24h"')}: {tok(NUM, '+2.14')},{'\n'}
-            {tok(KEY, '"volume_24h"')}: {tok(NUM, '142891.50')},{'\n'}
-            {tok(KEY, '"liquidity"')}: {tok(NUM, '2400000')},{'\n'}
-            {tok(KEY, '"source"')}: {tok(STR, '"soroswap"')},{'\n'}
-            {tok(KEY, '"updated_at"')}: {tok(STR, '"2026-04-13T14:23:51Z"')}
+            {tok(KEY, '"asset"')}: {tok(STR, '"native"')},{'\n'}
+            {tok(KEY, '"price_usd"')}: {tok(STR, '"0.17735783908195"')},{'\n'}
+            {tok(KEY, '"price_xlm"')}: {tok(STR, '"1"')},{'\n'}
+            {tok(KEY, '"vwap_24h"')}: {tok(STR, '"0.17729898377938"')},{'\n'}
+            {tok(KEY, '"volume_24h_usd"')}:{' '}
+            {tok(STR, '"383736.40419055725213"')},{'\n'}
+            {tok(KEY, '"change_24h_pct"')}: {tok(STR, '"-1.6635"')},{'\n'}
+            {tok(KEY, '"sources"')}: {'{ '}
+            {tok(KEY, '"aquarius"')}: {'{ '}
+            {tok(KEY, '"price"')}: {tok(STR, '"0.1774"')},{' '}
+            {tok(KEY, '"volume_24h"')}: {tok(STR, '"277436.70"')}
+            {' }, '}
+            {tok(KEY, '"sdex"')}: {'{…}, '}
+            {tok(KEY, '"soroswap"')}: {'{…} },\n'}
+            {tok(KEY, '"updated_at"')}: {tok(STR, '"2026-08-31T12:22:00Z"')}
             {'\n}'}
           </code>
         </Box>

@@ -1,5 +1,6 @@
 import Box from '@mui/material/Box';
 import type { ReactNode } from 'react';
+import { PUBLIC_API_BASE_URL } from './links';
 
 import { color, font } from '../theme/tokens';
 import { WindowCard } from './primitives';
@@ -62,41 +63,46 @@ export function Terminal() {
         >
           <code>
             {'$ curl '}
-            {/* Our host, not the frame's `api.soroswap.finance` — the same
-                reasoning as `quickstart/QuickStart.tsx`'s `BASE_URL`: a page
-                that renders a credential must not aim it at another domain.
-                The path stays the design's; task 0233 reconciles it. */}
-            <Tok c={NUM}>
-              https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/prices
-            </Tok>
-            {' XLM-USDC \\\n-H '}
-            <Tok c={KEY}>&quot;x-api-key: sf_live_k8mN2p...&quot;</Tok>
+            {/* The real call, on the API's own hostname — not the frame's
+                `api.soroswap.finance` (a page that renders a credential must
+                not aim it at another domain) and, since 2026-08-31, not the
+                design's `/prices XLM-USDC` either: that path does not exist,
+                and a reader's first request 403'd. Fields and shape are the
+                live `/v1/assets/native/price` answer, decimals as strings. */}
+            <Tok c={NUM}>{PUBLIC_API_BASE_URL}/assets/native/price</Tok>
+            {' \\\n-H '}
+            <Tok c={KEY}>&quot;x-api-key: YOUR_API_KEY&quot;</Tok>
             {'\n\n'}
-            <Tok c={MUTED}># 200 OK — 38ms</Tok>
+            <Tok c={MUTED}># 200 OK — 180ms</Tok>
             {'\n{\n'}
             <Tok c={KEY}>&quot;asset&quot;</Tok>
             {': '}
-            <Tok c={STR}>&quot;XLM-USDC&quot;</Tok>
+            <Tok c={STR}>&quot;native&quot;</Tok>
             {', '}
-            <Tok c={KEY}>&quot;price&quot;</Tok>
+            <Tok c={KEY}>&quot;price_usd&quot;</Tok>
             {': '}
-            <Tok c={NUM}>0.0812</Tok>
+            <Tok c={STR}>&quot;0.1774&quot;</Tok>
             {', '}
-            <Tok c={KEY}>&quot;change_24h&quot;</Tok>
+            <Tok c={KEY}>&quot;vwap_24h&quot;</Tok>
             {': '}
-            <Tok c={NUM}>+2.14</Tok>
+            <Tok c={STR}>&quot;0.1773&quot;</Tok>
             {', '}
-            <Tok c={KEY}>&quot;volume_24h&quot;</Tok>
+            <Tok c={KEY}>&quot;change_24h_pct&quot;</Tok>
             {': '}
-            <Tok c={NUM}>142891.50</Tok>
+            <Tok c={STR}>&quot;-1.66&quot;</Tok>
             {', '}
-            <Tok c={KEY}>&quot;liquidity&quot;</Tok>
+            <Tok c={KEY}>&quot;volume_24h_usd&quot;</Tok>
             {': '}
-            <Tok c={NUM}>2400000</Tok>
+            <Tok c={STR}>&quot;383736.40&quot;</Tok>
             {', '}
-            <Tok c={KEY}>&quot;source&quot;</Tok>
-            {': '}
-            <Tok c={STR}>&quot;soroswap&quot;</Tok>
+            <Tok c={KEY}>&quot;sources&quot;</Tok>
+            {': { '}
+            <Tok c={KEY}>&quot;aquarius&quot;</Tok>
+            {': {…}, '}
+            <Tok c={KEY}>&quot;sdex&quot;</Tok>
+            {': {…}, '}
+            <Tok c={KEY}>&quot;soroswap&quot;</Tok>
+            {': {…} }'}
             {'\n}'}
             {/* The block cursor. A static glyph, not an animation: a blinking
               caret next to a code sample is a distraction on a page whose job

@@ -162,11 +162,36 @@ CREATE TABLE IF NOT EXISTS prices.current_prices (
     market_cap_usd   Decimal(38, 14),
     vwap_24h         Decimal(38, 14),
     sources          String,
-    updated_at       DateTime      DEFAULT now()
+    updated_at       DateTime      DEFAULT now(),
+    method           LowCardinality(String) DEFAULT ''
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (asset_id)
 SETTINGS index_granularity = 8192;
+
+-- Price provenance (task 0178). Extends [[0165]]'s price_usd_series vocabulary
+-- to the tip surface, so a consumer can tell a MEASURED 1.0000 from a filled
+-- one — without it, `price_usd` repeats the `close_usd = 0` mistake of one
+-- value meaning several things.
+--
+--   'traded' — a real aggregate of candles some pricing tier already priced.
+--   'oracle' — a measured depeg-aware rate from prices.usd_rate. USDC ONLY;
+--              see the allowlist warning in current.sql before widening it.
+--   ''       — the "unavailable" SENTINEL, not a vocabulary word: the asset has
+--              no priced candle in the window, so `price_usd` is the 0 sentinel
+--              and no method applies. This column is non-nullable like every
+--              other column on this table, so absence must be a value.
+--   'peg'    — reserved by 0165 and deliberately NOT emitted here. This surface
+--              reads the real rate, so "no measured rate was available" is
+--              never true of it.
+--
+-- ⚠️ Do NOT conflate with prices.usd_rate.method, which is a RATE-provenance
+-- enum ('oracle'/'peg'/'pivot'/'pivot2') answering a different question. 0165
+-- made them distinct deliberately (views.sql:171-174).
+--
+-- Idempotent ALTER for databases created before 0178, mirroring the close_usd
+-- pattern above.
+ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS method LowCardinality(String) DEFAULT '' AFTER updated_at;
 
 ----------------------------------------------------------------------
 -- Per-asset circulating supply (task 0039 supply worker). Its OWN

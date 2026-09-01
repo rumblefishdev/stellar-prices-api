@@ -26,43 +26,41 @@ async fn main() {
 
     let mut config = AppConfig::from_env();
 
-    // Portal sign-in credentials (task 0186), read through the same Parameters &
-    // Secrets extension as the mTLS bundle below — so no secret VALUE is ever an
-    // environment variable (ADR 0007, Tranche 3 AC 6).
+    // The portal's three sources, read through the same Parameters & Secrets
+    // extension as the mTLS bundle below — so no secret VALUE is ever an
+    // environment variable (ADR 0007, Tranche 3 AC 6):
     //
-    // A no-op while `PORTAL_ENABLED` is false, which is production for the whole
-    // of the portal's build: see `AppConfig::load_portal_oauth` for why loading
-    // it unconditionally would let a missing portal secret take out `/v1`. With
-    // the portal open, a missing or malformed secret fails init on purpose —
-    // that surfaces as `Init Errors` at deploy rather than as a `503` under a
-    // sign-in button.
-    config
-        .load_portal_oauth()
-        .await
-        .expect("failed to load portal OAuth credentials at cold start");
-
-    // Self-service key issuance (task 0187). Reads the `pricing-api-free`
-    // usage-plan id from SSM through the same extension, and builds the API
-    // Gateway control-plane client from the execution role's credentials.
+    // - sign-in credentials (task 0186): the Discord OAuth secret;
+    // - key issuance (task 0187): the `pricing-api-free` usage-plan id from
+    //   SSM, plus the API Gateway control-plane client built from the
+    //   execution role's credentials;
+    // - the eligibility gate (task 0189): the SSM parameter NAMES for the guild
+    //   id and the minimum account age — resolved per issuance so operator
+    //   changes need no redeploy — each probed once here so a mis-seeded
+    //   parameter is found now and not at a visitor's click.
     //
-    // A no-op while `PORTAL_ENABLED` is false, which does double duty: it keeps
-    // two operations off the cold-start path of `/v1`, and it means a closed
-    // portal has no control-plane client in the process at all — so no code path
-    // in this build can create or delete a production API key.
-    config
-        .load_portal_keys()
-        .await
-        .expect("failed to configure portal key issuance at cold start");
-
-    // The eligibility gate (task 0189). Stores the SSM parameter names for the
-    // guild id and the minimum account age — resolved per issuance so operator
-    // changes need no redeploy — and probes both once, so a mis-seeded
-    // parameter fails here in `Init Errors` rather than at a visitor's click.
-    // A no-op while `PORTAL_ENABLED` is false, like the two loads above.
-    config
-        .load_portal_eligibility()
-        .await
-        .expect("failed to configure the portal eligibility gate at cold start");
+    // A no-op while `PORTAL_ENABLED` is false; with it true (task 0194) all
+    // three are read at every cold start, and the reads are four: one secret,
+    // three parameters. See the deploy-gate note on `PORTAL_ENABLED` in
+    // `compute-stack.ts`.
+    //
+    // **Closed, not crashed.** A failed read closes the portal in this
+    // execution environment and is logged here; it does not panic init. This
+    // Lambda also serves `/v1`, and an init panic is a `502` to the next data
+    // API caller — for sources `/v1` never uses, read with no retry against a
+    // 40 TPS account-wide Parameter Store budget. The reasoning and the cost
+    // are on `AppConfig::load_portal_or_close`. The log line below is one
+    // signal a misconfigured or throttled deploy leaves; `/config` answering
+    // `enabled: false` is the other, and it is the probe the deploy runbook
+    // makes.
+    if let Err(err) = config.load_portal_or_close().await {
+        tracing::error!(
+            error = %err,
+            "portal closed at cold start: a portal source failed to load; /v1 is \
+             unaffected, and the portal answers as closed in this execution \
+             environment until it is recycled"
+        );
+    }
 
     // Build the CH client eagerly at cold start; it is Arc-backed and shared via
     // AppState across warm invocations. `client_from_lambda_env` reads

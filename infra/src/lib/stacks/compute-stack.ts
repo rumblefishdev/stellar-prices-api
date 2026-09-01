@@ -482,9 +482,13 @@ export class ComputeStack extends cdk.Stack {
     // wider blast radius than it needs.
     //
     // The grant is on the by-name wildcard ARN, so it does not require the
-    // secret to exist at synth time — the operator creates it, and until they
-    // do, the Lambda simply never asks (`PORTAL_ENABLED=false` short-circuits
-    // the read; see `AppConfig::load_portal_oauth`).
+    // secret to exist at synth time. That WAS harmless because a closed portal
+    // never asked; with `PORTAL_ENABLED` true (task 0194) the read happens at
+    // every cold start, and a missing or misnamed secret closes the portal in
+    // that execution environment with a `portal closed at cold start` error
+    // log — not an init panic, because the Lambda also serves `/v1`. See the
+    // deploy-gate note on `PORTAL_ENABLED` below and
+    // `AppConfig::load_portal_or_close`.
     this.apiHandlerRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'ReadPortalOauthSecret',
@@ -576,11 +580,30 @@ export class ComputeStack extends cdk.Stack {
     //    whose name is not exactly the caller's — a guard in code, on a grant
     //    that is account-wide in IAM.
     //
-    // What is deliberately NOT here: `apigateway:*`, `PUT /tags/*` (the portal
-    // never re-tags a key), and any grant on `/usageplans` beyond the key
-    // attachment and the usage read — both of those need the plan id, so both
-    // live in `ApiGatewayStack`'s standalone policy (`POST …/keys` for 0187's
-    // attach, `GET …/usage` for 0188's `GetUsage`).
+    // 4. **Tagging on create is a fourth grant, and it was missing.** Found
+    //    2026-08-31 by task 0194's first real sign-in on the sign-off host:
+    //    `CreateApiKey` with `tags` is authorised as `apigateway:PUT` on
+    //    `/tags/<url-encoded /apikeys/*>`, separately from `POST /apikeys`, and
+    //    without it every issue attempt ended in `AccessDeniedException` —
+    //    the Lambda had never created a key in production; the one key that
+    //    existed came from a local run under operator credentials. An earlier
+    //    revision of this comment listed `PUT /tags/*` under "deliberately
+    //    NOT here (the portal never re-tags a key)": true of re-tagging, false
+    //    of creating, and the reason the audit's IAM check passed a policy
+    //    that could not do its job. Born narrow: `aws:RequestTag/ManagedBy`
+    //    must be `prices-portal` and the tag keys are the two the create
+    //    call sets (`TAG_MANAGED_BY`, `TAG_ISSUED_BY` in `keys/gateway.rs`).
+    //    What the condition does NOT do: IAM cannot tell tag-on-create from
+    //    tag-later on this action, so the grant also lets this role stamp
+    //    `ManagedBy=prices-portal` on an existing key — which is the tag limit
+    //    3's `PATCH` trusts. The handler has no `TagResource` call path, so
+    //    this is again exposure under code execution, not feature behaviour.
+    //
+    // What is deliberately NOT here: `apigateway:*`, `PUT /tags/*` on anything
+    // but API keys, and any grant on `/usageplans` beyond the key attachment
+    // and the usage read — both of those need the plan id, so both live in
+    // `ApiGatewayStack`'s standalone policy (`POST …/keys` for 0187's attach,
+    // `GET …/usage` for 0188's `GetUsage`).
     //
     // `DELETE` **is** here, and it is this slice's: the reconciler removes
     // duplicate keys after a double-submit ("keep the earliest createdDate,
@@ -603,6 +626,23 @@ export class ComputeStack extends cdk.Stack {
     );
     this.apiHandlerRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
+        sid: 'PortalTagApiKeysOnCreate',
+        actions: ['apigateway:PUT'],
+        // The tagging resource for "any API key", in the URL-encoded form the
+        // service names in its own AccessDenied message (limit 4 above).
+        resources: [
+          `arn:aws:apigateway:${awsRegion}::/tags/arn%3Aaws%3Aapigateway%3A${awsRegion}%3A%3A%2Fapikeys%2F*`,
+        ],
+        conditions: {
+          StringEquals: { 'aws:RequestTag/ManagedBy': 'prices-portal' },
+          'ForAllValues:StringEquals': {
+            'aws:TagKeys': ['ManagedBy', 'IssuedBy'],
+          },
+        },
+      }),
+    );
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
         sid: 'PortalReadAndDeleteOwnApiKeys',
         actions: ['apigateway:GET', 'apigateway:DELETE'],
         resources: [`arn:aws:apigateway:${awsRegion}::/apikeys/*`],
@@ -616,6 +656,28 @@ export class ComputeStack extends cdk.Stack {
         // See limit 3 above: the revoke touches portal-made keys only, and
         // this condition is on the new verb ALONE — do not fold this statement
         // back into the one above.
+        //
+        // ⚠️ **What this condition is worth, stated so it is not over-read**
+        // (task 0194's review). It is a guard against THIS code disabling a
+        // key it did not make — a reconciler bug, a mis-parsed id, a future
+        // caller passing the wrong ARN — and it is a good one. It is not a
+        // containment boundary against a compromised handler, because
+        // `PortalTagApiKeysOnCreate` above lets this same role write
+        // `ManagedBy=prices-portal` onto a key of its choosing, and
+        // `aws:ResourceTag` is evaluated after that write. Two calls, and the
+        // guard is satisfied. IAM cannot close that: `apigateway:PUT` on
+        // `/tags/…/apikeys/*` has no condition key distinguishing tagging a
+        // key being created from tagging one that already exists, and the
+        // create itself cannot be scoped to a key that does not exist yet
+        // (limit 1). So the honest reading of the pair is: the portal's role
+        // can reach any API key in the account if it runs code we did not
+        // write. What bounds that is not this line — it is that `POST
+        // /apikeys` is limit 1 with its own mitigation, that the only keys
+        // worth reaching are on a plan this role cannot detach, and that a
+        // `PUT /tags` not preceded by a `CreateApiKey` is visible in
+        // CloudTrail. The detective control is the follow-up; the condition
+        // stays because a guard against our own mistakes is the failure mode
+        // that actually happens.
         conditions: {
           StringEquals: { 'aws:ResourceTag/ManagedBy': 'prices-portal' },
         },
@@ -703,15 +765,45 @@ export class ComputeStack extends cdk.Stack {
         MTLS_SECRET_NAME: this.apiHandlerMtlsSecretName,
         // Build the mTLS CH client eagerly at cold start (primes the pool).
         CH_ENABLED: 'true',
-        // Onboarding portal kept dark (task 0183). There is one environment and
-        // it is production — `envName` is typed 'production' and `infra/envs/`
-        // holds only production.json — so every portal slice (0184-0195) is
-        // publicly reachable the moment it deploys unless this says otherwise.
-        // Set explicitly rather than omitted: the Rust side defaults to false
-        // either way, but spelling it here makes opening the portal a one-word
-        // diff that shows up in a deploy review. Flipped by task 0194, after
-        // 0189's eligibility gate passes — never as a side effect of finishing
-        // some other slice.
+        // Onboarding portal OPEN (task 0194, 2026-08-28). Task 0183 shipped it
+        // dark and this is the one-word diff that flag was designed to be:
+        // there is one environment and it is production — `envName` is typed
+        // 'production' and `infra/envs/` holds only production.json — so every
+        // portal slice (0184-0195) became publicly reachable the moment this
+        // changed. Reversing it is the same one word plus a deploy; nothing
+        // opening creates has to be unwound to close it again.
+        //
+        // ⚠️ **This value is a deploy gate, not just a flag.** With it true the
+        // handler resolves the portal's configuration AT COLD START, from FOUR
+        // reads, and the portal opens only if every one of them succeeds:
+        //
+        // 1. `load_portal_oauth` (`config.rs`) on the Discord OAuth secret
+        //    named by `PORTAL_OAUTH_SECRET_NAME` — operator-created, runbook §2
+        // 2. `load_portal_keys` (`config.rs`) on the SSM parameter named by
+        //    `PORTAL_FREE_PLAN_PARAM`, i.e.
+        //    `/prices/{env}/pricing-api-free-plan-id`. This one is NOT
+        //    operator-seeded and is easy to miss: it is published by
+        //    `ApiGatewayStack`, which DEPENDS ON this stack and therefore
+        //    deploys AFTER it. On a fresh environment, or any time the usage
+        //    plan is replaced or renamed, this stack can be live with the flag
+        //    true while the parameter does not yet exist. Deploy order matters
+        //    here
+        // 3. + 4. the eligibility probe (`portal/eligibility.rs`) on
+        //    `/prices/{env}/discord-guild-id` and
+        //    `/prices/{env}/min-account-age-minutes` — operator-seeded,
+        //    runbook §2a
+        //
+        // A failed read CLOSES the portal in that execution environment and
+        // logs `portal closed at cold start` on the api-handler; it does NOT
+        // panic init, because this Lambda also serves `/v1` and an init panic
+        // is a `502` to the next data-API caller (task 0194's PR review,
+        // finding 1; the reasoning is on `AppConfig::load_portal_or_close`).
+        // So deploying this ahead of the operator steps ships a portal whose
+        // `/config` says `enabled: false`, not a data-API outage — and nothing
+        // else tells you: the api-handler has no error alarm, so the runbook's
+        // `/config` probe after the deploy is the check. Runbook
+        // `portal-oauth-deploy-prep.md` §2, §2a and §5 are the steps; task
+        // 0194's audit is what verifies they were run.
         PORTAL_ENABLED: 'true',
         // The NAME of the portal's Discord OAuth bundle, never its value
         // (task 0186; ADR 0007's precedent, audited by Tranche 3 AC 6). The
@@ -719,20 +811,23 @@ export class ComputeStack extends cdk.Stack {
         // layer already attached above — the same mechanism, the same cache, the
         // same "no secret in an env var" rule as `MTLS_SECRET_NAME`.
         //
-        // Set unconditionally even though `PORTAL_ENABLED` is false, because the
-        // Rust side only performs the read when the portal is open. Wiring the
-        // name now means opening the portal stays the one-word diff the flag was
-        // designed to be, rather than a two-line change made under time pressure.
+        // Set unconditionally, which is what kept opening the portal to the
+        // one-word diff above rather than a two-line change made under time
+        // pressure. With the flag now true the read is no longer conditional:
+        // this name resolving to a missing secret is read 1 of the four fatal
+        // cold-start reads listed on `PORTAL_ENABLED`.
         PORTAL_OAUTH_SECRET_NAME: this.portalOauthSecretName,
         // The NAME of the SSM parameter holding the `pricing-api-free` usage
         // plan id (task 0187) — see `portalFreePlanParameterName` for why it is
         // a name, why it is not a cross-stack reference, and why it is not
-        // hard-coded. Read through the same extension layer, and only when the
-        // portal is open, so a closed portal has no control-plane client in the
-        // process at all.
+        // hard-coded. Read through the same extension layer, at cold start —
+        // with `PORTAL_ENABLED` now true the control-plane client IS built in
+        // every process, and this read is read 2 of the four listed on
+        // `PORTAL_ENABLED`, the one whose parameter `ApiGatewayStack` publishes
+        // after this stack deploys.
         //
         // Set unconditionally alongside `PORTAL_OAUTH_SECRET_NAME`, and for the
-        // same reason: opening the portal stays a one-word diff.
+        // same reason: opening the portal stayed a one-word diff.
         PORTAL_FREE_PLAN_PARAM: this.portalFreePlanParameterName,
         // The NAMES of the eligibility gate's two SSM parameters (task 0189):
         // which Discord guild membership is checked against, and the minimum
@@ -776,6 +871,14 @@ export class ComputeStack extends cdk.Stack {
         // would close a Compute → Gateway → Compute cycle. Includes the stage
         // path — see the `apiBaseUrl` validation in types.ts.
         API_BASE_URL: config.apiBaseUrl,
+        // The origin the portal's bundle is served from (task 0194). The
+        // backend now has a hostname of its own (`apiDomain`, in
+        // `api-gateway-stack.ts`) and the bundle calls it cross-origin, so the
+        // handler needs to know the one origin to name in
+        // `Access-Control-Allow-Origin` and the host to send the sign-in
+        // round-trip back to — the callback runs here, the page lives there.
+        // Unset would mean a same-origin deployment; production is not one.
+        PORTAL_WEB_ORIGIN: config.portalWebOrigin,
       },
     });
 

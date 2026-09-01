@@ -8,15 +8,43 @@
  * the links exist and point at the one artefact that is actually served today,
  * the OpenAPI document. When 0195 lands its route, this file is the diff.
  *
- * All same-origin and root-relative. `/api-docs-json` is on task 0184's
- * distribution behind the same CloudFront behaviour as `/v1`, so it is not a
- * third-party request and does not widen the CSP.
+ * All same-origin and root-relative — and all under `/api/`, because on the
+ * shared host the root belongs to the block explorer (task 0194): a link to
+ * `/api-docs-json` there opens the explorer's page, not the document.
  */
 
+import { API_ORIGIN } from '../api-origin';
 import { ROUTER_BASENAME } from '../base-path';
 
-/** The OpenAPI document. Real, served, and the only docs artefact today. */
-export const OPENAPI_JSON = '/api-docs-json';
+/**
+ * The public base of the data API, `/v1` included — what every snippet on the
+ * landing and the quick start tells a reader to call.
+ *
+ * The API's own hostname (task 0194), not the execute-api origin the pages
+ * carried until 2026-08-31. A literal rather than something derived from
+ * `API_ORIGIN`: that value is empty on every build but the shared-host one,
+ * and a snippet must name the same host wherever the page is served from.
+ * `links.spec.ts` asserts it equals `apiBaseUrl` in
+ * `infra/envs/production.json` — the value the OpenAPI `servers` block
+ * advertises — so a reader following the quick start and a reader following
+ * the spec are sent to the same place.
+ */
+export const PUBLIC_API_BASE_URL =
+  'https://prices-api.sorobanscan.rumblefish.dev/v1';
+
+/**
+ * The OpenAPI document. Real, served, and the only docs artefact today.
+ *
+ * Same-origin, the alias under the portal prefix (`portal::OPENAPI_PATH` in
+ * the API), not the root `/api-docs-json` that partners and the spec's
+ * `servers` block use — the two are the same bytes from the same handler. On
+ * the shared host (task 0194) the alias is a static-SPA path like every other
+ * `/api/*` there, so the link goes to the root copy on the API's own hostname
+ * instead — a document, opened by navigation, so no CORS is involved.
+ */
+export const OPENAPI_JSON = API_ORIGIN
+  ? `${API_ORIGIN}/api-docs-json`
+  : '/api/api-docs-json';
 
 /**
  * The API reference — today the raw OpenAPI document, because that is the

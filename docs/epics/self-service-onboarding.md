@@ -254,9 +254,9 @@ so a portal slice that is merged is a portal slice that strangers can reach.
 That is what `0183` is for, and it is the reason it comes before hosting rather
 than after the audit. One environment variable, `PORTAL_ENABLED`, read at cold
 start next to `CH_ENABLED` and `API_KEYS`: off by default, and every
-`/api/api/*` path returns an empty `404` — byte-identical to a route that
+`/api/*` path returns an empty `404` — byte-identical to a route that
 was never deployed, so a closed portal is not merely refused but invisible. One
-route answers in both states, `GET /api/api/config`, which is what the
+route answers in both states, `GET /api/config`, which is what the
 bundle reads to decide between the real UI and a "not yet available" page.
 
 It is a plain boolean rather than runtime config on purpose: it has to be

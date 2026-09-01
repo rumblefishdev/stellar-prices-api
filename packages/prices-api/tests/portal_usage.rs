@@ -74,7 +74,7 @@ async fn a_closed_portal_answers_usage_with_an_empty_404() {
     let unrouted = call_path(
         closed,
         "GET",
-        "/api/api/no-such-route",
+        "/api/no-such-route",
         Some(&session_cookie(USER_ID)),
     )
     .await;

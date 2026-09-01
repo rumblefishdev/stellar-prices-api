@@ -322,6 +322,7 @@ pub async fn get_assets(
                 vwap_24h,
                 sources,
                 updated_at: r.updated_at,
+                method: r.method,
             }
         })
         .collect();
