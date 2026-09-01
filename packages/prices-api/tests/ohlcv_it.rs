@@ -530,7 +530,10 @@ async fn ohlcv_usdc_self_pair_is_synthesized_from_the_measured_rate() {
     let data = json["data"].as_array().unwrap();
     assert_eq!(data.len(), 2, "USDC must have a series at all: {json}");
 
-    // ASOF at-or-before: 10:00 takes the 10:00 observation, 11:00 the 11:00 one.
+    // Each observation sits exactly on a bucket start, so each bucket contains
+    // its own: 10:00 takes 0.9993, 11:00 takes 1.0007. ⚠️ This fixture cannot
+    // tell the pre-0246 rule from the current one — both pick the same rows.
+    // `seed_0246` is the one that can; see the tests at the end of this file.
     approx(&data[0]["close"], 0.9993);
     approx(&data[1]["close"], 1.0007);
     assert_eq!(data[0]["method"], "oracle");
@@ -1297,6 +1300,265 @@ async fn ohlcv_xlm_merged_vwap_stays_inside_the_band() {
     let (status, json) = get(client, &uri).await;
     assert_eq!(status, StatusCode::OK, "body={json}");
     assert_ohlc_ordered(&json["data"].as_array().unwrap()[0], "xlm merged vwap");
+
+    teardown(db).await;
+}
+
+/// Seed one shared fixture for the task-0246 tests: an XLM/USDC hourly market
+/// whose buckets both surfaces read, plus measured rates placed **inside** a
+/// bucket rather than on its boundary.
+///
+/// 🔑 The boundary placement is the whole point. Every earlier fixture in this
+/// file put its observations exactly on the bucket start (10:00, 11:00), where
+/// resolving at the bucket's START and resolving at its END pick the same row —
+/// which is why 26 tests passed against both rules and the divergence survived.
+/// Here 10:05 and 10:55 sit strictly inside the 10:00 bucket, so the two rules
+/// give different answers and a test can finally tell them apart.
+async fn seed_0246(db: &str, admin: &Client) {
+    // Three consecutive hourly buckets on the reference market. The view's peg
+    // arm reads the same rows (USDC is the quote and never a base here, so
+    // `sum(w) = 0` and the placeholder applies).
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-02-10 10:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-10 11:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-10 12:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // Two observations, BOTH inside the 10:00 bucket. Nothing at all in 11:00
+    // or 12:00 — that gap is the simulated oracle outage.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2026-02-10 10:05:00', 0.99930000000000, 'oracle', '', 0, 1), \
+             ('credit', 'USDC', '{i}', '', '2026-02-10 10:55:00', 1.00070000000000, 'oracle', '', 0, 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// 🔑 Task 0246 — `/ohlcv` and `price_usd_series_1h` must publish the SAME
+/// value for the same identity in the same bucket.
+///
+/// This is the acceptance criterion the task exists for, and it is deliberately
+/// asserted **across the two surfaces** rather than against literals. Each
+/// surface already had tests pinning its own rule in isolation, and that
+/// isolation is exactly why they drifted apart: both suites were green while the
+/// two endpoints answered differently for the same request.
+///
+/// Against the pre-0246 query this fails on the 10:00 bucket, and not subtly —
+/// the old `ASOF … ON r.rts <= b.bkt` found no observation at or before 10:00:00
+/// (both sit later in the hour) and rendered the bucket as the `$1` peg, while
+/// the view published the measured 1.0007.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_agrees_with_price_usd_series_on_the_same_bucket() {
+    let db = "it_ohlcv_0246_cross_surface";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    prices_clickhouse::apply_sql(
+        &Client::default().with_url(ch_url()),
+        &rewrite(prices_clickhouse::VIEWS_SQL, db),
+    )
+    .await
+    .unwrap();
+    seed_0246(db, &admin).await;
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2026-02-10T10:00:00Z\
+         &end=2026-02-10T12:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 3, "three buckets expected: {json}");
+
+    for row in data {
+        let bucket = row["timestamp"].as_str().unwrap().replace('T', " ");
+        let bucket = bucket.trim_end_matches('Z').to_string();
+        let (view_close, view_method) = admin
+            .query(&format!(
+                "SELECT toString(close_usd), method FROM {db}.price_usd_series_1h \
+                 WHERE asset_code = ? AND issuer_address = ? AND bucket = toDateTime(?)"
+            ))
+            .bind("USDC")
+            .bind(iss())
+            .bind(bucket.as_str())
+            .fetch_one::<(String, String)>()
+            .await
+            .unwrap_or_else(|e| panic!("view has no row for {bucket}: {e}"));
+
+        let api_close: f64 = row["close"].as_str().unwrap().parse().unwrap();
+        let view_close_f: f64 = view_close.parse().unwrap();
+        assert!(
+            (api_close - view_close_f).abs() < 1e-12,
+            "{bucket}: /ohlcv published {api_close} but price_usd_series_1h \
+             published {view_close} — the two surfaces must resolve the rate by \
+             the same rule (task 0246)"
+        );
+        assert_eq!(
+            row["method"].as_str().unwrap(),
+            view_method,
+            "{bucket}: the surfaces disagree about PROVENANCE, which is worse \
+             than disagreeing about the value — one of them is calling a \
+             fallback a measurement"
+        );
+    }
+
+    // And the agreed value is the bucket's LAST observation, not its first and
+    // not the previous bucket's. Asserted once, so a future change that made
+    // both surfaces agree on the WRONG row would still fail here.
+    approx(&data[0]["close"], 1.0007);
+    assert_eq!(data[0]["method"], "oracle");
+
+    teardown(db).await;
+}
+
+/// 🔑 Task 0246 — an oracle gap must fall back to a labelled peg, never
+/// forward-fill the last reading as a measurement.
+///
+/// The pre-0246 query bounded its ASOF by nothing at all, so a bucket any
+/// distance after the final observation still resolved to that observation and
+/// was labelled `method = 'oracle'`. A dead oracle's last reading would have
+/// been served as a live measurement for the entire length of the outage — and
+/// the longer the outage, the more confidently wrong the answer.
+///
+/// Here 11:00 and 12:00 hold no observation of their own. Against the old query
+/// both returned 1.0007/`oracle`; they must now return the `$1` fallback and say
+/// so.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_does_not_forward_fill_a_stale_rate_into_later_buckets() {
+    let db = "it_ohlcv_0246_no_forward_fill";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    seed_0246(db, &admin).await;
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2026-02-10T10:00:00Z\
+         &end=2026-02-10T12:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 3, "three buckets expected: {json}");
+
+    // The gap buckets FIRST, so a regression fails on the defect this test is
+    // named for rather than on the sanity check below it.
+    for i in [1usize, 2usize] {
+        let ts = data[i]["timestamp"].as_str().unwrap().to_string();
+        assert_eq!(
+            data[i]["method"], "peg",
+            "{ts}: an oracle gap must render as the labelled peg. \
+             'oracle' here means the 10:55 reading forward-filled past its own \
+             bucket and is being presented as a measurement (task 0246)"
+        );
+        approx(&data[i]["close"], 1.0);
+    }
+
+    // And the bucket that HAS an observation still publishes the measured rate —
+    // the fix must not have simply switched the measurement off.
+    approx(&data[0]["close"], 1.0007);
+    assert_eq!(data[0]["method"], "oracle");
+
+    teardown(db).await;
+}
+
+/// 🔑 Task 0246 — at `1m` the window must be the ORACLE CADENCE, not the bucket.
+///
+/// The first cut of 0246 scoped the rate strictly to its bucket, copying
+/// `price_usd_series`. That is safe for the view because the view exists only at
+/// `1d` and `1h`. `/ohlcv` has no such floor: `Timeframe::H1`'s default
+/// granularity **is** `1m`, so `?timeframe=1h` with no other parameter returns
+/// sixty 1-minute buckets — while `oracleWatcher` polls every 5 minutes.
+///
+/// Strict bucket scoping therefore left roughly four buckets in five with no
+/// observation of their own, and the series alternated between a measured rate
+/// and the `$1` fallback every minute, flipping `method` with it. That is worse
+/// than the unbounded forward-fill this task removed: a three-minute-old
+/// measurement is better evidence than a literal `$1`.
+///
+/// One observation at 10:00:30, six 1-minute buckets. With the 300 s floor the
+/// first five carry it and the sixth has aged past the window:
+///
+/// | bucket | window floor | verdict |
+/// |---|---|---|
+/// | 10:00 – 10:04 | 09:56 – 10:00 | `0.9993` / `oracle` |
+/// | 10:05 | 10:01 | `1` / `peg` — the reading is now stale |
+///
+/// So this pins BOTH halves: the measurement carries across the poll gap, and it
+/// still stops. A regression in either direction fails here.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_at_1m_carries_a_measurement_across_the_oracle_poll_gap() {
+    let db = "it_ohlcv_0246_1m_cadence";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             SELECT toDateTime('2026-02-10 10:00:00') + INTERVAL number MINUTE, \
+                    1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1 \
+             FROM numbers(6)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // A single poll, 30 s into the first bucket.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2026-02-10 10:00:30', 0.99930000000000, 'oracle', '', 0, 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1m&start=2026-02-10T10:00:00Z\
+         &end=2026-02-10T10:05:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 6, "six 1-minute buckets expected: {json}");
+
+    for row in data.iter().take(5) {
+        let ts = row["timestamp"].as_str().unwrap().to_string();
+        assert_eq!(
+            row["method"], "oracle",
+            "{ts}: a measurement inside the oracle's 5-minute cadence must carry \
+             across the buckets it spans. 'peg' here means the window was scoped \
+             to the 1-minute bucket, and the series is a square wave (task 0246)"
+        );
+        approx(&row["close"], 0.9993);
+    }
+
+    // ...and it still stops. 10:05's window opens at 10:01, after the reading.
+    assert_eq!(
+        data[5]["method"], "peg",
+        "the floor is a WINDOW, not a licence to forward-fill: once the reading \
+         is older than ORACLE_POLL_FLOOR_S it must fall back and say so"
+    );
+    approx(&data[5]["close"], 1.0);
 
     teardown(db).await;
 }
