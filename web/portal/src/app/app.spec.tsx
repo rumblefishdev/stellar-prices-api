@@ -3240,8 +3240,21 @@ describe('usage against quota', () => {
 describe('replace my key', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    // The fixtures below name real instants — revoked 2026-08-21, eligible
+    // again 2026-09-01 — and the app compares them to the clock
+    // (`stillWaiting`, `revokedJustNow`, `describeNextPeriodStart`). Left on
+    // the real clock, every assertion here silently changed meaning on
+    // 1 September 2026 and three of them failed. Only `Date` is faked, so
+    // testing-library's `findBy*` polling keeps its real timers; the instant
+    // is 30 min after the fixture's revocation (past the 5 min "just now"
+    // window) and inside the period whose end the fixtures name.
+    vi.useFakeTimers({
+      toFake: ['Date'],
+      now: new Date('2026-08-21T12:30:00Z'),
+    });
   });
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
