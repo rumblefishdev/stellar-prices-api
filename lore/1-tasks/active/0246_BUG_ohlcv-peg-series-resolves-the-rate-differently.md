@@ -2,7 +2,7 @@
 id: "0246"
 title: "/ohlcv's USDC peg series resolves the rate at the bucket START, unbounded — it disagrees with price_usd_series"
 type: BUG
-status: backlog
+status: active
 related_adr: ["0011"]
 related_tasks: ["0168", "0170", "0167"]
 tags: ["priority-medium", "effort-small", "clickhouse", "read-surface", "data-correctness", "api"]
@@ -18,6 +18,17 @@ history:
       our surfaces read prices.usd_rate for the same identity and the same
       bucket and reach different values, by two independent mechanisms. Not
       fixed in 0168 because it changes a shipped endpoint's published values.
+  - date: 2026-09-01
+    status: active
+    who: okarcz
+    note: >
+      Activated. [[0168]] deployed and closed the same day, so the reference
+      side of the disagreement is now live on prod and this is the last surface
+      where the old resolution rule survives. Taken now rather than [[0126]],
+      which is the other candidate: 0126's remaining substance is CORS in
+      api-gateway-stack.ts, the file PR #268 rewrites, and the pattern it would
+      build on (portalWebOrigin, addCorsPreflight) exists only on that unmerged
+      branch. 0246 touches queries_ch.rs and views.sql, which nobody else is in.
 ---
 
 # `/ohlcv`'s peg series and `price_usd_series` disagree about the same bucket
