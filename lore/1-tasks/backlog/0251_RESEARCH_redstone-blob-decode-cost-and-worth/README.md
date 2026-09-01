@@ -129,6 +129,12 @@ is not enough before recommending the decode.
       complete outcome and should say what would reverse it
 - [ ] Accumulated `redstone` row count and byte footprint stated as measured
       numbers
+- [ ] **§4.4 of `prices-api-general-overview.md` reflects reality** — the example
+      response shows what the endpoint actually returns, with a sentence saying
+      RedStone events are ingested for reference and carry no decoded price.
+      §3.4's `oracle_name` vocabulary comment corrected in the same edit. This
+      lands whatever the decision is; it is only bundled here so §4.4 is written
+      once (see the section above)
 
 ## Out of scope
 
@@ -138,7 +144,7 @@ is not enough before recommending the decode.
   stay derived from observed trades; a second oracle would be reference data on
   the same footing as Reflector.
 
-## ⚠️ Adjacent, and it must NOT wait for this decision
+## 📝 The §4.4 doc defect — FOLDED INTO THIS TASK (decided 2026-09-01)
 
 `docs/prices-api-general-overview.md` §4.4 shows a `GET /oracles/{id}` example
 response containing a **`redstone` entry with a price of `1.0001`**. That
@@ -151,7 +157,16 @@ at 1. So every real response has exactly one entry, `reflector`.
 where only two are ever written and one only as a zero-priced placeholder.
 
 This is a consumer-facing contract doc sitting in the SCF evidence chain
-([[0128]]), and it is the same family as [[0248]] and 0237. **Correct it
-regardless of what this task decides** — if the decision is "build", the example
-becomes true later; if it is "drop", it was never true. Either way a consumer
-should not be coding against a second array element that cannot arrive.
+([[0128]]), and it is the same family as [[0248]] and 0237.
+
+**Decided 2026-09-01: fix it as part of this task, not before it.** It was
+offered as a standalone correction and deliberately declined — the two are about
+the same thing, and splitting them means editing §4.4 twice if the decision is
+"build". The doc fix is therefore an acceptance criterion below rather than a
+separate change.
+
+⚠️ **Consequence to hold, since it is now load-bearing:** while this task sits in
+the backlog, the published spec advertises a response element that cannot arrive.
+If an external consumer integrates against §4.4 in the meantime, that is where
+the confusion comes from — and if this task is dropped without being worked, the
+doc correction must be lifted back out rather than dropped with it.
