@@ -173,6 +173,20 @@ history:
       in `5635af9`. Rust 405 → 416, portal 157 → 170. Nothing about the
       checks' verdicts changed; the record of what merging this branch does
       did.
+  - date: "2026-09-01"
+    status: active
+    who: akot
+    note: >
+      Oskar's review of PR #268 (seven findings, read at `e7704ae`) assessed
+      and answered on the branch: all seven valid, two already fixed in the
+      unpushed `5635af9`, five fixed here. Finding 1 became a design decision
+      — a portal source failing at cold start now closes the portal instead
+      of panicking the Lambda that serves `/v1` — recorded as Emerged #4 with
+      the evidence the original stance lacked. Spawned [[0249]] (the
+      api-handler error alarm it never had, plus the new log line) and
+      [[0250]] (the CloudTrail detective control the 08-31 review left as
+      prose). Also disarmed a calendar bomb in `app.spec.tsx` that turned CI
+      red today on every branch. Rust 416 → 418, portal 170 → 179.
 ---
 
 # Portal security and ops audit — and the three changes it forced
@@ -276,6 +290,10 @@ had assumed was already true:
 - **The Discord redirect URI** now names the API host and is registered.
 - **A CloudTrail detective control** for a `PUT /tags` not preceded by a
   `CreateApiKey` — spawned by the review's finding 4, which is unfixable in IAM.
+  Filed as [[0250]] on 2026-09-01; it had been prose only.
+- **An error alarm on the api-handler** — on `Errors`, which it never had,
+  and on the `portal closed at cold start` log line that the PR review's
+  finding 1 introduced. Filed as [[0249]].
 
 ## Why an audit rather than a checklist item in each slice
 
@@ -1253,7 +1271,84 @@ suite green including the two new specs; `synth-production` green with
 `THROTTLED` in the template. **Not deployed** — findings 3 and 6 are a
 production change and land with the merge.
 
+## PR review — 2026-09-01, Oskar on #268
+
+Seven findings, read at `e7704ae` — three commits behind this branch, because
+`5635af9` (the branch's own review) had fixed #4 and #6 the evening before and
+was never pushed. Every finding is valid; the table is what was done with each.
+
+| # | finding | verdict | what changed |
+|---|---|---|---|
+| 1 | a portal source failing at cold start panics init on the Lambda that serves `/v1` | **valid, and understated** — next section | `AppConfig::load_portal_or_close`: closed, not crashed |
+| 2 | `sync-portal-explorer` uploads with no `Cache-Control` | valid | two `s3 sync` calls mirroring the stack's two `BucketDeployment`s — `assets/*` `public, max-age=31536000, immutable`, everything else `public, max-age=0, must-revalidate` — assets first, as the stack orders them. A fresh build re-stamps every object's mtime, so the next sync re-uploads all of them with headers; nothing needs a one-off fix |
+| 3 | `$(shell jq …)` bakes `https://` or `https://null` into the bundle | valid | `// empty` in the filter and a `check-portal-api-origin` prerequisite that refuses anything but `https://<host.with.dot>`. Exercised: the real value passes, `https://null` and `https://` are refused with the cause named |
+| 4 | rendered JS/Rust snippets declare `prices` and use `price` | valid — already fixed in `5635af9` (its finding 1, `QuickStart.spec.tsx` as the tie) | pushed with this |
+| 5 | "Copy example response" is not JSON | valid | all three venues spelled out in `value` and `raw` alike; the per-venue volumes sum to `volume_24h_usd`; the spec parses `RESPONSE_TEXT` and ties each field's `value` to its `raw` |
+| 6 | dev proxy misses `/api/config?x=1` | valid — already fixed in `5635af9` (its finding 5) | pushed with this |
+| 7 | `BUNDLE_PROBES` hand-lists the SPA routes | valid | the routes are read from `PORTAL_APP_ROUTES` in the stack source and from `<Route path>` in `app.tsx`, asserted equal, and each one's rewrite is asserted in the synthesized `DirectoryIndexFn`. A route added on one side only, or a stale synth, fails CI — all three cases exercised by hand before the change was kept |
+
+### Finding 1 — what the review understated, and the decision
+
+The comment on the block called the panic deliberate: "fail at deploy, in
+`Init Errors`, not at a visitor's click". Measured against the code, three
+parts of that were wrong:
+
+- **`cdk deploy` does not fail on an init error.** The deploy succeeds; the
+  failure is the next `/v1` caller's `502`. "Fail at deploy" was really "fail
+  on the first partner request after the deploy".
+- **It was not only a deploy hazard.** The extension client has a 2 s timeout
+  and no retry (`prices_clickhouse::mtls`), the flip added three SSM reads to
+  a cold start that previously made none, and Parameter Store's default
+  throughput is 40 TPS for the whole account. A burst of cold starts —
+  [[0121]]'s 100 rps ramp — is exactly where a throttled read would have
+  taken `/v1` down.
+- **Nobody is paged by `Init Errors`.** `observability-stack.ts` has no alarm
+  on the api-handler's `Errors` at all; the only error alarm is the
+  ledger-processor's. "Loud" was loud to whoever ran a probe.
+
+Decision (Emerged #4 below): **closed, not crashed.** A failed read closes the
+portal in that execution environment — flag off, all three sources dropped,
+so no control-plane client survives — and logs `portal closed at cold start`
+with the failing variable named. `/config` then answers `enabled: false`,
+which is the probe the runbook already makes after every deploy, so a
+misconfigured deploy is caught by the same step as before and `/v1` never
+notices. `serve.rs` keeps its three panics: a developer who asked for the
+portal wants to know now, and no partner is behind that process.
+
+Cost, stated: an environment that failed a *transient* read stays closed for
+its lifetime, where the panic discarded it and the next cold start retried.
+That is a portal saying "not open" from one environment, traded for a `502`
+on the data API. The alarm on the log line is [[0249]] — the same task that
+gives the api-handler the error alarm it never had.
+
+Verified: Rust 416 → 418 (two unit tests on the closed-after-failure
+property), clippy `-D warnings` green with and without `--features lambda`
+(`main.rs` only compiles with it); portal 179/179 after the calendar fix in
+Issues Encountered; `format:check`, infra lint/typecheck and
+`openapi:verify-routes` green against a fresh synth. **Not deployed** —
+lands with the merge, like the 08-31 review's findings.
+
 ## Issues Encountered
+
+- **Three portal tests started failing on 1 September 2026, by the calendar.**
+  `app.spec.tsx`'s "replace my key" fixtures name real instants —
+  `revoked_at: 2026-08-21`, `next_eligible_at: 2026-09-01` — and the app
+  compares them to the real clock (`stillWaiting`, `revokedJustNow`,
+  `describeNextPeriodStart`). From today `2026-09-01` is no longer ahead, so
+  "After 1 September 2026, sign in again" rendered as "A new key can be
+  issued now" and three assertions failed — on `develop` too, for everyone,
+  with no code change. Fixed by faking `Date` (and only `Date`, so
+  testing-library's polling keeps its real timers) at `2026-08-21T12:30Z` in
+  that describe: 30 min past the fixture's revocation, inside the period
+  whose end the fixtures name. Not a regression of this branch and not one of
+  the review's findings; recorded because CI here was red for a reason no
+  diff would show.
+- **`cargo clippy --features lambda --all-targets` does not compile**, and
+  never did: `gateway.rs`'s tests call `Gateway::against`, which is
+  `#[cfg(not(feature = "lambda"))]`. CI runs clippy and tests without the
+  feature and only *builds* the bins with it, so nothing notices. Not fixed
+  here — noted so the next person to check `main.rs` under the feature runs
+  `--lib --bins`, which is clean.
 
 - **The api-handler had never been able to create a key in production, and
   every reading of its policy said it could.** Found 2026-08-31 by the first
@@ -1424,6 +1519,19 @@ production change and land with the merge.
    origin leg rather than dropping the fetch-metadata one; the bundle's API
    origin is a build-time variable with an empty default, so only the
    Explorer-bound build is absolute. See "The backend on its own host".
+
+4. **A portal source failing at cold start closes the portal; it does not
+   crash the Lambda.** Emerged from the PR review (finding 1) and decided
+   here without asking, on evidence the original stance did not have: the
+   api-handler has no error alarm, `cdk deploy` does not fail on an init
+   error, and the flip made `/v1`'s cold start depend on three SSM reads
+   against a 40 TPS account budget with no retry. Reverses the "fail at
+   deploy, in `Init Errors`" comments in `config.rs`, `main.rs`,
+   `compute-stack.ts` and the deploy-prep runbook, all rewritten. One commit,
+   easy to drop if the loud stance is preferred — but then [[0249]]'s alarm
+   is a precondition of the loud stance being loud, not a follow-up. Full
+   reasoning on `AppConfig::load_portal_or_close`; the section "PR review —
+   2026-09-01" has the measurements.
 
 ## Acceptance Criteria
 
