@@ -2,9 +2,9 @@
 id: "0231"
 title: "Nothing alarms when the oracle poll feed goes dark — 0227's guard turns silently-wrong rows into a silently-absent feed"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0227", "0226", "0086", "0199", "0056", "0167"]
+related_tasks: ["0227", "0226", "0086", "0199", "0056", "0167", "0241"]
 tags: ["priority-medium", "effort-medium", "observability", "oracle", "infra", "milestone-M2"]
 milestone: 2
 links:
@@ -48,6 +48,28 @@ history:
       is 30 minutes, not 15; missing data on `-dark-feed` stays `BREACHING`.
       Induction plan written before the deploy, deliberately - ACs 1/2/3/5 are
       all still owed and only prod can close them.
+  - date: 2026-08-31
+    status: completed
+    who: okarcz
+    note: >
+      CLOSED - all 5 ACs verified, both loose ends settled. AC 2: the induction
+      clone prices-production-oracle-dark-feed-induction was read before
+      deletion and had gone OK to ALARM at 2026-08-28T15:24:39.978Z, so the
+      FILL(m,0) + 3x10min + LESS_THAN 1 geometry does breach on a dark series -
+      the thing 0222 showed can silently fail to happen. It breached ~5.5 min
+      LATER than the clock-aligned estimate of 15:19, the opposite direction
+      from the rejection alarm on 08-28 which fired sooner than estimated; the
+      general lesson is to read the alarm, never compute when it should have
+      fired. AC 5: the real -dark-feed still carries StateUpdatedTimestamp
+      2026-08-28T14:31:12Z, never transitioning across three days including two
+      unattended ones, while the identical geometry on a dark series fired.
+      Clone deleted; the five real oracle alarms remain and are all OK. Loose
+      end 2 resolved and REFUTED - Slack is delivering: the operator's "12
+      alarms yesterday" matches exactly the twelve state changes on 2026-08-30,
+      all of them prices-production-oracle-errors. Chasing it found that alarm
+      flapping for weeks on Runtime.OutOfMemory (3-7 of ~294 invocations a day,
+      Max Memory Used 256 MB = Memory Size 256 MB), which long predates this
+      task; spawned as 0241.
 ---
 
 # The guard is silent, and silence is what 0227 was about
@@ -417,7 +439,11 @@ verified.
 
 ---
 
-# ⏸️ SESSION END 2026-08-28 15:02 UTC — deployed, 3 of 5 ACs verified
+# ⏸️ SESSION 2026-08-28 15:02 UTC — deployed, 3 of 5 ACs verified
+
+> ✅ **CLOSED 2026-08-31.** Both loose ends settled, all 5 ACs verified. The
+> induction clone was read (that reading *was* AC 2) then deleted; Slack was
+> confirmed working. See the two resolved sections below, and [[0241]].
 
 **PR #267 merged 14:15:25 UTC. Both stacks deployed to production.** Task stays
 `active`: two items below must be settled before it can be archived.
@@ -437,17 +463,27 @@ verified.
 - [x] **AC 1** — `OracleTimestampRejected` and `OracleRowsWritten` published by a
       real pass and visible in CloudWatch. All 7 series present; first pass read
       `Runs=1 FailedRuns=0 RowsWritten=2 TimestampRejected=0 RowsSkipped=0`.
-- [ ] **AC 2** — dark-feed alarm fires, verified by inducing. ⏳ **See loose end 1.**
+- [x] **AC 2** — dark-feed alarm fires, verified by inducing. ✅ **2026-08-31.**
+      The clone `-dark-feed-induction` went `INSUFFICIENT_DATA → OK` at
+      **14:50:39** on the single probe datapoint, then **`OK → ALARM` at
+      2026-08-28T15:24:39.978Z** once `FILL(m, 0)` extended past it. The
+      geometry breaches on a dark series — the thing [[0222]] proved can
+      silently fail to happen.
 - [x] **AC 3** — rejection alarm fires, raw value reachable. Induced with one
       synthetic datapoint at 14:42:00; `OK → ALARM` at **14:43:05**, self-cleared
       at 14:48:05. Description carries the log filter and field names.
 - [x] **AC 4** — pure mapping with unit tests. 18 tests, non-vacuity checked.
-- [ ] **AC 5** — neither alarm false-fires on an idle environment. ⏳ Partially:
-      all four alarms sat OK from creation through session end, and
-      `-timestamp-rejected` returned to OK by itself. Completing AC 2 completes
-      this, since the real `-dark-feed` must have stayed OK while the clone fired.
+- [x] **AC 5** — neither alarm false-fires on an idle environment. ✅
+      **2026-08-31**, and over a far better window than the session that wrote
+      this could offer: the real `-dark-feed` still carries
+      `StateUpdatedTimestamp` **2026-08-28T14:31:12Z**, so it has not
+      transitioned once in the three days since creation — including the two
+      days nobody was watching — while the clone sitting on the identical
+      geometry fired. Same shape, opposite outcomes, decided only by whether the
+      series had data. `-timestamp-rejected` returned to OK by itself at
+      14:48:05 and has stayed there.
 
-## ⛔ Loose end 1 — an induction alarm is LIVE ON PROD
+## ✅ Loose end 1 — RESOLVED 2026-08-31, and it carried AC 2
 
 `prices-production-oracle-dark-feed-induction`, created 14:50 UTC. A throwaway
 clone of the dark-feed geometry on a scratch metric
@@ -476,7 +512,42 @@ Then delete it:
 aws cloudwatch delete-alarms --alarm-names prices-production-oracle-dark-feed-induction
 ```
 
-## ⚠️ Loose end 2 — alarms fire but may not reach Slack (NOT a 0231 defect)
+### ✅ What actually happened — 2026-08-31 09:5x UTC
+
+Read before deleting, as instructed. The prediction held:
+
+| alarm | state | `StateUpdatedTimestamp` |
+|---|---|---|
+| `-dark-feed-induction` (clone, dark series) | **ALARM** | 2026-08-28T15:24:39.978Z |
+| `-dark-feed` (real, live series) | **OK** | 2026-08-28T14:31:12.545Z |
+
+Clone history: `INSUFFICIENT_DATA → OK` 14:50:39 (the probe landed), then
+`OK → ALARM` 15:24:39.
+
+🔑 **It breached at 15:24:39 against a predicted ~15:19** — about 5.5 minutes
+later than `14:49 + 3 × 10 min`. That is the query-anchored sliding window
+again, not a slow alarm, and it is the *opposite* direction from the 14:42
+rejection datapoint that fired **sooner** than a clock-aligned estimate. The
+lesson generalises: a clock-aligned hand-estimate of a CloudWatch evaluation
+predicts neither direction reliably, so **wait for the period to close and read
+the alarm, never compute when it "should" have fired.**
+
+Deleted the same session; `describe-alarms --alarm-name-prefix
+prices-production-oracle` afterwards returns exactly the five real alarms
+(`-dark-feed`, `-timestamp-rejected`, `-no-invocations`,
+`-duration-near-timeout`, `-errors`), **all OK**.
+
+⚠️ The scratch series `Prices/Oracle` / `OracleRowsWrittenProbe` itself cannot
+be deleted — CloudWatch has no delete-metric API; it ages out after 15 months.
+One probe datapoint at 2026-08-28T14:49 is all it will ever hold. Nothing reads
+it now that its alarm is gone.
+
+Live-series health at the same moment, for the record: `OracleRowsWritten`
+returned **18 of 18** ten-minute buckets over three hours, min 2.0 / max 6.0 —
+consistent with the measured "2 symbols, 2 rows a pass" and never near the
+`< 1` threshold.
+
+## ✅ Loose end 2 — RESOLVED 2026-08-31: Slack works. The real defect is [[0241]]
 
 The operator reported the last Slack alarm as **14:31**, yet
 `-oracle-timestamp-rejected` went ALARM at 14:43:05 and back to OK at 14:48:05.
@@ -497,6 +568,43 @@ reachable from the session's network, so its configuration was never inspected.
 Ask before filing anything.** If real, spawn a separate task — this routing is
 [[0056]]'s wiring and nothing in 0231 touched it. It does not block these ACs;
 AC 3 asks only that the alarm fire with the raw value reachable, which it did.
+
+### ✅ Asked, and the answer refuted the hypothesis — 2026-08-31
+
+The operator's report: *"The last alarm on Slack on Friday was at 14:31 UTC.
+Then nothing and yesterday 12 new alarms showed up."*
+
+**"12 yesterday" is the whole answer.** Account-wide alarm history for
+2026-08-30 contains exactly twelve state changes — six `OK → ALARM` and six
+`ALARM → OK`, every one of them `prices-production-oracle-errors`. Twelve
+transitions, twelve Slack messages, same day. **The Chatbot → Slack link is
+delivering.** There is no routing defect and no task to file against [[0056]].
+
+⚠️ **The framing in the section above is what made this hard to see.** It asked
+"did the 14:43 pair arrive?" and treated a silent channel as evidence of a
+broken link. But the channel was not silent — it was carrying a *different*
+alarm at a rate nobody had counted. Measuring what Slack *did* receive, rather
+than hunting for what it did not, answered it in one query. Worth keeping:
+**"a notification is missing" and "notifications are working" are not opposites
+when more than one alarm shares the channel.**
+
+### 🔴 What chasing it actually found → [[0241]]
+
+`prices-production-oracle-errors` has been flapping for **weeks**:
+`prices-production-oracle` fails **3-7 invocations a day out of ~294** with
+`Error Type: Runtime.OutOfMemory` and `Max Memory Used: 256 MB` against a
+`Memory Size: 256 MB`. The alarm is `1/1` on a 5-minute period, so each OOM
+pages twice, and ~6 OOMs a day is the twelve messages.
+
+🔑 **It long predates 0231** — the daily `Errors` series is flat at ~2% either
+side of the 0231 deploy, and alarm transitions are still present at the oldest
+history page checked (2026-08-18). Nothing here is caused by this task, and the
+five alarms 0231 shipped are all OK. Spawned as [[0241]].
+
+That is the same shape as [[0214]] — *the alarm worked, the process did not* —
+one step earlier: a channel noisy enough that a real page is indistinguishable
+from the daily churn. The operator's reading of the channel on 08-28 is
+downstream of exactly that.
 
 ## Prod facts measured here — reuse rather than re-derive
 
