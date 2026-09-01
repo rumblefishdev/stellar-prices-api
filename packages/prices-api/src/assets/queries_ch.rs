@@ -453,6 +453,35 @@ impl Granularity {
         }
     }
 
+    /// The `toStartOfInterval` argument that floors a timestamp onto THIS
+    /// grain's bucket — task 0246.
+    ///
+    /// ⚠️ These must stay identical to `rollups.sql`, which builds the candle
+    /// buckets with the same function and the same intervals. The whole point is
+    /// that flooring a `usd_rate` observation lands it on the bucket the candle
+    /// already carries; a mismatch here silently resolves every rate against the
+    /// wrong bucket rather than failing.
+    ///
+    /// ⚠️ `1M` is the one grain where "the bucket a rate falls into" and "the
+    /// bucket the candle is filed under" can differ. The `1M` rollup reads from
+    /// `1w`, so a week that STARTS in August but runs into September has its
+    /// September days filed under August, while an observation on 1 September
+    /// floors to September here. Both are defensible and the difference is
+    /// invisible to task 0246's acceptance test, which compares against
+    /// `price_usd_series{,_1h}` — daily and hourly only. Stated so the next
+    /// reader does not have to rediscover it.
+    pub fn interval_sql(self) -> &'static str {
+        match self {
+            Granularity::M1 => "1 MINUTE",
+            Granularity::M15 => "15 MINUTE",
+            Granularity::H1 => "1 HOUR",
+            Granularity::H4 => "4 HOUR",
+            Granularity::D1 => "1 DAY",
+            Granularity::W1 => "1 WEEK",
+            Granularity::Mo1 => "1 MONTH",
+        }
+    }
+
     /// Bucket width in seconds, for the window-vs-granularity point count
     /// (task 0119). `1M` uses 30 days — under-counting a month's seconds
     /// over-counts buckets, which only makes the check stricter.
@@ -702,18 +731,28 @@ const PRECISION_FLOOR: &str = "toDecimal128('0.000000000001', 14)";
 /// series spans the whole backfilled range and every bucket corresponds to a
 /// period the market was actually open — not a synthetic calendar.
 ///
-/// The value per bucket is the newest `prices.usd_rate` observation **at or
-/// before** the bucket. That is 0167's stated rule for this table — observations
-/// and `ASOF` at-or-before, never an average — and it is the same shape the
-/// enrichment oracle tier uses, so the read side cannot drift from the write
-/// side.
+/// The value per bucket is the newest `prices.usd_rate` observation **inside**
+/// that bucket — its closing rate. That is 0167's stated rule for a
+/// bucket-grained consumer (*"T is the BUCKET'S END"*), never an average, and it
+/// is the same rule `price_usd_series{,_1h}` applies, so the two surfaces cannot
+/// answer differently for the same request.
+///
+/// ⚠️ **It resolved at the bucket's START until task 0246**, with no staleness
+/// bound — which made this surface disagree with the view on every bucket and
+/// forward-fill a dead oracle's last reading indefinitely. See the comment at
+/// the join for the full account; do not "simplify" it back to an ASOF.
 ///
 /// ## The fallback is the peg, and it is labelled as such
 ///
-/// `usd_rate` starts 2026-03-11; `timeframe=all` reads back to 2021. Buckets with
-/// no observation at or before them fall back to $1 and are labelled
+/// `usd_rate` starts 2026-03-11; `timeframe=all` reads back to 2021. Buckets
+/// holding no observation of their own fall back to $1 and are labelled
 /// `method = 'peg'`, which 0165 defines as *"no measured rate was available"* —
 /// never as an assertion that $1 is correct.
+///
+/// Since task 0246 that covers two cases with one rule: deep history before the
+/// feed existed, and **any later gap in it**. A bucket the oracle sat out reads
+/// `peg` rather than inheriting the previous bucket's measurement, so the label
+/// stays true no matter how long the outage runs.
 ///
 /// ⚠️ **This is the one place a literal `1.0` is right.** ADR 0011 §6 forbids a
 /// hardcoded peg *where a measurement exists* — our own enrichment prices a
@@ -777,10 +816,41 @@ pub async fn ohlcv_peg_series(
         conds.push("timestamp <= toDateTime(?)".to_string());
     }
 
-    // ClickHouse's ASOF JOIN needs at least one equality alongside the
-    // inequality; there is no natural key here, so both sides carry a constant.
+    // ⚠️ **Task 0246 replaced an unbounded ASOF with a bucket-scoped equi-join.**
+    // This query used to read `ASOF LEFT JOIN … ON b.k = r.k AND r.rts <= b.bkt`
+    // — the newest observation at or before the bucket's START, with no
+    // staleness bound at all. Two defects followed, and they are independent:
     //
-    // ⚠️ An unmatched ASOF row does NOT yield NULL. By default
+    //   1. A bucket's value was the PREVIOUS bucket's last reading, so this
+    //      surface and `price_usd_series` (`views.sql`, task 0168) published
+    //      different numbers for the same identity in the same bucket — they
+    //      differed by the intraday drift, ~1e-4, on every row.
+    //   2. After an oracle outage the last known rate forward-filled
+    //      INDEFINITELY, still labelled `method = 'oracle'`. A dead oracle's
+    //      final reading served as a measurement for the length of the outage.
+    //
+    // `init.sql`'s 0167 block names the rule for a bucket-grained consumer:
+    // *T is the BUCKET'S END* — the bucket's closing rate. It is also the only
+    // resolution under which a daily close equals the last hourly close of that
+    // day, i.e. the only one that composes across the six grains.
+    //
+    // Written, as in `views.sql`, as an `argMax` INSIDE the bucket joined on the
+    // bucket rather than as an ASOF, which is the same value and makes the
+    // staleness window exactly one bucket width for free: an observation either
+    // falls in the bucket or the bucket falls back to the labelled peg. There is
+    // no window over which a stale reading can be presented as a measurement.
+    //
+    // ⚠️ **Only `method = 'oracle'` is accepted now.** The old form ranked
+    // `oracle > pivot > pivot2 > …` with `argMin(rate, pref)` and rendered a
+    // pivot row as `'traded'`. `price_usd_series` and `current.sql`'s tip
+    // surface both take measurements or nothing, so this surface was the only
+    // one that would have answered from a task 0154 pivot — a second way for the
+    // same two surfaces to disagree, on a bucket that HAS observations. Today it
+    // is a no-op: nothing writes a non-`oracle` row for canonical USDC. If 0154
+    // ever wants pivots on a read surface, it must add them to ALL of them in
+    // one change, not inherit one silently here.
+    //
+    // ⚠️ An unmatched joined row does NOT yield NULL. By default
     // (`join_use_nulls = 0`, which is what production runs) it yields the
     // column's DEFAULT — so `r.rate` is `0` for every pre-observation bucket,
     // and a NULL test never fires, rendering USDC at $0.00 instead of falling
@@ -804,16 +874,15 @@ pub async fn ohlcv_peg_series(
     // makes the test hold under `join_use_nulls = 1` too, so the answer no
     // longer depends on a server default in either direction.
     //
-    // ⚠️ The right side is collapsed to ONE row per timestamp before the join.
+    // ⚠️ The right side is collapsed to ONE row per BUCKET before the join.
     // `usd_rate` is ORDER BY (…, timestamp, method) with `method` in the key
     // *deliberately*, so a measured `oracle` and a fallback `peg` can coexist at
-    // the same instant and "the consumer chooses" (`init.sql:280`). Joining the
-    // raw table would let ASOF break that tie by part read order, so the same
-    // request could return 0.9993/`oracle` or 1.0/`peg` on consecutive calls.
-    // The preference below is the choice, made explicitly: a measurement beats a
-    // pivot beats a fallback.
+    // the same instant and "the consumer chooses" (`init.sql:280`). This
+    // consumer chooses measured-or-nothing in the WHERE clause, so the tie
+    // cannot be broken by part read order — which it could when the raw table
+    // was joined directly.
     // The no-match sentinel, in one place because three expressions below must
-    // agree on what "no observation at or before this bucket" means.
+    // agree on what "no observation INSIDE this bucket" means.
     const NO_RATE: &str = "ifNull(r.meth, '') = ''";
 
     let val = if in_xlm {
@@ -835,29 +904,27 @@ pub async fn ohlcv_peg_series(
              '0' AS vqu, \
              toUInt64(0) AS tc, \
              if(o IS NULL, NULL, \
-                toNullable(multiIf({NO_RATE}, 'peg', \
-                                   r.meth = 'oracle', 'oracle', \
-                                   r.meth = 'peg', 'peg', \
-                                   'traded'))) AS meth, \
+                toNullable(if({NO_RATE}, 'peg', 'oracle'))) AS meth, \
              if(o IS NULL, NULL, toNullable(toUInt8(1))) AS drv, \
              b.bkt AS bkt \
-           FROM ( SELECT timestamp AS bkt, 1 AS k, {denom} AS den \
+           FROM ( SELECT timestamp AS bkt, {denom} AS den \
                   FROM {table} FINAL WHERE {conds} \
                   GROUP BY timestamp \
                   ORDER BY bkt DESC LIMIT {limit} ) AS b \
-           ASOF LEFT JOIN ( \
-                  SELECT 1 AS k, rts, argMin(rate, pref) AS rate, argMin(m, pref) AS meth \
-                  FROM ( SELECT timestamp AS rts, usd_rate AS rate, method AS m, \
-                                multiIf(method = 'oracle', 0, method = 'pivot', 1, \
-                                        method = 'pivot2', 2, 3) AS pref \
-                         FROM usd_rate FINAL \
-                         WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
-                           AND issuer_address = ? AND contract_address = '' ) \
-                  GROUP BY rts ) AS r \
-             ON b.k = r.k AND r.rts <= b.bkt \
+           LEFT JOIN ( \
+                  SELECT toStartOfInterval(timestamp, INTERVAL {interval}) AS rbkt, \
+                         argMax(usd_rate, timestamp)               AS rate, \
+                         CAST(argMax(method, timestamp) AS String) AS meth \
+                  FROM usd_rate FINAL \
+                  WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+                    AND issuer_address = ? AND contract_address = '' \
+                    AND method = 'oracle' \
+                  GROUP BY rbkt ) AS r \
+             ON r.rbkt = b.bkt \
          ) ORDER BY bkt ASC",
         conds = conds.join(" AND "),
         limit = args.limit,
+        interval = args.granularity.interval_sql(),
         denom = if in_xlm {
             // XLM's USD price for the bucket, from the highest-volume source.
             format!("argMaxIf(close_usd, volume_base, close_usd >= {PRECISION_FLOOR})")

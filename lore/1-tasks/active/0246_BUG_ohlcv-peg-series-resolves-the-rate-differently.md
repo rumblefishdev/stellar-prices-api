@@ -88,17 +88,130 @@ forward-fill is a defect on any reading.
 
 ## Acceptance Criteria
 
-- [ ] For a bucket with observations, `/ohlcv` and `price_usd_series` at the same
+- [x] For a bucket with observations, `/ohlcv` and `price_usd_series` at the same
       grain publish the **same** `close` for canonical USDC.
-- [ ] An oracle gap longer than the staleness window renders as `method = 'peg'`
+      `ohlcv_agrees_with_price_usd_series_on_the_same_bucket`.
+- [x] An oracle gap longer than the staleness window renders as `method = 'peg'`
       on both surfaces, never as a forward-filled `'oracle'`.
-- [ ] A test pins the agreement across the two surfaces directly, rather than
+      `ohlcv_does_not_forward_fill_a_stale_rate_into_later_buckets`.
+- [x] A test pins the agreement across the two surfaces directly, rather than
       each surface pinning its own rule in isolation — that isolation is why the
-      divergence went unnoticed.
-- [ ] No `SETTINGS` clause; verified as a `readonly = 1` user
-      (`ohlcv_peg_series_answers_for_a_readonly_user` is the existing pattern).
+      divergence went unnoticed. The cross-surface test queries
+      `price_usd_series_1h` in the same scratch database and compares
+      **surface against surface**, not against literals.
+- [x] No `SETTINGS` clause; verified as a `readonly = 1` user —
+      `ohlcv_peg_series_answers_for_a_readonly_user` still passes against the new
+      query shape.
+- [ ] ⏳ **Live on prod.** `/ohlcv` is served by the api-handler Lambda, so this
+      needs a **Compute deploy** — see the note at the end.
 
 ## Out of scope
 
 - The enrichment peg tier's flat `$1` in `close_usd` itself — a write-path change,
   tracked in [[0168]]'s "Known adjacent gap".
+
+
+---
+
+# Implementation Notes — 2026-09-01
+
+## What changed
+
+`packages/prices-api/src/assets/queries_ch.rs` only, plus its tests. The ASOF
+became a bucket-scoped equi-join, in the shape [[0168]] landed on:
+
+```sql
+-- was: ASOF LEFT JOIN (…) AS r ON b.k = r.k AND r.rts <= b.bkt
+LEFT JOIN (
+    SELECT toStartOfInterval(timestamp, INTERVAL <grain>) AS rbkt,
+           argMax(usd_rate, timestamp)                    AS rate,
+           CAST(argMax(method, timestamp) AS String)      AS meth
+    FROM usd_rate FINAL
+    WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+      AND issuer_address = ? AND contract_address = ''
+      AND method = 'oracle'
+    GROUP BY rbkt
+) AS r ON r.rbkt = b.bkt
+```
+
+The staleness window becomes exactly one bucket width for free: an observation
+either falls inside the bucket or the bucket falls back to the labelled peg.
+There is no window over which a stale reading can be dressed as a measurement.
+
+`Granularity::interval_sql()` is new — the `toStartOfInterval` argument per
+grain, deliberately identical to the intervals `rollups.sql` uses to BUILD these
+buckets. A mismatch there would resolve every rate against the wrong bucket
+silently rather than failing.
+
+## Design Decisions
+
+### From Plan
+
+1. **`argMax` in the bucket, not a bounded ASOF.** The task suggested it and it
+   is right: ClickHouse's ASOF takes exactly one inequality, so a staleness bound
+   would have needed a second predicate applied after the join. Scoping to the
+   bucket expresses the same rule with no extra constant.
+2. **`o = h = l = c` stays.** The task offered keeping bucket-start for the
+   `open`. Rejected: these are flat synthetic candles by construction, and a real
+   `open` with a synthetic `high`/`low` would imply a range that was never
+   traded. Documented rather than half-implemented.
+
+### Emerged
+
+3. **Only `method = 'oracle'` is accepted now.** The old query ranked
+   `oracle > pivot > pivot2 > …` via `argMin(rate, pref)` and rendered a pivot
+   row as `'traded'`. `price_usd_series` and `current.sql` both take measurements
+   or nothing, so this surface was the only one that would have answered from a
+   [[0154]] pivot — **a second way for the same two surfaces to disagree, on a
+   bucket that HAS observations**, which AC 1 forbids. Today it is a no-op:
+   nothing writes a non-`oracle` row for canonical USDC. Recorded because it
+   narrows a shipped endpoint's inputs, and because 0154 must now add pivots to
+   every read surface in one change rather than inheriting one here silently.
+4. **`1M` has a bucket-attribution edge, stated rather than solved.** The `1M`
+   rollup reads from `1w`, so a week starting in August but running into
+   September files its September days under August, while an observation on
+   1 September floors to September here. Both are defensible, and the difference
+   is invisible to AC 1, which compares against `price_usd_series{,_1h}` — daily
+   and hourly only. Noted in `interval_sql`'s doc comment.
+
+## Issues Encountered
+
+- 🔑 **All 26 existing tests passed against BOTH rules**, before and after. That
+  is not reassurance, it is the finding: every fixture in `ohlcv_it.rs` placed
+  its observations exactly on a bucket boundary (10:00, 11:00), where resolving
+  at the start and resolving at the end pick the same row. The new fixture
+  (`seed_0246`) puts them at 10:05 and 10:55 — strictly inside the bucket — which
+  is the smallest change that makes the two rules distinguishable at all.
+- **Both new tests were verified to FAIL against the old query** by reverting
+  `queries_ch.rs` and re-running, rather than assumed to be regressions. The
+  cross-surface one failed with `/ohlcv published 1 but price_usd_series_1h
+  published 1.0007` — the divergence, in the assertion message.
+- The forward-fill test originally asserted the measured bucket first, so a
+  regression tripped on the sanity check instead of on the defect the test is
+  named for. Reordered so the failure names the forward-fill.
+
+## Test Results
+
+| suite | result |
+|---|---|
+| `prices-api` `ohlcv_it` (`--ignored`) | **28 passed, 2 new** (was 26) |
+| `prices-api` full (`--include-ignored`) | 169 lib + every IT suite, all green |
+| `cargo clippy -p prices-api --all-targets` | clean |
+
+## ⏳ Remaining — the deploy
+
+`/ohlcv` runs in the api-handler Lambda, so prod still serves the old resolution
+until a **Compute deploy**. ⚠️ That deploy is not ours alone to make: `develop`
+carries Adam's merged work, so `make deploy-production-compute` ships his
+changes too — the same coupling [[0244]] is waiting on. Ride his next Compute
+deploy rather than triggering one, and verify with the runbook query below.
+
+```sql
+-- after the deploy, for a bucket that HAS observations, these must agree
+SELECT bucket, close_usd, method FROM prices.price_usd_series_1h
+WHERE asset_code = 'USDC' AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+ORDER BY bucket DESC LIMIT 5;
+```
+
+against `GET /v1/assets/USDC:GA5ZSE…/ohlcv?granularity=1h&base_currency=USD`
+(⚠️ `apiKeyRequired`), same buckets.
