@@ -152,7 +152,9 @@ the RFP on its own terms — including the option to leave it as-is.
 Requirements list *"Price Aggregation: Weighted average across major markets
 (Soroswap, Aquarius, SDEX, Blend)"* as the method for producing normalized
 prices, and the same list names *"Current Price"* as the field a consumer
-reads. The natural reading of the pair is that the price a consumer sees IS
+reads. (⚠️ Blend is a LENDING protocol and we ingest no such venue — that is a
+separate deviation, filed as [[0248]]. This task is about the METHOD, 0248 is
+about the VENUE LIST.) The natural reading of the pair is that the price a consumer sees IS
 the aggregate. Our shipped design does the opposite: the headline `price_usd`
 is the unfiltered latest priced close from a single venue, and the aggregate
 lives in the secondary `vwap_24h`.
