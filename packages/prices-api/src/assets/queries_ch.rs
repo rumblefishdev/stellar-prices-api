@@ -420,6 +420,26 @@ impl BaseCurrency {
     }
 }
 
+/// Floor on the peg series' staleness window, in seconds — task 0246.
+///
+/// 🔑 **A one-bucket window is only safe while the bucket is wider than the
+/// oracle's poll interval.** `oracleWatcher` runs `rate(5 minutes)`
+/// (`infra/envs/production.json`) and `usd_rate` carries one row per poll, so a
+/// 1-minute bucket contains an observation only about one time in five. Scoping
+/// the rate strictly to the bucket — which is what `price_usd_series` does, and
+/// what it can safely do because it exists only at `1d` and `1h` — would make
+/// `GET /ohlcv?granularity=1m` alternate between a measured rate and the `$1`
+/// fallback every minute, flipping `method` with it. That is worse than the
+/// unbounded forward-fill task 0246 removed: a three-minute-old measurement is
+/// strictly better evidence than a literal `$1`.
+///
+/// 300 s is not a new number — it is enrichment's `FORWARD_FILL_WINDOW_S`
+/// default, the window the write path already forward-fills an oracle reading
+/// across at 1-minute candles (`ch_enrich.rs`). Duplicated rather than imported
+/// because `prices-api` does not depend on `enrichment-worker`; if that default
+/// moves, this moves with it.
+pub const ORACLE_POLL_FLOOR_S: u64 = 300;
+
 /// OHLCV granularity → per-grain table suffix. Tokens are case-sensitive by
 /// necessity: `1m` (minute) and `1M` (month) differ only by case.
 #[derive(Debug, Clone, Copy, serde::Deserialize, utoipa::ToSchema)]
@@ -453,23 +473,16 @@ impl Granularity {
         }
     }
 
-    /// The `toStartOfInterval` argument that floors a timestamp onto THIS
-    /// grain's bucket — task 0246.
+    /// The `INTERVAL` literal for ONE bucket of this grain — task 0246.
     ///
-    /// ⚠️ These must stay identical to `rollups.sql`, which builds the candle
-    /// buckets with the same function and the same intervals. The whole point is
-    /// that flooring a `usd_rate` observation lands it on the bucket the candle
-    /// already carries; a mismatch here silently resolves every rate against the
-    /// wrong bucket rather than failing.
+    /// Used two ways and they must agree: `bkt + INTERVAL x` is the bucket's
+    /// end, and the same width is the staleness window wherever it is at least
+    /// [`ORACLE_POLL_FLOOR_S`] wide.
     ///
-    /// ⚠️ `1M` is the one grain where "the bucket a rate falls into" and "the
-    /// bucket the candle is filed under" can differ. The `1M` rollup reads from
-    /// `1w`, so a week that STARTS in August but runs into September has its
-    /// September days filed under August, while an observation on 1 September
-    /// floors to September here. Both are defensible and the difference is
-    /// invisible to task 0246's acceptance test, which compares against
-    /// `price_usd_series{,_1h}` — daily and hourly only. Stated so the next
-    /// reader does not have to rediscover it.
+    /// ⚠️ These must stay identical to the intervals `rollups.sql` uses to BUILD
+    /// the candle buckets. `bkt + INTERVAL x` has to land exactly on the next
+    /// bucket's start, or the window is off by the difference on every row —
+    /// silently, since nothing fails.
     pub fn interval_sql(self) -> &'static str {
         match self {
             Granularity::M1 => "1 MINUTE",
@@ -881,18 +894,40 @@ pub async fn ohlcv_peg_series(
     // consumer chooses measured-or-nothing in the WHERE clause, so the tie
     // cannot be broken by part read order — which it could when the raw table
     // was joined directly.
+    // The staleness window: `[floor, bucket end)`.
+    //
+    // For every grain at least ORACLE_POLL_FLOOR_S wide the floor is the
+    // bucket's own start, so the window IS the bucket and this is exactly
+    // `price_usd_series`'s rule — `toStartOfInterval(t, g) = bkt` and
+    // `bkt <= t < bkt + g` are the same predicate, which is what keeps the two
+    // surfaces in agreement (task 0246 AC 1).
+    //
+    // `1m` is the one grain narrower than the oracle's 5-minute cadence, so its
+    // floor widens to ORACLE_POLL_FLOOR_S — see that constant for why a strict
+    // one-bucket window would be a regression there rather than a fix.
+    let floor = if args.granularity.seconds() >= ORACLE_POLL_FLOOR_S {
+        "b.bkt".to_string()
+    } else {
+        format!("b.bend - INTERVAL {ORACLE_POLL_FLOOR_S} SECOND")
+    };
     // The no-match sentinel, in one place because three expressions below must
-    // agree on what "no observation INSIDE this bucket" means.
-    const NO_RATE: &str = "ifNull(r.meth, '') = ''";
+    // agree on what "no usable observation for this bucket" means. Two ways to
+    // fail: nothing matched at all, or what matched is older than the window.
+    //
+    // ⚠️ The second test is not redundant under `join_use_nulls = 0`, it is the
+    // belt: an unmatched ASOF yields the DEFAULT, and for a DateTime that is
+    // `1970-01-01` — which fails the floor too. Under `join_use_nulls = 1` the
+    // first test carries it, since `NULL < x` is NULL rather than true.
+    let no_rate = format!("(ifNull(r.meth, '') = '' OR r.rts < {floor})");
 
     let val = if in_xlm {
         format!(
             "toNullable(toString(toDecimal128OrNull(toString( \
-             toFloat64(if({NO_RATE}, toDecimal128(1, 14), r.rate)) \
+             toFloat64(if({no_rate}, toDecimal128(1, 14), r.rate)) \
              / nullIf(toFloat64(b.den), 0)), 14)))"
         )
     } else {
-        format!("toNullable(toString(if({NO_RATE}, toDecimal128(1, 14), r.rate)))")
+        format!("toNullable(toString(if({no_rate}, toDecimal128(1, 14), r.rate)))")
     };
     let sql = format!(
         "SELECT ts, o, h, l, c, vb, vqu, vw, tc, meth, drv FROM ( \
@@ -904,23 +939,24 @@ pub async fn ohlcv_peg_series(
              '0' AS vqu, \
              toUInt64(0) AS tc, \
              if(o IS NULL, NULL, \
-                toNullable(if({NO_RATE}, 'peg', 'oracle'))) AS meth, \
+                toNullable(if({no_rate}, 'peg', 'oracle'))) AS meth, \
              if(o IS NULL, NULL, toNullable(toUInt8(1))) AS drv, \
              b.bkt AS bkt \
-           FROM ( SELECT timestamp AS bkt, {denom} AS den \
+           FROM ( SELECT timestamp AS bkt, timestamp + INTERVAL {interval} AS bend, \
+                         1 AS k, {denom} AS den \
                   FROM {table} FINAL WHERE {conds} \
                   GROUP BY timestamp \
                   ORDER BY bkt DESC LIMIT {limit} ) AS b \
-           LEFT JOIN ( \
-                  SELECT toStartOfInterval(timestamp, INTERVAL {interval}) AS rbkt, \
-                         argMax(usd_rate, timestamp)               AS rate, \
-                         CAST(argMax(method, timestamp) AS String) AS meth \
-                  FROM usd_rate FINAL \
-                  WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
-                    AND issuer_address = ? AND contract_address = '' \
-                    AND method = 'oracle' \
-                  GROUP BY rbkt ) AS r \
-             ON r.rbkt = b.bkt \
+           ASOF LEFT JOIN ( \
+                  SELECT 1 AS k, rts, argMax(rate, rts) AS rate, \
+                         CAST(argMax(m, rts) AS String) AS meth \
+                  FROM ( SELECT timestamp AS rts, usd_rate AS rate, method AS m \
+                         FROM usd_rate FINAL \
+                         WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+                           AND issuer_address = ? AND contract_address = '' \
+                           AND method = 'oracle' ) \
+                  GROUP BY rts ) AS r \
+             ON b.k = r.k AND r.rts < b.bend \
          ) ORDER BY bkt ASC",
         conds = conds.join(" AND "),
         limit = args.limit,

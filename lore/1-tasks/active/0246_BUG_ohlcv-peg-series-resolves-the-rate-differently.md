@@ -134,14 +134,33 @@ LEFT JOIN (
 ) AS r ON r.rbkt = b.bkt
 ```
 
-The staleness window becomes exactly one bucket width for free: an observation
-either falls inside the bucket or the bucket falls back to the labelled peg.
-There is no window over which a stale reading can be dressed as a measurement.
+🔴 **First cut got this wrong and code review caught it — see Issues.** The
+window is `[max(bucket, 300 s) before the bucket's end, bucket end)`, expressed
+as an ASOF at the bucket's END bounded below:
 
-`Granularity::interval_sql()` is new — the `toStartOfInterval` argument per
-grain, deliberately identical to the intervals `rollups.sql` uses to BUILD these
-buckets. A mismatch there would resolve every rate against the wrong bucket
-silently rather than failing.
+```sql
+ASOF LEFT JOIN (…one row per observation…) AS r ON b.k = r.k AND r.rts < b.bend
+-- plus, in the value and method expressions:
+--   no_rate = (nothing matched)  OR  r.rts < floor
+--   floor   = b.bkt                        when the grain is >= 300 s
+--           = b.bend - INTERVAL 300 SECOND at 1m
+```
+
+For every grain at least 300 s wide the floor IS the bucket's own start, so the
+window is exactly the bucket and `bkt <= t < bkt + g` is the same predicate as
+the view's `toStartOfInterval(t, g) = bkt`. That identity is what keeps the two
+surfaces in agreement, and it is asserted rather than assumed.
+
+`Granularity::interval_sql()` is new — one bucket's width per grain, deliberately
+identical to the intervals `rollups.sql` uses to BUILD these buckets, since
+`bkt + INTERVAL x` must land exactly on the next bucket's start. So is
+`ORACLE_POLL_FLOOR_S = 300`, which is enrichment's `FORWARD_FILL_WINDOW_S`
+default rather than a new number.
+
+`views.sql` also changed: both grain bodies carried a fence saying `/ohlcv`
+ASOFs at the bucket start with no bound and that reconciling them was a separate
+task. This PR makes that false, so both copies now describe the shared rule and
+the one deliberate difference below.
 
 ## Design Decisions
 
@@ -176,6 +195,28 @@ silently rather than failing.
 
 ## Issues Encountered
 
+- 🔴 **The first implementation was a REGRESSION at `1m`, found in code review.**
+  Scoping the rate strictly to its bucket was copied from `price_usd_series`,
+  where it is safe *because that view exists only at `1d` and `1h`* — both far
+  wider than the oracle's 5-minute cadence. `/ohlcv` has no such floor:
+  `Timeframe::H1::default_granularity()` **is** `1m`, so `?timeframe=1h` with no
+  other parameter returns sixty 1-minute buckets while `oracleWatcher` runs
+  `rate(5 minutes)`. Roughly four buckets in five would have held no observation
+  and dropped to `$1`, so the published series became a 0.07% square wave
+  flipping value *and* `method` every minute — strictly worse than the unbounded
+  forward-fill this task set out to remove, because a three-minute-old
+  measurement beats a literal `$1`.
+  🔑 **The lesson is transplanting a rule together with the precondition that
+  made it safe.** The bucket-scoped window is not a general rule; it is a rule
+  that holds while the bucket is wider than the poll interval. The view never had
+  to say so because it cannot be asked for a narrow grain.
+  Fixed by flooring the window at `ORACLE_POLL_FLOOR_S`, and pinned by
+  `ohlcv_at_1m_carries_a_measurement_across_the_oracle_poll_gap`, which was
+  verified to FAIL against the strict-bucket version.
+- **Neither of the first two tests could have caught it** — both use `1h`, where
+  the floor and the bucket coincide. Grain coverage was the gap, not assertion
+  strength.
+
 - 🔑 **All 26 existing tests passed against BOTH rules**, before and after. That
   is not reassurance, it is the finding: every fixture in `ohlcv_it.rs` placed
   its observations exactly on a bucket boundary (10:00, 11:00), where resolving
@@ -194,8 +235,9 @@ silently rather than failing.
 
 | suite | result |
 |---|---|
-| `prices-api` `ohlcv_it` (`--ignored`) | **28 passed, 2 new** (was 26) |
-| `prices-api` full (`--include-ignored`) | 169 lib + every IT suite, all green |
+| `prices-api` `ohlcv_it` (`--ignored`) | **29 passed, 3 new** (was 26) |
+| `prices-api` full (`--include-ignored`) | every suite green, 0 failures |
+| `prices-clickhouse` lib + `views_it` | 28 + 11 green (views.sql fence updated) |
 | `cargo clippy -p prices-api --all-targets` | clean |
 
 ## ⏳ Remaining — the deploy

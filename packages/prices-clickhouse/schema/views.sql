@@ -486,18 +486,28 @@ FROM
     --     flips to 'oracle'. That is a ~0.07% step on a partial bucket, and it
     --     is visible in `method`, so a consumer that cares can wait for it.
     --
-    -- ⚠️ `/v1/assets/{id}/ohlcv`'s USDC peg series (task 0170,
-    -- queries_ch.rs::ohlcv_peg_series) reads the same table and reaches a
-    -- DIFFERENT value for the same bucket. It ASOFs at the bucket's START and
-    -- applies NO staleness bound, so (a) its daily "close" is the previous day's
-    -- last reading, and (b) after an oracle outage it forward-fills the last
-    -- known rate indefinitely, still labelled 'oracle'. This view follows the
-    -- rule init.sql states for this consumer by name ("T is the BUCKET'S END"),
-    -- which is also the only one under which a daily close can equal the last
-    -- hourly close of that day at all (subject to the gap caveat above). The two surfaces therefore disagree by the
-    -- intraday drift in normal operation and by the whole staleness gap after an
-    -- outage. Reconciling them is its own task — NOT fixed here, because it is a
-    -- change to a shipped endpoint's published values.
+    -- ✅ `/v1/assets/{id}/ohlcv`'s USDC peg series (task 0170,
+    -- queries_ch.rs::ohlcv_peg_series) reads the same table and now applies the
+    -- SAME rule — task 0246. It used to ASOF at the bucket's START with NO
+    -- staleness bound, so (a) its daily "close" was the PREVIOUS day's last
+    -- reading and (b) after an oracle outage it forward-filled the last known
+    -- rate indefinitely, still labelled 'oracle'. Both surfaces now take the
+    -- last observation inside the bucket, per the rule init.sql states for this
+    -- consumer by name ("T is the BUCKET'S END") — which is also the only one
+    -- under which a daily close can equal the last hourly close of that day at
+    -- all (subject to the gap caveat above).
+    --
+    -- ⚠️ ONE DELIBERATE DIFFERENCE, and it is not drift. `/ohlcv` serves grains
+    -- this view does not, down to `1m`, and a 1-minute bucket is NARROWER than
+    -- the oracle's 5-minute poll cadence — so scoping strictly to the bucket
+    -- there would leave ~4 buckets in 5 on the $1 fallback and turn the series
+    -- into a square wave. Its window is therefore max(bucket, 300 s), 300 s
+    -- being enrichment's own FORWARD_FILL_WINDOW_S. At `1h` and `1d` — the only
+    -- grains this view has — max(bucket, 300 s) IS the bucket, so the two agree
+    -- exactly wherever they are comparable. Pinned by
+    -- ohlcv_agrees_with_price_usd_series_on_the_same_bucket (ohlcv_it.rs), which
+    -- compares the two surfaces against each other rather than against
+    -- literals.
     LEFT JOIN
     (
         SELECT
@@ -683,18 +693,28 @@ FROM
     --     flips to 'oracle'. That is a ~0.07% step on a partial bucket, and it
     --     is visible in `method`, so a consumer that cares can wait for it.
     --
-    -- ⚠️ `/v1/assets/{id}/ohlcv`'s USDC peg series (task 0170,
-    -- queries_ch.rs::ohlcv_peg_series) reads the same table and reaches a
-    -- DIFFERENT value for the same bucket. It ASOFs at the bucket's START and
-    -- applies NO staleness bound, so (a) its daily "close" is the previous day's
-    -- last reading, and (b) after an oracle outage it forward-fills the last
-    -- known rate indefinitely, still labelled 'oracle'. This view follows the
-    -- rule init.sql states for this consumer by name ("T is the BUCKET'S END"),
-    -- which is also the only one under which a daily close can equal the last
-    -- hourly close of that day at all (subject to the gap caveat above). The two surfaces therefore disagree by the
-    -- intraday drift in normal operation and by the whole staleness gap after an
-    -- outage. Reconciling them is its own task — NOT fixed here, because it is a
-    -- change to a shipped endpoint's published values.
+    -- ✅ `/v1/assets/{id}/ohlcv`'s USDC peg series (task 0170,
+    -- queries_ch.rs::ohlcv_peg_series) reads the same table and now applies the
+    -- SAME rule — task 0246. It used to ASOF at the bucket's START with NO
+    -- staleness bound, so (a) its daily "close" was the PREVIOUS day's last
+    -- reading and (b) after an oracle outage it forward-filled the last known
+    -- rate indefinitely, still labelled 'oracle'. Both surfaces now take the
+    -- last observation inside the bucket, per the rule init.sql states for this
+    -- consumer by name ("T is the BUCKET'S END") — which is also the only one
+    -- under which a daily close can equal the last hourly close of that day at
+    -- all (subject to the gap caveat above).
+    --
+    -- ⚠️ ONE DELIBERATE DIFFERENCE, and it is not drift. `/ohlcv` serves grains
+    -- this view does not, down to `1m`, and a 1-minute bucket is NARROWER than
+    -- the oracle's 5-minute poll cadence — so scoping strictly to the bucket
+    -- there would leave ~4 buckets in 5 on the $1 fallback and turn the series
+    -- into a square wave. Its window is therefore max(bucket, 300 s), 300 s
+    -- being enrichment's own FORWARD_FILL_WINDOW_S. At `1h` and `1d` — the only
+    -- grains this view has — max(bucket, 300 s) IS the bucket, so the two agree
+    -- exactly wherever they are comparable. Pinned by
+    -- ohlcv_agrees_with_price_usd_series_on_the_same_bucket (ohlcv_it.rs), which
+    -- compares the two surfaces against each other rather than against
+    -- literals.
     LEFT JOIN
     (
         SELECT
