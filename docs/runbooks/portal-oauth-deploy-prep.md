@@ -69,7 +69,17 @@ In the [Discord Developer Portal](https://discord.com/developers/applications):
 2. **OAuth2 → Redirects → Add Redirect**, and enter the callback URL exactly:
 
    ```
-   https://<portal-host>/api/api/auth/callback
+   https://<portal-host>/api/auth/callback
+   ```
+
+   `<portal-host>` is **the host the backend answers on**, not the host the
+   page is served from — since task 0194 those are two hostnames:
+   `prices-api.sorobanscan.rumblefish.dev` runs the callback and sets the
+   session cookie, `sorobanscan.rumblefish.dev/api/` is the page it sends the
+   visitor back to (`PORTAL_WEB_ORIGIN`). Register the former. In production:
+
+   ```
+   https://prices-api.sorobanscan.rumblefish.dev/api/auth/callback
    ```
 
    ⚠️ **Assume the match is character-exact.** Discord's documentation states
@@ -129,7 +139,7 @@ aws secretsmanager create-secret \
     --secret-string "$(jq -n \
         --arg id "$CLIENT_ID" \
         --arg secret "$CLIENT_SECRET" \
-        --arg redirect "https://<portal-host>/api/api/auth/callback" \
+        --arg redirect "https://<portal-host>/api/auth/callback" \
         --arg key "$SIGNING_KEY" \
         '{client_id:$id, client_secret:$secret, redirect_uri:$redirect, session_signing_key:$key}')"
 ```
@@ -222,8 +232,11 @@ Both must print `prices/production/portal-discord-oauth`.
 `PORTAL_ENABLED` is still `false` at this point and the routes still answer an
 empty `404`. That is correct: **the api-handler does not read this secret while
 the portal is closed** (see `AppConfig::load_portal_oauth`), so creating it does
-not change any behaviour and forgetting to create it before opening the portal
-fails the _next_ cold start rather than silently serving a broken sign-in.
+not change any behaviour, and forgetting to create it before opening the portal
+closes the portal again at the _next_ cold start — `/config` answers
+`enabled: false` and the api-handler logs `portal closed at cold start` naming
+`PORTAL_OAUTH_SECRET_NAME` — rather than silently serving a broken sign-in
+(`AppConfig::load_portal_or_close`). `/v1` is unaffected either way.
 
 ## 4. Verify locally before opening production
 
@@ -237,7 +250,7 @@ Two things that are **this runbook's**, because they are changes to the
 registration rather than to a developer's machine:
 
 1. **Add a second redirect URI** to the same Discord application, pointing at
-   `http://localhost:4200/api/api/auth/callback`. Discord accepts several
+   `http://localhost:4200/api/auth/callback`. Discord accepts several
    redirects per application, so this sits alongside the production one and
    neither disturbs the other.
 2. **Decide what happens to it afterwards.** Remove it once the flow is
@@ -318,7 +331,7 @@ host, at the new host, or both.
    `redirect_uri` still names the old host, and Discord matches whichever we
    send.
 2. **Verify the new hostname serves the portal** and that
-   `https://<new-host>/api/api/config` answers — i.e. the distribution and
+   `https://<new-host>/api/config` answers — i.e. the distribution and
    its behaviours are live on the new name. Sign-in still runs through the old
    host at this point.
 3. **Update the secret's `redirect_uri`** to the new host:
@@ -327,7 +340,7 @@ host, at the new host, or both.
    aws secretsmanager put-secret-value \
        --secret-id prices/production/portal-discord-oauth \
        --secret-string "$(jq -n --arg id "$CLIENT_ID" --arg secret "$CLIENT_SECRET" \
-            --arg redirect "https://<new-host>/api/api/auth/callback" \
+            --arg redirect "https://<new-host>/api/auth/callback" \
             --arg key "$SIGNING_KEY" \
             '{client_id:$id, client_secret:$secret, redirect_uri:$redirect, session_signing_key:$key}')"
    ```
@@ -395,11 +408,17 @@ so a drift fails CI rather than a deploy — but the _existence_ of the deployed
 parameter is not something CI can see.
 
 **If the parameter is missing when `PORTAL_ENABLED` becomes `true`, the
-api-handler fails cold start**, and that is not confined to the portal: one
-router serves every route group (ADR 0008), so it takes `/v1` down. This is the
-same "fatal only at the moment of opening" shape as the OAuth secret in §3, and
-it is deliberate — the alternative is a portal with a key button that answers
-`503`.
+api-handler closes the portal at cold start** — `/config` answers
+`enabled: false` and the log carries `portal closed at cold start` naming
+`PORTAL_FREE_PLAN_PARAM` — and `/v1` is unaffected. It used to fail init
+instead, which took `/v1` down with it (one router serves every route group,
+ADR 0008); task 0194's PR review is where that changed, and the reasoning is on
+`AppConfig::load_portal_or_close`. The shape is still "found only at the moment
+of opening", as with the OAuth secret in §3, and the alternative it avoids is
+still a portal with a key button that answers `503` — a closed portal answers
+before any button renders. What it costs: nothing pages on it (the api-handler
+has no error alarm), so the `/config` probe after the deploy is the check, not
+an optional confirmation.
 
 While the portal is closed the handler reads neither, so nothing here changes
 any behaviour until the flag moves.

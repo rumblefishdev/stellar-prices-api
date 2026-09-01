@@ -66,6 +66,7 @@ fn config_with(base_url: Option<&str>, api_keys: Vec<String>) -> AppConfig {
         portal_keys: None,
         portal_eligibility: None,
         portal_rate_limit: None,
+        portal_web_origin: None,
     }
 }
 

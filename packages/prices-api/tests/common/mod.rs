@@ -34,6 +34,7 @@ pub fn app_without_ch() -> Router {
         portal_keys: None,
         portal_eligibility: None,
         portal_rate_limit: None,
+        portal_web_origin: None,
     };
     app(&config, AppState::without_ch())
 }

@@ -1,7 +1,10 @@
 import * as cdk from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import type * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as targets from 'aws-cdk-lib/aws-route53-targets';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 
@@ -133,7 +136,7 @@ const API_DOCS_THROTTLE = { rate: 10, burst: 20 } as const;
  * A change set accepts every one of the rejected forms, so this fails on apply
  * and only on apply. Do not read a clean `cdk diff` as evidence here.
  */
-const PORTAL_API_RESOURCE_PATH = '/api/api/{proxy+}';
+const PORTAL_API_RESOURCE_PATH = '/api/{proxy+}';
 
 /**
  * The verbs mapped under the portal prefix, enumerated because `ANY` cannot
@@ -149,7 +152,7 @@ const PORTAL_API_RESOURCE_PATH = '/api/api/{proxy+}';
  * which the greedy `{proxy+}` above covers and the intermediate
  * `{proxy}` + `{proxy}/{sub}` pair that is CURRENTLY DEPLOYED does not — see
  * task 0205, which ships this file's committed shape. Until that deploy runs,
- * `/api/api/auth/login` answers the gateway's own
+ * `/api/auth/login` answers the gateway's own
  * `403 Missing Authentication Token` rather than reaching the handler. That is a
  * deployment gap, not a defect in either task: the flag keeps the handler dark
  * regardless, and `/config` at depth 1 is unaffected.
@@ -164,7 +167,7 @@ const PORTAL_API_RESOURCE_PATH = '/api/api/{proxy+}';
 const PORTAL_API_METHODS = ['GET', 'POST', 'DELETE'] as const;
 
 /**
- * Method-level throttle for the portal's backend (`/api/api/...`).
+ * Method-level throttle for the portal's backend (`/api/...`).
  *
  * Same argument as `API_DOCS_THROTTLE` above, and the same reason it cannot be
  * left to the default. These routes are anonymous by design — a visitor signing
@@ -215,6 +218,36 @@ const PORTAL_API_METHODS = ['GET', 'POST', 'DELETE'] as const;
 const PORTAL_THROTTLE = { rate: 10, burst: 40 } as const;
 
 /**
+ * The header the bundle marks its state-changing calls with —
+ * `PORTAL_REQUEST_HEADER` in `packages/prices-api/src/portal/keys/mod.rs`,
+ * where it is the CSRF guard on the revoke. Non-safelisted, so the preflight
+ * below has to name it or the browser never sends the revoke at all: the
+ * failure is a `403` from the preflight in the network tab and a "could not
+ * be reached" on the page, with nothing in any log of ours.
+ */
+const PORTAL_REQUEST_HEADER = 'X-Requested-With';
+
+/**
+ * How long a browser may reuse one preflight answer (task 0194).
+ *
+ * The bundle's calls are simple `GET`s except the revoke, which carries the
+ * header above, and every one of them carries the session cookie — a
+ * credentialed request, which is what makes the answer cacheable per origin
+ * rather than per URL. Chromium caps this at two hours; one is the figure the
+ * block explorer settled on for the same reason (its task 0317), and there is
+ * no argument for a different one here.
+ */
+const PORTAL_PREFLIGHT_MAX_AGE = cdk.Duration.hours(1);
+
+/**
+ * Every verb the stage carries a portal method setting for: the three Lambda
+ * verbs plus the `OPTIONS` preflight, which is a MOCK — no invocation, but a
+ * billed gateway request, and the one verb an anonymous loop can drive without
+ * even a session. Same throttle as the rest of the prefix, for the same reason.
+ */
+const PORTAL_STAGE_METHODS = [...PORTAL_API_METHODS, 'OPTIONS'] as const;
+
+/**
  * Public REST API Gateway for prices-api.
  *
  * Fronts the single axum api-handler Lambda (ADR 0008): every `/v1` route is a
@@ -228,7 +261,7 @@ const PORTAL_THROTTLE = { rate: 10, burst: 40 } as const;
  *   monthly quota (task 0157, overriding the design doc's §2.1/§7 100 req/s).
  *   `GET /health` stays a keyless mock (cheapest liveness probe), and
  *   `GET /api-docs-json` is a keyless proxy to the handler (task 0124 — public
- *   documentation). `GET`/`POST`/`DELETE` on `/api/api/{proxy+}` are the
+ *   documentation). `GET`/`POST`/`DELETE` on `/api/{proxy+}` are the
  *   onboarding portal's backend (task 0184), keyless for the same reason, gated
  *   in the handler by `PORTAL_ENABLED` (task 0183) and carrying their own
  *   method-level throttle since they sit outside the usage plan.
@@ -236,9 +269,15 @@ const PORTAL_THROTTLE = { rate: 10, burst: 40 } as const;
  *   opt-in per method; each cached method declares its query params as cache
  *   keys.
  *
- * Still deferred (task 0056 / later): custom domain + ACM, WAF WebACL, CORS
- * preflight. The REST API ID is published to SSM at
- * `/prices/{env}/api-gateway-id`.
+ * - **Hostname**: `config.apiDomain` (task 0194) — a REGIONAL custom domain
+ *   with a DNS-validated certificate and Route 53 aliases, mapped at the root
+ *   to this stage. The portal's bundle lives on another distribution and
+ *   calls the backend here, cross-origin; the `OPTIONS` preflight on
+ *   `/api/{proxy+}` and the CORS headers on the gateway's own error
+ *   responses exist for that one caller, `config.portalWebOrigin`.
+ *
+ * Still deferred (task 0056 / later): WAF WebACL. The REST API ID is published
+ * to SSM at `/prices/{env}/api-gateway-id`.
  */
 export class ApiGatewayStack extends cdk.Stack {
   public readonly api: apigateway.RestApi;
@@ -343,7 +382,7 @@ export class ApiGatewayStack extends cdk.Stack {
     });
 
     // ---------------------------------------------------------------
-    // /api/api/{proxy+} — the onboarding portal's backend (0184).
+    // /api/{proxy+} — the onboarding portal's backend (0184).
     // ---------------------------------------------------------------
     // Without these resources the portal's routes are unreachable in production
     // no matter what the handler does: CloudFront forwards the request, the
@@ -357,9 +396,10 @@ export class ApiGatewayStack extends cdk.Stack {
     // has to hold at the gateway, or every slice pays for a CDK change and a
     // deploy. `{proxy+}` covers task 0186's `/auth/*`, task 0187's `/key`, task
     // 0188's `/usage` and task 0192's `/key/revoke` at any depth with no further
-    // work here. The axum router decides what actually exists — and while
-    // `PORTAL_ENABLED` is false, that answer is "nothing", byte-identical to a
-    // path that was never deployed.
+    // work here. The axum router decides what actually exists — which while
+    // `PORTAL_ENABLED` was false meant "nothing", byte-identical to a path that
+    // was never deployed. Task 0194 has since flipped the flag, so these verbs
+    // now reach real handlers.
     //
     // The verbs are listed rather than collapsed into `ANY` because `ANY` cannot
     // carry the throttle below, and that throttle is task 0186's acceptance
@@ -376,13 +416,43 @@ export class ApiGatewayStack extends cdk.Stack {
     // **Throttled and uncached by entries of their own**, in `portalSettings`
     // below — declared outside the `cacheEnabled` branch, because with the stage
     // cache off is exactly when an unbounded anonymous route costs the most.
+    // `/api/{proxy+}` directly under the root: the bundle's paths share the
+    // prefix but never reach the gateway — CloudFront carves them out to S3
+    // ahead of the API row (task 0194, `portal-hosting-stack.ts`). The
+    // OpenAPI alias `/api/api-docs-json` rides on this same proxy.
     const portalProxy = this.api.root
-      .addResource('api')
       .addResource('api')
       .addResource('{proxy+}');
     for (const httpMethod of PORTAL_API_METHODS) {
       portalProxy.addMethod(httpMethod, proxy([]), { apiKeyRequired: false });
     }
+
+    // The preflight for the bundle's cross-origin calls (task 0194).
+    //
+    // The bundle is served from `config.portalWebOrigin` — another
+    // application's distribution, whose `/api/*` behaviour is a static SPA
+    // that rewrites every extensionless path to its `index.html`. A
+    // same-origin `fetch('/api/config')` from there gets the bundle back as
+    // `200 text/html`, so the bundle calls this API on `config.apiDomain`
+    // instead, and a browser asks before a non-simple request crosses an
+    // origin: the revoke's marker header (`PORTAL_REQUEST_HEADER`) is one, and
+    // so is any `DELETE`. Answered here by a MOCK integration rather than by
+    // the Lambda — no invocation, and the `max-age` has to be set by whoever
+    // answers the preflight, which is the gateway — with the handler adding
+    // `Access-Control-Allow-Origin` on the actual responses (`portal::apply`
+    // in the Rust crate names the same one origin).
+    //
+    // ONE origin, exactly, and `allowCredentials: true`: the calls carry the
+    // session cookie, and a credentialed answer cannot use `*`. The same
+    // value reaches the handler as `PORTAL_WEB_ORIGIN`, so the two answers
+    // cannot drift apart — `validateConfig` checks its shape once.
+    portalProxy.addCorsPreflight({
+      allowOrigins: [config.portalWebOrigin],
+      allowMethods: [...PORTAL_API_METHODS],
+      allowHeaders: ['Content-Type', 'Accept', PORTAL_REQUEST_HEADER],
+      allowCredentials: true,
+      maxAge: PORTAL_PREFLIGHT_MAX_AGE,
+    });
 
     const PATH_ID = 'method.request.path.asset_identifier';
     const qs = (name: string) => `method.request.querystring.${name}`;
@@ -499,7 +569,7 @@ export class ApiGatewayStack extends cdk.Stack {
     // that arm alone silently vanishes wherever the stage cache is off, which is
     // precisely the configuration where every anonymous request is a billed
     // Lambda invocation.
-    const portalSettings = PORTAL_API_METHODS.map((httpMethod) => ({
+    const portalSettings = PORTAL_STAGE_METHODS.map((httpMethod) => ({
       resourcePath: PORTAL_API_RESOURCE_PATH,
       httpMethod,
       throttlingRateLimit: PORTAL_THROTTLE.rate,
@@ -736,6 +806,114 @@ export class ApiGatewayStack extends cdk.Stack {
       ],
     });
 
+    // CORS on the gateway's OWN error answers (task 0194): a `429` from the
+    // throttle above, a `504` when the Lambda runs out of time. Neither
+    // reaches the handler, so neither carries its `Access-Control-Allow-Origin`
+    // — and to a browser on `portalWebOrigin` a cross-origin response without
+    // one is not a `429`, it is a network error. The bundle's `getJson` would
+    // then report "could not be reached", which points at the visitor's
+    // network when the cause is a throttle that has a status and a body. A
+    // static value rather than the request's `Origin`, because a gateway
+    // response cannot read one: this is the one origin the API serves a page
+    // to, and a browser on any other origin rejects the mismatch and shows the
+    // same opaque error it would have shown anyway.
+    //
+    // ⚠️ **A gateway response is scopable by `ResponseType` and by nothing
+    // else** — there is no path, resource or stage dimension. So every entry
+    // here is API-WIDE, `/v1` included, and the header goes out even on a
+    // request that carried no `Origin` at all. That is why the 4xx half is
+    // `THROTTLED` and not `DEFAULT_4XX`, which 0194's review found stamping
+    // the portal's origin onto every keyless `/v1` `403` — a set of answers
+    // the portal never reads, on the far larger half of the API, for no gain.
+    // `THROTTLED` is the one 4xx the bundle has to be able to tell apart from
+    // a dead network, and it is the same `429` on `/v1`, so widening it there
+    // costs nothing: the body is API Gateway's own generic text and the header
+    // lets a page on OUR origin read a status it could already read by
+    // sending the request itself.
+    //
+    // `DEFAULT_5XX` stays broad on the same reasoning and cannot be narrowed
+    // usefully anyway — every 5xx here is ours (integration failure, timeout),
+    // there is no per-path form of it, and the alternative is enumerating
+    // response types that AWS may add to.
+    for (const [id, type] of [
+      ['PortalCors4xx', apigateway.ResponseType.THROTTLED],
+      ['PortalCors5xx', apigateway.ResponseType.DEFAULT_5XX],
+    ] as const) {
+      this.api.addGatewayResponse(id, {
+        type,
+        responseHeaders: {
+          'Access-Control-Allow-Origin': `'${config.portalWebOrigin}'`,
+          'Access-Control-Allow-Credentials': "'true'",
+          Vary: "'Origin'",
+        },
+      });
+    }
+
+    // ---------------------------------------------------------------
+    // The API's own hostname — `config.apiDomain` (task 0194).
+    // ---------------------------------------------------------------
+    // What the block explorer's `api-gateway-stack.ts` does for
+    // `api.sorobanscan.rumblefish.dev`, in the same zone: a REGIONAL domain,
+    // TLS 1.2, alias A + AAAA records. Two choices differ from theirs and are
+    // worth stating:
+    //
+    // - **The certificate is created here**, DNS-validated in the zone,
+    //   rather than referenced by ARN. The wildcard `*.sorobanscan…` cert in
+    //   this region belongs to no stack, is attached to nothing
+    //   (`InUseBy: []`), and ACM reports it `INELIGIBLE` for renewal — a
+    //   domain hung on it would go dark on its expiry with nobody's deploy to
+    //   blame. One we own, in use, renews.
+    // - **The base path is the root.** `addDomainName` maps the domain to
+    //   this deployment stage, so `https://{domainName}/v1/…` is the data API
+    //   and `https://{domainName}/api/…` is the portal's backend, with no
+    //   stage segment in either — which is what a bundle built with
+    //   `VITE_PORTAL_API_ORIGIN` assumes, and what `AWS_LAMBDA_HTTP_IGNORE_
+    //   STAGE_IN_PATH` already made the handler indifferent to.
+    //
+    // The execute-api endpoint stays enabled: `PortalHostingStack` fronts it
+    // as an origin, and `apiBaseUrl` still advertises it. Retiring it is a
+    // decision for after this hostname has carried traffic.
+    const hostedZone = route53.HostedZone.fromHostedZoneAttributes(
+      this,
+      'HostedZone',
+      {
+        hostedZoneId: config.apiDomain.hostedZoneId,
+        zoneName: config.apiDomain.hostedZoneName,
+      },
+    );
+    const certificate = new acm.Certificate(this, 'ApiCertificate', {
+      domainName: config.apiDomain.domainName,
+      validation: acm.CertificateValidation.fromDns(hostedZone),
+    });
+    const apiDomain = this.api.addDomainName('ApiDomain', {
+      domainName: config.apiDomain.domainName,
+      certificate,
+      endpointType: apigateway.EndpointType.REGIONAL,
+      securityPolicy: apigateway.SecurityPolicy.TLS_1_2,
+    });
+    // Relative to the zone — `validateConfig` guarantees the suffix.
+    const recordName = config.apiDomain.domainName.slice(
+      0,
+      -(config.apiDomain.hostedZoneName.length + 1),
+    );
+    const alias = route53.RecordTarget.fromAlias(
+      new targets.ApiGatewayDomain(apiDomain),
+    );
+    new route53.ARecord(this, 'ApiARecord', {
+      zone: hostedZone,
+      recordName,
+      target: alias,
+    });
+    new route53.AaaaRecord(this, 'ApiAaaaRecord', {
+      zone: hostedZone,
+      recordName,
+      target: alias,
+    });
+
+    new cdk.CfnOutput(this, 'ApiCustomDomain', {
+      value: `https://${config.apiDomain.domainName}`,
+      description: 'The API on its own hostname (root base path → this stage)',
+    });
     new cdk.CfnOutput(this, 'ApiUrl', {
       value: this.api.url,
       description: `Invoke URL for prices-${config.envName}-api stage`,

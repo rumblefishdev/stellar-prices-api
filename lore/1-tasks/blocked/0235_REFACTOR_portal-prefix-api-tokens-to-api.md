@@ -2,7 +2,8 @@
 id: "0235"
 title: "Move the portal's prefix from /api-tokens to /api — the whole portal, bundle and backend alike"
 type: REFACTOR
-status: active
+status: blocked
+by: ["0195"]
 related_adr: ["0010"]
 related_tasks: ["0161", "0184", "0186", "0194", "0195", "0205"]
 tags: [layer-frontend, layer-backend, layer-infra, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, portal, routing]
@@ -38,6 +39,24 @@ history:
       across handler, routing table and check, and `openapi:verify-servers`
       green. Rust suite green; portal 156/156 (one flaky failure seen once
       while `cargo test` saturated the CPU, not reproduced in four runs).
+  - date: "2026-08-31"
+    status: blocked
+    who: akot
+    by: ["0195"]
+    note: >
+      Blocked on [[0195]]. Everything this slice owns is done: the prefix
+      deploy went out on 2026-08-28 (all six stacks, 13:16-13:31Z, portal
+      still closed), [[0194]] re-ran the checks the rename invalidated and
+      checks 1 (gateway half), 3, 4 and 9 PASS on `/api/api/{proxy+}`, and the
+      four orphaned `api-tokens/*` objects the Implementation section
+      predicted are deleted — `/api-tokens/` now `403`, `/api/` `200`. The
+      Discord AC is ticked: the OAuth secret was created at 13:53Z already
+      carrying this task's callback, so the rename cost no cutover exactly as
+      the Context section argued. What remains is not this task's to run —
+      [[0194]]'s two `(host)` checks (the portal behaviour's caching and
+      cookie forwarding, and API-before-bundle ordering) are answered against
+      `EA2TLS5SS5M87`, which has no origin pointing at our API at all yet.
+      That origin is [[0195]]'s work.
 ---
 
 # Move the portal's prefix from /api-tokens to /api
@@ -111,9 +130,12 @@ the old one and rewritten by `put-secret-value` under [[0186]]'s §6 dance.
       the portal behaviour's ordering against the synthesized template
 - [x] A synth diff shows the gateway resource, all three `methodSettings`
       entries and both CloudFront behaviours moved together
-- [ ] The Discord registration carries the new callback before the secret is
-      created ([[0194]] step 1)
-- [ ] The three [[0194]] checks marked `(host)` are re-run after the deploy
+- [x] The Discord registration carries the new callback before the secret is
+      created ([[0194]] step 1) — secret created 13:53Z carrying
+      `…/api/api/auth/callback`, validated by shape ([[0194]] blocker B1)
+- [ ] The three [[0194]] checks marked `(host)` are re-run after the deploy —
+      1 of 3 done (check 11, the SPA bucket, PASSES); checks 2 and 5 wait on
+      [[0195]], because `EA2TLS5SS5M87` has no origin pointing at our API yet
 
 ## Notes
 

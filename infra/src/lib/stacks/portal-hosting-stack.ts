@@ -25,30 +25,64 @@ import type { EnvironmentConfig } from '../types.js';
  *
  * This replaced task 0184's throwaway `assets/portal-placeholder/index.html`,
  * which said the portal was not yet available. The app now says that itself,
- * and says it on the authority of `GET /api/api/config` rather than of a
+ * and says it on the authority of `GET /api/config` rather than of a
  * hardcoded sentence that nobody would remember to delete.
  */
 const PORTAL_ASSET_DIR =
   process.env['PORTAL_ASSET_DIR'] ?? '../web/portal/dist';
 
 /**
- * The portal's path prefixes, and the rule that produced them.
+ * The portal's path layout, and the rule that produced it.
  *
- * Settled 2026-08-07 (task 0161), and a **convention** rather than a one-off,
- * because several frontends will share this distribution: `<app>/*` is that
- * app's bundle and `<app>/api/*` is that app's backend. A new frontend adds two
- * rows and invents nothing.
+ * **`/api/` is the whole self-service portal**, bundle and backend alike, with
+ * no sub-prefix for either (task 0194, 2026-08-31 — decided by Adam). On the
+ * shared host the root belongs to the block explorer, so everything of ours
+ * lives under this one prefix: `/api/login` is a page, `/api/auth/login` is
+ * the backend, `/api/api-docs-json` is the OpenAPI document.
  *
- * ⚠️ CloudFront evaluates cache behaviours **in order** and the first match
- * wins, so the `/api/*` row must precede the bundle row it sits inside. Get it
- * backwards and every portal backend call is answered with the SPA bundle: a
- * `200` full of HTML, which surfaces as a JSON parse error in the browser
- * rather than as a routing bug. `PORTAL_BACKEND` mirrors `PORTAL_API_PREFIX` in
- * `packages/prices-api/src/portal/mod.rs`, and is also the prefix the Discord
- * redirect URI (task 0186) is registered under — the three must agree.
+ * That replaces task 0161's `<app>/*` + `<app>/api/*` convention, which for an
+ * app called "api" produced `/api/api/…`, and it inverts which side of the
+ * split is enumerated. CloudFront evaluates cache behaviours **in order** and
+ * the first match wins, so:
+ *
+ * - the bundle's paths — `PORTAL_BUNDLE_PATHS`, a short FIXED list — are carved
+ *   out to S3 by rows listed **first**;
+ * - `PORTAL_BACKEND` (`/api/*`) is the catch-all and goes to the API.
+ *
+ * The backend is the open-ended side (five slices added routes; none touched
+ * this file), so it gets the catch-all. And the failure modes are asymmetric:
+ * a bundle path missing from the list reaches the API and gets a loud JSON
+ * `404`, whereas the old shape's failure — a backend call reaching S3 — was a
+ * `200` full of HTML that only surfaced as a JSON parse error in a browser.
+ *
+ * `PORTAL_BACKEND` mirrors `PORTAL_API_PREFIX` in
+ * `packages/prices-api/src/portal/mod.rs` and is the prefix the Discord
+ * redirect URI (task 0186) is registered under; `PORTAL_APP_ROUTES` mirrors
+ * the router in `web/portal/src/landing/links.ts`. `tools/scripts/
+ * verify-openapi-routes.mjs` asserts the carve-outs and the catch-all against
+ * the synthesized template, so a reorder cannot pass CI.
  */
-const PORTAL_BACKEND = '/api/api/*';
-const PORTAL_BUNDLE = '/api/*';
+const PORTAL_BACKEND = '/api/*';
+
+/**
+ * The SPA's client-side routes, without the prefix. Adding a page means adding
+ * it here AND to `web/portal/src/landing/links.ts` — this list produces both
+ * the CloudFront carve-out rows and the `DirectoryIndexFn` allow-list below.
+ */
+const PORTAL_APP_ROUTES = ['login', 'dashboard', 'quick-start'] as const;
+
+/**
+ * Every path under `/api/` that S3 serves. Both slash forms of each route,
+ * because CloudFront path patterns are literal and the function that rewrites
+ * `/api/login/` runs only AFTER a behaviour has matched.
+ */
+const PORTAL_BUNDLE_PATHS: readonly string[] = [
+  '/api/',
+  '/api/index.html',
+  '/api/favicon.ico',
+  '/api/assets/*',
+  ...PORTAL_APP_ROUTES.flatMap((r) => [`/api/${r}`, `/api/${r}/`]),
+];
 
 export interface PortalHostingStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
@@ -69,9 +103,9 @@ export interface PortalHostingStackProps extends cdk.StackProps {
  * depends on. No app, no auth, no API calls from the page.
  *
  * **This distribution is production.** There is no staging environment — see
- * `packages/prices-api/src/portal/mod.rs` — so the portal's backend routes ship
- * behind task 0183's `PORTAL_ENABLED` flag and answer with an empty `404` until
- * task 0194 opens them. The gate exists before the door.
+ * `packages/prices-api/src/portal/mod.rs` — so the portal's backend routes
+ * shipped behind task 0183's `PORTAL_ENABLED` flag, answering with an empty
+ * `404` until task 0194 flipped it. The gate existed before the door.
  *
  * Two things live here even though nothing yet uses them, because retrofitting
  * either would invalidate a decision made downstream:
@@ -81,8 +115,8 @@ export interface PortalHostingStackProps extends cdk.StackProps {
  *   session cookie be `SameSite=Lax` and keeps CORS out of portal traffic
  *   entirely. Both properties fail in a browser rather than in `curl`, so they
  *   are cheap now and expensive to discover later.
- * - **`/api/api/*` ordered before `/api/*`** — see the constants
- *   above.
+ * - **The bundle carve-outs ordered before the `/api/*` API row** — see the
+ *   constants above.
  *
  * Deferred to task 0195 on purpose: Swagger UI at `/docs/*`, the per-prefix SPA
  * fallback (a real CloudFront Function, and pointless while the app has one
@@ -123,7 +157,7 @@ export class PortalHostingStack extends cdk.Stack {
     // On, because CloudFront cannot backfill: a distribution that was not
     // logging at the time of an incident has nothing to reconstruct it from,
     // and the two things most likely to need reconstructing both arrive here.
-    // `/api/api/*` is an anonymous entry point, and its throttle
+    // `/api/*` is an anonymous entry point, and its throttle
     // (`PORTAL_THROTTLE`, 10 req/s) is a global rate cap rather than a
     // per-caller one — it bounds the bill, not the behaviour, so what a flood
     // looked like is a question only the logs can answer. Task 0186 then puts
@@ -186,10 +220,7 @@ export class PortalHostingStack extends cdk.Stack {
     // `s3:ListBucket` — S3 masks the missing key as `403 AccessDenied` XML
     // rather than a 404. That is the same bare AccessDenied page the `/`
     // redirect exists to prevent, at a URL a reviewer reaches by trimming one
-    // character off the documented one. `/api/api` needs it too: it
-    // lands on S3 via the bundle behaviour for the same reason, and the
-    // redirect puts it back on the API behaviour, where the gateway answers for
-    // its own namespace instead of S3 answering for it.
+    // character off the documented one.
     //
     // ⚠️ **The redirect targets are a fixed list, and must stay one.** The
     // obvious generalisation — redirect any path whose last segment has no file
@@ -234,8 +265,7 @@ var REDIRECTS = {
   // The distribution root has no app of its own yet. Task 0195 gives it one
   // when a second frontend joins; until then the only page here is the portal.
   '/': '/api/',
-  '/api': '/api/',
-  '/api/api': '/api/api/'
+  '/api': '/api/'
 };
 
 // The portal's client-side routes, served by the portal's own index.html.
@@ -259,14 +289,16 @@ var REDIRECTS = {
 // WARNING: add a route to web/portal/src/landing/links.ts and you must add
 // it here too. Task 0195 is where this stops being a hand-maintained list and
 // becomes the per-prefix SPA fallback.
-var APP_ROUTES = {
-  '/api/login': '/api/index.html',
-  '/api/login/': '/api/index.html',
-  '/api/dashboard': '/api/index.html',
-  '/api/dashboard/': '/api/index.html',
-  '/api/quick-start': '/api/index.html',
-  '/api/quick-start/': '/api/index.html'
-};
+var APP_ROUTES = ${JSON.stringify(
+        Object.fromEntries(
+          PORTAL_APP_ROUTES.flatMap((r) => [
+            [`/api/${r}`, '/api/index.html'],
+            [`/api/${r}/`, '/api/index.html'],
+          ]),
+        ),
+        null,
+        2,
+      )};
 
 function handler(event) {
   var request = event.request;
@@ -348,7 +380,8 @@ function handler(event) {
     // The routing table.
     // ---------------------------------------------------------------
     // Insertion order IS precedence — see the constants at the top of this
-    // file. `/api-docs-json` and `/health` are listed individually because both
+    // file: the bundle carve-outs first, then the `/api/*` catch-all to the
+    // API. `/api-docs-json` and `/health` are listed individually because both
     // are mounted on the API *root*, not under `/v1`: a table that routes only
     // `/v1/*` sends them to S3, and the Swagger UI that task 0195 adds then
     // loads with a 404 on its spec fetch.
@@ -356,8 +389,10 @@ function handler(event) {
       comment: `prices-${config.envName} portal + API`,
       defaultBehavior: staticBehaviour,
       additionalBehaviors: {
+        ...Object.fromEntries(
+          PORTAL_BUNDLE_PATHS.map((p) => [p, staticBehaviour]),
+        ),
         [PORTAL_BACKEND]: apiBehaviour,
-        [PORTAL_BUNDLE]: staticBehaviour,
         '/v1/*': apiBehaviour,
         '/api-docs-json': apiBehaviour,
         '/health': apiBehaviour,

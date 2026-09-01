@@ -77,15 +77,15 @@ use session::Session;
 use state_token::{Action, StateError};
 
 /// Where the visitor starts.
-pub const LOGIN_PATH: &str = "/api/api/auth/login";
+pub const LOGIN_PATH: &str = "/api/auth/login";
 /// Where Discord sends them back. **This exact suffix is what is registered in
 /// the Discord Developer Portal**, and `secret.rs` refuses a `redirect_uri` that
 /// does not end in it.
-pub const CALLBACK_PATH: &str = "/api/api/auth/callback";
+pub const CALLBACK_PATH: &str = "/api/auth/callback";
 /// Who am I?
-pub const ME_PATH: &str = "/api/api/auth/me";
+pub const ME_PATH: &str = "/api/auth/me";
 /// Sign out.
-pub const LOGOUT_PATH: &str = "/api/api/auth/logout";
+pub const LOGOUT_PATH: &str = "/api/auth/logout";
 
 /// Where the callback sends the browser when it is done, in every outcome.
 ///
@@ -161,16 +161,6 @@ const ERROR_ACCESS_DENIED: &str = "access_denied";
 /// documented codes. Sanitised as well as truncated — see `sanitise_error`.
 const ERROR_LOG_MAX: usize = 64;
 
-/// Error code for every `state` rejection.
-///
-/// One code for all five [`StateError`] variants, on purpose — see the type's
-/// own documentation. The variants exist so the tests can tell which check
-/// fired; the caller gets the same answer either way.
-const INVALID_STATE: &str = "invalid_state";
-/// Error code for a Discord round-trip that did not complete.
-const DISCORD_UNAVAILABLE: &str = "discord_unavailable";
-/// Error code for reaching these routes on a deployment that has no credentials.
-const SIGN_IN_UNCONFIGURED: &str = "sign_in_unconfigured";
 /// Error code for a deployment whose sign-in configuration cannot produce a
 /// valid response — today, only a `Location` that is not a header value.
 const SIGN_IN_MISCONFIGURED: &str = "sign_in_misconfigured";
@@ -191,6 +181,11 @@ pub struct AuthState {
     /// What the `action=issue` round-trip needs beyond sign-in (task 0189).
     /// Defaults to unwired; [`super::apply`] wires it when the portal opens.
     issue: issue::IssueDeps,
+    /// Where every round-trip lands: [`PORTAL_HOME`], prefixed with the
+    /// bundle's origin when the bundle lives on another host (task 0194 —
+    /// see [`Self::with_web_origin`]). Still a literal, still never derived
+    /// from the request; the origin is deployment configuration.
+    pub(super) home: std::sync::Arc<str>,
 }
 
 impl AuthState {
@@ -200,7 +195,24 @@ impl AuthState {
             endpoints: std::sync::Arc::new(endpoints),
             http: discord::build_client(),
             issue: issue::IssueDeps::default(),
+            home: PORTAL_HOME.into(),
         }
+    }
+
+    /// Land round-trips on the bundle's own origin (task 0194).
+    ///
+    /// The callback runs on this backend's host, where the session cookie is
+    /// set; the page the visitor is sent back to lives on
+    /// `AppConfig::portal_web_origin`. A relative `Location` would keep them
+    /// on the API host, where `/api/` is nothing — the gateway's own `403`.
+    /// `None` keeps the bare path, which is the same-origin deployment and
+    /// what every existing test sees. A builder, like [`Self::with_issue`],
+    /// so every constructor and test stays valid.
+    pub fn with_web_origin(mut self, origin: Option<&str>) -> Self {
+        if let Some(origin) = origin {
+            self.home = format!("{origin}{PORTAL_HOME}").into();
+        }
+        self
     }
 
     /// Wire the issue round-trip's dependencies in. A builder, like
@@ -277,6 +289,7 @@ async fn login(
     // line, not the first.
     if action == Action::Issue && (state.oauth.is_none() || !state.issue.is_wired()) {
         return issue::refuse_issue_start(
+            &state.home,
             state.oauth.is_some(),
             state.issue.gateway.is_some(),
             state.issue.settings.is_some(),
@@ -284,7 +297,7 @@ async fn login(
     }
 
     let Some(oauth) = state.oauth.as_ref() else {
-        return unconfigured();
+        return unconfigured(&state.home);
     };
 
     let started = state_token::start(&oauth.signing_key, action, state_token::now_secs());
@@ -406,9 +419,10 @@ async fn callback(
     // the end, so the clock that bounds the reconciliation has to start here
     // rather than where that work begins — see `issue::ISSUE_BUDGET`.
     let started = std::time::Instant::now();
+    let home = state.home.as_ref();
 
     let Some(oauth) = state.oauth.as_ref() else {
-        return unconfigured();
+        return unconfigured(home);
     };
 
     // `state` FIRST, before the outcome is even read.
@@ -419,7 +433,7 @@ async fn callback(
     // `state` on the error response too, so an error callback that carries none
     // did not come from Discord finishing our round-trip.
     let Some(state_param) = query.state.as_deref() else {
-        return refuse_state(StateError::BadSignature);
+        return refuse_state(StateError::BadSignature, home);
     };
     let pending = cookies::read(&headers, cookies::PENDING_COOKIE);
     let accepted = match state_token::accept(
@@ -429,7 +443,7 @@ async fn callback(
         state_token::now_secs(),
     ) {
         Ok(accepted) => accepted,
-        Err(error) => return refuse_state(error),
+        Err(error) => return refuse_state(error, home),
     };
 
     // Only NOW is the pending cookie dropped, and that ordering is the whole
@@ -470,7 +484,7 @@ async fn callback(
                 Action::TestOther => CANCELLED_QUERY,
                 Action::SignIn => CANCELLED_QUERY,
             };
-            return redirect(&format!("{PORTAL_HOME}{query}"), vec![drop_pending]);
+            return redirect(&format!("{home}{query}"), vec![drop_pending]);
         }
 
         // Everything else is a failure somebody has to know about, and the one
@@ -480,7 +494,7 @@ async fn callback(
         // a door that check never sees. Reported as "cancelled" and unlogged,
         // it presents as every visitor changing their mind forever, with
         // nothing in CloudWatch to contradict that reading.
-        return refuse_oauth_error(error, accepted.action, drop_pending);
+        return refuse_oauth_error(error, accepted.action, drop_pending, home);
     }
 
     let Some(code) = query.code.as_deref() else {
@@ -532,9 +546,9 @@ async fn callback(
         // here, `UnexpectedScope`, is a registration drift the issue flow has
         // a designed state for. See `issue::refuse_issue_discord`.
         Err(error) if accepted.action == Action::Issue => {
-            return issue::refuse_issue_discord("token exchange", error, drop_pending);
+            return issue::refuse_issue_discord(home, "token exchange", error, drop_pending);
         }
-        Err(error) => return refuse_discord("token exchange", error, drop_pending),
+        Err(error) => return refuse_discord("token exchange", error, drop_pending, home),
     };
 
     // An issue round-trip diverges here, with the fresh, scope-verified token:
@@ -632,10 +646,7 @@ async fn callback(
         // 2026-08-27, the screen this lands on: see `NOT_OPEN_QUERY`.
         None => {
             tracing::error!("a sign-in callback arrived with no eligibility settings wired");
-            return redirect(
-                &format!("{PORTAL_HOME}{NOT_OPEN_QUERY}"),
-                vec![drop_pending],
-            );
+            return redirect(&format!("{home}{NOT_OPEN_QUERY}"), vec![drop_pending]);
         }
     };
     let membership = checked
@@ -647,10 +658,7 @@ async fn callback(
         eligibility::Membership::Member => {}
         eligibility::Membership::NotMember => {
             tracing::info!(outcome = "not_member", "portal sign-in refused");
-            return redirect(
-                &format!("{PORTAL_HOME}{NOT_MEMBER_QUERY}"),
-                vec![drop_pending],
-            );
+            return redirect(&format!("{home}{NOT_MEMBER_QUERY}"), vec![drop_pending]);
         }
         eligibility::Membership::Unknown => {
             // The load-bearing warns (which check could not answer, and why)
@@ -660,14 +668,14 @@ async fn callback(
                 outcome = "unknown",
                 "portal sign-in refused without accusation"
             );
-            return redirect(&format!("{PORTAL_HOME}{UNKNOWN_QUERY}"), vec![drop_pending]);
+            return redirect(&format!("{home}{UNKNOWN_QUERY}"), vec![drop_pending]);
         }
     }
 
     // `token` is moved here, so from this line on the handler cannot reach it.
     let user = match discord::current_user(&state.http, &state.endpoints, token).await {
         Ok(user) => user,
-        Err(error) => return refuse_discord("identity read", error, drop_pending),
+        Err(error) => return refuse_discord("identity read", error, drop_pending, home),
     };
 
     let session = Session::issue(&user.id, &user.username, state_token::now_secs());
@@ -681,7 +689,7 @@ async fn callback(
     };
 
     redirect(
-        &format!("{PORTAL_HOME}{landing}"),
+        &format!("{home}{landing}"),
         vec![
             drop_pending,
             cookies::set(
@@ -826,34 +834,47 @@ fn no_store(mut response: Response) -> Response {
     response
 }
 
-/// `503` for a deployment that reached these routes with no credentials.
+/// Land a deployment that reached these routes with no credentials.
 ///
-/// Only reachable if `PORTAL_ENABLED` is true and the secret is missing — the
-/// load in `AppConfig::load_portal_oauth` fails hard on exactly that
-/// combination, so this is a second line rather than the first.
-fn unconfigured() -> Response {
-    no_store(errors::service_unavailable(
-        SIGN_IN_UNCONFIGURED,
-        "sign-in is not configured on this deployment",
-    ))
+/// Only reachable if `PORTAL_ENABLED` is true and the secret is missing —
+/// `AppConfig::load_portal_or_close` closes the portal on exactly that
+/// combination, so the gate answers first and this is a second line rather
+/// than the first.
+///
+/// **A landing, not the `503 sign_in_unconfigured` envelope it used to be**
+/// (task 0194's review). Both call sites are reached by a browser following a
+/// link or a popup: `login` is a top-level navigation the visitor started by
+/// pressing a button, and `callback` is Discord returning them. A JSON body
+/// with a 5xx status renders as raw text with no link back, and in the popup
+/// it is worse than that — `bridgeOAuthPopup` only ever posts to its opener
+/// from a page of ours, so a JSON dead end leaves the window open and the
+/// dashboard waiting forever. [`NOT_OPEN_QUERY`] renders [0183]'s
+/// closed-portal card, which is what a deployment with no credentials is.
+fn unconfigured(home: &str) -> Response {
+    redirect(&format!("{home}{NOT_OPEN_QUERY}"), vec![])
 }
 
 /// Refuse a callback whose `state` did not check out.
 ///
-/// `400` with one message for all five reasons. `tracing` records which check
-/// fired, at `warn`, because a rise in one of them is the signal that someone is
-/// probing — but the caller is told only that it was rejected.
+/// One landing for all five reasons. `tracing` records which check fired, at
+/// `warn`, because a rise in one of them is the signal that someone is probing
+/// — but the caller is told only that it was rejected.
+///
+/// **A landing, not the `400 invalid_state` envelope it used to be** (task
+/// 0194's review): every arrival here is a browser following Discord's
+/// redirect, and the honest ones are the ordinary races — a stale tab, a
+/// re-presented callback, a cookie the browser dropped. Those visitors get
+/// [`FAILED_QUERY`] and the button, instead of a JSON blob. `home` is this
+/// deployment's own landing, never anything from the request, so this is not a
+/// redirect an unverified callback gets to aim.
 ///
 /// **Deliberately does not touch the pending-login cookie.** A refusal here
 /// means this callback could not be shown to belong to the browser that sent
 /// it, so acting on that browser's state is precisely what must not happen —
 /// see the ordering note in `callback`.
-fn refuse_state(error: StateError) -> Response {
+fn refuse_state(error: StateError, home: &str) -> Response {
     tracing::warn!(reason = ?error, "portal sign-in callback rejected");
-    no_store(errors::bad_request(
-        INVALID_STATE,
-        "this sign-in could not be verified; start again from the portal",
-    ))
+    redirect(&format!("{home}{FAILED_QUERY}"), vec![])
 }
 
 /// Land a Discord OAuth error that is **not** the visitor declining.
@@ -864,7 +885,7 @@ fn refuse_state(error: StateError) -> Response {
 /// green — the same shape of gap that let "every error is a cancellation" ship
 /// in the first place. A behaviour nothing can observe is a behaviour nothing
 /// protects.
-fn refuse_oauth_error(error: &str, action: Action, drop_pending: String) -> Response {
+fn refuse_oauth_error(error: &str, action: Action, drop_pending: String, home: &str) -> Response {
     tracing::warn!(
         error = %sanitise_error(error),
         ?action,
@@ -878,7 +899,7 @@ fn refuse_oauth_error(error: &str, action: Action, drop_pending: String) -> Resp
         Action::TestOther => FAILED_QUERY,
         Action::SignIn => FAILED_QUERY,
     };
-    redirect(&format!("{PORTAL_HOME}{query}"), vec![drop_pending])
+    redirect(&format!("{home}{query}"), vec![drop_pending])
 }
 
 /// Refuse a callback that is malformed on the caller's side.
@@ -888,6 +909,12 @@ fn refuse_oauth_error(error: &str, action: Action, drop_pending: String) -> Resp
 /// Kept distinct from [`refuse_discord`] so that a 5xx on these routes means
 /// what it says: something upstream failed. See the missing-`code` branch in
 /// `callback`.
+///
+/// **Still an envelope, while its neighbours became landings** (task 0194's
+/// review). Discord's callback always carries `code` or `error`, so an arrival
+/// with neither is not a visitor part-way through signing in — it is a caller
+/// hand-building the URL, and an envelope is the honest answer to one. The
+/// landings exist for browsers that got here honestly.
 fn refuse_query(reason: &str, drop_pending: String) -> Response {
     tracing::warn!(reason, "portal sign-in callback was malformed");
     let mut response = errors::bad_request(
@@ -935,27 +962,23 @@ fn sanitise_error(error: &str) -> String {
 
 /// Refuse a callback that Discord did not complete.
 ///
-/// `502`, not `500`: the failure is upstream, and saying so is what stops an
-/// operator looking for a bug in this handler when Discord is having an
-/// incident. The visitor's own message says nothing about which call failed.
-fn refuse_discord(stage: &str, error: discord::DiscordError, drop_pending: String) -> Response {
+/// **A landing, not the `502 discord_unavailable` envelope it used to be**
+/// (task 0194's review). The argument was already written down one function
+/// away and applied to half the traffic: the issue arm has redirected here
+/// since [0189] because "`502` JSON is a dead end with no link back", and the
+/// visitor arriving on the sign-in arm is the same visitor in the same
+/// browser. `stage` and the upstream error still go to the log at `warn`,
+/// which is where an operator distinguishing a Discord incident from a bug in
+/// this handler was always going to read them — the status code was never what
+/// carried that, because nothing but a browser ever sees it.
+fn refuse_discord(
+    stage: &str,
+    error: discord::DiscordError,
+    drop_pending: String,
+    home: &str,
+) -> Response {
     tracing::warn!(stage, error = %error, "portal sign-in could not complete");
-    let mut response = (
-        StatusCode::BAD_GATEWAY,
-        Json(errors::ErrorEnvelope {
-            code: DISCORD_UNAVAILABLE,
-            message: "could not complete sign-in with Discord; try again".into(),
-            details: None,
-        }),
-    )
-        .into_response();
-    response.headers_mut().append(
-        SET_COOKIE,
-        drop_pending
-            .parse()
-            .expect("a cleared cookie is a valid header value"),
-    );
-    no_store(response)
+    redirect(&format!("{home}{FAILED_QUERY}"), vec![drop_pending])
 }
 
 #[cfg(test)]
@@ -996,7 +1019,7 @@ mod tests {
             &serde_json::json!({
                 "client_id": "client-1",
                 "client_secret": "shh",
-                "redirect_uri": "https://portal.example/api/api/auth/callback",
+                "redirect_uri": "https://portal.example/api/auth/callback",
                 "session_signing_key": "0123456789abcdef0123456789abcdef0123456789abcdef",
             })
             .to_string(),
@@ -1037,7 +1060,7 @@ mod tests {
         assert_eq!(get("client_id"), "client-1");
         assert_eq!(
             get("redirect_uri"),
-            "https://portal.example/api/api/auth/callback"
+            "https://portal.example/api/auth/callback"
         );
         // Exactly the pair — not a superset, and never `guilds` or `email`.
         assert_eq!(get("scope"), "identify guilds.members.read");
@@ -1148,7 +1171,7 @@ mod tests {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            refuse_oauth_error("invalid_scope", Action::SignIn, String::new());
+            refuse_oauth_error("invalid_scope", Action::SignIn, String::new(), PORTAL_HOME);
         });
 
         let text = logs.text();
@@ -1231,6 +1254,28 @@ mod tests {
         ] {
             assert!(format!("{PORTAL_HOME}{query}").starts_with("/api/?"));
         }
+    }
+
+    /// With the bundle on a host of its own (task 0194) the landing is the
+    /// same literal, prefixed with that one configured origin — and with
+    /// nothing configured it is exactly the path it always was.
+    #[test]
+    fn the_landing_is_prefixed_with_the_configured_origin_and_nothing_else() {
+        let bare = AuthState::new(None, discord::Endpoints::default());
+        assert_eq!(&*bare.home, "/api/");
+
+        let kept = AuthState::new(None, discord::Endpoints::default()).with_web_origin(None);
+        assert_eq!(&*kept.home, "/api/");
+
+        let hosted = AuthState::new(None, discord::Endpoints::default())
+            .with_web_origin(Some("https://sorobanscan.example"));
+        assert_eq!(&*hosted.home, "https://sorobanscan.example/api/");
+
+        let response = redirect(&format!("{}{CANCELLED_QUERY}", hosted.home), vec![]);
+        assert_eq!(
+            response.headers()[LOCATION],
+            "https://sorobanscan.example/api/?signin=cancelled"
+        );
     }
 
     /// The registered redirect URI and the route that serves it are one string,

@@ -20,6 +20,16 @@ type ResolvedConfig = {
 
 const PROXY_TARGET = 'https://portal.example.invalid';
 
+/**
+ * The portal backend's proxy rule is a regex key (the bundle shares `/api/`,
+ * task 0194), so look it up by shape rather than by literal.
+ */
+const backendRule = (proxy: Record<string, ProxyEntry> | undefined) => {
+  const key = Object.keys(proxy ?? {}).find((k) => k.startsWith('^/api/'));
+  expect(key, 'a regex proxy rule for the portal backend').toBeDefined();
+  return { key: key as string, entry: proxy?.[key as string] };
+};
+
 const resolve = (): ResolvedConfig => {
   const config =
     typeof viteConfig === 'function'
@@ -45,8 +55,8 @@ describe('dev proxy', () => {
     // `preview` is the only local way to run the BUILT bundle, so it is the
     // closest thing to a production rehearsal; without a proxy it could only
     // ever render the "could not reach the portal backend" branch.
-    expect(server?.proxy?.['/api/api']?.target).toBe(PROXY_TARGET);
-    expect(preview?.proxy?.['/api/api']?.target).toBe(PROXY_TARGET);
+    expect(backendRule(server?.proxy).entry?.target).toBe(PROXY_TARGET);
+    expect(backendRule(preview?.proxy).entry?.target).toBe(PROXY_TARGET);
     expect(preview?.proxy).toEqual(server?.proxy);
   });
 
@@ -57,7 +67,45 @@ describe('dev proxy', () => {
     // portal's own routes in dev would exercise a configuration production never
     // runs — and would hide a 403 that only appears for real users.
     expect(proxy['/v1']?.headers?.['x-api-key']).toBe('test-key-must-not-leak');
-    expect(proxy['/api/api']?.headers).toBeUndefined();
+    expect(backendRule(proxy).entry?.headers).toBeUndefined();
+  });
+
+  it('proxies the backend segments and leaves the bundle to Vite', () => {
+    const { key } = backendRule(resolve().server?.proxy);
+    const rule = new RegExp(key);
+
+    for (const backend of [
+      '/api/config',
+      '/api/auth/login',
+      '/api/auth/callback?code=x',
+      // A query directly on a segment, with no slash between: the guard used to
+      // read `(/|$)`, so `/api/config?…` fell through to Vite and the dev server
+      // answered the app's own `index.html` with a `200` — the same silent
+      // wrong-`200` shape task 0194 spent a day diagnosing in production.
+      '/api/config?fresh=1',
+      '/api/usage?window=day',
+      '/api/key',
+      '/api/key/rework',
+      '/api/usage',
+      '/api/api-docs-json',
+    ]) {
+      expect(rule.test(backend), backend).toBe(true);
+    }
+    // Vite's own dev-server paths and the app's pages share the prefix and
+    // must NOT be proxied, or the dev server cannot serve itself.
+    for (const bundle of [
+      '/api/',
+      '/api/index.html',
+      '/api/@vite/client',
+      '/api/src/main.tsx',
+      '/api/assets/index.js',
+      '/api/login',
+      '/api/dashboard',
+      '/api/keys', // not `/api/key` — the `(/|\?|$)` guard
+      '/api/configuration', // and the query arm did not widen it into a prefix match
+    ]) {
+      expect(rule.test(bundle), bundle).toBe(false);
+    }
   });
 
   // NOT tested here: "no target configured → no proxy". `loadEnv` reads

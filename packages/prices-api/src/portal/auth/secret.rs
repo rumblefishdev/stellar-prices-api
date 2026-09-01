@@ -14,7 +14,7 @@
 //! {
 //!   "client_id":          "...",
 //!   "client_secret":      "...",
-//!   "redirect_uri":       "https://<host>/api/api/auth/callback",
+//!   "redirect_uri":       "https://<host>/api/auth/callback",
 //!   "session_signing_key": "<64 hex chars>"
 //! }
 //! ```
@@ -255,7 +255,7 @@ mod tests {
         serde_json::json!({
             "client_id": "1234567890",
             "client_secret": "a-client-secret",
-            "redirect_uri": "https://example.cloudfront.net/api/api/auth/callback",
+            "redirect_uri": "https://example.cloudfront.net/api/auth/callback",
             "session_signing_key": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         })
         .to_string()
@@ -296,7 +296,7 @@ mod tests {
     /// in our logs.
     #[test]
     fn a_redirect_uri_that_is_not_the_callback_path_is_refused_at_load() {
-        let json = valid_json().replace("/api/api/auth/callback", "/api/api/auth/callbac");
+        let json = valid_json().replace("/api/auth/callback", "/api/auth/callbac");
         assert!(matches!(
             OauthSecret::parse(&json),
             Err(SecretError::RedirectUriMismatch { .. })

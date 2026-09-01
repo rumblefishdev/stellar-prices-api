@@ -57,7 +57,7 @@ In the [Discord Developer Portal](https://discord.com/developers/applications),
 **OAuth2 → Redirects → Add Redirect**, exactly:
 
 ```
-http://localhost:4200/api/api/auth/callback
+http://localhost:4200/api/auth/callback
 ```
 
 Port `4200`, not `8080`: the redirect URI must be the origin the **browser**
@@ -78,7 +78,7 @@ real client secret — check `git status` before committing anything.
 {
   "client_id": "000000000000000000",
   "client_secret": "REPLACE_ME_from_the_Developer_Portal",
-  "redirect_uri": "http://localhost:4200/api/api/auth/callback",
+  "redirect_uri": "http://localhost:4200/api/auth/callback",
   "session_signing_key": "REPLACE_ME_openssl_rand_hex_32"
 }
 ```
@@ -108,7 +108,7 @@ PORT=8080 RUST_LOG=info \
 ```
 
 ```bash
-# terminal 2 — the portal on :4200, proxying /api/api/* to :8080
+# terminal 2 — the portal on :4200, proxying /api/* to :8080
 echo "DEV_API_PROXY_TARGET=http://localhost:8080" > web/portal/.env.development
 npx nx dev portal
 ```
@@ -139,8 +139,8 @@ Without the UI, the same thing over HTTP:
 ```bash
 curl -sL -c jar.txt -b jar.txt -o /dev/null \
      -w '%{url_effective} %{http_code}\n' \
-     http://localhost:4200/api/api/auth/login
-curl -s -b jar.txt http://localhost:4200/api/api/auth/me
+     http://localhost:4200/api/auth/login
+curl -s -b jar.txt http://localhost:4200/api/auth/me
 # → {"authenticated":true,"user_id":"...","username":"..."}
 ```
 
@@ -181,7 +181,7 @@ sign-in from their own machine.
 
 ## Running self-service key issuance locally (tasks 0187 + 0189)
 
-Since task 0189, `GET`/`POST /api/api/key` only **reveal** — the route is
+Since task 0189, `GET`/`POST /api/key` only **reveal** — the route is
 read-only by construction. Issuing runs through the eligibility round-trip:
 "Get my API key" navigates to `/auth/login?action=issue`, and the callback
 checks Stellar Discord membership and account age against a **fresh** Discord
@@ -288,7 +288,7 @@ point of the design, and the reason the local seam is the exception.
 
 ### 3b. Usage against quota (task 0188)
 
-The same local run also serves `GET /api/api/usage`, and the page renders
+The same local run also serves `GET /api/usage`, and the page renders
 it under the key. The principal needs one more grant than the five above:
 `apigateway:GET` on `/usageplans/{id}/usage` (in the Lambda's role it lives in
 `ApiGatewayStack`'s standalone portal policy, next to the `/keys` attach).
@@ -312,7 +312,7 @@ and nobody else's.
 
 On the page, **Replace my key…** beside the key opens a confirmation; the
 confirm button arms only once you type `delete-key`. Pressing it **deactivates
-the key and issues nothing** — `POST /api/api/key/rework`,
+the key and issues nothing** — `POST /api/key/rework`,
 session-authenticated, no Discord round-trip. The control plane answers at
 once; the **data plane follows within about half a minute** (~25 s measured,
 0180 item 8), so treat the value as live until then — which is what the

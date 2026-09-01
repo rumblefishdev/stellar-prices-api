@@ -96,7 +96,7 @@ export function mtlsSecretName(envName: string, role: MtlsRole): string {
  * {
  *   "client_id":           "...",
  *   "client_secret":       "...",
- *   "redirect_uri":        "https://<host>/api/api/auth/callback",
+ *   "redirect_uri":        "https://<host>/api/auth/callback",
  *   "session_signing_key": "<openssl rand -hex 32>"
  * }
  * ```

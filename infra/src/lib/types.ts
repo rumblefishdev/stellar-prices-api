@@ -80,11 +80,17 @@ export interface EnvironmentConfig {
    * Public base URL of the deployed API, passed to the api-handler as
    * `API_BASE_URL` and stamped into the OpenAPI `servers` block (task 0124).
    *
-   * MUST include the stage path. API Gateway serves the REST API at
+   * Since 2026-08-31 this is the API's own hostname (`apiDomain`, task 0194),
+   * whose base path mapping is the root — so NO stage path. The execute-api
+   * form is still accepted, and then it MUST include the stage path: API
+   * Gateway serves the REST API at
    * `https://{id}.execute-api.{region}.amazonaws.com/{stage}`, so a value
    * without `/production` advertises a base that 403s on every route — the same
    * stage-prefix trap that made `AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH=true`
-   * necessary for `/v1` (task 0089).
+   * necessary for `/v1` (task 0089). `validateConfig` checks whichever form
+   * is used. The portal's snippets carry the same value as
+   * `PUBLIC_API_BASE_URL` (`web/portal/src/landing/links.ts`), asserted by
+   * `links.spec.ts`.
    *
    * Configured rather than derived because ComputeStack (which owns the
    * function's environment) is a *dependency* of ApiGatewayStack (which owns
@@ -93,6 +99,49 @@ export interface EnvironmentConfig {
    * custom domain.
    */
   readonly apiBaseUrl: string;
+
+  /**
+   * The API's own hostname (task 0194, the "custom domain" piece of 0195):
+   * `prices-api.sorobanscan.rumblefish.dev`.
+   *
+   * A REGIONAL custom domain on the REST API with a DNS-validated certificate
+   * (created by `ApiGatewayStack` — not the block explorer's unused wildcard,
+   * which nothing renews) and alias records in `hostedZoneId`. The base path
+   * mapping is the root, so `https://{domainName}/api/config` is what
+   * execute-api serves at `/{envName}/api/config`; there is no stage in the
+   * path and no `/prices` prefix, because the mapping target is the stage,
+   * not a resource under it.
+   *
+   * Why the portal needs it at all: the bundle is served from another
+   * application's distribution (`portalWebOrigin`), whose `/api/*` behaviour
+   * is a static SPA — every extensionless path under it, `/api/config`
+   * included, is rewritten to `/api/index.html` at the edge and answered
+   * `200 text/html`. There is nothing on that host for a same-origin call to
+   * reach, so the bundle calls this hostname directly, cross-origin and
+   * same-site — the pattern the explorer's own SPA uses for its API.
+   *
+   * `hostedZoneName` must be a suffix of `domainName`, and the zone must live
+   * in this account: the certificate's validation record and the alias records
+   * are both written into it at deploy time.
+   */
+  readonly apiDomain: {
+    readonly domainName: string;
+    readonly hostedZoneId: string;
+    readonly hostedZoneName: string;
+  };
+
+  /**
+   * The origin the portal's bundle is served from —
+   * `https://sorobanscan.rumblefish.dev`, scheme and host, no path.
+   *
+   * Two things hang off it and only these two: it is the one origin the
+   * portal routes' CORS answer names (`allowOrigins` on the gateway's
+   * preflight, `Access-Control-Allow-Origin` from the handler), and it is the
+   * host the sign-in round-trip lands on after the callback — which runs on
+   * `apiDomain`, where the session cookie is set. Passed to the api-handler
+   * as `PORTAL_WEB_ORIGIN`.
+   */
+  readonly portalWebOrigin: string;
 
   // API handler Lambda (consumed by ComputeStack + ApiGatewayStack — task 0040)
 
@@ -516,6 +565,47 @@ export function validateConfig(config: EnvironmentConfig): void {
     ) {
       errors.push(
         `apiBaseUrl is an execute-api URL and must end with the stage path "/${config.envName}", got: "${config.apiBaseUrl}"`,
+      );
+    }
+  }
+
+  // The API hostname and the bundle's origin (task 0194). Both are literals in
+  // `production.json` and both are wrong silently: a hostname outside the zone
+  // fails at deploy time with an ACM validation that never completes, and an
+  // origin with a path or a trailing slash is a CORS header the browser
+  // compares byte-for-byte and never matches.
+  {
+    const hostname =
+      /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+    const { domainName, hostedZoneId, hostedZoneName } = config.apiDomain ?? {};
+    if (!domainName || !hostname.test(domainName)) {
+      errors.push(
+        `apiDomain.domainName must be a lowercase hostname, got: "${domainName}"`,
+      );
+    }
+    if (!hostedZoneName || !hostname.test(hostedZoneName)) {
+      errors.push(
+        `apiDomain.hostedZoneName must be a lowercase hostname, got: "${hostedZoneName}"`,
+      );
+    } else if (
+      !domainName?.endsWith(`.${hostedZoneName}`) ||
+      domainName === hostedZoneName
+    ) {
+      errors.push(
+        `apiDomain.domainName must be a subdomain of apiDomain.hostedZoneName ("${hostedZoneName}"), got: "${domainName}"`,
+      );
+    }
+    if (!hostedZoneId || !/^Z[0-9A-Z]{8,}$/.test(hostedZoneId)) {
+      errors.push(
+        `apiDomain.hostedZoneId must be a Route 53 hosted zone id, got: "${hostedZoneId}"`,
+      );
+    }
+    if (
+      typeof config.portalWebOrigin !== 'string' ||
+      !/^https:\/\/[a-z0-9.-]+(:\d+)?$/.test(config.portalWebOrigin)
+    ) {
+      errors.push(
+        `portalWebOrigin must be an https origin with no path or trailing slash, got: "${config.portalWebOrigin}"`,
       );
     }
   }

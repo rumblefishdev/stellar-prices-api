@@ -124,6 +124,67 @@ deploy-production-portal: build-production
 destroy-production-portal: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-PortalHosting --force
 
+# The portal on the shared host (task 0194). `https://sorobanscan.rumblefish.dev/api/`
+# is served by the block explorer's distribution (EA2TLS5SS5M87) from ITS
+# bucket, which nothing in this repo deploys — this sync is the only way a
+# build reaches it, and it has been done by hand twice. Built with the API's
+# own hostname baked in (`VITE_PORTAL_API_ORIGIN`, see
+# `web/portal/src/api-origin.ts`): on that host `/api/*` is a static SPA, so
+# the bundle must call the backend on `apiDomain.domainName` rather than
+# relatively. `--skip-nx-cache` because the variable is not an Nx input — a
+# cached build would hand back whichever variant ran last, and the relative
+# one is indistinguishable from this one until a visitor opens the page.
+#
+# ⚠️ This leaves the ABSOLUTE build in `web/portal/dist`. `deploy-production-portal`
+# rebuilds (relative) through `build-portal` first, so our own distribution
+# never ships it — but do not `cdk deploy` PortalHosting by hand after this.
+#
+# The two names are the explorer repo's (`ApiSpaBucket` and the distribution
+# of `Explorer-production-Delivery`); override on the command line if that
+# stack ever renames them.
+EXPLORER_PORTAL_BUCKET ?= production-soroban-explorer-api-spa
+EXPLORER_DISTRIBUTION_ID ?= EA2TLS5SS5M87
+# `// empty`, so a renamed key yields `https://` rather than `https://null`.
+# Either is refused by `check-portal-api-origin` below before a build can bake
+# it in; a missing `jq` produces the same empty value and the same refusal.
+PORTAL_API_ORIGIN ?= https://$(shell jq -r '.apiDomain.domainName // empty' envs/production.json)
+
+# `$(shell …)` swallows a failed `jq` — binary missing, key renamed — into the
+# value, and the value is baked into the bundle: every backend call then goes
+# to a host nobody watches, invisible until a visitor opens the page (the same
+# failure shape the cache note above describes). Refuse anything that is not
+# `https://` followed by a hostname with a dot in it.
+check-portal-api-origin:
+	@case '$(PORTAL_API_ORIGIN)' in \
+	  https://*.*) ;; \
+	  *) echo "error: PORTAL_API_ORIGIN is '$(PORTAL_API_ORIGIN)', expected https://<hostname>." >&2; \
+	     echo "  → is jq installed, and does envs/production.json still carry apiDomain.domainName?" >&2; \
+	     exit 1 ;; \
+	esac
+
+build-portal-explorer: check-portal-api-origin
+	cd .. && VITE_PORTAL_API_ORIGIN=$(PORTAL_API_ORIGIN) npx nx build portal --skip-nx-cache
+
+# Mirrors the two `BucketDeployment`s in `portal-hosting-stack.ts`, headers
+# included. A bare `sync` uploads with no `Cache-Control` at all, so after a
+# re-sync a returning visitor keeps booting the previous `index.html` from
+# heuristic freshness, and the hashed chunks lose the year-long immutability
+# their content-addressed names earn them. Hashed assets go first, so a new
+# `index.html` never names a chunk that is not there yet — the order the stack
+# enforces with `addDependency`.
+#
+# No `--delete`: a visitor holding the previous `index.html` still resolves
+# its chunk. The invalidation covers the whole prefix because `index.html` is
+# the object that changes and the one a browser asks for by name.
+sync-portal-explorer: build-portal-explorer
+	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/api/ \
+	  --exclude '*' --include 'assets/*' \
+	  --cache-control 'public, max-age=31536000, immutable'
+	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/api/ \
+	  --exclude 'assets/*' \
+	  --cache-control 'public, max-age=0, must-revalidate'
+	aws cloudfront create-invalidation --distribution-id $(EXPLORER_DISTRIBUTION_ID) --paths '/api/*'
+
 deploy-production-eventbridge: build-production
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-EventBridge --require-approval broadening
 
