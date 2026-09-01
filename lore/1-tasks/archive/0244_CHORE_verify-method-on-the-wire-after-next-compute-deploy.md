@@ -2,7 +2,7 @@
 id: "0244"
 title: "Verify `method` reaches the API response after the next Compute deploy — 0178's last AC, blocked only on someone else's rollout"
 type: CHORE
-status: backlog
+status: completed
 related_adr: []
 related_tasks: ["0178", "0194", "0235"]
 tags:
@@ -26,6 +26,17 @@ history:
       ClickHouse side is deployed and verified on prod, but the api-handler
       Lambda still runs the pre-merge build, so the field is absent from the
       JSON. Deploying it was deliberately NOT done - see below.
+  - date: 2026-09-01
+    status: completed
+    who: okarcz
+    note: >
+      CLOSED — verified on prod. The Compute deploy landed at 12:22:58Z (not
+      ours; it rode another rollout, which is exactly what this task was
+      waiting for). GET /v1/assets/USDC:GA5ZSE…/price returns method 'oracle'
+      at 1.00020363843936, and GET /v1/assets/native/price returns method
+      'traded' at 0.17885337161879. 0178's AC 2 ticked in the archive copy with
+      the date. Nothing was built here — the task existed only to carry a wait
+      on someone else's rollout so 0178 could close without an open box.
 ---
 
 # 0178's last AC: `method` is not on the wire yet
@@ -82,6 +93,10 @@ execute-api host used on 2026-08-31 still applies.
 
 ## Acceptance Criteria
 
-- [ ] `GET /price` for canonical USDC returns `"method": "oracle"`.
-- [ ] A `traded` asset (native XLM) returns `"method": "traded"`.
-- [ ] [[0178]]'s AC 2 is then ticked in the archive copy, with the date.
+- [x] `GET /price` for canonical USDC returns `"method": "oracle"` — **prod
+      2026-09-01, `1.00020363843936`**.
+- [x] A `traded` asset (native XLM) returns `"method": "traded"` — **prod
+      2026-09-01, `0.17885337161879`**. 🔑 The pair is the point: a hardcoded
+      string would satisfy one of these and fail the other.
+- [x] [[0178]]'s AC 2 is then ticked in the archive copy, with the date —
+      done 2026-09-01, with both measured values quoted.

@@ -357,13 +357,16 @@ workspace green.
 - [x] `GET /price` (and `current_price_usd`) returns a row for USDC at the
       canonical issuer, with a plausible USD value. **HTTP 200 on prod
       2026-08-31, $1.00005447313041 — was 404.**
-- [ ] Provenance is expressible — a consumer can tell a measured `1.0000` from a
-      filled one. **DONE in ClickHouse and verified on prod** (`oracle_rows = 1`,
-      USDC tagged `oracle`); the DTO change is merged in PR #272. NOT yet on the
-      wire — the api-handler still runs the pre-merge build.
-      **(deferred to [[0244]])** — deploying it was blocked on another dev's
-      undeployed infra work, see Issues Encountered. Requires adding the column; follow `views.sql:273` (append
-      last) and 0165's `'traded'`/`'peg'`/`'oracle'` vocabulary.
+- [x] Provenance is expressible — a consumer can tell a measured `1.0000` from a
+      filled one. ✅ **CLOSED 2026-09-01, ON THE WIRE.** Verified against prod
+      after the Compute deploy of 12:22:58Z:
+      `GET /v1/assets/USDC:GA5ZSE…/price` → `"method": "oracle"`,
+      `GET /v1/assets/native/price` → `"method": "traded"`. The two-value
+      check matters more than either alone: a hardcoded string would satisfy
+      one and fail the other. Was DONE in ClickHouse on 2026-08-31 and merged
+      in PR #272, but held off the wire because deploying it was blocked on
+      another dev's undeployed infra work — see Issues Encountered, and
+      [[0244]], which carried the wait and is now closed.
 - [x] The derived columns are decided explicitly, not left to fall out of the
       arithmetic — each is either populated meaningfully or lands on its
       documented "unavailable" sentinel. **No fabricated `change_*` values.**
