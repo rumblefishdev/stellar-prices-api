@@ -102,6 +102,9 @@ forward-fill is a defect on any reading.
 - [x] No `SETTINGS` clause; verified as a `readonly = 1` user —
       `ohlcv_peg_series_answers_for_a_readonly_user` still passes against the new
       query shape.
+- [x] The one intentional difference between the surfaces (`1m` staleness) is a
+      decision on the record, not an implementation detail — see design
+      decision 5.
 - [ ] ⏳ **Live on prod.** `/ohlcv` is served by the api-handler Lambda, so this
       needs a **Compute deploy** — see the note at the end.
 
@@ -192,6 +195,22 @@ the one deliberate difference below.
    1 September floors to September here. Both are defensible, and the difference
    is invisible to AC 1, which compares against `price_usd_series{,_1h}` — daily
    and hourly only. Noted in `interval_sql`'s doc comment.
+
+5. **The `1m` window deliberately differs from `price_usd_series`, and this was
+   DECIDED, not defaulted (2026-09-01).** At `1m` a candle can carry a rate up to
+   300 s older than the candle itself, still labelled `'oracle'`. The stricter
+   alternative — a reading from that exact minute or nothing — was put to the
+   operator alongside "refuse `1m` for this series", and reuse-within-the-cadence
+   was chosen. Reasons, in order: it is the same 300 s window enrichment already
+   forward-fills across at 1-minute candles, so the read and write paths agree; a
+   3-minute-old measurement is better information than a literal `$1`; and the
+   strict rule would render the 1m chart as a sawtooth between the real rate and
+   a dollar, which misleads a reader more than a slightly stale number does.
+   ⚠️ The staleness bound is what makes this safe — it is a bounded window, not a
+   forward-fill, so a genuinely dead oracle still falls back to a labelled `peg`.
+   Recorded because it is the one place the two surfaces are intentionally
+   allowed to differ, and a future "make them identical" change would be a
+   regression rather than a tidy-up.
 
 ## Issues Encountered
 
