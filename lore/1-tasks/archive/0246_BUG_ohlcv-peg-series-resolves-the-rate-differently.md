@@ -29,6 +29,24 @@ history:
       api-gateway-stack.ts, the file PR #268 rewrites, and the pattern it would
       build on (portalWebOrigin, addCorsPreflight) exists only on that unmerged
       branch. 0246 touches queries_ch.rs and views.sql, which nobody else is in.
+  - date: 2026-09-01
+    status: completed
+    who: okarcz
+    note: >
+      Merged as PR #274 (3 commits, CI green on the final SHA) and VERIFIED ON
+      PROD the same day. /ohlcv now resolves the USDC rate the way
+      price_usd_series does — the last observation in the bucket — and an oracle
+      gap falls back to a labelled peg instead of forward-filling the last
+      reading as a measurement indefinitely. Seven of seven hourly buckets match
+      to 14 decimal places with matching method; every AC closed.
+      ⚠️ CODE REVIEW CAUGHT A REGRESSION IN THE FIRST CUT: scoping the rate
+      strictly to its bucket was copied from price_usd_series, which is safe
+      only because that view exists at 1d and 1h alone. /ohlcv serves 1m, and 1m
+      is Timeframe::H1's default granularity, so ~4 buckets in 5 would have
+      dropped to $1 — a square wave, worse than the forward-fill being removed.
+      The window now floors at 300 s, enrichment's own FORWARD_FILL_WINDOW_S.
+      The lesson is transplanting a rule without the precondition that made it
+      safe. ohlcv_it 29 passed, 3 new; full prices-api suite green.
 ---
 
 # `/ohlcv`'s peg series and `price_usd_series` disagree about the same bucket
@@ -105,8 +123,11 @@ forward-fill is a defect on any reading.
 - [x] The one intentional difference between the surfaces (`1m` staleness) is a
       decision on the record, not an implementation detail — see design
       decision 5.
-- [ ] ⏳ **Live on prod — NOT verified, deliberately left unticked.** `/ohlcv` is served by the api-handler Lambda, so this
-      needs a **Compute deploy** — see the note at the end.
+- [x] ✅ **Live on prod and VERIFIED 2026-09-01.** api-handler `LastModified`
+      2026-09-01T12:22:58Z, 48 min after PR #274 merged. All **seven**
+      overlapping hourly buckets match `price_usd_series_1h` to all 14 decimal
+      places, `method = 'oracle'` on both sides of every one — including the
+      still-open 12:00 bucket. Evidence in the section at the end.
 
 ## Out of scope
 
@@ -259,7 +280,41 @@ the one deliberate difference below.
 | `prices-clickhouse` lib + `views_it` | 28 + 11 green (views.sql fence updated) |
 | `cargo clippy -p prices-api --all-targets` | clean |
 
-## ⏳ Remaining — the deploy
+## ✅ Verified on prod — 2026-09-01
+
+Deployed as part of another Compute rollout — api-handler `LastModified`
+**2026-09-01T12:22:58Z**, `CodeSha256` `J2mXF75RHuY1tAY49SL+VIBQ8f5LczaTv3ZhPmrts/Q=`
+— 48 minutes after PR #274 merged. The "old build" explanation was therefore
+ruled out *before* any value was compared, not after.
+
+`GET /ohlcv?granularity=1h` against `prices.price_usd_series_1h`, same identity,
+same buckets:
+
+| bucket (UTC) | view | `/ohlcv` |
+|---|---|---|
+| 06:00 | 1.000200040008 | 1.000200040008 |
+| 07:00 | 1.00005022104415 | 1.00005022104415 |
+| 08:00 | 1.00021428537323 | 1.00021428537323 |
+| 09:00 | 1.00025930648749 | 1.00025930648749 |
+| 10:00 | 1.00007579902932 | 1.00007579902932 |
+| 11:00 | 1.00027081929813 | 1.00027081929813 |
+| 12:00 | 1.00026813949084 | 1.00026813949084 |
+
+**Seven of seven identical to the last decimal place**, `method = 'oracle'` on
+both sides of every row. Before this change each of those rows carried the
+PREVIOUS hour's rate.
+
+🔑 Two details make this evidence rather than a coincidence:
+
+- **The still-open 12:00 bucket agrees.** The tip is where two different
+  resolution rules diverge most visibly, so that is the strongest single row.
+- **The labels match, not just the values.** A surface can reach the right
+  number by the wrong route; `method` agreeing everywhere rules that out.
+
+⚠️ A 05:00 row appeared only on the API side — the ClickHouse window was
+`now() - INTERVAL 8 HOUR` and 05:00 had just aged out of it. Not a discrepancy.
+
+## Historical — the deploy note this task closed on
 
 `/ohlcv` runs in the api-handler Lambda, so prod still serves the old resolution
 until a **Compute deploy**. ⚠️ That deploy is not ours alone to make: `develop`
