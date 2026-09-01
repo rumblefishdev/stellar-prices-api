@@ -1,6 +1,6 @@
 ---
 id: "0194"
-title: "Portal security and ops audit — caching, IAM, throttles, logs, against Tranche 3 AC 6"
+title: "Portal security and ops audit — and the three changes it forced: the flip, the flat /api/ prefix, and the API's own hostname"
 type: TEST
 status: active
 related_adr: ["0007", "0010"]
@@ -146,6 +146,22 @@ history:
       gate precondition. With [[0189]] met and blockers B1 and B2 closed, the
       only preconditions still open are the two `(host)` checks, which wait on
       the Explorer distribution.
+  - date: "2026-09-01"
+    status: active
+    who: akot
+    note: >
+      Retitled and given a "What this task actually shipped" section, because
+      the title said `TEST` while seven commits carried code and three of them
+      changed the portal's architecture: the flip (`PORTAL_ENABLED` true, in
+      production), the flat `/api/` prefix (supersedes [[0161]]'s convention
+      for this app and [[0235]]'s three-day-old layout), and the API's own
+      hostname with CORS (supersedes the same-origin property [[0184]] and
+      [[0186]] were built on). Plus the tag-on-create IAM fix without which no
+      key could ever be issued, the example rewrite that closes [[0233]]'s
+      portal half, and the branch's own code review — six findings, all fixed
+      in `5635af9`. Rust 405 → 416, portal 157 → 170. Nothing about the
+      checks' verdicts changed; the record of what merging this branch does
+      did.
 ---
 
 # Portal security and ops audit
@@ -159,6 +175,81 @@ be.*
 Everything here is already required by an earlier slice. What is new is checking
 the composition, because three of these are properties of the whole array or the
 whole policy and are invisible from inside any one task.
+
+## What this task actually shipped — read this before the title
+
+**The title says `TEST` and "audit". Seven of the branch's commits carry code,
+and three of them changed the portal's architecture.** That is not scope creep
+discovered late: each one was a decision Adam made *because* the audit measured
+something that could not pass as built. The record below is the honest index of
+what merging this branch does, because "audit" is not a description anyone
+would deploy carefully on.
+
+The `Notes` at the bottom say a `TEST` that writes code should hand the work to
+the slice that owns it. That rule was consciously not followed here, twice
+(the flat prefix and the custom domain), and the reason is written at each
+decision: both were prefix/host changes whose cost was one deploy on our side
+*only* while the Explorer repo had not yet built against the old shape. A week
+later they would have been a coordinated change across two repos.
+
+### The three architectural changes
+
+| # | commit | what it changed | what it supersedes |
+|---|---|---|---|
+| 1 | `4ebb0ea` + `8562cf1` | **The portal is open.** `PORTAL_ENABLED: false → true`, deployed to production 2026-08-31 10:43Z (`ComputeStack` alone). Four cold-start sources had to exist first, and two of them did not — see the flip section | the flag's own gate; nothing else |
+| 2 | `a0aaa13` | **The flat prefix.** `/api/` is the whole portal — `/api/login` is a page, `/api/auth/login` is the backend. Bundle and backend share one prefix, so the *bundle* is enumerated as ten CloudFront carve-outs ahead of an `/api/*` catch-all to the API. Touches Rust route constants, the gateway resource `/api/{proxy+}`, `portal-hosting-stack.ts`, the Vite dev proxy, `verify-openapi-routes.mjs`, `links.ts` and the docs. New `OPENAPI_PATH` alias at `/api/api-docs-json` | [[0161]]'s `<app>/*` + `<app>/api/*` convention, **for this app**. [[0235]]'s `/api/api/` layout, which had shipped three days earlier |
+| 3 | `c8fa31d` | **The API has its own hostname.** `prices-api.sorobanscan.rumblefish.dev`, a REGIONAL custom domain with its own DNS-validated certificate and A/AAAA records; the bundle on the shared host calls it **cross-origin, same-site**. Brings with it: `addCorsPreflight` on `/api/{proxy+}` (MOCK, one origin, credentials) joining `portalSettings` in **both** arms, CORS headers on the gateway's own error responses, a `CorsLayer` scoped to the portal routes, `PORTAL_WEB_ORIGIN`, an absolute `AuthState.home`, a third leg on the CSRF check, `credentials: 'include'` in the bundle, and `make sync-portal-explorer` | the **same-origin, no-CORS** property [[0184]] and [[0186]] were built on. The four Explorer-side requirements in `audit/2026-08-31-explorer-distribution-requirements.md`, which is now superseded to one item |
+
+### The four smaller code changes
+
+- **`a5c920e` — the api-handler could never create a key in production.**
+  `CreateApiKey` with `tags` is authorised as `apigateway:PUT` on
+  `/tags/…/apikeys/*`, separate from `POST /apikeys`, and the role had `POST`
+  only. Three per-resource IAM audits read the policy comment's "deliberately
+  NOT here" as a statement of intent and agreed with it. The first real
+  browser sign-in found it in one press. `PortalTagApiKeysOnCreate`, conditioned
+  on `aws:RequestTag/ManagedBy` and a `aws:TagKeys` allow-list.
+- **`64e22da` — every code example on the portal was the design's API, not
+  ours.** The hero, the landing endpoints and the whole quick start showed
+  `GET /v1/prices/XLM-USDC`, `/pools`, `/history`, `source: "soroswap"` — routes
+  that do not exist. With a freshly issued key, the quick start's own "First
+  request" answered `403`. Rewritten against the seven live routes on the API's
+  hostname, with `apiBaseUrl` feeding the OpenAPI `servers` block. This closes
+  [[0233]]'s portal half.
+- **`5635af9` — the branch's own `/code-review`, six findings.** Full table in
+  "Code review of the whole branch" below. The two that reach a visitor: two
+  quick-start snippets whose on-screen code did not compile while their Copy
+  button wrote correct code, and three sign-in refusals that answered a
+  **browser** with a JSON envelope — leaving the OAuth popup open on raw text
+  with no way back.
+- **Test suites grew with all of it:** Rust 405 → 416, portal 157 → 170, plus
+  a new carve-out assertion in `openapi:verify-routes`.
+
+### The operator actions, which are not in any diff
+
+Four production changes this task performed by hand, each of which a check
+had assumed was already true:
+
+- the Discord OAuth secret **created** (it did not exist), then **rotated**
+  after its `client_secret` leaked into a working transcript, then rewritten
+  twice more as the callback path and then the callback *host* moved;
+- both eligibility SSM parameters **seeded** (neither existed — the runbook's
+  own ticked criterion had been true of the runbook and false of the account);
+- one stray portal-tagged API key from a local run **deleted** off the live
+  free-tier plan;
+- the orphaned `api-tokens/*` bundle objects **deleted**, after this task
+  predicted they were inert and measured that they were not — they were still
+  serving the previous portal at `200`.
+
+### What is left for other tasks
+
+- **[[0195]]** is reduced to one item: `enableApiSpaBasicAuth: false` in the
+  Explorer repo, which gates *public availability*, not correctness.
+- **The gating guild is still the test guild** — a `put-parameter --overwrite`
+  away, and it must happen before the portal is advertised (Design Decision 1).
+- **The Discord redirect URI** now names the API host and is registered.
+- **A CloudTrail detective control** for a `PUT /tags` not preceded by a
+  `CreateApiKey` — spawned by the review's finding 4, which is unfixable in IAM.
 
 ## Why an audit rather than a checklist item in each slice
 
