@@ -446,9 +446,25 @@ FROM
     -- every candle row on the left. An unbounded ASOF would forward-fill a dead
     -- oracle's last reading across years of buckets; this cannot.
     --
-    -- argMax is a LAST, not a mean — averaging is forbidden by 0167 (it does not
-    -- compose across the six grains; a daily close must equal the last hourly
-    -- close, and it does here because both are the last observation in the span).
+    -- argMax is a LAST, not a mean — averaging is forbidden by 0167 because it
+    -- does not compose across the six grains. This form composes WHERE THE
+    -- ORACLE OBSERVED: when the day's last candle-bearing hour holds a reading,
+    -- the daily close and that hour's close are the SAME observation, and are
+    -- therefore the same value.
+    --
+    -- ⚠️ It does NOT compose across an oracle gap, and that is a property of the
+    -- bucket-width window rather than an oversight. If the day's last reading
+    -- falls in an EARLIER hour than the day's last candle, the daily bucket
+    -- still contains that reading while the final hourly bucket does not — so
+    -- the day publishes the measured rate ('oracle') while the last hour falls
+    -- back to $1 ('peg'). Measured on the prod pin: a single reading at 09:05
+    -- with hourly candles at 09:00 and 23:00 gives daily 0.9993/'oracle'
+    -- against a last-hourly 1/'peg'. Both values are correct under the rule
+    -- above and both are labelled, but a consumer comparing the two grains
+    -- across an outage will see them differ. Closing that needs a rule that
+    -- reaches OUTSIDE the bucket — i.e. the forward-fill this deliberately
+    -- refuses. Pinned as expected behaviour by views_it.rs::
+    -- a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains.
     --
     -- method = 'oracle' selects a MEASURED reading. usd_rate keys on
     -- (identity, timestamp, method) precisely so a task 0154 'pivot' row cannot
@@ -477,8 +493,8 @@ FROM
     -- last reading, and (b) after an oracle outage it forward-fills the last
     -- known rate indefinitely, still labelled 'oracle'. This view follows the
     -- rule init.sql states for this consumer by name ("T is the BUCKET'S END"),
-    -- which is also the only one under which a daily close equals the last
-    -- hourly close of that day. The two surfaces therefore disagree by the
+    -- which is also the only one under which a daily close can equal the last
+    -- hourly close of that day at all (subject to the gap caveat above). The two surfaces therefore disagree by the
     -- intraday drift in normal operation and by the whole staleness gap after an
     -- outage. Reconciling them is its own task — NOT fixed here, because it is a
     -- change to a shipped endpoint's published values.
@@ -627,9 +643,25 @@ FROM
     -- every candle row on the left. An unbounded ASOF would forward-fill a dead
     -- oracle's last reading across years of buckets; this cannot.
     --
-    -- argMax is a LAST, not a mean — averaging is forbidden by 0167 (it does not
-    -- compose across the six grains; a daily close must equal the last hourly
-    -- close, and it does here because both are the last observation in the span).
+    -- argMax is a LAST, not a mean — averaging is forbidden by 0167 because it
+    -- does not compose across the six grains. This form composes WHERE THE
+    -- ORACLE OBSERVED: when the day's last candle-bearing hour holds a reading,
+    -- the daily close and that hour's close are the SAME observation, and are
+    -- therefore the same value.
+    --
+    -- ⚠️ It does NOT compose across an oracle gap, and that is a property of the
+    -- bucket-width window rather than an oversight. If the day's last reading
+    -- falls in an EARLIER hour than the day's last candle, the daily bucket
+    -- still contains that reading while the final hourly bucket does not — so
+    -- the day publishes the measured rate ('oracle') while the last hour falls
+    -- back to $1 ('peg'). Measured on the prod pin: a single reading at 09:05
+    -- with hourly candles at 09:00 and 23:00 gives daily 0.9993/'oracle'
+    -- against a last-hourly 1/'peg'. Both values are correct under the rule
+    -- above and both are labelled, but a consumer comparing the two grains
+    -- across an outage will see them differ. Closing that needs a rule that
+    -- reaches OUTSIDE the bucket — i.e. the forward-fill this deliberately
+    -- refuses. Pinned as expected behaviour by views_it.rs::
+    -- a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains.
     --
     -- method = 'oracle' selects a MEASURED reading. usd_rate keys on
     -- (identity, timestamp, method) precisely so a task 0154 'pivot' row cannot
@@ -658,8 +690,8 @@ FROM
     -- last reading, and (b) after an oracle outage it forward-fills the last
     -- known rate indefinitely, still labelled 'oracle'. This view follows the
     -- rule init.sql states for this consumer by name ("T is the BUCKET'S END"),
-    -- which is also the only one under which a daily close equals the last
-    -- hourly close of that day. The two surfaces therefore disagree by the
+    -- which is also the only one under which a daily close can equal the last
+    -- hourly close of that day at all (subject to the gap caveat above). The two surfaces therefore disagree by the
     -- intraday drift in normal operation and by the whole staleness gap after an
     -- outage. Reconciling them is its own task — NOT fixed here, because it is a
     -- change to a shipped endpoint's published values.

@@ -1168,10 +1168,14 @@ async fn usdt_quote_only_gets_no_peg_fallback_but_usdc_still_does() {
 ///      replace a measurement; this consumer chooses measured or nothing. The
 ///      fixture plants a wildly wrong pivot value at the end of the day — if it
 ///      leaked it would win case 2's "last observation" test.
-///   5. **The grains compose.** The daily close equals the LAST hourly close of
-///      the same day (task 0167's stated reason for a close rather than an
-///      average). Both are the last observation in their span, so this holds by
-///      construction — and breaks the moment someone reaches for an average.
+///   5. **The grains compose where the oracle observed.** The daily close equals
+///      the LAST hourly close of the same day (task 0167's stated reason for a
+///      close rather than an average). Both are the same observation here, so it
+///      holds by construction — and breaks the moment someone reaches for an
+///      average. ⚠️ It holds only because this fixture's last reading (23:55)
+///      sits INSIDE the day's last candle-bearing hour. When it does not, the
+///      grains legitimately diverge; that case is
+///      [`a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains`].
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
 async fn peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one() {
@@ -1357,6 +1361,161 @@ async fn peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one() 
     let garbage: u64 = client
         .query(&format!(
             "SELECT countIf(toFloat64(close_usd) <= 0) FROM {db}.price_usd_series"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(garbage, 0, "no row may publish a non-positive close_usd");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0168 — the two grains DIVERGE across an oracle gap, and that is expected.
+///
+/// The sibling test
+/// [`peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one`]
+/// asserts that a daily close equals the last hourly close of the same day. That
+/// invariant holds only when the day's last candle-bearing hour actually holds a
+/// reading. This test is the misaligned case, and it exists because the sibling's
+/// fixture (last reading at 23:55, inside the 23:00 hour) cannot see it and would
+/// otherwise read as a guarantee the design does not make.
+///
+/// One reading at 09:05, hourly candles at 09:00 and 23:00. The daily bucket
+/// contains the reading; the 23:00 bucket does not. So:
+///
+/// | grain  | bucket | close  | method   |
+/// |--------|--------|--------|----------|
+/// | daily  | 00:00  | 0.9993 | `oracle` |
+/// | hourly | 09:00  | 0.9993 | `oracle` |
+/// | hourly | 23:00  | 1      | `peg`    |
+///
+/// Both values are correct under task 0167's rule (the bucket's LAST observation)
+/// and both are labelled, so nothing here is silent. Making them agree would need
+/// a resolution rule that reaches outside the bucket — the unbounded forward-fill
+/// this view deliberately refuses, and the one `/ohlcv`'s peg series does apply.
+/// Written down as EXPECTED so that a future change which "fixes" the divergence
+/// has to delete an assertion rather than merely satisfy a green suite.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains() {
+    let db = "it_views_0168_grain_divergence_across_a_gap";
+    let client = setup_scratch(db).await;
+
+    /// The day's only reading, landing in the 09:00 hour.
+    const MEASURED: &str = "0.99930223861292";
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // FOO/USDC — USDC is quote-only, so arm B emits a peg placeholder per bucket.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (toDateTime('2026-08-12 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // The day's candles sit in two hours; the LAST one (23:00) is the one the
+    // oracle sat out.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (toDateTime('2026-08-12 09:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
+             (toDateTime('2026-08-12 23:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // A single measurement, 09:05 — inside the day, inside the 09:00 hour, and
+    // NOT inside the 23:00 hour.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, hops, version) VALUES \
+             ('credit','USDC','{USDC_ISSUER}','',toDateTime('2026-08-12 09:05:00'),{MEASURED},'oracle','',0,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let usdc_at = |view: &'static str, bucket: &'static str| {
+        let client = client.clone();
+        let db = db.to_string();
+        async move {
+            client
+                .query(&format!(
+                    "SELECT toString(close_usd), method FROM {db}.{view} \
+                     WHERE asset_code = ? AND issuer_address = ? AND bucket = toDateTime(?)"
+                ))
+                .bind("USDC")
+                .bind(USDC_ISSUER)
+                .bind(bucket)
+                .fetch_one::<(String, String)>()
+                .await
+                .unwrap()
+        }
+    };
+
+    // The day contains the reading, so the daily bucket publishes it.
+    let (daily, daily_method) = usdc_at("price_usd_series", "2026-08-12 00:00:00").await;
+    assert_eq!(
+        daily, MEASURED,
+        "the daily bucket contains the 09:05 reading and must publish it"
+    );
+    assert_eq!(daily_method, "oracle");
+
+    // So does the hour that holds it.
+    let (nine, nine_method) = usdc_at("price_usd_series_1h", "2026-08-12 09:00:00").await;
+    assert_eq!(nine, MEASURED, "the 09:00 hour holds the reading");
+    assert_eq!(nine_method, "oracle");
+
+    // The day's LAST candle-bearing hour does not, and falls back — labelled.
+    let (last_hour, last_method) = usdc_at("price_usd_series_1h", "2026-08-12 23:00:00").await;
+    assert_eq!(
+        last_hour, "1",
+        "the 23:00 hour holds no reading and must fall back to $1 rather than \
+         carry the 09:00 hour's rate forward"
+    );
+    assert_eq!(
+        last_method, "peg",
+        "the fallback must stay labelled 'peg' — the divergence below is only \
+         acceptable because a consumer can SEE which value is measured"
+    );
+
+    // The divergence itself, asserted rather than assumed. This is the property
+    // the sibling test's fixture cannot reach.
+    assert_ne!(
+        daily, last_hour,
+        "EXPECTED: across an oracle gap covering the day's last candle-bearing \
+         hour, the daily close ({daily}) and the last hourly close ({last_hour}) \
+         differ. If this now passes, the resolution rule has gained a \
+         forward-fill outside the bucket — see the comment in views.sql"
+    );
+
+    // The 0165 invariants survive the gap.
+    let garbage: u64 = client
+        .query(&format!(
+            "SELECT countIf(toFloat64(close_usd) <= 0) FROM {db}.price_usd_series_1h"
         ))
         .fetch_one::<u64>()
         .await
