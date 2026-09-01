@@ -232,8 +232,11 @@ Both must print `prices/production/portal-discord-oauth`.
 `PORTAL_ENABLED` is still `false` at this point and the routes still answer an
 empty `404`. That is correct: **the api-handler does not read this secret while
 the portal is closed** (see `AppConfig::load_portal_oauth`), so creating it does
-not change any behaviour and forgetting to create it before opening the portal
-fails the _next_ cold start rather than silently serving a broken sign-in.
+not change any behaviour, and forgetting to create it before opening the portal
+closes the portal again at the _next_ cold start — `/config` answers
+`enabled: false` and the api-handler logs `portal closed at cold start` naming
+`PORTAL_OAUTH_SECRET_NAME` — rather than silently serving a broken sign-in
+(`AppConfig::load_portal_or_close`). `/v1` is unaffected either way.
 
 ## 4. Verify locally before opening production
 
@@ -405,11 +408,17 @@ so a drift fails CI rather than a deploy — but the _existence_ of the deployed
 parameter is not something CI can see.
 
 **If the parameter is missing when `PORTAL_ENABLED` becomes `true`, the
-api-handler fails cold start**, and that is not confined to the portal: one
-router serves every route group (ADR 0008), so it takes `/v1` down. This is the
-same "fatal only at the moment of opening" shape as the OAuth secret in §3, and
-it is deliberate — the alternative is a portal with a key button that answers
-`503`.
+api-handler closes the portal at cold start** — `/config` answers
+`enabled: false` and the log carries `portal closed at cold start` naming
+`PORTAL_FREE_PLAN_PARAM` — and `/v1` is unaffected. It used to fail init
+instead, which took `/v1` down with it (one router serves every route group,
+ADR 0008); task 0194's PR review is where that changed, and the reasoning is on
+`AppConfig::load_portal_or_close`. The shape is still "found only at the moment
+of opening", as with the OAuth secret in §3, and the alternative it avoids is
+still a portal with a key button that answers `503` — a closed portal answers
+before any button renders. What it costs: nothing pages on it (the api-handler
+has no error alarm), so the `/config` probe after the deploy is the check, not
+an optional confirmation.
 
 While the portal is closed the handler reads neither, so nothing here changes
 any behaviour until the flag moves.

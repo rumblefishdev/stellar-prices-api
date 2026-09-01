@@ -132,7 +132,9 @@ impl EligibilitySettings {
         // says nothing about anybody's membership. Every member would have
         // been told "we could not verify", indefinitely, with the actual fault
         // one `put-parameter` away. This is the failure the probe exists to
-        // turn into an `Init Errors` event.
+        // turn into a cold-start error — a closed portal and a
+        // `portal closed at cold start` log line, per
+        // `AppConfig::load_portal_or_close`.
         if !crate::portal::auth::discord::is_snowflake(&id) {
             return Err(EligibilityError::NotSnowflake {
                 what: "discord-guild-id",

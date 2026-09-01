@@ -484,9 +484,11 @@ export class ComputeStack extends cdk.Stack {
     // The grant is on the by-name wildcard ARN, so it does not require the
     // secret to exist at synth time. That WAS harmless because a closed portal
     // never asked; with `PORTAL_ENABLED` true (task 0194) the read happens at
-    // every cold start and a missing or misnamed secret is an `Init Errors`
-    // event on the Lambda that also serves `/v1` — see the deploy-gate note on
-    // `PORTAL_ENABLED` below and `AppConfig::load_portal_oauth`.
+    // every cold start, and a missing or misnamed secret closes the portal in
+    // that execution environment with a `portal closed at cold start` error
+    // log — not an init panic, because the Lambda also serves `/v1`. See the
+    // deploy-gate note on `PORTAL_ENABLED` below and
+    // `AppConfig::load_portal_or_close`.
     this.apiHandlerRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'ReadPortalOauthSecret',
@@ -772,8 +774,8 @@ export class ComputeStack extends cdk.Stack {
         // opening creates has to be unwound to close it again.
         //
         // ⚠️ **This value is a deploy gate, not just a flag.** With it true the
-        // handler resolves the portal's configuration AT COLD START, and each
-        // of FOUR reads is fatal if it fails:
+        // handler resolves the portal's configuration AT COLD START, from FOUR
+        // reads, and the portal opens only if every one of them succeeds:
         //
         // 1. `load_portal_oauth` (`config.rs`) on the Discord OAuth secret
         //    named by `PORTAL_OAUTH_SECRET_NAME` — operator-created, runbook §2
@@ -784,16 +786,22 @@ export class ComputeStack extends cdk.Stack {
         //    `ApiGatewayStack`, which DEPENDS ON this stack and therefore
         //    deploys AFTER it. On a fresh environment, or any time the usage
         //    plan is replaced or renamed, this stack can be live with the flag
-        //    true while the parameter does not yet exist — and that is an init
-        //    panic, not a degraded portal. Deploy order matters here
+        //    true while the parameter does not yet exist. Deploy order matters
+        //    here
         // 3. + 4. the eligibility probe (`portal/eligibility.rs`) on
         //    `/prices/{env}/discord-guild-id` and
         //    `/prices/{env}/min-account-age-minutes` — operator-seeded,
         //    runbook §2a
         //
-        // A missing one is an `Init Errors` event on the api-handler, and this
-        // Lambda also serves `/v1`, so deploying this ahead of the operator
-        // steps takes the DATA API down with the portal. Runbook
+        // A failed read CLOSES the portal in that execution environment and
+        // logs `portal closed at cold start` on the api-handler; it does NOT
+        // panic init, because this Lambda also serves `/v1` and an init panic
+        // is a `502` to the next data-API caller (task 0194's PR review,
+        // finding 1; the reasoning is on `AppConfig::load_portal_or_close`).
+        // So deploying this ahead of the operator steps ships a portal whose
+        // `/config` says `enabled: false`, not a data-API outage — and nothing
+        // else tells you: the api-handler has no error alarm, so the runbook's
+        // `/config` probe after the deploy is the check. Runbook
         // `portal-oauth-deploy-prep.md` §2, §2a and §5 are the steps; task
         // 0194's audit is what verifies they were run.
         PORTAL_ENABLED: 'true',

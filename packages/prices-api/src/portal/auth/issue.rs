@@ -240,8 +240,8 @@ const _: () = assert!(
 ///
 /// All optional, like `AuthState::oauth` and `KeysState::gateway`, and for the
 /// same reason: the api-handler boots with the portal closed and nothing
-/// provisioned. `config::load_portal_eligibility` fails the cold start when
-/// the portal is *open* with these missing, so a `None` here in production
+/// provisioned. `config::load_portal_or_close` closes the portal at cold start
+/// when it is *open* with these missing, so a `None` here in production
 /// means the portal is closed and the gate answers before any handler does.
 #[derive(Clone)]
 pub struct IssueDeps {

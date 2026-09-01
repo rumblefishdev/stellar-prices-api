@@ -836,9 +836,10 @@ fn no_store(mut response: Response) -> Response {
 
 /// Land a deployment that reached these routes with no credentials.
 ///
-/// Only reachable if `PORTAL_ENABLED` is true and the secret is missing — the
-/// load in `AppConfig::load_portal_oauth` fails hard on exactly that
-/// combination, so this is a second line rather than the first.
+/// Only reachable if `PORTAL_ENABLED` is true and the secret is missing —
+/// `AppConfig::load_portal_or_close` closes the portal on exactly that
+/// combination, so the gate answers first and this is a second line rather
+/// than the first.
 ///
 /// **A landing, not the `503 sign_in_unconfigured` envelope it used to be**
 /// (task 0194's review). Both call sites are reached by a browser following a
