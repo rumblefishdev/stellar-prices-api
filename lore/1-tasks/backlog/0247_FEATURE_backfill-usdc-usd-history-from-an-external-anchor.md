@@ -73,6 +73,10 @@ further back to copy.
 
 ## Implementation
 
+⚠️ **The span is 2021-01-25 → 2026-03-11, not "SDEX genesis (2021-02)"** —
+`price_usd_series`'s first USDC bucket is **2021-01-25**, measured on prod
+2026-09-01 during [[0168]]'s deploy. The earlier figure was an estimate.
+
 Load an external USDC/USD daily (or hourly) series into `prices.usd_rate` for the
 pre-oracle window, keyed on the canonical Stellar identity.
 
@@ -84,7 +88,7 @@ pre-oracle window, keyed on the canonical Stellar identity.
   `init.sql`'s vocabulary block alongside `oracle`/`peg`/`pivot`/`pivot2`. A
   consumer must be able to tell a first-party measurement from an imported one.
 - **`usd_rate` is append-only for this purpose** — no re-enrichment. See below.
-- Range: from SDEX genesis (2021-02) to `2026-03-11 14:00`, stopping where our
+- Range: from **2021-01-25** to `2026-03-11 14:00`, stopping where our
   own readings begin so the two never overlap at the same key.
 
 ## 🔑 Why this is unusually cheap for `price_usd_series`
@@ -118,7 +122,7 @@ generalise the loader to "stablecoins" or "assets with a `usd_rate` row".
 
 ## Sizing — do this before committing to it
 
-USDC held par tightly across almost all of 2021-02 → 2026-03. The real content is
+USDC held par tightly across almost all of 2021-01 → 2026-03. The real content is
 a handful of event days plus sub-0.1% wobble. Establish the payoff first:
 
 - How many days in our span deviate more than, say, 0.5% from par?
@@ -130,7 +134,7 @@ argues for a daily grain rather than an hourly one.
 
 ## Acceptance Criteria
 
-- [ ] `prices.usd_rate` carries canonical-USDC rows from SDEX genesis to
+- [ ] `prices.usd_rate` carries canonical-USDC rows from 2021-01-25 to
       `2026-03-11 14:00`, with a `method` distinct from `'oracle'`.
 - [ ] No overlap with our own readings at the same key; the join in
       `price_usd_series*` picks exactly one row per bucket either side of the

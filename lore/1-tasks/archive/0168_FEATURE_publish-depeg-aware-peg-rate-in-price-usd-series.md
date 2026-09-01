@@ -2,7 +2,7 @@
 id: "0168"
 title: "Publish the real peg rate in price_usd_series instead of a hardcoded $1"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0165", "0167", "0154", "0151", "0150", "0172", "0196", "0173", "0170", "0246", "0247"]
 tags:
@@ -70,6 +70,28 @@ history:
       ⚠️ Found an UNPLANNED disagreement with 0170's /ohlcv peg series, which
       ASOFs at the bucket START with no staleness bound - spawned [[0246]].
       Remaining: the prod internal-consistency check, which needs the deploy.
+  - date: 2026-09-01
+    status: completed
+    who: okarcz
+    note: >
+      DEPLOYED AND VERIFIED ON PROD. Two CREATE OR REPLACE VIEWs through CHQ;
+      no CDK, no data, no migration. The split appeared exactly as designed:
+      1,866 'peg' buckets (2021-01-25 to 2026-03-10, all exactly 1) and 175
+      'oracle' (2026-03-11 to 2026-09-01, 0.99940 to 1.00127) - 1,866 + 175 =
+      2,041, the exact pre-deploy row count, so the join neither multiplied nor
+      dropped a row. The last AC closed: at hourly grain against XLM/USDC, 16 of
+      24 rows are IDENTICAL to eight decimal places, which is only possible if
+      this view and the enrichment tier read the same Reflector value for the
+      same bucket. prices_reader needed no new grant (GRANT SELECT ON prices.*).
+      ⚠️ TWO FIGURES IN THIS FILE WERE WRONG and are corrected in place - the
+      deploy gate band (0.999-1.001 false-positived against a correct view; the
+      real usd_rate range over 49,759 rows is 0.99930 to 1.00148) and the
+      magnitude of the error being fixed (+0.148%/-0.070%, not ~0.07%). The
+      daily agreement query cannot pass at its stated ~1e-4 because it compares
+      a cross-asset day-AVERAGE against a day-CLOSE; reformulated rather than
+      relaxed. Code review before merge also corrected a false grain-composition
+      claim in both view bodies and added the test that pins the real behaviour.
+      PR #273 merged (6 commits). Spawned [[0246]] and [[0247]].
 ---
 
 # ✅ HOLD LIFTED 2026-08-13 — this task is unblocked
@@ -199,10 +221,14 @@ Fold these into 0165 **before it merges**, or this task turns into a rewrite:
       yields the Decimal DEFAULT `0` (prod runs `join_use_nulls = 0`), which the
       `> 0` test routes to the `$1` fallback. Pinned by the
       `countIf(close_usd <= 0) = 0` assertion carried in three tests.
-- [ ] The published value agrees with what the oracle tier baked into candles in
+- [x] The published value agrees with what the oracle tier baked into candles in
       the same bucket — the internal-consistency check that motivates this task.
-      **Needs the deploy** — see the runbook at the end of this file. Cannot be
-      checked locally: it compares against enriched prod candles.
+      **VERIFIED ON PROD 2026-09-01, after the deploy.** At the hourly grain
+      against a single asset (XLM/USDC), **16 of 24 rows match to all eight
+      decimal places** — identical, not merely within tolerance, which can only
+      happen if both surfaces read the same Reflector value for the same bucket.
+      See "Deploy" below for the residual's explanation and for why the check had
+      to be reformulated to mean anything.
 - [x] Applies to every peg asset, not a USDC special case. ⚠️ **The AC's "(USDT
       too)" is STALE** — [[0172]] removed USDT from the peg set in 2026-08-12
       and [[0196]] made that a standing condition. The MECHANISM is general: the
@@ -494,6 +520,27 @@ delete an assertion rather than merely stay green.
 7. **The AC "applies to every peg asset (USDT too)" was written before
    [[0172]].** Read as "not a USDC special case" — satisfied by 6 — not as an
    instruction to re-add USDT, which the standing condition forbids.
+8. **The grain-composition claim was WEAKENED rather than the design changed**
+   (2026-09-01, from code review). The comment asserted a daily close always
+   equals the last hourly close; under a bucket-width window it holds only when
+   the day's last candle-bearing hour holds a reading. The alternative — making
+   them always agree — requires a resolution rule reaching outside the bucket,
+   i.e. the unbounded forward-fill this view exists to refuse and [[0246]] exists
+   to take away from `/ohlcv`. So the honest divergence was kept and PINNED by a
+   test, rather than traded for a dishonest agreement.
+9. **The deploy gate band was WIDENED from 0.999–1.001 to 0.99–1.01**
+   (2026-09-01). It false-positived on the real deploy against a correct view.
+   A gate whose purpose is catching a wrong-identity match (a $0.13 IOU) must be
+   sized for that, not for basis points; a band tight enough to trip on an
+   ordinary day trains its reader to override it, which is worse than no gate.
+10. **The internal-consistency AC was REFORMULATED, not merely ticked**
+    (2026-09-01). As written it compared a cross-asset day-AVERAGE against a
+    day-CLOSE and could not pass at its own tolerance. Rather than relax the
+    tolerance until the original query passed — which would have made the
+    criterion unfalsifiable — the check was restated at hourly grain against a
+    single asset, where it passes exactly (16 of 24 identical to 8 dp). The
+    daily query is retained with its limits documented because it is the one a
+    consumer will actually run.
 
 ## Issues Encountered
 
@@ -516,6 +563,25 @@ delete an assertion rather than merely stay green.
   up automatically. Checked before writing the join, because a missing grant on a
   view's new dependency fails only on prod.
 
+- **The deploy gate FALSE-POSITIVED against a correct view** (2026-09-01). Step 2
+  demanded `oracle` inside 0.999–1.001; the view returned a max of
+  1.00126506013917 and, read literally, that is a stop-and-roll-back. It was not
+  a fault: `usd_rate`'s own 49,759 rows span 0.99930048965723 – 1.00147561299535,
+  so the view sat strictly inside its source. Two diagnostics settled it in one
+  hop — an identity census on `usd_rate` (exactly one identity, the 0196 standing
+  condition intact) and a view-vs-table comparison at the extremes (same buckets,
+  same values to the last decimal). **Root cause: a narrower statistic quoted as
+  if it were the raw range.** Band corrected in the runbook. The lesson worth
+  keeping is that the diagnostic pair — *census the source identities, then
+  compare view against source at the extremes* — distinguishes "wrong identity"
+  from "stale expectation" without touching production.
+- **The AC's own comparison was between two different statistics.** See the
+  DEPLOYED section. Noted here because it is the failure mode this task exists to
+  fix, appearing in the verification of the fix.
+- **`CHQ` returns no query timing** — `clickhouse-client` prints elapsed only to
+  a TTY, and `CHQ` runs non-interactively. Read `system.query_log` instead of
+  flipping production twice to time the old definition.
+
 ## Future Work
 
 - [[0246]] — reconcile `/ohlcv`'s peg series with this view's resolution rule.
@@ -523,10 +589,75 @@ delete an assertion rather than merely stay green.
   change this task's fallback, which stays correct either way; it shrinks the
   span the fallback covers.
 
-## Remaining before this task can close
+# ✅ DEPLOYED TO PROD — 2026-09-01
 
-The prod internal-consistency AC. It compares against enriched prod candles and
-cannot be checked locally. Runbook below.
+Two `CREATE OR REPLACE VIEW`s applied through `CHQ`. Runbook below was followed
+as written; the two corrections it needed are folded into it.
+
+## The split, exactly as predicted
+
+| method | rows | span | range |
+|---|---|---|---|
+| `peg` | 1,866 | 2021-01-25 → 2026-03-10 | exactly `1` |
+| `oracle` | **175** | 2026-03-11 → 2026-09-01 | 0.99940035978412 – 1.00126506013917 |
+
+**1,866 + 175 = 2,041 — the exact pre-deploy row count.** The join neither
+multiplied nor dropped a row, and the `peg`/`oracle` boundary is clean with no
+overlapping bucket.
+
+## The AC: agreement with the candles
+
+**The daily form of this check cannot pass at its own stated tolerance, and that
+is a flaw in the check.** `published_by_view` is the day's LAST oracle
+observation; `implied_from_candles` averages ~800 *different assets*, each
+carrying the rate at ITS OWN last trade of the day, spread across 24 hours. A
+day-average against a day-close cannot agree exactly. Measured: 11 of 14 days
+inside 1e-4, three at 1.35e-4 – 2.33e-4 — which is the size intraday drift
+actually is. **The runbook's "~1e-4" was comparing two different statistics** —
+the same defect class this task exists to fix, one level up in the verification.
+
+**Reformulated to be apples-to-apples, it passes decisively.** Hourly grain (24×
+narrower averaging window) against ONE asset (removes the cross-asset spread):
+
+```
+XLM/USDC, price_ohlcv_1h vs price_usd_series_1h, 24 rows to 2026-09-01
+-> 16 of 24 IDENTICAL to all eight decimal places
+```
+
+Identical, not "within tolerance" — only possible if both surfaces read the same
+Reflector value for the same bucket. The 8 that differ follow one pattern: three
+rows per hour are three SOURCES (SDEX/Soroswap/Phoenix), two tie exactly and one
+does not, because a venue's `close_usd` comes from its last 1m candle in the
+hour — a venue trading near the top of the hour gets the hour's last reading, one
+trading earlier gets an earlier one. Residual 1.3e-5 – 1.6e-4 = drift over a
+known gap. **Use the hourly single-asset form for this check in future.**
+
+The deliverable, on the peak-deviation window (2026-06-22 → 06-26): both surfaces
+now agree USDC sat **0.045% – 0.11% above par**, peaking at 1.00127 on the 24th.
+The old view published a flat `1.00000000` on all five days.
+
+## ⚠️ Two figures in this file were WRONG and are corrected
+
+1. **The gate band** — see the correction inside Step 2 of the runbook.
+2. **The magnitude of the error being fixed.** This file quotes ~0.07%
+   throughout, from a single 2026-08-10 reading. Measured over all 49,759
+   observations, USDC's actual excursion is **+0.148% / −0.070%** — so flat `$1`
+   was wrong by up to ~0.15%, twice the figure argued from. The direction of the
+   argument is unchanged and stronger.
+
+⚠️ **Honest sizing of the win.** Across the last 14 days USDC sat very near par,
+so mean error against the candles improved only ~1.07e-4 → ~8.0e-5 (about 25%).
+The fortnight is a mild sample; the win is on days like 2026-06-24, where flat
+`$1` was ~19× further out than the published rate now is. Anyone re-measuring
+this in a quiet fortnight should expect a modest number and not conclude the
+change did little.
+
+## Step 6 — the reader grant
+
+`SHOW GRANTS FOR prices_reader` -> `GRANT SELECT ON prices.* TO prices_reader`.
+Database-wide, so the new `prices.usd_rate` dependency needed no grant work.
+Confirmed rather than assumed, because a missing grant on a new dependency fails
+ONLY on prod.
 
 ---
 
@@ -592,9 +723,19 @@ WHERE asset_code = 'USDC' AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335
 GROUP BY method;
 ```
 
-`oracle` must sit inside **0.999 – 1.001** (measured 1.000086 – 1.000639 over
-2026-03 → 2026-08). Anything outside that band means the join matched the wrong
-identity — **stop and roll back**. `peg` must be exactly `1`.
+`oracle` must sit inside **0.99 – 1.01**. Anything outside that band means the
+join matched the wrong identity — **stop and roll back**. `peg` must be exactly
+`1`.
+
+⚠️ **This band was 0.999 – 1.001 and that was WRONG — it false-positived on the
+real deploy (2026-09-01).** It came from a "measured 1.000086 – 1.000639 over
+2026-03 → 2026-08" note that does not describe the raw observations: the actual
+range of `usd_rate`'s 49,759 canonical-USDC rows is **0.99930048965723 –
+1.00147561299535** (measured 2026-09-01, 2026-03-11 → 2026-09-01). The view
+returned 0.99940 – 1.00127, strictly inside that, i.e. correct. The gate's job is
+catching a WRONG IDENTITY — a $0.13 IOU, three orders of magnitude out — not
+policing basis points, so it is now sized for that and cannot fire on an ordinary
+day. **Do not re-tighten it without re-measuring the table first.**
 
 ## Step 3 — the open AC: agreement with the candles
 
@@ -623,8 +764,15 @@ GROUP BY bucket
 ORDER BY bucket;
 ```
 
-**PASS:** `implied_from_candles` and `published_by_view` agree to ~1e-4 on
-`view_method = 'oracle'` rows — both are the same Reflector feed near the day's
+⚠️ **This daily form CANNOT pass at ~1e-4 and it is not supposed to** — see the
+DEPLOYED section above: it compares a cross-asset day-AVERAGE against a day-CLOSE.
+Expect ~1e-4 typical and up to ~2.5e-4, and read it for SIGN AGREEMENT (13 of 14
+days on 2026-09-01), not for magnitude. The check that actually tests the
+property is the hourly single-asset form recorded above. Keeping the daily query
+here because it is the one a consumer will run.
+
+**PASS (as originally written, retained for the record):** `implied_from_candles`
+and `published_by_view` agree to ~1e-4 on `view_method = 'oracle'` rows — both are the same Reflector feed near the day's
 end. Before this change `published_by_view` was a flat `1.00000000` against an
 `implied_from_candles` of ~0.9993–1.0007; that gap closing IS the deliverable.
 
