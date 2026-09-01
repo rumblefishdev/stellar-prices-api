@@ -60,8 +60,9 @@ history:
       IMPLEMENTED AND GREEN LOCALLY, NOT YET DEPLOYED. Both views now carry the
       measured rate through a peg_rate column on arm B and fall back to $1 only
       where no observation exists in the bucket; 'oracle' vs 'peg' tells the two
-      apart. 12 tests green on the prod pin 26.3.10.60 (10 views_it incl. 2 new
-      + 26 ohlcv_it + 28 lib guards), no existing test needed a behaviour change
+      apart. 11 views_it green on the prod pin 26.3.10.60 (3 new, one of them
+      pinning the across-a-gap grain divergence code review surfaced; + 26 ohlcv_it
+      + 28 lib guards). No existing test needed a behaviour change
       - 0165 wrote them against fallback semantics exactly so this would hold.
       Resolution is 0167's rule (last observation in the bucket, never an
       average) written as an argMax per bucket rather than an ASOF, which makes
@@ -392,11 +393,11 @@ than only under UTC.
 
 ## Tests
 
-12 green on the prod pin (ClickHouse 26.3.10.60), plus the guards:
+Green on the prod pin (ClickHouse 26.3.10.60), plus the guards:
 
 | suite | result |
 |---|---|
-| `views_it` (`--ignored`) | 10 passed, **2 new** |
+| `views_it` (`--ignored`) | 11 passed, **3 new** |
 | `prices-api` `ohlcv_it` (`--ignored`) | 26 passed |
 | `prices-clickhouse` lib guards | 28 passed |
 | `oracle-worker` + `prices-ingest-core` (peg-set guards) | 65 passed |
@@ -421,6 +422,36 @@ New tests:
   distinguishability AC. Two buckets that both read `1`, told apart only by
   `method`. No value-based check can cover this, which is the point.
 
+## ⚠️ The grains do NOT compose across an oracle gap — found in code review
+
+Corrected 2026-09-01. `views.sql` asserted as fact that a daily close must equal
+the last hourly close of the same day. Under the bucket-width staleness window
+that holds only when the day's **last candle-bearing hour holds a reading**.
+
+Reproduced on the prod pin — one reading at 09:05, hourly candles at 09:00 and
+23:00:
+
+| grain | bucket | close | method |
+|---|---|---|---|
+| daily | 00:00 | 0.9993 | `oracle` |
+| hourly | 09:00 | 0.9993 | `oracle` |
+| hourly | 23:00 | **1** | `peg` |
+
+The daily bucket contains the reading; the day's final hourly bucket does not.
+Both values are correct under [[0167]]'s rule and both are labelled, so nothing
+is silent — but a consumer comparing grains across an oracle outage sees them
+differ by the same ~0.07% this task exists to remove. Making them agree needs a
+rule reaching outside the bucket, i.e. the forward-fill this view refuses and
+[[0246]] exists to take away from `/ohlcv`.
+
+Two things were wrong and are now fixed: the comment stated the invariant
+unconditionally in **both** grain bodies, and the new test's fixture put its last
+reading at 23:55 — inside the final hour — so it exercised only the aligned case
+and read as a guarantee. Added
+`a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains`, which
+asserts the divergence as EXPECTED, so a future change that "fixes" it has to
+delete an assertion rather than merely stay green.
+
 ## Design Decisions
 
 ### From Plan
@@ -443,7 +474,7 @@ New tests:
    the argMax form above exact rather than approximate.
    **Accepted cost:** the NEWEST bucket reads `'peg'` until the first poll lands
    inside it — up to ~5 minutes at the top of each hour (`_1h`) or each UTC day.
-   It is a ~0.07{'iss': 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'}tep on a partial bucket and it is visible in `method`.
+   It is a ~0.07% step on a partial bucket and it is visible in `method`.
 5. **`ifNull(r.usd_rate, …)` is belt-and-braces; the real discriminator is
    `> 0`.** Prod runs `join_use_nulls = 0`, so an unmatched `LEFT JOIN` yields
    the column DEFAULT (`0` for a Decimal), never `NULL` — a `coalesce()`/`IS NULL`
@@ -637,6 +668,17 @@ WHERE bucket >= now() - INTERVAL 30 DAY;
 Compare the elapsed time against the same query on the captured old definition.
 A material regression is not a correctness problem — push the peg set onto the
 primary key as `views.sql` describes, or materialise per [[0150]].
+
+⚠️ **Measure the `usd_rate` side specifically, not just the total.** Code review
+(2026-09-01) confirmed by `EXPLAIN` that only `method = 'oracle'` reaches
+`ReadFromMergeTree (usd_rate)` — **no `timestamp` predicate is pushed down**. So
+every query of the view, including BE's single-bucket lookup, `FINAL`-scans the
+whole rate table across all identities and all history before grouping. Noise at
+today's ~87k rows; it grows ~105k rows/identity/year, and much faster if [[0154]]
+starts writing `pivot`/`pivot2` rows for many assets. If Step 5 shows the join
+side is material, the fix is a `timestamp` bound on the subquery mirroring the
+outer `bucket` predicate — deliberately not added blind, because it changes the
+plan and the current numbers do not justify it.
 
 ## Rollback
 
