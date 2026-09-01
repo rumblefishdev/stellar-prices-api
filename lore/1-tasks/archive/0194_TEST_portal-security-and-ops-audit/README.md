@@ -2,7 +2,7 @@
 id: "0194"
 title: "Portal security and ops audit — and the three changes it forced: the flip, the flat /api/ prefix, and the API's own hostname"
 type: TEST
-status: active
+status: completed
 related_adr: ["0007", "0010"]
 related_tasks: ["0183", "0159", "0160", "0184", "0186", "0187", "0188", "0189", "0191", "0192", "0164"]
 tags: [layer-infra, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, security, audit, iam, slice-11]
@@ -187,6 +187,38 @@ history:
       [[0250]] (the CloudTrail detective control the 08-31 review left as
       prose). Also disarmed a calendar bomb in `app.spec.tsx` that turned CI
       red today on every branch. Rust 416 → 418, portal 170 → 179.
+  - date: "2026-09-01"
+    status: completed
+    who: akot
+    note: >
+      Done and merged to develop (PR #268, merge commit `584afec`, approved
+      by Oskar). Twelve checks: eleven PASS, one not applicable by decision A.
+      Both acceptance criteria that no configuration reading could answer are
+      met — the portal is open in production since 2026-08-31 10:43Z, and a
+      full sign-in plus key issue was walked in a browser on the sign-off
+      host, which is what found the tag-on-create IAM defect three
+      per-resource audits had read past. Three architectural changes shipped
+      under a `TEST` title and are indexed in "What this task actually
+      shipped": the flip, the flat `/api/` prefix (supersedes [[0161]] for
+      this app and [[0235]]'s three-day-old layout), and the API's own
+      hostname with CORS (supersedes the same-origin property [[0184]] and
+      [[0186]] were built on). Two code reviews, thirteen findings, all
+      fixed: the branch's own six on 2026-08-31 and Oskar's seven on
+      2026-09-01, one of which reversed a stated design decision — a portal
+      source failing at cold start now closes the portal instead of panicking
+      the Lambda that also serves `/v1`. Tests 405 → 418 Rust, 157 → 179
+      portal; 742 Rust tests green across the workspace on the merged tree.
+      Spawned [[0249]] and [[0250]]; [[0235]] closed alongside.
+      ⚠️ **Merged is not deployed.** The last three code changes — the
+      `THROTTLED` gateway response, the three sign-in landings and the
+      cold-start change — are on develop and NOT in production; they need
+      `deploy-production-apigateway` + `deploy-production-compute` off
+      freshly built binaries, then `sync-portal-explorer`. Production has
+      carried everything before them since 2026-08-31. Still open and owned
+      elsewhere: the Explorer's `enableApiSpaBasicAuth: false` ([[0195]]),
+      and the gating guild is still the TEST guild — one
+      `put-parameter --overwrite`, and it must happen before the portal is
+      advertised (Design Decision 1).
 ---
 
 # Portal security and ops audit — and the three changes it forced

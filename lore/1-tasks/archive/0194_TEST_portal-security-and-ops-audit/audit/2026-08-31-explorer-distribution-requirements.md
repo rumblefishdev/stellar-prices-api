@@ -254,7 +254,7 @@ curl -u <basic-auth> https://sorobanscan.rumblefish.dev/api/config
 Questions to Adam (this repo). The portal's own side — gateway resource
 `/api/{proxy+}` with its throttles, IAM, secrets, `PORTAL_ENABLED` — is
 deployed and audited; evidence in
-`lore/1-tasks/active/0194_TEST_portal-security-and-ops-audit/`.
+`lore/1-tasks/archive/0194_TEST_portal-security-and-ops-audit/`.
 
 ---
 
