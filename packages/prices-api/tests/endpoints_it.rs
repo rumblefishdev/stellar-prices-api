@@ -199,6 +199,72 @@ async fn asset_detail_returns_home_domain_from_metadata() {
     teardown(db).await;
 }
 
+/// A valid Soroban C-strkey. The detail route parses the identifier through
+/// `stellar_strkey::Contract`, so a placeholder like list_it's `CCONTRACTTOKEN`
+/// would 400 before reaching the query.
+fn contract() -> String {
+    stellar_strkey::Contract([9u8; 32]).to_string()
+}
+
+/// Seed a Soroban asset plus, optionally, its resolved symbol.
+async fn seed_soroban(db: &str, symbol: Option<&str>) {
+    let admin = Client::default().with_url(ch_url());
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (3, '', 'contract', '', '{c}')",
+            c = contract()
+        ))
+        .execute()
+        .await
+        .unwrap();
+    if let Some(symbol) = symbol {
+        admin
+            .query(&format!(
+                "INSERT INTO {db}.asset_symbol (contract_address, symbol) VALUES ('{c}', '{symbol}')",
+                c = contract()
+            ))
+            .execute()
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a local ClickHouse"]
+async fn asset_detail_returns_soroban_symbol_as_code() {
+    // Task 0210. The symbol is served from the asset_symbol LEFT JOIN, not the
+    // assets identity row — the same single-writer shape 0067 gave home_domain,
+    // but keyed on `contract_address` because 10 of the 52 soroban rows share an
+    // `asset_id` with another row (0139).
+    let db = "it_ep_detail_symbol_0210";
+    let client = setup(db).await;
+    seed_soroban(db, Some("SolvBTC")).await;
+
+    let (status, json) = get(client, &format!("/v1/assets/{}", contract())).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["code"], "SolvBTC");
+    assert_eq!(json["contract"], contract());
+    assert_eq!(json["issuer"], "");
+    teardown(db).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a local ClickHouse"]
+async fn asset_detail_unresolved_soroban_code_is_empty() {
+    // No asset_symbol row: the join misses and `code` stays `""`, which is the
+    // pre-0210 behaviour. Consumers must not see a partially-composed value.
+    let db = "it_ep_detail_symbol_miss_0210";
+    let client = setup(db).await;
+    seed_soroban(db, None).await;
+
+    let (status, json) = get(client, &format!("/v1/assets/{}", contract())).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["code"], "");
+    teardown(db).await;
+}
+
 #[tokio::test]
 #[ignore = "requires a local ClickHouse"]
 async fn asset_detail_unknown_is_404() {

@@ -307,3 +307,126 @@ async fn keyset_pagination_250_rows_no_dup_no_skip() {
 
     teardown(db).await;
 }
+
+// ---------------------------------------------------------------------------
+// Task 0210 — Soroban token symbols composed into `asset_code` at read time.
+// ---------------------------------------------------------------------------
+
+/// Insert a `prices.asset_symbol` row for the fixture's Soroban asset (id 3,
+/// `CCONTRACTTOKEN`), which `setup` seeds with an empty `asset_code`.
+async fn seed_symbol(db: &str, contract: &str, symbol: &str) {
+    Client::default()
+        .with_url(ch_url())
+        .query(&format!(
+            "INSERT INTO {db}.asset_symbol (contract_address, symbol) VALUES ('{contract}', '{symbol}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a local ClickHouse"]
+async fn listing_composes_soroban_symbol_into_asset_code() {
+    // The stored `assets` row keeps `asset_code = ''` — writing the symbol there
+    // would create a SECOND row, because that column is part of the table's sort
+    // key (task 0139's fan-out). The symbol lives in the single-writer
+    // `asset_symbol` table and the listing composes it in.
+    let db = "it_list_symbol_0210";
+    let client = setup(db).await;
+    seed_symbol(db, "CCONTRACTTOKEN", "SolvBTC").await;
+
+    let (status, json) = get(client, "/v1/assets?type=soroban").await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let rows = json["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "still exactly one soroban asset, not two");
+    assert_eq!(rows[0]["asset_code"], "SolvBTC");
+    assert_eq!(rows[0]["contract_address"], "CCONTRACTTOKEN");
+    teardown(db).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a local ClickHouse"]
+async fn listing_leaves_unresolved_soroban_code_empty() {
+    // No `asset_symbol` row: the LEFT JOIN misses and the field stays `""`,
+    // which is the pre-0210 behaviour every existing consumer sees.
+    let db = "it_list_symbol_miss_0210";
+    let client = setup(db).await;
+
+    let (status, json) = get(client, "/v1/assets?type=soroban").await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["data"][0]["asset_code"], "");
+    teardown(db).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a local ClickHouse"]
+async fn listing_reads_the_sentinel_row_as_an_empty_code() {
+    // An empty `symbol` is the sentinel the resolver writes for a contract that
+    // exposes no usable `symbol()`. It must read back as `""` — indistinguishable
+    // from "not resolved yet" to a consumer, and never leaked as a marker.
+    let db = "it_list_symbol_sentinel_0210";
+    let client = setup(db).await;
+    seed_symbol(db, "CCONTRACTTOKEN", "").await;
+
+    let (status, json) = get(client, "/v1/assets?type=soroban").await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["data"][0]["asset_code"], "");
+    teardown(db).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a local ClickHouse"]
+async fn classic_codes_are_untouched_by_the_symbol_join() {
+    // Classic and native rows have `contract_address = ''` and miss the join
+    // entirely; the `if(a.asset_code != '', …)` branch short-circuits for them
+    // regardless. Pinned because the join sits on the listing's hot path.
+    let db = "it_list_symbol_classic_0210";
+    let client = setup(db).await;
+    seed_symbol(db, "CCONTRACTTOKEN", "SolvBTC").await;
+
+    let (status, json) = get(client, "/v1/assets?sort=volume_24h&order=desc").await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let codes: Vec<&str> = json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["asset_code"].as_str().unwrap())
+        .collect();
+    assert_eq!(codes, vec!["USDC", "SolvBTC", "XLM", "FOO"]);
+    teardown(db).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a local ClickHouse"]
+async fn search_and_sort_still_read_the_raw_column() {
+    // Deliberate scope boundary, not an oversight: `?search=` is
+    // `startsWith(a.asset_code, ?)` and `sort=code` orders on `a.asset_code`,
+    // both on the STORED column. A Soroban token is therefore displayed by its
+    // symbol but not matched or ordered by it.
+    //
+    // `symbol()` is a string the contract itself controls, so making it
+    // searchable is what would let a hostile token surface under a well-known
+    // code. That belongs with the verification signal that makes it safe (task
+    // 0252), not here. This test pins the boundary so a later change to it is a
+    // decision rather than an accident.
+    let db = "it_list_symbol_search_0210";
+    let client = setup(db).await;
+    seed_symbol(db, "CCONTRACTTOKEN", "SolvBTC").await;
+
+    let (status, json) = get(client.clone(), "/v1/assets?search=Solv").await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert!(
+        json["data"].as_array().unwrap().is_empty(),
+        "search matches the stored asset_code only, so the symbol is not findable"
+    );
+
+    // sort=code orders on the stored `''`, which sorts first ascending.
+    let (status, json) = get(client, "/v1/assets?sort=code&order=asc").await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(
+        json["data"][0]["asset_code"], "SolvBTC",
+        "the row displaying SolvBTC is ordered by its stored empty code"
+    );
+    teardown(db).await;
+}

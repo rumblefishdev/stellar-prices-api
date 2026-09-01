@@ -28,6 +28,8 @@
 //! of `prices.assets` — never `home_domain`, whose enrichment carries the
 //! task-0067 whole-row-clobber hazard.
 
+pub mod symbols;
+
 use prices_ingest_core::{
     AssetIdentity, AssetRegistry, IngestError, OhlcvWriter, Registries, decode_object,
     extract_trades, process_ledger,

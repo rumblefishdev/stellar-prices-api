@@ -180,7 +180,7 @@ pub async fn list_assets(
     let sql = format!(
         "SELECT \
            a.asset_id AS asset_id, \
-           a.asset_code AS asset_code, \
+           if(a.asset_code != '', a.asset_code, sym.symbol) AS asset_code, \
            a.issuer_address AS issuer_address, \
            a.contract_address AS contract_address, \
            m.home_domain AS home_domain, \
@@ -195,6 +195,7 @@ pub async fn list_assets(
          FROM current_prices AS c FINAL \
          INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
          LEFT JOIN asset_metadata AS m FINAL ON m.asset_id = a.asset_id \
+         LEFT JOIN asset_symbol AS sym FINAL ON sym.contract_address = a.contract_address \
          {where_clause} \
          ORDER BY {sort_expr} {dir}, a.asset_id {dir} \
          LIMIT {limit}",
@@ -356,9 +357,11 @@ pub async fn asset_detail(
 ) -> Result<Option<AssetRow>, clickhouse::error::Error> {
     let (where_sql, binds) = identity_where(id);
     let sql = format!(
-        "SELECT a.asset_code, a.issuer_address, a.contract_address, m.home_domain, a.is_active \
+        "SELECT if(a.asset_code != '', a.asset_code, sym.symbol) AS asset_code, \
+           a.issuer_address, a.contract_address, m.home_domain, a.is_active \
          FROM assets AS a FINAL \
          LEFT JOIN asset_metadata AS m FINAL ON m.asset_id = a.asset_id \
+         LEFT JOIN asset_symbol AS sym FINAL ON sym.contract_address = a.contract_address \
          WHERE {where_sql} \
          LIMIT 1"
     );

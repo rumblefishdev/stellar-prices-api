@@ -185,6 +185,37 @@ ORDER BY (asset_id)
 SETTINGS index_granularity = 8192;
 
 ----------------------------------------------------------------------
+-- Per-contract Soroban token symbol (task 0210). Soroban tokens carry no
+-- asset_code -- the symbol lives on the token contract and is read over RPC.
+--
+-- Its OWN single-writer table, for two reasons:
+--   1. It cannot live in `assets.asset_code`: that column is part of that
+--      table's sort key, so amending it writes a SECOND row rather than
+--      replacing (one asset_id on two natural identities -- task 0139's live
+--      fan-out, deliberately widened).
+--   2. It cannot be a column on `asset_metadata`: `write_asset_metadata`
+--      replaces the WHOLE row, so a symbol writer and the home_domain writer
+--      would clobber each other -- the task-0067 hazard `asset_supply` exists
+--      to avoid.
+--
+-- Keyed on `contract_address`, not `asset_id`: the symbol belongs to the
+-- contract, and 10 of the 52 soroban rows share an asset_id with another row
+-- (0139), which would make an asset_id-keyed symbol unattributable.
+--
+-- An empty `symbol` is a SENTINEL, not missing data: it records "asked, and
+-- this contract exposes no usable symbol", so the resolver stops retrying it.
+-- Sole writer = the asset-discovery worker's symbol stage.
+----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS prices.asset_symbol (
+    contract_address  String,
+    symbol            String    DEFAULT '',
+    fetched_at        DateTime  DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(fetched_at)
+ORDER BY (contract_address)
+SETTINGS index_granularity = 8192;
+
+----------------------------------------------------------------------
 -- Oracle reference prices (§3.4). ReplacingMergeTree, monthly partitions.
 -- Written by the Oracle Fetcher Lambda in production; the backfill writes
 -- REFLECTOR/REDSTONE samples decoded from soroban events. raw_data keeps the
