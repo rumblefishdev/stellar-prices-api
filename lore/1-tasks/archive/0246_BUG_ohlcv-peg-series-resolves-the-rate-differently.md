@@ -2,7 +2,7 @@
 id: "0246"
 title: "/ohlcv's USDC peg series resolves the rate at the bucket START, unbounded — it disagrees with price_usd_series"
 type: BUG
-status: active
+status: completed
 related_adr: ["0011"]
 related_tasks: ["0168", "0170", "0167"]
 tags: ["priority-medium", "effort-small", "clickhouse", "read-surface", "data-correctness", "api"]
@@ -105,7 +105,7 @@ forward-fill is a defect on any reading.
 - [x] The one intentional difference between the surfaces (`1m` staleness) is a
       decision on the record, not an implementation detail — see design
       decision 5.
-- [ ] ⏳ **Live on prod.** `/ohlcv` is served by the api-handler Lambda, so this
+- [ ] ⏳ **Live on prod — NOT verified, deliberately left unticked.** `/ohlcv` is served by the api-handler Lambda, so this
       needs a **Compute deploy** — see the note at the end.
 
 ## Out of scope
