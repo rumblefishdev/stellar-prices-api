@@ -153,7 +153,16 @@ build-portal-explorer: check-portal-api-origin
 # No `--delete`: a visitor holding the previous `index.html` still resolves
 # its chunk. The invalidation covers the whole prefix because `index.html` is
 # the object that changes and the one a browser asks for by name.
-sync-portal-explorer: build-portal-explorer
+# The guild the bundle sends a refused visitor to (`links.ts`) and the guild
+# the deployed gate checks (SSM) are one fact in two places with no runtime
+# reconciliation. This is the only path by which the bundle reaches
+# production, and it already holds AWS credentials, so the comparison runs
+# HERE rather than in CI: a bundle that disagrees with the gate does not ship
+# (task 0254). Same env as the parameter the stack reads.
+verify-portal-guild:
+	cd .. && node tools/scripts/verify-discord-guild.mjs --ssm --env production
+
+sync-portal-explorer: build-portal-explorer verify-portal-guild
 	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/api/ \
 	  --exclude '*' --include 'assets/*' \
 	  --cache-control 'public, max-age=31536000, immutable'

@@ -174,19 +174,25 @@ Seed both by hand, alongside the mTLS material and the secret above:
 # 897514728459468821 — the official and ONLY Stellar guild this project refers
 # to (Adam, 2026-09-02, task 0254). It is the same guild `STELLAR_DISCORD_INVITE`
 # in `web/portal/src/landing/links.ts` sends a refused visitor to, and the two
-# must agree or the refusal is a loop; `npm run discord:verify-guild -- --ssm`
-# resolves the invite through Discord's API and compares it with this value.
-# ⚠️ That script reads `/prices/production/` ONLY, and is not in CI — it is a
-# check you run when either value changes, not a guard. `links.ts` carries the
-# guild id as a build-time constant, so a parameter that drifts in any other
-# environment sends refused members to a guild nobody is gating on, and
-# nothing would say so.
-# Seeded as the stellar_test guild (1536303837785362432) while building;
-# re-pointing is a `put-parameter --overwrite`, no deploy.
+# must agree or the refusal is a loop.
+#
+# State: the parameter EXISTS and holds this value (version 2, 2026-09-02; it
+# was seeded as the stellar_test guild 1536303837785362432 on 2026-08-28 while
+# building). So the command below is the RE-POINT form, with `--overwrite` —
+# without it SSM answers ParameterAlreadyExists. Takes effect without a deploy.
 aws ssm put-parameter \
     --name /prices/production/discord-guild-id \
     --type String \
+    --overwrite \
     --value "897514728459468821"
+
+# Then prove the three places agree — invite, bundle constant, this parameter:
+#   npm run discord:verify-guild -- --ssm        (add `--env <name>` for another env)
+# The same check gates `make -C infra sync-portal-explorer`, so a bundle whose
+# constant disagrees with the parameter cannot ship. It is not in CI (it calls
+# discord.com); `links.ts` is a build-time constant, so after changing this
+# value re-sync the bundle if the id itself changed, not only the guild's
+# settings.
 
 # Minimum Discord account age, in whole minutes. 5 matches the Stellar guild's
 # own verification_level: 2 ("registered on Discord for longer than 5 minutes")

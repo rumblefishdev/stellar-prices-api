@@ -1071,11 +1071,28 @@ describe('sign in with Discord', () => {
       screen.queryByRole('link', { name: /join stellar discord/i }),
     ).toBeNull();
 
-    // The card is replaced like `not_member`: no sign-in control, the quiet
-    // second action instead.
+    // The card is replaced like `not_member`: the ordinary sign-in control
+    // is gone — but the way back in is the SAME account once the rules are
+    // accepted, so this screen offers "Sign in again" as our own round-trip
+    // (same tab), beside the quiet switch-account action it shares with
+    // `not_member` (PR #278 review; kept both — Adam, 2026-09-02).
     expect(
       screen.queryByRole('link', { name: /sign in with discord/i }),
     ).toBeNull();
+    const again = screen.getByRole('link', { name: /^sign in again$/i });
+    expect(again.getAttribute('href')).toBe('/api/auth/login');
+    expect(again.getAttribute('target')).toBeNull();
+    expect(
+      screen.getByRole('button', { name: /try different account/i }),
+    ).toBeTruthy();
+  });
+
+  it('does not offer "Sign in again" to a non-member — another account is their remedy', async () => {
+    openAndSignedOut();
+    renderAt('/?signin=not_member');
+
+    await screen.findByRole('heading', { name: /access not available/i });
+    expect(screen.queryByTestId('sign-in-again')).toBeNull();
     expect(
       screen.getByRole('button', { name: /try different account/i }),
     ).toBeTruthy();

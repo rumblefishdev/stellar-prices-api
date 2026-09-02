@@ -837,6 +837,19 @@ function LoginView({
             Join Stellar Discord
           </DiscordButton>
         )}
+        {/* ⚠️ `pending_rules` only: the way back in is the SAME account, one
+            more time, after the rules are accepted in the other tab — so the
+            card says so with a control, not just with the sentence "then
+            sign in again" (PR #278 review: the copy pointed at a recovery
+            the card did not offer, since "Try different account" below leads
+            with switching accounts). Same tab, our own round-trip, meant to
+            replace this page — exactly what the sign-in button is. Kept
+            beside "Try different account" rather than instead of it (Adam,
+            2026-09-02): a visitor who signed in with the wrong account is
+            still a real case here. */}
+        {pendingRules && (
+          <SignInAgain href={signInUrl()} onClick={onSignInClick} />
+        )}
         {/* The quiet second action. A REFUSED sign-in leaves no session (see
             `portal/auth/mod.rs`), so there is nothing to sign out of and this
             is simply the round-trip again — where Discord's own account
@@ -1023,6 +1036,47 @@ function DiscordButton({
  * and "less-than sign, try different account" is what a screen reader would
  * otherwise say.
  */
+/**
+ * The refusal screen's "sign in again" — the outlined secondary that
+ * `SwitchAccountDialog` also draws, lifted to the card for the one refusal
+ * whose remedy is the same account a second time (`pending_rules`).
+ *
+ * An `<a>` for the reason every sign-in control is one (see the sign-in
+ * button's comment): the round-trip is a top-level navigation and the
+ * `SameSite=Lax` cookie depends on it.
+ */
+function SignInAgain({
+  href,
+  onClick,
+}: {
+  href: string;
+  onClick: (event: MouseEvent<HTMLAnchorElement>) => void;
+}) {
+  return (
+    <Button
+      component="a"
+      href={href}
+      onClick={onClick}
+      fullWidth
+      variant="outlined"
+      data-testid="sign-in-again"
+      sx={{
+        minHeight: 48,
+        ...theme.typography.body1,
+        fontWeight: 700,
+        color: color.text.primary,
+        borderColor: color.stroke.default,
+        '&:hover': {
+          borderColor: color.text.primary,
+          backgroundColor: alpha(color.gray[50], 0.06),
+        },
+      }}
+    >
+      Sign in again
+    </Button>
+  );
+}
+
 function TryDifferentAccount({ onClick }: { onClick: () => void }) {
   return (
     <Button

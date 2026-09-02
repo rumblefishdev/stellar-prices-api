@@ -31,15 +31,24 @@
  *      ADR 0010 silently becomes "has a Discord account" — task 0170 owns the
  *      alert; this line is the cheapest place to notice.
  *   3. With `--ssm`, the live parameter equals the same id — the deployed
- *      gate and the published invite agree. Needs AWS credentials for the
- *      production account; skipped otherwise.
+ *      gate and the published invite agree. Needs AWS credentials for that
+ *      environment's account; skipped otherwise.
+ *
+ * `--env <name>` picks the environment (default `production`): the parameter
+ * is `/prices/<env>/discord-guild-id` and the region is `awsRegion` from
+ * `infra/envs/<env>.json` — the same file CDK deploys from, so this cannot
+ * compare against a parameter in a region the stack is not in.
  *
  * Not in CI: it calls discord.com, and a Discord hiccup must not block an
- * unrelated merge. Run it when either value changes, and at deploy prep.
+ * unrelated merge. It IS a prerequisite of `make -C infra sync-portal-explorer`
+ * — the one path by which `links.ts` reaches production — so a bundle whose
+ * guild id disagrees with the deployed gate cannot ship. Run it by hand when
+ * either value changes.
  *
  * Usage:
- *   npm run discord:verify-guild            # invite ↔ links.ts
- *   npm run discord:verify-guild -- --ssm   # …and ↔ SSM (production)
+ *   npm run discord:verify-guild                       # invite ↔ links.ts
+ *   npm run discord:verify-guild -- --ssm              # …and ↔ SSM (production)
+ *   npm run discord:verify-guild -- --ssm --env <name> # …for another env
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -48,8 +57,13 @@ import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const LINKS = join(root, 'web', 'portal', 'src', 'landing', 'links.ts');
-const SSM_PARAMETER = '/prices/production/discord-guild-id';
-const SSM_REGION = 'eu-central-1';
+
+const argv = process.argv.slice(2);
+const envFlag = argv.indexOf('--env');
+const ENV = envFlag === -1 ? 'production' : (argv[envFlag + 1] ?? '');
+if (!/^[a-z][a-z0-9-]*$/.test(ENV)) fail(`--env needs a name, got "${ENV}"`);
+const ENV_FILE = join(root, 'infra', 'envs', `${ENV}.json`);
+const SSM_PARAMETER = `/prices/${ENV}/discord-guild-id`;
 
 const links = readFileSync(LINKS, 'utf8');
 const constant = (name) => {
@@ -110,7 +124,18 @@ if (!Array.isArray(guild.features)) {
 }
 
 // 3. The deployed gate, if asked.
-if (process.argv.includes('--ssm')) {
+if (argv.includes('--ssm')) {
+  let region;
+  try {
+    region = JSON.parse(readFileSync(ENV_FILE, 'utf8')).awsRegion;
+  } catch (error) {
+    fail(
+      `cannot read ${ENV_FILE} (${error.message}) — is "${ENV}" an environment?`,
+    );
+  }
+  if (typeof region !== 'string' || !region) {
+    fail(`${ENV_FILE} declares no awsRegion`);
+  }
   let value;
   try {
     value = execFileSync(
@@ -121,7 +146,7 @@ if (process.argv.includes('--ssm')) {
         '--name',
         SSM_PARAMETER,
         '--region',
-        SSM_REGION,
+        region,
         '--query',
         'Parameter.Value',
         '--output',
@@ -134,12 +159,12 @@ if (process.argv.includes('--ssm')) {
       `aws ssm get-parameter ${SSM_PARAMETER} failed: ${error.stderr ?? error.message}`,
     );
   }
-  console.log(`ssm      ${SSM_PARAMETER} = ${value}`);
+  console.log(`ssm      ${SSM_PARAMETER} = ${value}   (${ENV}, ${region})`);
   if (value !== guildId) {
     fail(
       `the deployed gate checks ${value} but the portal sends visitors to ${guildId}. ` +
         `Re-point with: aws ssm put-parameter --name ${SSM_PARAMETER} --value ${guildId} ` +
-        `--type String --overwrite --region ${SSM_REGION}`,
+        `--type String --overwrite --region ${region}`,
     );
   }
 }
