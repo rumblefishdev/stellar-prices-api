@@ -1,8 +1,8 @@
 ---
 id: "0252"
-title: "The API publishes no asset-identity signal — asset codes are not unique, 415 issuers publish BTC, and the only thing separating a fake from the real one is attacker-influenceable volume"
+title: "The API publishes no asset-identity signal — asset codes are not unique, 415 issuers publish BTC, and the only thing ordering them is a volume figure that overclaims what it measures"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0210", "0120", "0139", "0040", "0119", "0118", "0178"]
 tags: [layer-backend, layer-api, priority-high, effort-large, milestone-M2, api, security, metadata]
@@ -11,6 +11,16 @@ links:
   - "../../../packages/prices-api/src/assets/queries_ch.rs"
   - "../../../packages/prices-ingest-core/src/writer.rs"
 history:
+  - date: 2026-09-02
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated. Scoping and the two design decisions are already recorded from
+      today's measurement work — SEP-1 coverage, the `blackrock.co.com` finding
+      that turns the deliverable into a published domain rather than a boolean,
+      and scope item 3's ranking decision. What remains is implementation:
+      populate and verify `home_domain` (item 1), expose the domain and the
+      how-it-ended enum (item 2), and surface a contested code (item 3).
   - date: 2026-09-02
     status: backlog
     who: stkrolikiewicz
@@ -445,6 +455,78 @@ It does not make the API safe to resolve names against. It makes the API stop
 implying that it is. A consumer who needs *the* USDC still has to know Circle's
 issuer, and this task's job is to give them enough on the response to check that
 they got it — not to guess it for them.
+
+## Proposed table shape — 2026-09-02, awaiting agreement
+
+Drafted at the end of the session, **not yet agreed**. Nothing is implemented.
+
+```sql
+CREATE TABLE IF NOT EXISTS prices.asset_verification (
+    asset_code      String,
+    issuer_address  String,
+    home_domain     String                  DEFAULT '',
+    verdict         LowCardinality(String)  DEFAULT '',
+    attempts        UInt8                   DEFAULT 0,
+    checked_at      DateTime                DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(checked_at)
+ORDER BY (asset_code, issuer_address);
+```
+
+**Keyed on the pair, not the issuer.** Two facts with different scopes:
+`home_domain` belongs to the *account* (1,953 Horizon lookups), the SEP-1
+back-reference to the *pair* (3,522). A pair key lets the API join on what
+`assets` already has, at 1.8× duplication of the domain string — measured, and
+negligible. The worker dedupes Horizon calls by issuer in memory. Not `asset_id`,
+for [[0139]]'s reason: 3,300 ids are ambiguous.
+
+**`verdict` carries how the check ended**, because today's measurement showed
+these are different facts and a boolean loses them:
+
+| value | meaning |
+|---|---|
+| `verified` | domain declared, toml reachable, `[[CURRENCIES]]` lists this pair |
+| `not_listed` | domain and toml fine, but this asset is not in it |
+| `unreachable` | domain declared, toml could not be fetched or parsed |
+| `no_domain` | the account declares no `home_domain` |
+| `''` | not checked yet |
+
+Three of the eight BTC issuers sampled were `unreachable`, which is a different
+statement from `not_listed` and should not collapse into one "unverified".
+
+### ⚠️ The one place this must NOT copy [[0210]]
+
+0210 triggers on **absence** of a row and does nothing in steady state, because
+`symbol()` is fixed at contract deploy. **That reasoning does not transfer.**
+`home_domain` is mutable: an issuer can change it, a domain can lapse, a toml can
+be rewritten. `blackrock.co.com` could be gone tomorrow, and a legitimate issuer
+that was `unreachable` this hour may verify next week.
+
+So the queue needs: no row **or** `checked_at` older than a threshold **or** a
+failure under the attempt cap. That is the config surface 0210 deliberately
+removed — justified here because the underlying fact genuinely changes.
+
+Sizing: 1,953 issuers ÷ 50 per hourly run ≈ 1.6 days for a full cycle, so a
+7-day threshold leaves ample margin.
+
+### What the API publishes
+
+`home_domain` **only when `verdict = 'verified'`**, with `verdict` always present.
+An unverified claim must not be rendered the way a verified one is — which is the
+whole point of the `blackrock.co.com` finding above.
+
+### Open questions for the next session
+
+1. **Table name** — `asset_verification` (names the act) or `asset_domain`
+   (names the data)? Leaning to the first, since `verdict` is the payload and the
+   domain is supporting evidence.
+2. **Staleness threshold as a constant or an env var?** Leaning to a 7-day
+   constant, revisited if it proves too slow.
+3. **Scope to API-visible issuers only?** 1,953 visible against 59,332 in the
+   registry. Leaning to visible-only: the rest cannot be handed to anyone.
+
+Also note: `prices-clickhouse/src/lib.rs`'s statement-count guard will need
+bumping again (33 → 34) when this lands, as it did for [[0210]].
 
 ## Notes
 
