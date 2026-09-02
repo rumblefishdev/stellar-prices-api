@@ -184,6 +184,20 @@ describe('ApiReference', () => {
     expect(screen.getByRole('heading', { name: 'Values' })).toBeTruthy();
   });
 
+  it('renders the page when the hash cannot be decoded, rather than blanking', async () => {
+    stubSpec();
+    // A bare `%` is a malformed escape: `decodeURIComponent` throws on it.
+    // The read happens in a `useState` initializer, so an unguarded throw
+    // propagates out of render — and there is no error boundary above this
+    // page, which turned a mistyped link into a blank screen (PR #276 review).
+    window.history.replaceState(null, '', '#100%off');
+    render(<ApiReference />);
+
+    // The document renders in full; the hash simply names no row.
+    await screen.findByRole('heading', { name: 'Ops', level: 2 });
+    expect(screen.queryAllByRole('button', { expanded: true })).toHaveLength(0);
+  });
+
   it('lists every tag and operation in the rail', async () => {
     stubSpec();
     render(<ApiReference />);

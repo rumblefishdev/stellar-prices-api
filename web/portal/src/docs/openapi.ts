@@ -434,8 +434,13 @@ export function displaySummary(
  * mention goes alone, and the spacing around it is tidied.
  */
 export function scrubInternal(text: string): string {
+  // The bare-id arm carries the SAME lead-word bound as the bare-mention rule
+  // below (:459). Unbounded, `\b0\d{3}\b` also matches the fractional tail of
+  // any 4-decimal number — `(0.0500 USD)` — and this arm decides whether a
+  // whole parenthetical is deleted, so the unbounded version silently dropped
+  // published text. The two rules are one policy and must agree.
   const marker =
-    /(?:\btasks?\s*#?\d{3,4}\b|\bADRs?\s*#?\d{3,4}\b|\bPRs?\s*#\d+\b|§\s?\d+(?:\.\d+)*|\bgeneral-overview\b|\boverview\s+§|\b0\d{3}\b)/;
+    /(?:\btasks?\s*#?\d{3,4}\b|\bADRs?\s*#?\d{3,4}\b|\bPRs?\s*#\d+\b|§\s?\d+(?:\.\d+)*|\bgeneral-overview\b|\boverview\s+§|\b(?:the|in|from|see|per)\s+0\d{3}\b)/;
   return (
     text
       // Parentheticals with a marker inside: `(task 0135)`, `(overview §4.2)`,

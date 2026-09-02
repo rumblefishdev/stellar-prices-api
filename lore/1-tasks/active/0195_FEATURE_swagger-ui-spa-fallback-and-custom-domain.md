@@ -508,9 +508,14 @@ there, and the tables collapse to one column below `sm`.
    the property under test (the layer stops at the prefix) is unchanged.
 7. **The "OpenAPI Specification" landing card opens the rendered reference,
    not the raw JSON.** Its copy promises "Full Swagger UI included"; the raw
-   document is linked from the reference page's header instead. The four
+   document is linked from the reference page's header instead. ~~The four
    cards that were placeholders for the quick start's sections still open the
-   reference — [[0163]]'s to re-point.
+   reference — [[0163]]'s to re-point.~~ **Corrected in review (PR #276,
+   2026-09-02): three of them are re-pointed here, not by 0163.** The deferral
+   assumed the quick start had no sections to aim at; it has had them since
+   [[0193]]. "Authentication" is the one that stays, because the reference
+   answers it better. The struck sentence is kept so the wrong premise, and
+   not just the fix, is on the record.
 8. **`Documentation`/`Chrome` links became `RouterLink`s** ("OpenAPI Docs" in
    the signed-in bar, "Documentation" in the footer): an in-app route as a
    bare `href` reloads the bundle, and the footer already had the basename
@@ -584,6 +589,50 @@ there, and the tables collapse to one column below `sm`.
   rewritten by Oskar the same morning. Read before branching; no overlap —
   it owns `/v1` CORS and the execute-api retirement, this task the spec
   route and the distribution.
+
+### Review round — PR #276, Oskar, 2026-09-02
+
+Five findings, all confirmed against the code and all fixed in the same PR.
+Two were more than the "low" they were filed as; one had a premise of its own
+worth correcting.
+
+- **`scrubInternal`'s two rules disagreed.** `marker` — which decides whether
+  a whole parenthetical is deleted — still carried the unbounded
+  `\b0\d{3}\b` that the sibling bare-mention rule was narrowed away from, and
+  the comment explaining the narrowing sat three lines below it. `(0.0500
+  USD)` matched on the decimal's tail, so the failure mode was *losing a whole
+  parenthetical*, not mangling one. Latent — Oskar ran it over all 262
+  literals in `descriptions.rs` and every `#[utoipa::path]` string: 0 altered.
+  `marker`'s arm now carries the same lead-word bound; four assertions added.
+- **A malformed hash blanked the page.** `decodeURIComponent` throws on a bare
+  `%` (`/api/docs#100%off`), and the read sits in a `useState` initializer —
+  during render, with no error boundary anywhere in `app.tsx` (checked: zero
+  `componentDidCatch`). So a mistyped link unmounted the reference instead of
+  failing to pre-open a row. Lifted to a module-level `hashId()` with a
+  try/catch falling back to the raw text, used by both call sites; one test.
+  **This was a crash, not a nit** — it is recorded here as such.
+- **Four cards promised content the page they opened does not carry.**
+  "Example Requests" (curl commands), "SDK Examples" (snippets), "Rate Limits"
+  (headers, backoff) all opened the reference. Decision 7 above deferred this
+  to [[0163]], and `Documentation.tsx`'s docblock said the cards would point
+  at the quick start "until 0163's walkthrough gives it sections of its own".
+  **That premise was already false when it was written**: [[0193]] built
+  `SECTIONS` with `first-request`, `sdk`, `rate-limits` and `authentication`.
+  The three are re-pointed at those anchors; "Authentication" stays on the
+  reference, which answers it in more detail, with the reason in a comment.
+  Decision 7 is corrected rather than deleted — see it above.
+- **`descriptions.rs`'s docblock named a test that does not exist**
+  (`every_schema_and_property_is_described`). The guard is
+  `every_published_text_is_present_and_reader_facing`. `openapi.ts`'s docblock
+  names it correctly, so only one of the two had drifted.
+- **`app.ts`'s comment sent a reader looking for a use that isn't there** —
+  "`apiGateway` is still used below for its side effects", when the side
+  effect is the construction and the only mention below is `void apiGateway;`.
+  Reworded; the binding stays, per decision 11.
+
+Verification after the round: portal 202/202 (+1), lint, typecheck, build;
+Rust 420/420; `cargo fmt --check`; infra lint and typecheck; prettier on the
+six touched files.
 
 ## Operator steps (not in any diff)
 

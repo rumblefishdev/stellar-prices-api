@@ -463,13 +463,30 @@ function Row({
   );
 }
 
+/**
+ * The id named by the URL's hash, or `''`.
+ *
+ * `decodeURIComponent` THROWS on a malformed escape — `#100%off` is enough —
+ * and this is read inside a `useState` initializer, i.e. during render, with
+ * no error boundary above it (`app.tsx` has none). Unguarded, a hash somebody
+ * pasted wrong unmounted the whole page to blank instead of merely failing to
+ * pre-open a row. An undecodable hash names no row we published, so the raw
+ * text is the honest fallback: it opens nothing and renders everything.
+ */
+function hashId(): string {
+  const raw = window.location.hash.replace(/^#/, '');
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 /** Which rows are open. A row named in the URL's hash opens itself. */
 function useOpenRows(): {
   isOpen: (id: string) => boolean;
   toggle: (id: string) => void;
 } {
-  const hashId = () =>
-    decodeURIComponent(window.location.hash.replace(/^#/, ''));
   const [open, setOpen] = useState<ReadonlySet<string>>(() => {
     const id = hashId();
     return new Set(id ? [id] : []);
@@ -1145,7 +1162,7 @@ function Reference({ doc }: { doc: OpenApiDocument }) {
   // then, and every row here arrives with the document — so a pasted link
   // landed at the top of the page. Once, when the document is in.
   useEffect(() => {
-    const id = decodeURIComponent(window.location.hash.replace(/^#/, ''));
+    const id = hashId();
     // Optional call: jsdom has no `scrollIntoView`.
     if (id) document.getElementById(id)?.scrollIntoView?.();
   }, [doc]);

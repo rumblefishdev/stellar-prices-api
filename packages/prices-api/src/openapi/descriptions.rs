@@ -16,8 +16,9 @@
 //! descriptions do not need it — those are already `#[utoipa::path(...)]`
 //! attribute strings, published as written.
 //!
-//! `every_schema_and_property_is_described` in `tests/openapi.rs` fails if a
-//! schema or a field reaches the document without a description, which is
+//! `every_published_text_is_present_and_reader_facing` in `tests/openapi.rs`
+//! fails if a schema or a field reaches the document without a description, or
+//! carries one written for a maintainer rather than an integrator. That is
 //! what catches a new field, a rename, or an entry left behind here.
 
 use utoipa::Modify;

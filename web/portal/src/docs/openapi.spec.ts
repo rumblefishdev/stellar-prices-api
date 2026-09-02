@@ -220,6 +220,24 @@ describe('scrubInternal', () => {
       'a threshold of 0.0500 USD',
     );
     expect(scrubInternal('port 0800 stays')).toBe('port 0800 stays');
+    // The same rule INSIDE a parenthetical, which is decided by `marker` and
+    // not by the bare-mention rule. `marker` carried the unbounded
+    // `\b0\d{3}\b` until the review of PR #276 caught it: the decimal's tail
+    // matched, and a parenthetical is deleted whole, so this lost the bound
+    // rather than mangling it — the same defect, one level louder.
+    expect(scrubInternal('A threshold (0.0500 USD) applies.')).toBe(
+      'A threshold (0.0500 USD) applies.',
+    );
+    expect(scrubInternal('The window is 5000 candles (max 0250 rows).')).toBe(
+      'The window is 5000 candles (max 0250 rows).',
+    );
+    // Still scrubbed, both forms, so the narrowing did not disarm the rule.
+    expect(scrubInternal('A bound (task 0135) applies.')).toBe(
+      'A bound applies.',
+    );
+    expect(scrubInternal('A bound (the 0135 carry) applies.')).toBe(
+      'A bound applies.',
+    );
   });
 });
 

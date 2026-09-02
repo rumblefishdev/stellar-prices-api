@@ -52,10 +52,12 @@ export function createApp({ config }: CreateAppOptions): void {
   // `https://sorobanscan.rumblefish.dev/api/` (its bucket, synced by
   // `make -C infra sync-portal-explorer`) and calls this API on
   // `config.apiDomain` directly, so the distribution had become a second,
-  // ungated front door to the same portal. `apiGateway` is still used below
-  // for its side effects; nothing imports its exports any more, so it can be
-  // destroyed or have its RestApi replaced without tearing anything down
-  // first.
+  // ungated front door to the same portal. Constructing `ApiGatewayStack` is
+  // what has the effect; the binding below is now read by nothing, and the
+  // `void` is there to say so deliberately rather than to use it. That is the
+  // fact worth keeping: nothing imports the stack's exports any more, so it
+  // can be destroyed or have its RestApi replaced without tearing anything
+  // down first.
   void apiGateway;
 
   // EventBridgeStack is independent of ComputeStack in the skeleton
