@@ -303,6 +303,45 @@ actually held by. **Out of scope unless step 0 shows the guild gates on
 Onboarding instead of screening**, in which case the decision comes back to Adam
 before any `flags` field is added.
 
+### Measured — production, 2026-09-02
+
+The deploy that made the new state reachable, and the first visitor to hit
+it. From the api-handler's log group:
+
+```
+12:57:57Z  Lambda updated — the deployed binary carries `pending_rules`
+           (`unzip -p fn.zip bootstrap | grep -ac pending_rules` → 1)
+
+12:37:42Z  outcome="not_member"      ┐
+12:42:44Z  outcome="not_member"      │ the OLD binary, folding a member in
+12:43:08Z  outcome="not_member"      │ screening into "join the server"
+12:43:36Z  outcome="not_member"      │
+12:53:10Z  outcome="not_member"      ┘
+12:59:19Z  outcome="pending_rules"   ← two minutes after the deploy
+```
+
+The first five and the sixth are the same person in the same state; what
+changed between them is the binary. That is the refusal half of the last
+acceptance criterion, measured.
+
+⚠️ **The second half is Adam's attestation, not a log line.** No
+`portal issued an API key` appears after `12:59:19` in the hour that
+follows, so accepting the rules and signing in again is confirmed by the
+person who did it rather than by CloudWatch. Two reasons it can be true and
+invisible: a plain successful sign-in logs no line of its own (the same gap
+`scripts/measure-pending-absent.sh` documents, which is why that script
+watches for a key, a cap or an age refusal instead), and an account already
+holding a key takes the adopt path. The refusal half, which is what this
+task built, is on the record above.
+
+**The deploy that was not a deploy.** The first attempt shipped the old
+binary: `make -C infra deploy-production-compute` builds the CDK app, not
+the Rust, and CDK packages whatever already sits in
+`../target/lambda/prices-api` (`compute-stack.ts:82`). The artifact was from
+10:59, the code from 12:14. `cargo lambda build -p prices-api --release
+--arm64 --features lambda` is the missing step, and the Makefile does not
+say so — see Issues Encountered.
+
 ## Implementation
 
 ### 1. The guild — one value moves, the other is guarded
@@ -419,9 +458,9 @@ button would hand the visitor back to the same refusal).
 - [x] The rework path ([[0191]]) gives an unscreened member the same answer as
       the issue path — both consumers of `membership()`/`decide()` (sign-in in
       `auth/mod.rs`, issue in `auth/issue.rs`) match the new variant
-- [ ] A real account walks: join Stellar Developers → refused with the new
-      screen → accept the rules → sign in → key issued (**step 0 / phase E,
-      Adam's hand**)
+- [x] A real account walks: join Stellar Developers → refused with the new
+      screen → accept the rules → sign in → key issued — walked on
+      **production** by Adam, 2026-09-02 (see "Measured — production" below)
 - [x] Rust and portal suites green; the `not_member` card no longer carries the
       screening sentence
 
@@ -535,6 +574,19 @@ observations above, the decision on the 10004 warn, and the SSM switch.
   absent, `signin=not_member` present. **Bundle-before-backend is the safe
   order** — the new bundle handles both literals, while the reverse would
   land a literal the old bundle drops silently.
+- **`deploy-production-compute` does not build the Rust.** `build-production:
+  build` builds the CDK app only, and `ComputeStack` packages the pre-built
+  `../target/lambda/prices-api` (`compute-stack.ts:82`). The first production
+  deploy of this task therefore shipped a binary from 10:59 against code
+  written at 12:14, and the new screen "did not work" while both the bundle
+  and the SSM parameter were already right. The missing step is `cargo lambda
+  build -p prices-api --release --arm64 --features lambda` — `--arm64`
+  because the function runs on Graviton, `--features lambda` because without
+  it the local-only seams compile in place of the SSM client. Diagnosed by
+  grepping the deployed artifact rather than by reading the Makefile:
+  `aws lambda get-function --query Code.Location` → `unzip -p … bootstrap |
+  grep -ac pending_rules`. Worth a Makefile prerequisite; spawned as a
+  follow-up rather than fixed here (see Future Work).
 - **Portal vitest is flaky under load**: three timeouts on a run started
   while `cargo test` had the CPU; clean under `--skipNxCache`, and Nx marked
   the task flaky itself. Nothing was wrong with the tests.
@@ -615,6 +667,13 @@ observations above, the decision on the 10004 warn, and the SSM switch.
 - Not blocked by [[0195]]'s open operator step (the two `RETAIN`ed buckets); no
   overlap.
 
+## Future Work
+
+- **`deploy-production-compute` should refuse a stale Lambda artifact**, or
+  build it. Costing this task one bad deploy and an hour of "the feature does
+  not work" is the cheapest possible demonstration; the next person will not
+  be watching for it. Spawned as a backlog task.
+
 ## Operator steps (not in any diff)
 
 Done:
@@ -625,21 +684,17 @@ Done:
 2. ~~`prices/production/portal-discord-oauth` re-pointed at the new Discord
    application~~ — 2026-09-02 (see Issues Encountered; not this task's).
 
-Open, in this order:
+3. ~~`cargo lambda build -p prices-api --release --arm64 --features lambda`
+   then `make -C infra deploy-production-compute`~~ — 2026-09-02 12:57 UTC.
+   The deployed binary carries `pending_rules`, verified out of
+   `aws lambda get-function`.
+4. ~~`make -C infra sync-portal-explorer`~~ — the bundle was synced 14:42
+   local, before the backend.
+5. ~~The walk-through~~ — production landed `pending_rules` at 12:59 UTC; the
+   sign-in after accepting is Adam's attestation. See "Measured — production".
 
-3. **Merge this PR (#278), then `make -C infra deploy-production-compute`.**
-   The bundle is already synced and the Lambda is not: measured 2026-09-02,
-   the deployed binary carries `signin=not_member` and no `pending_rules`, so
-   production still folds a member in screening into "join the server". Verify:
-   `aws lambda get-function --function-name prices-production-api-handler --query Code.Location --output text | xargs curl -s -o /tmp/fn.zip && unzip -p /tmp/fn.zip bootstrap | grep -ac pending_rules`
-   → `1`.
-4. `make -C infra sync-portal-explorer` — only if the bundle moves again
-   after the merge.
-5. **The walk-through** (the last AC): join Stellar Developers → refused with
-   the accept-rules screen → accept → sign in → key. Needs an account NOT in
-   the guild to start, and confirms the one thing no test can:
-   that `discord.com/channels/897514728459468821` lands an unscreened member
-   on the rules prompt.
+Open:
+
 6. **Register `https://prices-api.sorobanscan.rumblefish.dev/api/auth/callback`
    in the NEW Discord application**, if it is not there. The production secret
    already names that application, so without it production sign-in fails on
