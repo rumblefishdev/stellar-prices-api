@@ -2,7 +2,7 @@
 id: "0210"
 title: "Soroban assets carry an empty asset_code in listing and detail — top-volume rows are unidentifiable to consumers"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0120", "0139", "0242", "0252", "0256", "0257", "0258", "0259"]
 tags: [layer-backend, priority-medium, effort-medium, milestone-M2, api, metadata, defect]
@@ -92,6 +92,18 @@ history:
       a rejected symbol was sentinelled with no log at all. Four findings
       spawned as [[0256]]-[[0259]]. Not archived: PR #275 is still open, so the
       implementation is not on develop.
+  - date: 2026-09-02
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Archived. All six acceptance criteria met and verified on production.
+      Archived while PR #275 is still open, so the implementation is on
+      `fix/0210_soroban-asset-symbol` rather than on develop — deliberate, at
+      the developer's call, after the risk was raised. Two things still owed by
+      people, not code: karczuRF's re-review of the five fixes his review
+      produced (one of which was answered with a different design than he
+      suggested — `result.error` stays permanent, with an attempts counter
+      instead), and the merge itself.
 ---
 
 # Soroban assets have empty asset_code
