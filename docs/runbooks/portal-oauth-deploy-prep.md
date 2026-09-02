@@ -176,6 +176,11 @@ Seed both by hand, alongside the mTLS material and the secret above:
 # in `web/portal/src/landing/links.ts` sends a refused visitor to, and the two
 # must agree or the refusal is a loop; `npm run discord:verify-guild -- --ssm`
 # resolves the invite through Discord's API and compares it with this value.
+# ⚠️ That script reads `/prices/production/` ONLY, and is not in CI — it is a
+# check you run when either value changes, not a guard. `links.ts` carries the
+# guild id as a build-time constant, so a parameter that drifts in any other
+# environment sends refused members to a guild nobody is gating on, and
+# nothing would say so.
 # Seeded as the stellar_test guild (1536303837785362432) while building;
 # re-pointing is a `put-parameter --overwrite`, no deploy.
 aws ssm put-parameter \

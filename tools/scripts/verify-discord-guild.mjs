@@ -89,10 +89,25 @@ if (guild.id !== guildId) {
 }
 
 // 2. The barrier the gate rents from SDF.
-const screening = guild.features?.includes('MEMBER_VERIFICATION_GATE_ENABLED');
-console.log(
-  `screening ${screening ? 'ON  (MEMBER_VERIFICATION_GATE_ENABLED)' : 'OFF — ⚠️  every joiner is pending: false; see task 0170'}`,
-);
+// Three states, not two. `features` missing altogether is a shape change or a
+// partial guild object, NOT evidence that the gate is off — and reporting it
+// as OFF is how an operator learns to ignore the one line that would tell
+// them ADR 0010's abuse barrier is gone.
+if (!Array.isArray(guild.features)) {
+  console.log(
+    'screening UNKNOWN — the invite carried no `features` array, so this run ' +
+      'cannot say. Check the guild in Discord, and this script against the ' +
+      'invite API if it keeps happening.',
+  );
+} else if (guild.features.includes('MEMBER_VERIFICATION_GATE_ENABLED')) {
+  console.log('screening ON  (MEMBER_VERIFICATION_GATE_ENABLED)');
+} else {
+  console.log(
+    'screening OFF — ⚠️  Membership Screening is disabled on this guild, so ' +
+      'every joiner is `pending: false` immediately and the barrier is "has a ' +
+      'Discord account". See task 0170.',
+  );
+}
 
 // 3. The deployed gate, if asked.
 if (process.argv.includes('--ssm')) {

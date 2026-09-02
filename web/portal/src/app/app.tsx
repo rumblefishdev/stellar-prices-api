@@ -2718,11 +2718,25 @@ function ApiKey({
           you do not have a working key.
         </p>
       )}
+      {/* ⚠️ Both Discord links open in a NEW TAB, like the refusal screens'
+          buttons and for a sharper version of their reason: `useOneShotParams`
+          has already stripped `?issue=…` from the URL by the time either is
+          clicked, so a visitor who navigates this tab to Discord, does the
+          errand and presses Back returns to a dashboard with the refusal —
+          and its "try again" link — gone. The "try again" links stay
+          same-tab: they are our own round-trip and are meant to replace
+          this page. */}
       {refusedNotMember && (
         <p data-testid="issue-not-member">
           You need to be a member of the{' '}
-          <a href={STELLAR_DISCORD_INVITE}>Stellar Developers Discord</a> to get
-          an API key — joining is an open invite. Once you are in,{' '}
+          <a
+            href={STELLAR_DISCORD_INVITE}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Stellar Developers Discord
+          </a>{' '}
+          to get an API key — joining is an open invite. Once you are in,{' '}
           <a href={issueUrl()}>try again</a>.
         </p>
       )}
@@ -2731,9 +2745,15 @@ function ApiKey({
       {refusedPendingRules && (
         <p data-testid="issue-pending-rules">
           Your Discord account is on the{' '}
-          <a href={STELLAR_DISCORD_SERVER}>Stellar Developers Discord</a>, but
-          you have not accepted the server&apos;s rules yet. Accept them on
-          Discord, then <a href={issueUrl()}>try again</a>.
+          <a
+            href={STELLAR_DISCORD_SERVER}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Stellar Developers Discord
+          </a>
+          , but you have not accepted the server&apos;s rules yet. Accept them
+          on Discord, then <a href={issueUrl()}>try again</a>.
         </p>
       )}
       {issue === 'too_young' && (

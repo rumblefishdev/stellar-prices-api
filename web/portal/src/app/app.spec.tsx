@@ -2514,6 +2514,10 @@ describe('the API key', () => {
       name: /stellar developers discord/i,
     })[0];
     expect(invite.getAttribute('href')).toBe('https://discord.gg/stellardev');
+    // A new tab: `?issue=…` is stripped on arrival, so navigating away and
+    // pressing Back would lose the refusal and its retry link.
+    expect(invite.getAttribute('target')).toBe('_blank');
+    expect(invite.getAttribute('rel')).toContain('noopener');
     const retry = screen.getAllByRole('link', { name: /try again/i })[0];
     expect(retry.getAttribute('href')).toBe(ISSUE_HREF);
     // The screening clause moved to its own state (task 0254).
@@ -2537,8 +2541,13 @@ describe('the API key', () => {
     expect(server.getAttribute('href')).toBe(
       'https://discord.com/channels/897514728459468821',
     );
+    expect(server.getAttribute('target')).toBe('_blank');
+    expect(server.getAttribute('rel')).toContain('noopener');
+    // …while our own round-trip stays in this tab: it is meant to replace
+    // this page, not to be come back from.
     const retry = within(refusal).getByRole('link', { name: /try again/i });
     expect(retry.getAttribute('href')).toBe(ISSUE_HREF);
+    expect(retry.getAttribute('target')).toBeNull();
     expect(screen.queryByTestId('issue-not-member')).toBeNull();
   });
 
