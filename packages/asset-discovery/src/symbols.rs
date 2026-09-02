@@ -52,25 +52,35 @@ pub const MAX_SYMBOL_LEN: usize = 32;
 
 /// What one contract's `symbol()` resolution produced.
 ///
-/// The Absent/Transient split is load-bearing. Absent writes a sentinel row so
-/// the contract leaves the queue permanently; Transient writes nothing so it is
-/// retried next run. Collapsing them either way is a real failure: sentinelling
-/// a transient error names 52 tokens `""` forever, and retrying an absent one
-/// re-polls RPC every hour for a contract that will never answer.
+/// The Absent/Transient split is load-bearing, and neither arm is a sentinel on
+/// its own. Absent records one negative answer and increments `attempts`;
+/// Transient writes nothing at all. A contract is only sentinelled once it has
+/// answered negatively [`MAX_SYMBOL_ATTEMPTS`] times in a row, because the one
+/// thing we cannot do is publish an empty symbol that nothing re-polls.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
     /// A usable symbol.
     Symbol(String),
-    /// Asked, and this contract exposes no usable symbol. Sentinel it.
+    /// Asked, and got a negative answer. Counts against [`MAX_SYMBOL_ATTEMPTS`].
     Absent,
-    /// Transport-level failure. Leave it for the next run.
+    /// Never got an answer at all. Leave it for the next run, uncounted.
     Transient,
 }
+
+/// Consecutive negative answers before a contract is sentinelled for good.
+///
+/// Three rather than one because the simulation's `error` field cannot
+/// distinguish "this contract has no `symbol()`" from "this node failed to read
+/// a ledger entry". A deterministic failure exhausts the counter in three runs;
+/// a transient one resolves and resets it. See the `asset_symbol` DDL comment.
+pub const MAX_SYMBOL_ATTEMPTS: u8 = 3;
 
 #[derive(Debug, Serialize, clickhouse::Row)]
 struct SymbolRow {
     contract_address: String,
     symbol: String,
+    /// 0 on success. On a negative answer, the prior count plus one.
+    attempts: u8,
 }
 
 /// Outcome of a [`run_symbols`] pass.
@@ -80,9 +90,12 @@ pub struct SymbolStats {
     pub considered: usize,
     /// Contracts that yielded a usable symbol.
     pub resolved: usize,
-    /// Contracts sentinelled as having no usable symbol.
+    /// Contracts sentinelled for good this run — a negative answer that took
+    /// `attempts` to [`MAX_SYMBOL_ATTEMPTS`]. Not every negative answer: the
+    /// earlier ones are still retryable and count as `skipped`.
     pub absent: usize,
-    /// Contracts left for the next run after a transient failure.
+    /// Contracts coming back next run, either because nothing answered
+    /// (transient) or because a negative answer has not yet exhausted the count.
     pub skipped: usize,
 }
 
@@ -138,6 +151,12 @@ pub fn build_simulate_envelope(contract: &str, func: &str) -> Option<String> {
 #[derive(serde::Deserialize)]
 struct RpcResponse {
     result: Option<RpcResult>,
+    /// JSON-RPC 2.0 reports failure *here*, with HTTP 200 — which is how public
+    /// endpoints signal quota exhaustion, a disabled method, and a node that is
+    /// not synced. Without this field such a body deserialises to
+    /// `result: None`, and every contract in the run sentinels permanently.
+    #[serde(default)]
+    error: Option<serde_json::Value>,
 }
 #[derive(serde::Deserialize)]
 struct RpcResult {
@@ -145,6 +164,10 @@ struct RpcResult {
     results: Vec<RpcInvokeResult>,
     #[serde(default)]
     error: Option<String>,
+    /// Set when the contract's instance or Wasm is archived but restorable —
+    /// a live token, not one that lacks a symbol.
+    #[serde(default, rename = "restorePreamble")]
+    restore_preamble: Option<serde_json::Value>,
 }
 #[derive(serde::Deserialize)]
 struct RpcInvokeResult {
@@ -165,16 +188,27 @@ pub fn scval_to_string(v: &ScVal) -> Option<String> {
 
 /// Bound and clean a symbol read off-chain, or reject it.
 ///
-/// ponytail: a length and control-character floor only. `symbol()` is a string
-/// the contract itself controls, so this bounds what we store and print — it
-/// does **not** establish that the token is what it claims to be. A hostile
-/// contract returning `"USDC"` passes this check. Asset identity verification
-/// (SEP-1 `home_domain`, a verification flag on the response) is task 0252; this
-/// task deliberately keeps the blast radius to display only, leaving `?search=`
-/// and `sort=code` on the raw `assets.asset_code` column.
+/// A length and character-class floor only. `symbol()` is a string the contract
+/// itself controls, so this bounds what we store and print — it does **not**
+/// establish that the token is what it claims to be. A hostile contract
+/// returning `"USDC"` passes this check, and so does one returning a Cyrillic
+/// homoglyph of it. Asset identity verification (SEP-1 `home_domain`, a
+/// verification flag on the response) is task 0252; this task deliberately keeps
+/// the blast radius to display only, leaving `?search=` and `sort=code` on the
+/// raw `assets.asset_code` column.
+///
+/// The class is a positive one because the complement cannot be written with
+/// `char::is_control`, which matches Unicode category Cc alone: `U+202E`
+/// (right-to-left override), `U+200B` and `U+FEFF` are Cf and would pass,
+/// letting a contract reorder or hide text in every consumer UI and in operator
+/// terminals.
+// ponytail: an allow-list of alphanumerics plus the punctuation real symbols
+// use. Widen it if a legitimate token is ever rejected — the log line names the
+// contract.
 pub fn sanitize_symbol(raw: &str) -> Option<String> {
     let s = raw.trim();
-    (!s.is_empty() && s.chars().count() <= MAX_SYMBOL_LEN && !s.chars().any(char::is_control))
+    let printable = |c: char| c.is_alphanumeric() || matches!(c, '-' | '.' | '_' | '+' | ':' | ' ');
+    (!s.is_empty() && s.chars().count() <= MAX_SYMBOL_LEN && s.chars().all(printable))
         .then(|| s.to_string())
 }
 
@@ -220,58 +254,138 @@ pub async fn resolve_symbol(http: &reqwest::Client, rpc_url: &str, contract: &st
         }
     };
 
-    // Everything below is a fact about the contract: it simulated, and did not
-    // give back a usable symbol. Sentinel so it stops leading the queue.
+    classify(resp, contract)
+}
+
+/// Decide what a parsed simulate response means for this contract.
+///
+/// The line between the two failure arms is **whether the simulation actually
+/// evaluated the contract**. If it did, its outcome is a fact that will repeat
+/// on every future run, so it sentinels. If we never got that far — a JSON-RPC
+/// error, archived state, an empty body — we learned nothing about the
+/// contract, so it must retry. Getting this backwards is unrecoverable in one
+/// direction only: a wrong `Transient` costs one RPC call per run, a wrong
+/// `Absent` publishes a permanent empty symbol that nothing re-polls.
+fn classify(resp: RpcResponse, contract: &str) -> Outcome {
+    // Arrives with HTTP 200, so `error_for_status` above cannot see it.
+    if let Some(err) = resp.error {
+        tracing::warn!(contract, error = %err, "symbol() rpc returned a json-rpc error; retrying next run");
+        return Outcome::Transient;
+    }
     let Some(result) = resp.result else {
-        return Outcome::Absent;
+        tracing::warn!(
+            contract,
+            "symbol() rpc returned neither result nor error; retrying next run"
+        );
+        return Outcome::Transient;
     };
+    if result.restore_preamble.is_some() {
+        tracing::warn!(
+            contract,
+            "symbol() needs a state restore; retrying next run"
+        );
+        return Outcome::Transient;
+    }
+    // The simulation ran and the contract itself errored — deterministic, so a
+    // fact. This is the one arm that stays permanent.
     if let Some(err) = result.error {
-        tracing::debug!(contract, error = %err, "symbol() simulate returned error");
+        tracing::debug!(contract, error = %err, "symbol() simulate returned error; sentinelling");
         return Outcome::Absent;
     }
-    let decoded = result
+    if result.results.is_empty() {
+        tracing::warn!(
+            contract,
+            "symbol() simulated without a result or an error; retrying next run"
+        );
+        return Outcome::Transient;
+    }
+
+    let raw = result
         .results
         .into_iter()
         .next()
         .and_then(|r| base64::engine::general_purpose::STANDARD.decode(r.xdr).ok())
-        .and_then(|raw| ScVal::from_xdr(&raw, Limits::none()).ok())
+        .and_then(|bytes| ScVal::from_xdr(&bytes, Limits::none()).ok())
         .as_ref()
-        .and_then(scval_to_string)
-        .as_deref()
-        .and_then(sanitize_symbol);
+        .and_then(scval_to_string);
 
-    match decoded {
+    match raw.as_deref().and_then(sanitize_symbol) {
         Some(s) => Outcome::Symbol(s),
-        None => Outcome::Absent,
+        // It answered, and the answer is unusable. A fact — but a permanent and
+        // otherwise invisible one, so say which contract and what it returned.
+        // This is the line to grep if a legitimate symbol is ever rejected.
+        None => {
+            tracing::warn!(
+                contract,
+                raw = raw.as_deref().unwrap_or("<not a string>"),
+                "symbol() returned nothing usable; sentinelling"
+            );
+            Outcome::Absent
+        }
     }
 }
 
-/// Soroban contracts in `prices.assets` with no `prices.asset_symbol` row yet.
+/// Soroban contracts still worth asking about, each with the count of negative
+/// answers it has already given.
+///
+/// A contract leaves this queue two ways: it resolved (`symbol != ''`), or it
+/// exhausted [`MAX_SYMBOL_ATTEMPTS`]. Everything else — no row at all, or a row
+/// still under the cap — comes back.
 ///
 /// `NOT IN` over a subquery rather than a `LEFT JOIN` so the result cannot
-/// depend on the session's `join_use_nulls`; no `FINAL` on either side, since
-/// both are read only for set membership on a sort-key column, where a
-/// ReplacingMergeTree's un-merged duplicates are indistinguishable. `DISTINCT`
-/// matters: 10 of the 52 Soroban rows share an `asset_id` with another row
-/// (task 0139), and without it those would produce duplicate RPC calls.
+/// depend on the session's `join_use_nulls`. No `FINAL`: both exit conditions
+/// are monotonic — `attempts` only rises and a resolved symbol is never
+/// un-resolved — so *any* row meeting them is decisive, and un-merged duplicates
+/// cannot change the answer. `DISTINCT` matters: 10 of the 52 Soroban rows share
+/// an `asset_id` with another row (task 0139), and without it those would
+/// produce duplicate RPC calls.
+///
+/// The second query reads the counts. It is separate rather than a join for the
+/// same `join_use_nulls` reason, and is bounded by the first query's `LIMIT`.
 pub async fn load_unresolved_contracts(
     client: &Client,
     limit: usize,
-) -> Result<Vec<String>, clickhouse::error::Error> {
-    client
+) -> Result<Vec<(String, u8)>, clickhouse::error::Error> {
+    let contracts = client
         .query(
             "SELECT DISTINCT contract_address \
              FROM prices.assets \
              WHERE contract_address != '' \
                AND contract_address NOT IN ( \
                    SELECT contract_address FROM prices.asset_symbol \
+                   WHERE symbol != '' OR attempts >= ? \
                ) \
              ORDER BY contract_address \
              LIMIT ?",
         )
+        .bind(MAX_SYMBOL_ATTEMPTS)
         .bind(limit as u64)
         .fetch_all::<String>()
-        .await
+        .await?;
+
+    if contracts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let prior = client
+        .query(
+            "SELECT contract_address, argMax(attempts, fetched_at) \
+             FROM prices.asset_symbol \
+             WHERE contract_address IN ? \
+             GROUP BY contract_address",
+        )
+        .bind(&contracts)
+        .fetch_all::<(String, u8)>()
+        .await?;
+    let prior: std::collections::HashMap<String, u8> = prior.into_iter().collect();
+
+    Ok(contracts
+        .into_iter()
+        .map(|c| {
+            let attempts = prior.get(&c).copied().unwrap_or(0);
+            (c, attempts)
+        })
+        .collect())
 }
 
 /// Write resolved symbols and sentinels into `prices.asset_symbol`.
@@ -300,8 +414,8 @@ async fn write_symbols(
 /// Only a ClickHouse failure fails the run: an RPC problem is per-contract and
 /// costs at most a run's worth of progress. Writes happen once at the end rather
 /// than in flushed batches (`supply-worker`'s shape) because the batch is bounded
-/// at 25 rows — a mid-run Lambda kill loses one run, and absence-triggering means
-/// the next run picks up exactly where this one stopped.
+/// at 25 rows — a mid-run Lambda kill loses one run, and the queue being derived
+/// from stored state means the next run picks up exactly where this one stopped.
 pub async fn run_symbols(
     ch: &Client,
     http: &reqwest::Client,
@@ -315,24 +429,40 @@ pub async fn run_symbols(
     };
     let mut rows: Vec<SymbolRow> = Vec::new();
 
-    for contract in &contracts {
+    for (contract, prior_attempts) in &contracts {
         match resolve_symbol(http, rpc_url, contract).await {
             Outcome::Symbol(symbol) => {
                 tracing::debug!(contract, symbol, "resolved soroban symbol");
+                // attempts back to 0: a contract that answered after failing is
+                // evidence those failures were transient, not a fact about it.
                 rows.push(SymbolRow {
                     contract_address: contract.clone(),
                     symbol,
+                    attempts: 0,
                 });
                 stats.resolved += 1;
             }
             Outcome::Absent => {
-                // Sentinel: an empty symbol records "asked, no usable answer",
-                // which is what stops this contract being re-polled every hour.
+                // One negative answer, recorded. It only becomes a permanent
+                // sentinel once the count reaches MAX_SYMBOL_ATTEMPTS — which is
+                // what the queue reads, so nothing else has to enforce it.
+                let attempts = prior_attempts.saturating_add(1);
+                if attempts >= MAX_SYMBOL_ATTEMPTS {
+                    tracing::info!(
+                        contract,
+                        attempts,
+                        "symbol() gave a negative answer {attempts}x; sentinelling for good"
+                    );
+                    stats.absent += 1;
+                } else {
+                    tracing::debug!(contract, attempts, "symbol() negative; will retry");
+                    stats.skipped += 1;
+                }
                 rows.push(SymbolRow {
                     contract_address: contract.clone(),
                     symbol: String::new(),
+                    attempts,
                 });
-                stats.absent += 1;
             }
             Outcome::Transient => stats.skipped += 1,
         }
@@ -373,6 +503,66 @@ mod tests {
         assert_eq!(sanitize_symbol("US\nDC"), None);
         assert_eq!(sanitize_symbol("US\u{0}DC"), None);
         assert_eq!(sanitize_symbol("\u{1b}[31mUSDC"), None);
+    }
+
+    #[test]
+    fn rejects_invisible_and_bidi_characters() {
+        // `char::is_control` is Cc only, so these all passed the earlier check.
+        // U+202E reverses everything after it wherever the symbol is rendered.
+        assert_eq!(sanitize_symbol("USD\u{202e}CBA"), None, "rtl override");
+        assert_eq!(sanitize_symbol("US\u{200b}DC"), None, "zero-width space");
+        assert_eq!(sanitize_symbol("\u{feff}USDC"), None, "byte-order mark");
+        assert_eq!(sanitize_symbol("US\u{ad}DC"), None, "soft hyphen");
+        // Punctuation real symbols do use still passes.
+        assert!(sanitize_symbol("sky-USD").is_some());
+        assert!(sanitize_symbol("v1.2_beta").is_some());
+    }
+
+    fn classify_json(body: &str) -> Outcome {
+        classify(
+            serde_json::from_str(body).expect("test body parses"),
+            "C_TEST",
+        )
+    }
+
+    #[test]
+    fn a_json_rpc_error_retries_instead_of_sentinelling() {
+        // JSON-RPC reports this with HTTP 200, so `error_for_status` cannot see
+        // it. Sentinelling here would name every contract in the run `""`
+        // permanently, with nothing that ever re-polls them.
+        let out = classify_json(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not enabled"}}"#,
+        );
+        assert_eq!(out, Outcome::Transient);
+    }
+
+    #[test]
+    fn an_empty_or_archived_response_retries() {
+        // Neither result nor error: we learned nothing about the contract.
+        assert_eq!(
+            classify_json(r#"{"jsonrpc":"2.0","id":1}"#),
+            Outcome::Transient
+        );
+        // Archived-but-restorable state is a live token, not a symbol-less one.
+        assert_eq!(
+            classify_json(r#"{"result":{"results":[],"restorePreamble":{"minResourceFee":"1"}}}"#),
+            Outcome::Transient,
+        );
+        // Simulated clean, returned nothing at all — not a fact either.
+        assert_eq!(
+            classify_json(r#"{"result":{"results":[]}}"#),
+            Outcome::Transient
+        );
+    }
+
+    #[test]
+    fn a_contract_error_is_the_one_permanent_arm() {
+        // The simulation evaluated the contract and it errored. That repeats on
+        // every run, so it must leave the queue or it starves the tail.
+        assert_eq!(
+            classify_json(r#"{"result":{"results":[],"error":"HostError: missing symbol"}}"#),
+            Outcome::Absent,
+        );
     }
 
     #[test]

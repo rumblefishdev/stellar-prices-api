@@ -227,13 +227,29 @@ SETTINGS index_granularity = 8192;
 -- contract, and 10 of the 52 soroban rows share an asset_id with another row
 -- (0139), which would make an asset_id-keyed symbol unattributable.
 --
--- An empty `symbol` is a SENTINEL, not missing data: it records "asked, and
--- this contract exposes no usable symbol", so the resolver stops retrying it.
+-- An empty `symbol` is a NEGATIVE ANSWER, not missing data: it records "asked,
+-- and this contract gave nothing usable". `attempts` is what turns a run of
+-- those into a permanent sentinel, at MAX_SYMBOL_ATTEMPTS.
+--
+-- The counter exists because the simulation's `error` field mixes causes that
+-- look identical from here: a contract that was never deployed or has no
+-- `symbol()` (deterministic, should stop being polled) and a ledger-entry read
+-- failure or a node behind the network (transient, must not be recorded as
+-- fact). Telling them apart would mean matching on the host's error text, which
+-- is a protocol-version detail. Counting observes the difference instead: a
+-- deterministic failure repeats and exhausts the counter, a transient one
+-- resolves and `attempts` returns to 0.
+--
+-- The asymmetry is why this is worth a column. A wrong retry costs one RPC call
+-- per run; a wrong sentinel publishes an empty symbol that nothing re-polls, and
+-- undoing it means hand-editing a ReplacingMergeTree on the shared box.
+--
 -- Sole writer = the asset-discovery worker's symbol stage.
 ----------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS prices.asset_symbol (
     contract_address  String,
     symbol            String    DEFAULT '',
+    attempts          UInt8     DEFAULT 0,
     fetched_at        DateTime  DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(fetched_at)
