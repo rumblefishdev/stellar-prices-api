@@ -497,9 +497,10 @@ async fn the_portals_credentialed_layer_stops_at_the_portal_prefix() {
 /// browser call failing exactly as before, while `curl` passes: that near-miss
 /// is why this test exists.
 ///
-/// `/health` stands in for the data surface here because it needs no
-/// ClickHouse. It is a gateway MOCK in production and never reaches this code
-/// there, but it sits inside the same layer, so it pins the layer's answer.
+/// `/health` is the subject here because it needs no ClickHouse. ⚠️ It is a
+/// gateway MOCK in production and never reaches this code there, so on its own
+/// it pins the layer without pinning a route the layer actually has to serve.
+/// [`a_real_v1_route_carries_the_wildcard_on_its_own_response`] covers that.
 #[tokio::test]
 async fn data_routes_answer_a_wildcard_origin_without_credentials() {
     let config = config_with_origin(Some(WEB_ORIGIN));
@@ -521,6 +522,76 @@ async fn data_routes_answer_a_wildcard_origin_without_credentials() {
             "`*` and credentials together are refused by every browser"
         );
     }
+}
+
+/// The same wildcard on a **real `/v1` route**, proven to have been ROUTED
+/// there (task 0126).
+///
+/// 🔑 **Why this exists next to the `/health` test above.** Every other CORS
+/// assertion in this file rides on `/health`, which production answers from a
+/// gateway MOCK — this handler never sees it. So `/health` can only show that
+/// `data_cors_layer` is attached, not that it covers the surface the task is
+/// about. Anything that leaves `/health` inside the layer while a data route
+/// moves out of it — a router re-nested after the `.layer()` call in `app()`,
+/// or simply a new `/v1` route registered below it — keeps the `/health` test
+/// green while browser calls go back to being blocked and `curl` stays green
+/// too: the exact half-shipped mechanism this task nearly released.
+///
+/// ⚠️ **A CORS header alone would NOT prove that.** The layer wraps the
+/// fallback too, so an unrouted path answers `404` carrying the same `*`, and
+/// a test that only read the header would pass against a route that no longer
+/// exists. Hence the status and the error code: `{"assets": []}` is rejected by
+/// `post_batch` itself, before `state.ch()` is reached, so a `400`
+/// `invalid_query` is the handler's own signature — reachable with
+/// [`AppState::without_ch`] and reachable no other way.
+#[tokio::test]
+async fn a_real_v1_route_carries_the_wildcard_on_its_own_response() {
+    let config = config_with_origin(Some(WEB_ORIGIN));
+    let reply = app(&config, AppState::without_ch())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/prices/batch")
+                .header("origin", "https://evil.example")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"assets": []}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let origin = reply
+        .headers()
+        .get("access-control-allow-origin")
+        .map(|v| v.to_str().unwrap().to_string());
+    let credentials = reply
+        .headers()
+        .get("access-control-allow-credentials")
+        .is_some();
+    let status = reply.status();
+    let body = axum::body::to_bytes(reply.into_body(), usize::MAX)
+        .await
+        .expect("body should be readable");
+    let body = String::from_utf8_lossy(&body);
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the batch handler must have run and rejected the empty list; got {status} {body}"
+    );
+    assert!(
+        body.contains("invalid_query"),
+        "a 400 from anywhere else would not prove the route was reached: {body}"
+    );
+    assert_eq!(
+        origin.as_deref(),
+        Some("*"),
+        "a /v1 response carries the wildcard the gateway preflight advertises"
+    );
+    assert!(
+        !credentials,
+        "`*` and credentials together are refused by every browser"
+    );
 }
 
 /// A closed portal answers a preflight like everything else under the prefix:
