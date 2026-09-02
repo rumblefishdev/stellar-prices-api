@@ -15,6 +15,23 @@ history:
     status: backlog
     who: stkrolikiewicz
     note: >
+      Measured the SEP-1 half. `prices.asset_metadata` holds **zero** rows on
+      prod — empty, not sparse — while `home_domain` ships as `""` on every
+      response. Scoping to what consumers can see makes this tractable: 1,948
+      distinct issuers behind API-visible assets against 59,332 in the registry.
+      Coverage is good (48/50 of the top issuers by volume declare a domain,
+      43/50 of a random visible sample), far better than the 17/52 that sank
+      BE's table as a mechanism in 0210. But running the full bidirectional
+      check on the eight highest-volume BTC issuers found that
+      **`blackrock.co.com` passes** — a lookalike domain serving a well-formed
+      stellar.toml that lists the asset back. SEP-1 proves domain control, not
+      legitimacy. So the deliverable changes: publish the verified *domain*, not
+      a boolean, because a boolean would launder that into an endorsement this
+      API cannot make.
+  - date: 2026-09-02
+    status: backlog
+    who: stkrolikiewicz
+    note: >
       Sharpened after [[0210]] shipped. The self-declared Soroban names are no
       longer inferred from BE's table — all 52 contracts were resolved directly
       over RPC, confirming the five recorded here exactly. An earlier version of that
@@ -214,6 +231,95 @@ control both the account and the domain. **It has no production writer**
 (`write_asset_metadata`, `writer.rs:295-310`, is called from one test), so the
 column is served, always empty, on every response.
 
+## Measured 2026-09-02: SEP-1 works, and does not do what this task assumed
+
+### `asset_metadata` is empty, not sparse
+
+```
+prices.asset_metadata          0 rows
+```
+
+Zero. The table exists with `asset_id`, `home_domain`, `updated_at` and has never
+held a row. Confirmed in code: the only caller of `write_asset_metadata` outside
+its own definition is a test (`asset-discovery/tests/enrichment_survives_it.rs:48`).
+`home_domain` is nonetheless in the response contract and ships as `""` on every
+asset in both listing and detail.
+
+### The population is bounded if scoped to what consumers see
+
+| | |
+|---|---|
+| distinct issuers, whole registry | 59,332 |
+| distinct issuers, assets visible through the API | **1,948** |
+| visible `(code, issuer)` pairs | 3,530 |
+
+Verifying the registry is a 59k-account job. Verifying **what a consumer can
+actually be shown** is 1,948 Horizon lookups — the same shape as [[0210]]'s
+52-contract sweep, thirty times larger, still one Lambda run. Fewer `stellar.toml`
+fetches than that, since one domain serves many issuers.
+
+### Coverage is good
+
+Sampled against Horizon:
+
+| sample | declares `home_domain` |
+|---|---|
+| top 50 issuers by 24 h volume | **48 / 50** |
+| random 50 from the API-visible set | **43 / 50** |
+
+Far better than the 17/52 that made BE's `soroban_contract_metadata` unusable as
+a mechanism in 0210. SEP-1 has enough coverage here to be worth building on.
+
+### ⚠️ But bidirectional SEP-1 does not answer this task's question
+
+Run end to end on the eight highest-volume `BTC` issuers — Horizon `home_domain`,
+then `https://<domain>/.well-known/stellar.toml`, then a `[[CURRENCIES]]` entry
+matching `code="BTC"` **and** that exact issuer:
+
+| issuer | domain | verdict |
+|---|---|---|
+| `GDPJALI4AZ…` | ultracapital.xyz | verified |
+| `GBVOL67TMU…` | stellarport.io | verified |
+| `GAUTUYY2TH…` | dead.apay.io | verified |
+| `GD6PQQAIG5…` | **blackrock.co.com** | **verified** |
+| `GCNSGHUCG5…` | interstellar.exchange | toml unreachable |
+| `GARRC2RFPP…` | jfkrise.com | toml unreachable |
+| `GAYEYN65Z4…` | djtstellar.com | toml unreachable |
+| `GCQVEST7KI…` | — | no domain |
+
+`blackrock.co.com` **passes completely**. It serves a well-formed toml:
+
+```toml
+[[CURRENCIES]]
+code="BTC"
+issuer="GD6PQQAIG5FSIBKGM5FH7RUUSKP5V4VT2VWDX5OHDEEZFPPUYAU2RKUR"
+status="live"
+name="Bitcoin"
+```
+
+Note the domain: `blackrock.co.com`, not BlackRock's. Someone registered a
+lookalike, published a toml, and the protocol confirms them.
+
+**SEP-1 proves domain control, not legitimacy** — which is exactly what it is
+specified to prove. It is a real, checkable fact and it does useful work here:
+three of eight could not even serve a toml. But it cannot answer *"is this the
+BTC I mean"*, and no bidirectional check can, because the question is about a
+name's reputation rather than about cryptography.
+
+### What that changes about the deliverable
+
+**Publish the verified domain, not a boolean.** A `verified: true` on
+`GD6PQQAIG5…` would launder `blackrock.co.com` into an endorsement this API
+cannot make. A `verified_domain: "blackrock.co.com"` states the checkable fact
+and leaves the judgement where it can actually be made — with the consumer, who
+can see `.co.com`. This is the reason browsers show a URL rather than only a
+padlock, and the same reasoning applies.
+
+So scope item 2 below (*"an enum verified / unverified / unknown"*) is wrong as
+written and is superseded: the enum still has a place for **how** the check
+ended — verified, domain unreachable, asset not listed back, no domain claimed,
+not checked — but the domain string is the field that carries the meaning.
+
 ## Scope
 
 Three parts, separable:
@@ -223,10 +329,13 @@ Three parts, separable:
    the `[[CURRENCIES]]` block lists this exact `(code, issuer)`. Store the
    verdict, not just the domain — an unverified domain claim is worth little on
    its own.
-2. **Expose the verdict.** A field on `AssetListItem` / `AssetDetail` — likely
-   an enum (`verified` / `unverified` / `unknown`) rather than a bare boolean,
-   because "we have not checked" and "we checked and it failed" are different
-   facts and must not collapse.
+2. **Expose the verdict.** ⚠️ **Reshaped by the 2026-09-02 measurement above** —
+   the primary field is the **verified domain string**, not a boolean or a bare
+   enum, because a lookalike domain passes SEP-1 and a boolean would endorse it.
+   An enum still carries *how the check ended* (verified / domain unreachable /
+   asset not listed back / no domain claimed / not checked), since "we have not
+   looked" and "we looked and it failed" must not collapse — but it sits beside
+   the domain rather than replacing it.
 3. **Decide what ranking and search should do with it.** Options, in rough
    order of cost: leave ordering alone and let consumers filter; add a
    `?verified=` filter; break volume ties by verification; stop ranking search
@@ -260,8 +369,9 @@ a decision made here.
 
 - [ ] `home_domain` has a production writer and is populated for the assets the
       API actually serves — not just present as a column
-- [ ] The API publishes a verification verdict that distinguishes "verified",
-      "failed verification" and "not checked"
+- [ ] The API publishes the **verified domain**, not only a verdict — measured
+      2026-09-02: `blackrock.co.com` passes bidirectional SEP-1 in full, so a
+      boolean would endorse a lookalike
 - [ ] Verification is bidirectional (SEP-1): an issuer claiming a domain is not
       enough; the domain's `stellar.toml` must list the asset back
 - [ ] For a code with many issuers — `BTC` (415) is the sharpest classic case —
