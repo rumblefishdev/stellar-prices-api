@@ -35,9 +35,9 @@
     },
     {
       "id": "CBIJBDNZNF4X35BJ4FFZWCDBSCKOP5NB4PLG4SNENRMLAPYG4P5FM6VN",
-      "code": "",
+      "code": "SolvBTC",
       "form": "contract",
-      "why": "top-volume soroban-native asset; only asset kind addressable by contract form"
+      "why": "top-volume soroban-native asset; only asset kind addressable by contract form. Code was \"\" until task 0210 resolved symbol() off the contract; verified on prod 2026-09-02"
     },
     {
       "id": "USDCAllow:GDIEKKIQWMIZ4LD3RP3ABPN7X5KEAEWYMR634BRHB7EULIMEVREWLF3G",
