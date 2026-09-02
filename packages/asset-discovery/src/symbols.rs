@@ -103,11 +103,22 @@ pub struct SymbolStats {
 ///
 /// Built here rather than at the call site so the stage's time bound stays next
 /// to the constant that states it.
+///
+/// # Panics
+///
+/// If the client cannot be built — in practice a TLS backend that failed to
+/// initialise, which is an environment fault at cold start, identical on every
+/// invocation. Deliberately not a silent fallback to `Client::default()`: that
+/// client carries **no timeout**, so the stage's whole `MAX_CONTRACTS_PER_RUN ×
+/// RPC_TIMEOUT_SECS` bound would quietly become unbounded, and 25 hung requests
+/// would eat the Lambda's five minutes ahead of the ledger scan that runs after
+/// it. A loud failure at startup beats an hourly discovery outage with no
+/// obvious cause.
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(RPC_TIMEOUT_SECS))
         .build()
-        .unwrap_or_default()
+        .expect("build an HTTP client with a timeout")
 }
 
 /// Base64 `TransactionEnvelope` invoking the zero-argument `func()` on
