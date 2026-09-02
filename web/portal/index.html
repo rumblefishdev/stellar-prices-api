@@ -8,15 +8,15 @@
     <meta name="robots" content="noindex" />
     <title>Stellar Prices API — API keys</title>
     <!-- No `<base href>`: Vite's `base` option (vite.config.mts) already
-         rewrites asset URLs to `/api-tokens/`, and a `<base>` tag on top of it
+         rewrites asset URLs to `/api/`, and a `<base>` tag on top of it
          would resolve them twice. The router's `basename` handles routes.
 
          Root-relative `/favicon.ico`, NOT `./favicon.ico`. Vite prefixes
          absolute public-dir URLs with `base` and leaves relative ones untouched,
          so the relative form shipped verbatim and resolved against whatever path
-         the browser was on. That happens to work at `/api-tokens/` and breaks on
-         every sub-route task 0195 adds — `/api-tokens/keys/new` would ask for
-         `/api-tokens/keys/favicon.ico` and get a 403 from S3. -->
+         the browser was on. That happens to work at `/api/` and breaks on
+         every sub-route — `/api/docs` would ask for `/api/docs/favicon.ico`,
+         which the host rewrites to the page itself. -->
     <link rel="icon" type="image/x-icon" href="/favicon.ico" />
     <link rel="stylesheet" href="/src/styles.css" />
   </head>

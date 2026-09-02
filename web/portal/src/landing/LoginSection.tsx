@@ -22,14 +22,13 @@ import { LOGIN_ANCHOR } from './links';
  * The section the "Get API Key" controls scroll to — the Figma login frame,
  * rendered in place rather than on a route of its own.
  *
- * **In place, deliberately.** Task 0195 has not landed the per-prefix SPA
- * fallback, so a hard refresh on `/api/login` resolves against S3, which
- * grants `s3:GetObject` and not `s3:ListBucket` — a missing key comes back as
- * `403 AccessDenied`, which the router never sees and cannot handle. Every
- * redirect in the OAuth flow also lands back on `/api/`, so a login
- * route would be a URL the flow returns *from* and never *to*. A section keeps
- * refresh, Back and the callback all working today; when 0195 lands, this is
- * the component a route would render.
+ * **In place, deliberately.** Every redirect in the OAuth flow lands back on
+ * `/api/`, so a login route would be a URL the flow returns *from* and never
+ * *to* — a section keeps refresh, Back and the callback all working. (The
+ * original reason was different and no longer applies: a hard refresh on
+ * `/api/login` used to resolve against S3 and come back `403 AccessDenied`.
+ * The host rewrites extensionless paths to the bundle now, so `/login` IS a
+ * route — see `app.tsx` — and this component is what it renders.)
  *
  * The backdrop repeats the hero's grid and glow, at the same 80 px pitch. That
  * is what makes the scroll read as arriving somewhere rather than as the page

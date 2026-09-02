@@ -28,16 +28,17 @@ const BASE_PATH = '/api/';
 /**
  * Dev-server proxy targets, mirroring `soroban-block-explorer`'s pattern.
  *
- * The browser only ever talks to localhost, so dev is same-origin exactly like
- * production is — which is the property task 0184 bought by putting the API on
- * the same distribution, and the one that lets task 0186's session cookie be
- * `SameSite=Lax`. Developing against a cross-origin API would hide every CORS
- * and cookie problem until the first deploy.
+ * The browser only ever talks to localhost, so dev is same-origin. Production
+ * is not, since task 0194: the page is on the explorer's host and calls the
+ * API on its own hostname, cross-origin and same-site — so a CORS or cookie
+ * problem on the backend's side is one this proxy cannot show. What it does
+ * show is everything else, with one origin and no build variable to set.
  *
- * `DEV_API_PROXY_TARGET` should be the **CloudFront distribution**, not the
- * execute-api URL: the distribution serves all four of these paths at exactly
- * the same shape this proxy forwards, whereas execute-api serves them under
- * `/{stage}` and would need a rewrite here that production does not perform.
+ * `DEV_API_PROXY_TARGET` should be the **API's own hostname**
+ * (`https://prices-api.sorobanscan.rumblefish.dev`), not the execute-api
+ * URL: the custom domain serves all four of these paths at exactly the shape
+ * this proxy forwards, whereas execute-api serves them under `/{stage}` and
+ * would need a rewrite here that production does not perform.
  */
 /**
  * The backend's top-level segments under `/api/`. The bundle shares the prefix
@@ -65,9 +66,9 @@ const PROXIED_PATHS = [
   //
   // ⚠️ For the sign-in round-trip, `DEV_API_PROXY_TARGET` must point at a LOCAL
   // `cargo run --bin serve` (with `PORTAL_ENABLED=true` and a
-  // `PORTAL_OAUTH_SECRET_FILE`), not at the CloudFront distribution — production
-  // runs with the portal closed, so proxying there gets an empty 404 from the
-  // gate. See docs/runbooks/portal-oauth-deploy-prep.md § 4.
+  // `PORTAL_OAUTH_SECRET_FILE`), not at production — the production callback
+  // is registered against the production host and lands there, never back on
+  // localhost. See docs/runbooks/portal-oauth-deploy-prep.md § 4.
   //
   // A regex key (Vite treats keys starting with `^` as RegExp) — see
   // `PORTAL_BACKEND_SEGMENTS`.

@@ -148,7 +148,6 @@ namespace:
 | `/prices/{env}/ledger-processor-lambda-arn` | Live ingest Lambda ARN (for BE SNS subscription)          | BE task 0050 / task 0038 |
 | `/prices/{env}/api-gateway-id`              | REST API ID (for downstream domain wiring)                | task 0040                |
 | `/prices/{env}/pricing-api-free-plan-id`    | Usage plan ID for key issuance + `GetUsage`               | task 0160 / 0187         |
-| `/prices/{env}/portal-distribution-domain`  | CloudFront domain serving the portal                      | task 0184 / 0186 / 0195  |
 | `/prices/{env}/portal-oauth-secret-name`    | Secrets Manager NAME of the portal's Discord OAuth bundle | task 0186                |
 
 **Boundary rule:** the deploy role's IAM scope enforces this — it
@@ -216,7 +215,8 @@ role read on exactly that ARN, and sets `PORTAL_OAUTH_SECRET_NAME` —
 never the value, which the operator creates and updates by hand.
 
 Here the out-of-band ownership is load-bearing for a second reason: the
-`redirect_uri` field is re-pointed at the custom-domain cutover, and a
+`redirect_uri` field is re-pointed whenever the backend's hostname changes
+(it did on 2026-08-31, task 0194), and a
 CloudFormation-managed value would be restored to the committed one by
 the next deploy, breaking sign-in silently some time afterwards.
 

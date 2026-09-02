@@ -43,7 +43,8 @@ use super::crypto::{self, CTX_SESSION};
 /// sign in, get a key, occasionally check usage — not an application they live
 /// in, so a long-lived cookie buys little. Against that, from [0187] onwards
 /// this cookie authorizes revealing an API key, and it is `SameSite=Lax` on a
-/// shared CloudFront domain. Re-signing in costs a redirect and no consent
+/// host shared with another application. Re-signing in costs a redirect and no
+/// consent
 /// screen (Discord does not re-prompt for scopes already granted), which is
 /// what makes a short session cheap here and not merely virtuous.
 pub const SESSION_TTL_SECS: u64 = 24 * 60 * 60;

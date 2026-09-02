@@ -33,20 +33,21 @@ struct Health {
     path = "/health",
     tag = "ops",
     summary = "`GET /health` — liveness probe.",
-    description = "Returns 200 with a small JSON body and a non-cacheable \
-                   `Cache-Control`. Does not touch ClickHouse, so it answers \
-                   even when the database client is unavailable.",
+    description = "Returns 200 with a small JSON body carrying `\"status\": \"ok\"` and a \
+                   non-cacheable `Cache-Control`. Answered at the edge without \
+                   reaching the service, so it reports that the API is up — not that \
+                   its data is fresh, and not that the database is reachable.",
     // Opts out of the global `x-api-key` requirement — /health is a keyless
     // API Gateway mock and is exempt from the in-app gate (task 0124).
     security(()),
     responses(
-        (status = 200, description = "Service is healthy"),
+        (status = 200, description = "The API is up"),
         // Keyless does not mean unthrottled: the stage-wide throttle covers
         // `/*` `*`, so API Gateway can 429 this route too. No body — the
         // gateway produces this response, not the handler (there is none: this
         // is a MockIntegration). Documented so a generated client has an error
         // branch instead of trying to deserialize `{"message": …}` as `Health`.
-        (status = 429, description = "Rate limit exceeded (API Gateway stage throttle)"),
+        (status = 429, description = "Rate limit exceeded"),
     )
 )]
 pub async fn health() -> Response {

@@ -78,121 +78,94 @@ and the extracted spec) plus the faster in-process check in
 `packages/prices-api/tests/openapi.rs`. If this table drifts from either, fix
 the table.
 
-## Portal distribution — CloudFront (task 0184)
+## Portal hosting — two hosts, no distribution of ours (tasks 0194, 0195)
 
-**Portal:** `https://dojr4epgxo2qp.cloudfront.net/api/`
+**Portal:** `https://sorobanscan.rumblefish.dev/api/`
+**API reference:** `https://sorobanscan.rumblefish.dev/api/docs`
 
-Distribution `EU8O3ADXFZP5U`, deployed 2026-08-13. The domain is also published
-to SSM at `/prices/production/portal-distribution-domain`, which is where task
-0186 (Discord redirect URI) and task 0195 (custom domain) should read it from
-rather than copying it.
+The portal is a page on one host that calls an API on another:
 
-> **Ahead of the deploy.** This section describes what task 0184's branch
-> synthesizes. Three of its properties are not live yet — the trailing-slash
-> redirect, CloudFront access logs, and `Cache-Control` on the uploaded objects
-> — so `/api` answers `403 AccessDenied` today rather than redirecting.
-> The gateway is a fourth case: it currently maps the portal as
-> `ANY /api/{proxy}` and `.../{proxy}/{sub}` with **no throttle**, an
-> intermediate state left by the 2026-08-14 deploy attempt (see task 0184).
-> Moving it to the `{proxy+}` above means replacing a path-parameter resource,
-> which API Gateway will not do in one update — deploy once with the portal
-> resources removed, then again with them. **Task 0205 owns those deploys and
-> deleting this note.**
+| What               | Where                                                                                                                                                         | Owned by                                                                                                     |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| the page (bundle)  | `s3://production-soroban-explorer-api-spa/api/`, behaviour `/api/*` of the block explorer's distribution `EA2TLS5SS5M87` (alias `sorobanscan.rumblefish.dev`) | `soroban-block-explorer` (their stack); this repo syncs the bundle with `make -C infra sync-portal-explorer` |
+| the backend + spec | `https://prices-api.sorobanscan.rumblefish.dev` — the custom domain above, no CloudFront in front of it                                                       | `ApiGatewayStack` here                                                                                       |
 
-A second, equivalent way to reach the API. One CloudFront distribution fronts
-two origins: a private S3 bucket holding the portal bundle, and the API Gateway
-stage above. That is not a convenience — it is what makes every portal request
-**same-origin**, which is what lets the session cookie (task 0186) be
-`SameSite=Lax` and keeps CORS out of portal traffic entirely.
+Decided 2026-08-31 (task 0194, "decision A"). The bundle is built with
+`VITE_PORTAL_API_ORIGIN` set to the API hostname, so every backend call is
+**cross-origin and same-site**: the session cookie is `SameSite=Lax` and rides
+along because the two hosts share a registrable domain, and the portal's
+routes answer CORS for exactly one origin, with credentials
+(`portal::cors_layer` in the handler and `addCorsPreflight` on `/api/{proxy+}`
+at the gateway — both name `portalWebOrigin` from `infra/envs/production.json`).
 
-Behaviours, in precedence order. CloudFront takes the **first** match, so the
-order is part of the configuration, not a presentation choice:
+**Our own distribution is gone.** Task 0184's `PortalHostingStack` — a private
+bucket and a CloudFront distribution (`dojr4epgxo2qp.cloudfront.net`) fronting
+both the bundle and the execute-api origin — was the portal's first home and,
+after the move above, a second, ungated copy of the same portal on a hostname
+nobody audited. Task 0195 destroyed it on 2026-09-01 and removed the stack, its
+`deploy-production-portal` target and the
+`/prices/production/portal-distribution-domain` SSM parameter. The
+execute-api origin it fronted still answers on its own URL; see task 0126 for
+whether that is announced as retired or kept as an alias.
 
-| Path pattern     | Origin      | Notes                            |
-| ---------------- | ----------- | -------------------------------- |
-| `/api/*`         | API Gateway | must precede the row below       |
-| `/api/*`         | S3          | the portal bundle                |
-| `/v1/*`          | API Gateway | data routes                      |
-| `/api-docs-json` | API Gateway | root-level, **not** under `/v1`  |
-| `/health`        | API Gateway | root-level                       |
-| _(default)_      | S3          | `/` redirects to `/api/` for now |
+### The path convention
 
-The convention, settled 2026-08-07 and meant for the frontends that follow:
-**`<app>/*` is that app's bundle, `<app>/api/*` is that app's backend.** A new
-frontend adds two rows and invents nothing.
+Everything of ours on the shared host lives under **one prefix, `/api/`**, with
+no sub-prefix for the bundle or the backend: `/api/login` is a page,
+`/api/docs` is a page, `/api/auth/login` is the backend, `/api/api-docs-json`
+is the OpenAPI document. On that host the root belongs to the block explorer,
+so nothing of ours may assume it.
 
-That ordering is no longer a hand-checked property: `openapi:verify-routes`
-takes the first pattern that matches a portal backend path out of the
-synthesized distribution and fails CI unless it is `/api/*` pointing
-at the execute-api origin. The same check asserts the prefix is identical in the
-handler (`PORTAL_API_PREFIX`), in the CDK routing table (`PORTAL_BACKEND`) and
-in the script itself, so moving it in one place cannot leave the other two
-behind.
+This replaced task 0161's `<app>/*` + `<app>/api/*` convention on 2026-08-31,
+which for an app called "api" produced `/api/api/…` (task 0235's record of the
+three days that layout lived). The rule that decides which side of the split
+is enumerated:
 
-**Three paths redirect, and only three.** A pattern like `/api/*` does
-not match `/api`, so the bare prefix would fall to the default behaviour
-and S3 would answer `403 AccessDenied` XML — it grants `s3:GetObject` and not
-`s3:ListBucket`, so a missing key reads as forbidden rather than absent. A
-viewer-request function redirects the bare prefixes to their trailing-slash
-form, which is what a reviewer trimming the documented URL should get:
+- **the bundle's paths are a short, fixed list** — `/api/`, `/api/index.html`,
+  `/api/favicon.ico`, `/api/assets/*` and the app's routes — and
+- **the backend is the open-ended side** (five slices added routes; none
+  touched infrastructure), so it gets the catch-all.
 
-| Request | Result                                    |
-| ------- | ----------------------------------------- |
-| `/`     | `302` → `/api/` → the portal page         |
-| `/api`  | `302` → `/api/` → the portal page         |
-| `/api`  | `302` → `/api/` → the gateway, **not** S3 |
+The failure modes are asymmetric, which is why it is this way round: a bundle
+path that reaches the API gets a loud JSON `404`; a backend call that reaches
+a static host gets a `200` full of HTML that only surfaces as a JSON parse
+error in a browser (`web/portal/src/api/portal.ts` names the URL when it
+happens).
 
-The targets are a fixed list rather than a rule like "any path with no file
-extension". That generalisation was written first and rejected twice over: it
-interpolates `request.uri` into `Location`, and CloudFront does not collapse a
-leading `//`, so `//evil.com/x` would have redirected to a **different origin**
-— an open redirect on the origin that will host task 0186's OAuth callback. It
-would also fight task 0185's router, rewriting `/api/keys` to a
-trailing-slash form in the address bar that task 0195's SPA fallback would then
-have to undo. A new frontend adds its prefix to the list.
+On the explorer's host the split needs no routing table at all: their `/api/*`
+behaviour is S3, and their viewer-request function rewrites **every path whose
+last segment has no `.`** to `/api/index.html`. That is what makes a hard
+refresh on `/api/dashboard` — or on `/api/docs` — boot the portal, and it is
+also why the API reference is a **route of the portal** rather than a static
+`docs/` folder in the bundle: a folder would have been reachable only as
+`/api/docs/index.html`. Adding a page to the app therefore needs nothing on
+the hosting side; adding a backend route needs nothing either, because the
+gateway maps `/api/{proxy+}` and the bundle calls the API host directly.
 
-`/api/` reaches API Gateway but matches no method on the resource, so
-it answers `403 {"message":"Missing Authentication Token"}` — the gateway's
-standard response for an unmapped path, the same as `/v1`. It is deliberately
-**not** the empty `404` described below: that applies to paths _under_ the
-prefix, which `{proxy+}` maps and the handler then gates.
-
-**Access logs are on**, to a private bucket with a 90-day expiry. Cookies are
-excluded: from task 0186 the portal's cookie is the session itself, and logging
-it would write a usable credential to S3 in plaintext. CloudFront cannot
-backfill logs, so this has to be on before the incident, not after.
-
-Three properties worth knowing before changing anything here:
-
-- **The bucket is private.** No public objects, no ACLs; the distribution reads
-  it through Origin Access Control and nothing else can.
-- **API behaviours are uncached at the edge and forward everything except
-  `Host`.** Forwarding the viewer's `Host` to an execute-api origin 403s every
-  request; the obvious `CACHING_OPTIMIZED` policy would strip `x-api-key` and
-  403 every keyed route. The gateway's own stage cache (table above) is
-  unaffected.
-- **The execute-api base keeps working.** Only one of the two is documented and
-  supported as _the_ base URL, and until the custom domain lands (task 0195)
-  that is still the execute-api URL at the top of this file — `apiBaseUrl` and
-  the OpenAPI `servers` block are unchanged by this task, so a reader is not
-  handed a base that changes twice in a month.
-
-Deploy and cache invalidation are one operation
-(`make -C infra deploy-production-portal`); there is no separate upload step to
-forget.
+What the shared host does NOT give us, and what still gates the portal's
+public availability: the same function answers `401` to anyone without the
+explorer's staging credentials while `enableApiSpaBasicAuth` is on in their
+`production.json`. Turning it off is the explorer team's call, not this
+repo's.
 
 ## OpenAPI specification (task 0124)
 
 ```
-GET https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/api-docs-json
+GET https://prices-api.sorobanscan.rumblefish.dev/api-docs-json
 ```
 
 Anonymous — no API key needed. Verify with:
 
 ```bash
-curl -sS https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/api-docs-json \
+curl -sS https://prices-api.sorobanscan.rumblefish.dev/api-docs-json \
   | jq '{openapi, servers, paths: (.paths | keys)}'
 ```
+
+The same bytes are served at `/api/api-docs-json` (the portal's alias, task
+0194), and rendered as the portal's API reference at
+`https://sorobanscan.rumblefish.dev/api/docs` (task 0195) — Swagger UI's
+shape (tags, collapsible operations, parameters, responses, schemas) in the
+portal's own design system, reading the live document on every visit.
 
 - **Format:** OpenAPI 3.1.0, generated from the axum routes by `utoipa`, so it
   cannot drift from the implementation.
@@ -201,6 +174,16 @@ curl -sS https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/ap
   self-service dead end. `/health` set the anonymous-route precedent. The
   document contains nothing key-specific, which is what makes it safe to cache
   for all callers.
+- **CORS:** `Access-Control-Allow-Origin: *`, on both copies (task 0195). The
+  portal's API reference is a page on `sorobanscan.rumblefish.dev` that
+  `fetch`es the document from the API host, and so may a partner's
+  browser-side tooling.
+  `*` rather than the portal's origin because the document is public and
+  carries no credential, and because the value must be a **constant**: the
+  gateway's stage cache would serve a reflected origin to the next caller.
+  This is the only `*` on the API — the portal's own routes answer one
+  origin with credentials, and the `/v1` data routes answer no CORS at all
+  until task 0126.
 - **`x-api-key` scheme:** declared in `components.securitySchemes` and required
   document-wide, with `/health` and `/api-docs-json` opting out explicitly. A
   reader can therefore see exactly which routes need a key without being told.
@@ -231,11 +214,16 @@ npm run openapi:extract   # → target/openapi.json, servers stamped from config
 - ~~**Custom domain** (task 0126)~~ — landed 2026-08-31 (task 0194):
   `prices-api.sorobanscan.rumblefish.dev`, `apiBaseUrl` and `servers` updated
   in the same change as this file.
-- **Swagger UI** (task 0195) — served from the portal distribution at `/docs/*`,
-  rendering the live `/api-docs-json` rather than a checked-in copy. Lands with
-  the custom domain and the per-prefix SPA fallback.
-- **Onboarding portal** — the distribution and its routing table are live (task
-  0184); the portal itself ships closed behind `PORTAL_ENABLED` and is opened by
-  task 0194's audit.
+- ~~**Swagger UI** (task 0195)~~ — landed 2026-09-01 as the portal's API
+  reference, `https://sorobanscan.rumblefish.dev/api/docs`, rendering the
+  live `/api-docs-json` in the portal's own design system. Nothing on it
+  sends a request until the data routes answer CORS (task 0126).
+- **Onboarding portal** — open (`PORTAL_ENABLED=true` since task 0194) at
+  `https://sorobanscan.rumblefish.dev/api/`, behind the block explorer's
+  basic auth until their `enableApiSpaBasicAuth` is turned off; that switch
+  and the move from the test guild to the Stellar guild (task 0179) both
+  precede advertising the URL.
+- **CORS on `/v1`** (task 0126) — no browser can call the data routes yet;
+  the portal's API reference sends no requests for exactly this reason.
 - **`info.license`** (task 0155) — currently emitted empty; the licensing
   decision is open.

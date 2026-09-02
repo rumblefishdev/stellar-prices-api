@@ -66,13 +66,13 @@ use crate::config::AppConfig;
 /// Path prefix owned by the portal's backend. Everything under it is gated.
 ///
 /// `/api/` is the whole self-service portal on the shared host (task 0194,
-/// 2026-08-31): the bundle **and** the backend share this one prefix, with no
-/// sub-prefix for either. The CloudFront table makes the split, the other way
-/// round from how it used to: a short fixed list of bundle paths
-/// (`/api/`, `index.html`, `favicon.ico`, `assets/*`, the SPA routes) is
-/// carved out to S3, and everything else under `/api/*` reaches this Lambda.
-/// So from in here the prefix is simply ours — a bundle path that arrives
-/// (it should not) is a plain `404`, the same as any unrouted path.
+/// 2026-08-31): the bundle **and** the backend answer under this one prefix,
+/// with no sub-prefix for either. Nothing routes between them, because they
+/// are on different HOSTS — the bundle is served from the block explorer's
+/// distribution at `sorobanscan.rumblefish.dev/api/`, and the page calls this
+/// backend on the API's own hostname, cross-origin and same-site. So from in
+/// here the prefix is simply ours end to end; a bundle path that arrives (it
+/// should not) is a plain `404`, the same as any unrouted path.
 ///
 /// Replaces [0161]'s `<app>/*` + `<app>/api/*` convention, which produced
 /// `/api/api/…` for an app that is itself called "api". The OAuth redirect URI
@@ -161,8 +161,9 @@ impl PortalGate {
 /// Wired in [`crate::app`] rather than through `openapi::register_routes`,
 /// deliberately: these are the portal's own endpoints, not partner-facing data
 /// routes, and publishing them in the OpenAPI document would advertise a
-/// half-built portal to every integrator reading the spec. [0195]'s Swagger UI
-/// describes the public API; the portal describes itself to its own bundle.
+/// half-built portal to every integrator reading the spec. [0195]'s API
+/// reference describes the public API; the portal describes itself to its own
+/// bundle.
 pub fn apply(router: Router, config: &AppConfig) -> Router {
     let gate = PortalGate {
         enabled: config.portal_enabled,

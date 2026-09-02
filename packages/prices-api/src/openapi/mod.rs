@@ -6,6 +6,9 @@
 //! so the documented routes and the served routes can never drift. Each `/v1`
 //! resource adds its `routes!(...)` here as it lands (Phases 2–3).
 
+mod descriptions;
+
+use descriptions::Descriptions;
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 use utoipa_axum::router::OpenApiRouter;
@@ -59,10 +62,9 @@ impl Modify for SecurityAddon {
     path = "/api-docs-json",
     tag = "ops",
     summary = "`GET /api-docs-json` — this OpenAPI document.",
-    description = "Returns the machine-readable description of this API. \
-                   Served anonymously. The document is identical for the life \
-                   of a deployment; revalidate every 5 minutes to pick up the \
-                   next one.",
+    description = "The machine-readable description of this API, served \
+                   anonymously. The document changes only with a new release; \
+                   revalidate every 5 minutes to pick the next one up.",
     security(()),
     responses(
         (
@@ -80,7 +82,7 @@ impl Modify for SecurityAddon {
         // whose body is `{"message": …}`. Documented so a client generated from
         // this document has an error branch rather than trying to parse that as
         // the OpenAPI document itself.
-        (status = 429, description = "Rate limit exceeded (API Gateway stage throttle)"),
+        (status = 429, description = "Rate limit exceeded"),
         (status = 500, description = "The API description could not be served"),
     )
 )]
@@ -98,10 +100,13 @@ fn api_docs_json() {}
     info(
         title = "Stellar Prices API",
         version = env!("CARGO_PKG_VERSION"),
-        description = "Public read API for Stellar asset prices, OHLCV, oracle \
-                       cross-reference, and backfill status."
+        description = "Public read API for Stellar asset prices: current prices, OHLCV \
+                       candles, oracle readings and the progress of the historical \
+                       backfill. Prices, volumes and rates are decimal strings rather \
+                       than JSON numbers, so no precision is lost in transport; counts \
+                       and ledger sequences are plain integers."
     ),
-    modifiers(&SecurityAddon),
+    modifiers(&SecurityAddon, &Descriptions),
     security(("api_key" = [])),
     paths(api_docs_json),
     components(schemas(
@@ -130,11 +135,11 @@ fn api_docs_json() {}
         crate::assets::queries_ch::BaseCurrency,
     )),
     tags(
-        (name = "ops", description = "Operational endpoints (health)"),
-        (name = "assets", description = "Asset metadata"),
-        (name = "prices", description = "Asset prices (current + batch)"),
-        (name = "oracles", description = "Oracle cross-reference prices"),
-        (name = "backfill", description = "Historical backfill progress")
+        (name = "ops", description = "Liveness and this API description"),
+        (name = "assets", description = "Asset metadata and the tracked-asset listing"),
+        (name = "prices", description = "Current prices, batch prices and OHLCV history"),
+        (name = "oracles", description = "Latest oracle readings per asset"),
+        (name = "backfill", description = "Progress of the historical backfill")
     )
 )]
 pub struct ApiDoc;

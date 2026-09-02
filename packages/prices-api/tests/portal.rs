@@ -10,7 +10,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::routing::get;
-use prices_api::portal::{CONFIG_PATH, PortalGate, gate_portal};
+use prices_api::portal::{CONFIG_PATH, OPENAPI_PATH, PortalGate, gate_portal};
 use prices_api::{AppConfig, AppState, app};
 use tower::ServiceExt;
 
@@ -456,15 +456,69 @@ async fn the_revokes_preflight_allows_the_marker_header_from_the_configured_orig
 /// API and the root OpenAPI copy answer a cross-origin request as they
 /// always did, with no allow header — `/v1` is keyed, not cookied, and
 /// nothing on the bundle calls it.
+///
+/// ⚠️ **Amended by task 0195: the OpenAPI copies are no longer part of that
+/// claim.** They now carry `Access-Control-Allow-Origin: *` of their own,
+/// written by the handler in `lib.rs` so the portal's API reference page can
+/// fetch the document cross-origin. The property this test is named for is
+/// unchanged — it just cannot be observed on the allow header any more, so
+/// it is observed on `Access-Control-Allow-Credentials`, which only this
+/// layer writes. `/v1` and `/health` are still asserted on both headers.
 #[tokio::test]
 async fn the_cors_layer_stops_at_the_portal_prefix() {
     let config = config_with_origin(Some(WEB_ORIGIN));
-    for uri in ["/api-docs-json", "/health"] {
+    let reply = send_with(&config, "GET", "/health", &[("origin", WEB_ORIGIN)]).await;
+    assert!(
+        reply.headers().get("access-control-allow-origin").is_none(),
+        "/health is outside the portal"
+    );
+    // `/v1/…/price` with a malformed identifier: a `400` from the handler's
+    // own validation, before any database call, so the data API is covered
+    // here without this suite needing ClickHouse.
+    for uri in [
+        "/api-docs-json",
+        OPENAPI_PATH,
+        "/health",
+        "/v1/assets/not-an-asset/price",
+    ] {
         let reply = send_with(&config, "GET", uri, &[("origin", WEB_ORIGIN)]).await;
         assert!(
-            reply.headers().get("access-control-allow-origin").is_none(),
-            "{uri} is outside the portal"
+            reply
+                .headers()
+                .get("access-control-allow-credentials")
+                .is_none(),
+            "{uri} is outside the portal's credentialed CORS answer"
         );
+    }
+}
+
+/// Both copies of the OpenAPI document are readable from ANY origin (task
+/// 0195): the portal's Swagger UI fetches the spec from the API's own hostname,
+/// cross-origin, and so may a partner's tooling. `*` — constant, so the
+/// gateway's stage cache cannot serve one caller's origin to the next — and
+/// present whether or not the request carried an `Origin` at all, and whether
+/// or not a portal origin is configured: it is a property of the document,
+/// not of the portal.
+#[tokio::test]
+async fn the_openapi_document_is_readable_from_any_origin() {
+    for config in [
+        config_with_origin(Some(WEB_ORIGIN)),
+        config_with_origin(None),
+    ] {
+        for uri in ["/api-docs-json", OPENAPI_PATH] {
+            for headers in [&[][..], &[("origin", "https://partner.example")][..]] {
+                let reply = send_with(&config, "GET", uri, headers).await;
+                assert_eq!(reply.status(), StatusCode::OK, "{uri}");
+                assert_eq!(
+                    reply
+                        .headers()
+                        .get("access-control-allow-origin")
+                        .map(|v| v.to_str().unwrap()),
+                    Some("*"),
+                    "{uri} with {headers:?}"
+                );
+            }
+        }
     }
 }
 
