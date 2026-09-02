@@ -10,6 +10,16 @@ tags:
 milestone: 2
 links: []
 history:
+  - date: 2026-09-02
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Re-measured on prod while deploying [[0210]]: 3,300 asset_ids now serve
+      6,606 identities (was 3,275 ids on 2026-08-03), and one id carries three
+      identities rather than two. 10 of those ids touch soroban contracts,
+      covering 20 identities — the measurement that made 0210 key its symbol
+      table on contract_address instead of asset_id, so that work sits beside
+      this defect rather than adding to it.
   - date: 2026-08-03
     status: backlog
     who: okarcz
@@ -68,6 +78,46 @@ current_prices FINAL rows                       4,068
 current_price_usd rows                          4,442   (+374 duplicates)
 asset_ids with >1 row in assets FINAL           3,275
 ```
+
+## Re-measured on prod, 2026-09-02 — still live, and slightly worse
+
+Taken while deploying [[0210]], a month after the numbers above:
+
+```
+distinct natural identities                     207,754
+distinct asset_ids                              204,448
+excess identities (identities − ids)              3,306
+asset_ids serving >1 identity                     3,300
+identities living under those ids                 6,606
+worst single asset_id                                 3   identities
+```
+
+The 3,275 figure of 2026-08-03 is now **3,300 affected ids**. It grows with the
+registry, which is what "the intern assigns ids that do not track identity"
+predicts — this is not drift in the measurement, it is the defect accreting.
+
+**One id carries three identities**, not merely two. Any fix that assumes pairs
+will leave that case behind.
+
+### The soroban slice, and why [[0210]] did not inherit it
+
+Of the 3,300, **10 ids touch a Soroban contract**, covering 20 identities. That
+measurement is why 0210's `prices.asset_symbol` is keyed on `contract_address`
+rather than `asset_id`: an `asset_id`-keyed symbol would have been
+unattributable for 19% of the 52-contract population, and would have added to
+this defect rather than sitting beside it.
+
+So the symbol table is unaffected — but the `assets` side of every join it
+participates in still carries the ambiguity. 0210 dissolved its own exposure,
+not this one.
+
+### A measurement hazard worth knowing before re-counting
+
+`prices.assets` is rewritten in full every hour ([[0140]]), so a plain `count()`
+reads 1×, 2× or 3× depending on where the merge cycle is — 623,154 / 207,741 /
+415,495 were observed on three consecutive hours. **Every number in this section
+is `uniqExact`.** A raw count taken mid-cycle led, during 0210's deploy, to a
+false conclusion that the registry had doubled.
 
 ## The deeper question this exposes
 

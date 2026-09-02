@@ -1,8 +1,8 @@
 /**
  * The prefix this app is served from — one definition, two consumers.
  *
- * Task 0184's CloudFront table routes `<app>/*` to that app's bundle, so this
- * bundle only ever answers under `/api/`. Getting there takes two
+ * The bundle is served under `/api/` on the shared host (task 0194) and only
+ * ever answers there. Getting there takes two
  * settings that must agree: Vite's `base` covers ASSETS, react-router's
  * `basename` covers ROUTES, and either one alone leaves the app broken on the
  * only URL it is served from.

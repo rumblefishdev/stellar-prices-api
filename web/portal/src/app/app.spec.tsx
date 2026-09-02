@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ROUTER_BASENAME } from '../base-path';
 import App from './app';
+import { FIXTURE } from '../docs/openapi.fixture';
 
 /**
  * Records the router's current query string, so the one-shot landing-param
@@ -76,6 +77,8 @@ function stubRoutes(
 }
 
 const CONFIG_URL = '/api/config';
+/** The OpenAPI document the API reference route fetches (task 0195). */
+const SPEC_URL = '/api/api-docs-json';
 const ME_URL = '/api/auth/me';
 const LOGOUT_URL = '/api/auth/logout';
 const USAGE_URL = '/api/usage';
@@ -127,6 +130,7 @@ const keyNoKey = () => ({
 const openAndSignedOut = () =>
   stubRoutes({
     [CONFIG_URL]: openConfig,
+    [SPEC_URL]: () => ({ json: async () => FIXTURE }),
     [ME_URL]: () => ({ json: async () => ({ authenticated: false }) }),
   });
 
@@ -134,6 +138,7 @@ const openAndSignedOut = () =>
 const openAndSignedIn = () =>
   stubRoutes({
     [CONFIG_URL]: openConfig,
+    [SPEC_URL]: () => ({ json: async () => FIXTURE }),
     [ME_URL]: () => ({
       json: async () => ({
         authenticated: true,
@@ -386,6 +391,45 @@ describe('routes', () => {
     expect(lastPath).toBe('/quick-start');
   });
 
+  it('serves the API reference to a signed-in visitor under the dashboard bar', async () => {
+    openAndSignedIn();
+    renderAt('/docs');
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: /api reference/i }),
+    ).toBeTruthy();
+    // The document's own content, once it has arrived.
+    expect(
+      await screen.findByRole('button', { name: /GET \/v1\/assets/ }),
+    ).toBeTruthy();
+    const bar = within(
+      await screen.findByRole('navigation', { name: 'Dashboard' }),
+    );
+    expect(
+      bar
+        .getByRole('link', { name: 'OpenAPI Docs' })
+        .getAttribute('aria-current'),
+    ).toBe('page');
+    expect(
+      bar.getByRole('link', { name: 'Dashboard' }).getAttribute('aria-current'),
+    ).toBeNull();
+    expect(lastPath).toBe('/docs');
+  });
+
+  it('serves the API reference to a signed-out visitor under the landing bar', async () => {
+    openAndSignedOut();
+    renderAt('/docs');
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: /api reference/i }),
+    ).toBeTruthy();
+    expect(
+      await screen.findByRole('navigation', { name: 'Primary' }),
+    ).toBeTruthy();
+    expect(screen.queryByRole('navigation', { name: 'Dashboard' })).toBeNull();
+    expect(lastPath).toBe('/docs');
+  });
+
   it('points the footer dashboard link at the prefix the app is served from', async () => {
     openAndSignedIn();
     // WITH the basename, unlike every other test here: the bug this pins only
@@ -533,10 +577,10 @@ describe('portal home', () => {
     expect(screen.queryByText(/Checking whether/i)).toBeNull();
   });
 
-  // A `200` carrying HTML is what CloudFront returns when a backend path is
-  // routed to a bundle bucket — the regression `portal-hosting-stack.ts` fails
-  // CI to prevent on our distribution, and exactly what the shared host did
-  // before its `/api/*` row pointed at the API (task 0194, 2026-08-31). Unwrapped, `response.json()`
+  // A `200` carrying HTML is what the shared host returns when a backend
+  // call reaches it — a bundle built without `VITE_PORTAL_API_ORIGIN`, whose
+  // relative `/api/config` the explorer's `/api/*` behaviour rewrites to
+  // `/api/index.html` (task 0194, 2026-08-31). Unwrapped, `response.json()`
   // throws a bare SyntaxError about an unexpected `<`, which names neither the
   // URL nor the status and reads like a bug in this app.
   it('reports a 200 that is not JSON as a backend failure, with the status', async () => {

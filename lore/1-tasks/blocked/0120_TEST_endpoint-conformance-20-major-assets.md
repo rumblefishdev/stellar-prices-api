@@ -12,6 +12,25 @@ links:
   - "../../../packages/prices-api/src/lib.rs"
   - "../../../docs/prices-api-general-overview.md"
 history:
+  - date: 2026-09-02
+    status: blocked
+    who: stkrolikiewicz
+    note: >
+      Re-run after [[0210]] deployed: 870 pass, 16 fail, 0 skip. The fixture
+      changed for the first time — `CBIJ…`'s code from "" to SolvBTC, updated
+      after the worker resolved it on prod rather than before, and all 43 of its
+      checks pass. Pagination 18 pages / 3,567 distinct, down from 3,880, which
+      is the traded population moving rather than a regression. Found that AC 3
+      cannot go green as written: 0178 has landed, but its closing notes record
+      `vwap_24h 0` and `sources {}` for canonical USDC as decided sentinels for
+      a quote-only asset, not as pending work. The assertion needs to account
+      for `method`, or it blocks this task permanently by accident. Checked the
+      other two owners while there: 0135 and 0170 are both completed and
+      archived (2026-08-25 and 2026-08-27), so nothing open blocks AC 3 at all.
+      Of the 16 failures, 3 are the missing-USDC-pair class already recorded
+      here, 2 are 0178's decided sentinels, and the remaining 11 did not
+      reproduce 40 minutes later — 169 buckets, 0 violations on the suite's own
+      window.
   - date: 2026-07-23
     status: backlog
     who: okarcz
@@ -143,8 +162,10 @@ after 0072 and [[0119]].
 - [x] All 7 route groups exercised for every asset; every response validates
       against the OpenAPI spec (0 schema failures in the 2026-08-19 run)
 - [ ] No documented response field is a stub/sentinel for a liquid asset
-      (**failing on production** — deferred to [[0135]], [[0170]], [[0178]];
-      re-run must go green after those land)
+      (**failing on production** — deferred to [[0135]], [[0170]]; ⚠️ **needs
+      rewording, see the 2026-09-02 run**: [[0178]] has landed and deliberately
+      publishes `vwap_24h 0` / `sources {}` for a quote-only asset, so as
+      written this criterion can never go green — it must account for `method`)
 - [x] OHLCV invariants asserted (OHLC ordering, bucket alignment, no dupes —
       all pass wherever data exists)
 - [x] Cursor pagination on `GET /assets` proven exhaustive and duplicate-free
@@ -257,6 +278,85 @@ unrelated tasks spawned on develop — do not cross-reference). Two findings sha
   same 30-day window. The default USD mode pins the quote leg to canonical
   USDC ([[0170]]), which these assets never traded against — 0170's blast
   radius is every XLM-only-quoted asset, not just USDC's self-pair.
+
+### Run 2026-09-02 11:28 — after [[0210]] shipped
+
+```
+870 pass, 16 fail, 0 skip
+  ohlcv:1h  10 failing
+  price      5 failing
+  ohlcv:1d   1 failing
+pagination walk: 18 pages, 3,567 distinct assets
+```
+
+**The fixture changed for the first time.** `CBIJ…`'s `code` moved from `""` to
+`SolvBTC` (`conformance-assets.json:38`), because 0210 now resolves a Soroban
+token's `symbol()` and composes it into `asset_code`. The order mattered: the
+fixture had to move *after* the worker covered that contract on prod, or the
+suite fails for the whole window in between. All 43 `CBIJ…` checks pass,
+including *code matches the fixed list*.
+
+Pagination shrank from 3,880 distinct assets to 3,567. Both walks were
+exhaustive and duplicate-free; the listing `INNER JOIN`s `current_prices`, so
+this is the 24 h-traded population moving, not a suite regression.
+
+### AC 3 is blocked on nothing — all three owners have landed
+
+The deferral names [[0135]], [[0170]] and [[0178]]. **All three are completed
+and archived** — 0135 on 2026-08-25, 0170 on 2026-08-27, 0178 verified on prod
+today. Yet the 16 failures persist, so the attribution needs replacing, not
+waiting on.
+
+What they actually are, from the 2026-09-02 report:
+
+| class | count | owner |
+|---|---|---|
+| `all OHLCV values are decimal strings` | 11 | **transient** — see below |
+| `/price returns 200` (AUD, RON, EQL) | 3 | the missing-USDC-pair class this task already records at line 66 |
+| USDC `vwap_24h` / `sources` | 2 | [[0178]]'s **decision**, not its backlog |
+
+**The 11 are not reproducible.** Re-running the suite's exact window for
+`native` (`granularity=1h`, 7 days, explicit start/end) 40 minutes after the
+report: **169 buckets, 0 violations.** The assertion checks seven fields against
+`/^-?\d+(\.\d+)?$/`, and every one of them was a conforming decimal string.
+This is the enrichment-timing dependence this task already warns about — *"the
+count is not reproducible 15 minutes later"* — showing up in the one class
+nobody had pinned to an owner.
+
+So the honest state is: **no open task blocks AC 3.** Two of its failure classes
+are already documented here, one is a settled decision, and the largest is a
+timing artefact of the suite's own design. Whether that means rewording the
+criterion, moving this task out of `blocked/`, or both, is a decision this file
+should not make silently.
+
+### The criterion as written can never pass
+
+AC 3 — *"No documented response field is a stub/sentinel for a liquid asset"* —
+is still `[ ]` and deferred to [[0135]], [[0170]], [[0178]] with the note that a
+re-run *"must go green after those land"*. **0178 has landed**, verified on prod
+(`current_prices.method` present, `mv_current_prices` carrying `usdc_tip`,
+`vol_all`, `is_oracle`), and two of the five `price` failures are still
+canonical USDC:
+
+```
+vwap_24h is not the zero sentinel   → FAIL
+sources is a non-empty object       → FAIL
+```
+
+Live values, same asset, 2026-09-02: `price_usd 1.00033`, `volume_24h_usd
+68,893,238`, `method oracle`, **`vwap_24h 0`, `sources {}`**.
+
+That is not 0178 unfinished — it is 0178's **decision**. Its closing notes record
+exactly these values and call them *"every derived column on its decided
+sentinel"*: a quote-only asset has no base-leg candles, `per_source`
+(`current.sql:269`) groups `price_ohlcv_1m` by the candle's own `asset_id`, and
+fabricating a VWAP for an asset with no traded closes would re-create [[0144]]'s
+"one value meaning several things".
+
+So this assertion now tests against a settled decision. **It should account for
+`method`** — an `oracle`-priced asset legitimately has no VWAP and no sources —
+rather than block on a fix that is not coming. Until it is reworded, AC 3 cannot
+go green no matter what lands, which makes it a permanent blocker by accident.
 
 ### Suite hardening (code review, 2026-08-20)
 

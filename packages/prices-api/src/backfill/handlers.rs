@@ -15,12 +15,16 @@ use crate::state::AppState;
     get,
     path = "/backfill/status",
     tag = "backfill",
+    summary = "`GET /backfill/status` — progress of the historical backfill streams.",
+    description = "Progress of the two streams that load history: the SDEX archive, which walks the \
+     ledger\nhistory in order, and the one-shot Soroban AMM import. A stream that has never \
+     reported\nis absent from the response.",
     responses(
         (status = 200, description = "Backfill progress", body = BackfillStatus),
-        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
-        (status = 403, description = "API key missing, invalid, or not authorized for this API"),
-        (status = 429, description = "Per-key rate limit or monthly quota exceeded (API Gateway usage plan)"),
-        (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
 pub async fn get_status(State(state): State<AppState>) -> Response {

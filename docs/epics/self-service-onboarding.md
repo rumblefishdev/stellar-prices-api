@@ -19,6 +19,10 @@ appears as an acceptance criterion in every iteration of our design response
 ## Agreed scope (settled — from the design docs, do not relitigate)
 
 - Static portal hosted on **S3 + CloudFront**, alongside the OpenAPI/Swagger UI docs
+  — as delivered: the block explorer's bucket and distribution at
+  `sorobanscan.rumblefish.dev/api/` (task 0194), with the API reference a
+  route of the portal at `/api/docs` (task 0195, Swagger UI's shape in the
+  portal's design system); our own distribution was retired
 - **Sign-in via Discord OAuth** — matches how other Stellar/SCF-ecosystem services
   authenticate against the Stellar Discord. This replaces the earlier "anonymous form"
   assumption and is the primary abuse-prevention mechanism (see below)
@@ -225,21 +229,21 @@ a complete, hardened subsystem, which meant none of them was demonstrable alone
 and the first user-visible result sat behind all of them. It was re-cut into
 thirteen vertical increments, each one a user story that can be deployed and shown.
 
-| #   | Task   | Story                                                                              |
-| --- | ------ | ---------------------------------------------------------------------------------- |
-| 0   | `0183` | Nothing half-built is publicly reachable — the flag, because a deploy is a release |
-| 1   | `0184` | Portal reachable at a URL — private S3, CloudFront, routing, placeholder           |
-| 2   | `0185` | An ugly but real Vite/React app served from `/api/`, built by CI                   |
-| 3   | `0186` | Sign in with Discord — identity only, scope `identify`                             |
-| 4   | `0187` | Press a button, get a working key; come back and it is still there                 |
-| 5   | `0188` | See usage against quota and the reset date                                         |
-| 6   | `0189` | Only Stellar Discord members with a non-new account can get a key                  |
-| 7   | `0190` | The key registry table — deferred, and has to justify itself                       |
-| 8   | `0191` | Replace my key — revoke now, re-issue next quota period (merged with `0192`)       |
-| 9   | `0192` | ~~Revoke a leaked key~~ — merged into `0191` on 2026-08-21, superseded             |
-| 10  | `0193` | Make it presentable                                                                |
-| 11  | `0194` | Audit the assembled configuration (Tranche 3 AC 6)                                 |
-| 12  | `0195` | Swagger UI, per-prefix SPA fallback, custom domain                                 |
+| #   | Task   | Story                                                                               |
+| --- | ------ | ----------------------------------------------------------------------------------- |
+| 0   | `0183` | Nothing half-built is publicly reachable — the flag, because a deploy is a release  |
+| 1   | `0184` | Portal reachable at a URL — private S3, CloudFront, routing, placeholder            |
+| 2   | `0185` | An ugly but real Vite/React app served from `/api/`, built by CI                    |
+| 3   | `0186` | Sign in with Discord — identity only, scope `identify`                              |
+| 4   | `0187` | Press a button, get a working key; come back and it is still there                  |
+| 5   | `0188` | See usage against quota and the reset date                                          |
+| 6   | `0189` | Only Stellar Discord members with a non-new account can get a key                   |
+| 7   | `0190` | The key registry table — deferred, and has to justify itself                        |
+| 8   | `0191` | Replace my key — revoke now, re-issue next quota period (merged with `0192`)        |
+| 9   | `0192` | ~~Revoke a leaked key~~ — merged into `0191` on 2026-08-21, superseded              |
+| 10  | `0193` | Make it presentable                                                                 |
+| 11  | `0194` | Audit the assembled configuration (Tranche 3 AC 6)                                  |
+| 12  | `0195` | API reference; the shadow distribution retired (fallback + domain landed with 0194) |
 
 Unchanged and still in the epic: `0163` (quickstart), `0179` (production guild
 with SDF), `0164` (end-to-end evidence, last).

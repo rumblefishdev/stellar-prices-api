@@ -14,8 +14,9 @@
 //! - **`HttpOnly`** — the session *is* the credential, so script must not be
 //!   able to read it. Nothing in [0185]'s bundle needs to: it asks
 //!   `/auth/me` who it is talking to and the browser attaches the cookie.
-//! - **`Secure`** — the distribution is `REDIRECT_TO_HTTPS`, so a cleartext
-//!   request should never happen; this is what makes it not happen *silently*.
+//! - **`Secure`** — both hosts are HTTPS-only (the API's custom domain has no
+//!   plaintext listener), so a cleartext request should never happen; this is
+//!   what makes it not happen *silently*.
 //!   Browsers treat `http://localhost` as a secure context, so this does not
 //!   get in the way of the local round-trip the acceptance criteria call for.
 //! - **`SameSite=Lax`, not `Strict`** — and this is the one that is a real
@@ -26,17 +27,20 @@
 //!   verification, and sign-in would be broken in a way that looks like a bug in
 //!   the state check. `Lax` sends cookies on top-level GET navigation and
 //!   withholds them from cross-site subrequests, which is precisely the
-//!   distinction wanted. It is available at all only because [0184] put the
-//!   bundle and the API on one distribution — cross-origin, this would have had
-//!   to be `SameSite=None`, i.e. no CSRF protection from the cookie layer at all.
+//!   distinction wanted. It survives the split across two hosts (task 0194)
+//!   because those hosts are **same-site**: `sorobanscan.rumblefish.dev` and
+//!   `prices-api.sorobanscan.rumblefish.dev` share a registrable domain, and
+//!   `SameSite` is judged on that, not on origin. Had the backend moved to an
+//!   unrelated domain this would have had to become `SameSite=None`, i.e. no
+//!   CSRF protection from the cookie layer at all.
 //! - **`Path`** — the session is scoped to `/api/`, so it is not attached
 //!   to `/v1/*` data requests, which have no use for it and are the highest-volume
-//!   route group on the distribution. The pending-login cookie is scoped tighter
+//!   route group on this host. The pending-login cookie is scoped tighter
 //!   still: it is only ever read by the callback.
 //!
 //! No `Domain` attribute, deliberately. Omitting it produces a host-only cookie;
 //! setting it to the registrable domain would share the session with every other
-//! host under it, which on a CloudFront domain means somebody else's distribution.
+//! host under it — the block explorer's among them.
 
 use axum::http::HeaderMap;
 use axum::http::header::COOKIE;

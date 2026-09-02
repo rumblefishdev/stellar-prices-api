@@ -1,10 +1,11 @@
 /**
  * The portal's own backend calls.
  *
- * Every URL here is **relative and same-origin by default** — the property
- * task 0184 bought by putting the API on the same CloudFront distribution as
- * this bundle: no base URL to configure, no CORS preflight, and task 0186's
- * session cookie can be `SameSite=Lax`.
+ * Every URL here is **relative by default** and absolute on the shared host,
+ * where `api-origin.ts` supplies the API's own hostname (task 0194). The calls
+ * are then cross-origin but **same-site**, which is what keeps task 0186's
+ * session cookie on `SameSite=Lax`; the backend names this page's origin in
+ * its CORS answer.
  *
  * The shared host (task 0194) cannot offer that: its `/api/*` behaviour is a
  * static SPA with no route to any backend. So the bundle built for it carries
@@ -234,13 +235,14 @@ async function getJson<T>(url: string): Promise<T> {
     return (await response.json()) as T;
   } catch {
     // A `200` that is not JSON is the signature of the most likely routing
-    // regression there is here: a CloudFront table that sends a backend path
-    // to the bundle bucket — on our distribution, a bundle carve-out row that
-    // is too broad (see `portal-hosting-stack.ts`, which fails CI on it); on a
-    // shared host, an `/api/*` row that still points at S3. Either way
-    // CloudFront answers this call with an SPA bundle as `200 text/html`. Left unwrapped, that surfaces as a bare `SyntaxError`
-    // about an unexpected `<` — no status, no URL, and no hint that the cause is
-    // a routing table. Carry the status so the page can say which URL lied.
+    // regression there is here: a backend call that reached a static host —
+    // a bundle built WITHOUT `VITE_PORTAL_API_ORIGIN` and synced to the shared
+    // host, where `/api/*` is an S3 behaviour that rewrites `/api/config` to
+    // `/api/index.html` and answers it as `200 text/html` (exactly what task
+    // 0194 saw on 2026-08-31). Left unwrapped, that surfaces as a bare
+    // `SyntaxError` about an unexpected `<` — no status, no URL, and no hint
+    // that the cause is where the request went. Carry the status so the page
+    // can say which URL lied.
     throw new PortalApiError(
       `${url} answered ${response.status}, not JSON`,
       response.status,

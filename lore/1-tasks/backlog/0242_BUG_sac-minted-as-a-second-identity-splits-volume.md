@@ -10,6 +10,18 @@ milestone: 2
 links:
   - "../../../packages/prices-ingest-core/src/canonical.rs"
 history:
+  - date: 2026-09-02
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Re-measured after [[0210]] shipped. All 11 SACs resolve `symbol()` to the
+      exact code of the classic asset they wrap, so the split is now two
+      well-formed answers under two addresses rather than one named row and one
+      blank. Not a regression — nothing was written to `prices.assets` (52
+      contracts, 52 identities, unchanged) — but the defect stopped being
+      invisible, which argues for raising priority. Also separated these from
+      the impersonation set: `USD`/`EUR`/`USDP` are SACs and belong here, while
+      [[0252]]'s five are non-SAC contracts.
   - date: 2026-08-28
     status: backlog
     who: stkrolikiewicz
@@ -62,6 +74,49 @@ fraction of the activity.
 The derivation needed to detect this is **already in the codebase and already
 persisted** — `assets.sac_address` is populated on 207,471 classic rows by
 `sac_address_of()` at intern time. Only `resolve_sac`'s direction is missing.
+
+## Re-measured 2026-09-02: the split now has a name on it
+
+[[0210]] shipped, so every soroban contract's `symbol()` is resolved and
+published as `asset_code`. Asking all 11 SACs what they call themselves gives
+the same answer every time — **the code of the classic asset they wrap**:
+
+```
+ESP → ESP    EUR → EUR    USD → USD    USDP → USDP    XCR → XCR
+VEUR → VEUR  VCHF → VCHF  POINTS → POINTS  USDM1 → USDM1
+FrogST → FrogST           WHLAQUA → WHLAQUA
+```
+
+Eleven for eleven. This is the expected behaviour of a Stellar Asset Contract —
+it faithfully reports its underlying asset — and it is precisely what makes the
+split legible now in a way it was not before.
+
+**What a consumer sees today.** `GET /v1/assets/{sac_address}` returns 200 with
+`code: "USDP"` and essentially no price history, while `GET /v1/assets/USDP:GDTEQ…`
+returns the same code with 2,067 candles. Same asset, two addresses, two answers,
+both well-formed. Before 0210 the SAC row was at least visibly nameless; it now
+looks like a legitimate but inexplicably empty listing of the same token.
+
+**This is not a regression introduced by 0210** — the two rows, two `asset_id`s
+and split candles all predate it, and 0210 writes nothing to `prices.assets`
+(verified: 52 contracts, 52 identities, unchanged across the deploy). What
+changed is that the defect stopped being invisible. If anything that raises this
+task's priority, because the failure mode is now "two plausible answers"
+rather than "one answer and one blank".
+
+**Still hidden from the listing**, which `INNER JOIN`s `current_prices`: only
+the SACs with candles surface, and the four zero-volume ones do not. Detail
+reads `FROM assets` with `LEFT JOIN`s and has no such floor, so every one of the
+11 is addressable right now.
+
+### These are not the impersonation cases
+
+Worth stating because the symbols invite the confusion: `USD`, `EUR` and `USDP`
+resolve off **SACs**, and faithfully name their classic counterpart. They are
+this task, not [[0252]]. The impersonation set is disjoint and is five
+**non-SAC** contracts — `USDC`, `USDT` (×2), `BTC`, `XRP` — verified against
+`assets.sac_address` on 2026-09-02. A first pass at recording the sweep folded
+the two together; they are separate defects with separate fixes.
 
 ## Why this is not [[0139]]
 

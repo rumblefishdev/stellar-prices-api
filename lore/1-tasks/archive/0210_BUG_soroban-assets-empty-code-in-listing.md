@@ -2,9 +2,9 @@
 id: "0210"
 title: "Soroban assets carry an empty asset_code in listing and detail — top-volume rows are unidentifiable to consumers"
 type: BUG
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0120", "0139", "0242", "0252"]
+related_tasks: ["0120", "0139", "0242", "0252", "0256", "0258", "0259", "0140"]
 tags: [layer-backend, priority-medium, effort-medium, milestone-M2, api, metadata, defect]
 milestone: 2
 links: []
@@ -73,6 +73,37 @@ history:
       already self-declare USDC, USDT (×2), BTC and XRP without being SACs of
       those assets, all zero-volume and so not API-visible; identity
       verification spun out as [[0252]]. Not yet on prod.
+  - date: 2026-09-02
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Deployed to production and verified end to end. DDL applied by hand on the
+      shared box (BE told first), grants checked, the 52-contract sweep re-run
+      after the sanitiser change (52/52, 0 rejections), asset-discovery deployed
+      and run three times to full coverage, then prices-api. `GET
+      /v1/assets/CBIJ…` returns `code: "SolvBTC"`; all five API-visible Soroban
+      assets are named where every one read `""` before. Coverage query 0,
+      0 sentinels, 0 non-zero attempts — the retry machinery never fired, which
+      is the expected outcome for 52 live tokens. 0120's fixture updated and its
+      assertion green. Review of PR #275 produced five code fixes before this:
+      a JSON-RPC error at HTTP 200 was sentinelling every contract in a run,
+      archived contract state was treated as permanent, `is_control` missed
+      bidi/format characters, `http_client` silently dropped its timeout, and
+      a rejected symbol was sentinelled with no log at all. Four findings
+      spawned as [[0256]]-[[0259]]. Not archived: PR #275 is still open, so the
+      implementation is not on develop.
+  - date: 2026-09-02
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Archived. All six acceptance criteria met and verified on production.
+      Archived while PR #275 is still open, so the implementation is on
+      `fix/0210_soroban-asset-symbol` rather than on develop — deliberate, at
+      the developer's call, after the risk was raised. Two things still owed by
+      people, not code: karczuRF's re-review of the five fixes his review
+      produced (one of which was answered with a different design than he
+      suggested — `result.error` stays permanent, with an attempts counter
+      instead), and the merge itself.
 ---
 
 # Soroban assets have empty asset_code
@@ -307,6 +338,108 @@ character outside the class would now be rejected — recoverable, since it take
 three runs to sentinel and the rejection is logged with the raw string, but
 better caught before deploy.
 
+### Deployed to production, 2026-09-02
+
+Ran in the runbook's order, and the order mattered less than expected only
+because every check passed.
+
+| Step | Result |
+|---|---|
+| DDL on the shared box | table created, four columns; BE told first |
+| Reader/writer grants | `prices_reader` / `prices_writer` are `ON prices.*` — nothing to add |
+| 52-contract sweep, re-run after the sanitiser change | **52/52**, 0 rejections, 9.5 s |
+| `asset-discovery` deploy + 3 runs | 52/52 covered, 09:54 → 10:19 |
+| `prices-api` deploy | `code: "SolvBTC"` live in detail and listing |
+| 0120 fixture | updated, suite green on that assertion |
+
+**Nothing exercised the retry machinery.** 0 sentinels, 0 non-zero `attempts` —
+the `attempts` counter added after review never fired on this population. That
+is the expected outcome for 52 live tokens; it exists for the contract that
+fails later, not for these.
+
+**The stricter character class rejected nothing** — but `PEPE TOKEN` contains a
+space, and would have been rejected had the positive class not included one.
+That was a judgement call made while writing it; the sweep is what turned it
+from a guess into a fact.
+
+**Structural criterion re-verified on prod after the fact:** `prices.assets`
+still holds 52 contracts and 52 identities, unchanged by the deploy.
+
+## Issues Encountered
+
+- **The registry looked like it had doubled.** `count()` on `prices.assets` read
+  415,494 against the 207,493 recorded on 2026-08-28, and the Soroban subset 104
+  against 52 — both exactly 2×, which reads as duplication, not growth. It was
+  neither: `uniqExact` returned 207,754 and 52. The worker re-inserts the whole
+  registry every hour into a `ReplacingMergeTree`, so a raw count lands wherever
+  the merge cycle happens to be — 1×, 2× or 3× depending on the minute. Cost a
+  detour mid-deploy; already filed as [[0140]].
+- **The first `cdk diff` proposed creating the entire stack.** Every resource
+  showed `[+]`. The cause was the wrong AWS profile: the credentials could not
+  assume the CDK lookup/deploy roles, so CDK diffed against an empty template
+  instead of the deployed one. Deploying on that diff would have attempted to
+  recreate nine live Lambdas. The warning lines above the table say so, and are
+  easy to scroll past.
+- **Deploying one Lambda deploys nine.** CDK synthesises the whole app, so every
+  artifact must exist, and the stack is the deploy unit. Established that the
+  Rust build is byte-reproducible here — so pinning the others to their deployed
+  commit *would* isolate a single function — but chose not to: seven of the nine
+  differed only by `init.sql` embedded via `include_str!`, and the eighth
+  (`oracle-worker`, task 0231) was five days stale against `develop` while the
+  API already had the matching shared-crate changes. Deploying resolved a
+  version split rather than creating one.
+- **`prices-clickhouse-init`'s doc comment omits `--features lambda`.** The crate
+  has `default = []`, so following that comment builds the non-Lambda `main`,
+  which prints a message and exits. It would deploy cleanly and do nothing.
+
+## Design Decisions
+
+### From Plan
+
+1. **Destination is a single-writer table keyed on `contract_address`.** Not
+   `assets.asset_code` (sort-key column — a write adds a row rather than
+   replacing), not `asset_metadata` (whole-row writer, would clobber
+   `home_domain`), not `asset_id`-keyed (ambiguous for 10 of the 52).
+2. **The symbol surfaces as `asset_code`, composed at read time**, because the
+   RFP names *Asset/Token Code* as required and §4.1 has no other field.
+3. **Three-way outcome policy** — resolved / absent / transient — so an RPC
+   outage cannot name the population `""`.
+
+### Emerged
+
+4. **Trigger is absence of a row, not staleness.** Removed the stalest-first
+   ordering, time budget and env config the plan had copied from
+   `supply-worker`. That worker's queue is the whole registry and never empties;
+   this one is 52 rows and then nothing.
+5. **`attempts` counter, added after review.** The simulation's `error` field
+   mixes a contract with no `symbol()` against a failed ledger read, and telling
+   them apart means matching host error text — a protocol-version detail.
+   Counting observes the difference instead. Also closed the queue-starvation
+   finding, since a persistently failing contract now leaves the head.
+6. **Positive character class instead of `!is_control()`.** `char::is_control`
+   is Unicode category Cc only, so `U+202E`, `U+200B` and `U+FEFF` passed. The
+   existing test used `U+001B`, which *is* Cc, and so gave false confidence.
+7. **`http_client` panics rather than falling back.** `Client::default()` has no
+   timeout, which would silently unbound the stage's whole time budget.
+8. **Search and sort deliberately left on the stored column.** Confirmed on prod
+   by the sweep: contracts self-declare `USDC`, `USDT` (×2), `BTC`, `XRP`, plus
+   bare `USD` and `EUR`. Making those searchable is exactly the exposure
+   [[0252]] is about.
+9. **`classify` extracted as a pure function.** The bug review found was
+   unreachable from a test because classification only ran behind live HTTP.
+
+## Future Work
+
+Spawned rather than left as prose:
+
+- [[0256]] — the ledger scan half of this same worker has never run on prod
+- [[0140]] — the hourly full-registry rewrite. Already filed by okarcz on
+  2026-08-03; this deploy's measurements were added there rather than spawning
+  a duplicate
+- [[0258]] — `api_reader` / `ingestion_writer` hold `DROP` and `SYSTEM` on `*.*`
+- [[0259]] — prod schema is hand-applied with no drift check
+- [[0252]] — asset identity verification, spawned earlier from the same work
+
 ## Acceptance Criteria
 
 - [x] Soroban assets expose their on-chain symbol through the API — surfaced
@@ -315,8 +448,10 @@ better caught before deploy.
       The `views.sql` interop contract is untouched (REST handlers do not read
       those views). *Criterion reworded from "in a field of their own" — see
       Implementation for why a new field was the wrong call.*
-- [ ] `CBIJ…` shows its real symbol in list + detail — **verified locally**
-      (resolves to `SolvBTC` against mainnet RPC); pending on prod
+- [x] `CBIJ…` shows its real symbol in list + detail — **verified on prod
+      2026-09-02**: `GET /v1/assets/CBIJ…` returns `code: "SolvBTC"`, and all
+      five API-visible Soroban assets are named (SolvBTC, XAUM, HITZ, BnUSD,
+      xSolvBTC) where every one read `""` before
 - [x] No new row is created in `prices.assets` for an asset that gains a symbol
       — structural, not incidental: nothing writes to `assets` at all. Pinned by
       `listing_composes_soroban_symbol_into_asset_code`, which asserts the
@@ -325,5 +460,10 @@ better caught before deploy.
       forever (empty-symbol sentinel on absent). Note the population turned out
       to need it less than expected — 52/52 resolve — but the sentinel is what
       makes an unresolvable *future* contract safe
-- [ ] DDL applied and the worker deployed to prod; coverage query reaches zero
-- [ ] 0120's conformance fixture updated after prod resolution
+- [x] DDL applied and the worker deployed to prod; coverage query reaches zero
+      — 52/52 covered in three runs over 25 minutes, 0 sentinels, 0 non-zero
+      `attempts`, all 52 symbols identical to the pre-deploy sweep
+- [x] 0120's conformance fixture updated after prod resolution — `code` moved
+      from `""` to `SolvBTC` and the suite's *code matches the fixed list* now
+      passes. The 16 remaining failures are the classes 0120 already owns
+      (0135/0170/0178); 0 schema failures, none in the `detail` group

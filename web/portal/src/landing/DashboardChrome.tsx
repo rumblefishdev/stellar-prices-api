@@ -10,7 +10,7 @@ import { Link as RouterLink } from 'react-router-dom';
 import { color, font, radius } from '../theme/tokens';
 import { DiscordIcon } from './DiscordIcon';
 import { Wordmark } from './Chrome';
-import { DASHBOARD_ROUTE, QUICKSTART_ROUTE, API_REFERENCE } from './links';
+import { DASHBOARD_ROUTE, DOCS_ROUTE, QUICKSTART_ROUTE } from './links';
 import { cardBorder } from './primitives';
 
 /**
@@ -30,7 +30,7 @@ export function DashboardNavbar({
   username?: string;
   onSignOut: () => void;
   /** Which of the bar's own pages this is — the one that gets the underline. */
-  current?: 'dashboard' | 'quick-start';
+  current?: 'dashboard' | 'quick-start' | 'docs';
 }) {
   const links = [
     {
@@ -43,7 +43,9 @@ export function DashboardNavbar({
       to: QUICKSTART_ROUTE,
       current: current === 'quick-start',
     },
-    { label: 'OpenAPI Docs', href: API_REFERENCE },
+    // A route since task 0195 — the API reference is a page of this app, so
+    // it gets the underline like the other two when the visitor is on it.
+    { label: 'OpenAPI Docs', to: DOCS_ROUTE, current: current === 'docs' },
   ];
 
   return (
@@ -90,10 +92,11 @@ export function DashboardNavbar({
               flexWrap: { xs: 'wrap', sm: 'nowrap' },
             }}
           >
-            {links.map(({ label, to, href, current }) => (
+            {links.map(({ label, to, current }) => (
               <Link
                 key={label}
-                {...(to ? { component: RouterLink, to } : { href })}
+                component={RouterLink}
+                to={to}
                 // `aria-current`, not just an underline: "you are here" has to
                 // reach a screen reader too, and a border-bottom does not.
                 aria-current={current ? 'page' : undefined}

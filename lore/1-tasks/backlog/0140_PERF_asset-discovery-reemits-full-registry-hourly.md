@@ -4,7 +4,7 @@ title: "asset-discovery re-emits the whole asset registry every hour — 0132's 
 type: PERF
 status: backlog
 related_adr: []
-related_tasks: ["0132", "0133", "0067"]
+related_tasks: ["0210", "0132", "0133", "0067"]
 tags: ["priority-medium", "effort-small", "cost", "write-amplification", "clickhouse"]
 links: []
 history:
@@ -74,6 +74,33 @@ of asset discovery — genuine new assets are a handful per hour at most.
 **Not a correctness problem** — RMT dedup means no consumer sees a wrong value,
 exactly as in 0132. The cost is egress to Hetzner, merge pressure on a cluster
 shared with BE, and `FINAL` read cost against the accumulated parts.
+
+## Still live on 2026-09-02, and it cost a deploy an hour
+
+Confirmed unchanged a month later, from the worker's own logs while deploying
+[[0210]]: every run still logs `wrote asset rows: 207754` — the whole registry.
+
+The consequence this task predicts ("pile up parts and inflate the next FINAL
+load") is now observable as a **reading hazard**, not just a cost. `existing_assets`
+read at the start of three consecutive runs:
+
+| run | rows read | ratio |
+|---|---|---|
+| 07:17 | 623,154 | 3× |
+| 08:17 | 207,741 | 1× |
+| 09:17 | 415,495 | 2× |
+
+Distinct identities held at 207,754 throughout. A `count()` therefore lands
+wherever the merge cycle happens to be, and this is not theoretical: during
+0210's prod deploy a count taken mid-cycle read as *"the registry doubled in
+five days, and the Soroban subset with it — 104 against 52"*. Both were exactly
+2×, which reads as duplication rather than growth, and the deploy stopped until
+`uniqExact` disproved it.
+
+So the operational cost is larger than the write volume alone: **any count on
+`prices.assets` is unreliable unless it is `uniqExact` or `FINAL`**, and nothing
+says so at the point where someone would read one. Worth stating in whatever
+fixes this, or in the schema comment if the fix is deferred again.
 
 ## Implementation
 

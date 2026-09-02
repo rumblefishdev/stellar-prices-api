@@ -42,15 +42,6 @@ jobs:
               # as the single file rather than `infra/**` so unrelated CDK edits
               # do not pay for an ARM Rust build.
               - 'infra/src/lib/stacks/api-gateway-stack.ts'
-              # And this one, for the other half of the same check (task 0184).
-              # `openapi:verify-routes` also reads the synthesized PortalHosting
-              # template and fails unless `/api-tokens/api/*` is the first
-              # behaviour matching a portal backend path. Without this line,
-              # reordering `additionalBehaviors` — or editing `PORTAL_BACKEND` —
-              # is a pure `infra/**` change: the typescript job runs, this one
-              # is skipped, and the guard is silent while every portal backend
-              # call is answered with the SPA bundle as `200 text/html`.
-              - 'infra/src/lib/stacks/portal-hosting-stack.ts'
               # Same reasoning for the document's `servers` block:
               # compute-stack.ts is what actually puts API_BASE_URL on the
               # api-handler, and types.ts is what asserts the value carries the
@@ -76,7 +67,7 @@ jobs:
               # typecheck and tests never run: no other pattern here matches
               # `web/`, so a frontend-only PR would run no job at all and merge
               # green having been checked by nothing. Same shape as the gap the
-              # `rust` filter above closes for `portal-hosting-stack.ts`.
+              # `rust` filter above closes for `api-gateway-stack.ts`.
               - 'web/**'
               - 'package.json'
               - 'package-lock.json'

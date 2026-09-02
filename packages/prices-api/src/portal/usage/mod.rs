@@ -655,10 +655,11 @@ fn answer(cached: CachedAnswer) -> Response {
 }
 
 /// `no-store` on every response this module produces — the handler's own
-/// statement of the rule the gateway (`portalSettings`) and CloudFront
-/// (`CachingDisabled`) also state. Usage is per-caller data on an
-/// authenticated route; any shared cache entry serves one visitor another
-/// visitor's numbers.
+/// statement of the rule the gateway (`portalSettings`) also states. Usage is
+/// per-caller data on an authenticated route; any shared cache entry serves one
+/// visitor another visitor's numbers. (A CDN behaviour stated it as well until
+/// [0195] retired that distribution; nothing caches in front of these routes
+/// now.)
 fn no_store(mut response: Response) -> Response {
     cache_control::attach(&mut response, cache_control::NO_STORE);
     response

@@ -30,13 +30,11 @@ destroy-cicd: build
 # test-sized parameters; production sizing is swapped in via
 # envs/production.json once the service is exercised in anger.
 
-# EVERY target that synthesizes the production app needs the portal bundle on
-# disk, not just the portal's own (task 0185). PortalHostingStack packages
-# `web/portal/dist`, and cdk synthesizes the whole app whichever stack you name
-# — so an unbuilt frontend fails `synth-production`, `diff-production` and every
-# per-stack deploy alike. The cicd app does not include it and keeps using
-# `build`.
-build-production: build build-portal
+# Synthesizing the production app no longer needs the portal bundle on disk:
+# `PortalHostingStack`, which packaged `web/portal/dist`, was retired by task
+# 0195. The bundle is built and shipped by `sync-portal-explorer` below, on
+# its own.
+build-production: build
 
 synth-production: build-production
 	npx cdk --app "$(PRODUCTION_APP)" synth
@@ -95,39 +93,17 @@ destroy-production-compute: build-production
 deploy-production-apigateway: build-production
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-ApiGateway --require-approval broadening
 
-# ORDERING (task 0184): PortalHosting imports this stack's RestApi id to build
-# its execute-api origin, and CloudFormation refuses to delete a stack whose
-# exports are in use. So this target now fails with `Export ... cannot be
-# deleted as it is in use` until `destroy-production-portal` has run first.
-# The same import blocks any change that REPLACES the RestApi, for the same
-# reason and with the same remedy.
+# Nothing imports this stack's exports since task 0195 retired
+# `PortalHostingStack` (which used the RestApi id for its execute-api origin),
+# so destroying it — or replacing the RestApi — no longer needs another stack
+# torn down first.
 destroy-production-apigateway: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-ApiGateway --force
 
-# Uploads the portal bundle and invalidates the CloudFront cache as part of the
-# deploy (BucketDeployment), so there is no separate `aws s3 sync` step to
-# forget. A stale bundle behind a CDN is indistinguishable from a broken deploy.
-#
-# `build-portal` first, and it is not a convenience (task 0185): this stack
-# packages `web/portal/dist` off the disk with no freshness check, so without it
-# an unbuilt tree fails synth and — worse — a stale one deploys quietly and
-# reports success. That is task 0141's footgun arriving for the frontend.
-#
-# First deploy of this stack creates a distribution; that took ~4.5 minutes end
-# to end, most of it CloudFront propagating. Subsequent deploys are quick.
-build-portal:
-	cd .. && npx nx build portal
-
-deploy-production-portal: build-production
-	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-PortalHosting --require-approval broadening
-
-destroy-production-portal: build-production
-	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-PortalHosting --force
-
-# The portal on the shared host (task 0194). `https://sorobanscan.rumblefish.dev/api/`
-# is served by the block explorer's distribution (EA2TLS5SS5M87) from ITS
-# bucket, which nothing in this repo deploys — this sync is the only way a
-# build reaches it, and it has been done by hand twice. Built with the API's
+# The portal (task 0194; the only deploy path since task 0195).
+# `https://sorobanscan.rumblefish.dev/api/` is served by the block explorer's
+# distribution (EA2TLS5SS5M87) from ITS bucket, which nothing in this repo
+# deploys — this sync is the only way a build reaches it. Built with the API's
 # own hostname baked in (`VITE_PORTAL_API_ORIGIN`, see
 # `web/portal/src/api-origin.ts`): on that host `/api/*` is a static SPA, so
 # the bundle must call the backend on `apiDomain.domainName` rather than
@@ -135,9 +111,10 @@ destroy-production-portal: build-production
 # cached build would hand back whichever variant ran last, and the relative
 # one is indistinguishable from this one until a visitor opens the page.
 #
-# ⚠️ This leaves the ABSOLUTE build in `web/portal/dist`. `deploy-production-portal`
-# rebuilds (relative) through `build-portal` first, so our own distribution
-# never ships it — but do not `cdk deploy` PortalHosting by hand after this.
+# There is no CDK stack behind this any more. `PortalHostingStack` — our own
+# bucket and distribution, `deploy-production-portal` — was destroyed and
+# removed by task 0195: it served a second, ungated copy of the same portal on
+# `dojr4epgxo2qp.cloudfront.net`.
 #
 # The two names are the explorer repo's (`ApiSpaBucket` and the distribution
 # of `Explorer-production-Delivery`); override on the command line if that
@@ -165,13 +142,13 @@ check-portal-api-origin:
 build-portal-explorer: check-portal-api-origin
 	cd .. && VITE_PORTAL_API_ORIGIN=$(PORTAL_API_ORIGIN) npx nx build portal --skip-nx-cache
 
-# Mirrors the two `BucketDeployment`s in `portal-hosting-stack.ts`, headers
-# included. A bare `sync` uploads with no `Cache-Control` at all, so after a
-# re-sync a returning visitor keeps booting the previous `index.html` from
-# heuristic freshness, and the hashed chunks lose the year-long immutability
-# their content-addressed names earn them. Hashed assets go first, so a new
-# `index.html` never names a chunk that is not there yet — the order the stack
-# enforces with `addDependency`.
+# Two syncs because two cache policies. A bare `sync` uploads with no
+# `Cache-Control` at all, so after a re-sync a returning visitor keeps booting
+# the previous `index.html` from heuristic freshness, and the hashed chunks
+# lose the year-long immutability their content-addressed names earn them.
+# Hashed assets go first, so a new `index.html` never names a chunk that is
+# not there yet. The API reference route (task 0195) is part of the same
+# bundle, so it needs nothing of its own here.
 #
 # No `--delete`: a visitor holding the previous `index.html` still resolves
 # its chunk. The invalidation covers the whole prefix because `index.html` is

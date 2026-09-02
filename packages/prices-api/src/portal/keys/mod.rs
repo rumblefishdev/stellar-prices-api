@@ -276,10 +276,12 @@ pub fn routes(state: KeysState) -> Router {
 /// What both routes answer with.
 ///
 /// `value` is the credential. It is in the body of a `no-store` response over a
-/// path CloudFront is told not to cache and API Gateway is told not to cache —
-/// three independent statements of the same rule, because a cached reveal hands
-/// one visitor another visitor's key (the gateway's cache has no cache-key
-/// parameters, so every caller collapses onto one entry).
+/// path API Gateway is told not to cache — two independent statements of the
+/// same rule, because a cached reveal hands one visitor another visitor's key
+/// (the gateway's cache has no cache-key parameters, so every caller collapses
+/// onto one entry). It used to be three: a CDN behaviour said it too, until
+/// [0195] retired the distribution that carried it — there is no cache between
+/// a browser and these routes any more.
 ///
 /// **No `Debug`.** This is the one type in the module that holds the value as a
 /// plain `String` — [`KeyValue`]'s protection ends where `expose` is called, and
@@ -1292,11 +1294,11 @@ async fn attempt(
 
 /// `no-store` on every response this module produces.
 ///
-/// The handler's own statement of the rule, alongside the two configurations
-/// that state it as well (`CACHING_DISABLED` on CloudFront's API behaviour,
-/// `cachingEnabled: false` in `portalSettings`). Three layers because the
-/// failure they prevent is one visitor being handed another visitor's
-/// credential, and configuration drifts.
+/// The handler's own statement of the rule, alongside the configuration that
+/// states it as well (`cachingEnabled: false` in `portalSettings`). Two layers
+/// because the failure they prevent is one visitor being handed another
+/// visitor's credential, and configuration drifts. The third — a CDN behaviour
+/// — went with the distribution [0195] retired.
 fn no_store(mut response: Response) -> Response {
     cache_control::attach(&mut response, cache_control::NO_STORE);
     response

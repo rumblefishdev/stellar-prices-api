@@ -21,18 +21,23 @@ use crate::state::AppState;
     get,
     path = "/oracles/{asset_identifier}",
     tag = "oracles",
+    summary = "`GET /oracles/{asset_identifier}` — latest per-oracle readings for an asset.",
+    description = "The most recent reading from each oracle that publishes a USD price for the asset, \
+     one\nentry per oracle. An unknown asset is a 404; a known asset with no oracle \
+     readings\nreturns 200 with an empty `oracles` array.",
     params(
         ("asset_identifier" = String, Path,
-         description = "native, CODE:ISSUER, or a C… contract address")
+         description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
+          the `C…` address of a Soroban contract")
     ),
     responses(
         (status = 200, description = "Oracle readings", body = OraclesResponse),
-        (status = 400, description = "Invalid asset identifier", body = ErrorEnvelope),
-        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
-        (status = 403, description = "API key missing, invalid, or not authorized for this API"),
-        (status = 404, description = "Unknown asset", body = ErrorEnvelope),
-        (status = 429, description = "Per-key rate limit or monthly quota exceeded (API Gateway usage plan)"),
-        (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
+        (status = 400, description = "Invalid asset identifier (`invalid_id`)", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
+        (status = 404, description = "Unknown asset (`not_found`)", body = ErrorEnvelope),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
 pub async fn get_oracles(

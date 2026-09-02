@@ -165,7 +165,7 @@ to their own infrastructure at any time if needed.
 | **EventBridge Scheduler**            | Scheduled triggers          | Cron/rate rules for all periodic Lambda workers                                                                                                                                                                                                                                                   |
 | **Secrets Manager**                  | Credentials & mTLS material | Per-env client `{cert,key,ca}` for Caddy:443 mTLS (single JSON bundle secret per identity, named by `MTLS_SECRET_NAME`); Soroswap/Aquarius API keys; oracle contract address                                                                                                                      |
 | **CloudWatch + X-Ray**               | Observability               | API latency, error rates, ingestion lag, Lambda duration/concurrency, backfill progress; mTLS cert NotAfter alarm                                                                                                                                                                                 |
-| **S3** (API docs)                    | Documentation hosting       | OpenAPI spec + self-service onboarding portal, served via CloudFront                                                                                                                                                                                                                              |
+| **S3** (API docs)                    | Documentation hosting       | self-service onboarding portal + API reference, served from the block explorer's bucket and CloudFront distribution at `sorobanscan.rumblefish.dev/api/`; the OpenAPI document is served by the API itself                                                                                        |
 
 **Components no longer in the Prices API budget** (eliminated by ADR 0007):
 
@@ -1207,7 +1207,7 @@ on ClickHouse, that machinery is not part of the prices-api budget at any traffi
 | Infrastructure    | AWS CDK (TypeScript) — shared CDK app with Block Explorer stacks; prices-api stacks deploy no VPC/RDS/NAT                                                                                                                                        |
 | CI/CD             | GitHub Actions → `cdk deploy` — shared pipeline with Block Explorer                                                                                                                                                                              |
 | Monitoring        | CloudWatch Logs + Metrics + Alarms + X-Ray tracing; mTLS cert NotAfter alarm; ingestion-lag alarm                                                                                                                                                |
-| API Docs          | OpenAPI 3.0 spec, auto-generated from axum routes; Swagger UI hosted on S3 + CloudFront                                                                                                                                                          |
+| API Docs          | OpenAPI 3.0 spec, auto-generated from axum routes; the API reference (Swagger UI's shape, the portal's design system) is a route of the onboarding portal (`/api/docs`) on the block explorer's CloudFront                                       |
 
 **Shared with Block Explorer codebase (same Rust workspace):**
 
