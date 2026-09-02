@@ -25,9 +25,11 @@ pub mod telemetry;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::http::header::CONTENT_TYPE;
+use axum::http::header::{ACCEPT, CONTENT_TYPE};
+use axum::http::{HeaderName, Method};
 use axum::response::IntoResponse;
 use axum::routing::get;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 pub use config::AppConfig;
 pub use state::AppState;
@@ -50,6 +52,23 @@ pub fn app(config: &AppConfig, state: AppState) -> Router {
         .split_for_parts();
 
     openapi::stamp_servers(&mut spec, config);
+
+    // CORS for the data routes (task 0126). The gateway answers the PREFLIGHT
+    // from a MOCK and never invokes this Lambda for it — but a preflight only
+    // buys permission to send the real request, and the browser then checks the
+    // REAL response for its own `Access-Control-Allow-Origin`. With a Lambda
+    // PROXY integration that header can only come from here: API Gateway
+    // returns what this handler returns, verbatim.
+    //
+    // ⚠️ **Shipping the gateway preflight without this layer changes nothing a
+    // user can see.** The preflight answers `204`, the browser sends the `GET`,
+    // the response arrives with no allow-origin, and the browser blocks it with
+    // the same opaque `TypeError: Failed to fetch` as before — while `curl`
+    // keeps working perfectly. That is the exact shape of defect this task
+    // exists to close, and it was nearly re-shipped inside the fix for it.
+    // Caught in review of PR #277; the two halves are declared together here
+    // and in `api-gateway-stack.ts` so neither can travel alone.
+    let router = router.layer(data_cors_layer());
 
     // Serialize once at startup; serve the cached string (no per-request work).
     // `DEPLOY_STATIC` is the client-facing tier for this route — the document
@@ -90,4 +109,47 @@ pub fn app(config: &AppConfig, state: AppState) -> Router {
     let router = portal::apply(router, config);
 
     auth::apply(router, config)
+}
+
+/// The `/v1` data routes' CORS answer — `*`, no credentials (task 0126).
+///
+/// Deliberately NOT `portal::cors_layer`, and the difference is forced rather
+/// than chosen: `Access-Control-Allow-Origin: *` cannot be combined with
+/// credentials — browsers reject that pairing outright — so the portal, whose
+/// calls carry the session cookie, must name exactly one origin. These routes
+/// carry no cookie and no session (auth is an `x-api-key` header the caller
+/// supplies deliberately), so `*` is available and costs nothing: a hostile
+/// page calling `/v1` gets exactly what `curl` gets.
+///
+/// 🔑 **The value is a CONSTANT, and that is load-bearing under the gateway's
+/// stage cache.** A reflected `Origin` cached there would be served to the next
+/// caller as if their origin had been granted — the same cross-caller bleed
+/// task 0118 measured on production with an undeclared cache-key parameter.
+/// `AllowOrigin::any()` writes one fixed `*` for every caller, so there is
+/// nothing per-caller to cache wrongly.
+///
+/// Mirrors the gateway's preflight answer in
+/// `infra/src/lib/stacks/api-gateway-stack.ts` (`DATA_CORS_ALLOW_HEADERS`,
+/// `DATA_PREFLIGHT_MAX_AGE`). The two must agree: the gateway states what a
+/// browser MAY send, this states what it may READ, and a mismatch fails in the
+/// browser only — never in `curl`, and never in a test that checks one side.
+///
+/// ⚠️ **What this does NOT cover.** It wraps the data router, so it is inside
+/// two things that can reject a request before it: API Gateway's own error
+/// responses (task 0255 — those still carry the PORTAL's single origin on
+/// `/v1`, which a browser reads as a mismatch), and the in-app key gate, which
+/// `auth::apply` layers outside every route. The gate is armed only when
+/// `API_KEYS` is set and the gateway rejects a keyless caller first, so its
+/// `401` is reachable only by a key the gateway accepted and this service does
+/// not know — but that `401` reaches a browser without an allow-origin header
+/// and reads as a dead network. Both are error paths; neither blocks a working
+/// call. Tracked with 0255 rather than fixed here, because moving this layer
+/// outside `auth::apply` would put it over the portal's routes too and emit TWO
+/// allow-origin headers, which browsers reject outright.
+fn data_cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::any())
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([CONTENT_TYPE, ACCEPT, HeaderName::from_static("x-api-key")])
+        .max_age(std::time::Duration::from_secs(3600))
 }

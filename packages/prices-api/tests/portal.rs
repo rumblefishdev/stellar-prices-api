@@ -452,18 +452,73 @@ async fn the_revokes_preflight_allows_the_marker_header_from_the_configured_orig
     assert!(reply.headers().contains_key("access-control-max-age"));
 }
 
-/// The CORS layer covers the portal's routes and nothing else: the data
-/// API and the root OpenAPI copy answer a cross-origin request as they
-/// always did, with no allow header — `/v1` is keyed, not cookied, and
-/// nothing on the bundle calls it.
+/// The PORTAL's layer covers the portal's routes and nothing else.
+///
+/// ⚠️ **Rewritten by task 0126, which changed this test's premise.** It used to
+/// assert that data routes carry NO allow-origin at all — true while `/v1` was
+/// uncallable from a browser, and the reason it was uncallable. `/v1` now
+/// answers `*` (`data_cors_layer` in `lib.rs`), so "no header" is no longer the
+/// property worth pinning.
+///
+/// What still must hold, and is the whole point of two layers on one service:
+/// the portal's SINGLE ORIGIN and its CREDENTIALS must never appear on a data
+/// route. `*` with credentials is refused by every browser, and the portal's
+/// origin on a data route would hand one site a readable answer while telling
+/// every other site it was not allowed.
 #[tokio::test]
-async fn the_cors_layer_stops_at_the_portal_prefix() {
+async fn the_portals_credentialed_layer_stops_at_the_portal_prefix() {
     let config = config_with_origin(Some(WEB_ORIGIN));
     for uri in ["/api-docs-json", "/health"] {
         let reply = send_with(&config, "GET", uri, &[("origin", WEB_ORIGIN)]).await;
+        let headers = reply.headers();
         assert!(
-            reply.headers().get("access-control-allow-origin").is_none(),
-            "{uri} is outside the portal"
+            headers.get("access-control-allow-credentials").is_none(),
+            "{uri} must never answer with credentials"
+        );
+        let origin = headers
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap().to_string());
+        assert_ne!(
+            origin.as_deref(),
+            Some(WEB_ORIGIN),
+            "{uri} must not name the portal's origin"
+        );
+    }
+}
+
+/// The data routes' own answer: `*`, and NOTHING that would make a browser
+/// refuse it (task 0126).
+///
+/// 🔑 **This is the half the gateway cannot provide.** `addCorsPreflight` in
+/// `api-gateway-stack.ts` answers the preflight from a MOCK, but a preflight
+/// only buys permission to SEND the request — the browser then reads the real
+/// response's own allow-origin, and with a Lambda proxy integration that can
+/// only come from this handler. Shipping the preflight alone leaves every
+/// browser call failing exactly as before, while `curl` passes: that near-miss
+/// is why this test exists.
+///
+/// `/health` stands in for the data surface here because it needs no
+/// ClickHouse. It is a gateway MOCK in production and never reaches this code
+/// there, but it sits inside the same layer, so it pins the layer's answer.
+#[tokio::test]
+async fn data_routes_answer_a_wildcard_origin_without_credentials() {
+    let config = config_with_origin(Some(WEB_ORIGIN));
+    // Two unrelated origins: a constant `*` must not vary with the caller, or
+    // the gateway's stage cache would serve one caller's answer to the next
+    // (the shape task 0118 measured on production).
+    for origin in ["https://evil.example", "https://someone-else.example"] {
+        let reply = send_with(&config, "GET", "/health", &[("origin", origin)]).await;
+        let headers = reply.headers();
+        assert_eq!(
+            headers
+                .get("access-control-allow-origin")
+                .map(|v| v.to_str().unwrap()),
+            Some("*"),
+            "a data route answers every origin with the same wildcard"
+        );
+        assert!(
+            headers.get("access-control-allow-credentials").is_none(),
+            "`*` and credentials together are refused by every browser"
         );
     }
 }

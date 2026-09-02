@@ -300,11 +300,14 @@ const DATA_CORS_ALLOW_HEADERS = ['Content-Type', 'Accept', 'x-api-key'];
 /**
  * Preflight cache lifetime for the data routes.
  *
- * Longer than it looks: an UNcredentialed `*` answer is cacheable by the
- * browser across origins rather than per origin, so one hour of reuse costs the
- * gateway nothing and saves an integrator a round trip on every distinct route.
- * Chromium caps the header at two hours regardless; one hour matches
- * `PORTAL_PREFLIGHT_MAX_AGE` so the two policies differ only where they must.
+ * ⚠️ A browser keys its preflight cache on (origin, URL, method, headers,
+ * credentials mode) NO MATTER what the response says — a `*` answer is not
+ * shared between origins, and an earlier draft of this comment claimed it was.
+ * So the saving is per origin per route: one round trip avoided on every
+ * repeat call an integrator's page makes, which is most of them.
+ *
+ * Chromium caps the header at two hours regardless. One hour matches
+ * `PORTAL_PREFLIGHT_MAX_AGE`, so the two policies differ only where they must.
  */
 const DATA_PREFLIGHT_MAX_AGE = cdk.Duration.hours(1);
 
