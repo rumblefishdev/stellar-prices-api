@@ -76,6 +76,28 @@ history:
       (09:00:25Z) and EventBridge (09:46:20Z) were deployed by someone else
       this morning; the Lambda asset diffs in `cdk diff` must NOT be read as
       stale deploys - see [[lambda-asset-diff-is-feature-unification]].
+  - date: 2026-09-02
+    status: active
+    who: okarcz
+    note: >
+      THE CORS WORK IS BUILT — PR #277, CDK only, not deployed. addCorsPreflight
+      on all seven /v1 data routes: `*`, no credentials, x-api-key in
+      allowHeaders, MOCK integration, 1h max-age. Folded into addGet rather than
+      left as a separate call, so a future data route cannot silently ship
+      without one. Synth confirms seven OPTIONS, every one ApiKeyRequired=false
+      and Type=MOCK, with the portal's preflight unchanged; verify-routes,
+      verify-servers, lint and typecheck green. The reconciliation AC is closed
+      by writing the reason at DATA_CORS_ALLOW_ORIGINS - a credentialed answer
+      CANNOT use `*`, so the two policies differ because the browser rules leave
+      no choice. Both WAF deferral comments in the file now carry the decision.
+      Left open deliberately: milestone-1-evidence.md is a FROZEN SUBMISSION
+      RECORD and I will not rewrite what we told reviewers - that is a team
+      question, and it governs the execute-api URLs in the other two M1 docs
+      too. Also found while checking for conflicts: PR #276 (0195, another
+      owner) DELETES portal-hosting-stack.ts, which moots this task's
+      origin-migration criterion and reduces execute-api to disable-or-keep.
+      ⚠️ The browser AC still cannot pass on a deploy alone - [[0255]] must land
+      first, or a third-party page sees a CORS mismatch on every /v1 error.
 ---
 
 # API edge — CORS, custom domain, WAF decision
@@ -375,17 +397,27 @@ thing worth not repeating.
 ## Acceptance Criteria
 
 - [ ] Cross-origin `GET` from a browser page against every data route succeeds,
-      preflight included
-- [ ] `x-api-key` is in the allowed-headers list; `OPTIONS` requires no API key
-      and does not invoke Lambda
+      preflight included. ⚠️ **Needs a deploy AND a real browser** — this task
+      says it and it still holds: `curl -X OPTIONS` succeeding proves less than
+      it appears to. ⚠️ **Blocked in practice by [[0255]]**: once `/v1` answers
+      `*`, its 4xx still carry the portal's single origin, so a third-party
+      page hitting a 403 or 429 sees a CORS mismatch and reads it as a dead
+      network. The preflight alone does not make the API browser-usable
+- [x] `x-api-key` is in the allowed-headers list; `OPTIONS` requires no API key
+      and does not invoke Lambda — PR #277. Synth shows `OPTIONS` on all SEVEN
+      data routes, every one `ApiKeyRequired: false` and `Type: MOCK`,
+      `Allow-Headers: 'Content-Type,Accept,x-api-key'`
 - [x] Allowed-origin policy decided and recorded — **`*`, no credentials**,
       settled 2026-09-02 with the reasoning and the two rejected alternatives
       in decision 1 above
 - [x] Custom domain resolves and serves the API over TLS; certificate valid and
       auto-renewing — **delivered by [[0194]]**, verified 2026-09-01
-- [ ] The two CORS policies on this gateway (portal: one origin + credentials;
+- [x] The two CORS policies on this gateway (portal: one origin + credentials;
       data routes: `*`, no credentials) are reconciled DELIBERATELY, with the
-      reason recorded — not left looking like one of them is a mistake
+      reason recorded — not left looking like one of them is a mistake.
+      PR #277 writes it at `DATA_CORS_ALLOW_ORIGINS` in `api-gateway-stack.ts`,
+      where the next reader hits it: a credentialed answer CANNOT use `*`, so
+      the portal is forced to one origin and `/v1` is not
 - [ ] Gateway-level `DEFAULT_4XX`/`DEFAULT_5XX` responses do not leak the
       portal's single `Access-Control-Allow-Origin` onto data-route errors.
       ⚠️ **CORRECTED 2026-09-02: 0194's review narrowed this to `THROTTLED`,
@@ -414,11 +446,18 @@ thing worth not repeating.
       Decide and record; no portal round-trip is gated on it
 - [x] WAF decision recorded with reasoning, cost, and a reversal trigger —
       **NO**, settled 2026-09-02, four triggers named (decision 2 above)
-- [ ] The three stale deferrals updated to point at that decision:
-      `api-gateway-stack.ts:212`, `:279` and `milestone-1-evidence.md:959` —
-      otherwise the next reader re-opens a settled question
-- [ ] All of it expressed in CDK (Tranche 3 AC 7 requires clean-account
-      reproducibility)
+- [ ] The three stale deferrals updated to point at that decision. **Two done**
+      in PR #277 (`api-gateway-stack.ts`, both comments). ⚠️ The third,
+      `milestone-1-evidence.md:959`, is DELIBERATELY NOT TOUCHED — it is a
+      frozen submission record ("Table 4 — Out-of-scope and known-open items")
+      and rewriting what we told reviewers is not a call to make in passing.
+      **Open question for the team: are the M1 evidence docs frozen as
+      submitted, or maintained?** The same question governs the execute-api
+      URLs still in `milestone-1-form-answers.md` and
+      `milestone-1-video-scenario.md`
+- [x] All of it expressed in CDK (Tranche 3 AC 7 requires clean-account
+      reproducibility) — PR #277 is CDK only; no console step, no manual
+      gateway edit
 
 ## 📏 Measured on prod 2026-09-02 — before any of this task's code
 
@@ -514,6 +553,69 @@ in the repo.
   (`apiGatewayCacheEnabled: true`, `infra/envs/production.json`). Needs a keyed
   request pair, which the agent cannot issue — hand-over for the operator.
 - A keyed `200` on a `/v1` route.
+
+## 🛠️ Implementation — PR #277 (branch `feat/0126_v1-cors-preflight-and-waf-decision`)
+
+CDK only, not deployed. `infra/src/lib/stacks/api-gateway-stack.ts`.
+
+### What shipped
+
+`addCorsPreflight` on all seven data routes — `*`, **no credentials**,
+`allowHeaders: ['Content-Type', 'Accept', 'x-api-key']`, MOCK, `maxAge` 1 h:
+
+| resource | verbs answered |
+|---|---|
+| `/v1/assets` | `GET,OPTIONS` |
+| `/v1/assets/{asset_identifier}` | `GET,OPTIONS` |
+| `/v1/assets/{asset_identifier}/price` | `GET,OPTIONS` |
+| `/v1/assets/{asset_identifier}/ohlcv` | `GET,OPTIONS` |
+| `/v1/oracles/{asset_identifier}` | `GET,OPTIONS` |
+| `/v1/backfill/status` | `GET,OPTIONS` |
+| `/v1/prices/batch` | `POST,OPTIONS` |
+
+### Design decisions
+
+1. **The preflight is folded into `addGet`, not called separately.** A data
+   route added later without one is invisible to `curl` and to every test in
+   this repo, and surfaces only as "the API cannot be called from a browser" —
+   the exact defect this task exists to close. Coupling them makes forgetting it
+   require an edit rather than an omission. `batch` names its own, being the one
+   non-GET — and the one a browser preflights unconditionally, since a JSON
+   `POST` is never a "simple" request.
+2. **`x-api-key` listed explicitly** although `apigateway.Cors.DEFAULT_HEADERS`
+   already contains it. A default that silently stopped including it would take
+   every browser integrator down and nothing here would show why.
+3. **The `OPTIONS` methods take the wildcard stage entry** (uncached,
+   `apiGatewayThrottleRate/Burst`) rather than the portal's tighter
+   `PORTAL_THROTTLE`. The portal's verbs are keyless AND reach the Lambda;
+   these reach a MOCK, which is the shape `/health` has carried on the stage
+   default since it shipped. Caching them would be worse than pointless — the
+   BROWSER already caches a preflight answer for `maxAge`.
+4. **`milestone-1-evidence.md` left alone** — see the AC above.
+
+### Verified locally
+
+- `cdk synth` → seven `OPTIONS`, every one `ApiKeyRequired: false`, `Type: MOCK`,
+  `Allow-Origin: '*'`, no `Allow-Credentials`, `Max-Age: '3600'`. The portal's
+  preflight is byte-identical to before.
+- `openapi:verify-routes` green — 9 routes agree in both directions. `OPTIONS`
+  is skipped on the gateway side by a rule in
+  `tools/scripts/verify-openapi-routes.mjs:147` that **already named this
+  task** — someone pre-wired the gate for this change.
+- `openapi:verify-servers`, `lint`, `typecheck` all green.
+
+### ⚠️ Coordination
+
+PR **#276** (task 0195, another owner) rewrites this same file and **deletes
+`portal-hosting-stack.ts` entirely**. Checked before writing: its only two hunks
+in `api-gateway-stack.ts` are comments at lines ~417 and ~870, nowhere near the
+`/v1` block, so #277 does not collide.
+
+⚠️ **#276 also settles decision 3 by removing its subject.** Its own comment
+says the distribution that fronted execute-api as an origin "was retired by task
+0195", and leaves the retire-or-alias call to this task. So the origin-migration
+criterion above is moot the moment #276 merges, and the execute-api question
+reduces to: disable the endpoint, or keep it. Nothing is gated on it.
 
 ## Notes
 
