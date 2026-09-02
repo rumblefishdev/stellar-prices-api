@@ -17,8 +17,10 @@ history:
     note: >
       Sharpened after [[0210]] shipped. The self-declared Soroban names are no
       longer inferred from BE's table — all 52 contracts were resolved directly
-      over RPC, confirming the five recorded here and finding three more (bare
-      `USD`, `EUR`, and `USDP`). Those symbols are now *published* as
+      over RPC, confirming the five recorded here exactly. An earlier version of that
+      note claimed three more — `USD`, `EUR`, `USDP` — which was wrong: all
+      three are SACs faithfully naming their classic asset, and belong to
+      [[0242]]. Those symbols are now *published* as
       `asset_code`, and `GET /v1/assets/{contract}` already returns
       `code: "USDC"` for one of them, so the list is inventory rather than
       forecast. Added the mechanism and real cost of manufacturing volume, and
@@ -80,20 +82,25 @@ them invisible; they surface the moment they trade.
 another team's table — every Soroban contract in the registry was asked
 directly, over `simulateTransaction`. All 52 answered. Among them:
 
-| symbol | contracts |
-|---|---|
-| `USDT` | **two** — `CBBUOYO3…` and `CCU77UVQ…` |
-| `USDC` | `CDPV3H7C…` |
-| `BTC` | `CBOZ6HCY…` |
-| `XRP` | `CB7OOP3V…` |
-| `USD` | `CBS7NEHF…` |
-| `EUR` | `CARCEFDR…` |
-| `USDP` | `CCOB35AE…` |
+| symbol | contracts | SAC? |
+|---|---|---|
+| `USDT` | **two** — `CBBUOYO3…` and `CCU77UVQ…` | no |
+| `USDC` | `CDPV3H7C…` | no |
+| `BTC` | `CBOZ6HCY…` | no |
+| `XRP` | `CB7OOP3V…` | no |
 
-The five this task recorded are confirmed exactly. **Three more were not in
-that count** — the bare currency codes `USD` and `EUR`, and `USDP`. Plus a
-prefixed family that is not impersonation but sits adjacent to the originals
-under a prefix search: `yUSDT`, `nBTC`, `nETH`, `BnUSD`, `USDM1`.
+**The five this task recorded are confirmed exactly, and there are no others.**
+
+⚠️ *A first pass at this section claimed three more — the bare codes `USD` and
+`EUR`, and `USDP`. That was wrong, and the correction is the useful part:
+checking each against `assets.sac_address` shows all three are **SACs** of
+classic assets that genuinely carry those codes, so they name their underlying
+asset faithfully. They belong to [[0242]], not here.* The two populations are
+disjoint and a symbol alone does not tell them apart — the SAC check does.
+
+Also present, and not impersonation: a prefixed family that merely sits adjacent
+to the originals under a prefix search — `yUSDT`, `nBTC`, `nETH`, `BnUSD`,
+`USDM1`.
 
 ⚠️ Since 0210 these symbols are **published** as `asset_code` / `code`. They
 are still absent from the listing, which `INNER JOIN`s `current_prices` and so
@@ -104,8 +111,10 @@ The list is a real inventory of what a consumer can be handed, not a forecast.
 This is also the concrete argument for the boundary 0210 kept: `?search=` and
 `sort=code` read the **stored** `assets.asset_code`, which is `''` for contract
 rows, so none of the above is findable by name. Moving search onto the resolved
-symbol before this task lands would make `?search=USD` return seven unverified
-contracts alongside the real thing.
+symbol before this task lands would surface these five alongside the real
+issuers — and, because a prefix match does not know a SAC from an impostor,
+would mix them with the legitimate wrappers and the `y…`/`n…` family under one
+undifferentiated `?search=USD`.
 
 ## Why today's de facto defence is not one
 
