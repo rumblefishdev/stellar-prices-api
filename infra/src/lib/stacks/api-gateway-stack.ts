@@ -377,6 +377,18 @@ export class ApiGatewayStack extends cdk.Stack {
           : {}),
       },
       endpointTypes: [apigateway.EndpointType.REGIONAL],
+      // execute-api is OFF: this API is reachable only at
+      // `config.apiDomain.domainName` (task 0126 — migrate then retire, the
+      // retirement half). The custom domain and its base-path mapping are
+      // unaffected; this closes only the raw
+      // `https://{restApiId}.execute-api.{region}.amazonaws.com/{stage}` door.
+      //
+      // ⚠️ Anything still pointed at the execute-api hostname gets a 403
+      // `ForbiddenException` from this moment, not a DNS failure — the name
+      // still resolves and TLS still completes, so it reads like a broken key
+      // rather than a retired endpoint. Known callers were dealt with first;
+      // see the retirement note further down this file.
+      disableExecuteApiEndpoint: true,
     });
 
     // ---------------------------------------------------------------
