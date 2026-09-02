@@ -15,6 +15,24 @@ history:
     status: backlog
     who: stkrolikiewicz
     note: >
+      Scope item 3 decided. Ordering stays on `volume_24h desc`, no `?verified=`
+      filter, and ambiguity is surfaced instead. The filter is rejected on the
+      SEP-1 measurement — `?verified=true` would include `blackrock.co.com` and
+      exclude a legitimate issuer whose toml was briefly unreachable, which is a
+      stronger claim on weaker evidence than publishing nothing. Volume stays
+      because it overclaims nothing: it answers "most traded", which is true and
+      already documented as an unfiltered total. The real defect is that a flat
+      ranked list hides the other 414, so the fix is visibility: the verified
+      domain per row, plus a count of how many issuers share the searched code.
+      Measured to size it — 341 of 2,884 visible codes have more than one
+      issuer, covering 989 of 3,530 visible pairs, so this is a quarter of the
+      surface rather than an edge case. Also settled that [[0210]]'s search
+      boundary should stay permanently for Soroban: no SEP-1 equivalent means no
+      domain to publish beside a self-declared symbol.
+  - date: 2026-09-02
+    status: backlog
+    who: stkrolikiewicz
+    note: >
       Measured the SEP-1 half. `prices.asset_metadata` holds **zero** rows on
       prod — empty, not sparse — while `home_domain` ships as `""` on every
       response. Scoping to what consumers can see makes this tractable: 1,948
@@ -336,11 +354,8 @@ Three parts, separable:
    asset not listed back / no domain claimed / not checked), since "we have not
    looked" and "we looked and it failed" must not collapse — but it sits beside
    the domain rather than replacing it.
-3. **Decide what ranking and search should do with it.** Options, in rough
-   order of cost: leave ordering alone and let consumers filter; add a
-   `?verified=` filter; break volume ties by verification; stop ranking search
-   results on volume alone. This part needs a decision, not just an
-   implementation — it changes what every existing consumer sees.
+3. **Ranking and search — decided 2026-09-02, see below.** Ordering stays on
+   volume; ambiguity becomes visible instead. No `?verified=` filter.
 
 ⚠️ **Only after (1)–(3) should `?search=` be extended to Soroban symbols.**
 [[0210]] deliberately left `startsWith(a.asset_code, ?)` and `sort=code` on the
@@ -350,6 +365,86 @@ signal is precisely what would let a hostile token surface under a well-known
 code. There is a test pinning that boundary
 (`list_it.rs::search_and_sort_still_read_the_raw_column`); changing it should be
 a decision made here.
+
+## Decision: ranking stays on volume, ambiguity becomes visible
+
+Taken 2026-09-02, after measuring SEP-1 and the shape of the ambiguity. Recorded
+here with the reasoning because the alternatives are all plausible and the one
+that looks most protective is the one the measurement rules out.
+
+### The measurement that decides it
+
+Among API-visible classic assets:
+
+```
+distinct codes                         2,884
+codes with more than one issuer          341   (12%)
+visible (code, issuer) pairs under them  989   (28% of 3,530)
+```
+
+Ambiguity is not an edge case. More than a quarter of what a consumer can see
+sits under a code that at least one other visible issuer also uses.
+
+### What we cannot do
+
+**There is no canonical `BTC` on Stellar.** Any ordering we choose over 415 `BTC`
+issuers implies an answer to "which one is real", and we have no basis for that
+answer. So the question is not "order better" — it is "stop implying an answer
+we cannot justify".
+
+That eliminates two of the four options outright:
+
+- **`?verified=` filter — rejected.** It is the boolean the SEP-1 measurement
+  above rules out. `?verified=true` would *include* `blackrock.co.com`, which
+  passes the check in full, and *exclude* a legitimate issuer whose toml happened
+  to be unreachable that hour. It would be worse than nothing: a filter named
+  "verified" that quietly endorses a lookalike is a stronger claim than an
+  unfiltered list, made on weaker evidence.
+- **Break volume ties by verification — rejected.** `volume_24h_usd` is a
+  high-precision decimal; exact ties essentially never occur, so this changes
+  nothing while sounding like it does.
+
+### What we do instead
+
+**Keep `sort=volume_24h desc` as the default.** Not because volume is good
+evidence of identity — this task exists because it is not — but because it is
+*honestly labelled*. It answers "most traded", which is true, measurable, and
+already documented as an unfiltered total (`current.sql:40`). Replacing it with
+an identity-derived order would swap a metric that overclaims nothing for one
+that overclaims a great deal.
+
+**Make the ambiguity visible in the response.** The real defect is not that the
+order is wrong; it is that a flat ranked list *hides* the existence of the other
+414. A consumer reading `data[0]` today has no way to know the name they searched
+is contested. So:
+
+- each row carries the **verified domain** (from item 2), and
+- a search or listing response says **how many issuers share this code**.
+
+That turns "here is BTC" into "here is one of 415 things called BTC, issued by
+whoever controls ultracapital.xyz" — which is the true statement, and is
+actionable by a consumer in a way a rank never is.
+
+**Leave the default listing alone.** Ranked by volume across all assets, it is a
+"most traded" view and volume is exactly the right metric for it. Nothing here
+changes it.
+
+### Consequence for [[0210]]'s boundary
+
+`?search=` stays on the **stored** `assets.asset_code`, so Soroban symbols remain
+unfindable — and, unlike the classic side, that should not change even after this
+task lands. Soroban tokens have no SEP-1 equivalent and no `home_domain`, so
+there is no verified domain to publish beside them; extending search to their
+self-declared symbols would surface the five impersonating contracts with nothing
+to qualify them. The boundary is pinned by
+`list_it.rs::search_and_sort_still_read_the_raw_column`.
+
+### What this decision is not
+
+It does not make the API safe to resolve names against. It makes the API stop
+implying that it is. A consumer who needs *the* USDC still has to know Circle's
+issuer, and this task's job is to give them enough on the response to check that
+they got it — not to guess it for them.
 
 ## Notes
 
@@ -377,7 +472,12 @@ a decision made here.
 - [ ] For a code with many issuers — `BTC` (415) is the sharpest classic case —
       a consumer can tell the canonical one from the rest **without** relying on
       volume ordering
-- [ ] A decision is recorded on whether search and ranking use the signal, with
-      its reasoning, whichever way it goes
+- [x] A decision is recorded on whether search and ranking use the signal, with
+      its reasoning — **decided 2026-09-02**: ordering stays on volume, no
+      `?verified=` filter, and ambiguity is surfaced instead (see the Decision
+      section). The implementation of that decision remains open below
+- [ ] A search or listing response makes a contested code visible — 341 of 2,884
+      visible codes have more than one issuer, and today a flat ranked list hides
+      that entirely
 - [ ] Soroban tokens are either verifiable by some stated mechanism, or
       explicitly labelled unverifiable — not silently indistinguishable
