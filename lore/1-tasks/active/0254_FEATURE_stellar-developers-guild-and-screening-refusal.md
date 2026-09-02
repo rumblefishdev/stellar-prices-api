@@ -233,11 +233,33 @@ three arms above are distinguishable from the outside. Capturing a body would
 mean a temporary `tracing` line and a decision about logging member objects
 that this task should not make on its own.
 
-**Still open:** observation 2 (the same account after accepting the rules →
-`pending: false`, sign-in proceeds) and observation 3 (an account that never
-joined → 404 with code 10007 → `outcome="not_member"`). Neither can change the
-finding above; they confirm the other two arms still answer as they did before
-the variant was split off.
+### Measured — observation 2, 2026-09-02
+
+The same account, after accepting the server's rules on Discord, signing in
+again 25 seconds later:
+
+```
+2026-09-02T12:25:05Z INFO prices_api::portal::auth: portal sign-in refused outcome="pending_rules"
+2026-09-02T12:25:30Z INFO prices_api::portal::keys: portal issued an API key key_id=ak1dkldyog created=false
+```
+
+**The field flips.** `pending` went `true` → `false` across one click of the
+rules prompt: the first line is `PendingScreening`, the second can only be
+reached through `Membership::Member`, and nothing else changed between them.
+Observation 1 alone would have been consistent with a field stuck at `true`;
+this is the half that rules that out.
+
+`created=false` is the reconciler adopting an existing key rather than
+creating one — `discord-1542110353150967951-key`, created earlier the same
+day (13:45 local) by an earlier local run, tagged `ManagedBy=prices-portal`.
+A **real production key issued from a laptop**: it is the local-run hazard
+`packages/prices-api/README.md` and [[0194]] both name, and it is Adam's to
+keep or delete.
+
+**Still open:** observation 3 (an account that never joined → 404 with code
+10007 → `outcome="not_member"`). It cannot change the finding above; it
+confirms the third arm still answers as it did before the variant was split
+off.
 
 Note this is **not** the same question as Onboarding. `pending` is Membership
 Screening — the rules checkbox, which is what Adam asked for. Discord Onboarding
