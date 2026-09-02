@@ -256,10 +256,42 @@ A **real production key issued from a laptop**: it is the local-run hazard
 `packages/prices-api/README.md` and [[0194]] both name, and it is Adam's to
 keep or delete.
 
-**Still open:** observation 3 (an account that never joined → 404 with code
-10007 → `outcome="not_member"`). It cannot change the finding above; it
-confirms the third arm still answers as it did before the variant was split
-off.
+### Measured — observation 3, 2026-09-02, and the assumption it breaks
+
+The same account again, after **leaving** Stellar Developers:
+
+```
+2026-09-02T12:28:03Z WARN prices_api::portal::auth: sign-in membership check answered Unknown Guild (10004) — is the discord-guild-id parameter right? guild_id=897514728459468821
+2026-09-02T12:28:03Z INFO prices_api::portal::auth: portal sign-in refused outcome="not_member"
+```
+
+The verdict is right. **The code the task predicted is not**: this expected
+`10007` ("Unknown Member") and Discord answered **`10004`** ("Unknown Guild")
+— with the guild id correct, freshly proved correct by observations 1 and 2
+against the same snowflake minutes earlier.
+
+This settles [[0180]] item 1, unmeasured since 0189, and it contradicts what
+`discord.rs` says about the code:
+
+> 10004 usually means the *guild id* is wrong, which is our configuration and
+> not the user; the caller logs it loudly for exactly that reason.
+
+The mechanism, once seen, is obvious: under `guilds.members.read` a token
+whose account is not in the guild **cannot see the guild**, so Discord's
+answer is "Unknown Guild", not "Unknown Member". 10004 is the ORDINARY
+non-member reply on this route, not the sign of a mis-seed.
+
+**What it costs today.** Both refusal paths (`auth/mod.rs` and
+`auth/issue.rs`) `tracing::warn!` on 10004 asking whether the parameter is
+right. In production that fires for **every non-member** — the exact
+population the portal expects to refuse most often — telling operators to
+check a parameter that is fine, and burying the signal the warn exists for.
+A mis-seeded guild id produces the same line as an ordinary refusal, so the
+line distinguishes nothing.
+
+Not fixed in this task's diff yet: the warn is 0189's deliberate decision,
+made on an assumption this measurement is the first to test. See "Open" in
+the notes.
 
 Note this is **not** the same question as Onboarding. `pending` is Membership
 Screening — the rules checkbox, which is what Adam asked for. Discord Onboarding
