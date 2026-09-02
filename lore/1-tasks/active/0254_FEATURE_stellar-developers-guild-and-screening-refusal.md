@@ -427,8 +427,10 @@ button would hand the visitor back to the same refusal).
 
 ## Implementation Notes
 
-Three commits on `feat/0254_stellar-developers-guild-and-screening-refusal`,
-2026-09-02, one per phase of the plan:
+Thirteen commits on `feat/0254_stellar-developers-guild-and-screening-refusal`,
+2026-09-02. The first three are the phases of the plan; D is Adam's two
+review passes over the rendered screens; then one merge of `develop` and the
+step 0 record.
 
 **A — Rust** (`31e2383`). `eligibility.rs`: `Membership::PendingScreening`
 and `Eligibility::PendingScreening` for `pending: Some(true)`; `decide()`
@@ -474,6 +476,68 @@ CI (network). `measure-pending-absent.sh`: default guild is the official one,
 the scratch guild is the documented alternative, and a `pending_rules` line
 in the log is a verdict of its own. Runbook §2a names the official guild and
 the check; the epic's barrier reads membership + screening cleared + age.
+
+**D — the two review passes** (`3ef95ba`, `00021df`). Both refusal buttons
+open in a new tab, not only the new one — decision 9. The `not_member`
+sentence names the server in full and links the same invite the button
+opens, so a reader of the copy does not have to hunt for the control:
+"members of the [Stellar Developers Discord](invite) server". Assertions for
+`target`/`rel` on both screens and for the inline link.
+
+**The merge** (`9264d50`). `origin/develop` moved by 27 commits under the
+branch — [[0195]] (PR #276: the API reference page, `PortalHostingStack`
+retired), [[0210]] (Soroban symbols), [[0126]] (CORS). No conflicts: 0195
+added `/docs`, `DocPrimitives` and the `openapi` module, this task touches
+the refusal screens and `oauthPopup`. After it: Rust green, portal
+**205/205** (182 + 0195's 23), lint, typecheck and build clean.
+
+**Step 0** (`f8364f1`, `dfd231a`, `4f9f9a0`, `20a6f4c`, `6b9fa73`). The three
+observations above, the decision on the 10004 warn, and the SSM switch.
+
+## Issues Encountered
+
+- **`.portal-oauth.json` still held the retired `/api/api/` layout**
+  (`redirect_uri: http://localhost:4200/api/api/auth/callback`), so Discord
+  answered "Invalid OAuth2 redirect_url" and nothing reached our logs. The
+  loader refuses a `redirect_uri` that does not end in `CALLBACK_PATH` and
+  the old value *does* end in it, so it booted clean and failed at Discord —
+  the runbook's own warning about a host typo, one path segment up. Not a
+  regression: [[0235]] moved the prefix on 2026-08-31 and this file is
+  gitignored, so nothing could have migrated it.
+- **`scripts/measure-pending-absent.sh` probed `/api/api/config`** for the
+  same reason and reported "serve never answered /config" against a healthy
+  serve. Fixed in `3bb2ea2`.
+- **`serve` panics `NoSource` without `PORTAL_FREE_PLAN_ID`.**
+  `serve.rs:68` calls `load_portal_keys()` unconditionally while the portal
+  is on, and `free_plan_id()` has no default. A placeholder is enough to
+  measure step 0 — the refusal lands before any gateway call — but the
+  variable cannot be omitted. (Written down because the advice "just leave it
+  out" was given in-session and was wrong.)
+- **`FOO=$(aws …) BAR=… AWS_PROFILE=x cargo run`** runs the substitution
+  before the assignments, so `aws` ran without the profile, returned nothing
+  and produced the same `NoSource`. Export the profile first.
+- **The Discord application was replaced mid-task.** A new one
+  (`client_id` ending 361254) took over from the old (…781190) and
+  `prices/production/portal-discord-oauth` still named the old: production
+  would have signed in through an application nobody was maintaining, or
+  failed with `invalid_client` if it had been deleted. Updated with
+  `put-secret-value` on 2026-09-02, `session_signing_key` carried over
+  unchanged so no session was invalidated; the previous version is
+  `AWSPREVIOUS` (`e73d09a7…`). **Not this task's change** — recorded here
+  because it happened under it and the runbook does not yet say the
+  application was replaced.
+- **A non-member answers 10004, not 10007** — see step 0, observation 3.
+- **A split deploy read as "the feature does not work".** The portal bundle
+  was synced while the Lambda still ran the old binary, so the backend landed
+  `?signin=not_member` for a pending member and the new bundle honestly
+  rendered the old screen. Diagnosed by pulling the deployed binary
+  (`aws lambda get-function` → `Code.Location`) and grepping it: `pending_rules`
+  absent, `signin=not_member` present. **Bundle-before-backend is the safe
+  order** — the new bundle handles both literals, while the reverse would
+  land a literal the old bundle drops silently.
+- **Portal vitest is flaky under load**: three timeouts on a run started
+  while `cargo test` had the CPU; clean under `--skipNxCache`, and Nx marked
+  the task flaky itself. Nothing was wrong with the tests.
 
 ## Design Decisions
 
@@ -533,17 +597,55 @@ the check; the epic's barrier reads membership + screening cleared + age.
 
 ## Notes
 
-- **Sequencing.** Step 0 and items 2-3 are ours and can run now against
-  `stellar_test` for the code paths. The SSM switch is the moment the portal
-  becomes real for outsiders — it belongs next to [[0179]], and [[0164]]'s
-  evidence pass must run after it, not before.
+- **Sequencing — done up to the compute deploy.** Step 0 measured, the SSM
+  switch made (2026-09-02 14:39, version 2). [[0164]]'s evidence pass must
+  run after the deploy below, not before.
 - **The barrier is rented.** `MEMBER_VERIFICATION_GATE_ENABLED` is SDF's setting
   on SDF's server. If they turn it off, every joiner is `pending: false`
   immediately and ADR 0010's barrier silently becomes "has a Discord account".
   Nothing alerts on that today; the epic tracks it as [[0170]].
-- **32873 members** on the official guild against 3204 on the alternative — the
-  gate is a barrier to bots, not a small-community filter, which is what ADR
-  0010 assumed and can now say with a number.
+- **~32.9k members** on the official guild against 3204 on the alternative —
+  the gate is a barrier to bots, not a small-community filter, which is what
+  ADR 0010 assumed and can now say with a number.
+- **ADR 0010 needs no amendment.** The task reserved one in case step 0
+  changed what `pending` means on this route; it did not — the field is
+  present and behaves as documented. What step 0 changed is the 404 *code*
+  a non-member gets, which the ADR does not speak about.
 - This task does **not** touch `flags` / Discord Onboarding. See step 0.
 - Not blocked by [[0195]]'s open operator step (the two `RETAIN`ed buckets); no
   overlap.
+
+## Operator steps (not in any diff)
+
+Done:
+
+1. ~~`put-parameter /prices/production/discord-guild-id = 897514728459468821`~~
+   — 2026-09-02 14:39, version 2. `npm run discord:verify-guild -- --ssm`
+   passes.
+2. ~~`prices/production/portal-discord-oauth` re-pointed at the new Discord
+   application~~ — 2026-09-02 (see Issues Encountered; not this task's).
+
+Open, in this order:
+
+3. **Merge this PR (#278), then `make -C infra deploy-production-compute`.**
+   The bundle is already synced and the Lambda is not: measured 2026-09-02,
+   the deployed binary carries `signin=not_member` and no `pending_rules`, so
+   production still folds a member in screening into "join the server". Verify:
+   `aws lambda get-function --function-name prices-production-api-handler --query Code.Location --output text | xargs curl -s -o /tmp/fn.zip && unzip -p /tmp/fn.zip bootstrap | grep -ac pending_rules`
+   → `1`.
+4. `make -C infra sync-portal-explorer` — only if the bundle moves again
+   after the merge.
+5. **The walk-through** (the last AC): join Stellar Developers → refused with
+   the accept-rules screen → accept → sign in → key. Needs an account NOT in
+   the guild to start, and confirms the one thing no test can:
+   that `discord.com/channels/897514728459468821` lands an unscreened member
+   on the rules prompt.
+6. **Register `https://prices-api.sorobanscan.rumblefish.dev/api/auth/callback`
+   in the NEW Discord application**, if it is not there. The production secret
+   already names that application, so without it production sign-in fails on
+   Discord's own page with nothing in our logs. Not this task's, blocking the
+   portal's opening.
+7. Housekeeping: `discord-1542110353150967951-key` (`ak1dkldyog`) is a real
+   production key created from a laptop during step 0, 2026-09-02 13:45. Keep
+   it or `aws apigateway delete-api-key --api-key ak1dkldyog`; [[0194]] audits
+   what is left.
