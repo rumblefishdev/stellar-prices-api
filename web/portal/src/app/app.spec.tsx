@@ -952,7 +952,16 @@ describe('sign in with Discord', () => {
       await screen.findByRole('heading', { name: /access not available/i }),
     ).toBeTruthy();
     const message = screen.getByTestId('signin-not-member');
-    expect(message.textContent).toMatch(/members of the stellar discord/i);
+    expect(message.textContent).toMatch(
+      /members of the stellar developers discord/i,
+    );
+    // The sentence carries the invite too, not only the button below it.
+    const inline = within(message).getByRole('link', {
+      name: /stellar developers discord/i,
+    });
+    expect(inline.getAttribute('href')).toBe('https://discord.gg/stellardev');
+    expect(inline.getAttribute('target')).toBe('_blank');
+    expect(inline.getAttribute('rel')).toContain('noopener');
     // The screening sentence 0189 kept here is GONE (task 0254): a visitor
     // who has joined and is still refused now has a screen of their own, so
     // this card says one thing — join.

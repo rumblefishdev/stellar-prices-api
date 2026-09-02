@@ -794,8 +794,20 @@ function LoginView({
             title="Stellar Discord membership required"
           >
             <p data-testid="signin-not-member">
-              API keys are available to members of the Stellar Discord server.
-              Join the server and try again.
+              API keys are available to members of the{' '}
+              {/* The same invite the button below opens, and the same new
+                  tab. A link in the sentence as well as the button: the
+                  sentence is where the visitor reads what to do, and a
+                  reader who is scanning the copy should not have to hunt for
+                  the control to act on it. */}
+              <a
+                href={STELLAR_DISCORD_INVITE}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Stellar Developers Discord
+              </a>{' '}
+              server. Join the server and try again.
             </p>
           </Callout>
         )}
