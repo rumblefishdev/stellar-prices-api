@@ -2,9 +2,9 @@
 id: "0126"
 title: "API edge — CORS preflight, custom domain, and a recorded WAF decision"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0008"]
-related_tasks: ["0124", "0121", "0128", "0194", "0122"]
+related_tasks: ["0124", "0121", "0128", "0194", "0122", "0195", "0255"]
 tags: [layer-infra, priority-medium, effort-medium, milestone-M2, api-gateway, cors, dns, security]
 milestone: 2
 links:
@@ -214,6 +214,28 @@ history:
       `*`. Added to [[0255]]: a THROTTLED preflight answers 429 carrying the
       portal's origin and credentials, so under throttle this feature is
       intermittently broken, not merely broken on errors.
+  - date: 2026-09-02
+    status: completed
+    who: okarcz
+    note: >
+      CLOSED. 14 of 15 acceptance criteria met; the browser run was WAIVED by
+      the operator and is left UNCHECKED rather than ticked, because everything
+      it depends on was measured but the run itself was not performed.
+      Delivered: CORS preflight on all seven /v1 routes plus the handler-side
+      wildcard (both halves - the second nearly shipped missing); the `*`
+      no-credentials policy decided and reconciled with the portal's forced
+      single origin; WAF decided AGAINST with four reversal triggers;
+      execute-api RETIRED (disableExecuteApiEndpoint, answers 403); all four
+      docs/scf documents migrated to the custom domain with dated amendment
+      notes after the operator ruled the M1 docs maintained rather than frozen;
+      three stale deferrals updated. Measured on prod: seven preflights 204
+      with `*`, keyed GET 200 with `*`, cache hit 0.128s vs 0.241s miss with a
+      real TTL expiry, execute-api 403. 🔴 The deploy caused a ~9-minute outage
+      from a stale Lambda asset, and every check in my own runbook was blind to
+      it - full account under Issues Encountered and in
+      [[deploy-ships-stale-lambda-assets]]. Left open elsewhere: [[0255]]
+      re-scoped (the leak stopped, the mechanism is unexplained), [[0122]]
+      carries two TTL drifts, [[0121]] must be re-pointed at the custom domain.
 ---
 
 # API edge — CORS, custom domain, WAF decision
@@ -570,11 +592,16 @@ rather than a wrong URL.
 ## Acceptance Criteria
 
 - [ ] Cross-origin `GET` from a browser page against every data route succeeds,
-      preflight included. ✅ **UNBLOCKED 2026-09-02** — deployed, and the
-      [[0255]] blocker named below is measurably GONE, so a third-party page no
-      longer meets a portal-origin mismatch on a 403. All seven preflights
-      answer `204` with `*`. What remains is the browser run itself, which
-      needs a key. ⚠️ **Needs a real browser** — this task
+      preflight included. ⚠️ **WAIVED by the operator on 2026-09-02, not
+      done — recorded as unchecked deliberately.** Everything it depends on is
+      measured on production: all seven preflights answer `204` with `*` and
+      `x-api-key` allowed; a KEYED `GET /v1/assets/native/price` returns `200`
+      carrying `access-control-allow-origin: *` (both halves, the second being
+      the one review nearly let ship missing); and the [[0255]] error-path
+      blocker is gone. What was NOT executed is a real browser performing a
+      real preflight+request pair. ⚠️ **This task's own text argues that gap
+      matters** — see below; it is left `[ ]` so nobody later reads a tick as
+      evidence of something that was not run. ⚠️ **Needs a real browser** — this task
       says it and it still holds: `curl -X OPTIONS` succeeding proves less than
       it appears to. ⚠️ **Blocked in practice by [[0255]]**: once `/v1` answers
       `*`, its 4xx still carry the portal's single origin, so a third-party
@@ -1198,6 +1225,126 @@ hits a 403 or 429 sees a CORS mismatch and reads it as a dead network.
 3. **[same tab]** Then send it **without** the key and watch the 403 fail on
    CORS. That is 0255, not a regression, and it is worth seeing once so the
    report of 0255 is first-hand.
+
+## Implementation Notes
+
+Merged as PR **#277** (`66581f4`), five commits, then deployed on 2026-09-02.
+
+| commit | what |
+|---|---|
+| `12a5f4c` | `addCorsPreflight` on all seven `/v1` routes, folded into `addGet` |
+| `8321e9a` | `data_cors_layer` in `lib.rs` — the handler half |
+| `1b20a68` | the wildcard pinned on a real `/v1` route, not only `/health` |
+| `a96e297` | merge of develop after #276 landed on the same two files |
+| `fea74ae` | the execute-api decision stated where the code deferred it |
+| `a635439` | `disableExecuteApiEndpoint: true` — the retirement |
+
+Files: `infra/src/lib/stacks/api-gateway-stack.ts`,
+`packages/prices-api/src/lib.rs`, `packages/prices-api/tests/portal.rs`, plus
+the four `docs/scf/` documents migrated off the retired hostname.
+
+### Broken / modified tests
+
+- **`the_cors_layer_stops_at_the_portal_prefix` → renamed
+  `the_portals_credentialed_layer_stops_at_the_portal_prefix`.** It asserted
+  that data routes carry NO allow-origin — true only while `/v1` was
+  uncallable from a browser, which was the defect. Rewritten to pin what
+  survives: the portal's single origin and its credentials never appear
+  anywhere else. **Intentional, not a regression** — and rewritten a second
+  time during the #276 merge, because [[0195]] had amended the same test from
+  the opposite side (see Issues).
+- **`data_routes_answer_a_wildcard_origin_without_credentials`** — new.
+- **`a_real_v1_route_carries_the_wildcard_on_its_own_response`** — new.
+
+## Issues Encountered
+
+1. **The fix nearly re-shipped the defect it exists to close.** `addCorsPreflight`
+   creates only the `OPTIONS` mock; on a Lambda PROXY integration the real
+   response's allow-origin can only come from the handler, and the Rust
+   `CorsLayer` was scoped to the portal. Every local signal was green and
+   `curl` passed throughout. Caught in review, fixed in `8321e9a`. Root cause of
+   the class: **the preflight is the visible half and the response header is the
+   half nothing tested.** → [[cors-preflight-is-half-the-mechanism]]
+
+2. **The fix's own test pinned the layer, not the surface.** It asserted the
+   wildcard on `/health` — a gateway MOCK production never routes to the
+   Lambda. After the fix the suite still touched no `/v1` path. Fixed in
+   `1b20a68` with a route whose `400 invalid_query` proves it was ROUTED, not
+   merely wrapped.
+
+3. **🔴 The deploy caused a ~9-minute production outage.**
+   `deploy-production-compute` does not build the Rust; it packaged an Aug-31
+   bootstrap predating [[0194]]'s `CALLBACK_PATH` flatten, and the handler
+   panicked at cold start against the already-re-pointed secret. Every
+   Lambda-backed route `502`d. **Every post-deploy check passed anyway** —
+   `/health` and all seven preflights are gateway MOCKs and a keyless `/v1`
+   stops at the gateway, so none of them reach the handler. →
+   [[deploy-ships-stale-lambda-assets]] instance 4.
+
+4. **A wrong claim shipped in a code comment and was corrected by
+   measurement.** `data_cors_layer`'s doc said an overlapping layer would emit
+   TWO allow-origin headers. It does not — `CorsLayer` OVERWRITES. The real
+   consequence is quieter: the portal's credentialed origin is silently
+   replaced. Same class as the `DATA_PREFLIGHT_MAX_AGE` claim corrected in
+   `8321e9a`.
+
+5. **PR #276 collided, and the dangerous half merged CLEANLY.** Git raised
+   markers around the doc comments while silently keeping 0195's assertion that
+   `/health` carries no allow-origin — into a tree where it now carries `*`.
+   Resolved on the property both tasks need.
+
+6. **A commit landed on a detached HEAD.** A background `/code-review pr#278`
+   checked that PR out in the same working directory; `git push origin develop`
+   then reported "Everything up-to-date" truthfully, because the branch never
+   had the commit. Recovered by cherry-picking onto a clean worktree. →
+   [[verify-push-against-remote-ref]]
+
+## Design Decisions
+
+### From Plan
+
+1. **`/v1` allowed origins: `*`, no credentials** — decision 1 above, with the
+   two rejected alternatives and their costs.
+2. **WAF: NO**, with four named reversal triggers — decision 2.
+3. **execute-api: migrate then RETIRE, not a permanent alias** — decision 3,
+   executed 2026-09-02.
+4. **Preflight at the gateway as a MOCK**, `apiKeyRequired: false`, so an
+   unauthenticated `OPTIONS` never invokes Lambda or consumes quota.
+
+### Emerged
+
+5. **The preflight is folded into `addGet` rather than called separately.** A
+   data route added later without one is invisible to `curl` and to every test
+   here. Coupling them makes forgetting it require an edit rather than an
+   omission.
+6. **`Access-Control-Allow-Origin` is a CONSTANT, never a reflected `Origin`.**
+   Forced by the stage cache: a reflected value cached there is served to the
+   next caller — the bleed [[0118]] measured on production.
+7. **`x-api-key` listed explicitly** although `Cors.DEFAULT_HEADERS` contains
+   it. A default that silently stopped including it would take every browser
+   integrator down with nothing here to show why.
+8. **A written test was DROPPED rather than kept.** An "exactly one
+   allow-origin" assertion was written, then measurement showed no ordering
+   makes it fail. Keeping it because it existed would have been this task's own
+   failure mode in a new place.
+9. **The `PortalHostingStack` origin fix was deliberately NOT written** — PR
+   #276 deletes that file. The criterion closed as resolved-by-deletion.
+10. **The M1 documents are MAINTAINED, not frozen** (operator's call). URLs
+    migrated with a dated amendment note in each file rather than silently
+    swapped, so a reviewer holding the submitted PDF can see what changed.
+11. **`/health` gained `*` as a side effect** of `data_cors_layer` wrapping the
+    whole pre-layer router. Harmless — it is anonymous and carries no
+    credentials — and invisible in production, where `/health` is a gateway
+    MOCK.
+
+## Future Work
+
+- **[[0255]]** — the error-path leak is GONE on the wire, but WHY is unconfirmed.
+  Kept open for the mechanism, which generalises well beyond this task.
+- **[[0122]]** — the full TTL/hit-rate matrix, plus two drifts against §6
+  recorded from here (`/price` 10s vs 15s, `/backfill/status` 60s vs 30s).
+- **[[0121]]** — must run against `prices-api.sorobanscan.rumblefish.dev`; the
+  execute-api base its instructions name now answers `403`.
 
 ## Notes
 

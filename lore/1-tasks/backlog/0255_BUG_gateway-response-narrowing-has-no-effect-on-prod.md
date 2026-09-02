@@ -21,9 +21,58 @@ history:
       0126 because it is not 0126's CORS work and not 0194's tail: their code
       is correct and shipped. This is API Gateway behaviour we do not
       understand, and it invalidates the verification method both tasks used.
+  - date: 2026-09-02
+    status: backlog
+    who: okarcz
+    note: >
+      🎉 THE SYMPTOM IS GONE — measured right after [[0126]]'s deploy. All four
+      probes that leaked the portal's origin this morning now carry NO CORS
+      header at all, credentials and Vary included. Nothing in this task was
+      worked on; the fix, if it is one, was a side effect. ⚠️ The MECHANISM is
+      still unknown and that is now the whole of this task: what changed
+      alongside is that the ApiGateway deploy created a NEW
+      AWS::ApiGateway::Deployment and repointed the stage. The plausible
+      reading - control-plane gateway responses are not what the STAGE serves
+      until a new deployment - would also explain why `cdk diff --strict` saw
+      no difference while the wire disagreed. That is a HYPOTHESIS. This task's
+      own lesson is that explaining a measurement instead of extending it
+      produced two wrong answers already, so it is not being written up as
+      resolved. Re-scoped from "fix the leak" to "explain why it stopped, and
+      write down what that means for verifying gateway config".
 ---
 
 # The narrowing is live, correct, and does nothing
+
+## ✅ UPDATE 2026-09-02 — the leak STOPPED, cause unconfirmed
+
+Measured immediately after [[0126]] deployed (Compute, then ApiGateway):
+
+| request | this morning | after the deploy |
+|---|---|---|
+| `/v1/assets/native/price`, no key, `Origin: evil` | 403 + `…sorobanscan…` | **403, no CORS header** |
+| same, **no `Origin` header** | 403 + `…sorobanscan…` | **403, no CORS header** |
+| `/nope`, no `Origin` | 403 + `…sorobanscan…` | **403, no CORS header** |
+| `/v1/assets`, no key | 403 + `…sorobanscan…` | **403, no CORS header** |
+
+`Access-Control-Allow-Credentials` and `Vary: Origin` went with them.
+
+⚠️ **Nothing in this task was worked on.** No code here changed; 0126 deployed
+CORS preflights and `disableExecuteApiEndpoint`. So this is a side effect, and
+**the bug this task was filed for — that a deployed, correct control-plane
+change had no effect — is still unexplained.**
+
+🔑 **The task is therefore RE-SCOPED, not closed:** from *fix the leak* to
+*explain why it stopped*. The candidate is that the ApiGateway deploy created a
+new `AWS::ApiGateway::Deployment` and repointed the stage
+(`ApiDeployment…1de519c6` → `…13811535`), i.e. **gateway responses are served
+per stage-deployment, and the control plane can be ahead of what the stage
+serves.** That would explain why `describe-stacks` and `cdk diff --strict` both
+reported agreement while the wire disagreed — they compare against the control
+plane, which was correct all along.
+
+⚠️ **That is a hypothesis and is labelled as one deliberately.** Two published
+diagnoses on this bug were already wrong, both from explaining a measurement
+instead of extending it. Confirming it needs a deliberate test, not a story.
 
 ## Summary
 
