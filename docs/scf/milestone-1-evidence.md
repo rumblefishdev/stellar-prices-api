@@ -15,6 +15,15 @@ margin:
 > evidence: resource names, SQL queries with output, screenshots, and code
 > references.
 >
+> **⚠️ Amended 2026-09-02 — the API base URL changed after this document was
+> submitted.** Every command below now uses
+> `https://prices-api.sorobanscan.rumblefish.dev`, the API's own hostname
+> (a REGIONAL custom domain mapped at the root, so there is no stage path).
+> The original `…execute-api.eu-central-1.amazonaws.com/production` base was
+> **switched off on 2026-09-02** and answers `403` — the URLs were updated
+> rather than left dead, so every command here remains runnable as written.
+> Nothing else in this document was changed by that amendment.
+>
 > It also documents — honestly and in full — the scope refinements made during
 > the tranche. The largest is the primary datastore: the approved plan
 > specified PostgreSQL on AWS RDS; the delivered system writes to ClickHouse on
@@ -742,11 +751,11 @@ _Evidence tasks:_ [0038](https://github.com/rumblefishdev/stellar-prices-api/blo
 **The endpoint is live** at:
 
 ```
-GET https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/v1/backfill/status
+GET https://prices-api.sorobanscan.rumblefish.dev/v1/backfill/status
 ```
 
 ```bash
-API=https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production
+API=https://prices-api.sorobanscan.rumblefish.dev
 curl -sS -H "x-api-key: $KEY" "$API/v1/backfill/status" | jq .
 ```
 
@@ -956,20 +965,20 @@ here.
 | Rollup MV cadence tuning                                | The six rollup MVs **run in APPEND mode** (task 0095, deployed 2026-07-17) — a replace-mode incident that overwrote pre-rolled coarse history was caught and fixed, so refreshes now insert their window without clobbering history. Verified: deep history byte-identical to a pre-change backup, coarse tips advancing automatically (AC 6, Query (6)). The only open item is tuning the per-grain refresh cadence vs window against production merge load — behaviour, not correctness.                                                                                                                                                                                                                                                 | Follow-up (task 0104)  |
 | AMM live-era corrections                                | Two extractor defects were found and fixed **during** this tranche, and their historical effects are being repaired: Soroswap swaps were not being decoded until 2026-07-15 (the swap action sits in `topic[1]`, not `topic[0]`), and Phoenix was discarding ~2.1% of swaps whose event group omits optional fields. Both extractors are **fixed and deployed**, and history back to Soroban activation has been re-derived from on-chain events and verified. Residual: Soroswap has a 9-day hole (2026-07-06 → 07-15) and Phoenix is ~2% light over the same window, both pending a re-run. This affects AMM volume completeness in that window only — not the SDEX stream, not the live path, and not the ~6-month depth AC 6 asks for. | Follow-up (task 0101)  |
 | Swagger **UI**                                          | Not deployed. The OpenAPI **specification** is not exposed through the gateway either (the axum router defines `/api-docs-json`, but the API Gateway does not map it); the spec is generated from the code via `cargo run -p prices-api --bin extract_openapi`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Tranche 2              |
-| Custom API domain, WAF, CORS preflight                  | Deliberately deferred; the API is served on the API Gateway execute-api URL.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Tranche 2              |
+| Custom API domain, WAF, CORS preflight                  | ⚠️ **Amended 2026-09-02 — all three are now settled (task 0126).** Custom domain LIVE at `prices-api.sorobanscan.rumblefish.dev` (task 0194); CORS preflight deployed on all seven `/v1` routes (`*`, no credentials, `x-api-key` allowed); WAF **decided against** with recorded reasoning and reversal triggers — throttling at two levels already bounds the risk on a public, read-only, key-gated API with no PII. As submitted, this row read: _Deliberately deferred; the API is served on the API Gateway execute-api URL._ That URL is now off.                                                                                                                                                                                   | Tranche 2              |
 
 _Table 4 — Out-of-scope and known-open items, stated explicitly._
 
 ## 7. Live endpoints and access
 
-| Resource                         | URL / address                                                          | Access                               |
-| -------------------------------- | ---------------------------------------------------------------------- | ------------------------------------ |
-| Production API base              | `https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production` | `x-api-key` — key on request         |
-| Health probe                     | `…/production/health`                                                  | Anonymous                            |
-| `GET /v1/backfill/status` (AC 4) | `…/production/v1/backfill/status`                                      | `x-api-key`                          |
-| Production ClickHouse            | `ch.sorobanscan.rumblefish.dev` (database `prices`)                    | mTLS — client certificate on request |
-| Production alarms                | `prices-production-*` (eu-central-1)                                   | IAM, read-only access on request     |
-| GitHub repository                | `https://github.com/rumblefishdev/stellar-prices-api`                  | Anonymous                            |
+| Resource                         | URL / address                                         | Access                               |
+| -------------------------------- | ----------------------------------------------------- | ------------------------------------ |
+| Production API base              | `https://prices-api.sorobanscan.rumblefish.dev`       | `x-api-key` — key on request         |
+| Health probe                     | `…/health`                                            | Anonymous                            |
+| `GET /v1/backfill/status` (AC 4) | `…/v1/backfill/status`                                | `x-api-key`                          |
+| Production ClickHouse            | `ch.sorobanscan.rumblefish.dev` (database `prices`)   | mTLS — client certificate on request |
+| Production alarms                | `prices-production-*` (eu-central-1)                  | IAM, read-only access on request     |
+| GitHub repository                | `https://github.com/rumblefishdev/stellar-prices-api` | Anonymous                            |
 
 _Table 5 — Live verification endpoints and access model for reviewers._
 

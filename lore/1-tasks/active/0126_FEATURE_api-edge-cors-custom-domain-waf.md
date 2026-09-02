@@ -684,15 +684,18 @@ rather than a wrong URL.
       (`aws-cdk-lib` 2.257.0), and it does not disturb the custom domain
 - [x] WAF decision recorded with reasoning, cost, and a reversal trigger —
       **NO**, settled 2026-09-02, four triggers named (decision 2 above)
-- [ ] The three stale deferrals updated to point at that decision. **Two done**
-      in PR #277 (`api-gateway-stack.ts`, both comments). ⚠️ The third,
-      `milestone-1-evidence.md:959`, is DELIBERATELY NOT TOUCHED — it is a
-      frozen submission record ("Table 4 — Out-of-scope and known-open items")
-      and rewriting what we told reviewers is not a call to make in passing.
-      **Open question for the team: are the M1 evidence docs frozen as
-      submitted, or maintained?** The same question governs the execute-api
-      URLs still in `milestone-1-form-answers.md` and
-      `milestone-1-video-scenario.md`
+- [x] The three stale deferrals updated to point at that decision. Two done in
+      PR #277 (`api-gateway-stack.ts`, both comments). ✅ **The third,
+      `milestone-1-evidence.md`'s Table 4 row, is now done too** — the operator
+      answered the open question on 2026-09-02: **the M1 docs are MAINTAINED,
+      not frozen as submitted.** So the row states that all three (domain, CORS,
+      WAF) are settled, quoting what it said as submitted rather than erasing
+      it, and every execute-api URL across the four `docs/scf/` files was
+      migrated to `prices-api.sorobanscan.rumblefish.dev` with a dated
+      amendment note saying the original is off. Verified on the wire: the
+      anonymous `/health` the form answers tell reviewers to click returns 200,
+      and `/v1/backfill/status` returns 403 because it is key-gated, exactly as
+      the document says
 - [x] All of it expressed in CDK (Tranche 3 AC 7 requires clean-account
       reproducibility) — PR #277 is CDK only; no console step, no manual
       gateway edit

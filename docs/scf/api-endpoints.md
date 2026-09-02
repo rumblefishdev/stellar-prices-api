@@ -7,10 +7,14 @@ source at submission time.
 
 **Production base:** `https://prices-api.sorobanscan.rumblefish.dev`
 (since 2026-08-31, task 0194 — the API's own hostname, a REGIONAL custom
-domain on the REST API mapped at the root, so there is no stage path). The
-execute-api origin
-`https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production` still
-answers and is no longer the documented base.
+domain on the REST API mapped at the root, so there is no stage path).
+
+⚠️ **The execute-api origin is OFF as of 2026-09-02** (task 0126,
+`disableExecuteApiEndpoint: true`). `https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production`
+now answers `403 ForbiddenException` — the name still resolves and TLS still
+completes, so a caller still pointed at it sees what looks like a key problem
+rather than a retired endpoint. **There is one base URL and it is the one
+above.**
 
 The base URL is configured once, in `infra/envs/production.json`
 (`apiBaseUrl`), and flows from there to three places: the api-handler Lambda's
@@ -105,8 +109,8 @@ after the move above, a second, ungated copy of the same portal on a hostname
 nobody audited. Task 0195 destroyed it on 2026-09-01 and removed the stack, its
 `deploy-production-portal` target and the
 `/prices/production/portal-distribution-domain` SSM parameter. The
-execute-api origin it fronted still answers on its own URL; see task 0126 for
-whether that is announced as retired or kept as an alias.
+execute-api origin it fronted was itself retired by task 0126 on 2026-09-02 and
+now answers `403`.
 
 ### The path convention
 

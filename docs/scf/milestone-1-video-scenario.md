@@ -37,13 +37,19 @@ long, Scene 5 is the one to trim.
 
 ### Values to have ready
 
-| Item       | Value                                                                  |
-| ---------- | ---------------------------------------------------------------------- |
-| API base   | `https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production` |
-| API key    | `<API_KEY>` — export out of frame                                      |
-| ClickHouse | `ch.sorobanscan.rumblefish.dev`, database `prices`                     |
-| Repository | `https://github.com/rumblefishdev/stellar-prices-api`                  |
-| Region     | `eu-central-1`                                                         |
+⚠️ **Amended 2026-09-02.** The API base below was originally the `execute-api`
+hostname; that endpoint is now off (`403`) and the API's own custom domain
+replaces it. If the recorded video shows the old base, the video is a historical
+artefact — do not re-shoot for this alone, but do not re-use the old URL in
+anything new.
+
+| Item       | Value                                                 |
+| ---------- | ----------------------------------------------------- |
+| API base   | `https://prices-api.sorobanscan.rumblefish.dev`       |
+| API key    | `<API_KEY>` — export out of frame                     |
+| ClickHouse | `ch.sorobanscan.rumblefish.dev`, database `prices`    |
+| Repository | `https://github.com/rumblefishdev/stellar-prices-api` |
+| Region     | `eu-central-1`                                        |
 
 ### What NOT to show
 
