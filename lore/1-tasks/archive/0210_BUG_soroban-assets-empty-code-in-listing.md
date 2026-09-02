@@ -4,7 +4,7 @@ title: "Soroban assets carry an empty asset_code in listing and detail — top-v
 type: BUG
 status: completed
 related_adr: []
-related_tasks: ["0120", "0139", "0242", "0252", "0256", "0257", "0258", "0259"]
+related_tasks: ["0120", "0139", "0242", "0252", "0256", "0258", "0259", "0140"]
 tags: [layer-backend, priority-medium, effort-medium, milestone-M2, api, metadata, defect]
 milestone: 2
 links: []
@@ -373,7 +373,7 @@ still holds 52 contracts and 52 identities, unchanged by the deploy.
   neither: `uniqExact` returned 207,754 and 52. The worker re-inserts the whole
   registry every hour into a `ReplacingMergeTree`, so a raw count lands wherever
   the merge cycle happens to be — 1×, 2× or 3× depending on the minute. Cost a
-  detour mid-deploy; now [[0257]].
+  detour mid-deploy; already filed as [[0140]].
 - **The first `cdk diff` proposed creating the entire stack.** Every resource
   showed `[+]`. The cause was the wrong AWS profile: the credentials could not
   assume the CDK lookup/deploy roles, so CDK diffed against an empty template
@@ -433,7 +433,9 @@ still holds 52 contracts and 52 identities, unchanged by the deploy.
 Spawned rather than left as prose:
 
 - [[0256]] — the ledger scan half of this same worker has never run on prod
-- [[0257]] — the hourly full-registry rewrite
+- [[0140]] — the hourly full-registry rewrite. Already filed by okarcz on
+  2026-08-03; this deploy's measurements were added there rather than spawning
+  a duplicate
 - [[0258]] — `api_reader` / `ingestion_writer` hold `DROP` and `SYSTEM` on `*.*`
 - [[0259]] — prod schema is hand-applied with no drift check
 - [[0252]] — asset identity verification, spawned earlier from the same work
