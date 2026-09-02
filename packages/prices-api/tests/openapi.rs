@@ -523,3 +523,104 @@ async fn batch_and_search_publish_their_bounds() {
     assert_eq!(schema["minLength"], 1, "search minLength: {schema}");
     assert_eq!(schema["maxLength"], 64, "search maxLength: {schema}");
 }
+
+/// Every schema, field, operation, parameter and response the document
+/// publishes says what it is — and says it in the reader's terms, not ours.
+///
+/// The text comes from two places and this covers both: operation summaries,
+/// parameter and response descriptions are `#[utoipa::path(...)]` attributes,
+/// while schema and field descriptions are applied by
+/// `openapi::descriptions`, because a doc comment on a DTO is written for the
+/// next maintainer and would otherwise be published verbatim to integrators.
+/// A new field, a rename, or an entry left behind in that table lands here.
+///
+/// The forbidden-vocabulary half is the reason the table exists at all: task
+/// and ADR numbers, PR references and internal section marks are ours and are
+/// not to appear in a public document.
+#[tokio::test]
+async fn every_published_text_is_present_and_reader_facing() {
+    let (_, _, spec) = fetch_spec(&config_with(None, vec![])).await;
+
+    // `§4.2`, `task 0135`, `ADR 0011`, `PR #217`, `general-overview`, and a
+    // bare `0135` — the shapes maintainer-facing prose carries here.
+    let internal = |text: &str| -> Option<String> {
+        let lower = text.to_lowercase();
+        for word in ["general-overview", "§", "adr ", "task 0", "pr #"] {
+            if lower.contains(word) {
+                return Some(word.to_string());
+            }
+        }
+        // A bare four-digit task id: `0135`, but not a year or a decimal.
+        let bytes = text.as_bytes();
+        for (i, w) in bytes.windows(4).enumerate() {
+            let digits = w.iter().all(|c| c.is_ascii_digit()) && w[0] == b'0';
+            let before = i.checked_sub(1).map(|j| bytes[j]);
+            let after = bytes.get(i + 4).copied();
+            let bounded = |c: Option<u8>| !c.is_some_and(|c| c.is_ascii_digit() || c == b'.');
+            if digits && bounded(before) && bounded(after) {
+                return Some(String::from_utf8_lossy(w).to_string());
+            }
+        }
+        None
+    };
+
+    let mut described = 0usize;
+    let mut check = |what: String, text: Option<&str>| {
+        let text = text.unwrap_or_else(|| panic!("{what} has no description"));
+        assert!(!text.trim().is_empty(), "{what} has an empty description");
+        if let Some(hit) = internal(text) {
+            panic!("{what} publishes an internal reference ({hit}): {text}");
+        }
+        described += 1;
+    };
+
+    check("info".to_string(), spec["info"]["description"].as_str());
+    for tag in spec["tags"].as_array().expect("tags are declared") {
+        let name = tag["name"].as_str().unwrap_or("?");
+        check(format!("tag {name}"), tag["description"].as_str());
+    }
+
+    for (path, item) in spec["paths"].as_object().expect("paths").iter() {
+        for (method, op) in item.as_object().expect("path item").iter() {
+            let at = format!("{method} {path}");
+            check(format!("{at} (summary)"), op["summary"].as_str());
+            check(format!("{at} (description)"), op["description"].as_str());
+            for param in op["parameters"].as_array().unwrap_or(&Vec::new()) {
+                let name = param["name"].as_str().unwrap_or("?");
+                check(format!("{at} ?{name}"), param["description"].as_str());
+            }
+            for (status, response) in op["responses"].as_object().expect("responses").iter() {
+                check(format!("{at} {status}"), response["description"].as_str());
+            }
+        }
+    }
+
+    for (name, schema) in spec["components"]["schemas"]
+        .as_object()
+        .expect("schemas")
+        .iter()
+    {
+        check(name.clone(), schema["description"].as_str());
+        for (field, property) in schema["properties"]
+            .as_object()
+            .unwrap_or(&serde_json::Map::new())
+            .iter()
+        {
+            // An optional reference is a one-of; the field's own words sit on
+            // the variant when the reference itself carries none.
+            let own = property["description"].as_str().or_else(|| {
+                property["oneOf"]
+                    .as_array()?
+                    .iter()
+                    .find_map(|v| v["description"].as_str())
+            });
+            check(format!("{name}.{field}"), own);
+        }
+    }
+
+    // Non-vacuous: a parse that found nothing would pass every check above.
+    assert!(
+        described > 150,
+        "only {described} texts checked — the document did not parse as expected"
+    );
+}

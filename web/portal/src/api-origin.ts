@@ -3,8 +3,10 @@
  *
  * Empty by default, and then every backend URL in this app is **relative**:
  * `/api/config`, `/api/auth/login`. That is the same-origin layout — the dev
- * server's proxy, `vite preview`, and our own distribution, where the API is
- * an origin on the same CloudFront table as the bundle.
+ * server's proxy and `vite preview`, which forward `/api/*` to the backend.
+ * (It was also the layout of our own CloudFront distribution, where the API
+ * was an origin on the same table as the bundle; task 0195 retired that
+ * distribution, so production only ever runs the absolute form below.)
  *
  * On the shared host (task 0194) it is not: `sorobanscan.rumblefish.dev/api/*`
  * is a static SPA behaviour that rewrites every extensionless path to

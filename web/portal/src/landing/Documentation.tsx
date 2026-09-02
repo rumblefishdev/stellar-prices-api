@@ -10,7 +10,7 @@ import quickStartIcon from '../assets/icons/docs-quick-start.svg';
 import rateLimitsIcon from '../assets/icons/docs-rate-limits.svg';
 import sdkExamplesIcon from '../assets/icons/docs-sdk-examples.svg';
 import { color, radius } from '../theme/tokens';
-import { OPENAPI_JSON, QUICKSTART, API_REFERENCE } from './links';
+import { QUICKSTART, API_REFERENCE } from './links';
 import {
   CardRail,
   Section,
@@ -22,11 +22,12 @@ import {
 /**
  * "Everything developers need" — six doors into the documentation.
  *
- * Every card is a LINK, not a panel of prose, and they all point at the same
- * place today: the OpenAPI document, which is the only documentation artefact
- * actually served (see `links.ts`). Task 0163 writes the quickstart and task
- * 0195 mounts Swagger UI; when they land, the three constants in `links.ts`
- * diverge and these cards start pointing at six real destinations.
+ * Every card is a LINK, not a panel of prose. Two destinations exist today —
+ * the quick start and the API reference (task 0195), both pages of this app
+ * — and the cards split between them by what a reader would
+ * expect behind the title: "Authentication", "Example Requests" and the rest
+ * open the reference until task 0163's walkthrough gives the quick start
+ * sections of its own to point at.
  *
  * Cards rather than a list because that is what the design does, and links
  * rather than `<div>`s because a card that describes a document and cannot open
@@ -62,8 +63,12 @@ const DOCS: readonly Doc[] = [
   {
     icon: openApiIcon,
     title: 'OpenAPI Specification',
-    body: 'Full Swagger UI included. Explore, test and generate client code directly from the spec.',
-    href: OPENAPI_JSON,
+    body: 'Full API reference. Browse every endpoint, parameter and schema, and generate clients from the spec.',
+    // The rendered reference, which links to the raw JSON in its own header;
+    // a card promising Swagger UI used to open the bare document — and the
+    // reference is ours now, so the copy no longer names someone else's tool
+    // or promises a "try it" the page deliberately does not have (task 0126).
+    href: API_REFERENCE,
   },
   {
     icon: sdkExamplesIcon,

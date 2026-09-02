@@ -394,10 +394,10 @@ async fn console_created_lookalikes_are_not_revealed() {
 // Caching, secrecy and failure
 // ---------------------------------------------------------------------------
 
-/// The handler's own half of "reveal is not cached". The other two halves are
-/// the gateway's `cachingEnabled: false` and CloudFront's `CachingDisabled`,
-/// both asserted against the synthesized templates by
-/// `tools/scripts/verify-openapi-routes.mjs`.
+/// The handler's own half of "reveal is not cached". The other half is the
+/// gateway's `cachingEnabled: false`, asserted against the synthesized template
+/// by `tools/scripts/verify-openapi-routes.mjs`. There was a third — a CDN
+/// behaviour — until [0195] retired the distribution that carried it.
 #[tokio::test]
 async fn every_answer_carries_no_store() {
     let mock = MockGateway::start().await;
