@@ -76,6 +76,36 @@ history:
       run on prod: 2/20 assets dropped on 404 (USDC per [[0178]], RON), all
       four thresholds evaluated, p95 55.68 ms in `phase:main` against 670 ms
       unscoped. The `X-Request-Id` claim is also removed from the note below.
+  - date: 2026-09-02
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Pre-flight pass — everything that does not need the BE window is done, so
+      the window is spent measuring rather than debugging. Report skeleton
+      published at `docs/prices-api-load-test-100rps.md` (method, environment
+      and pre-flight final; every number `TBD`). Wide pool built: prod lists
+      **3543** assets, `setup()` drops **39** on 404 and names them, **3504**
+      under test — 3.5x the `RATE x TTL` margin, so the wide regime is viable
+      without hand-curation. Gitignored as a prod snapshot, not a fixture.
+      **One bug found that would have killed the run inside the window:** the
+      README's pool generator emitted `XLM:` for native XLM — the listing
+      returns it with *both* `contract_address` and `issuer_address` empty — and
+      the API answers that **400**, not 404, so `setup()`'s deliberate
+      abort-on-non-404 would have aborted the whole run pointing at the API
+      rather than at the pool file. Generator fixed and the trap documented.
+      Also measured, not guessed: setup on 3543 assets takes **59 s** at
+      `PROBE_BATCH=25` (the default 10 extrapolates to ~150 s against a 180 s
+      timeout — too little margin), `ASSETS` resolves relative to the *script*
+      not the shell cwd, `--summary-trend-stats` is required for the p50/p99 the
+      AC asks for (k6 defaults stop at p95), and in `--summary-export` JSON a
+      threshold of `false` means *passed* — so the report cites the exit code.
+      Script re-validated end-to-end on the full wide pool: all four thresholds
+      evaluated and passed. **New blocker for two AC items:** cold-start
+      incidence and ClickHouse-side query time live in CloudWatch in the prod
+      account, which is not reachable from the profiles available here —
+      `rumblefish-admin`/`rumblefish-readonly` (045028348791) return zero
+      APIGateway/Lambda/CloudWatch resources in eu-central-1. The load run
+      itself is unaffected (public endpoint + API key).
 ---
 
 # Load test — 100 req/s on `GET /assets/{id}/price`
@@ -145,8 +175,8 @@ was opened to answer.
 
 ## Acceptance Criteria
 
-- [ ] k6 (or Locust) script committed to the repo and runnable from the README
-- [ ] Dedicated load-test API key / usage plan provisioned, sized above 100 req/s
+- [x] k6 (or Locust) script committed to the repo and runnable from the README
+- [x] Dedicated load-test API key / usage plan provisioned, sized above 100 req/s
       — the run does **not** use a key on `pricing-api-free-production` (1 req/s,
       100 000/month), which would measure our own throttle rather than the system
 - [ ] 100 req/s sustained for 5 minutes on `GET /assets/{id}/price` completes

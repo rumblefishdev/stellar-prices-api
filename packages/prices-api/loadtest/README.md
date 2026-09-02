@@ -93,7 +93,11 @@ asset can miss at most 30 times, which fixes the arithmetic:
 |------|----------|--------------------|------------------------------|
 | 1 asset | `-e ASSET=native` | ~30 (0.1 %) | the gateway cache |
 | 20 assets (default) | *(nothing — it is the default)* | ~600 (2 %) | the AC scenario, still cache-dominated |
-| ≥ 2000 assets | `-e ASSETS=/path/pool.json` | 30 000 (100 %) | the real data path |
+| ≥ 2000 assets | `-e ASSETS=./pool-wide.json` | 30 000 (100 %) | the real data path |
+
+Production held **3543** listable assets on 2026-09-02, and a 200-asset random
+sample of them returned 200 on `/price` for **every** id — so the wide regime is
+viable at 3.5× the `RATE × TTL` margin, and the pool needs no hand-curation.
 
 ⚠️ **The wide regime needs `pool ≫ RATE × TTL`, not "a big number".** Selection
 is deterministic round-robin, so a pool of exactly `RATE × TTL` — 1000 at
@@ -112,8 +116,20 @@ Generate a wide pool by walking the listing (any key works; it is one page per
 200 assets):
 
 ```sh
-node -e 'const f=async()=>{let c=null,out=[];do{const u=new URL(process.env.BASE_URL+"/v1/assets");u.searchParams.set("limit","200");if(c)u.searchParams.set("cursor",c);const r=await fetch(u,{headers:{"x-api-key":process.env.API_KEY}});const j=await r.json();out.push(...j.data.map(a=>a.contract_address||`${a.asset_code}:${a.issuer_address}`));c=j.cursor;await new Promise(s=>setTimeout(s,1100));}while(c);console.log(JSON.stringify(out));};f()' > /tmp/pool.json
+node -e 'const id=a=>a.contract_address||(a.issuer_address?`${a.asset_code}:${a.issuer_address}`:"native");const f=async()=>{let c=null,out=[];do{const u=new URL(process.env.BASE_URL+"/v1/assets");u.searchParams.set("limit","200");if(c)u.searchParams.set("cursor",c);const r=await fetch(u,{headers:{"x-api-key":process.env.API_KEY}});const j=await r.json();out.push(...j.data.map(id));c=j.cursor;await new Promise(s=>setTimeout(s,1100));}while(c);console.log(JSON.stringify([...new Set(out)]));};f()' > packages/prices-api/loadtest/pool-wide.json
 ```
+
+⚠️ **The native asset is why that `id()` helper is not just `code:issuer`.** XLM
+comes back from the listing as `asset_type: "classic"` with **both**
+`contract_address` and `issuer_address` empty, so the obvious expression yields
+`XLM:` — which the API answers with **400**, not 404. `setup()` aborts on any
+non-404 (deliberately: a throttled key must not read as dead assets), so a pool
+built without this special case fails the run *at setup*, with a status that
+points at the API rather than at the pool file. Measured 2026-09-02.
+
+`pool-wide.json` is gitignored — it is a snapshot of production, not a fixture.
+Regenerate it before a run and record the count in the report; the 20-asset
+conformance list stays committed because the AC scenario must be reproducible.
 
 ## Before you run against production
 
@@ -128,6 +144,60 @@ borrowed from their harness:
 2. **Schedule the window away from our own OHLCV batch**, and tell BE before you
    start. 100 req/s of cache misses is real load on infrastructure another team
    depends on.
+
+## Run day — the three commands, in order
+
+Export the environment once (`.env.local` at the repo root holds `BASE_URL` and
+`API_KEY`; confirm the key is the 0121 loadtest one, not a free-tier key):
+
+```sh
+set -a && . ./.env.local && set +a && node -e 'console.log(process.env.BASE_URL)'
+```
+
+Regenerate the pool (see the generator above), then run the three regimes. The
+flags are not optional: `--summary-trend-stats` is what produces the p50/p99 the
+AC asks for — the default stats stop at p95 — and `--summary-export` is the raw
+artefact the report cites.
+
+```sh
+S='avg,min,med,max,p(50),p(90),p(95),p(99)'
+K="packages/prices-api/loadtest/price_load.js"
+
+# 1/3 — cache regime (upper bound)
+k6 run $K -e BASE_URL="$BASE_URL" -e API_KEY="$API_KEY" -e ASSET=native \
+  --summary-trend-stats="$S" --summary-export=loadtest-cache.json; echo "exit=$?"
+
+# 2/3 — THE AC SCENARIO: 20-asset conformance pool, no -e ASSET/ASSETS
+k6 run $K -e BASE_URL="$BASE_URL" -e API_KEY="$API_KEY" \
+  --summary-trend-stats="$S" --summary-export=loadtest-ac.json; echo "exit=$?"
+
+# 3/3 — wide pool, the real data path
+k6 run $K -e BASE_URL="$BASE_URL" -e API_KEY="$API_KEY" -e ASSETS=./pool-wide.json \
+  -e PROBE_BATCH=25 \
+  --summary-trend-stats="$S" --summary-export=loadtest-wide.json; echo "exit=$?"
+```
+
+`exit=0` means every threshold held. Leave ≥ 60 s between regimes so the 10 s
+gateway cache and the warm Lambda pool from the previous run are not carried into
+the next one's warmup.
+
+⚠️ **`ASSETS` is resolved relative to the *script*, not to your shell's cwd** —
+k6's `open()` works that way, which is also why the built-in default is the
+`../../../tools/...` walk-up. From anywhere in the repo, `./pool-wide.json` is
+therefore the correct value and `./packages/prices-api/loadtest/pool-wide.json`
+is not.
+
+⚠️ **`--summary-export` inverts the sense of a threshold.** In the exported JSON
+`"p(95)<200": false` means the threshold was **not** breached, i.e. it *passed*.
+Cite the process **exit code** in the report, not the boolean — it is the one
+number that cannot be read backwards.
+
+**Timing — pass `-e PROBE_BATCH=25` on the wide regime.** `setup()` probes every
+asset in the pool. Measured 2026-09-02 on the 3543-asset pool: **59 s at
+`PROBE_BATCH=25`**, against the 180 s `SETUP_TIMEOUT` default. At the default
+batch of 10 the same probe extrapolates to ~150 s — inside the timeout, but with
+too little margin to spend a coordinated BE window on. It dropped 39 assets on
+404 (no price row) and named every one, leaving 3504 under test.
 
 ## Reading the result
 
