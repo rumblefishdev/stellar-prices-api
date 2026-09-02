@@ -39,6 +39,24 @@ history:
       produced two wrong answers already, so it is not being written up as
       resolved. Re-scoped from "fix the leak" to "explain why it stopped, and
       write down what that means for verifying gateway config".
+  - date: 2026-09-02
+    status: backlog
+    who: okarcz
+    note: >
+      CONFIRMED FROM A REAL BROWSER, which every prior measurement on this task
+      was not. Running [[0126]]'s AC-1 browser check from origin
+      http://0.0.0.0:8080, a keyless GET /v1/assets/native/price fails with
+      "No 'Access-Control-Allow-Origin' header is present on the requested
+      resource" - ABSENT, not mismatched. That is first-hand corroboration of
+      the curl measurement taken after the deploy, from the only client whose
+      opinion the CORS rules describe. 🔑 It also sharpens WHY this matters,
+      which the task previously stated as a mismatch: Chrome logs
+      `403 (Forbidden)` in the console but script receives only
+      `TypeError: Failed to fetch` with NO status, because a response the CORS
+      check rejects is never surfaced to the caller. So a browser client cannot
+      distinguish a bad API key from a dead API - unchanged by the header
+      going absent, and NOT fixed by the leak stopping. The mechanism question
+      is untouched and this task stays open on it.
 ---
 
 # The narrowing is live, correct, and does nothing
@@ -73,6 +91,34 @@ plane, which was correct all along.
 ⚠️ **That is a hypothesis and is labelled as one deliberately.** Two published
 diagnoses on this bug were already wrong, both from explaining a measurement
 instead of extending it. Confirming it needs a deliberate test, not a story.
+
+## 🔎 First-hand browser confirmation — 2026-09-02
+
+Every measurement on this task until now was `curl`. [[0126]]'s AC-1 browser run
+put a real client on it, from origin `http://0.0.0.0:8080`:
+
+```
+Access to fetch at 'https://prices-api.sorobanscan.rumblefish.dev/v1/assets/native/price'
+from origin 'http://0.0.0.0:8080' has been blocked by CORS policy:
+No 'Access-Control-Allow-Origin' header is present on the requested resource.
+GET .../v1/assets/native/price net::ERR_FAILED 403 (Forbidden)
+→ script sees: TypeError: Failed to fetch
+```
+
+Two things this pins that `curl` could not:
+
+1. **The header is ABSENT, not mismatched.** The browser's own wording
+   distinguishes the two, and it says absent — corroborating the post-deploy
+   measurement above from the client the CORS rules are written for.
+2. **The consequence is worse than "a misleading origin".** Chrome logs
+   `403 (Forbidden)`, but **script receives only `TypeError` with no status**,
+   because a response failing the CORS check is never surfaced to the caller.
+   A browser consumer therefore cannot tell a bad API key from a dead API.
+
+🔑 **The leak stopping did NOT fix this.** "Why it matters" below was written
+when the header carried the portal's origin; the header is gone and the
+third-party failure mode is identical. Whatever this task concludes has to
+address the missing header, not just the wrong one.
 
 ## Summary
 
@@ -139,6 +185,11 @@ experiment, not more reasoning.
 
 Not security — the header names our own origin on API Gateway's generic
 `{"message":"Forbidden"}`. Nothing leaks.
+
+⚠️ **PARTLY STALE — corrected 2026-09-02, kept for the reasoning.** The error
+responses no longer carry the portal's origin; they carry no CORS header at all.
+The collision with [[0126]] described here SURVIVES that change unaltered, for
+the reason given in the browser section above.
 
 It matters because **it collides with [[0126]]'s deliverable.** Once `/v1`
 answers preflight with `Access-Control-Allow-Origin: *`, its ERROR responses

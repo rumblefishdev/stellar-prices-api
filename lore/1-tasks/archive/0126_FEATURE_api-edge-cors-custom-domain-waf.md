@@ -236,6 +236,28 @@ history:
       [[deploy-ships-stale-lambda-assets]]. Left open elsewhere: [[0255]]
       re-scoped (the leak stopped, the mechanism is unexplained), [[0122]]
       carries two TTL drifts, [[0121]] must be re-pointed at the custom domain.
+  - date: 2026-09-02
+    status: completed
+    who: okarcz
+    note: >
+      AC 1 CLOSED AFTER THE FACT - the browser run was PERFORMED and the
+      operator lifted the waiver, so this task is 15 of 15. Chrome, origin
+      http://0.0.0.0:8080 (a locally served blank page, preferred over
+      example.com so no third-party script could observe the API key pasted
+      into the console); all seven /v1 data routes returned 200 including
+      POST /v1/prices/batch, with no CORS failure. 🔑 The proof is that the
+      fetch RESOLVED, not a header read back. Access-Control-Allow-Origin is
+      not a CORS-safelisted response header, so Headers.get() returns null on
+      any cross-origin response whether or not it is present - my own check
+      script printed `ACAO=null` on all seven PASSES and that column was
+      unreadable by construction. In default cors mode a missing or mismatched
+      allow-origin rejects with TypeError and yields no status, so seven
+      readable 200s prove the header was present and accepted and that every
+      preflight passed first. ⚠️ A method note worth keeping: a verification
+      script that reads a header the browser forbids script to read will report
+      a false negative on a passing system. Also confirmed first-hand and
+      recorded on [[0255]]: a keyless 403 now carries NO CORS header at all,
+      and script sees only "Failed to fetch".
 ---
 
 # API edge — CORS, custom domain, WAF decision
@@ -591,22 +613,30 @@ rather than a wrong URL.
 
 ## Acceptance Criteria
 
-- [ ] Cross-origin `GET` from a browser page against every data route succeeds,
-      preflight included. ⚠️ **WAIVED by the operator on 2026-09-02, not
-      done — recorded as unchecked deliberately.** Everything it depends on is
-      measured on production: all seven preflights answer `204` with `*` and
-      `x-api-key` allowed; a KEYED `GET /v1/assets/native/price` returns `200`
-      carrying `access-control-allow-origin: *` (both halves, the second being
-      the one review nearly let ship missing); and the [[0255]] error-path
-      blocker is gone. What was NOT executed is a real browser performing a
-      real preflight+request pair. ⚠️ **This task's own text argues that gap
-      matters** — see below; it is left `[ ]` so nobody later reads a tick as
-      evidence of something that was not run. ⚠️ **Needs a real browser** — this task
-      says it and it still holds: `curl -X OPTIONS` succeeding proves less than
-      it appears to. ⚠️ **Blocked in practice by [[0255]]**: once `/v1` answers
-      `*`, its 4xx still carry the portal's single origin, so a third-party
-      page hitting a 403 or 429 sees a CORS mismatch and reads it as a dead
-      network. The preflight alone does not make the API browser-usable
+- [x] Cross-origin `GET` from a browser page against every data route succeeds,
+      preflight included. ✅ **RUN 2026-09-02 — the operator's waiver was LIFTED
+      and the run performed.** Chrome, from origin `http://0.0.0.0:8080` — a
+      locally served blank page, chosen over `example.com` so that no
+      third-party script could observe the API key pasted into the console.
+      All seven data routes returned `200` with no CORS failure: `/v1/assets`,
+      `/v1/assets/{id}`, `/price`, `/ohlcv`, `/v1/oracles/{id}`,
+      `/v1/backfill/status` and `POST /v1/prices/batch`. This is the real
+      preflight+request pair that `curl -X OPTIONS` could not establish.
+      🔑 **The evidence is that the `fetch` RESOLVED — NOT a header the
+      script read back.** `Access-Control-Allow-Origin` is not a
+      CORS-safelisted response header, so `Headers.get()` returns `null` for it
+      on any cross-origin response whether or not it is present; the check
+      script's own header column reported `ACAO=null` on all seven passes and
+      was unreadable by construction, not a failure. In default `cors` mode a
+      response with a missing or mismatched allow-origin **rejects with
+      `TypeError` and yields no status at all**, so seven readable `200`s prove
+      the browser saw and accepted the header on every route, and that each
+      preflight passed first. ⚠️ **The [[0255]] consequence is unchanged and
+      was seen first-hand in the same session**: a keyless `GET` returns `403`
+      with NO allow-origin header (absent now, no longer the portal's origin),
+      so script sees only `Failed to fetch` and cannot tell a bad key from a
+      dead API. That is 0255's to close — this criterion asserts the success
+      path, and the success path passes
 - [x] `x-api-key` is in the allowed-headers list; `OPTIONS` requires no API key
       and does not invoke Lambda — PR #277. Synth shows `OPTIONS` on all SEVEN
       data routes, every one `ApiKeyRequired: false` and `Type: MOCK`,
@@ -1202,10 +1232,29 @@ curl -s -o /dev/null -w '/api-docs-json → %{http_code} (expect 200)\n' \
 
 ### B. The browser check for AC 1 — after PR #277 deploys
 
+✅ **EXECUTED 2026-09-02 — all seven routes passed.** Kept here as the procedure,
+not as outstanding work; the result is under AC 1. Two amendments learned from
+running it, both applied below:
+
+- **Serve the page yourself** rather than using `example.com`. Any origin that
+  is not the API's and not the portal's satisfies CORS, but you paste an API key
+  into that page's console, and a page with its own JavaScript could hook
+  `fetch` and read it. `python3 -m http.server 8080` over a blank file has none.
+  (`example.com` is IANA-reserved under RFC 2606/6761 and ships no JS, so it is
+  also safe — the local page is simply under your control.)
+- **Do not assert on `access-control-allow-origin` from script.** It is not
+  CORS-safelisted, so `Headers.get()` returns `null` on a cross-origin response
+  whether or not it is there. A resolving `fetch` IS the pass; a blocked one
+  throws `TypeError` with no status. Read the header in the Network tab if you
+  want it sighted.
+
 ⚠️ Do not attempt this before the deploy, and expect it to be **partially
 blocked by [[0255]]**: the preflight and the `200` should now both work, but any
 `/v1` 4xx still carries the portal's single origin, so a third-party page that
 hits a 403 or 429 sees a CORS mismatch and reads it as a dead network.
+⚠️ **Amended by the run:** the 4xx now carries NO CORS header at all rather than
+the portal's origin, so the failure mode is `Failed to fetch` with no status —
+same consequence for a browser client, different cause. See [[0255]].
 
 1. **[any browser, on a page that is NOT `sorobanscan.rumblefish.dev`]** — the
    origin has to be a third party or the test proves nothing. A blank tab on
