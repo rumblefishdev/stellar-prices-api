@@ -20,6 +20,19 @@ history:
       `cachingEnabled` flags already exist in CDK from M1
       (`api-gateway-stack.ts:199-238`, `apiGatewayCacheEnabled: true`), so
       this is verification and TTL reconciliation, not new infrastructure.
+  - date: 2026-09-02
+    status: backlog
+    who: okarcz
+    note: >
+      Noted from [[0126]] while probing the same stack: TWO of the §6 TTLs in
+      this task's own table are already contradicted by the CDK, so AC 1 has a
+      known answer waiting. `/price` is 10s, not 15s, and `/backfill/status` is
+      60s, not 30s (`CACHE_TTL`, `api-gateway-stack.ts:53-59`). Not fixed here
+      — deciding whether the code or §6 is wrong IS this task. Also: 0126
+      reworded its own "re-verify 0122's cache-hit behaviour" AC after finding
+      there is no baseline to re-verify, and narrowed its scope to the one
+      question its change raised (do the two hostnames share the stage cache).
+      Everything else stays here.
 ---
 
 # API Gateway cache verification
@@ -98,6 +111,28 @@ Two things make this worth a dedicated task rather than a line in [[0121]]:
       with the alternative evidence used — no hand-waving in [[0128]]
 
 ## Notes
+
+- 🔴 **AC 1 already has two answers waiting — measured 2026-09-02 from
+  [[0126]].** The §6 table in the Context section above disagrees with the
+  deployed CDK on two rows:
+
+  | endpoint | §6 (this task) | `CACHE_TTL` in CDK |
+  |---|---|---|
+  | `GET /assets/{id}/price` | 15s | **10s** |
+  | `GET /backfill/status` | 30s | **60s** |
+
+  The other rows match. This is exactly the drift AC 1 exists to reconcile, so
+  it is recorded rather than fixed: whether the code or §6 is wrong is a call
+  this task makes, and the answer has to be written into one of them.
+  ⚠️ Note the `/price` value also makes the "miss after expiry" AC cheaper than
+  it reads — a 10s window, not 15.
+
+- **The custom domain ([[0194]]) added a hostname, not a cache.** Both
+  `prices-api.sorobanscan.rumblefish.dev` and the execute-api URL map to the
+  same stage, so they should share one cache and one set of keys. 0126 hands
+  over a short cross-hostname probe for that single property; if it comes back
+  showing per-domain fragmentation, it lands here, because the hit rate this
+  task measures would be the thing it damages.
 
 - The in-app `Cache-Control` headers (`common/cache_control.rs`) are a second,
   independent layer aimed at clients/CDNs. Check the two do not contradict each

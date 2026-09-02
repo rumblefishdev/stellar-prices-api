@@ -68,31 +68,36 @@ fn min_volume_error(v: Option<f64>) -> Option<Response> {
     get,
     path = "/assets/{asset_identifier}/price",
     tag = "prices",
+    summary = "`GET /assets/{asset_identifier}/price` — current price for one asset.",
+    description = "The current price snapshot for one asset: the latest USD close, the same price in XLM, \
+     the\n24-hour volume-weighted average, volume, change and a per-venue breakdown, all \
+     computed\nover the trailing 24-hour window. `updated_at` is the time of the snapshot. \
+     Identifier\nvalidation runs before any database access, so a malformed identifier is a 400 \
+     and\nnever reaches storage.\n\n`min_volume_usd` re-weights `vwap_24h` from the response's \
+     own `sources` and drops the\nvenues at or below the threshold; it never changes `price_usd` \
+     or `volume_24h_usd`. The\nparameter is part of the cache key, so requests that omit it share \
+     one cached response.",
     params(
         ("asset_identifier" = String, Path,
-         description = "native, CODE:ISSUER, or a C… contract address"),
+         description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
+          the `C…` address of a Soroban contract"),
         ("min_volume_usd" = Option<f64>, Query, minimum = 0,
-         description = "Exclude sources whose trailing-24h USD volume is at or \
-                        below this value from `vwap_24h` weighting and from \
-                        `sources` (§5.5). An explicit value ALWAYS filters \
-                        strictly at exactly that value and can empty \
-                        `sources`, unlike the producer-side $100 system \
-                        default, which is conditional (a below-threshold \
-                        source is kept when no source on the asset clears the \
-                        threshold). On an asset with a funded venue the \
-                        producer has already applied the $100 cut, so a value \
-                        at or below 100 returns the same body as omitting the \
-                        param; on an all-dust asset it does not. Omit on the \
-                        common path to share the response cache entry."),
+         description = "Drop every venue whose trailing 24-hour USD volume is at or below this value, then \
+          recompute `vwap_24h` over the venues that remain. Applied exactly as given: it can \
+          leave `sources` empty and `vwap_24h` at `\"0\"`. The default threshold (100 USD) is \
+          conditional — it keeps a low-volume venue when no venue on the asset clears it — so an \
+          explicit `100` can still remove venues the default kept. `price_usd` and \
+          `volume_24h_usd` are unaffected. Between 0 and 1e15. Omit it unless needed: the \
+          parameter is part of the cache key."),
     ),
     responses(
         (status = 200, description = "Current price", body = PriceResponse),
-        (status = 400, description = "Invalid asset identifier or query parameter", body = ErrorEnvelope),
-        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
-        (status = 403, description = "API key missing, invalid, or not authorized for this API"),
-        (status = 404, description = "No current price for the asset", body = ErrorEnvelope),
-        (status = 429, description = "Per-key rate limit or monthly quota exceeded (API Gateway usage plan)"),
-        (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
+        (status = 400, description = "Invalid asset identifier or query parameter (`invalid_id`, `invalid_query`)", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
+        (status = 404, description = "No current price for the asset: unknown, or not priced yet (`not_found`)", body = ErrorEnvelope),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
 pub async fn get_price(
@@ -128,18 +133,23 @@ pub async fn get_price(
     get,
     path = "/assets/{asset_identifier}",
     tag = "assets",
+    summary = "`GET /assets/{asset_identifier}` — single-asset metadata.",
+    description = "Metadata for one asset, looked up by its natural identifier. Fields that do not apply \
+     to\nthe asset's kind are empty strings: `code` and `issuer` for a Soroban contract, \
+     `contract`\nfor a classic asset.",
     params(
         ("asset_identifier" = String, Path,
-         description = "native, CODE:ISSUER, or a C… contract address")
+         description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
+          the `C…` address of a Soroban contract")
     ),
     responses(
         (status = 200, description = "Asset detail", body = AssetDetail),
-        (status = 400, description = "Invalid asset identifier", body = ErrorEnvelope),
-        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
-        (status = 403, description = "API key missing, invalid, or not authorized for this API"),
-        (status = 404, description = "Unknown asset", body = ErrorEnvelope),
-        (status = 429, description = "Per-key rate limit or monthly quota exceeded (API Gateway usage plan)"),
-        (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
+        (status = 400, description = "Invalid asset identifier (`invalid_id`)", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
+        (status = 404, description = "Unknown asset (`not_found`)", body = ErrorEnvelope),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
 pub async fn get_asset(
@@ -203,35 +213,38 @@ pub struct ListParams {
     get,
     path = "/assets",
     tag = "assets",
+    summary = "`GET /assets` — paginated, sortable, filterable list of tracked assets.",
+    description = "The tracked assets with their current-price snapshot, one page at a time. Sorted by\n`sort` \
+     and `order`, filtered by `type` and `search`, and paginated with an opaque keyset\ncursor: \
+     pass the previous page's `cursor` while `has_more` is `true`, with the same\n`sort` and \
+     `order`. Unknown query parameters are ignored.",
     params(
-        ("type" = Option<TypeFilter>, Query, description = "classic | soroban | all (default all)"),
+        ("type" = Option<TypeFilter>, Query, description = "Which assets to list: `classic` (classic assets, including the native asset), `soroban` \
+          (Soroban contracts) or `all` (default)"),
         ("search" = Option<String>, Query,
-         description = "asset code prefix match (max 64 bytes; an empty value \
-                        is treated as absent)",
+         description = "Case-sensitive prefix match on the asset code, 1 to 64 bytes; an empty value is treated \
+          as absent. Soroban assets whose code is not yet resolved are not matched",
          min_length = 1, max_length = 64),
         ("sort" = Option<SortCol>, Query,
-         description = "price | volume_24h | change_24h | code (default volume_24h)"),
-        ("order" = Option<Order>, Query, description = "asc | desc (default desc)"),
-        ("cursor" = Option<String>, Query, description = "opaque pagination cursor"),
-        ("limit" = Option<u32>, Query, description = "1..=200 (default 50)",
+         description = "Sort column (default `volume_24h`): `price`, `volume_24h`, `change_24h` or `code`"),
+        ("order" = Option<Order>, Query, description = "Sort direction (default `desc`)"),
+        ("cursor" = Option<String>, Query, description = "Opaque cursor from the previous page's `cursor` field; use it with the same `sort` and \
+          `order`"),
+        ("limit" = Option<u32>, Query, description = "Page size, 1 to 200 (default 50)",
          minimum = 1, maximum = 200),
         ("min_volume_usd" = Option<f64>, Query, minimum = 0,
-         description = "Exclude sources whose trailing-24h USD volume is at or \
-                        below this value from `vwap_24h` weighting and from \
-                        `sources` (§5.5) — identical semantics to the \
-                        parameter on `GET /assets/{asset_identifier}/price`: \
-                        an explicit value ALWAYS filters strictly at exactly \
-                        that value and can empty `sources`, while the \
-                        producer-side $100 default is conditional. Does not \
-                        affect `price_usd`, `volume_24h_usd`, or the sort."),
+         description = "Same as on `GET /assets/{asset_identifier}/price`: drop the venues at or below this \
+          trailing 24-hour USD volume and recompute each row's `vwap_24h` and `sources`. Applied \
+          exactly as given; between 0 and 1e15. Does not affect `price_usd`, `volume_24h_usd` or \
+          the sort order, which are computed before the filter."),
     ),
     responses(
         (status = 200, description = "Asset list page", body = AssetListResponse),
-        (status = 400, description = "Invalid query parameter", body = ErrorEnvelope),
-        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
-        (status = 403, description = "API key missing, invalid, or not authorized for this API"),
-        (status = 429, description = "Per-key rate limit or monthly quota exceeded (API Gateway usage plan)"),
-        (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
+        (status = 400, description = "Invalid query parameter or cursor (`invalid_query`)", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
 pub async fn get_assets(
@@ -364,34 +377,51 @@ pub struct OhlcvParams {
     get,
     path = "/assets/{asset_identifier}/ohlcv",
     tag = "prices",
+    summary = "`GET /assets/{asset_identifier}/ohlcv` — candlestick history.",
+    description = "Candlestick history for one asset. `base_currency` sets the currency the candles \
+     are\nexpressed in, not which market they come from. With `USD` (the default) every candle \
+     is\nconverted to USD whatever it traded against, so an asset with no USD market still has \
+     a\nhistory: `close` is exact, while `open`, `high`, `low` and `vwap` are scaled from \
+     the\nquote-asset values with one rate per bucket and flagged with `derived`. With `XLM` \
+     only\ntrades against the native asset are returned, as stored.\n\nA bucket that traded but \
+     has no USD value yet is returned with its price fields `null`\nrather than omitted, so a \
+     chart keeps its time axis. Trades from every venue — and, in\nUSD mode, against every quote \
+     asset — are merged per bucket, in ascending time order.\n\nThe window is `timeframe`, ending \
+     now, or `start`/`end`. A window that would exceed 5000\ncandles at the chosen granularity is \
+     rejected with a 400. `backfill_note` is present only\nfor `timeframe=all` while the \
+     historical backfill is still running.",
     params(
-        ("asset_identifier" = String, Path, description = "native, CODE:ISSUER, or a C… contract"),
+        ("asset_identifier" = String, Path, description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
+          the `C…` address of a Soroban contract"),
         ("timeframe" = Option<Timeframe>, Query,
-         description = "1h | 24h | 7d | 30d | 1y | all (default 24h)"),
+         description = "Window ending now: `1h`, `24h` (default), `7d`, `30d`, `1y` or `all` (from Stellar \
+          genesis). `start` overrides its start"),
         ("granularity" = Option<Granularity>, Query,
-         description = "1m | 15m | 1h | 4h | 1d | 1w | 1M; omitted = timeframe default, or \
-                        the finest fitting 5000 points for explicit windows and `all`"),
+         description = "Bucket size: `1m`, `15m`, `1h`, `4h`, `1d`, `1w` or `1M` (case-sensitive: `1m` is one \
+          minute, `1M` one month). Default: the timeframe's own — `1h`→`1m`, `24h`→`15m`, \
+          `7d`→`1h`, `30d`→`4h`, `1y`→`1d`; for `start`/`end` windows and `timeframe=all`, the \
+          finest size that keeps the window within 5000 candles"),
         ("start" = Option<String>, Query,
-         description = "range start: ISO-8601 or unix epoch (seconds; ms if 13+ digits); \
-                        overrides timeframe"),
+         description = "Window start, inclusive: `YYYY-MM-DD`, an ISO 8601 date-time (a time without an offset \
+          is UTC), or a Unix epoch in seconds (milliseconds when 13 or more digits). Overrides \
+          the start of `timeframe`"),
         ("end" = Option<String>, Query,
-         description = "range end, same forms; with only `end`, the timeframe window \
-                        ends there"),
+         description = "Window end, inclusive, in the same forms (default: now). With `end` alone, the \
+          `timeframe` window ends there"),
         ("base_currency" = Option<BaseCurrency>, Query,
-         description = "USD (default) | XLM; all-lowercase usd/xlm accepted as \
-                        legacy aliases"),
+         description = "`USD` (default) or `XLM`; all-lowercase `usd`/`xlm` are accepted as aliases"),
     ),
     responses(
         (status = 200, description = "Candlestick series", body = OhlcvResponse),
-        (status = 400, description = "Invalid parameter", body = ErrorEnvelope),
-        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
-        (status = 403, description = "API key missing, invalid, or not authorized for this API"),
-        (status = 404, description = "Unknown asset", body = ErrorEnvelope),
-        (status = 429, description = "Per-key rate limit or monthly quota exceeded (API Gateway usage plan)"),
-        (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
-        (status = 503, description = "A reference asset the denomination needs is not \
-                                      tracked — canonical USDC for `USD`, native for \
-                                      `XLM` (`quote_unavailable`)", body = ErrorEnvelope),
+        (status = 400, description = "Invalid identifier or parameter, or a window over 5000 candles (`invalid_id`, \
+          `invalid_query`)", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
+        (status = 404, description = "Unknown asset (`not_found`)", body = ErrorEnvelope),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
+        (status = 503, description = "A reference asset the conversion needs is not tracked — USDC for `USD`, the native \
+          asset for `XLM` (`quote_unavailable`)", body = ErrorEnvelope),
     )
 )]
 pub async fn get_ohlcv(

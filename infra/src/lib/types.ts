@@ -95,8 +95,8 @@ export interface EnvironmentConfig {
    * Configured rather than derived because ComputeStack (which owns the
    * function's environment) is a *dependency* of ApiGatewayStack (which owns
    * the URL) — reading `api.url` here would close the cycle Compute → Gateway →
-   * Compute and fail synth. Update this one value when task 0126 lands the
-   * custom domain.
+   * Compute and fail synth. Names `apiDomain.domainName` since task 0194
+   * (2026-08-31).
    */
   readonly apiBaseUrl: string;
 

@@ -175,10 +175,11 @@ const GATEWAY_SKIPPED_METHODS = new Set(['options']);
  * segment is a placeholder for whatever routes the axum router owns, and the
  * verbs say nothing about which paths answer on them.
  *
- * Mirrors `PORTAL_API_PREFIX` in that module and `PORTAL_BACKEND` in
- * `infra/src/lib/stacks/portal-hosting-stack.ts` — and, unlike when this skip
- * was written, that agreement is now asserted rather than asked for in a
- * comment. See the three-way check below the gateway walk.
+ * Mirrors `PORTAL_API_PREFIX` in that module — and, unlike when this skip was
+ * written, that agreement is asserted rather than asked for in a comment. See
+ * the check below the gateway walk. (A third copy, `PORTAL_BACKEND` in the
+ * CloudFront routing table of `portal-hosting-stack.ts`, went with that stack
+ * — task 0195.)
  *
  * The skip is symmetric, unlike the OPTIONS one above: a portal path appearing
  * in the document would be checked by neither direction, so the spec side
@@ -247,31 +248,23 @@ for (const [, res] of resources) {
 }
 
 // ---------------------------------------------------------------------------
-// The portal prefix agrees across all three places that declare it.
+// The portal prefix agrees between the handler and this check.
 // ---------------------------------------------------------------------------
-// The skip above is the reason this section has to exist. Until now the prefix
-// was three independent literals — Rust `PORTAL_API_PREFIX`, CDK
-// `PORTAL_BACKEND`, and the one in this file — tied together by comments saying
-// "the three must agree", which is not a check.
+// The skip above is the reason this section has to exist. The prefix is two
+// independent literals — Rust `PORTAL_API_PREFIX` and the one in this file —
+// and a comment saying "the two must agree" is not a check: move the Rust
+// prefix alone and this script keeps skipping the OLD one while every route
+// under the new one is compared against a document that never describes it,
+// with the wrong remedy printed.
 //
-// The failure that buys: task 0186 moves the Rust prefix, the CloudFront table
-// still routes the NEW prefix to S3, and the OAuth callback is answered with
-// the SPA bundle as `200 text/html` — the exact "reads as a JSON parse error,
-// not as a routing bug" outcome the portal stack's own docblock warns about.
-// CI stays green throughout, because this script skips the OLD prefix and the
-// portal is absent from the document either way.
-//
-// This script already derives both of its sides from synthesized artifacts, so
-// it is the natural place: same technique, one more artifact.
-const portalTemplate = readJson(
-  join(
-    repoRoot,
-    'infra',
-    'cdk.out',
-    'Prices-production-PortalHosting.template.json',
-  ),
-  'run `npm run infra:synth:production` first',
-);
+// There used to be a third copy, `PORTAL_BACKEND` in the CloudFront routing
+// table of `portal-hosting-stack.ts`, and a whole section here probing that
+// table the way CloudFront does — first match wins, the API row ahead of the
+// bundle rows, cookies forwarded, caching off, access logs without cookies.
+// The distribution was retired by task 0195 (the page is on the explorer's
+// host and calls the API on its own hostname, task 0194), and the section
+// went with it: the properties it guarded are now the explorer repo's, or do
+// not exist — there is no CDN between the browser and the portal's routes.
 const portalModPath = join(
   repoRoot,
   'packages',
@@ -309,315 +302,14 @@ if (rustPrefix !== PORTAL_API_PREFIX) {
     `error: the portal prefix disagrees between the handler and this check:`,
     `  ${portalModPath}: ${rustPrefix}`,
     `  ${fileURLToPath(import.meta.url)}: ${PORTAL_API_PREFIX}`,
-    '  → the routing table in infra/src/lib/stacks/portal-hosting-stack.ts ' +
-      'almost certainly needs the same edit; all three must agree.',
+    '  → the gateway resource (`PORTAL_API_RESOURCE_PATH` in ' +
+      'infra/src/lib/stacks/api-gateway-stack.ts), the bundle (`BASE_PATH` ' +
+      'in web/portal) and the Discord redirect URI all carry it too; a move ' +
+      'is a coordinated change, see task 0235.',
   );
 }
 
-// --- 2. The CloudFront behaviour that must win for a portal backend path. ---
-const distributions = Object.values(portalTemplate.Resources ?? {}).filter(
-  (r) => r.Type === 'AWS::CloudFront::Distribution',
-);
-if (distributions.length !== 1) {
-  fail(
-    `error: expected exactly 1 AWS::CloudFront::Distribution in the ` +
-      `PortalHosting template, found ${distributions.length}. This check ` +
-      `assumes one distribution owns the portal's routing table.`,
-  );
-}
-const distConfig = distributions[0].Properties?.DistributionConfig ?? {};
-const behaviours = distConfig.CacheBehaviors ?? [];
-const originsById = new Map((distConfig.Origins ?? []).map((o) => [o.Id, o]));
-
-/**
- * CloudFront matches a path pattern with `*` (any run of characters) and `?`
- * (exactly one), first behaviour wins. Everything else is a literal — escape it
- * so a `.` or `+` in a pattern cannot widen the match.
- */
-const patternToRegExp = (pattern) =>
-  new RegExp(
-    `^${pattern.replace(/[.*+?^${}()|[\]\\]/g, (c) =>
-      c === '*' ? '.*' : c === '?' ? '.' : `\\${c}`,
-    )}$`,
-  );
-
-// Ordering is the property under test, so probe it the way CloudFront does:
-// take the FIRST pattern that matches a representative backend path.
-const probe = `${PORTAL_API_PREFIX}probe`;
-const winner = behaviours.find((b) =>
-  patternToRegExp(String(b.PathPattern)).test(probe),
-);
-const expectedPattern = `${PORTAL_API_PREFIX}*`;
-
-if (!winner) {
-  fail(
-    `error: no cache behaviour matches ${probe}, so it falls to the ` +
-      `distribution's DefaultCacheBehavior — the bundle bucket.`,
-    `  → add \`${expectedPattern}\` to the routing table in ` +
-      'infra/src/lib/stacks/portal-hosting-stack.ts.',
-  );
-}
-if (winner.PathPattern !== expectedPattern) {
-  fail(
-    `error: ${probe} is matched first by \`${winner.PathPattern}\`, not by ` +
-      `\`${expectedPattern}\`.`,
-    '  → CloudFront takes the first match, so a broader pattern listed above ' +
-      'the portal backend swallows every portal API call and answers it with ' +
-      'whatever that behaviour serves. If that is the bundle, the caller gets ' +
-      'a 200 full of HTML, which surfaces as a JSON parse error rather than ' +
-      'as a routing bug. Reorder `additionalBehaviors` in ' +
-      'infra/src/lib/stacks/portal-hosting-stack.ts.',
-  );
-}
-// Matching first is not enough — it has to point at the API. An S3 target here
-// is the same 200-full-of-HTML failure arriving by a different route.
-const winnerOrigin = originsById.get(winner.TargetOriginId);
-if (!winnerOrigin?.CustomOriginConfig) {
-  fail(
-    `error: behaviour \`${winner.PathPattern}\` targets origin ` +
-      `\`${winner.TargetOriginId}\`, which is not an HTTP (execute-api) ` +
-      `origin — the portal's backend calls would be served from the bundle ` +
-      `bucket.`,
-  );
-}
-// Two more settings on the same objects, each load-bearing and each failing
-// silently. Cheap to assert now that `winner` and `winnerOrigin` are in hand.
-//
-// The methods: CloudFront's default allowance is GET/HEAD, and it answers
-// anything else with a 403 of its own that never reaches the API — which would
-// take out task 0186's token exchange and task 0187's key issue, both POSTs,
-// while every GET kept working.
-const WRITE_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
-const allowed = new Set(winner.AllowedMethods ?? []);
-const missingMethods = WRITE_METHODS.filter((m) => !allowed.has(m));
-if (missingMethods.length > 0) {
-  fail(
-    `error: behaviour \`${winner.PathPattern}\` does not allow ` +
-      `${missingMethods.join(', ')}.`,
-    '  → CloudFront rejects a disallowed method with its own 403 before the ' +
-      "origin is reached, so the portal's writes would fail while its reads " +
-      'kept working. Set `allowedMethods: ALLOW_ALL` on the API behaviour in ' +
-      'infra/src/lib/stacks/portal-hosting-stack.ts.',
-  );
-}
-// The origin path: API Gateway serves a REST API only under `/{stage}`, so
-// without it every proxied request arrives one segment short and 403s.
-if (!/^\/[^/]+$/.test(String(winnerOrigin.OriginPath ?? ''))) {
-  fail(
-    `error: the API origin behind \`${winner.PathPattern}\` has OriginPath ` +
-      `${JSON.stringify(winnerOrigin.OriginPath ?? null)}, which is not a ` +
-      `single stage segment.`,
-    '  → an execute-api origin serves the REST API under `/{stage}` only. ' +
-      'Without it CloudFront forwards `/api/x` to the gateway as `/api/x` ' +
-      'instead of `/production/api/x`, the gateway maps nothing, and every ' +
-      'portal call 403s. Set ' +
-      '`originPath` on the HttpOrigin in ' +
-      'infra/src/lib/stacks/portal-hosting-stack.ts.',
-  );
-}
-
-// The other half of the split (task 0194): the bundle shares the prefix and is
-// carved out to S3 by rows listed BEFORE the `/api/*` catch-all. A carve-out
-// that is missing, or listed after the catch-all, sends that path to the API —
-// a loud JSON 404 rather than the old silent 200-of-HTML, but still a broken
-// page. Probed the way CloudFront does: first match wins, and it must be S3.
-//
-// The SPA's routes are READ, not listed. They live in two places that must
-// agree — `PORTAL_APP_ROUTES` in portal-hosting-stack.ts, which generates both
-// the carve-out rows and the `DirectoryIndexFn` allow-list, and the app's own
-// router in web/portal/src/app/app.tsx, which decides what a deep link renders
-// — and this check used to be a third hand-written copy of them. A fourth
-// route added to both then shipped with a row and a rewrite CI never probed,
-// while the claim "a reorder cannot pass CI" stood (PR review of task 0194).
-// Same technique as `PORTAL_API_PREFIX` above: the source is the artifact.
-const hostingStackPath = join(
-  repoRoot,
-  'infra',
-  'src',
-  'lib',
-  'stacks',
-  'portal-hosting-stack.ts',
-);
-const appRouterPath = join(repoRoot, 'web', 'portal', 'src', 'app', 'app.tsx');
-function readSource(path) {
-  try {
-    return readFileSync(path, 'utf8');
-  } catch (err) {
-    fail(`error: cannot read ${path}\n  ${err.message}`);
-  }
-}
-
-const stackRoutesLiteral =
-  /const PORTAL_APP_ROUTES = \[([^\]]*)\] as const;/.exec(
-    readSource(hostingStackPath),
-  )?.[1];
-if (stackRoutesLiteral === undefined) {
-  fail(
-    `error: could not find \`const PORTAL_APP_ROUTES = [...] as const\` in ${hostingStackPath}.`,
-    '  → this check reads the list to probe every SPA route the stack carves ' +
-      'out. Restore the constant, or update the pattern here.',
-  );
-}
-const stackRoutes = [...stackRoutesLiteral.matchAll(/'([^']+)'/g)]
-  .map((m) => m[1])
-  .sort();
-
-// `<Route path="/login" …>` — the root (`/`) and the catch-all (`*`) are not
-// pages with a URL of their own and are excluded by the character class.
-const appRoutes = [
-  ...readSource(appRouterPath).matchAll(/<Route path="\/([^"*]+)"/g),
-]
-  .map((m) => m[1])
-  .sort();
-if (appRoutes.length === 0) {
-  fail(
-    `error: found no \`<Route path="/…">\` in ${appRouterPath}.`,
-    '  → this check reads the router to know which deep links must be carved ' +
-      'out to S3. Update the pattern here if the router moved or changed shape.',
-  );
-}
-if (JSON.stringify(stackRoutes) !== JSON.stringify(appRoutes)) {
-  fail(
-    'error: the SPA routes disagree between the app and the hosting stack:',
-    `  ${appRouterPath}: ${appRoutes.join(', ')}`,
-    `  ${hostingStackPath} (PORTAL_APP_ROUTES): ${stackRoutes.join(', ')}`,
-    '  → a route in the app and not in the stack is a deep link that reaches ' +
-      'the API and 404s on a hard refresh; one in the stack and not in the app ' +
-      'is a carve-out for a page that does not exist. Add it to both.',
-  );
-}
-
-// The rewrite half: `DirectoryIndexFn` maps each route (both slash forms) to
-// `/api/index.html` on VIEWER_REQUEST. Read from the synthesized function
-// code, which is what CloudFront will run — a route with a row and no rewrite
-// is a `403` from S3 masking the missing key.
-const cfFunctions = Object.values(portalTemplate.Resources ?? {}).filter(
-  (r) => r.Type === 'AWS::CloudFront::Function',
-);
-const functionCode = cfFunctions
-  .map((f) => f.Properties?.FunctionCode)
-  .map((code) => (typeof code === 'string' ? code : JSON.stringify(code)))
-  .find((code) => code.includes('var APP_ROUTES = '));
-const appRoutesLiteral = /var APP_ROUTES = (\{[\s\S]*?\});/.exec(
-  functionCode ?? '',
-)?.[1];
-if (appRoutesLiteral === undefined) {
-  fail(
-    'error: no AWS::CloudFront::Function in the PortalHosting template carries ' +
-      '`var APP_ROUTES = {...};`.',
-    '  → this check reads the rewrite table from the synthesized function ' +
-      'code. Restore it in `DirectoryIndexFn` in ' +
-      'infra/src/lib/stacks/portal-hosting-stack.ts, or update the pattern here.',
-  );
-}
-let rewriteTable;
-try {
-  rewriteTable = JSON.parse(appRoutesLiteral);
-} catch (err) {
-  fail(
-    `error: the \`APP_ROUTES\` table in the synthesized DirectoryIndexFn is not JSON: ${err.message}`,
-  );
-}
-for (const route of stackRoutes) {
-  for (const path of [`/api/${route}`, `/api/${route}/`]) {
-    if (rewriteTable[path] !== '/api/index.html') {
-      fail(
-        `error: ${path} is not rewritten to /api/index.html by DirectoryIndexFn ` +
-          `(found ${JSON.stringify(rewriteTable[path] ?? null)}).`,
-        '  → a hard refresh on that page finds no S3 key and answers `403`. ' +
-          'The table is generated from `PORTAL_APP_ROUTES` in ' +
-          'infra/src/lib/stacks/portal-hosting-stack.ts; re-synth, or fix the generator.',
-      );
-    }
-  }
-}
-
-const BUNDLE_PROBES = [
-  '/api/',
-  '/api/index.html',
-  '/api/favicon.ico',
-  '/api/assets/index-abc123.js',
-  ...stackRoutes.flatMap((r) => [`/api/${r}`, `/api/${r}/`]),
-];
-for (const bundleProbe of BUNDLE_PROBES) {
-  const first = behaviours.find((b) =>
-    patternToRegExp(String(b.PathPattern)).test(bundleProbe),
-  );
-  const origin = first ? originsById.get(first.TargetOriginId) : undefined;
-  if (!first || origin?.CustomOriginConfig) {
-    fail(
-      `error: ${bundleProbe} is matched first by ` +
-        `\`${first?.PathPattern ?? '(nothing — DefaultCacheBehavior)'}\`, ` +
-        `which does not serve the bundle bucket.`,
-      '  → every bundle path must be carved out to S3 by a row listed BEFORE ' +
-        'the `/api/*` API catch-all. Add or reorder it in `PORTAL_BUNDLE_PATHS` ' +
-        'in infra/src/lib/stacks/portal-hosting-stack.ts.',
-    );
-  }
-}
-
-// The session cookie has to reach the origin, and the responses that carry it
-// must not be cached at the edge (task 0186). Both are properties of the two
-// managed policies attached to this behaviour, both fail ONLY in a browser —
-// `curl` sends whatever headers you tell it to and reads whatever comes back —
-// and both are the kind of setting a later "tidy-up" reaches for.
-//
-// Asserted by managed-policy ID rather than by name, because the ID is what the
-// template actually contains. AWS documents these as fixed and global:
-//   Managed-AllViewerExceptHostHeader  b689b0a8-53d0-40ab-baf2-68738e2966ac
-//   Managed-CachingDisabled            4135ea2d-6df8-44a3-9df3-4b5a84be39ad
-//
-// The narrow reading of the first is "forward every header except Host", which
-// is how `portal-hosting-stack.ts` originally justified it. The load-bearing
-// half for this task is that it also forwards **all cookies** — which
-// `Managed-CORS-S3Origin`, `Managed-UserAgentRefererHeaders` and every other
-// managed origin-request policy except `Managed-AllViewer` do not. Swapping to
-// one of those would leave `Host` correct, every `curl` passing, and every
-// signed-in visitor reading as signed out.
-const ALL_VIEWER_EXCEPT_HOST_HEADER = 'b689b0a8-53d0-40ab-baf2-68738e2966ac';
-const CACHING_DISABLED = '4135ea2d-6df8-44a3-9df3-4b5a84be39ad';
-
-if (String(winner.OriginRequestPolicyId) !== ALL_VIEWER_EXCEPT_HOST_HEADER) {
-  fail(
-    `error: behaviour \`${winner.PathPattern}\` has OriginRequestPolicyId ` +
-      `${JSON.stringify(winner.OriginRequestPolicyId ?? null)}, not ` +
-      `Managed-AllViewerExceptHostHeader (${ALL_VIEWER_EXCEPT_HOST_HEADER}).`,
-    '  → that policy is what forwards the portal session cookie to the origin ' +
-      "and what withholds the viewer's Host from execute-api. Under any other " +
-      'managed policy the cookie is stripped, `/api/auth/me` reads ' +
-      'as signed-out for a visitor who just signed in, and nothing fails ' +
-      'outside a browser. Set `originRequestPolicy: ' +
-      'ALL_VIEWER_EXCEPT_HOST_HEADER` on the API behaviour in ' +
-      'infra/src/lib/stacks/portal-hosting-stack.ts.',
-  );
-}
-if (String(winner.CachePolicyId) !== CACHING_DISABLED) {
-  fail(
-    `error: behaviour \`${winner.PathPattern}\` has CachePolicyId ` +
-      `${JSON.stringify(winner.CachePolicyId ?? null)}, not ` +
-      `Managed-CachingDisabled (${CACHING_DISABLED}).`,
-    '  → the portal backend carries a session cookie and, from task 0187, an ' +
-      'API key. A cached response on this prefix is one visitor served ' +
-      "another visitor's identity or credential. Set `cachePolicy: " +
-      'CACHING_DISABLED` on the API behaviour in ' +
-      'infra/src/lib/stacks/portal-hosting-stack.ts.',
-  );
-}
-
-// Cookies must reach the origin; they must NOT be written to the access-log
-// bucket. From task 0186 the portal's cookie IS the session, so logging it
-// would put a usable credential in S3 in plaintext for the log bucket's whole
-// 90-day retention, to answer a question the request line already answers.
-if (distConfig.Logging && distConfig.Logging.IncludeCookies !== false) {
-  fail(
-    `error: the distribution's access logging has IncludeCookies=` +
-      `${JSON.stringify(distConfig.Logging.IncludeCookies ?? null)}.`,
-    '  → from task 0186 the portal session is a cookie, so this writes a live ' +
-      'credential into the log bucket in plaintext. Set ' +
-      '`logIncludesCookies: false` in ' +
-      'infra/src/lib/stacks/portal-hosting-stack.ts.',
-  );
-}
+// --- 2. (Retired.) The CloudFront routing table — see the section comment. ---
 
 // The anonymous routes keep their throttle in BOTH arms of `if (cacheEnabled)`.
 //
@@ -696,8 +388,9 @@ if (portalGatewayRoutes.length === 0) {
   fail(
     `error: API Gateway maps no route under ${PORTAL_API_PREFIX}, so this ` +
       `check's portal skip covers nothing.`,
-    '  → the portal backend is unreachable in production: CloudFront forwards ' +
-      'the request and the gateway answers 403 Missing Authentication Token. ' +
+    '  → the portal backend is unreachable in production: the bundle calls ' +
+      'the API host directly and the gateway answers 403 Missing ' +
+      'Authentication Token. ' +
       'Restore the `/api/{proxy+}` methods in ' +
       'infra/src/lib/stacks/api-gateway-stack.ts.',
   );
@@ -1191,8 +884,7 @@ console.log(
 );
 for (const r of [...gatewayRoutes].sort()) console.log(`  ${r}`);
 console.log(
-  `\nPortal prefix ${PORTAL_API_PREFIX} agrees across the handler, the ` +
-    `CloudFront routing table and this check; ` +
-    `${portalGatewayRoutes.length} gateway route(s) skipped as portal:`,
+  `\nPortal prefix ${PORTAL_API_PREFIX} agrees between the handler and this ` +
+    `check; ${portalGatewayRoutes.length} gateway route(s) skipped as portal:`,
 );
 for (const r of portalGatewayRoutes.sort()) console.log(`  ${r}`);

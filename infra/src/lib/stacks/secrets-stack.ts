@@ -47,10 +47,10 @@ export interface SecretsStackProps extends cdk.StackProps {
  * because "the operator owns the value, CDK owns only the name" is the property
  * this stack exists to state, and it now holds for three secrets rather than
  * two. For the OAuth bundle it is load-bearing twice over: its `redirect_uri`
- * field is re-pointed by hand at the custom-domain cutover ([0195]), and a
- * CloudFormation-managed value would be restored to the committed one by the
- * next deploy — silently breaking sign-in some time after the cutover looked
- * like it had worked.
+ * field is re-pointed by hand whenever the backend's hostname changes (it did
+ * on 2026-08-31, [0194]), and a CloudFormation-managed value would be restored
+ * to the committed one by the next deploy — silently breaking sign-in some time
+ * after the cutover looked like it had worked.
  */
 export class SecretsStack extends cdk.Stack {
   /** Secrets Manager name of the ingestion (writer) `{cert,key,ca}` bundle. */
@@ -97,7 +97,8 @@ export class SecretsStack extends cdk.Stack {
         "Secrets Manager NAME of the onboarding portal's Discord OAuth bundle " +
         '{client_id, client_secret, redirect_uri, session_signing_key}. ' +
         'Operator creates AND updates the secret out-of-band (the redirect_uri ' +
-        'is re-pointed at the custom-domain cutover); CDK only names + grants. ' +
+        'is re-pointed whenever the backend hostname changes); CDK only names ' +
+        'and grants. ' +
         'Value = PORTAL_OAUTH_SECRET_NAME on the api-handler Lambda.',
     });
 

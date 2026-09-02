@@ -158,11 +158,13 @@ dependencies = [
 name = "asset-discovery"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clickhouse",
  "lambda_runtime 0.13.0",
  "prices-clickhouse",
  "prices-ingest-core",
  "prices-ledger-processor",
+ "reqwest",
  "serde",
  "serde_json",
  "stellar-strkey",

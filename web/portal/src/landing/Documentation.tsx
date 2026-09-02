@@ -10,7 +10,7 @@ import quickStartIcon from '../assets/icons/docs-quick-start.svg';
 import rateLimitsIcon from '../assets/icons/docs-rate-limits.svg';
 import sdkExamplesIcon from '../assets/icons/docs-sdk-examples.svg';
 import { color, radius } from '../theme/tokens';
-import { OPENAPI_JSON, QUICKSTART, API_REFERENCE } from './links';
+import { QUICKSTART, API_REFERENCE } from './links';
 import {
   CardRail,
   Section,
@@ -22,11 +22,19 @@ import {
 /**
  * "Everything developers need" — six doors into the documentation.
  *
- * Every card is a LINK, not a panel of prose, and they all point at the same
- * place today: the OpenAPI document, which is the only documentation artefact
- * actually served (see `links.ts`). Task 0163 writes the quickstart and task
- * 0195 mounts Swagger UI; when they land, the three constants in `links.ts`
- * diverge and these cards start pointing at six real destinations.
+ * Every card is a LINK, not a panel of prose. Two destinations exist today —
+ * the quick start and the API reference (task 0195), both pages of this app
+ * — and the cards split between them by what a reader would expect behind the
+ * title. A card whose body promises curl commands, code snippets or throttling
+ * advice goes to the quick start SECTION that holds them; a card about the
+ * endpoint catalogue itself goes to the reference.
+ *
+ * This used to say the cards opened the reference "until task 0163's
+ * walkthrough gives the quick start sections of its own to point at". The
+ * sections have existed since task 0193 — `first-request`, `sdk`,
+ * `rate-limits`, `authentication` are all in `QuickStart.tsx`'s `SECTIONS` —
+ * so the wait was over before the sentence was written, and four cards spent
+ * that time promising content the page they opened does not carry.
  *
  * Cards rather than a list because that is what the design does, and links
  * rather than `<div>`s because a card that describes a document and cannot open
@@ -51,31 +59,45 @@ const DOCS: readonly Doc[] = [
     icon: authenticationIcon,
     title: 'Authentication',
     body: 'How API keys work, where to pass them, and what to expect when a key is missing or rate-limited.',
+    // Stays on the reference, unlike its three siblings below: the reference
+    // opens with a "Base URL & authentication" strip naming the header, and
+    // publishes the 401/403/429 shapes this body promises. Both pages answer
+    // this card; the one that answers it in more detail wins.
     href: API_REFERENCE,
   },
   {
     icon: exampleRequestsIcon,
     title: 'Example Requests',
     body: 'Copy-ready curl commands for every endpoint. Test against the live API from your terminal.',
-    href: API_REFERENCE,
+    // The reference generates examples from the schemas and deliberately has
+    // no "try it" (task 0126 owns that decision). The curl commands this body
+    // promises are the quick start's first request.
+    href: `${QUICKSTART}#first-request`,
   },
   {
     icon: openApiIcon,
     title: 'OpenAPI Specification',
-    body: 'Full Swagger UI included. Explore, test and generate client code directly from the spec.',
-    href: OPENAPI_JSON,
+    body: 'Full API reference. Browse every endpoint, parameter and schema, and generate clients from the spec.',
+    // The rendered reference, which links to the raw JSON in its own header;
+    // a card promising Swagger UI used to open the bare document — and the
+    // reference is ours now, so the copy no longer names someone else's tool
+    // or promises a "try it" the page deliberately does not have (task 0126).
+    href: API_REFERENCE,
   },
   {
     icon: sdkExamplesIcon,
     title: 'SDK Examples',
     body: 'Working code snippets in four languages to copy into your project.',
-    href: API_REFERENCE,
+    // The four languages are the quick start's; the reference carries none.
+    href: `${QUICKSTART}#sdk`,
   },
   {
     icon: rateLimitsIcon,
     title: 'Rate Limits',
     body: 'How throttling works, what headers to watch, and how to handle 429 responses gracefully.',
-    href: API_REFERENCE,
+    // The reference publishes the 429 response; what to DO about it — the
+    // headers, the backoff — is only written in the quick start.
+    href: `${QUICKSTART}#rate-limits`,
   },
 ];
 

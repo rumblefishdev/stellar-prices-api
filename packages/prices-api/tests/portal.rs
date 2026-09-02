@@ -10,7 +10,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::routing::get;
-use prices_api::portal::{CONFIG_PATH, PortalGate, gate_portal};
+use prices_api::portal::{CONFIG_PATH, OPENAPI_PATH, PortalGate, gate_portal};
 use prices_api::{AppConfig, AppState, app};
 use tower::ServiceExt;
 
@@ -451,29 +451,42 @@ async fn the_revokes_preflight_allows_the_marker_header_from_the_configured_orig
     assert!(allowed.contains(PORTAL_REQUEST_HEADER.0), "{allowed}");
     assert!(reply.headers().contains_key("access-control-max-age"));
 }
-
-/// The PORTAL's layer covers the portal's routes and nothing else.
+/// The PORTAL's credentialed layer covers the portal's routes and nothing else.
 ///
-/// ⚠️ **Rewritten by task 0126, which changed this test's premise.** It used to
-/// assert that data routes carry NO allow-origin at all — true while `/v1` was
-/// uncallable from a browser, and the reason it was uncallable. `/v1` now
-/// answers `*` (`data_cors_layer` in `lib.rs`), so "no header" is no longer the
-/// property worth pinning.
+/// ⚠️ **Rewritten twice in one day, by two tasks that changed its premise from
+/// opposite sides — read both before amending it again.**
 ///
-/// What still must hold, and is the whole point of two layers on one service:
-/// the portal's SINGLE ORIGIN and its CREDENTIALS must never appear on a data
-/// route. `*` with credentials is refused by every browser, and the portal's
-/// origin on a data route would hand one site a readable answer while telling
-/// every other site it was not allowed.
+/// It was originally observed on the ALLOW-ORIGIN header: nothing outside the
+/// portal carried one. That is no longer true of anything it checks.
+/// [[0195]] gave both OpenAPI copies `Access-Control-Allow-Origin: *` so the
+/// API reference page can fetch the document cross-origin, and [[0126]] gave
+/// the data routes and `/health` the same `*` via `data_cors_layer`, which is
+/// what makes `/v1` callable from a browser at all. **"No allow-origin" now
+/// describes nothing this repo serves.**
+///
+/// What survives both, and is the whole point of running two CORS policies on
+/// one service: the portal's SINGLE ORIGIN and its CREDENTIALS must never
+/// appear anywhere else. `*` with credentials is refused by every browser, and
+/// the portal's origin on a data route would hand one site a readable answer
+/// while telling every other site it was not allowed. Those are the two
+/// assertions below, and they hold no matter which way the wildcard spreads.
 #[tokio::test]
 async fn the_portals_credentialed_layer_stops_at_the_portal_prefix() {
     let config = config_with_origin(Some(WEB_ORIGIN));
-    for uri in ["/api-docs-json", "/health"] {
+    // `/v1/…/price` with a malformed identifier: a `400` from the handler's
+    // own validation, before any database call, so the data API is covered
+    // here without this suite needing ClickHouse (task 0195).
+    for uri in [
+        "/api-docs-json",
+        OPENAPI_PATH,
+        "/health",
+        "/v1/assets/not-an-asset/price",
+    ] {
         let reply = send_with(&config, "GET", uri, &[("origin", WEB_ORIGIN)]).await;
         let headers = reply.headers();
         assert!(
             headers.get("access-control-allow-credentials").is_none(),
-            "{uri} must never answer with credentials"
+            "{uri} is outside the portal's credentialed CORS answer"
         );
         let origin = headers
             .get("access-control-allow-origin")
@@ -497,10 +510,14 @@ async fn the_portals_credentialed_layer_stops_at_the_portal_prefix() {
 /// browser call failing exactly as before, while `curl` passes: that near-miss
 /// is why this test exists.
 ///
-/// `/health` is the subject here because it needs no ClickHouse. ⚠️ It is a
-/// gateway MOCK in production and never reaches this code there, so on its own
-/// it pins the layer without pinning a route the layer actually has to serve.
-/// [`a_real_v1_route_carries_the_wildcard_on_its_own_response`] covers that.
+/// ⚠️ `/health` is in here because it needs no ClickHouse — but it is a gateway
+/// MOCK in production and never reaches this code there, so on its own it pins
+/// the layer without pinning a route the layer actually has to serve. The `/v1`
+/// path alongside it is the real subject: a malformed identifier is rejected by
+/// the handler's own validation before any database call (task 0195 found this
+/// route), and
+/// [`a_real_v1_route_carries_the_wildcard_on_its_own_response`] covers the
+/// `POST` side.
 #[tokio::test]
 async fn data_routes_answer_a_wildcard_origin_without_credentials() {
     let config = config_with_origin(Some(WEB_ORIGIN));
@@ -508,19 +525,21 @@ async fn data_routes_answer_a_wildcard_origin_without_credentials() {
     // the gateway's stage cache would serve one caller's answer to the next
     // (the shape task 0118 measured on production).
     for origin in ["https://evil.example", "https://someone-else.example"] {
-        let reply = send_with(&config, "GET", "/health", &[("origin", origin)]).await;
-        let headers = reply.headers();
-        assert_eq!(
-            headers
-                .get("access-control-allow-origin")
-                .map(|v| v.to_str().unwrap()),
-            Some("*"),
-            "a data route answers every origin with the same wildcard"
-        );
-        assert!(
-            headers.get("access-control-allow-credentials").is_none(),
-            "`*` and credentials together are refused by every browser"
-        );
+        for uri in ["/health", "/v1/assets/not-an-asset/price"] {
+            let reply = send_with(&config, "GET", uri, &[("origin", origin)]).await;
+            let headers = reply.headers();
+            assert_eq!(
+                headers
+                    .get("access-control-allow-origin")
+                    .map(|v| v.to_str().unwrap()),
+                Some("*"),
+                "{uri} answers every origin with the same wildcard"
+            );
+            assert!(
+                headers.get("access-control-allow-credentials").is_none(),
+                "`*` and credentials together are refused by every browser"
+            );
+        }
     }
 }
 
@@ -592,6 +611,36 @@ async fn a_real_v1_route_carries_the_wildcard_on_its_own_response() {
         !credentials,
         "`*` and credentials together are refused by every browser"
     );
+}
+
+/// Both copies of the OpenAPI document are readable from ANY origin (task
+/// 0195): the portal's Swagger UI fetches the spec from the API's own hostname,
+/// cross-origin, and so may a partner's tooling. `*` — constant, so the
+/// gateway's stage cache cannot serve one caller's origin to the next — and
+/// present whether or not the request carried an `Origin` at all, and whether
+/// or not a portal origin is configured: it is a property of the document,
+/// not of the portal.
+#[tokio::test]
+async fn the_openapi_document_is_readable_from_any_origin() {
+    for config in [
+        config_with_origin(Some(WEB_ORIGIN)),
+        config_with_origin(None),
+    ] {
+        for uri in ["/api-docs-json", OPENAPI_PATH] {
+            for headers in [&[][..], &[("origin", "https://partner.example")][..]] {
+                let reply = send_with(&config, "GET", uri, headers).await;
+                assert_eq!(reply.status(), StatusCode::OK, "{uri}");
+                assert_eq!(
+                    reply
+                        .headers()
+                        .get("access-control-allow-origin")
+                        .map(|v| v.to_str().unwrap()),
+                    Some("*"),
+                    "{uri} with {headers:?}"
+                );
+            }
+        }
+    }
 }
 
 /// A closed portal answers a preflight like everything else under the prefix:

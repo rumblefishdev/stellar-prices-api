@@ -91,11 +91,9 @@ pub const LOGOUT_PATH: &str = "/api/auth/logout";
 ///
 /// A **literal**, never anything derived from the request. A `redirect_to`
 /// parameter is the standard first link in an open-redirect chain, and this
-/// origin is the one that handles OAuth — the same reasoning that keeps
-/// `DirectoryIndexFn`'s redirect targets a fixed list in
-/// `infra/src/lib/stacks/portal-hosting-stack.ts`. When the portal grows a
-/// second page, the page it lands on decides where to go next; this handler
-/// still will not.
+/// origin is the one that handles OAuth. The portal has several pages now and
+/// this did not change: the page it lands on decides where to go next; this
+/// handler still will not.
 const PORTAL_HOME: &str = "/api/";
 
 /// Appended to [`PORTAL_HOME`] when the visitor declined at Discord's consent
@@ -824,11 +822,11 @@ fn redirect(location: &str, set_cookies: Vec<String>) -> Response {
 /// `no-store` on every response this module produces.
 ///
 /// Three of the four routes carry or set a credential and the fourth is a
-/// redirect that does. CloudFront is already told not to cache this prefix
-/// (`CACHING_DISABLED` on the API behaviour) and the gateway is told the same
-/// (`portalSettings`), but those are two configurations that can drift; this is
-/// the one the handler controls, and it is also what stops a *browser* holding
-/// `/auth/me` from before a sign-out.
+/// redirect that does. The gateway is told not to cache this prefix
+/// (`portalSettings`), but that is a configuration that can drift; this is the
+/// one the handler controls, and it is also what stops a *browser* holding
+/// `/auth/me` from before a sign-out. A CDN behaviour said it too until [0195]
+/// retired the distribution in front of these routes.
 fn no_store(mut response: Response) -> Response {
     cache_control::attach(&mut response, cache_control::NO_STORE);
     response

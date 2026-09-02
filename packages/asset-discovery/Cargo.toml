@@ -35,6 +35,15 @@ prices-clickhouse = { path = "../prices-clickhouse" }
 prices-ledger-processor = { path = "../prices-ledger-processor" }
 
 stellar-xdr = { workspace = true }
+# Task 0210 symbol stage: Soroban RPC `simulateTransaction` against a token
+# contract's `symbol()`. Same set (and the same reqwest feature list)
+# oracle-worker uses for its Reflector calls.
+stellar-strkey = { workspace = true }
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-webpki-roots",
+    "json",
+] }
 clickhouse = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -44,7 +53,3 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 lambda_runtime = { workspace = true, optional = true }
-
-[dev-dependencies]
-# Checksum-validates every seed issuer is a well-formed Stellar public key.
-stellar-strkey = { workspace = true }

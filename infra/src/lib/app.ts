@@ -6,7 +6,6 @@ import { ComputeStack } from './stacks/compute-stack.js';
 import { ApiGatewayStack } from './stacks/api-gateway-stack.js';
 import { EventBridgeStack } from './stacks/eventbridge-stack.js';
 import { ObservabilityStack } from './stacks/observability-stack.js';
-import { PortalHostingStack } from './stacks/portal-hosting-stack.js';
 
 export interface CreateAppOptions {
   readonly config: EnvironmentConfig;
@@ -46,25 +45,20 @@ export function createApp({ config }: CreateAppOptions): void {
     apiHandlerRole: compute.apiHandlerRole,
   });
 
-  // PortalHostingStack fronts both the bundle bucket and the API on one
-  // CloudFront distribution, so it needs the REST API id to build the
-  // execute-api origin hostname. Passing it in creates the cross-stack
-  // dependency, which orders ApiGateway before PortalHosting.
-  //
-  // That ordering runs BOTH ways and the reverse one is easy to miss:
-  // CloudFormation will not delete a stack whose exports are in use, so
-  // ApiGateway can no longer be destroyed — or have its RestApi replaced —
-  // while PortalHosting exists. Tear the portal down first; the Makefile's
-  // `destroy-production-apigateway` target carries the same note.
-  //
-  // The distribution lives in this stack's region like everything else: it
-  // needs no us-east-1 certificate, because it has no custom domain until task
-  // 0195 adds one (and that certificate is that task's problem).
-  new PortalHostingStack(app, `${prefix}-PortalHosting`, {
-    env,
-    config,
-    restApiId: apiGateway.api.restApiId,
-  });
+  // No hosting stack for the portal. `PortalHostingStack` (task 0184) — a
+  // private bucket and a CloudFront distribution fronting both the bundle
+  // and this API — was retired by task 0195 on 2026-09-01: since task 0194
+  // the page is served from the block explorer's distribution at
+  // `https://sorobanscan.rumblefish.dev/api/` (its bucket, synced by
+  // `make -C infra sync-portal-explorer`) and calls this API on
+  // `config.apiDomain` directly, so the distribution had become a second,
+  // ungated front door to the same portal. Constructing `ApiGatewayStack` is
+  // what has the effect; the binding below is now read by nothing, and the
+  // `void` is there to say so deliberately rather than to use it. That is the
+  // fact worth keeping: nothing imports the stack's exports any more, so it
+  // can be destroyed or have its RestApi replaced without tearing anything
+  // down first.
+  void apiGateway;
 
   // EventBridgeStack is independent of ComputeStack in the skeleton
   // (no Lambda targets yet — task 0039 wires the cross-stack

@@ -23,12 +23,12 @@
 //!
 //! - They are **one operator artefact**. `client_id`, `client_secret` and
 //!   `redirect_uri` are all properties of a single Discord application
-//!   registration, owned by one person (ADR 0010 §6), and at the custom-domain
-//!   cutover ([0195]/[0126]) the redirect URI changes in the Developer Portal
-//!   and here **at the same moment**. Two homes for one artefact is two things
-//!   to change and one to forget, and forgetting the second is a sign-in that
-//!   breaks silently on the cutover — the failure the task asks the runbook to
-//!   prevent.
+//!   registration, owned by one person (ADR 0010 §6), and when the backend
+//!   moved to its own hostname ([0194], 2026-08-31) the redirect URI changed in
+//!   the Developer Portal and here **at the same moment**. Two homes for one
+//!   artefact is two things to change and one to forget, and forgetting the
+//!   second is a sign-in that breaks silently on the cutover — the failure the
+//!   runbook exists to prevent.
 //! - They must **survive a deploy**. The repo already learned this for
 //!   operator-owned values: `SecretsStack` "deliberately does NOT create the
 //!   secrets" and `compute-stack.ts` reads the ledger cursor from SSM rather

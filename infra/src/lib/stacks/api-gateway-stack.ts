@@ -551,9 +551,10 @@ export class ApiGatewayStack extends cdk.Stack {
     // below — declared outside the `cacheEnabled` branch, because with the stage
     // cache off is exactly when an unbounded anonymous route costs the most.
     // `/api/{proxy+}` directly under the root: the bundle's paths share the
-    // prefix but never reach the gateway — CloudFront carves them out to S3
-    // ahead of the API row (task 0194, `portal-hosting-stack.ts`). The
-    // OpenAPI alias `/api/api-docs-json` rides on this same proxy.
+    // prefix but never reach the gateway — the page lives on another host
+    // (task 0194) and only its backend calls come here, on the API's own
+    // hostname. The OpenAPI alias `/api/api-docs-json` rides on this same
+    // proxy.
     const portalProxy = this.api.root
       .addResource('api')
       .addResource('{proxy+}');
@@ -1010,9 +1011,11 @@ export class ApiGatewayStack extends cdk.Stack {
     //   `VITE_PORTAL_API_ORIGIN` assumes, and what `AWS_LAMBDA_HTTP_IGNORE_
     //   STAGE_IN_PATH` already made the handler indifferent to.
     //
-    // The execute-api endpoint stays enabled: `PortalHostingStack` fronts it
-    // as an origin, and `apiBaseUrl` still advertises it. Retiring it is a
-    // decision for after this hostname has carried traffic.
+    // The execute-api endpoint stays enabled. Nothing advertises it any more
+    // (`apiBaseUrl` names this hostname, and the distribution that fronted it
+    // as an origin was retired by task 0195), but it still answers; whether
+    // it is announced as retired or kept as a permanent alias is task 0126's
+    // decision.
     const hostedZone = route53.HostedZone.fromHostedZoneAttributes(
       this,
       'HostedZone',

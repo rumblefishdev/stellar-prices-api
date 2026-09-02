@@ -1,16 +1,16 @@
 /**
  * Every off-page destination the landing page names, in one place.
  *
- * Two of the three are placeholders **on purpose**, and centralising them is
- * what keeps that honest: the quickstart is task 0163's and the Swagger UI is
- * task 0195's, and neither has landed. Task 0193's brief says to link out to
- * both — "a key is only useful next to the thing that shows what to call" — so
- * the links exist and point at the one artefact that is actually served today,
- * the OpenAPI document. When 0195 lands its route, this file is the diff.
+ * Centralised so that a destination that does not exist yet cannot hide: the
+ * quick start and the API reference were both placeholders aliased to the raw
+ * OpenAPI document until their pages landed (task 0193 for the quick start's
+ * page, task 0195 for Swagger UI), and every "Swagger UI" affordance on the
+ * landing page went through this file rather than through a literal. Task
+ * 0163's curl-by-curl walkthrough is still owed to the quick start's snippets.
  *
- * All same-origin and root-relative — and all under `/api/`, because on the
- * shared host the root belongs to the block explorer (task 0194): a link to
- * `/api-docs-json` there opens the explorer's page, not the document.
+ * All root-relative and all under `/api/`, because on the shared host the root
+ * belongs to the block explorer (task 0194): a link to `/api-docs-json` there
+ * opens the explorer's page, not the document.
  */
 
 import { API_ORIGIN } from '../api-origin';
@@ -33,29 +33,46 @@ export const PUBLIC_API_BASE_URL =
   'https://prices-api.sorobanscan.rumblefish.dev/v1';
 
 /**
- * The OpenAPI document. Real, served, and the only docs artefact today.
+ * The OpenAPI document itself — the raw JSON, linked beside the rendered
+ * reference for generators and other tooling.
  *
  * Same-origin, the alias under the portal prefix (`portal::OPENAPI_PATH` in
  * the API), not the root `/api-docs-json` that partners and the spec's
  * `servers` block use — the two are the same bytes from the same handler. On
  * the shared host (task 0194) the alias is a static-SPA path like every other
- * `/api/*` there, so the link goes to the root copy on the API's own hostname
- * instead — a document, opened by navigation, so no CORS is involved.
+ * `/api/*` there, so this points at the root copy on the API's own hostname
+ * instead.
+ *
+ * ⚠️ This is also what `docs/ApiReference.tsx` **fetches**, cross-origin, to
+ * render the reference — which is why `GET /api-docs-json` answers
+ * `Access-Control-Allow-Origin: *` (see `packages/prices-api/src/lib.rs`).
+ * Opened by navigation it would need no such header; opened by `fetch` it
+ * does, so the two must stay in step.
  */
 export const OPENAPI_JSON = API_ORIGIN
   ? `${API_ORIGIN}/api-docs-json`
   : '/api/api-docs-json';
 
 /**
- * The API reference — today the raw OpenAPI document, because that is the
- * only reference that exists. Task 0195 mounts Swagger UI on it; when it
- * lands, this is the one constant to re-point.
+ * The API reference route — the live OpenAPI document rendered in the
+ * portal's own pieces, in Swagger UI's shape (task 0195,
+ * `src/docs/ApiReference.tsx`). A ROUTE like the quick start, so it is a
+ * `RouterLink` target inside the app; `API_REFERENCE` is the same place as an
+ * absolute href for the plain `<a>`s on the landing page.
  *
- * Was `API_REFERENCE`, aliased to the document above. Every "Swagger UI"
- * affordance then silently opened `/api-docs-json`: a name that promised a
- * page the portal does not have. Named for what it opens instead.
+ * On the shared host this URL works BECAUSE it is a route: the explorer's
+ * `/api/*` behaviour rewrites every extensionless path to `/api/index.html`,
+ * so `/api/docs` boots this bundle and the router renders the reference. A
+ * static `docs/` folder in the bundle would have been reachable only as
+ * `/api/docs/index.html`, which is why the reference is a page and not a
+ * static folder.
+ *
+ * Until 2026-09-01 `API_REFERENCE` was an alias of {@link OPENAPI_JSON} —
+ * the only reference that existed — and every "Swagger UI" affordance
+ * silently opened the raw document.
  */
-export const API_REFERENCE = OPENAPI_JSON;
+export const DOCS_ROUTE = '/docs';
+export const API_REFERENCE = `${ROUTER_BASENAME}${DOCS_ROUTE}`;
 
 /**
  * The quick start — the in-app page built from the Figma `Quick start` frame
@@ -88,12 +105,11 @@ export const LOGIN_ANCHOR = 'login';
  * The login route, relative to the router's basename — so `/api/login`
  * once `ROUTER_BASENAME` is applied.
  *
- * ⚠️ This path only resolves on a hard refresh once the deployment answers it
- * with the portal's `index.html`. Until then S3 masks the missing key as
- * `403 AccessDenied` (the bucket grants `s3:GetObject`, not `s3:ListBucket`),
- * which is why `infra/.../portal-hosting-stack.ts` rewrites the app's known
- * routes to `/api/index.html` in `DirectoryIndexFn`. Add a route here
- * and you must add it there.
+ * A hard refresh on this path resolves because the host's `/api/*` behaviour
+ * rewrites every extensionless path to `/api/index.html` — a rule, not an
+ * allow-list, so adding a route here needs nothing on the hosting side. (Our
+ * own distribution kept a per-route allow-list in `DirectoryIndexFn`; it was
+ * retired by task 0195 once the page moved to the explorer's host.)
  */
 export const LOGIN_ROUTE = '/login';
 

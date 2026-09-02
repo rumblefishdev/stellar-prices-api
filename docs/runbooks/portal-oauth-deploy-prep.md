@@ -22,9 +22,10 @@ Two things, and they are the same artefact seen from two sides:
 
 1. **Registering the Discord application** and creating the one Secrets Manager
    secret the api-handler reads.
-2. **What has to change, and in what order, at the custom-domain cutover**
-   ([0195] / [0126]) — because getting that order wrong breaks sign-in silently,
-   which is precisely the failure this runbook exists to prevent.
+2. **What has to change, and in what order, when the backend's hostname
+   moves** — done once already on 2026-08-31 ([0194]), and kept because getting
+   that order wrong breaks sign-in silently, which is precisely the failure this
+   runbook exists to prevent.
 
 ## What CDK does and does not do
 
@@ -48,15 +49,14 @@ for this.
 ## Prerequisites
 
 - `export AWS_PROFILE=soroban-explorer`, `export AWS_REGION=eu-central-1`.
-- The portal's public hostname. Until [0195] lands, that is the CloudFront
-  distribution domain, published by CDK at
-  `/prices/production/portal-distribution-domain`:
-
-  ```bash
-  aws ssm get-parameter \
-      --name /prices/production/portal-distribution-domain \
-      --query Parameter.Value --output text
-  ```
+- The two hostnames, both from `infra/envs/production.json` since [0194]
+  (2026-08-31): the **page** is served at `portalWebOrigin`
+  (`https://sorobanscan.rumblefish.dev`, the block explorer's distribution)
+  and the **backend** — where the callback lands and the session cookie is
+  set — at `apiDomain.domainName` (`https://prices-api.sorobanscan.rumblefish.dev`).
+  The redirect URI below names the API host. (Our own CloudFront distribution
+  and its `/prices/production/portal-distribution-domain` parameter were
+  retired by [0195]; nothing reads that parameter any more.)
 
 ---
 
@@ -316,11 +316,15 @@ from a scratch guild.
 
 ---
 
-## 6. The custom-domain cutover — ordering
+## 6. Moving the callback to another host — ordering
 
-When [0195] / [0126] put the portal on a custom domain, the portal is reachable
-at **two** hostnames for a while: the CloudFront distribution domain and the new
-one. The redirect URI is registered per-URL, and our stored `redirect_uri` is a
+Done once already: on 2026-08-31 ([0194]) the callback moved from our
+CloudFront distribution to `prices-api.sorobanscan.rumblefish.dev`, in the
+order below, and the old distribution was retired afterwards ([0195]). Kept
+as the procedure for the next move, whenever the API host changes again.
+
+While a move is in progress the backend is reachable at **two** hostnames.
+The redirect URI is registered per-URL, and our stored `redirect_uri` is a
 single string, so an ordering mistake breaks sign-in for everyone at the old
 host, at the new host, or both.
 
@@ -330,9 +334,9 @@ host, at the new host, or both.
    one_. Two registered redirects, both valid. Nothing changes yet: our stored
    `redirect_uri` still names the old host, and Discord matches whichever we
    send.
-2. **Verify the new hostname serves the portal** and that
-   `https://<new-host>/api/config` answers — i.e. the distribution and
-   its behaviours are live on the new name. Sign-in still runs through the old
+2. **Verify the new hostname serves the backend** — `https://<new-host>/api/config`
+   answers JSON, with `Access-Control-Allow-Origin` naming the page's origin
+   when asked with an `Origin` header. Sign-in still runs through the old
    host at this point.
 3. **Update the secret's `redirect_uri`** to the new host:
 

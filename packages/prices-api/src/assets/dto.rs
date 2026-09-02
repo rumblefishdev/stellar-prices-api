@@ -195,7 +195,15 @@ pub struct AssetDetail {
     pub asset: String,
     /// Normalized kind: `native`, `credit`, or `contract`.
     pub asset_kind: String,
-    /// Classic asset code (`""` for native/contract).
+    /// Display code. A classic asset's `asset_code`; for a Soroban token, the
+    /// `symbol()` read off its contract (task 0210), which is `""` until the
+    /// discovery worker has resolved it or has recorded that the contract
+    /// exposes none.
+    ///
+    /// ⚠️ **Not an identifier.** Asset codes are not unique on Stellar — the
+    /// identity is `(code, issuer)` for classic assets and the contract address
+    /// for Soroban ones, and a Soroban token's symbol is self-declared by the
+    /// contract. Resolve assets by `issuer`/`contract`, never by this field.
     pub code: String,
     /// Classic issuer G-strkey (`""` otherwise).
     pub issuer: String,
@@ -210,6 +218,13 @@ pub struct AssetDetail {
 /// One item in the `GET /assets` listing (overview §4.1).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AssetListItem {
+    /// Display code — same semantics and the same caveat as
+    /// [`AssetDetail::code`]: a classic asset's `asset_code`, or a Soroban
+    /// token's self-declared `symbol()`, and not an identifier.
+    ///
+    /// Note that `?search=` and `sort=code` operate on the stored classic
+    /// `asset_code` only, so a Soroban token is displayed by its symbol but is
+    /// not matched or ordered by it.
     pub asset_code: String,
     /// `classic` or `soroban` (matches the `?type` filter vocabulary).
     pub asset_type: String,

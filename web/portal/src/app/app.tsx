@@ -7,6 +7,8 @@ import Stack from '@mui/material/Stack';
 import CircularProgress from '@mui/material/CircularProgress';
 import Typography from '@mui/material/Typography';
 import {
+  Suspense,
+  lazy,
   useCallback,
   useEffect,
   useRef,
@@ -111,15 +113,14 @@ import {
  *
  * What this page is for is the pipeline behind it — a change to this file
  * reaches `/api/` — plus two properties that are expensive to prove any
- * later: that a relative `fetch` from this bundle reaches the API
- * **same-origin** through task 0184's distribution, and now that the session
+ * later: that a `fetch` from this bundle reaches the API and that the session
  * cookie survives that round-trip in a real browser.
  *
- * Do not add a second route before task 0195 lands the per-prefix SPA fallback.
- * A hard refresh on a sub-path resolves against S3, which grants `s3:GetObject`
- * and not `s3:ListBucket`, so a missing key reads as `403 AccessDenied` rather
- * than a 404. Sign-in does not need one: every redirect in the flow lands back
- * on `/api/`, which is a real object.
+ * Sub-routes were once forbidden here — a hard refresh resolved against S3 and
+ * came back `403 AccessDenied`. That constraint is gone (task 0194): the host
+ * rewrites every extensionless path under `/api/` to this bundle, so a route
+ * costs nothing on the hosting side. Sign-in still needs none: every redirect
+ * in the flow lands back on `/api/`.
  */
 
 type Probe =
@@ -4387,6 +4388,55 @@ function QuickStartRoute({ gate }: { gate: Gate }) {
   );
 }
 
+/**
+ * The API reference, as a chunk of its own (task 0195). Its renderer and the
+ * OpenAPI parser it needs stay out of the bundle a first visit pays for — the
+ * landing page links to `/docs` but most visitors never open it. It is a small
+ * chunk; the split is for the landing page's sake, not the reference's.
+ */
+const ApiReference = lazy(() => import('../docs/ApiReference'));
+
+/**
+ * `/docs` — the API reference, the live OpenAPI document rendered in the
+ * portal's own pieces (task 0195). Documentation like the quick start: no
+ * session needed, and the bar depends on who is looking. The document is
+ * fetched by the page itself; a spinner covers the chunk on the rare first
+ * visit that starts here.
+ */
+function DocsRoute({ gate }: { gate: Gate }) {
+  const signedIn = gate.open && gate.authenticated;
+  const username = signedIn
+    ? (gate.session as { state: 'ok'; session: PortalSession }).session.username
+    : undefined;
+
+  return (
+    <>
+      {signedIn ? (
+        <DashboardNavbar
+          username={username}
+          onSignOut={gate.onSignOut}
+          current="docs"
+        />
+      ) : (
+        <Navbar canOfferKey={gate.open} inPage={false} />
+      )}
+      <Suspense
+        fallback={
+          <Stack alignItems="center" sx={{ py: 12 }} aria-busy="true">
+            <CircularProgress
+              size={28}
+              aria-label="Loading the API reference"
+            />
+          </Stack>
+        }
+      >
+        <ApiReference />
+      </Suspense>
+      <Footer canOfferKey={signedIn} />
+    </>
+  );
+}
+
 export function App() {
   const probe = useConfigProbe();
   const open = probe.state === 'ok' && probe.config.enabled;
@@ -4408,12 +4458,12 @@ export function App() {
       <Route path="/login" element={<LoginRoute gate={gate} />} />
       <Route path="/dashboard" element={<DashboardRoute gate={gate} />} />
       <Route path="/quick-start" element={<QuickStartRoute gate={gate} />} />
-      {/* Anything else is a URL this app never minted. Sending it to `/`
-          rather than rendering a 404 keeps one promise the deployment cannot
-          yet keep on its own: until task 0195 lands the per-prefix SPA
-          fallback, an unknown path under this prefix never reaches the bundle
-          at all — S3 answers `403 AccessDenied` because the bucket policy
-          grants `s3:GetObject` and not `s3:ListBucket`. */}
+      <Route path="/docs" element={<DocsRoute gate={gate} />} />
+      {/* Anything else is a URL this app never minted. On the shared host
+          every extensionless path under `/api/` boots this bundle (the
+          explorer's routing function rewrites it to `/api/index.html`), so
+          a mistyped deep link arrives here rather than at S3 — and goes to
+          `/` rather than to a 404 page the app does not have. */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

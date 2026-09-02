@@ -25,8 +25,8 @@ pub mod telemetry;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::http::header::{ACCEPT, CONTENT_TYPE};
-use axum::http::{HeaderName, Method};
+use axum::http::header::{ACCEPT, ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE};
+use axum::http::{HeaderName, HeaderValue, Method};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -90,11 +90,32 @@ pub fn app(config: &AppConfig, state: AppState) -> Router {
     // block expect it, and under the portal prefix (`portal::OPENAPI_PATH`),
     // which is the only place the portal's own "API reference" link can reach
     // on a host whose root belongs to another application (task 0194).
+    //
+    // `Access-Control-Allow-Origin: *`, on both copies (task 0195). The
+    // portal's Swagger UI is a page on `sorobanscan.rumblefish.dev` fetching
+    // this document from `prices-api.sorobanscan.rumblefish.dev` — cross-origin,
+    // and read by `fetch`, not by navigation, so without an allow header the
+    // browser refuses to hand the bytes to the page. `*` rather than the
+    // portal's origin, deliberately: the document is anonymous, public and
+    // carries no cookie and no key, so there is nothing an origin restriction
+    // would protect and everything it would cost — a partner's Postman, a
+    // client generator run from a browser, somebody else's Swagger. And the
+    // value is a CONSTANT, which is what makes it safe under the gateway's
+    // 3600 s stage cache: a reflected origin cached there would be served to
+    // the next caller. The portal's own routes keep their single credentialed
+    // origin (`portal::cors_layer`); this header never says `*` on anything
+    // that reads a cookie.
     let serve_spec = move || {
         let spec_json = spec_json.clone();
         async move {
-            let mut resp =
-                ([(CONTENT_TYPE, "application/json")], (*spec_json).clone()).into_response();
+            let mut resp = (
+                [
+                    (CONTENT_TYPE, HeaderValue::from_static("application/json")),
+                    (ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*")),
+                ],
+                (*spec_json).clone(),
+            )
+                .into_response();
             common::cache_control::attach(&mut resp, common::cache_control::DEPLOY_STATIC);
             resp
         }
@@ -144,8 +165,22 @@ pub fn app(config: &AppConfig, state: AppState) -> Router {
 /// not know — but that `401` reaches a browser without an allow-origin header
 /// and reads as a dead network. Both are error paths; neither blocks a working
 /// call. Tracked with 0255 rather than fixed here, because moving this layer
-/// outside `auth::apply` would put it over the portal's routes too and emit TWO
-/// allow-origin headers, which browsers reject outright.
+/// outside `auth::apply` would put it over the PORTAL's routes too.
+///
+/// ⚠️ **An earlier draft of this comment said that would emit TWO allow-origin
+/// headers. It does not — measured 2026-09-02.** `CorsLayer` OVERWRITES the
+/// header rather than appending, so an overlap is invisible in the response:
+/// exactly one value comes back either way, and no test that reads the header
+/// with `HeaderMap::get` could tell. The real consequence is worse for being
+/// quiet — the portal's single credentialed origin is silently REPLACED by `*`,
+/// and its `Access-Control-Allow-Credentials` disappears with it, which breaks
+/// every cookie-bearing portal call. Four tests in `tests/portal.rs` do catch
+/// that, so the constraint is pinned; it is the reasoning that was wrong.
+///
+/// The same measurement retires a worry recorded on PR #277: the OpenAPI
+/// routes carry their own `*` from task 0195's handler, and this layer is
+/// declared BEFORE they are registered — but even if it were not, the two
+/// would not stack.
 fn data_cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::any())

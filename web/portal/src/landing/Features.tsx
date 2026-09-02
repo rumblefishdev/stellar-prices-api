@@ -69,7 +69,7 @@ const FEATURES: readonly Feature[] = [
   {
     icon: developerFriendlyIcon,
     title: 'Developer Friendly',
-    body: 'REST API with full OpenAPI specification. Swagger UI included. SDK examples in JavaScript, Python, Rust and Go.',
+    body: 'REST API with a full OpenAPI specification, a browsable API reference, and copy-ready examples in four languages.',
   },
 ];
 

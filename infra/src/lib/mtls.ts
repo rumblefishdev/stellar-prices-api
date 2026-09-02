@@ -108,10 +108,10 @@ export function mtlsSecretName(envName: string, role: MtlsRole): string {
  *
  * **Created out-of-band by the operator, never by CDK** — the same rule
  * `SecretsStack` states for the mTLS material, and here it is load-bearing for a
- * second reason: `redirect_uri` changes at the custom-domain cutover ([0195]),
- * and a CloudFormation-managed value would be silently restored to the committed
- * one by the next `cdk deploy`, un-pointing sign-in hours or weeks after the
- * cutover appeared to succeed.
+ * second reason: `redirect_uri` changes whenever the backend's hostname does —
+ * it did on 2026-08-31 ([0194]) — and a CloudFormation-managed value would be
+ * silently restored to the committed one by the next `cdk deploy`, un-pointing
+ * sign-in hours or weeks after the cutover appeared to succeed.
  *
  *   portalOauthSecretName('production')
  *     === 'prices/production/portal-discord-oauth'
