@@ -574,10 +574,24 @@ rather than a wrong URL.
       whichever lands: #276 merging deletes its subject; #276 being abandoned
       makes the fix real work.**
       ✅ **RESOLVED 2026-09-02 12:10Z — #276 merged and
-      `infra/src/lib/stacks/portal-hosting-stack.ts` no longer exists.** There
-      is no origin left to point anywhere, so this criterion has no subject and
-      closes as moot, not as done. Holding the fix was the right call: writing
-      it would have produced a conflict against a deletion
+      `infra/src/lib/stacks/portal-hosting-stack.ts` no longer exists.**
+      ⚠️ **"Moot" was the first word written here and it UNDERSTATES it — the
+      goal is met, by a different mechanism than this task designed.** The
+      portal no longer has a CloudFront origin to point at anything: it is
+      served from the Explorer's distribution and reaches the backend through a
+      BUILD-TIME `VITE_PORTAL_API_ORIGIN` (`web/portal/src/api-origin.ts`),
+      which `infra/Makefile:127` derives from `apiDomain.domainName` in
+      `envs/production.json` — the custom domain. `check-portal-api-origin`
+      fails the build unless that value is `https://<host with a dot>`, so it
+      cannot silently fall back to the relative same-origin layout, which on
+      the shared host would return `index.html` for `/api/config`.
+      **So: nothing points at execute-api, and the `originPath: '/production'`
+      stage-prefix trap left the codebase with the file.** Holding the fix was
+      the right call — writing it would have conflicted against a deletion.
+      ⚠️ Not verified on the wire: `sorobanscan.rumblefish.dev/api/` answers
+      `401` to an anonymous probe, so which origin the CURRENTLY DEPLOYED
+      bundle was built with is unconfirmed. It is a build-time constant, so it
+      only changes when `make sync-portal-explorer` runs
 - [x] Execute-api retirement: since nothing deployed consumes it as an origin,
       the remaining question is only whether the endpoint itself is disabled.
       **Decided 2026-09-02 — KEEP it serving for now** (decision 5 above), with
