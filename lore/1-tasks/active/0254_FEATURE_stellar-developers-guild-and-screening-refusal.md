@@ -411,6 +411,13 @@ the check; the epic's barrier reads membership + screening cleared + age.
 8. **`after_sign_in`'s unreachable arm** gained the new variant rather than a
    wildcard: an exhaustive match is what makes the next variant a compile
    error here rather than a silent plain landing.
+9. **Both refusal buttons open in a new tab** (Adam, 2026-09-02) — the
+   invite on `not_member` as well as the server on `pending_rules`, not just
+   the new one. Each sends the visitor to Discord to perform an errand and
+   come back, and the page they leave is the page that explains it; the
+   sign-in button stays a same-tab navigation because OAuth returns here by
+   itself. `rel="noopener noreferrer"` comes from `DiscordButton`'s
+   `target`, so no call site can forget it.
 
 ## Notes
 

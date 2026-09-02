@@ -805,13 +805,22 @@ function LoginView({
 
             The invite for a non-member; the SERVER for a member in screening —
             a member following an invite is told they are already in and sent
-            nowhere, while opening the guild lands them on its rules prompt. */}
+            nowhere, while opening the guild lands them on its rules prompt.
+
+            ⚠️ **Both open in a NEW TAB** (Adam, 2026-09-02), like the switch-
+            account link and unlike the sign-in button. The visitor has to do
+            something on Discord — join, or accept the rules — and then come
+            BACK here and sign in again; navigating this tab away would make
+            the return trip a browser-history problem, and the refusal that
+            explains what to do would be gone from the screen while they do
+            it. `target` also carries `rel="noopener noreferrer"` — see
+            `DiscordButton`. */}
         {pendingRules ? (
-          <DiscordButton href={STELLAR_DISCORD_SERVER}>
+          <DiscordButton href={STELLAR_DISCORD_SERVER} target="_blank">
             Open Stellar Discord
           </DiscordButton>
         ) : (
-          <DiscordButton href={STELLAR_DISCORD_INVITE}>
+          <DiscordButton href={STELLAR_DISCORD_INVITE} target="_blank">
             Join Stellar Discord
           </DiscordButton>
         )}
@@ -944,11 +953,18 @@ function DiscordButton({
   href: string;
   onClick?: (event: MouseEvent<HTMLAnchorElement>) => void;
   /**
-   * `_blank` for the one caller that sends the visitor to discord.com to do
-   * something there and come BACK — switching account. `rel` is set from this
-   * rather than passed separately, because `noopener` is not optional on a
-   * `_blank` and leaving it to the call site is how one of them ends up
-   * without it.
+   * `_blank` for the callers that send the visitor to discord.com to do
+   * something there and come BACK: switching account, and — since task 0254 —
+   * the two refusal screens' buttons (join the server, accept its rules).
+   * What they have in common is that the page they leave is the page that
+   * explains the errand, and the visitor needs it again afterwards.
+   *
+   * The sign-in button is deliberately NOT one of them: OAuth is a top-level
+   * navigation that returns to this origin on its own.
+   *
+   * `rel` is set from this rather than passed separately, because `noopener`
+   * is not optional on a `_blank` and leaving it to the call site is how one
+   * of them ends up without it.
    */
   target?: '_blank';
   children: ReactNode;

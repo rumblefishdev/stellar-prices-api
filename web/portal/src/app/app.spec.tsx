@@ -959,9 +959,12 @@ describe('sign in with Discord', () => {
     expect(message.textContent).not.toMatch(/screening/i);
     expect(screen.queryByTestId('signin-pending-rules')).toBeNull();
 
-    // The single filled action is the invite, and it is the real one.
+    // The single filled action is the invite, and it is the real one — opened
+    // in a new tab, so this refusal is still on screen when they come back.
     const join = screen.getByRole('link', { name: /join stellar discord/i });
     expect(join.getAttribute('href')).toBe('https://discord.gg/stellardev');
+    expect(join.getAttribute('target')).toBe('_blank');
+    expect(join.getAttribute('rel')).toContain('noopener');
 
     // The sign-in control is GONE — replaced by the quiet second action.
     expect(
@@ -1007,6 +1010,10 @@ describe('sign in with Discord', () => {
     expect(open.getAttribute('href')).toBe(
       'https://discord.com/channels/897514728459468821',
     );
+    // A new tab, for the same reason as the invite: accepting the rules
+    // happens on Discord and the visitor comes back here to sign in again.
+    expect(open.getAttribute('target')).toBe('_blank');
+    expect(open.getAttribute('rel')).toContain('noopener');
     expect(
       screen.queryByRole('link', { name: /join stellar discord/i }),
     ).toBeNull();
