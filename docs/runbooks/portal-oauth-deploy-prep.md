@@ -170,13 +170,18 @@ which Discord guild membership is checked against, and the minimum account age.
 Seed both by hand, alongside the mTLS material and the secret above:
 
 ```bash
-# The guild whose membership gates key issuance. The stellar_test guild while
-# building; task 0179 step 4 re-points it at the real Stellar Developers guild
-# (897514728459468821) — with `put-parameter --overwrite`, no deploy.
+# The guild whose membership gates key issuance: Stellar Developers,
+# 897514728459468821 — the official and ONLY Stellar guild this project refers
+# to (Adam, 2026-09-02, task 0254). It is the same guild `STELLAR_DISCORD_INVITE`
+# in `web/portal/src/landing/links.ts` sends a refused visitor to, and the two
+# must agree or the refusal is a loop; `npm run discord:verify-guild -- --ssm`
+# resolves the invite through Discord's API and compares it with this value.
+# Seeded as the stellar_test guild (1536303837785362432) while building;
+# re-pointing is a `put-parameter --overwrite`, no deploy.
 aws ssm put-parameter \
     --name /prices/production/discord-guild-id \
     --type String \
-    --value "<guild snowflake>"
+    --value "897514728459468821"
 
 # Minimum Discord account age, in whole minutes. 5 matches the Stellar guild's
 # own verification_level: 2 ("registered on Discord for longer than 5 minutes")
