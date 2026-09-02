@@ -611,8 +611,11 @@ rather than a wrong URL.
       `AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH=true` — measured 2026-09-02 below.
       A keyed `200` on a `/v1` route would be belt-and-braces; the resource
       resolves, which is what the base-path mapping could have broken
-- [ ] The custom domain did not fragment or bypass the stage cache.
-      ⚠️ **OVERTAKEN 2026-09-02: execute-api is now disabled, so the
+- [x] The custom domain did not fragment or bypass the stage cache.
+      ✅ **MEASURED 2026-09-02 after the deploy** — miss 0.241s, hit 0.128s,
+      miss again 0.276s after the 10s TTL, with `CacheHitCount` confirming.
+      The cache is reached through the custom domain and expires correctly.
+      ⚠️ **OVERTAKEN in its other half: execute-api is now disabled, so the
       cross-hostname half of this can never be measured — there is one door.**
       That also makes it un-needed: fragmentation ACROSS hostnames cannot matter
       when only one hostname resolves. What is left is same-host — does the
@@ -739,6 +742,36 @@ GET /api-docs-json              → 200, access-control-allow-origin: *
 GET /health                     → 200      GET /api/config → 200
 execute-api /health             → 403 ForbiddenException   ← retirement live
 ```
+
+### ✅ Keyed probe — the handler half, measured on prod for the first time
+
+```
+GET /v1/assets/native/price   x-api-key: <key>   Origin: https://example.com
+→ 200
+   access-control-allow-origin: *
+```
+
+That is the half `addCorsPreflight` cannot provide and that review nearly let
+ship missing (`8321e9a`). Both halves are now confirmed on the wire: the MOCK
+preflight answers `204` with `*`, and the Lambda's own response carries `*` too.
+
+### ✅ Cache works through the custom domain, and the TTL is REAL
+
+Same host (the cross-hostname question died with execute-api). `/price`, TTL 10s:
+
+| request | time | reading |
+|---|---|---|
+| 1st | 0.241s | miss |
+| 2nd, within 10s | **0.128s** | hit — about half |
+| after `sleep 12` | 0.276s | miss again |
+
+`CacheHitCount` (ApiName `prices-production-api`) Sum = 1 in each of 13:28 and
+13:29 — the counter agrees with the timings, so this is not network noise.
+
+🔑 **The third probe is the one that matters.** A cache that never expired would
+also read "fast on the second call"; only the rise after the TTL shows the
+10s freshness contract is honoured. `/price` is 10s in CDK, not §6's 15s — see
+the drift recorded in [[0122]].
 
 ### 🎉 UNEXPECTED: [[0255]] is RESOLVED by this deploy
 
