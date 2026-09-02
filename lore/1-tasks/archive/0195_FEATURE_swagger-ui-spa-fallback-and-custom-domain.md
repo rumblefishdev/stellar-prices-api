@@ -2,7 +2,7 @@
 id: "0195"
 title: "Swagger UI, and the two hosting leftovers the cutover did not close"
 type: FEATURE
-status: active
+status: done
 related_adr: []
 related_tasks: ["0183", "0124", "0126", "0161", "0184", "0185", "0163", "0164", "0194", "0235"]
 tags: [layer-infra, layer-backend, priority-medium, effort-medium, milestone-M3, epic-self-service-onboarding, cloudfront, swagger-ui, dns, slice-12]
@@ -108,6 +108,23 @@ history:
       every summary, description, parameter, response, schema and field),
       `git diff` removes no `///` line from any source file, Rust 420/420
       (+1 guard test), lint and `verify-routes` green.
+  - date: 2026-09-02
+    status: done
+    who: akot
+    note: >
+      Merged as PR #276 (approved by Oskar) into `develop` at b4b4898, after a
+      review round whose five findings are recorded under Issues Encountered.
+      Operator steps 1-3 run the same day: PortalHostingStack destroyed, the
+      host no longer resolves, the SSM parameter is gone, the CORS header is
+      live on both spec copies, and the bundle with the /docs route is on the
+      Explorer bucket. Both RETAINed buckets deleted by hand; their access
+      logs were summarised into the task first, and show GPTBot and Meta
+      crawling the ungated shadow portal before it was retired.
+      Two ACs left unticked on purpose, neither ours to close: the refresh
+      check on `/api/dashboard` and `/api/docs` needs the Explorer's
+      credentials, and the basic-auth switch is not this task's (decision 5).
+      Verification: Rust 420/420, portal 202/202, infra lint and typecheck,
+      cargo fmt, prettier.
 ---
 
 # Swagger UI, and the two hosting leftovers the cutover did not close
@@ -254,11 +271,12 @@ SSM parameter is still the **test guild** ([[0194]] Design Decision 1, a
       Emerged)
 - [x] `API_REFERENCE` in `links.ts` points at that page, and its comment no
       longer says the page does not exist
-- [ ] The shadow portal on `dojr4epgxo2qp.cloudfront.net` is gone —
+- [x] The shadow portal on `dojr4epgxo2qp.cloudfront.net` is gone —
       `curl https://dojr4epgxo2qp.cloudfront.net/api/` does not return a
-      working portal to an anonymous caller (**operator step, pending**: the
-      code no longer declares the stack; the deployed one is destroyed by
-      hand, see Operator steps)
+      working portal to an anonymous caller (operator steps run 2026-09-02:
+      stack destroyed, the host no longer resolves, the SSM parameter is gone,
+      and both `RETAIN`ed buckets are deleted — see "What the operator steps
+      actually measured")
 - [x] The decision on `PortalHostingStack` (retire) is written down, with what
       happens to the bundle bucket and the execute-api origin — decision 3 and
       `docs/scf/api-endpoints.md`
@@ -634,6 +652,52 @@ Verification after the round: portal 202/202 (+1), lint, typecheck, build;
 Rust 420/420; `cargo fmt --check`; infra lint and typecheck; prettier on the
 six touched files.
 
+## What the operator steps actually measured (2026-09-02)
+
+Adam ran steps 1–3; measured afterwards, plain `curl` and the AWS CLI, no
+credentials:
+
+```
+dojr4epgxo2qp.cloudfront.net /api/, /api/config, /api/dashboard   000  (host does not resolve)
+cloudformation describe-stacks Prices-production-PortalHosting    ValidationError: does not exist
+ssm get-parameter …/portal-distribution-domain                    ParameterNotFound
+cloudfront list-distributions                                     one left: EA2TLS5SS5M87 (the Explorer's)
+GET  prices-api…/api-docs-json                                    200, access-control-allow-origin: *
+GET  prices-api…/api/api-docs-json                                200, access-control-allow-origin: *
+sorobanscan.rumblefish.dev /api/ and /api/docs                    401  (the Explorer's basic auth, decision 5)
+s3://…-api-spa/api/                                               index.html 11:01 → index-CHE_V2UP.js;
+                                                                  ApiReference-DKWNjZEb.js 20 kB present
+```
+
+**The verification command in the operator steps is wrong and was corrected
+here**: `curl -sI` sends **HEAD**, and HEAD on `/api-docs-json` answers `403`
+with the *gateway's* CORS headers (`…allow-origin: https://sorobanscan…`,
+`…allow-credentials: true`). It reads as a failed deploy and is not one. Use
+`curl -s -o /dev/null -D - -H 'Origin: …'`, which is a GET.
+
+### The shadow portal was crawled — the reason the retirement mattered
+
+The access-log bucket held 23 CloudFront logs, 22 Aug – 2 Sep, **218 requests
+from 8 client IPs**. 199 are the team's own machine. The other 19 are not:
+
+| Client | When | What it got |
+| --- | --- | --- |
+| **GPTBot (OpenAI)** | 2026-09-01 03:13 UTC | `/api/` twice, the JS bundle, the CSS, five fonts, the favicon — **`200` on every one** |
+| OAI-SearchBot | 2026-09-01 03:13 UTC | `/robots.txt` → `403` (no such file, so no exclusion was published) |
+| Meta crawler | 2026-08-22, 2026-08-24 | `/api-tokens/` → **`200`**, twice |
+| facebookexternalhit | 3 times | `/robots.txt` → `403` only |
+
+No third party touched `/api/config`, `/api/auth/*` or any key route — what
+they took is the static shell and its assets. So nothing was issued or
+revealed; but a portal the task describes as "a complete, working,
+unauthenticated copy" was **fetched and ingested by two crawlers while it sat
+open**, and the distribution published no `robots.txt` to say otherwise. This
+is the concrete form of the risk decision 3 was made on, and it is recorded
+here because deleting the log bucket destroys the evidence.
+
+Summarised before deletion; the raw `.gz` files were not kept (decision 3:
+"both at once, logs included").
+
 ## Operator steps (not in any diff)
 
 In this order, and **the destroy before the merge** — after the code is on
@@ -648,7 +712,10 @@ In this order, and **the destroy before the merge** — after the code is on
    `/prices/production/portal-distribution-domain` is gone.
 2. `make -C infra deploy-production-compute` — the api-handler with the CORS
    header; the target flushes the stage cache. Verify:
-   `curl -sI -H 'Origin: https://x.example' https://prices-api.sorobanscan.rumblefish.dev/api-docs-json | grep -i access-control-allow-origin`
+   `curl -s -o /dev/null -D - -H 'Origin: https://x.example' https://prices-api.sorobanscan.rumblefish.dev/api-docs-json | grep -i access-control-allow-origin`
+   (a **GET**. `curl -sI` sends HEAD, which this route answers `403` with the
+   gateway's own credentialed CORS headers — it looks like a failed deploy and
+   is not one)
    → `*`.
 3. `make -C infra sync-portal-explorer` — the bundle with the `/docs` route.
    Verify (with the explorer's staging credentials):
