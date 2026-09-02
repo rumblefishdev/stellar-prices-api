@@ -32,6 +32,28 @@ history:
       credentialed preflight for the portal, so a second policy has to be
       reconciled with it rather than decided from scratch. WAF is untouched
       and stands as written.
+  - date: 2026-09-02
+    status: active
+    who: okarcz
+    note: >
+      THREE OF THE FOUR OPEN DECISIONS SETTLED with the operator, recorded in
+      full above with their rejected alternatives: /v1 CORS is `*` with no
+      credentials (and the portal's single-origin answer differs because a
+      credentialed response CANNOT use `*` - the browser rules leave no choice,
+      which is the sentence the reconciliation AC wanted); WAF is NO, with four
+      named reversal triggers; execute-api is MIGRATE-THEN-RETIRE, not a
+      permanent alias, once it emerged that it is not a legacy URL at all but a
+      load-bearing CloudFront origin (portal-hosting-stack.ts:191). Prod
+      measured first: /v1 has no OPTIONS on any route (403
+      MissingAuthenticationToken), routing survives the base-path mapping (the
+      two DIFFERENT 403 error types prove the resource resolves), and the
+      OpenAPI servers block on the wire matches apiBaseUrl. 🔴 FOUND: 0194's
+      review already fixed this task's DEFAULT_4XX leak (narrowed to
+      THROTTLED) but the fix IS NOT RUNNING - every /v1 403 still carries the
+      portal's origin, even with no Origin header sent, and Vary: Origin is
+      absent. The deploy ran 12:22Z, the fix committed 13:06Z. Inference from
+      outside, not an AWS read; ownership of that deploy is the one question
+      still open.
 ---
 
 # API edge — CORS, custom domain, WAF decision
@@ -169,31 +191,258 @@ here is what would change our mind" is a complete outcome.
   API whose load profile is about to be measured by [[0121]] will corrupt that
   measurement.
 
+## ✅ Decisions settled 2026-09-02 — with the operator
+
+Three of the four open questions are answered. They are recorded here as
+decisions, not preferences, so the implementation below is now execution
+rather than design. Measured evidence for the state they were taken against
+is in "Measured on prod 2026-09-02".
+
+### 1. `/v1` allowed origins: `*`, no credentials
+
+**Decided.** The conventional answer for a public, key-authenticated,
+read-only API, and here it is close to forced.
+
+CORS protects a browser user's *ambient authority* — credentials the browser
+attaches on its own. `/v1` has none: auth is an `x-api-key` header the caller
+supplies deliberately, there is no cookie and no session. So a hostile page
+calling `/v1` gets exactly what `curl` gets, and restricting the origin blocks
+only browsers — the one client where it costs legitimate users something and
+stops no attacker (a script or a server does not perform CORS at all).
+
+Rejected, with reasons:
+
+- **Mirror the request `Origin`.** Equivalent in effect, but the answer then
+  varies per caller and needs `Vary: Origin`, which splits the API Gateway
+  cache into one entry per origin. The cache is ON
+  (`apiGatewayCacheEnabled: true`) and cache-key mistakes have already cost us
+  once — [[0118]] shipped a parameter believing the gateway keyed on the query
+  string, and production served one caller's narrowed response to the next.
+  Measurable cost, no security gain.
+- **Allowlist named origins.** Only coherent if we intend to control who builds
+  against the API. We do not: keys are self-service through the portal and the
+  onboarding page ships example queries. An allowlist makes every new consumer
+  file a ticket.
+
+⚠️ **Why this is NOT the same as the portal's answer, and why that is correct.**
+`Access-Control-Allow-Origin: *` cannot be combined with credentials — browsers
+reject the pairing outright. The portal carries a session cookie, so it is
+*forced* to name exactly one origin; `/v1` carries none, so `*` is available and
+costs nothing. **The two policies differ because the browser rules leave no
+choice, not because one of them is a mistake.** That sentence is the deliverable
+of the reconciliation AC — write it next to the `/v1` preflight in
+`api-gateway-stack.ts`, not only here.
+
+### 2. WAF: NO — recorded, with reversal triggers
+
+**Decided: do not deploy.** The deliverable was always a reasoned decision
+rather than a deployment, and the reasoning is:
+
+- Public, read-only, key-gated API over public blockchain data. **No PII** (§7).
+- No user input reaches a query as SQL — routes take an asset identity and a
+  time window, both shape-validated before the DB is touched.
+- Rate abuse is already bounded at two levels: stage 200 rps / 400 burst, and
+  per key 100 / 200.
+- ~$5-6/mo per web ACL plus per-request charges against a §10 budget of
+  ~$108/mo total — a real share of it for coverage that largely duplicates the
+  throttles.
+
+**What a WAF would genuinely add, and why it still loses today:** the gap the
+throttles leave is per-caller *volume*, not rate — a caller sitting at the
+ceiling accumulates, and nothing notices (`api-gateway-stack.ts:205-213` records
+this). That is a real gap. It is not worth a standing cost and a new dependency
+for a threat nobody has observed.
+
+**Reversal triggers — any one of these reopens it:**
+
+1. Sustained abuse or a volume anomaly from a single caller.
+2. A Stellar-side or SCF requirement naming a WAF.
+3. An incident whose blast radius a rate-based rule would have bounded.
+4. Adding any route that accepts free-form input or writes.
+
+⚠️ If it is ever reversed: managed rule groups only, a rate-based rule aligned
+to the existing throttle, and **count mode first** — a blocking filter in front
+of an API whose load profile is about to be measured by [[0121]] corrupts that
+measurement.
+
+⚠️ Two code comments still defer this (`api-gateway-stack.ts:212` and `:279`,
+the latter pointing at task 0056) and `milestone-1-evidence.md:959` lists WAF
+with the domain and CORS as deferred to Tranche 2. All three are now stale and
+must be updated to point here, or the next reader re-opens a settled question.
+`:212` also says the right moment to decide is after 0194 has costed the
+portal's traffic — 0194 landed 2026-09-01, so that condition is met.
+
+### 3. execute-api: move the origin, THEN retire
+
+**Decided: migrate, then retire** — rather than keeping it as a permanent alias.
+
+The finding that made this a real decision: **execute-api is not a legacy public
+URL, it is load-bearing.** `PortalHostingStack` uses it as a CloudFront origin
+(`portal-hosting-stack.ts:191`) with `originPath: '/${config.envName}'`. So
+"retire it" was never a documentation change.
+
+The migration is small and CI-guarded:
+
+- swap the origin hostname to `config.apiDomain.domainName`;
+- **drop `originPath`** — the custom domain maps the base path to root, so
+  leaving `/production` in prefixes every request and 403s the lot;
+- **keep `ALL_VIEWER_EXCEPT_HOST_HEADER`.** It carries over unchanged and is
+  doing two jobs: withholding the viewer's `Host` (an origin authenticates
+  against its own hostname, so forwarding the viewer's 403s everything) and
+  forwarding the session cookie ([[0186]]). `tools/scripts/verify-openapi-routes.mjs`
+  asserts both the policy and the `originPath` against the synthesized template.
+
+Reasoning, including the argument AGAINST — which is real and was weighed:
+
+- **For.** Afterwards there is exactly one hostname; "execute-api retired"
+  becomes true rather than aspirational; the `originPath` stage-prefix trap
+  (same failure class as `AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH`, silent when
+  wrong) leaves the codebase; and the path our consumers use is the path we
+  exercise every day, so a fault in the custom domain surfaces to us first.
+- **Against.** It puts the DNS record, the ACM cert and the base-path mapping
+  into the portal's critical path, where today they are not. A cert or DNS
+  fault would take the portal down with the public API instead of only the
+  public API.
+
+The two are the same fact read opposite ways — *the portal does not currently
+depend on the custom domain*. Isolation was judged worth less than having one
+hostname and one exercised path. ⚠️ **This is the reasoning to re-read if a
+cert or DNS fault ever does take out both**: the trade was made knowingly.
+
+### 4. Open — the stale gateway deploy
+
+Not yet assigned. See "Measured on prod 2026-09-02" below.
+
 ## Acceptance Criteria
 
 - [ ] Cross-origin `GET` from a browser page against every data route succeeds,
       preflight included
 - [ ] `x-api-key` is in the allowed-headers list; `OPTIONS` requires no API key
       and does not invoke Lambda
-- [ ] Allowed-origin policy decided and recorded
+- [x] Allowed-origin policy decided and recorded — **`*`, no credentials**,
+      settled 2026-09-02 with the reasoning and the two rejected alternatives
+      in decision 1 above
 - [x] Custom domain resolves and serves the API over TLS; certificate valid and
       auto-renewing — **delivered by [[0194]]**, verified 2026-09-01
 - [ ] The two CORS policies on this gateway (portal: one origin + credentials;
       data routes: `*`, no credentials) are reconciled DELIBERATELY, with the
       reason recorded — not left looking like one of them is a mistake
 - [ ] Gateway-level `DEFAULT_4XX`/`DEFAULT_5XX` responses do not leak the
-      portal's single `Access-Control-Allow-Origin` onto data-route errors
+      portal's single `Access-Control-Allow-Origin` onto data-route errors.
+      ⚠️ **Fixed in merged code by 0194's own review (finding #3, narrowed to
+      `THROTTLED`) but NOT RUNNING ON PROD** — measured 2026-09-02, see below.
+      The design half is done and better reasoned than this task's version;
+      what is outstanding is a deploy, and its owner
 - [x] Every documented URL (§4, OpenAPI `servers`, evidence docs) updated
       consistently — **done by [[0194]]** (`apiBaseUrl`, `api-endpoints.md`)
-- [ ] Routing re-verified after the base-path mapping, given
-      `AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH=true`
+- [x] Routing re-verified after the base-path mapping, given
+      `AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH=true` — measured 2026-09-02 below.
+      A keyed `200` on a `/v1` route would be belt-and-braces; the resource
+      resolves, which is what the base-path mapping could have broken
 - [ ] [[0122]]'s cache-hit behaviour re-verified through the custom domain
-- [ ] Execute-api URL: retirement announced and dated, OR explicitly kept as a
-      permanent alias. It still serves today; the DECISION is what is missing
-- [ ] WAF decision recorded with reasoning, cost, and a reversal trigger —
-      deployed in count mode first if the answer is yes
+- [x] Execute-api URL: the DECISION is made — **migrate the CloudFront origin
+      to the custom domain, then retire** (decision 3 above). ⚠️ The decision
+      is recorded; the MIGRATION is implementation and is tracked by the two
+      criteria that follow
+- [ ] `PortalHostingStack`'s API origin points at `config.apiDomain.domainName`
+      with **no `originPath`**, `ALL_VIEWER_EXCEPT_HOST_HEADER` unchanged, and
+      `verify-openapi-routes.mjs` updated to assert the new shape
+- [ ] Execute-api retired only AFTER that origin move is deployed and the portal
+      verified in a browser — the sign-in round-trip, not only a `curl`
+- [x] WAF decision recorded with reasoning, cost, and a reversal trigger —
+      **NO**, settled 2026-09-02, four triggers named (decision 2 above)
+- [ ] The three stale deferrals updated to point at that decision:
+      `api-gateway-stack.ts:212`, `:279` and `milestone-1-evidence.md:959` —
+      otherwise the next reader re-opens a settled question
 - [ ] All of it expressed in CDK (Tranche 3 AC 7 requires clean-account
       reproducibility)
+
+## 📏 Measured on prod 2026-09-02 — before any of this task's code
+
+Probed from outside against `https://prices-api.sorobanscan.rumblefish.dev`.
+Recorded because three ACs turn on what is actually RUNNING, and this task's
+own history is a case study in a task file describing a world that had moved.
+
+### `/v1` has no preflight — the functional gap, confirmed
+
+```
+OPTIONS /v1/assets/native/price
+  Origin: https://example.com
+  Access-Control-Request-Method: GET
+  Access-Control-Request-Headers: x-api-key
+→ 403  x-amzn-errortype: MissingAuthenticationTokenException
+```
+
+No `OPTIONS` method exists on any data route — `addGet` adds `GET` alone
+(`api-gateway-stack.ts:349`), and the only `addCorsPreflight` in the stack is
+the portal's. The control confirms the mechanism works where it is wired:
+
+```
+OPTIONS /api/config   Origin: https://sorobanscan.rumblefish.dev
+→ 204
+   access-control-allow-origin: https://sorobanscan.rumblefish.dev
+   access-control-allow-headers: Content-Type,Accept,X-Requested-With
+   access-control-allow-methods: GET,POST,DELETE
+   access-control-max-age: 3600
+   access-control-allow-credentials: true
+```
+
+### 🔴 The `THROTTLED` narrowing is merged but NOT DEPLOYED
+
+Every `/v1` 4xx still carries the portal's origin, **including on requests that
+sent no `Origin` header at all**:
+
+| request | status | `access-control-allow-origin` |
+|---|---|---|
+| `GET /v1/assets/native/price`, no key, `Origin: https://evil.example` | 403 `ForbiddenException` | `https://sorobanscan.rumblefish.dev` |
+| same, **no `Origin` header** | 403 `ForbiddenException` | `https://sorobanscan.rumblefish.dev` |
+| `GET /nope`, no `Origin` | 403 `MissingAuthenticationTokenException` | `https://sorobanscan.rumblefish.dev` |
+| `GET /health`, `Origin: https://evil.example` | 200 | *(none — correct)* |
+
+Under the merged code none of these should carry CORS headers: they are
+`MISSING_AUTHENTICATION_TOKEN` / `ACCESS_DENIED`, and the configured types are
+`THROTTLED` and `DEFAULT_5XX` only. `Vary: Origin`, which the merged code adds,
+is **absent** from all three.
+
+**Inference: the deployed gateway predates 0194's review fix.** The api-handler's
+`LastModified` was `2026-09-01T12:22:58Z`; the review fix committed at 13:06 and
+PR #268 merged at 14:02 — the deploy ran before the fix existed.
+
+⚠️ **Not confirmed against the deployed stack** — `aws` has no credentials in the
+agent's shell, so this is inference from the outside, strong but not a read of
+`get-gateway-responses`. Confirm before acting, and re-measure after any deploy.
+
+🔑 The lesson is [[deploy-ships-stale-lambda-assets]] again: a merged fix is not
+a running fix. Every AC here that says "does not leak" must be verified by
+probing prod, never by reading the stack file.
+
+### Routing survives the base-path mapping
+
+The two different 403s are the evidence, and they are more informative than a
+200 would be:
+
+- `/v1/assets/native/price` → **`ForbiddenException`** = the resource and method
+  MATCHED, the API key is missing.
+- `/nope` → **`MissingAuthenticationTokenException`** = no such resource.
+
+Different errors mean the gateway is resolving `/v1` through the mapping. Also
+verified anonymously end to end:
+
+```
+GET /api-docs-json → 200, 34,541 bytes
+  servers: [{"url": "https://prices-api.sorobanscan.rumblefish.dev"}]
+```
+
+So [[0124]]'s `servers` block, `apiBaseUrl` and the live hostname all agree —
+the "every documented URL updated consistently" AC holds on the wire, not just
+in the repo.
+
+### Still unmeasured
+
+- **[[0122]]'s cache-hit behaviour through the custom domain.** The cache IS on
+  (`apiGatewayCacheEnabled: true`, `infra/envs/production.json`). Needs a keyed
+  request pair, which the agent cannot issue — hand-over for the operator.
+- A keyed `200` on a `/v1` route.
 
 ## Notes
 
