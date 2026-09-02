@@ -24,7 +24,13 @@ history:
       cannot go green as written: 0178 has landed, but its closing notes record
       `vwap_24h 0` and `sources {}` for canonical USDC as decided sentinels for
       a quote-only asset, not as pending work. The assertion needs to account
-      for `method`, or it blocks this task permanently by accident.
+      for `method`, or it blocks this task permanently by accident. Checked the
+      other two owners while there: 0135 and 0170 are both completed and
+      archived (2026-08-25 and 2026-08-27), so nothing open blocks AC 3 at all.
+      Of the 16 failures, 3 are the missing-USDC-pair class already recorded
+      here, 2 are 0178's decided sentinels, and the remaining 11 did not
+      reproduce 40 minutes later — 169 buckets, 0 violations on the suite's own
+      window.
   - date: 2026-07-23
     status: backlog
     who: okarcz
@@ -294,7 +300,36 @@ Pagination shrank from 3,880 distinct assets to 3,567. Both walks were
 exhaustive and duplicate-free; the listing `INNER JOIN`s `current_prices`, so
 this is the 24 h-traded population moving, not a suite regression.
 
-### One deferred criterion needs rewording, not waiting
+### AC 3 is blocked on nothing — all three owners have landed
+
+The deferral names [[0135]], [[0170]] and [[0178]]. **All three are completed
+and archived** — 0135 on 2026-08-25, 0170 on 2026-08-27, 0178 verified on prod
+today. Yet the 16 failures persist, so the attribution needs replacing, not
+waiting on.
+
+What they actually are, from the 2026-09-02 report:
+
+| class | count | owner |
+|---|---|---|
+| `all OHLCV values are decimal strings` | 11 | **transient** — see below |
+| `/price returns 200` (AUD, RON, EQL) | 3 | the missing-USDC-pair class this task already records at line 66 |
+| USDC `vwap_24h` / `sources` | 2 | [[0178]]'s **decision**, not its backlog |
+
+**The 11 are not reproducible.** Re-running the suite's exact window for
+`native` (`granularity=1h`, 7 days, explicit start/end) 40 minutes after the
+report: **169 buckets, 0 violations.** The assertion checks seven fields against
+`/^-?\d+(\.\d+)?$/`, and every one of them was a conforming decimal string.
+This is the enrichment-timing dependence this task already warns about — *"the
+count is not reproducible 15 minutes later"* — showing up in the one class
+nobody had pinned to an owner.
+
+So the honest state is: **no open task blocks AC 3.** Two of its failure classes
+are already documented here, one is a settled decision, and the largest is a
+timing artefact of the suite's own design. Whether that means rewording the
+criterion, moving this task out of `blocked/`, or both, is a decision this file
+should not make silently.
+
+### The criterion as written can never pass
 
 AC 3 — *"No documented response field is a stub/sentinel for a liquid asset"* —
 is still `[ ]` and deferred to [[0135]], [[0170]], [[0178]] with the note that a
