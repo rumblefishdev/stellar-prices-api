@@ -399,7 +399,9 @@ button would hand the visitor back to the same refusal).
 - [x] Step 0's three observations against `897514728459468821` are recorded in
       this task — verdict log lines rather than raw bodies, which nothing
       logs by design (see the measurements and decision 11)
-- [ ] `/prices/production/discord-guild-id` is `897514728459468821`
+- [x] `/prices/production/discord-guild-id` is `897514728459468821` — version
+      2, 2026-09-02 14:39 (Adam). `npm run discord:verify-guild -- --ssm`
+      passes for the first time: invite, `links.ts` and SSM all name it
 - [x] A scripted check resolves `STELLAR_DISCORD_INVITE` through the invite API
       and asserts it equals the guild the gate uses — the two values can no
       longer drift unnoticed (`npm run discord:verify-guild [-- --ssm]`)
