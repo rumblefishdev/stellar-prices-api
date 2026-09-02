@@ -199,6 +199,46 @@ Record the raw bodies in this task. If (1) and (2) show `pending` absent, this
 task stops and the gate needs a different mechanism — that is a finding, not a
 failure, and it is cheaper here than after the switch.
 
+### Measured — observation 1, 2026-09-02
+
+Local `serve` against the real Discord, `PORTAL_GUILD_ID=897514728459468821`,
+signed in with an account that had joined Stellar Developers and had **not**
+accepted its rules (Adam):
+
+```
+2026-09-02T12:22:01Z INFO serve: prices-api local server listening on http://0.0.0.0:8080
+2026-09-02T12:22:21Z INFO prices_api::portal::auth: portal sign-in refused outcome="pending_rules"
+```
+
+**The REST route carries `pending`.** This is the finding, and it is the one
+0180 item 2 was cancelled without making. The verdict is derivable backwards
+from the landing, because `membership()` has one arm per shape of the field:
+
+| what Discord sent | verdict | log |
+| --- | --- | --- |
+| `pending: true` | `PendingScreening` | `outcome="pending_rules"` ← **observed** |
+| `pending: false` | `Member` | sign-in proceeds |
+| field absent | `Unknown` | `reason="pending_absent"` warn, `outcome="unknown"` |
+
+`pending_absent` did **not** fire, so the field was present and true. The
+branch of this task that would have stopped it — "if the field is absent, the
+gate needs a different mechanism" — is closed, and the SSM switch carries no
+"every visitor is refused" risk beyond the ordinary.
+
+⚠️ **The raw body is not captured**, only the verdict: nothing in the handler
+logs Discord's response, deliberately (ADR 0010 — the registry stores no
+membership data, and a member object in CloudWatch is membership data). The
+log line is the observation this task has, and it is sufficient because the
+three arms above are distinguishable from the outside. Capturing a body would
+mean a temporary `tracing` line and a decision about logging member objects
+that this task should not make on its own.
+
+**Still open:** observation 2 (the same account after accepting the rules →
+`pending: false`, sign-in proceeds) and observation 3 (an account that never
+joined → 404 with code 10007 → `outcome="not_member"`). Neither can change the
+finding above; they confirm the other two arms still answer as they did before
+the variant was split off.
+
 Note this is **not** the same question as Onboarding. `pending` is Membership
 Screening — the rules checkbox, which is what Adam asked for. Discord Onboarding
 (channel/role prompts) lives in `flags`, bit `COMPLETED_ONBOARDING` (1<<1),
