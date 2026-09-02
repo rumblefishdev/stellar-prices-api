@@ -2,7 +2,7 @@
 id: "0254"
 title: "Point the portal at the Stellar Developers guild, and refuse an unscreened member as its own answer"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0010"]
 related_tasks: ["0163", "0164", "0170", "0179", "0186", "0189", "0191", "0193", "0195"]
 tags:
@@ -47,6 +47,19 @@ history:
       Activated. Branch
       `feat/0254_stellar-developers-guild-and-screening-refusal` cut from
       `develop`.
+  - date: 2026-09-02
+    status: completed
+    who: akot
+    note: >
+      Done. `pending: true` is its own refusal — `PendingScreening` /
+      `pending_rules` — with its own screen, query and log line, and the gate
+      is on the official guild (SSM version 2). 15 commits, PR #278. Rust
+      424/424 (+4), portal 205/205 (+3); two integration tests modified from
+      `not_member` to `pending_rules`. Step 0 answered both questions 0180
+      was cancelled without measuring: the REST route DOES carry `pending`,
+      and a non-member gets 10004, not 10007. Measured on production
+      2026-09-02 12:59 UTC. Guild id drift is now caught by
+      `npm run discord:verify-guild`.
   - date: 2026-09-02
     status: active
     who: akot
@@ -585,8 +598,20 @@ observations above, the decision on the 10004 warn, and the SSM switch.
   it the local-only seams compile in place of the SSM client. Diagnosed by
   grepping the deployed artifact rather than by reading the Makefile:
   `aws lambda get-function --query Code.Location` → `unzip -p … bootstrap |
-  grep -ac pending_rules`. Worth a Makefile prerequisite; spawned as a
-  follow-up rather than fixed here (see Future Work).
+  grep -ac pending_rules`. Worth a Makefile prerequisite; left as a written
+  finding rather than a task, by Adam's call (see Future Work).
+- **Two reviews of PR #278, eight findings, no correctness bug.** The
+  `/code-review` agent found three (dashboard links not `_blank`, the guard's
+  reach, `features` absent reported as screening OFF) — fixed in `7cdf7b4`.
+  Oskar's review found five, one overlapping: (1) guild id in the bundle and
+  in SSM with no runtime reconciliation; (2) the `pending_rules` screen said
+  "sign in again" while its only control led with **switching** accounts —
+  the best catch of the eight, a copy that pointed at a remedy the card did
+  not offer; (3) = the agent's first; (4) the guard hard-wired to
+  `/prices/production/` and `eu-central-1`; (5) the runbook block's comment
+  said "seeded as stellar_test" over a command that wrote the production
+  guild, without `--overwrite` — my own edit, half done. All five addressed:
+  see decisions 12 and 13 for the two that were choices.
 - **Portal vitest is flaky under load**: three timeouts on a run started
   while `cargo test` had the CPU; clean under `--skipNxCache`, and Nx marked
   the task flaky itself. Nothing was wrong with the tests.
@@ -646,6 +671,27 @@ observations above, the decision on the 10004 warn, and the SSM switch.
     are distinguishable from the landing alone, so the observation does not
     need it. The AC was written asking for raw bodies before that was
     weighed.
+12. **The guild-id guard gates the bundle deploy, not CI, and the id stays a
+    build-time constant** (finding 1). The alternative — serving the guild id
+    on `/api/config` so the page reads it at runtime — was weighed and
+    declined: `config_handler` holds only the `PortalGate`, so it would mean
+    an SSM read on every page load through a route that must answer for the
+    portal to open at all, i.e. a new failure mode on the one path that has
+    none; and the invite (`discord.gg/stellardev`) is a vanity code that
+    cannot be derived from the id, so it would stay a constant anyway.
+    Instead `verify-portal-guild` is a prerequisite of
+    `make -C infra sync-portal-explorer` — the only path by which `links.ts`
+    reaches production, and one that already holds AWS credentials — so a
+    bundle whose constant disagrees with the deployed parameter does not
+    ship. The script takes `--env` and reads the region from
+    `infra/envs/<env>.json` (finding 4).
+13. **`pending_rules` offers "Sign in again" beside "Try different account",
+    not instead of it** (finding 2; Adam, 2026-09-02). The remedy for a member
+    in screening is the same account once more, and the card now says so with
+    a control — an outlined secondary, same tab, our own round-trip. The
+    switch-account action stays because a visitor who signed in with the
+    wrong account is still a real case on this screen; it is not offered a
+    "sign in again" on `not_member`, where another account IS the remedy.
 
 ## Notes
 
@@ -670,9 +716,13 @@ observations above, the decision on the 10004 warn, and the SSM switch.
 ## Future Work
 
 - **`deploy-production-compute` should refuse a stale Lambda artifact**, or
-  build it. Costing this task one bad deploy and an hour of "the feature does
-  not work" is the cheapest possible demonstration; the next person will not
-  be watching for it. Spawned as a backlog task.
+  build it. It cost this task one bad deploy and an hour of "the feature does
+  not work", and nothing warns. **Deliberately not spawned as a task** (Adam,
+  2026-09-02) — written down here and in Issues Encountered so the next
+  person who deploys this stack finds it, without a backlog entry nobody
+  would pick up. The remedy, if anyone wants it: a prerequisite on the target
+  comparing `target/lambda/prices-api/bootstrap` against
+  `packages/prices-api/src`.
 
 ## Operator steps (not in any diff)
 
