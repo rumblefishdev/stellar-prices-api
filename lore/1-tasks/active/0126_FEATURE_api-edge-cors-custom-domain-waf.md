@@ -153,6 +153,26 @@ history:
     status: active
     who: okarcz
     note: >
+      🔴 CORRECTION, raised by the operator. Earlier today I recorded decision 5
+      as "execute-api: KEEP it serving, do not disable yet" and ticked its AC.
+      That REVERSED the migrate-then-retire call already taken with the
+      operator and recorded in decision 3 - which says explicitly "not a
+      permanent alias" - and the AC only ever offered two outcomes, "announced
+      and dated" or "explicitly kept as a permanent alias". I chose neither: I
+      invented a third and closed on it. The M1-docs dependency I found is real
+      (the submitted evidence, form answers and video scenario all cite
+      execute-api URLs, so announcing retirement before those are migrated or
+      marked historical breaks links given to SCF reviewers) but that is a
+      PREREQUISITE and an ordering constraint, not grounds to keep the endpoint
+      indefinitely, and reversing a settled decision was not mine to do.
+      Decision 5 rewritten as sequencing under the standing decision; the AC is
+      RE-OPENED. What is outstanding is the DATE, which is the operator's.
+      Live state unchanged and confirmed on the wire: execute-api still answers
+      200.
+  - date: 2026-09-02
+    status: active
+    who: okarcz
+    note: >
       🔴 REVIEW CAUGHT PR #277 SHIPPING HALF THE MECHANISM. addCorsPreflight
       emits only the OPTIONS mock; the GET/POST are Lambda PROXY integrations,
       so the real response's allow-origin can only come from the handler - and
@@ -466,13 +486,23 @@ and "saved but not published to the stage". Both died to `cdk diff` and
 `describe-stacks`. Recorded because the pattern, not the conclusion, is the
 thing worth not repeating.
 
-### 5. execute-api: KEEP it serving — do not disable it yet
+### 5. execute-api: RETIRE stands — what follows is the ORDER, not a reversal
 
-**Decided 2026-09-02.** Decision 3 settled *migrate then retire*, and the
-correction under it removed the migration from the critical path. What was left
-was one narrow question: **is the endpoint itself switched off?**
+⚠️ **CORRECTED. The first version of this section was headed "KEEP it serving —
+do not disable it yet" and closed the AC. That reversed a decision already taken
+with the operator, on the agent's own reasoning, and recorded the reversal as
+settled. It was not the agent's call to make.**
 
-**No — and the reason is not technical.** `disableExecuteApiEndpoint` is a
+**The standing decision is decision 3, unchanged: MIGRATE-THEN-RETIRE, and
+explicitly NOT a permanent alias.** The AC offers exactly two outcomes —
+*"announced and dated, or explicitly kept as a permanent alias"* — and this
+section only ever had grounds for the first. It is still **OPEN**, because
+"announced and dated" needs a date, and the date is the operator's.
+
+What this section legitimately contributes is the **one blocker on the way**,
+which is a sequencing fact rather than a reason to keep the endpoint:
+
+`disableExecuteApiEndpoint` is a
 one-line CDK property (confirmed present in `aws-cdk-lib` 2.257.0,
 `RestApiProps.disableExecuteApiEndpoint`), it does not disturb the custom domain
 mapping, and nothing deployed consumes execute-api as an origin. Flipping it is
@@ -496,12 +526,13 @@ retirement, by different routes, and neither is ours to pick alone:
 - **frozen** → mark them explicitly historical ("as submitted on <date>; the
   API now serves at …"), then disable.
 
-**What we are NOT doing is leaving it undecided by default.** The endpoint stays
-up as a deliberate, dated alias with a named condition for removal, not because
-nobody got round to it.
+⚠️ **This is a PREREQUISITE, not a reprieve.** The endpoint is on today because
+the M1 URLs have not been dealt with yet — not because it has been granted alias
+status. Decision 3 says it goes.
 
-**The trigger to disable:** the M1-docs question is answered and every cited
-execute-api URL is either migrated or explicitly marked historical. Then set
+**The remaining question for the operator is only the DATE**, and it has one
+dependency: the M1-docs question is answered and every cited execute-api URL is
+either migrated or explicitly marked historical. Then set
 `disableExecuteApiEndpoint: true` on the `RestApi` in `api-gateway-stack.ts` and
 deploy — CDK-expressible, so Tranche 3 AC 7 is unaffected.
 
@@ -592,14 +623,16 @@ rather than a wrong URL.
       `401` to an anonymous probe, so which origin the CURRENTLY DEPLOYED
       bundle was built with is unconfirmed. It is a build-time constant, so it
       only changes when `make sync-portal-explorer` runs
-- [x] Execute-api retirement: since nothing deployed consumes it as an origin,
-      the remaining question is only whether the endpoint itself is disabled.
-      **Decided 2026-09-02 — KEEP it serving for now** (decision 5 above), with
-      the condition for removal named and dated: it is cited by the submitted
-      M1 evidence, form answers and video scenario, so disabling it breaks URLs
-      given to SCF reviewers. The AC asked for a decision and a record, and
-      that is what this is — the flip itself is `disableExecuteApiEndpoint:
-      true`, one CDK line, gated on the M1-docs question below
+- [ ] Execute-api retirement: **announced and dated.** ⚠️ Briefly ticked on
+      2026-09-02 on the strength of a "keep it serving" decision the agent
+      recorded on its own — which REVERSED the migrate-then-retire call already
+      taken with the operator, and is not an outcome this AC offers. Re-opened.
+      The retirement stands; what is missing is the DATE, and one prerequisite
+      before it: the submitted M1 evidence, form answers and video scenario all
+      cite execute-api URLs, so those must be migrated or explicitly marked
+      historical first or the announcement breaks links given to SCF reviewers.
+      The flip itself is `disableExecuteApiEndpoint: true`, one CDK line
+      (`aws-cdk-lib` 2.257.0), and it does not disturb the custom domain
 - [x] WAF decision recorded with reasoning, cost, and a reversal trigger —
       **NO**, settled 2026-09-02, four triggers named (decision 2 above)
 - [ ] The three stale deferrals updated to point at that decision. **Two done**
