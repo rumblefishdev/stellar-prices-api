@@ -163,7 +163,8 @@ did.
 
 ### What was built
 
-- **Schema** — `prices.asset_symbol (contract_address, symbol, fetched_at)`,
+- **Schema** — `prices.asset_symbol (contract_address, symbol, attempts,
+  fetched_at)`,
   `ReplacingMergeTree(fetched_at) ORDER BY (contract_address)`. Statement-count
   guard in `prices-clickhouse/src/lib.rs` bumped 31 → 33 (this table plus
   [[0178]]'s `current_prices.method` ALTER, which landed on develop in between).
@@ -252,6 +253,59 @@ measurement, and now moot for coverage: RPC resolves all 52 anyway.
 ⚠️ [[0139]] is unfixed. Keying on `contract_address` rather than `asset_id` means
 this table does not inherit the ambiguity — but the `assets` side of the join
 still carries it, so do not treat the join as sound.
+
+### Deploy runbook
+
+**Order is load-bearing.** Both `list_assets` and `asset_detail` join
+`asset_symbol` unconditionally, and nothing applies schema automatically — no
+CI step, no CDK step; `grep -r 'prices-clickhouse-init\|init.sql' .github/
+Makefile infra/src` returns nothing. Prod DDL is hand-applied. Deploying
+`prices-api` before the table exists fails `GET /v1/assets` and
+`GET /v1/assets/{id}` with `UNKNOWN_TABLE` — a 500 on the two highest-traffic
+routes. Note the PR gate is *merge*, which is not the deploy gate.
+
+1. **Tell BE.** Shared box (ADR 0007). Pure `CREATE TABLE`, no restart, nothing
+   they read is touched — but nobody changes schema there silently.
+2. **Apply the DDL**, then confirm the table is there before anything ships:
+   ```sql
+   CREATE TABLE IF NOT EXISTS prices.asset_symbol (
+       contract_address  String,
+       symbol            String    DEFAULT '',
+       attempts          UInt8     DEFAULT 0,
+       fetched_at        DateTime  DEFAULT now()
+   ) ENGINE = ReplacingMergeTree(fetched_at) ORDER BY (contract_address);
+   ```
+   ⚠️ If an earlier version of this DDL was already applied, `IF NOT EXISTS`
+   will **not** add the new column — run
+   `ALTER TABLE prices.asset_symbol ADD COLUMN attempts UInt8 DEFAULT 0` instead.
+3. **Check the API reader's grant covers the new table.** If the role is granted
+   per-table rather than `ON prices.*`, the table existing is not enough and the
+   symptom is identical to it missing. Verify with `SHOW GRANTS FOR <reader>`
+   before deploying, not after.
+4. **Deploy `asset-discovery`** and let one run complete. Watch for
+   `sentinelling for good` and `returned nothing usable` — with all 52 expected
+   to resolve, either line means something changed on-chain or the character
+   class is too strict.
+5. **Deploy `prices-api`.** Only now is the read side safe.
+6. **Confirm coverage reaches zero** and stays there:
+   ```sql
+   SELECT count() FROM prices.assets
+   WHERE contract_address != ''
+     AND contract_address NOT IN (
+         SELECT contract_address FROM prices.asset_symbol
+         WHERE symbol != '' OR attempts >= 3
+     )
+   ```
+7. **Then** update 0120's fixture (`conformance-assets.json:36-41`) from
+   `code: ""` to `SolvBTC`. Doing it earlier fails the suite in the window
+   between fixture change and prod resolution.
+
+**Re-run the 52-contract sweep before step 4.** The symbol sanitiser moved from
+"reject control characters" to a positive character class after review, and the
+sweep that measured 52/52 predates that change. A legitimate symbol carrying a
+character outside the class would now be rejected — recoverable, since it takes
+three runs to sentinel and the rejection is logged with the raw string, but
+better caught before deploy.
 
 ## Acceptance Criteria
 
