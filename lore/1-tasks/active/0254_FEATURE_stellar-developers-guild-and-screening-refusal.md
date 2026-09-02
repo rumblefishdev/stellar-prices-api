@@ -289,9 +289,9 @@ check a parameter that is fine, and burying the signal the warn exists for.
 A mis-seeded guild id produces the same line as an ordinary refusal, so the
 line distinguishes nothing.
 
-Not fixed in this task's diff yet: the warn is 0189's deliberate decision,
-made on an assumption this measurement is the first to test. See "Open" in
-the notes.
+**Left as it is** — Adam, 2026-09-02, on being shown the above. Design
+decision 10 records it; the finding stands written here for whoever reads
+the warn in CloudWatch and wonders why the parameter it names is fine.
 
 Note this is **not** the same question as Onboarding. `pending` is Membership
 Screening — the rules checkbox, which is what Adam asked for. Discord Onboarding
@@ -396,8 +396,9 @@ button would hand the visitor back to the same refusal).
 
 ## Acceptance Criteria
 
-- [ ] Step 0's three observations against `897514728459468821` are recorded in
-      this task with raw response bodies
+- [x] Step 0's three observations against `897514728459468821` are recorded in
+      this task — verdict log lines rather than raw bodies, which nothing
+      logs by design (see the measurements and decision 11)
 - [ ] `/prices/production/discord-guild-id` is `897514728459468821`
 - [x] A scripted check resolves `STELLAR_DISCORD_INVITE` through the invite API
       and asserts it equals the guild the gate uses — the two values can no
@@ -512,6 +513,21 @@ the check; the epic's barrier reads membership + screening cleared + age.
    sign-in button stays a same-tab navigation because OAuth returns here by
    itself. `rel="noopener noreferrer"` comes from `DiscordButton`'s
    `target`, so no call site can forget it.
+10. **The 10004 warn stays exactly as it is** (Adam, 2026-09-02), knowing
+    what step 0's observation 3 proved: it fires for every ordinary
+    non-member and asks about a parameter that is fine, and a genuinely
+    mis-seeded guild id produces the identical line, so it distinguishes
+    nothing. Not an oversight — a decision taken with the measurement in
+    hand. What actually catches a mis-seed is the cold-start probe (a
+    non-snowflake fails init) and `npm run discord:verify-guild -- --ssm`
+    (a snowflake for the wrong guild). Anyone tempted to act on the warn
+    should read observation 3 first.
+11. **The raw member object is not logged, so step 0's record is the verdict
+    lines.** Logging Discord's response would put membership data in
+    CloudWatch, which ADR 0010 rules out; the three arms of `membership()`
+    are distinguishable from the landing alone, so the observation does not
+    need it. The AC was written asking for raw bodies before that was
+    weighed.
 
 ## Notes
 
