@@ -102,6 +102,33 @@ history:
     status: active
     who: okarcz
     note: >
+      Second review pass over PR #277, plus the remaining decisions. (1) The
+      test added by the half-mechanism fix pinned the LAYER, not the surface:
+      it asserts the wildcard on /health, which production answers from a
+      gateway MOCK and never routes to the Lambda, so the suite still touched
+      no /v1 path at all - the same failure shape one level up. `1b20a68` adds
+      a test on POST /v1/prices/batch (rejected before state.ch(), so it needs
+      no ClickHouse) that asserts the 400 and the invalid_query code as well as
+      the header, because the layer wraps the fallback too and a header-only
+      assertion would pass against a deleted route. Verified by detaching the
+      layer. (2) EXECUTE-API DECIDED: keep it serving, do not disable yet - the
+      blocker is not technical (disableExecuteApiEndpoint is one CDK line,
+      present in aws-cdk-lib 2.257.0) but that the submitted M1 evidence, form
+      answers and video scenario all cite execute-api URLs; disabling breaks
+      links we gave SCF reviewers, silently from our side. Downstream of the
+      M1-docs question, with the trigger named. (3) The 0122 AC was REWORDED:
+      it asked to "re-verify" cache behaviour that has never been measured -
+      0122 is still in backlog - so it could never have closed. Narrowed to the
+      one property this task's change could break (both hostnames map to one
+      stage, so they must share one cache) with a runbook handed over, and the
+      TTL matrix left in 0122, where two drifts against §6 are now recorded.
+      (4) The PortalHosting origin fix is deliberately NOT written: PR #276
+      deletes that file and is still open, so the fix would buy a conflict and
+      nothing else.
+  - date: 2026-09-02
+    status: active
+    who: okarcz
+    note: >
       🔴 REVIEW CAUGHT PR #277 SHIPPING HALF THE MECHANISM. addCorsPreflight
       emits only the OPTIONS mock; the GET/POST are Lambda PROXY integrations,
       so the real response's allow-origin can only come from the handler - and
@@ -415,6 +442,52 @@ and "saved but not published to the stage". Both died to `cdk diff` and
 `describe-stacks`. Recorded because the pattern, not the conclusion, is the
 thing worth not repeating.
 
+### 5. execute-api: KEEP it serving — do not disable it yet
+
+**Decided 2026-09-02.** Decision 3 settled *migrate then retire*, and the
+correction under it removed the migration from the critical path. What was left
+was one narrow question: **is the endpoint itself switched off?**
+
+**No — and the reason is not technical.** `disableExecuteApiEndpoint` is a
+one-line CDK property (confirmed present in `aws-cdk-lib` 2.257.0,
+`RestApiProps.disableExecuteApiEndpoint`), it does not disturb the custom domain
+mapping, and nothing deployed consumes execute-api as an origin. Flipping it is
+trivial. What stops it is what still POINTS at it:
+
+- `docs/scf/milestone-1-evidence.md` — the base URL in the evidence table, plus
+  a worked `curl` on `/v1/backfill/status`;
+- `docs/scf/milestone-1-form-answers.md` — two reviewer-runnable commands;
+- `docs/scf/milestone-1-video-scenario.md` — the API base shown on screen.
+
+Those are the URLs **we handed to SCF reviewers in a submitted milestone**.
+Disabling the endpoint turns every one of them into a connection error, and it
+does so silently from our side — nobody here would see it. A reviewer
+re-checking M1 would.
+
+🔑 **So this decision is DOWNSTREAM of the open question in the last AC** — are
+the M1 evidence docs frozen as submitted, or maintained? Both answers permit
+retirement, by different routes, and neither is ours to pick alone:
+
+- **maintained** → migrate those URLs to the custom domain first, then disable;
+- **frozen** → mark them explicitly historical ("as submitted on <date>; the
+  API now serves at …"), then disable.
+
+**What we are NOT doing is leaving it undecided by default.** The endpoint stays
+up as a deliberate, dated alias with a named condition for removal, not because
+nobody got round to it.
+
+**The trigger to disable:** the M1-docs question is answered and every cited
+execute-api URL is either migrated or explicitly marked historical. Then set
+`disableExecuteApiEndpoint: true` on the `RestApi` in `api-gateway-stack.ts` and
+deploy — CDK-expressible, so Tranche 3 AC 7 is unaffected.
+
+⚠️ **Do not disable it before [[0121]] runs.** The load test's own script is
+already portable — `packages/prices-api/loadtest/price_load.js:62` reads
+`BASE_URL` from the environment and hardcodes nothing — so 0121 needs no code
+change, only the right value passed. But a run launched from the stale
+instructions on that branch would hit a disabled host and read as an outage
+rather than a wrong URL.
+
 ## Acceptance Criteria
 
 - [ ] Cross-origin `GET` from a browser page against every data route succeeds,
@@ -451,7 +524,15 @@ thing worth not repeating.
       `AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH=true` — measured 2026-09-02 below.
       A keyed `200` on a `/v1` route would be belt-and-braces; the resource
       resolves, which is what the base-path mapping could have broken
-- [ ] [[0122]]'s cache-hit behaviour re-verified through the custom domain
+- [ ] The custom domain did not fragment or bypass the stage cache.
+      ⚠️ **REWORDED 2026-09-02 — the old text asked to "re-verify [[0122]]'s
+      cache-hit behaviour", and there is nothing to re-verify: 0122 is still in
+      `backlog/` and has never run.** There is no baseline this task can
+      compare against, so the AC as written could never have closed. What 0126
+      actually owns is the ONE property its own change could have broken — both
+      hostnames map to the same stage, so they must share one cache — and the
+      full TTL/hit-rate matrix stays where it already lives, in 0122. Runbook
+      below; needs a key, so it is the operator's to run
 - [x] Execute-api URL: the DECISION is made — **migrate the CloudFront origin
       to the custom domain, then retire** (decision 3 above). ⚠️ The decision
       is recorded; the MIGRATION is implementation and is tracked by the two
@@ -461,10 +542,21 @@ thing worth not repeating.
       `verify-openapi-routes.mjs` updated to assert the new shape.
       ⚠️ That stack is NOT DEPLOYED (verified 2026-09-02), so this is a
       correctness fix for the day it first is — **not** a prerequisite for
-      retiring execute-api, and not verifiable in a browser until then
-- [ ] Execute-api retirement: since nothing deployed consumes it as an origin,
+      retiring execute-api, and not verifiable in a browser until then.
+      ⚠️ **Deliberately NOT implemented here.** PR #276 (task 0195, another
+      owner) DELETES `portal-hosting-stack.ts` outright and was still open on
+      2026-09-02. Writing the origin fix into a file a pending PR removes buys
+      a merge conflict and nothing else. **This criterion is resolved by
+      whichever lands: #276 merging deletes its subject; #276 being abandoned
+      makes the fix real work.** Re-read this line the moment #276 closes
+- [x] Execute-api retirement: since nothing deployed consumes it as an origin,
       the remaining question is only whether the endpoint itself is disabled.
-      Decide and record; no portal round-trip is gated on it
+      **Decided 2026-09-02 — KEEP it serving for now** (decision 5 above), with
+      the condition for removal named and dated: it is cited by the submitted
+      M1 evidence, form answers and video scenario, so disabling it breaks URLs
+      given to SCF reviewers. The AC asked for a decision and a record, and
+      that is what this is — the flip itself is `disableExecuteApiEndpoint:
+      true`, one CDK line, gated on the M1-docs question below
 - [x] WAF decision recorded with reasoning, cost, and a reversal trigger —
       **NO**, settled 2026-09-02, four triggers named (decision 2 above)
 - [ ] The three stale deferrals updated to point at that decision. **Two done**
@@ -665,6 +757,36 @@ Also corrected: `DATA_PREFLIGHT_MAX_AGE`'s rationale claimed an uncredentialed
 `*` is cached across origins. It is not — browsers key the preflight cache per
 origin regardless of the response.
 
+### Second review round — the new test pinned the layer, not the surface
+
+`8321e9a` closed the half-mechanism, and the test it added asserts the wildcard
+on **`/health`**. That looked like the data surface and is not: `/health` is a
+gateway `MockIntegration` (`api-gateway-stack.ts:311`), so **production never
+routes it to this Lambda at all.** The test therefore proved `data_cors_layer`
+was attached and nothing about the routes the task exists to fix. Every other
+CORS assertion in `tests/portal.rs` rides on `/health` or `/api-docs-json` — so
+after the fix, the suite still touched no `/v1` path.
+
+The gap it leaves is the same shape as the one it was written to catch: a data
+router re-nested after the `.layer()` call in `app()`, or a new `/v1` route
+registered below it, keeps `/health` green while every browser call goes back to
+being blocked — and `curl` stays green throughout.
+
+Fixed in `1b20a68`: `a_real_v1_route_carries_the_wildcard_on_its_own_response`
+drives `POST /v1/prices/batch` with `{"assets": []}`, which `post_batch` rejects
+before `state.ch()` is reached — so it runs under `AppState::without_ch` like
+the rest of the suite, no ClickHouse required. It is also the one route a
+browser preflights unconditionally.
+
+🔑 **It asserts the `400` and the `invalid_query` code as well as the header,
+and that is the load-bearing part.** The layer wraps the fallback too, so an
+unrouted path answers `404` carrying the same `*` — a header-only assertion
+would pass against a route that had been deleted. The status is what proves the
+request was ROUTED rather than merely wrapped.
+
+Verified by detaching the layer: both data tests fail, the other 21 pass. 23
+green with it attached; `cargo clippy --all-targets` and `cargo fmt` clean.
+
 ### ⚠️ Coordination
 
 PR **#276** (task 0195, another owner) rewrites this same file and **deletes
@@ -677,6 +799,99 @@ says the distribution that fronted execute-api as an origin "was retired by task
 0195", and leaves the retire-or-alias call to this task. So the origin-migration
 criterion above is moot the moment #276 merges, and the execute-api question
 reduces to: disable the endpoint, or keep it. Nothing is gated on it.
+
+## 📕 OPERATOR HAND-OVER — the two checks an agent cannot run
+
+Both need a real API key, so they are yours. Neither is blocking: the first
+closes a reworded AC, the second is the top AC and also needs PR #277 deployed.
+
+### A. Does the custom domain share the stage cache? (~2 min, read-only)
+
+The claim to test is narrow: `prices-api.sorobanscan.rumblefish.dev` and the
+execute-api hostname are two doors onto **one stage**, so a response warmed
+through either should be served to the other. If they did NOT share, every
+cached route would silently halve its hit rate the day consumers moved over —
+and nothing would look wrong, which is this task's recurring failure shape.
+
+⚠️ **API Gateway REST does not emit `X-Cache`** — that is CloudFront's header,
+and expecting it is 0122's AC 7. The evidence here is the CloudWatch counter
+plus response time, and it should be reported as exactly that.
+
+1. **[local machine]** Put a key in the shell without printing it. Take it from
+   the portal, or from Secrets Manager — never paste it into a file or a task
+   note:
+   ```bash
+   read -rs KEY && export KEY
+   ```
+2. **[local machine]** Pick the shortest-TTL cached route so a stale entry from
+   an earlier probe cannot confuse the reading. `/price` is 10s
+   (`CACHE_TTL.price`, `api-gateway-stack.ts:56`):
+   ```bash
+   CUSTOM=https://prices-api.sorobanscan.rumblefish.dev
+   EXEC=https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production
+   R=/v1/assets/native/price
+   ```
+3. **[local machine]** Warm through **execute-api**, then read through the
+   **custom domain** inside the 10 s window. The cross-hostname direction is the
+   whole point — same-host twice proves only that a cache exists:
+   ```bash
+   curl -s -o /dev/null -w 'warm  %{time_total}s\n' -H "x-api-key: $KEY" "$EXEC$R"
+   curl -s -o /dev/null -w 'read  %{time_total}s\n' -H "x-api-key: $KEY" "$CUSTOM$R"
+   ```
+   ✅ **Checkpoint:** the second timing should drop to roughly the round-trip
+   floor. If it matches the first, suspect per-domain fragmentation and say so
+   rather than rounding it off — a single pair is weak evidence on its own.
+4. **[local machine]** Confirm against the counter, which is the evidence that
+   does not depend on timing noise. Run it after the pair above:
+   ```bash
+   aws cloudwatch get-metric-statistics --namespace AWS/ApiGateway \
+     --metric-name CacheHitCount --dimensions Name=ApiName,Value=prices-production-api \
+     --start-time "$(date -u -d '10 min ago' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" \
+     --period 60 --statistics Sum --region eu-central-1
+   ```
+   ✅ **Checkpoint:** a non-zero `Sum` in the minute you ran step 3.
+5. **[local machine]** Wait past the TTL and confirm the entry really expires —
+   a cache that never expires also reads as "Hit" and would be a freshness bug
+   on a 10 s contract:
+   ```bash
+   sleep 15 && curl -s -o /dev/null -w 'after ttl  %{time_total}s\n' \
+     -H "x-api-key: $KEY" "$CUSTOM$R"
+   ```
+
+**Final test command** — the one line that answers the AC, both hostnames on the
+same warmed entry:
+```bash
+for H in "$EXEC" "$CUSTOM"; do curl -s -o /dev/null -w "$H  %{time_total}s\n" -H "x-api-key: $KEY" "$H$R"; done
+```
+
+📌 Record the numbers here, and put anything about **TTL values or hit rates**
+into [[0122]] instead — including the drift already spotted below.
+
+### B. The browser check for AC 1 — after PR #277 deploys
+
+⚠️ Do not attempt this before the deploy, and expect it to be **partially
+blocked by [[0255]]**: the preflight and the `200` should now both work, but any
+`/v1` 4xx still carries the portal's single origin, so a third-party page that
+hits a 403 or 429 sees a CORS mismatch and reads it as a dead network.
+
+1. **[any browser, on a page that is NOT `sorobanscan.rumblefish.dev`]** — the
+   origin has to be a third party or the test proves nothing. A blank tab on
+   `https://example.com` with devtools open is enough:
+   ```js
+   await (await fetch('https://prices-api.sorobanscan.rumblefish.dev/v1/assets/native/price',
+     { headers: { 'x-api-key': '<key>' } })).json()
+   ```
+   ✅ **Checkpoint:** an object, not `TypeError: Failed to fetch`. In the
+   Network tab the `OPTIONS` is `204` and the `GET` carries
+   `access-control-allow-origin: *`. **Both halves must be visible** — the
+   preflight alone passing is precisely the near-miss recorded above.
+2. **[same tab]** Repeat once per route group (`/v1/assets`,
+   `/v1/assets/{id}`, `/price`, `/ohlcv`, `/v1/oracles/{id}`,
+   `/v1/backfill/status`, and `POST /v1/prices/batch`) — the AC says *every*
+   data route, and the preflight is declared per resource.
+3. **[same tab]** Then send it **without** the key and watch the 403 fail on
+   CORS. That is 0255, not a regression, and it is worth seeing once so the
+   report of 0255 is first-hand.
 
 ## Notes
 
