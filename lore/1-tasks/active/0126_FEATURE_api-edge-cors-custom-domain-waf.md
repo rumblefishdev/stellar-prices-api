@@ -129,6 +129,30 @@ history:
     status: active
     who: okarcz
     note: >
+      PR #276 MERGED at 12:10Z and it collided after all - not in
+      api-gateway-stack.ts as the pre-check predicted, but in lib.rs and
+      tests/portal.rs, which its review-fix commit reached. Merged as
+      `a96e297`. 🔴 The dangerous half merged CLEANLY: 0195 amended the same
+      CORS test from the other side, and git silently kept its assertion that
+      /health carries NO allow-origin into a tree where data_cors_layer gives
+      it `*`. Committing without reading the auto-merged middle would have
+      shipped a red test, and the obvious "fix" would have deleted the
+      wildcard. Resolved on the property both tasks still need - the portal's
+      single origin and its credentials appear nowhere else. 0195 also handed
+      over a better witness (/v1/assets/not-an-asset/price, a handler-side 400
+      with no DB call), now covered alongside the POST batch case. ⚠️ Also
+      corrected by measurement: data_cors_layer's comment claimed an overlap
+      would emit TWO allow-origin headers. It does not - CorsLayer OVERWRITES,
+      one value comes back in every arrangement, and HeaderMap::get cannot see
+      the difference. The real failure is that the portal's credentialed origin
+      is silently replaced by `*`; four existing tests already catch it. A test
+      I had written to assert "exactly one allow-origin" was DROPPED, because
+      no ordering makes it fail. The PortalHosting origin AC closes as MOOT:
+      portal-hosting-stack.ts no longer exists.
+  - date: 2026-09-02
+    status: active
+    who: okarcz
+    note: >
       🔴 REVIEW CAUGHT PR #277 SHIPPING HALF THE MECHANISM. addCorsPreflight
       emits only the OPTIONS mock; the GET/POST are Lambda PROXY integrations,
       so the real response's allow-origin can only come from the handler - and
@@ -537,7 +561,7 @@ rather than a wrong URL.
       to the custom domain, then retire** (decision 3 above). ⚠️ The decision
       is recorded; the MIGRATION is implementation and is tracked by the two
       criteria that follow
-- [ ] `PortalHostingStack`'s API origin points at `config.apiDomain.domainName`
+- [x] ~~`PortalHostingStack`'s API origin points at `config.apiDomain.domainName`~~
       with **no `originPath`**, `ALL_VIEWER_EXCEPT_HOST_HEADER` unchanged, and
       `verify-openapi-routes.mjs` updated to assert the new shape.
       ⚠️ That stack is NOT DEPLOYED (verified 2026-09-02), so this is a
@@ -548,7 +572,12 @@ rather than a wrong URL.
       2026-09-02. Writing the origin fix into a file a pending PR removes buys
       a merge conflict and nothing else. **This criterion is resolved by
       whichever lands: #276 merging deletes its subject; #276 being abandoned
-      makes the fix real work.** Re-read this line the moment #276 closes
+      makes the fix real work.**
+      ✅ **RESOLVED 2026-09-02 12:10Z — #276 merged and
+      `infra/src/lib/stacks/portal-hosting-stack.ts` no longer exists.** There
+      is no origin left to point anywhere, so this criterion has no subject and
+      closes as moot, not as done. Holding the fix was the right call: writing
+      it would have produced a conflict against a deletion
 - [x] Execute-api retirement: since nothing deployed consumes it as an origin,
       the remaining question is only whether the endpoint itself is disabled.
       **Decided 2026-09-02 — KEEP it serving for now** (decision 5 above), with
@@ -787,12 +816,63 @@ request was ROUTED rather than merely wrapped.
 Verified by detaching the layer: both data tests fail, the other 21 pass. 23
 green with it attached; `cargo clippy --all-targets` and `cargo fmt` clean.
 
-### ⚠️ Coordination
+### ⚠️ Coordination — #276 MERGED 2026-09-02 12:10Z, and it did collide
 
-PR **#276** (task 0195, another owner) rewrites this same file and **deletes
-`portal-hosting-stack.ts` entirely**. Checked before writing: its only two hunks
-in `api-gateway-stack.ts` are comments at lines ~417 and ~870, nowhere near the
-`/v1` block, so #277 does not collide.
+The pre-merge check said #276's only hunks in `api-gateway-stack.ts` were
+comments far from the `/v1` block. That held — but #276 grew a review-fix
+commit (`94c55aa`) and landed on **`packages/prices-api/src/lib.rs` and
+`packages/prices-api/tests/portal.rs`**, which is exactly where 0126's
+half-mechanism fix lives. Merged into this branch as `a96e297`.
+
+🔴 **The dangerous part merged CLEANLY.** 0195 amended
+`the_cors_layer_stops_at_the_portal_prefix` from one side while 0126 rewrote it
+from the other; git raised markers around the doc comments and the new tests,
+and silently kept 0195's assertion that **`/health` carries NO
+allow-origin** — in a tree where `data_cors_layer` gives it `*`. Committing the
+conflicted files without reading the auto-merged middle would have shipped a red
+test, and "fixing" it the obvious way (deleting the wildcard) would have undone
+the task.
+
+Resolved by keeping the property BOTH tasks still need — the portal's single
+origin and its credentials never appear anywhere else — and dropping "no
+allow-origin", which after today describes nothing this repo serves: 0195 gave
+both OpenAPI copies `*` and 0126 gave `/v1` and `/health` `*`.
+
+**0195 also handed this task a better test subject.** Its
+`/v1/assets/not-an-asset/price` is a real data route that 400s in handler
+validation before any DB call, so it runs without ClickHouse. The wildcard test
+now covers it alongside the `POST /v1/prices/batch` case, giving one GET and one
+POST data route.
+
+⚠️ Two things checked because #276 could have broken them, both fine:
+`openapi:verify-routes` still skips `OPTIONS` on the gateway side (the rule
+survived the script's rewrite and still names this task), and the OpenAPI routes
+carry 0195's `*` **once** — `data_cors_layer` is declared before they are
+registered, and an axum layer covers only the routes already added.
+
+### 🔬 Corrected by measurement: overlapping CORS does NOT duplicate the header
+
+`data_cors_layer`'s own comment claimed that layering it over the portal would
+emit **two** `Access-Control-Allow-Origin` headers, "which browsers reject
+outright". **Measured on 2026-09-02 — it does not.** `CorsLayer` OVERWRITES:
+
+| arrangement | `/api-docs-json` | `/health` | `/api/config` |
+|---|---|---|---|
+| layer before the spec routes (shipped) | `*` ×1 | `*` ×1 | portal origin |
+| layer moved below the spec routes | `*` ×1 | `*` ×1 | portal origin |
+| layer moved outside `auth::apply` | `*` ×1 | `*` ×1 | **`*`, credentials GONE** |
+
+🔑 **The real failure is quieter than the one that was written down.** Nothing
+duplicates; the portal's credentialed single origin is silently REPLACED, and
+`HeaderMap::get` returns one value in every arrangement, so no test that reads
+the header could tell the difference. Four existing portal tests do catch it, so
+the constraint was already pinned — only the reasoning was wrong. Comment fixed
+in place, the old claim named, same as `DATA_PREFLIGHT_MAX_AGE` before it.
+
+⚠️ **A test asserting "exactly one allow-origin" was written and then DROPPED.**
+With overwrite semantics there is no ordering that makes it fail. A test that
+cannot fail is the thing this task exists to stop shipping, and keeping it
+because it was already written would have been the same mistake in a new place.
 
 ⚠️ **#276 also settles decision 3 by removing its subject.** Its own comment
 says the distribution that fronted execute-api as an origin "was retired by task
