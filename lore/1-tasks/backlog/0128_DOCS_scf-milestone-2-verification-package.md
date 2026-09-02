@@ -108,6 +108,16 @@ review, the public repo, and the 7-day post-launch report.
 
 ## Notes
 
+- 📥 **INHERITED 2026-09-02 from [[0248]]: quote or link
+  `docs/prices-api-general-overview.md` §5.7.** 0248 needed a home for the
+  RFP-deviation answer on Blend (the RFP names four aggregation markets, we
+  ingest three plus Phoenix) and this package did not exist, so the operator
+  ruled it a permanent project fact and it landed in the general design doc
+  instead. §5.7 has the RFP quote, the venue table, the no-trades /
+  oracle-consumer reasoning and the backstop-AMM caveat — **written to be
+  lifted, not paraphrased.** The same slot is where [[0237]]'s float-vs-string
+  answer belongs. ⚠️ Do not re-derive either: paraphrasing a deviation entry is
+  how the two versions drift apart.
 - **Do not open this task until its inputs exist.** The M1 package was written
   after the work, from real outputs; drafting it early produces claims that then
   have to be walked back.

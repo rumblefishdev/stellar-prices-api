@@ -15,6 +15,7 @@ the API surface, or the cost / budget framing.
 
 | Date       | Sections touched                                                                                                                                                          | Driver                                                                                                                                                                                                                                                                                    | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-09-02 | §5.7 (new)                                                                                                                                                                | [Task 0248](../lore/1-tasks/active/0248_DOCS_blend-is-named-in-the-rfp-but-is-not-a-price-source.md)                                                                                                                                                                                      | **Venue coverage recorded against the RFP's named markets.** The RFP's Price Aggregation bullet names four markets (Soroswap, Aquarius, SDEX, Blend); we ingest three of them plus Phoenix, which it does not name. New §5.7 states the count plainly and records why **Blend cannot be a price source**: it is a lending protocol with no swap, and a price is a property of a trade. The decisive point is that Blend pool creators choose an _oracle_ to price collateral, which places Blend downstream of a service like this one — a consumer of price data, not a producer. Its 80/20 BLND:USDC backstop AMM is the only part that trades and its volume is **unmeasured**, stated rather than implied. No extractor, no `Venue` arm, no registry seeding: pricing BLND from the backstop pool would be a feature of its own. Deliberately **not** generalised into a rule about lending protocols.                                                                                                                                                                                                                                                                                                                 |
 | 2026-05-20 | §0, §1.1, §1.2, §2.1, §2.3, §3, §4.5, §5.2–§5.4, §5.6, §6, §7, §8, §9, §10, §11 (all-table refresh)                                                                       | [ADR 0007](../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0045](../lore/1-tasks/archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/README.md) · [Task 0049](../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md) | **Live data sink flipped from Prices-owned RDS PostgreSQL to BE's shared Hetzner ClickHouse cluster** (separate `prices` database). All live OHLCV / current-prices / oracle / asset registry / backfill-progress data now lives in ClickHouse, written over HTTPS-mTLS to Caddy:443 by Lambdas running outside any VPC. The S3 → Lambda path gains an SNS topic between the bucket and both tenants' processors (one-time BE CDK change). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`); rollups become a CH materialised-view chain, **eliminating the OHLCV Rollup Lambda**. Prices-api VPC, NAT Gateway, and RDS line items removed; mTLS cert lifecycle added (per-env certs, 1-year manual rotation, CA-rotation revocation). Cost lines: $12/mo RDS removed; ~$1-2/env/mo Hetzner CH cost-share added (basis: [task 0046](../lore/1-tasks/archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md) empirical ~0.45 GB/yr, 14.8× compression). Local backfill sections (Stream 1 ADR 0001, Stream 2 ADR 0005) preserved — only their cloud-push targets shift RDS → CH. |
 | 2026-05-15 | §2.3, §5.3, §5.6 Stream 1 (two-stream design table, architecture diagram, processing-rate sub-table, schema-coupling note), §9 (Tranche 1 work), §10, §11.1, §11.2, §11.4 | [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) · [Task 0029](../lore/1-tasks/active/0029_DOCS_update-design-doc-stream-1-adr-0001.md)                                                                                                                         | Stream 1 (Soroban AMM) backfill reconciled with ADR 0001: source moved from BE's PG `soroban_events` to a **local ClickHouse** instance populated upfront by BE's `backfill-runner --target=clickhouse`; deployment shape moved from ECS Fargate to a local Rust CLI (`soroban-amm-backfill`) on the operator's workstation, ScVal decoding via `stellar-xdr` crate, one-shot completion push to cloud RDS. Stream 1 Fargate cost line removed; backfill total now ~$30. BE coupling reframed as a transient prep-step tool invocation (not runtime DB read); §11.1 `soroban_events` row removed and its development-savings counterpart added to §11.2. Closes out the design-doc sweep started in [Task 0013](../lore/1-tasks/archive/0013_DOCS_update-design-doc-to-match-be-reality.md).                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | 2026-05-14 | §2.3, §3.5, §4.5, §5.3, §5.6 Stream 2, §6, §8, §9, §10, §11.1, §11.4                                                                                                      | [ADR 0005](../lore/2-adrs/0005_stream2-sdex-local-workstation-backfill.md) (supersedes ADR 0002) · [Task 0013](../lore/1-tasks/archive/0013_DOCS_update-design-doc-to-match-be-reality.md)                                                                                                | Stream 2 (SDEX) backfill moved from continuous ECS Fargate to a local Rust CLI on the operator's workstation with a separate `sdex-cloud-push` step to cloud RDS. `backfill_progress` schema swapped from heartbeat fields to `last_push_at`. `GET /backfill/status` response and tranche acceptance criteria reframed around push cadence. Backfill compute cost dropped ~95%. Stream 1 (Soroban AMM) reconciliation per [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) is tracked separately under [Task 0029](../lore/1-tasks/active/0029_DOCS_update-design-doc-stream-1-adr-0001.md).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -1116,6 +1117,71 @@ because push cadence is driven by tip-backward chunk size, not by a continuous h
 A laptop-side staleness check is **not** wired into AWS alarms — workstation uptime is an
 operator-managed concern (BE accepts the same trade in BE ADR 0010). Operators inspect local
 CLI progress via direct SQL on the local workstation ClickHouse.
+
+---
+
+### 5.7 Venue coverage — the markets we ingest, and why Blend is not one
+
+The SCF RFP's Core Requirements name four markets:
+
+> _"Price Aggregation: Weighted average across major markets (Soroswap,
+> Aquarius, SDEX, **Blend**)"_
+
+**We ingest three of the four named markets, plus one the RFP does not name.**
+Stated plainly so the count is not something a reader has to reconstruct:
+
+| Venue        | Ingested | Named in the RFP | Path                                           |
+| ------------ | -------- | ---------------- | ---------------------------------------------- |
+| **SDEX**     | Yes      | Yes              | Ledger-close trades (§5.2), plus §5.6 backfill |
+| **Soroswap** | Yes      | Yes              | Soroban AMM swap events (§5.2)                 |
+| **Aquarius** | Yes      | Yes              | Soroban AMM swap events (§5.2)                 |
+| **Phoenix**  | Yes      | **No**           | Soroban AMM swap events (§5.2)                 |
+| **Blend**    | **No**   | Yes              | — see below                                    |
+
+_Table 5.7 — Venue coverage against the RFP's named markets._
+
+#### Why Blend is not a price source
+
+**Blend is a lending protocol, not an exchange.** Users deposit assets to earn
+interest or borrow against collateral; there is no swap. **A price is a property
+of a trade**, so a lending pool has none to give — this is a mechanical fact
+about the protocol, not a scoping preference. From the protocol's own
+description ([Meru Wallet case study](https://stellar.org/case-studies/meru-wallet-uses-blend-defi-protocol-for-yield),
+read 2026-09-01):
+
+- **Isolated lending pools.** A pool creator sets supported assets, collateral
+  requirements, interest rates and utilisation caps. None of these is a traded
+  price.
+- **Pool creators specify which _oracle_ prices the collateral.** This is the
+  decisive fact: **Blend is a consumer of price data, positioned downstream of a
+  service like this one** — not a producer of it. Feeding Blend's own numbers
+  back into an aggregate would be circular.
+- **The backstop module is an 80/20 BLND:USDC AMM.** This is the only part of
+  Blend that trades. Its volume is **unmeasured** — we have not assessed whether
+  it clears enough to contribute a meaningful price, and no claim is made either
+  way.
+
+So the RFP bullet groups a lending protocol with three DEXes under "major
+markets". Aggregating it is not something we chose not to do; there is no trade
+stream to aggregate.
+
+⚠️ **This is not a rule about lending protocols as a category.** The reasoning
+is "no trades, therefore no prices", which happens to cover lending today. It
+does not generalise to a claim about protocol types.
+
+#### What would change the answer
+
+Only one technically coherent version of "add Blend" exists: **price the BLND
+token from the backstop pool's 80/20 AMM**, treating it as another Soroban AMM
+venue. That starts with measuring the backstop pool's volume, and is a feature
+in its own right — a `Venue` arm, an extractor, pool-registry seeding and a
+historical backfill. It is not in scope here, and this section is not a deferral
+of it.
+
+Recorded under [task 0248](../lore/1-tasks/active/0248_DOCS_blend-is-named-in-the-rfp-but-is-not-a-price-source.md).
+Whether the headline `price_usd` should even be the weighted cross-venue
+aggregate this same RFP bullet describes is a separate question, tracked as
+[task 0217](../lore/1-tasks/backlog/0217_FEATURE_decide-whether-price-usd-is-outlier-protected.md).
 
 ---
 

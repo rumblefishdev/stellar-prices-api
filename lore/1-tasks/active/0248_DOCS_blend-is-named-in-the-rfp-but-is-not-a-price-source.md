@@ -40,6 +40,28 @@ history:
       0128 creates the deviations section, which is where the ACs currently
       point. Nothing about the Blend ANSWER is in doubt - it produces no trades
       and is itself an oracle consumer - only where the text lands.
+  - date: 2026-09-02
+    status: active
+    who: okarcz
+    note: >
+      WRITTEN. The operator chose a destination neither option offered: not
+      0128's package and not this task file, but the GENERAL design doc -
+      docs/prices-api-general-overview.md, new §5.7 "Venue coverage - the
+      markets we ingest, and why Blend is not one", plus a Revision History
+      row. 🔑 The reasoning behind that call is worth keeping: "Blend produces
+      no trades" is a permanent fact about the protocol, true whether or not
+      SCF ever asks, so filing it as a submission artifact would have
+      mis-shelved it AND blocked it behind a task that has not started. §5.7
+      carries a five-row venue table with `Ingested` and `Named in the RFP`
+      columns so the three-of-four count reads off the page, the
+      price-is-a-property-of-a-trade argument, the decisive oracle-consumer
+      point with the circularity named, the backstop 80/20 BLND:USDC AMM
+      flagged as UNMEASURED, and a "what would change the answer" paragraph so
+      the section cannot be read as a permanent refusal. Five of six ACs met;
+      the sixth is [[0128]] quoting or linking §5.7 when the package is built,
+      recorded in 0128's own Notes as inherited debt rather than left to
+      memory. Nothing outside docs/ was touched - no extractor, no Venue arm,
+      no registry seeding.
 ---
 
 # Blend is named in the RFP's aggregation list and we do not ingest it
@@ -112,16 +134,36 @@ and still not worth building. **Measure before arguing either way.**
 
 ## Acceptance Criteria
 
-- [ ] [[0128]]'s package carries a "deviations from the RFP" entry quoting the
-      Price Aggregation line and naming Blend
-- [ ] The entry says what we DO ingest (SDEX, Soroswap, Aquarius + Phoenix),
-      not only what we don't
-- [ ] The reason given is "produces no trades, and is itself an oracle
-      consumer" — not "out of scope" without a mechanism
-- [ ] The backstop 80/20 BLND:USDC AMM is acknowledged, with its status
-      (unmeasured) stated rather than implied
-- [ ] No extractor, no `Venue` enum arm, no registry seeding — if the decision
-      ever reverses, that is a FEATURE task of its own
+⚠️ **DESTINATION CHANGED on activation, 2026-09-02, by the operator.** These
+ACs were written against "[[0128]]'s package", and 0128 is still in backlog —
+there is no `milestone-2-evidence.md`, and the sibling [[0237]] has not created
+the deviations slot either. The operator's call: **this is a permanent project
+fact, not a submission artifact**, so it lands in the general design doc and the
+M2 package quotes it later. ACs re-pointed accordingly; the substance is
+unchanged.
+
+- [x] The position is recorded in a **general, reviewer-reachable document**
+      quoting the Price Aggregation line and naming Blend —
+      `docs/prices-api-general-overview.md` **§5.7**, plus a Revision History
+      row. Chosen over 0128's package so the fact does not wait on a task that
+      has not started
+- [x] The entry says what we DO ingest (SDEX, Soroswap, Aquarius + Phoenix),
+      not only what we don't — Table 5.7 gives all five venues with an
+      `Ingested` and a `Named in the RFP` column, so the three-of-four count is
+      readable without reconstructing it
+- [x] The reason given is "produces no trades, and is itself an oracle
+      consumer" — not "out of scope" without a mechanism. §5.7 leads on **a
+      price is a property of a trade**, and gives the oracle-consumer point as
+      the decisive one, with the circularity named
+- [x] The backstop 80/20 BLND:USDC AMM is acknowledged, with its status
+      (unmeasured) stated rather than implied — §5.7 says the volume is
+      unmeasured and that no claim is made either way
+- [x] No extractor, no `Venue` enum arm, no registry seeding — nothing outside
+      `docs/` was touched. §5.7's "What would change the answer" names what a
+      reversal would cost and marks it a feature of its own
+- [ ] **0128 quotes or links §5.7** when the M2 package is built. Carried as
+      0128's debt, not closed here — noted in its file rather than left to
+      memory
 
 ## Out of scope
 
