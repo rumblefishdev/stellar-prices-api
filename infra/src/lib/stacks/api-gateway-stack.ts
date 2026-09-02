@@ -211,9 +211,17 @@ const PORTAL_API_METHODS = ['GET', 'POST', 'DELETE'] as const;
  *
  * Both are answerable — a volume alarm for the first, a WAF rate-based rule for
  * the second — and both are deliberately NOT built here: a standing cost and a
- * new dependency for a threat nobody has seen yet. Task 0194 costs the portal's
- * traffic before the flag is flipped, which is the right moment to decide
- * whether either is worth buying.
+ * new dependency for a threat nobody has seen yet.
+ *
+ * ✅ **The WAF half is now DECIDED, not deferred (task 0126, 2026-09-02): NO.**
+ * This comment used to say task 0194 should cost the portal's traffic first and
+ * then decide; 0194 landed on 2026-09-01 and the decision was taken. The gap
+ * described above — per-caller VOLUME, which the throttles do not bound — is
+ * real and is the strongest argument for one; it loses to ~$5-6/mo per web ACL
+ * plus per-request charges against a §10 budget of ~$108/mo, for a threat
+ * nobody has observed. Four named triggers reverse it, and if it is ever
+ * reversed the rule ships in COUNT mode first so it cannot corrupt task 0121's
+ * load measurement. Read the decision in task 0126 before re-opening it.
  */
 const PORTAL_THROTTLE = { rate: 10, burst: 40 } as const;
 
@@ -238,6 +246,67 @@ const PORTAL_REQUEST_HEADER = 'X-Requested-With';
  * no argument for a different one here.
  */
 const PORTAL_PREFLIGHT_MAX_AGE = cdk.Duration.hours(1);
+
+/**
+ * The `/v1` data routes' CORS answer — task 0126.
+ *
+ * ⚠️ **This gateway now carries TWO CORS policies, and they disagree on
+ * purpose. Neither is a mistake, and the reason is not a preference.**
+ *
+ * | | portal (`/api/{proxy+}`) | data routes (`/v1/*`) |
+ * |---|---|---|
+ * | origins | ONE (`config.portalWebOrigin`) | `*` |
+ * | credentials | `true` | absent |
+ *
+ * The browser leaves no choice. `Access-Control-Allow-Origin: *` **cannot** be
+ * combined with credentials — a browser rejects that pairing outright. The
+ * portal's calls carry the session cookie ([[0186]]), so it is *forced* to name
+ * exactly one origin; the data routes carry no cookie and no session, so `*` is
+ * available to them and costs nothing.
+ *
+ * And it genuinely costs nothing, which is the part worth stating rather than
+ * assuming. CORS protects a browser user's AMBIENT authority — credentials the
+ * browser attaches on its own. `/v1` has none: auth is an `x-api-key` header
+ * the caller supplies deliberately. So a hostile page calling `/v1` gets
+ * exactly what `curl` gets, and restricting the origin would block only
+ * browsers — the one client where it costs a legitimate integrator something
+ * and stops no attacker, since a script or a server performs no CORS at all.
+ *
+ * Two alternatives were weighed and rejected (task 0126, decision 1):
+ * mirroring the request `Origin` is equivalent in effect but makes the answer
+ * vary per caller, needing `Vary: Origin` and splitting the stage cache into
+ * one entry per origin — and this gateway's cache is ON, with a cache-key
+ * mistake already on record (task 0118, cross-caller poisoning measured on
+ * production 2026-08-28). An allowlist is only coherent if we intend to control
+ * who builds against the API; keys are self-service and the onboarding page
+ * ships example queries.
+ */
+const DATA_CORS_ALLOW_ORIGINS = ['*'];
+
+/**
+ * `x-api-key` is the one entry here that is load-bearing rather than
+ * conventional: it is how every data route authenticates, and a header absent
+ * from this list fails preflight in the browser before the request is ever
+ * sent. It is also in `apigateway.Cors.DEFAULT_HEADERS` — listed explicitly
+ * anyway, because a default that silently stops including it would take every
+ * browser integrator down with it and nothing here would show why.
+ *
+ * `Content-Type` is needed by `POST /v1/prices/batch`; `Accept` is harmless and
+ * conventional. Nothing else is used, and a longer list is a longer answer on
+ * every preflight.
+ */
+const DATA_CORS_ALLOW_HEADERS = ['Content-Type', 'Accept', 'x-api-key'];
+
+/**
+ * Preflight cache lifetime for the data routes.
+ *
+ * Longer than it looks: an UNcredentialed `*` answer is cacheable by the
+ * browser across origins rather than per origin, so one hour of reuse costs the
+ * gateway nothing and saves an integrator a round trip on every distinct route.
+ * Chromium caps the header at two hours regardless; one hour matches
+ * `PORTAL_PREFLIGHT_MAX_AGE` so the two policies differ only where they must.
+ */
+const DATA_PREFLIGHT_MAX_AGE = cdk.Duration.hours(1);
 
 /**
  * Every verb the stage carries a portal method setting for: the three Lambda
@@ -276,8 +345,10 @@ const PORTAL_STAGE_METHODS = [...PORTAL_API_METHODS, 'OPTIONS'] as const;
  *   `/api/{proxy+}` and the CORS headers on the gateway's own error
  *   responses exist for that one caller, `config.portalWebOrigin`.
  *
- * Still deferred (task 0056 / later): WAF WebACL. The REST API ID is published
- * to SSM at `/prices/{env}/api-gateway-id`.
+ * WAF WebACL: **decided against, not deferred** — task 0126, 2026-09-02, with
+ * reasoning and four reversal triggers. The REST API ID is still published to
+ * SSM at `/prices/{env}/api-gateway-id`, which is what a web ACL would attach
+ * to if that decision is ever reversed.
  */
 export class ApiGatewayStack extends cdk.Stack {
   public readonly api: apigateway.RestApi;
@@ -345,12 +416,72 @@ export class ApiGatewayStack extends cdk.Stack {
     /** Declare cache-key params on the method (path → required, query → optional). */
     const declare = (keys: string[]): Record<string, boolean> =>
       Object.fromEntries(keys.map((k) => [k, k.includes('.path.')]));
-    /** Add a key-gated GET with a cached integration. */
-    const addGet = (resource: apigateway.IResource, cacheKeys: string[]) =>
-      resource.addMethod('GET', proxy(cacheKeys), {
+    /**
+     * The `/v1` preflight, added to a resource that carries data methods
+     * (task 0126). See `DATA_CORS_ALLOW_ORIGINS` for why this policy differs
+     * from the portal's on the same gateway.
+     *
+     * Three properties are each load-bearing and each fail in a way that looks
+     * like something else:
+     *
+     * - **MOCK, not the Lambda.** `addCorsPreflight` emits a MockIntegration,
+     *   so an `OPTIONS` never invokes the handler, never costs an invocation
+     *   and never touches ClickHouse. A per-handler CORS layer would answer the
+     *   same headers and bill every preflight — and a browser sends one before
+     *   nearly every cross-origin call.
+     * - **No API key.** CDK does not set `apiKeyRequired` on the method it
+     *   emits, which is the only correct answer: a preflight is sent by the
+     *   browser BEFORE the caller's code runs and cannot carry one. Requiring a
+     *   key here would 403 the preflight and take every browser integrator
+     *   down while `curl` kept working perfectly.
+     * - **Per resource, not per prefix.** API Gateway has no wildcard for this;
+     *   a resource without its own `OPTIONS` answers 403, and the browser
+     *   reports that as a network failure rather than as a missing route. So
+     *   every resource carrying a data method gets one — which is why this is
+     *   folded into `addGet` rather than left as a call to remember.
+     *
+     * These methods get NO stage entry of their own, so they inherit the
+     * wildcard default below: uncached, and throttled at
+     * `apiGatewayThrottleRate/Burst` like every other data route. Deliberate,
+     * and different from the portal's `OPTIONS`, which carries the tighter
+     * `PORTAL_THROTTLE`. That tighter figure is there because the portal's
+     * verbs are keyless AND reach the Lambda; these reach a MOCK — no
+     * invocation, no ClickHouse — so the exposure is a gateway request, the
+     * same shape `/health` has carried on the stage default since it shipped.
+     * Caching them would be worse than pointless: a preflight answer is already
+     * cached by the BROWSER for `DATA_PREFLIGHT_MAX_AGE`.
+     */
+    const addDataCors = (
+      resource: apigateway.IResource,
+      allowMethods: string[],
+    ) =>
+      resource.addCorsPreflight({
+        allowOrigins: DATA_CORS_ALLOW_ORIGINS,
+        allowMethods: [...allowMethods, 'OPTIONS'],
+        allowHeaders: DATA_CORS_ALLOW_HEADERS,
+        // NO `allowCredentials`. Setting it true alongside `*` is refused by
+        // every browser, and nothing on these routes has a credential to send.
+        maxAge: DATA_PREFLIGHT_MAX_AGE,
+      });
+
+    /**
+     * Add a key-gated GET with a cached integration, and the preflight that
+     * lets a browser reach it.
+     *
+     * The two are declared together deliberately: a data route added later
+     * without a preflight is invisible to `curl` and to every test here, and
+     * shows up only as "the API cannot be called from a browser" — which is the
+     * defect task 0126 exists to close. Coupling them makes forgetting it
+     * require an edit rather than an omission.
+     */
+    const addGet = (resource: apigateway.IResource, cacheKeys: string[]) => {
+      const method = resource.addMethod('GET', proxy(cacheKeys), {
         apiKeyRequired: true,
         requestParameters: declare(cacheKeys),
       });
+      addDataCors(resource, ['GET']);
+      return method;
+    };
 
     // ---------------------------------------------------------------
     // GET /api-docs-json — the OpenAPI spec, anonymous (task 0124).
@@ -502,9 +633,15 @@ export class ApiGatewayStack extends cdk.Stack {
 
     // /v1/prices/batch (POST, uncached)
     const prices = v1.addResource('prices');
-    prices.addResource('batch').addMethod('POST', proxy([]), {
+    const batch = prices.addResource('batch');
+    batch.addMethod('POST', proxy([]), {
       apiKeyRequired: true,
     });
+    // The one data route that is not a GET, so it needs its preflight named
+    // rather than inherited from `addGet`. It is also the route that most needs
+    // one: a JSON `POST` is never a "simple" request, so a browser preflights
+    // it unconditionally — `Content-Type: application/json` alone is enough.
+    addDataCors(batch, ['POST']);
 
     // ---------------------------------------------------------------
     // Per-method stage settings: throttles (always) + cache TTLs (when the
