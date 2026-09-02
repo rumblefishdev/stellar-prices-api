@@ -102,6 +102,27 @@ Note the preflight case above: `OPTIONS` on `/v1` today returns 403 **with** the
 portal's origin attached. So the misleading header is already on the very
 response a browser consults first.
 
+## ⚠️ It also breaks the preflight itself, not only error responses
+
+Added 2026-09-02 from the review of PR #277, because neither that PR nor the
+first draft of this task had it.
+
+[[0126]]'s new `OPTIONS` methods inherit the stage default throttle
+(200 rps / 400 burst). A throttled preflight answers `429` through the
+`THROTTLED` gateway response — the one type that IS customised — so it comes
+back carrying `Access-Control-Allow-Origin: <portalWebOrigin>` **and**
+`Access-Control-Allow-Credentials: true`, against a third party's origin, and
+credentials are invalid alongside the `*` that same preflight advertises when
+it succeeds.
+
+🔑 **So this is not only "errors read as a dead network". Under throttle the
+data API's CORS is intermittently broken** — the same call works, then does
+not, with no signal a caller could act on. That moves this from a defect on the
+error path to one on the success path's precondition.
+
+Measured today: `OPTIONS /v1/assets/native/price` already returns 403 **with**
+the portal's origin attached, before any of 0126's work is deployed.
+
 ## 🔑 The generalisable lesson
 
 **A gateway-response change was verified by reading the CDK template, and the

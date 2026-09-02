@@ -98,6 +98,27 @@ history:
       origin-migration criterion and reduces execute-api to disable-or-keep.
       ⚠️ The browser AC still cannot pass on a deploy alone - [[0255]] must land
       first, or a third-party page sees a CORS mismatch on every /v1 error.
+  - date: 2026-09-02
+    status: active
+    who: okarcz
+    note: >
+      🔴 REVIEW CAUGHT PR #277 SHIPPING HALF THE MECHANISM. addCorsPreflight
+      emits only the OPTIONS mock; the GET/POST are Lambda PROXY integrations,
+      so the real response's allow-origin can only come from the handler - and
+      the Rust CorsLayer is portal-scoped, with a test asserting data routes
+      carry none. Preflight 204, then the browser blocks the actual GET, with
+      `curl` passing throughout: the exact defect this task exists to close,
+      nearly re-shipped inside its own fix. Every local signal was green and
+      this task's own text already said "verify from a real browser, not only
+      curl". Fixed in 8321e9a with data_cors_layer() - `*` via
+      AllowOrigin::any(), no credentials, a CONSTANT so the stage cache cannot
+      serve one caller's origin to the next. Rewrote the test that pinned the
+      old world; added one pinning the new answer across two origins. Corrected
+      a factually wrong max-age comment (browsers key the preflight cache per
+      origin regardless of the response). Left to PR #276: /api-docs-json's own
+      `*`. Added to [[0255]]: a THROTTLED preflight answers 429 carrying the
+      portal's origin and credentials, so under throttle this feature is
+      intermittently broken, not merely broken on errors.
 ---
 
 # API edge — CORS, custom domain, WAF decision
@@ -603,6 +624,46 @@ CDK only, not deployed. `infra/src/lib/stacks/api-gateway-stack.ts`.
   `tools/scripts/verify-openapi-routes.mjs:147` that **already named this
   task** — someone pre-wired the gate for this change.
 - `openapi:verify-servers`, `lint`, `typecheck` all green.
+
+### 🔴 The first cut shipped HALF the mechanism — caught in review of PR #277
+
+Recorded because the near-miss is the instructive part: **the fix for this task
+nearly re-shipped the defect this task exists to close.**
+
+`addCorsPreflight` creates the `OPTIONS` mock and **nothing else**. The
+`GET`/`POST` methods are Lambda PROXY integrations, so the real response's
+`Access-Control-Allow-Origin` can only come from the handler — and the Rust
+`CorsLayer` is scoped to the portal sub-router (`portal/mod.rs:240`), with a
+test that actively asserted data routes carry none.
+
+So the sequence was: preflight `204` ✅ → browser sends the real `GET` →
+response has no allow-origin → **browser blocks it**, with the same opaque
+`TypeError: Failed to fetch` as before. Net user-visible behaviour unchanged.
+Confirmed on prod against `/api-docs-json`, a Lambda proxy route: `200`, no CORS
+header.
+
+🔑 **Every local signal was green.** Synth showed seven correct `OPTIONS`;
+`verify-openapi-routes` passed; the portal suite passed. `curl -X OPTIONS`
+would have passed too — which is exactly what this task's own Implementation
+section warned about: *"Verify from a real browser, not only curl."* The warning
+was written here and still nearly missed, because the preflight is the visible
+half and the response header is the half nothing tests.
+
+Fixed in `8321e9a`: `data_cors_layer()` over the data router — `*` via
+`AllowOrigin::any()`, no credentials, matching headers and max-age. The value is
+a CONSTANT deliberately: a reflected `Origin` cached in the stage cache would be
+served to the next caller, the bleed [[0118]] measured on production. Each half
+now carries a comment pointing at the other so neither can travel alone.
+
+Two tests changed: `the_cors_layer_stops_at_the_portal_prefix` asserted the OLD
+world (a data route with no allow-origin — true while `/v1` was uncallable, and
+the reason it was), so it is rewritten to pin what still holds — the portal's
+single origin and credentials never appear on a data route. A new test sends two
+unrelated origins and asserts the same `*` both times.
+
+Also corrected: `DATA_PREFLIGHT_MAX_AGE`'s rationale claimed an uncredentialed
+`*` is cached across origins. It is not — browsers key the preflight cache per
+origin regardless of the response.
 
 ### ⚠️ Coordination
 
