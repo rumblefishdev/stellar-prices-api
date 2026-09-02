@@ -153,6 +153,30 @@ history:
     status: active
     who: okarcz
     note: >
+      DEPLOYED. PR #277 merged (66581f4), then Compute + ApiGateway. 🔴 The
+      Compute deploy took production down for ~9 minutes: it does not build the
+      Rust, so it shipped an Aug-31 bootstrap that predated 0194's
+      CALLBACK_PATH flatten, and the handler panicked at cold start against the
+      already-re-pointed secret - every Lambda route 502. My runbook omitted
+      the cargo lambda build; worse, every check IN it was structurally blind
+      (health and all seven preflights are gateway MOCKs, keyless /v1 stops at
+      the gateway) so the outage looked like a clean deploy. Recovered by
+      building the bootstraps and redeploying. The runbook now carries the
+      build step and /api-docs-json, the only keyless route that reaches the
+      Lambda. See [[deploy-ships-stale-lambda-assets]] instance 4. ✅ After
+      recovery: seven preflights 204 with `*`, execute-api 403 (retirement
+      LIVE), /api-docs-json 200 with `*`. 🎉 And [[0255]] is RESOLVED - all
+      four probes that leaked the portal origin this morning now carry no CORS
+      header at all. Mechanism is a HYPOTHESIS, labelled as such: the deploy
+      created a new stage Deployment, so the control plane may have been ahead
+      of the stage all along, which would explain why cdk diff --strict saw
+      nothing. 0255 owns confirming it. ⚠️ execute-api was retired BEFORE its
+      stated prerequisite: the M1 documents still cite it, so those URLs are
+      live-broken now.
+  - date: 2026-09-02
+    status: active
+    who: okarcz
+    note: >
       🔴 CORRECTION, raised by the operator. Earlier today I recorded decision 5
       as "execute-api: KEEP it serving, do not disable yet" and ticked its AC.
       That REVERSED the migrate-then-retire call already taken with the
@@ -546,7 +570,11 @@ rather than a wrong URL.
 ## Acceptance Criteria
 
 - [ ] Cross-origin `GET` from a browser page against every data route succeeds,
-      preflight included. ⚠️ **Needs a deploy AND a real browser** — this task
+      preflight included. ✅ **UNBLOCKED 2026-09-02** — deployed, and the
+      [[0255]] blocker named below is measurably GONE, so a third-party page no
+      longer meets a portal-origin mismatch on a 403. All seven preflights
+      answer `204` with `*`. What remains is the browser run itself, which
+      needs a key. ⚠️ **Needs a real browser** — this task
       says it and it still holds: `curl -X OPTIONS` succeeding proves less than
       it appears to. ⚠️ **Blocked in practice by [[0255]]**: once `/v1` answers
       `*`, its 4xx still carry the portal's single origin, so a third-party
@@ -567,8 +595,12 @@ rather than a wrong URL.
       PR #277 writes it at `DATA_CORS_ALLOW_ORIGINS` in `api-gateway-stack.ts`,
       where the next reader hits it: a credentialed answer CANNOT use `*`, so
       the portal is forced to one origin and `/v1` is not
-- [ ] Gateway-level `DEFAULT_4XX`/`DEFAULT_5XX` responses do not leak the
+- [x] Gateway-level `DEFAULT_4XX`/`DEFAULT_5XX` responses do not leak the
       portal's single `Access-Control-Allow-Origin` onto data-route errors.
+      ✅ **MEASURED CLEAN after the 2026-09-02 deploy** — all four probes that
+      leaked this morning now carry no CORS header at all, credentials and
+      `Vary` included. [[0255]] still owns explaining WHY (the stage got a new
+      Deployment); this AC turns on the wire, and the wire is clean.
       ⚠️ **CORRECTED 2026-09-02: 0194's review narrowed this to `THROTTLED`,
       the fix IS deployed, and it has NO EFFECT** — every `/v1` 4xx still
       carries the portal's origin. Not a deploy problem and not 0194's tail;
@@ -580,6 +612,13 @@ rather than a wrong URL.
       A keyed `200` on a `/v1` route would be belt-and-braces; the resource
       resolves, which is what the base-path mapping could have broken
 - [ ] The custom domain did not fragment or bypass the stage cache.
+      ⚠️ **OVERTAKEN 2026-09-02: execute-api is now disabled, so the
+      cross-hostname half of this can never be measured — there is one door.**
+      That also makes it un-needed: fragmentation ACROSS hostnames cannot matter
+      when only one hostname resolves. What is left is same-host — does the
+      cache hit at all through the custom domain — and that is 0122's job, not
+      this task's. Close it here by pointing at [[0122]] unless the operator
+      wants the single-host probe run under this task.
       ⚠️ **REWORDED 2026-09-02 — the old text asked to "re-verify [[0122]]'s
       cache-hit behaviour", and there is nothing to re-verify: 0122 is still in
       `backlog/` and has never run.** There is no baseline this task can
@@ -623,7 +662,14 @@ rather than a wrong URL.
       `401` to an anonymous probe, so which origin the CURRENTLY DEPLOYED
       bundle was built with is unconfirmed. It is a build-time constant, so it
       only changes when `make sync-portal-explorer` runs
-- [ ] Execute-api retirement: **announced and dated.** ⚠️ Briefly ticked on
+- [x] Execute-api retirement: **announced and dated — 2026-09-02.**
+      `disableExecuteApiEndpoint: true` deployed; the endpoint answers `403
+      ForbiddenException`. ⚠️ **The prerequisite was NOT met first** — the
+      operator chose to ship ahead of it, so the execute-api URLs in
+      `milestone-1-evidence.md`, `milestone-1-form-answers.md` and
+      `milestone-1-video-scenario.md` are live-broken as of now. That makes the
+      M1-docs question below urgent rather than tidy-up. History below.
+      ⚠️ Briefly ticked earlier on
       2026-09-02 on the strength of a "keep it serving" decision the agent
       recorded on its own — which REVERSED the migrate-then-retire call already
       taken with the operator, and is not an outcome this AC offers. Re-opened.
@@ -647,6 +693,78 @@ rather than a wrong URL.
 - [x] All of it expressed in CDK (Tranche 3 AC 7 requires clean-account
       reproducibility) — PR #277 is CDK only; no console step, no manual
       gateway edit
+
+## 🚀 DEPLOYED 2026-09-02 — and it took production down on the way
+
+PR #277 merged (`66581f4`, 13:14Z), Compute then ApiGateway deployed.
+
+### 🔴 The Compute deploy caused a ~9-minute outage — stale Lambda asset
+
+`make -C infra deploy-production-compute` does **not** build the Rust. It
+packaged `target/lambda/prices-api/bootstrap` with mtime **2026-08-31 18:26** —
+a binary predating `a0aaa13` ([[0194]], "flatten the portal prefix"), which
+changed `portal::auth::CALLBACK_PATH` from `/api/api/auth/callback` to
+`/api/auth/callback`. Secrets Manager's `redirect_uri` had already been
+re-pointed to the flat path, so the stale binary panicked at cold start:
+
+```
+panicked at packages/prices-api/src/main.rs:42:10
+RedirectUriMismatch { uri: "https://prices-api…/api/auth/callback",
+                      expected: "/api/api/auth/callback" }
+```
+
+Every invocation `502`d — `/api-docs-json`, `/api/config`, and every KEYED `/v1`
+call. Recovered by building the bootstraps and redeploying Compute
+(Lambda `LastModified` 13:27:33Z, zero panics since).
+
+⚠️ **The post-deploy checks in this task's runbook could not have caught it, and
+that is the lesson worth keeping.** `/health` is a gateway MOCK; all seven
+preflights are gateway MOCKs; a keyless `/v1` is rejected at the gateway before
+the Lambda. **Every green probe hit a MOCK or a gateway rejection.** The first
+one that actually entered the handler was an afterthought, and it was `502`.
+
+🔑 **On this API the only keyless route that reaches the Lambda is
+`/api-docs-json`.** Any post-deploy check for a handler change must include it.
+The runbook below now does. Full write-up:
+[[deploy-ships-stale-lambda-assets]] (instance 4 — the first to cause an
+outage rather than wrong data).
+
+### ✅ Measured after recovery — the CORS work is live
+
+```
+OPTIONS on all SEVEN /v1 routes → 204, access-control-allow-origin: *
+                                  allow-headers: Content-Type,Accept,x-api-key
+GET /api-docs-json              → 200, access-control-allow-origin: *
+                                  servers: [https://prices-api.sorobanscan.rumblefish.dev]
+GET /health                     → 200      GET /api/config → 200
+execute-api /health             → 403 ForbiddenException   ← retirement live
+```
+
+### 🎉 UNEXPECTED: [[0255]] is RESOLVED by this deploy
+
+The 4xx leak is **gone**. Re-measured immediately after, against the same probes
+that produced the morning's table:
+
+| request | this morning | now |
+|---|---|---|
+| `/v1/assets/native/price`, no key, `Origin: evil` | 403 + `…sorobanscan…` | **403, no CORS header** |
+| same, **no `Origin`** | 403 + `…sorobanscan…` | **403, no CORS header** |
+| `/nope`, no `Origin` | 403 + `…sorobanscan…` | **403, no CORS header** |
+| `/v1/assets`, no key | 403 + `…sorobanscan…` | **403, no CORS header** |
+
+`Access-Control-Allow-Credentials` and `Vary: Origin` are gone with it.
+
+⚠️ **The measurement is solid; the MECHANISM is a hypothesis and must be labelled
+as one** — this task's history is a case study in explaining a measurement
+instead of extending it. What changed alongside it: the ApiGateway deploy
+created a NEW `AWS::ApiGateway::Deployment` and repointed the stage
+(`ApiDeployment…1de519c6` → `…13811535`). The plausible reading is that
+0194's `THROTTLED` narrowing was live in the control plane but the STAGE was
+still serving an older deployment's gateway responses — which is exactly why
+`cdk diff --strict` showed no difference (the control plane already matched) and
+why the wire disagreed. **0255 owns confirming that.** If true it generalises:
+control-plane state is not stage-served state, and neither `describe-stacks` nor
+`cdk diff` can see the gap.
 
 ## 📏 Measured on prod 2026-09-02 — before any of this task's code
 
@@ -993,6 +1111,31 @@ for H in "$EXEC" "$CUSTOM"; do curl -s -o /dev/null -w "$H  %{time_total}s\n" -H
 
 📌 Record the numbers here, and put anything about **TTL values or hit rates**
 into [[0122]] instead — including the drift already spotted below.
+
+### ⚠️ A.0 — BEFORE any Compute deploy, BUILD THE RUST
+
+Learned the hard way on 2026-09-02 (a ~9-minute production outage, above).
+`make -C infra deploy-production-compute` builds the CDK TypeScript ONLY and
+packages whatever binary is already in `target/lambda/`.
+
+```bash
+args=(); while IFS= read -r n; do args+=(-p "$n"); done < <(tools/scripts/lambda-assets.sh)
+cargo lambda build --release --arm64 --features lambda "${args[@]}"
+```
+
+`--features lambda` and the explicit `-p` list are BOTH required; a bare
+`cargo lambda build` builds nothing relevant and exits 0.
+
+✅ **Checkpoint:** `ls -l target/lambda/prices-api/bootstrap` is from today.
+
+🔑 **And verify on a route that REACHES the Lambda.** `/health` and all seven
+preflights are gateway MOCKs, and a keyless `/v1` is rejected at the gateway —
+none of them can see a dead handler. The only keyless route that reaches it:
+
+```bash
+curl -s -o /dev/null -w '/api-docs-json → %{http_code} (expect 200)\n' \
+  https://prices-api.sorobanscan.rumblefish.dev/api-docs-json
+```
 
 ### B. The browser check for AC 1 — after PR #277 deploys
 
