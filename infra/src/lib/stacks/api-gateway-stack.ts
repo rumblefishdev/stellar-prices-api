@@ -1011,11 +1011,25 @@ export class ApiGatewayStack extends cdk.Stack {
     //   `VITE_PORTAL_API_ORIGIN` assumes, and what `AWS_LAMBDA_HTTP_IGNORE_
     //   STAGE_IN_PATH` already made the handler indifferent to.
     //
-    // The execute-api endpoint stays enabled. Nothing advertises it any more
-    // (`apiBaseUrl` names this hostname, and the distribution that fronted it
-    // as an origin was retired by task 0195), but it still answers; whether
-    // it is announced as retired or kept as a permanent alias is task 0126's
-    // decision.
+    // The execute-api endpoint is still enabled, and that is a SEQUENCING
+    // state, not the end state. Task 0195 left the call to task 0126 and 0126
+    // has made it: **migrate then RETIRE — explicitly not a permanent alias.**
+    //
+    // Nothing advertises it any more (`apiBaseUrl` names this hostname, and the
+    // distribution that fronted it as an origin was retired by 0195), but it
+    // still answers, and it is left answering for one reason: the SUBMITTED M1
+    // documents cite it — `docs/scf/milestone-1-evidence.md`,
+    // `milestone-1-form-answers.md` and `milestone-1-video-scenario.md` all
+    // carry `…execute-api…/production` URLs an SCF reviewer can run. Disabling
+    // it turns those into connection errors, silently from our side.
+    //
+    // ⚠️ So do NOT read "stays enabled" as a decision to keep it. The order is:
+    // settle whether the M1 docs are frozen-as-submitted or maintained, migrate
+    // or explicitly mark historical every execute-api URL they cite, then set
+    // `disableExecuteApiEndpoint: true` on the `RestApi` above. That property
+    // does not disturb the custom domain or its base-path mapping.
+    //
+    // The retirement date is the operator's; everything else is done.
     const hostedZone = route53.HostedZone.fromHostedZoneAttributes(
       this,
       'HostedZone',
