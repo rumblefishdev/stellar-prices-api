@@ -2,7 +2,7 @@
 id: "0248"
 title: "The RFP names Blend as a market to aggregate and we do not ingest it — record why that is not a shortfall"
 type: DOCS
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0128", "0237", "0217", "0173"]
 tags: [layer-docs, priority-medium, effort-small, milestone-M2, scf, submission, evidence, ingestion]
@@ -24,6 +24,22 @@ history:
       satisfy literally, needing a recorded position before a reviewer asks.
       Blend appears exactly ONCE in all of lore/ today ([[0217]]'s quotation of
       the RFP) — there is no prior decision to point at.
+  - date: 2026-09-02
+    status: active
+    who: okarcz
+    note: >
+      Activated as a short DOCS task. ⚠️ SEQUENCING FOUND ON ACTIVATION, not
+      yet resolved: every AC here writes into "[[0128]]'s package", and 0128 is
+      still in BACKLOG — there is no milestone-2-evidence.md; docs/scf/ holds
+      only the M1 set. The sibling precedent [[0237]] is ALSO still backlog, so
+      it has not created the "deviations from the RFP" slot either and cannot
+      be copied from. So this task can be worked in one of two shapes and the
+      choice is the operator's: (a) write the position into this task file now
+      and let 0128 lift it into the package verbatim when it is built, which
+      unblocks it today and leaves 0128 holding the debt; or (b) hold it until
+      0128 creates the deviations section, which is where the ACs currently
+      point. Nothing about the Blend ANSWER is in doubt - it produces no trades
+      and is itself an oracle consumer - only where the text lands.
 ---
 
 # Blend is named in the RFP's aggregation list and we do not ingest it
