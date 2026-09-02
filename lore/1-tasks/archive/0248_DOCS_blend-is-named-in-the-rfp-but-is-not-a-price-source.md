@@ -2,7 +2,7 @@
 id: "0248"
 title: "The RFP names Blend as a market to aggregate and we do not ingest it — record why that is not a shortfall"
 type: DOCS
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0128", "0237", "0217", "0173"]
 tags: [layer-docs, priority-medium, effort-small, milestone-M2, scf, submission, evidence, ingestion]
@@ -62,6 +62,28 @@ history:
       recorded in 0128's own Notes as inherited debt rather than left to
       memory. Nothing outside docs/ was touched - no extractor, no Venue arm,
       no registry seeding.
+  - date: 2026-09-02
+    status: completed
+    who: okarcz
+    note: >
+      CLOSED. 5 of 6 acceptance criteria met; the sixth - 0128 quoting or
+      linking §5.7 - is DEFERRED to [[0128]] and left unticked, because this
+      task cannot perform it: the M2 package does not exist and that task has
+      not started. Delivered in one commit (2c10339): a 66-line §5.7 in
+      docs/prices-api-general-overview.md plus a Revision History row, with the
+      RFP quote, a five-row venue table carrying `Ingested` and `Named in the
+      RFP` columns, the price-is-a-property-of-a-trade mechanism, the decisive
+      oracle-consumer point with the circularity named, the backstop 80/20
+      BLND:USDC AMM flagged UNMEASURED, and a "what would change the answer"
+      paragraph pricing the reversal. Closes the exposure the task was filed
+      for: Blend previously appeared EXACTLY ONCE in the whole repository, in
+      [[0217]]'s quotation of the RFP, with no position to point a reviewer at.
+      ⚠️ Two things carried forward rather than fixed: 0128 owes the citation
+      (recorded in its Notes), and the overview has a pre-existing broken link
+      to a deleted 0017 task file, noticed and left unswept. ⚠️ Also recorded
+      under Issues: the ACs as filed all targeted a document that does not
+      exist, which is what small answers queuing behind an unstarted package
+      looks like - [[0237]] is in the same position today.
 ---
 
 # Blend is named in the RFP's aggregation list and we do not ingest it
@@ -161,9 +183,87 @@ unchanged.
 - [x] No extractor, no `Venue` enum arm, no registry seeding — nothing outside
       `docs/` was touched. §5.7's "What would change the answer" names what a
       reversal would cost and marks it a feature of its own
-- [ ] **0128 quotes or links §5.7** when the M2 package is built. Carried as
-      0128's debt, not closed here — noted in its file rather than left to
-      memory
+- [ ] **0128 quotes or links §5.7** when the M2 package is built —
+      **(deferred to [[0128]])**. Not this task's to perform: the package does
+      not exist and 0128 has not started. Recorded in 0128's own Notes as
+      inherited debt rather than left to memory, and left unticked here so
+      nobody reads a tick as evidence the package cites §5.7
+
+## Implementation Notes
+
+One file of substance: `docs/prices-api-general-overview.md`, new **§5.7 "Venue
+coverage — the markets we ingest, and why Blend is not one"** (66 lines), placed
+at the end of §5 where the ingestion venue set is already described, plus a
+Revision History row per that document's own convention for substantive changes.
+
+Structure, and why each part is there:
+
+| Part | Why |
+|---|---|
+| The RFP quote | So the reader sees the exact line being answered, not a paraphrase of it |
+| Five-row venue table, `Ingested` + `Named in the RFP` columns | The three-of-four count reads off the page. Phoenix is volunteered in the same table, which is what makes it scope reporting rather than an excuse |
+| "A price is a property of a trade" | Leads on the mechanism, so the answer is obviously right rather than merely defensible |
+| Oracle-consumer point, circularity named | The decisive fact — Blend sits *downstream* of a service like this one |
+| Backstop 80/20 BLND:USDC AMM | Stated as **unmeasured**, so the section cannot be read as "we did not know Blend has any market at all" |
+| "What would change the answer" | Stops the section reading as a permanent refusal, and prices the reversal (a `Venue` arm, extractor, registry seeding, backfill) |
+
+Two lore files changed alongside: this one, and [[0128]]'s Notes carrying the
+inherited AC. **Nothing outside `docs/` and `lore/`** — no extractor, no `Venue`
+enum arm, no registry seeding, as the task required.
+
+## Issues Encountered
+
+- **Every AC pointed at a document that does not exist.** Found on activation,
+  not mid-write. The ACs targeted "[[0128]]'s package"; 0128 is still backlog,
+  there is no `milestone-2-evidence.md`, and `docs/scf/` holds only the M1 set.
+  The sibling precedent [[0237]] is *also* still backlog, so it had not created
+  the "deviations from the RFP" slot either and could not be copied from. Not a
+  defect in the task — a consequence of small answers queuing behind a package
+  that has not started. Resolved by the operator choosing a different
+  destination; see Design Decisions.
+- **A guessed link path.** The first draft of §5.7 cited
+  `0217_RESEARCH_price-usd-aggregation-method.md`, a filename invented from the
+  task's subject rather than read from disk. The real file is
+  `0217_FEATURE_decide-whether-price-usd-is-outlier-protected.md`. Caught by
+  checking both new links resolve before committing — worth keeping as the
+  reason to check rather than recall.
+- **Pre-existing broken link noticed, deliberately not fixed.** The overview
+  still links `../lore/1-tasks/backlog/0017_FEATURE_local-clickhouse-for-prices-backfill.md`,
+  which no longer exists. Out of scope for this task; unswept.
+
+## Design Decisions
+
+### From Plan
+
+1. **Record the position, do not build an extractor.** The task existed to close
+   a documentation exposure, not to add a venue. Held throughout.
+2. **Volunteer Phoenix.** Naming a venue the RFP does not ask for, in the same
+   table as the one we are missing, is what makes the entry read as scope
+   reporting rather than as an excuse for a gap.
+
+### Emerged
+
+3. **Destination changed from the M2 package to the general design doc** —
+   the operator's call, taken after being shown three options. The reasoning is
+   the part worth keeping: *"Blend produces no trades" is a permanent fact about
+   the protocol*, true whether or not SCF ever asks. Filing it as a submission
+   artifact would have mis-shelved it **and** blocked it behind a task that has
+   not started. The ACs were re-pointed and the change recorded in place rather
+   than quietly rewritten.
+4. **Written as a numbered section with a table, not prose.** The task asked for
+   "one paragraph". A table was chosen because the AC wanted the ingested set
+   stated as plainly as the missing one, and a prose sentence listing five
+   venues with two attributes each is harder to check than a grid.
+5. **Added a "what would change the answer" paragraph**, which the plan did not
+   call for. Without it the section states a boundary with no exit, and a
+   reviewer cannot tell a reasoned scope decision from a closed door.
+6. **Added a Revision History row.** That document's own header says to append
+   one when a change touches the architecture or scope framing; a new section
+   recording a venue-scope boundary qualifies.
+7. **Recorded 0128's inherited AC in 0128's Notes rather than spawning a backlog
+   task.** It is one sentence of debt inside a task that already exists and is
+   already scoped to write this package — a separate task would be overhead, and
+   a shared-sequence ID spent on a cross-reference.
 
 ## Out of scope
 
