@@ -305,24 +305,112 @@ button would hand the visitor back to the same refusal).
 - [ ] Step 0's three observations against `897514728459468821` are recorded in
       this task with raw response bodies
 - [ ] `/prices/production/discord-guild-id` is `897514728459468821`
-- [ ] A scripted check resolves `STELLAR_DISCORD_INVITE` through the invite API
+- [x] A scripted check resolves `STELLAR_DISCORD_INVITE` through the invite API
       and asserts it equals the guild the gate uses — the two values can no
-      longer drift unnoticed
-- [ ] No file outside `lore/` names `1536303837785362432` or
-      `761985725453303838` as a guild the product uses
-- [ ] A member with `pending: true` is refused with a distinct outcome, its own
+      longer drift unnoticed (`npm run discord:verify-guild [-- --ssm]`)
+- [x] No file outside `lore/` names `1536303837785362432` or
+      `761985725453303838` as a guild the product uses — the test guild is
+      named only as the scratch instrument in `measure-pending-absent.sh` and
+      as the runbook's "seeded while building" history
+- [x] A member with `pending: true` is refused with a distinct outcome, its own
       query parameter, and its own log line — not `not_member`
-- [ ] That refusal renders "Access not available" with "Stellar Discord accept
+- [x] That refusal renders "Access not available" with "Stellar Discord accept
       rules required", says the visitor is already on the server, and its action
       opens the server rather than an invite
-- [ ] `pending: None` still refuses as `Unknown` and still logs `pending_absent`
+- [x] `pending: None` still refuses as `Unknown` and still logs `pending_absent`
       — the fail-closed arm is not touched
-- [ ] The rework path ([[0191]]) gives an unscreened member the same answer as
-      the issue path
+- [x] The rework path ([[0191]]) gives an unscreened member the same answer as
+      the issue path — both consumers of `membership()`/`decide()` (sign-in in
+      `auth/mod.rs`, issue in `auth/issue.rs`) match the new variant
 - [ ] A real account walks: join Stellar Developers → refused with the new
-      screen → accept the rules → sign in → key issued
-- [ ] Rust and portal suites green; the `not_member` card no longer carries the
+      screen → accept the rules → sign in → key issued (**step 0 / phase E,
+      Adam's hand**)
+- [x] Rust and portal suites green; the `not_member` card no longer carries the
       screening sentence
+
+## Implementation Notes
+
+Three commits on `feat/0254_stellar-developers-guild-and-screening-refusal`,
+2026-09-02, one per phase of the plan:
+
+**A — Rust** (`31e2383`). `eligibility.rs`: `Membership::PendingScreening`
+and `Eligibility::PendingScreening` for `pending: Some(true)`; `decide()`
+returns it before the age check, like every membership verdict. `auth/mod.rs`
+`PENDING_RULES_QUERY = "?signin=pending_rules"`, `auth/issue.rs`
+`ISSUE_PENDING_RULES_QUERY = "?issue=pending_rules"`, both in the
+"distinct literals" and "only redirect targets" tests; `outcome =
+"pending_rules"` logged on both paths; the module table in `issue.rs` gains
+the row and `not_member` loses its "or has not cleared screening" clause.
+`after_sign_in`'s unreachable arm lists the new variant. **Modified tests**:
+`portal_auth.rs` `a_member_still_in_screening_cannot_sign_in` →
+`…_is_refused_as_pending_rules`, `portal_issue.rs` `a_pending_member_is_refused`
+→ `…_as_pending_rules` — each asserted `not_member` for a pending member;
+the refusal is unchanged, the landing is split. Unit tests: two new rows
+(`a_pending_member_is_refused_as_pending_screening`,
+`pending_screening_takes_precedence_over_age`), the `None → Unknown`
+assertion untouched. 420 → 424 tests, all green, `cargo fmt --check` clean.
+
+**B — Portal** (`65fece3`). `links.ts`: `STELLAR_DISCORD_GUILD_ID =
+'897514728459468821'` and `STELLAR_DISCORD_SERVER =
+https://discord.com/channels/<id>` derived from it; `STELLAR_DISCORD_INVITE`
+unchanged. `oauthPopup.ts`: `'pending_rules'` in the union and the allow-list.
+`app.tsx` `LoginView`: the `notMember` screen became `notMember ||
+pendingRules` — one `LoginCard` composition, the callout and the button
+chosen by the state ("Stellar Discord accept rules required" / "Open Stellar
+Discord" → the server; "membership required" / "Join Stellar Discord" → the
+invite). The screening sentence on the `not_member` callout is gone.
+Dashboard: `refusedPendingRules`, an `issue-pending-rules` paragraph naming
+the server, and the `issue-not-member` paragraph without its screening
+clause (and reading the invite from `links.ts` rather than a literal).
+`app.spec.tsx`: +3 tests (signed-out screen; dashboard `signin=pending_rules`;
+`issue=pending_rules` without a key), the `not_member` tests assert the
+sentence is absent. 182/182, lint and typecheck clean.
+
+**C — Guard and docs** (`7a28de8`). `tools/scripts/verify-discord-guild.mjs`
+(`npm run discord:verify-guild`): resolves the invite through
+`GET /api/v10/invites/<code>`, asserts `guild.id === STELLAR_DISCORD_GUILD_ID`,
+reports whether `MEMBER_VERIFICATION_GATE_ENABLED` is set, and with `--ssm`
+compares the live parameter. **Run on 2026-09-02 it reports the drift this
+task exists for**: invite → `897514728459468821`, screening ON, SSM =
+`1536303837785362432`, exit 1 with the `put-parameter` line to run. Not in
+CI (network). `measure-pending-absent.sh`: default guild is the official one,
+the scratch guild is the documented alternative, and a `pending_rules` line
+in the log is a verdict of its own. Runbook §2a names the official guild and
+the check; the epic's barrier reads membership + screening cleared + age.
+
+## Design Decisions
+
+### From Plan
+
+1. **Stellar Developers `897514728459468821` is the official and only guild**
+   (Adam, 2026-09-02) — see the history entry and "The rejected
+   alternative".
+2. **One screen, two fillings.** `not_member` and `pending_rules` share the
+   `LoginCard` composition from frame `825:1485`; only the callout and the
+   button differ. Two copies of the JSX is how two refusals end up two
+   pixels apart.
+3. **The button opens the server by id, never the invite**, for the pending
+   state — an invite tells a member they are already in.
+4. **The invite is not edited.** `discord.gg/stellardev` already resolves to
+   the official guild; what was missing was the comparison, so the change is
+   a check and a comment, not a value.
+
+### Emerged
+
+5. **The guard is not in CI.** It calls discord.com; a Discord hiccup must
+   not block an unrelated merge. It is an npm script named in the runbook
+   and meant to run when either value changes and at deploy prep. If that
+   proves too easy to forget, a scheduled workflow (not a PR gate) is the
+   next step — noted, not spawned.
+6. **Screening OFF is reported, not enforced**, by the guard: it is SDF's
+   setting and [[0170]] owns the alert; failing a check we cannot fix would
+   only teach people to ignore it.
+7. **`STELLAR_DISCORD_GUILD_ID` lives in `links.ts` as the one source** and
+   the server URL is derived from it, so the portal cannot open a guild
+   other than the one it names — the guard reads the same constant.
+8. **`after_sign_in`'s unreachable arm** gained the new variant rather than a
+   wildcard: an exhaustive match is what makes the next variant a compile
+   error here rather than a silent plain landing.
 
 ## Notes
 
