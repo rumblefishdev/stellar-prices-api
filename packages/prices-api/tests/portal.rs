@@ -451,30 +451,31 @@ async fn the_revokes_preflight_allows_the_marker_header_from_the_configured_orig
     assert!(allowed.contains(PORTAL_REQUEST_HEADER.0), "{allowed}");
     assert!(reply.headers().contains_key("access-control-max-age"));
 }
-
-/// The CORS layer covers the portal's routes and nothing else: the data
-/// API and the root OpenAPI copy answer a cross-origin request as they
-/// always did, with no allow header — `/v1` is keyed, not cookied, and
-/// nothing on the bundle calls it.
+/// The PORTAL's credentialed layer covers the portal's routes and nothing else.
 ///
-/// ⚠️ **Amended by task 0195: the OpenAPI copies are no longer part of that
-/// claim.** They now carry `Access-Control-Allow-Origin: *` of their own,
-/// written by the handler in `lib.rs` so the portal's API reference page can
-/// fetch the document cross-origin. The property this test is named for is
-/// unchanged — it just cannot be observed on the allow header any more, so
-/// it is observed on `Access-Control-Allow-Credentials`, which only this
-/// layer writes. `/v1` and `/health` are still asserted on both headers.
+/// ⚠️ **Rewritten twice in one day, by two tasks that changed its premise from
+/// opposite sides — read both before amending it again.**
+///
+/// It was originally observed on the ALLOW-ORIGIN header: nothing outside the
+/// portal carried one. That is no longer true of anything it checks.
+/// [[0195]] gave both OpenAPI copies `Access-Control-Allow-Origin: *` so the
+/// API reference page can fetch the document cross-origin, and [[0126]] gave
+/// the data routes and `/health` the same `*` via `data_cors_layer`, which is
+/// what makes `/v1` callable from a browser at all. **"No allow-origin" now
+/// describes nothing this repo serves.**
+///
+/// What survives both, and is the whole point of running two CORS policies on
+/// one service: the portal's SINGLE ORIGIN and its CREDENTIALS must never
+/// appear anywhere else. `*` with credentials is refused by every browser, and
+/// the portal's origin on a data route would hand one site a readable answer
+/// while telling every other site it was not allowed. Those are the two
+/// assertions below, and they hold no matter which way the wildcard spreads.
 #[tokio::test]
-async fn the_cors_layer_stops_at_the_portal_prefix() {
+async fn the_portals_credentialed_layer_stops_at_the_portal_prefix() {
     let config = config_with_origin(Some(WEB_ORIGIN));
-    let reply = send_with(&config, "GET", "/health", &[("origin", WEB_ORIGIN)]).await;
-    assert!(
-        reply.headers().get("access-control-allow-origin").is_none(),
-        "/health is outside the portal"
-    );
     // `/v1/…/price` with a malformed identifier: a `400` from the handler's
     // own validation, before any database call, so the data API is covered
-    // here without this suite needing ClickHouse.
+    // here without this suite needing ClickHouse (task 0195).
     for uri in [
         "/api-docs-json",
         OPENAPI_PATH,
@@ -482,14 +483,134 @@ async fn the_cors_layer_stops_at_the_portal_prefix() {
         "/v1/assets/not-an-asset/price",
     ] {
         let reply = send_with(&config, "GET", uri, &[("origin", WEB_ORIGIN)]).await;
+        let headers = reply.headers();
         assert!(
-            reply
-                .headers()
-                .get("access-control-allow-credentials")
-                .is_none(),
+            headers.get("access-control-allow-credentials").is_none(),
             "{uri} is outside the portal's credentialed CORS answer"
         );
+        let origin = headers
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap().to_string());
+        assert_ne!(
+            origin.as_deref(),
+            Some(WEB_ORIGIN),
+            "{uri} must not name the portal's origin"
+        );
     }
+}
+
+/// The data routes' own answer: `*`, and NOTHING that would make a browser
+/// refuse it (task 0126).
+///
+/// 🔑 **This is the half the gateway cannot provide.** `addCorsPreflight` in
+/// `api-gateway-stack.ts` answers the preflight from a MOCK, but a preflight
+/// only buys permission to SEND the request — the browser then reads the real
+/// response's own allow-origin, and with a Lambda proxy integration that can
+/// only come from this handler. Shipping the preflight alone leaves every
+/// browser call failing exactly as before, while `curl` passes: that near-miss
+/// is why this test exists.
+///
+/// ⚠️ `/health` is in here because it needs no ClickHouse — but it is a gateway
+/// MOCK in production and never reaches this code there, so on its own it pins
+/// the layer without pinning a route the layer actually has to serve. The `/v1`
+/// path alongside it is the real subject: a malformed identifier is rejected by
+/// the handler's own validation before any database call (task 0195 found this
+/// route), and
+/// [`a_real_v1_route_carries_the_wildcard_on_its_own_response`] covers the
+/// `POST` side.
+#[tokio::test]
+async fn data_routes_answer_a_wildcard_origin_without_credentials() {
+    let config = config_with_origin(Some(WEB_ORIGIN));
+    // Two unrelated origins: a constant `*` must not vary with the caller, or
+    // the gateway's stage cache would serve one caller's answer to the next
+    // (the shape task 0118 measured on production).
+    for origin in ["https://evil.example", "https://someone-else.example"] {
+        for uri in ["/health", "/v1/assets/not-an-asset/price"] {
+            let reply = send_with(&config, "GET", uri, &[("origin", origin)]).await;
+            let headers = reply.headers();
+            assert_eq!(
+                headers
+                    .get("access-control-allow-origin")
+                    .map(|v| v.to_str().unwrap()),
+                Some("*"),
+                "{uri} answers every origin with the same wildcard"
+            );
+            assert!(
+                headers.get("access-control-allow-credentials").is_none(),
+                "`*` and credentials together are refused by every browser"
+            );
+        }
+    }
+}
+
+/// The same wildcard on a **real `/v1` route**, proven to have been ROUTED
+/// there (task 0126).
+///
+/// 🔑 **Why this exists next to the `/health` test above.** Every other CORS
+/// assertion in this file rides on `/health`, which production answers from a
+/// gateway MOCK — this handler never sees it. So `/health` can only show that
+/// `data_cors_layer` is attached, not that it covers the surface the task is
+/// about. Anything that leaves `/health` inside the layer while a data route
+/// moves out of it — a router re-nested after the `.layer()` call in `app()`,
+/// or simply a new `/v1` route registered below it — keeps the `/health` test
+/// green while browser calls go back to being blocked and `curl` stays green
+/// too: the exact half-shipped mechanism this task nearly released.
+///
+/// ⚠️ **A CORS header alone would NOT prove that.** The layer wraps the
+/// fallback too, so an unrouted path answers `404` carrying the same `*`, and
+/// a test that only read the header would pass against a route that no longer
+/// exists. Hence the status and the error code: `{"assets": []}` is rejected by
+/// `post_batch` itself, before `state.ch()` is reached, so a `400`
+/// `invalid_query` is the handler's own signature — reachable with
+/// [`AppState::without_ch`] and reachable no other way.
+#[tokio::test]
+async fn a_real_v1_route_carries_the_wildcard_on_its_own_response() {
+    let config = config_with_origin(Some(WEB_ORIGIN));
+    let reply = app(&config, AppState::without_ch())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/prices/batch")
+                .header("origin", "https://evil.example")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"assets": []}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let origin = reply
+        .headers()
+        .get("access-control-allow-origin")
+        .map(|v| v.to_str().unwrap().to_string());
+    let credentials = reply
+        .headers()
+        .get("access-control-allow-credentials")
+        .is_some();
+    let status = reply.status();
+    let body = axum::body::to_bytes(reply.into_body(), usize::MAX)
+        .await
+        .expect("body should be readable");
+    let body = String::from_utf8_lossy(&body);
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the batch handler must have run and rejected the empty list; got {status} {body}"
+    );
+    assert!(
+        body.contains("invalid_query"),
+        "a 400 from anywhere else would not prove the route was reached: {body}"
+    );
+    assert_eq!(
+        origin.as_deref(),
+        Some("*"),
+        "a /v1 response carries the wildcard the gateway preflight advertises"
+    );
+    assert!(
+        !credentials,
+        "`*` and credentials together are refused by every browser"
+    );
 }
 
 /// Both copies of the OpenAPI document are readable from ANY origin (task
