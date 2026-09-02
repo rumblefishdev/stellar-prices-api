@@ -343,11 +343,12 @@ async fn a_429_or_5xx_from_discord_refuses_without_claiming_non_membership() {
     }
 }
 
-/// `pending: true` — joined, but not through Membership Screening — is not a
-/// member yet. Completing the screening is the same "join the server" action
-/// the refusal names, so it lands under the same state.
+/// `pending: true` — joined, but not through Membership Screening — is
+/// refused without a key, and lands on ITS OWN state (task 0254; this test
+/// asserted `not_member` before). The remedy is "accept the rules", not
+/// "join", and the page needs the literal to say which.
 #[tokio::test]
-async fn a_pending_member_is_refused() {
+async fn a_pending_member_is_refused_as_pending_rules() {
     let discord = MockDiscord::start_with(
         GRANTED_SCOPE,
         None,
@@ -360,7 +361,7 @@ async fn a_pending_member_is_refused() {
     let gateway = MockGateway::start().await;
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api/?issue=not_member");
+    assert_eq!(reply.location(), "/api/?issue=pending_rules");
     assert_eq!(gateway.with(|s| s.create_calls), 0);
 }
 

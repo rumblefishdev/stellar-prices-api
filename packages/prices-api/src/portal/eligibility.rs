@@ -27,9 +27,10 @@
 //! The registry stores no membership data — every check reads Discord live at
 //! the moment it matters, which is also why there is nothing here to expire.
 //!
-//! # Three outcomes, not two
+//! # Four refusals, not two
 //!
-//! [`decide`] answers eligible / not-a-member / too-young / **unknown**, and
+//! [`decide`] answers eligible / not-a-member / **pending screening** /
+//! too-young / **unknown**, and
 //! `Unknown` is a first-class verdict rather than an error: a throttled or
 //! down Discord must refuse issuance *without accusing the visitor of
 //! non-membership*, because "could not verify" is fixable by waiting and "you
@@ -164,8 +165,8 @@ pub enum EligibilityError {
     #[error("the `{what}` parameter is empty")]
     Empty { what: &'static str },
     #[error(
-        "the `{what}` parameter is not a Discord snowflake (all digits, e.g. \
-         897514728459468821) — a guild NAME will not work here"
+        "the `{what}` parameter is not a Discord snowflake (all digits — the official \
+         Stellar Developers guild is 897514728459468821) — a guild NAME will not work here"
     )]
     NotSnowflake { what: &'static str },
     #[error("the `{what}` parameter is not a whole number of minutes")]
@@ -218,11 +219,14 @@ async fn fetch_parameter(name: &str) -> Result<String, EligibilityError> {
 pub enum Eligibility {
     /// A member with `pending == Some(false)` and an old-enough account.
     Eligible,
-    /// Confirmed non-membership (Discord's own 10007/10004 on a 404), or a
-    /// member who has not cleared Membership Screening (`pending: true` —
-    /// joining and completing the screening is the same user action as
-    /// joining, so it renders under the same refusal).
+    /// Confirmed non-membership: Discord's own 10007/10004 on a 404.
     NotMember,
+    /// On the server but not through its Membership Screening — the rules
+    /// checkbox — so `pending: true`. Its own verdict since task 0254 (it was
+    /// folded into [`NotMember`] before): the remedy is "accept the rules",
+    /// not "join", and telling a member to join sends them to an invite that
+    /// only says they are already in.
+    PendingScreening,
     /// The account exists but is younger than the threshold. A *wait*, not a
     /// rejection: `wait_secs` is what the page renders, so the copy follows
     /// the operator's threshold instead of hard-coding one.
@@ -260,9 +264,9 @@ pub fn account_created_ms(snowflake: &str) -> Option<u64> {
 ///   as "the guild considers them a full member", and second-guessing an
 ///   admin's bypass would require the `flags` field this service deliberately
 ///   does not read.
-/// - `Some(true)` is **not a member yet** — they joined but have not cleared
-///   Membership Screening, and completing it is the same "join the server"
-///   action the refusal already names.
+/// - `Some(true)` is **pending screening** — they joined but have not
+///   accepted the rules. Refused before the age check like a non-member, but
+///   as its own verdict, because its remedy is a different click.
 /// - `None` is **unknown**, never a pass: the docs' presence guarantee for
 ///   `pending` is written about gateway events, not this REST route, and 0180
 ///   item 2 (which would settle what absence means here) is unmeasured. If
@@ -279,6 +283,7 @@ pub fn decide(
     match membership(member) {
         Membership::Member => {}
         Membership::NotMember => return Eligibility::NotMember,
+        Membership::PendingScreening => return Eligibility::PendingScreening,
         Membership::Unknown => return Eligibility::Unknown,
     }
 
@@ -307,8 +312,10 @@ pub fn decide(
 pub enum Membership {
     /// `pending == Some(false)` — a full member, admin bypass included.
     Member,
-    /// Confirmed non-membership, or `pending == Some(true)`.
+    /// Confirmed non-membership.
     NotMember,
+    /// `pending == Some(true)` — joined, rules not yet accepted.
+    PendingScreening,
     /// Could not verify, including an absent `pending`. Refuse, never accuse.
     Unknown,
 }
@@ -324,7 +331,7 @@ pub fn membership(member: &MemberLookup) -> Membership {
         }
         MemberLookup::Member(m) => match m.pending {
             Some(false) => Membership::Member,
-            Some(true) => Membership::NotMember,
+            Some(true) => Membership::PendingScreening,
             None => {
                 tracing::warn!(
                     reason = "pending_absent",
@@ -465,12 +472,24 @@ mod tests {
         );
     }
 
+    /// Joined, rules not accepted: refused, and NOT as a non-member — the
+    /// page must be able to say "accept the rules" rather than "join".
     #[test]
-    fn a_pending_member_is_not_a_member_yet() {
+    fn a_pending_member_is_refused_as_pending_screening() {
         let now = DOCUMENTED_CREATED_MS + 6 * 60_000;
         assert_eq!(
             decide(&member(Some(true)), DOCUMENTED_SNOWFLAKE, 5, now),
-            Eligibility::NotMember
+            Eligibility::PendingScreening
+        );
+    }
+
+    /// …and before the age check, like every membership verdict: a member in
+    /// screening on a brand-new account is told about the rules, not to wait.
+    #[test]
+    fn pending_screening_takes_precedence_over_age() {
+        assert_eq!(
+            decide(&member(Some(true)), "not-a-flake", 5, 0),
+            Eligibility::PendingScreening
         );
     }
 
@@ -531,7 +550,7 @@ mod tests {
         let now = DOCUMENTED_CREATED_MS + 6 * 60_000;
         let cases = [
             (member(Some(false)), Membership::Member),
-            (member(Some(true)), Membership::NotMember),
+            (member(Some(true)), Membership::PendingScreening),
             (member(None), Membership::Unknown),
             (
                 MemberLookup::NotMember { code: 10_007 },
@@ -549,6 +568,9 @@ mod tests {
             match expected {
                 Membership::Member => assert_eq!(full, Eligibility::Eligible),
                 Membership::NotMember => assert_eq!(full, Eligibility::NotMember),
+                Membership::PendingScreening => {
+                    assert_eq!(full, Eligibility::PendingScreening)
+                }
                 Membership::Unknown => assert_eq!(full, Eligibility::Unknown),
             }
         }

@@ -112,6 +112,16 @@ const CANCELLED_QUERY: &str = "?signin=cancelled";
 /// — see the sign-in tail in [`callback`] for why the later one cannot go.
 const NOT_MEMBER_QUERY: &str = "?signin=not_member";
 
+/// Appended to [`PORTAL_HOME`] when the visitor is on the guild but has not
+/// accepted its rules — Discord's Membership Screening, `pending: true`.
+///
+/// Its own landing since task 0254. It used to fold into
+/// [`NOT_MEMBER_QUERY`], whose card says "join the server": a member who
+/// follows that invite is told by Discord they are already in, and comes back
+/// to the same refusal. The remedy here is a different click — open the
+/// server, accept the rules — so the page needs to know which one to name.
+const PENDING_RULES_QUERY: &str = "?signin=pending_rules";
+
 /// Appended to [`PORTAL_HOME`] when the membership question could not be
 /// answered — Discord unreachable, an unreadable guild parameter, a response
 /// with no `pending` field, or a deployment with no eligibility settings wired.
@@ -659,6 +669,12 @@ async fn callback(
         eligibility::Membership::NotMember => {
             tracing::info!(outcome = "not_member", "portal sign-in refused");
             return redirect(&format!("{home}{NOT_MEMBER_QUERY}"), vec![drop_pending]);
+        }
+        eligibility::Membership::PendingScreening => {
+            // Counted apart from `not_member`: the ratio between the two is
+            // the only signal that the rules step is where visitors fall out.
+            tracing::info!(outcome = "pending_rules", "portal sign-in refused");
+            return redirect(&format!("{home}{PENDING_RULES_QUERY}"), vec![drop_pending]);
         }
         eligibility::Membership::Unknown => {
             // The load-bearing warns (which check could not answer, and why)
@@ -1219,6 +1235,8 @@ mod tests {
     fn the_two_landing_states_are_distinct_literals() {
         assert_eq!(CANCELLED_QUERY, "?signin=cancelled");
         assert_eq!(NOT_MEMBER_QUERY, "?signin=not_member");
+        assert_eq!(PENDING_RULES_QUERY, "?signin=pending_rules");
+        assert_ne!(NOT_MEMBER_QUERY, PENDING_RULES_QUERY);
         assert_eq!(UNKNOWN_QUERY, "?signin=unknown");
         assert_eq!(FAILED_QUERY, "?signin=failed");
         assert_ne!(CANCELLED_QUERY, FAILED_QUERY);
@@ -1229,7 +1247,7 @@ mod tests {
     }
 
     /// The redirect target is a literal in every branch — sign-in's two
-    /// landing states and the issue flow's five alike. An `assert` rather than
+    /// landing states and the issue flow's six alike. An `assert` rather than
     /// a comment, so a later slice that adds a `redirect_to` parameter has to
     /// delete this to do it.
     #[test]
@@ -1241,10 +1259,12 @@ mod tests {
             CANCELLED_QUERY,
             FAILED_QUERY,
             NOT_MEMBER_QUERY,
+            PENDING_RULES_QUERY,
             UNKNOWN_QUERY,
             NOT_OPEN_QUERY,
             issue::ISSUE_OK_QUERY,
             issue::ISSUE_NOT_MEMBER_QUERY,
+            issue::ISSUE_PENDING_RULES_QUERY,
             issue::ISSUE_UNKNOWN_QUERY,
             issue::ISSUE_FAILED_QUERY,
             issue::ISSUE_CANCELLED_QUERY,
