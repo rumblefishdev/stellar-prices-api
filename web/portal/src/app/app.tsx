@@ -79,6 +79,7 @@ import {
   LOGIN_ANCHOR,
   QUICKSTART,
   STELLAR_DISCORD_INVITE,
+  STELLAR_DISCORD_SERVER,
 } from '../landing/links';
 import { alpha } from '@mui/material/styles';
 
@@ -374,6 +375,11 @@ function LoginView({
   // now proves Discord membership, so the two verdicts that used to appear
   // only after pressing "Get my API key" can also end the sign-in itself.
   const notMember = outcome === 'not_member';
+  // Joined, rules not accepted — Discord's Membership Screening. Its own
+  // outcome since task 0254 (Adam, 2026-09-02): it used to arrive as
+  // `not_member`, and the "join the server" card sent a member to an invite
+  // that only told them they were already in.
+  const pendingRules = outcome === 'pending_rules';
   const unverified = outcome === 'unknown';
   // A deployment that cannot ask the eligibility question at all. Its own
   // literal since 2026-08-27 — it used to arrive as `unknown` and borrow the
@@ -749,7 +755,13 @@ function LoginView({
   //
   // Its sibling `unknown` deliberately stays a banner on the ordinary card.
   // See the comment there.
-  if (notMember) {
+  //
+  // `pending_rules` is the SAME screen with a different callout and a
+  // different button (task 0254, the same frame): one composition, two
+  // fillings, so the two refusals cannot drift apart in layout — and so the
+  // screening case, which used to be one sentence on this card, has a card
+  // whose one action is the click that actually changes its answer.
+  if (notMember || pendingRules) {
     return (
       <LoginCard
         title="Access not available"
@@ -765,26 +777,44 @@ function LoginView({
         {/* `neutral`, whose fallback glyph is already the frame's padlock.
             NOT the error skin: nothing failed — we asked, Discord answered,
             and the answer was no. Red would say the portal broke. */}
-        <Callout variant="neutral" title="Stellar Discord membership required">
-          <p data-testid="signin-not-member">
-            API keys are available to members of the Stellar Discord server.
-            Join the server and try again.{' '}
-            {/* ⚠️ The frame stops at the sentence above; this one is kept from
-                task 0189's wording (Adam, 2026-08-26) because it is the only
-                thing that explains the case where a visitor HAS joined and is
-                still refused. `pending: true` — on the server, still inside
-                its screening — is a refusal by `eligibility::membership`, and
-                without this line that visitor's only next step is a support
-                thread. */}
-            New members may need to complete the server&apos;s screening first.
-          </p>
-        </Callout>
-        {/* The invite, in Discord's own blurple — the same control the sign-in
-            state uses, because both hand the visitor to Discord and neither
-            should look like the rest of the site while doing it. */}
-        <DiscordButton href={STELLAR_DISCORD_INVITE}>
-          Join Stellar Discord
-        </DiscordButton>
+        {pendingRules ? (
+          <Callout
+            variant="neutral"
+            title="Stellar Discord accept rules required"
+          >
+            <p data-testid="signin-pending-rules">
+              Your Discord account is on the Stellar Developers server, but you
+              have not accepted its rules yet. Open Discord, accept the
+              server&apos;s rules, then sign in again.
+            </p>
+          </Callout>
+        ) : (
+          <Callout
+            variant="neutral"
+            title="Stellar Discord membership required"
+          >
+            <p data-testid="signin-not-member">
+              API keys are available to members of the Stellar Discord server.
+              Join the server and try again.
+            </p>
+          </Callout>
+        )}
+        {/* Discord's own blurple — the same control the sign-in state uses,
+            because both hand the visitor to Discord and neither should look
+            like the rest of the site while doing it.
+
+            The invite for a non-member; the SERVER for a member in screening —
+            a member following an invite is told they are already in and sent
+            nowhere, while opening the guild lands them on its rules prompt. */}
+        {pendingRules ? (
+          <DiscordButton href={STELLAR_DISCORD_SERVER}>
+            Open Stellar Discord
+          </DiscordButton>
+        ) : (
+          <DiscordButton href={STELLAR_DISCORD_INVITE}>
+            Join Stellar Discord
+          </DiscordButton>
+        )}
         {/* The quiet second action. A REFUSED sign-in leaves no session (see
             `portal/auth/mod.rs`), so there is nothing to sign out of and this
             is simply the round-trip again — where Discord's own account
@@ -1290,7 +1320,7 @@ function Dashboard({
    *
    * ⚠️ A landing that carries one keeps the ordinary dashboard, because the
    * revoked card cannot say what those outcomes say: `not_member`,
-   * `too_young`, `unknown` and `failed` are all reachable by an account whose
+   * `pending_rules`, `too_young`, `unknown` and `failed` are all reachable by an account whose
    * key is revoked, and each is a different reason the issue round-trip did
    * not produce one. Swallowing them behind a card that only knows a date
    * would leave the visitor with no explanation at all.
@@ -2405,6 +2435,8 @@ function ApiKey({
    */
   const { signin } = useOneShotParams(SIGNIN_PARAMS);
   const refusedNotMember = issue === 'not_member' || signin === 'not_member';
+  const refusedPendingRules =
+    issue === 'pending_rules' || signin === 'pending_rules';
   const refusedUnknown = issue === 'unknown' || signin === 'unknown';
   // Whether THIS landing is itself proof a key exists: the backend created
   // one before it redirected.
@@ -2660,10 +2692,19 @@ function ApiKey({
       {refusedNotMember && (
         <p data-testid="issue-not-member">
           You need to be a member of the{' '}
-          <a href="https://discord.gg/stellardev">Stellar Developers Discord</a>{' '}
-          to get an API key — joining is an open invite, and new members may
-          need to complete the server&apos;s screening first. Once you are in,{' '}
+          <a href={STELLAR_DISCORD_INVITE}>Stellar Developers Discord</a> to get
+          an API key — joining is an open invite. Once you are in,{' '}
           <a href={issueUrl()}>try again</a>.
+        </p>
+      )}
+      {/* On the server, rules not accepted (task 0254). Names the server, not
+          the invite: this visitor is already a member. */}
+      {refusedPendingRules && (
+        <p data-testid="issue-pending-rules">
+          Your Discord account is on the{' '}
+          <a href={STELLAR_DISCORD_SERVER}>Stellar Developers Discord</a>, but
+          you have not accepted the server&apos;s rules yet. Accept them on
+          Discord, then <a href={issueUrl()}>try again</a>.
         </p>
       )}
       {issue === 'too_young' && (

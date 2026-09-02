@@ -953,9 +953,11 @@ describe('sign in with Discord', () => {
     ).toBeTruthy();
     const message = screen.getByTestId('signin-not-member');
     expect(message.textContent).toMatch(/members of the stellar discord/i);
-    // Kept from 0189: the one line that explains a visitor who HAS joined and
-    // is still refused (`pending: true`).
-    expect(message.textContent).toMatch(/screening/i);
+    // The screening sentence 0189 kept here is GONE (task 0254): a visitor
+    // who has joined and is still refused now has a screen of their own, so
+    // this card says one thing — join.
+    expect(message.textContent).not.toMatch(/screening/i);
+    expect(screen.queryByTestId('signin-pending-rules')).toBeNull();
 
     // The single filled action is the invite, and it is the real one.
     const join = screen.getByRole('link', { name: /join stellar discord/i });
@@ -972,6 +974,51 @@ describe('sign in with Discord', () => {
     // Never dressed as our fault, and never as the visitor's cancellation.
     expect(screen.queryByText(/sign-in cancelled/i)).toBeNull();
     expect(screen.queryByTestId('signin-unknown')).toBeNull();
+  });
+
+  /**
+   * Joined, rules not accepted (task 0254, Adam, 2026-09-02): the SAME screen
+   * as `not_member` — the frame is `825:1485` for both — with the callout
+   * that names the missing click and a button that opens the SERVER rather
+   * than the invite. A member who follows an invite is told by Discord they
+   * are already in, and comes back to the same refusal; that loop is what
+   * this state exists to break.
+   */
+  it('replaces the login card with the accept-rules screen for a member still in screening', async () => {
+    openAndSignedOut();
+    renderAt('/?signin=pending_rules');
+
+    expect(
+      await screen.findByRole('heading', { name: /access not available/i }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/stellar discord accept rules required/i),
+    ).toBeTruthy();
+    const message = screen.getByTestId('signin-pending-rules');
+    // Says they ARE on the server, and what is left. Never "join".
+    expect(message.textContent).toMatch(/on the stellar developers server/i);
+    expect(message.textContent).toMatch(/accept/i);
+    expect(message.textContent).not.toMatch(/join/i);
+    expect(screen.queryByTestId('signin-not-member')).toBeNull();
+
+    // The one action opens the official guild itself — by id, so it cannot
+    // name a server other than the one the gate checks.
+    const open = screen.getByRole('link', { name: /open stellar discord/i });
+    expect(open.getAttribute('href')).toBe(
+      'https://discord.com/channels/897514728459468821',
+    );
+    expect(
+      screen.queryByRole('link', { name: /join stellar discord/i }),
+    ).toBeNull();
+
+    // The card is replaced like `not_member`: no sign-in control, the quiet
+    // second action instead.
+    expect(
+      screen.queryByRole('link', { name: /sign in with discord/i }),
+    ).toBeNull();
+    expect(
+      screen.getByRole('button', { name: /try different account/i }),
+    ).toBeTruthy();
   });
 
   /**
@@ -2355,6 +2402,17 @@ describe('the API key', () => {
     await waitFor(() => expect(lastSearch).toBe(''));
   });
 
+  it('renders the accept-rules refusal on the dashboard of a signed-in visitor', async () => {
+    signedInWithKey();
+    renderApp('/?signin=pending_rules');
+
+    const refusal = await screen.findByTestId('issue-pending-rules');
+    expect(refusal.textContent).toMatch(/not accepted the server's rules/i);
+    expect(screen.queryByTestId('issue-not-member')).toBeNull();
+    expect(await screen.findByTestId('api-key')).toBeTruthy();
+    await waitFor(() => expect(lastSearch).toBe(''));
+  });
+
   it('keeps could-not-verify distinct from not-a-member on the dashboard too', async () => {
     signedInWithKey();
     renderApp('/?signin=unknown');
@@ -2398,6 +2456,30 @@ describe('the API key', () => {
     expect(invite.getAttribute('href')).toBe('https://discord.gg/stellardev');
     const retry = screen.getAllByRole('link', { name: /try again/i })[0];
     expect(retry.getAttribute('href')).toBe(ISSUE_HREF);
+    // The screening clause moved to its own state (task 0254).
+    expect(refusal.textContent).not.toMatch(/screening/i);
+  });
+
+  /**
+   * On the server, rules not accepted: names the SERVER (the visitor is
+   * already a member — an invite would only say so) and offers the same
+   * retry, because accepting the rules and pressing again is all it takes.
+   */
+  it('names the server, not the invite, when the visitor has not accepted its rules', async () => {
+    signedInWithoutKey();
+    renderApp('/?issue=pending_rules');
+
+    const refusal = await screen.findByTestId('issue-pending-rules');
+    expect(refusal.textContent).toMatch(/not accepted the server's rules/i);
+    const server = within(refusal).getByRole('link', {
+      name: /stellar developers discord/i,
+    });
+    expect(server.getAttribute('href')).toBe(
+      'https://discord.com/channels/897514728459468821',
+    );
+    const retry = within(refusal).getByRole('link', { name: /try again/i });
+    expect(retry.getAttribute('href')).toBe(ISSUE_HREF);
+    expect(screen.queryByTestId('issue-not-member')).toBeNull();
   });
 
   /**

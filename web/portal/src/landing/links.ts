@@ -68,11 +68,32 @@ export const QUICKSTART_ROUTE = '/quick-start';
 export const QUICKSTART = `${ROUTER_BASENAME}${QUICKSTART_ROUTE}`;
 
 /**
- * The registered vanity invite. The other invites SDF publishes are personal
- * and at least one is already dead (task 0179) — do not swap this for one
- * found in a thread.
+ * The official Stellar Discord — **Stellar Developers**, and no other server
+ * (Adam, 2026-09-02). This snowflake is the guild the backend's membership
+ * gate checks: it is the value of the SSM parameter
+ * `/prices/production/discord-guild-id`, and the two are ONE FACT in two
+ * places. `tools/scripts/verify-discord-guild.mjs` resolves the invite below
+ * through Discord's API and asserts it lands here — the drift it guards
+ * against (invite to one server, gate on another) was invisible until task
+ * 0254 measured it, because nothing compared them.
+ */
+export const STELLAR_DISCORD_GUILD_ID = '897514728459468821';
+
+/**
+ * The registered vanity invite, resolving to `STELLAR_DISCORD_GUILD_ID`. The
+ * other invites SDF publishes are personal and at least one is already dead
+ * (task 0179) — do not swap this for one found in a thread.
  */
 export const STELLAR_DISCORD_INVITE = 'https://discord.gg/stellardev';
+
+/**
+ * The server itself, for a visitor who is ALREADY in it — a member following
+ * the invite is told by Discord they are already a member and sent nowhere.
+ * Discord opens a guild by id at this path (a member's own client picks the
+ * channel); an unscreened member lands on the rules prompt, which is the one
+ * click the `pending_rules` refusal asks for.
+ */
+export const STELLAR_DISCORD_SERVER = `https://discord.com/channels/${STELLAR_DISCORD_GUILD_ID}`;
 
 /**
  * The in-page anchor every "Get API Key" control scrolls to — the login
