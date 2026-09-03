@@ -78,6 +78,19 @@ history:
       measurement but a **decision** — add an `X-Cache` header or renegotiate
       the criterion with the reviewer on the timing evidence. AC 7 is the one
       that gates [[0128]].
+  - date: 2026-09-03
+    status: active
+    who: okarcz
+    note: >
+      **AC 7 closed — the `X-Cache` decision is made**: renegotiate the
+      criterion, do not add the header. Operator's call, taken after costing
+      CloudFront at 3-5 days for a header that would still read
+      `Hit from cloudfront` and not match the wording. Evidence document
+      `docs/prices-api-cache-verification.md` opened as PR #281. **5 of 7 ACs
+      done.** Remaining: AC 2 (hits on the four cached routes not yet probed)
+      and AC 6 (hit rate, derivable from 0121's pool arithmetic — no new run).
+      ⏳ The rewording still needs the reviewer's agreement; nothing else here
+      depends on it.
 ---
 
 # API Gateway cache verification
@@ -378,8 +391,56 @@ config alone — do not present the timings as evidence.
       that `x-api-key` is in no cache key, so the cache is shared across
       callers.
 - [ ] Cache hit rate under the [[0121]] load scenarios recorded
-- [ ] If `X-Cache` is not emitted by the deployed stage, that is stated plainly
-      with the alternative evidence used — no hand-waving in [[0128]]
+- [x] If `X-Cache` is not emitted by the deployed stage, that is stated plainly
+      with the alternative evidence used — no hand-waving in [[0128]].
+      **Done 2026-09-03**: `docs/prices-api-cache-verification.md` (PR #281)
+      states the absence, proves the handler cannot mark a hit, costs the
+      CloudFront alternative, proposes the reworded criterion and labels the
+      latency evidence as the weaker claim. ⏳ The reviewer has not yet agreed
+      the rewording — that hand-off is tracked in Future Work, not here.
+
+## Design Decisions
+
+### Emerged
+
+1. **AC 3's criterion is renegotiated, not satisfied — the `X-Cache` header is
+   not being added.** Decided with the operator 2026-09-03 after costing the
+   alternative. Evidence document: `docs/prices-api-cache-verification.md`
+   (PR #281), which proposes the reworded criterion and carries everything
+   below.
+
+   The cheap version was tested and **fails**: API Gateway replays a cached
+   response byte for byte (body hash `4694801b` across two hits, changing to
+   `039f54a6` only on the post-expiry miss), so a header written by the handler
+   is frozen at miss time and would report `Miss` on genuine hits. Worse than no
+   header. The same reasoning rules out integration-response mappings.
+
+   A truthful header needs a cache **in front of** the gateway. Nothing is:
+   the REST API is `REGIONAL` and both custom domains are regional endpoints
+   with `distributionDomainName: null`. CloudFront would mean ~6 cache
+   behaviours to reproduce the per-route key, an origin request policy keeping
+   `x-api-key` out of the key, a DNS move, a decision about the existing 0.5 GB
+   stage cache, and re-verification of everything [[0126]] settled — **3-5 days**
+   plus edge deploy risk. Cost is roughly neutral (~$12-13/mo CloudFront against
+   ~$14-15/mo recovered), so cost is not the reason.
+
+   🔑 **The deciding argument is that option (b) does not work either**:
+   CloudFront emits `X-Cache: Hit from cloudfront`, not `X-Cache: Hit`. The
+   criterion's literal wording is unmet after a week of edge work, and the same
+   reviewer conversation is still required. One thing that would *not* have
+   cost anything: a `*.sorobanscan.rumblefish.dev` cert already exists in
+   `us-east-1`.
+
+2. **The evidence is latency, and it is labelled as the weaker claim it is.**
+   Hits 45-53 ms against misses 78-145 ms, no overlap, with expiry demonstrated
+   on both tiers. This shows *behaviour consistent with a cache*, not the cache
+   asserting itself. Recorded that way in the report and to be carried that way
+   into [[0128]] — the distinction is not to be blurred at submission time.
+
+3. **The report is a `docs/` deliverable, mirroring [[0121]].** Not folded into
+   [[0128]]: 0128 has not started, and the same reasoning [[0248]] settled
+   applies — an evidence artefact that stands on its own should not be blocked
+   behind an unstarted package. 0128 cites it, as it cites the load test report.
 
 ## Notes
 
