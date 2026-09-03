@@ -5,12 +5,29 @@ type: FEATURE
 status: active
 related_adr: []
 related_tasks: ["0210", "0120", "0139", "0040", "0119", "0118", "0178"]
-tags: [layer-backend, layer-api, priority-high, effort-large, milestone-M2, api, security, metadata]
-milestone: 2
+tags: [layer-backend, layer-api, priority-high, effort-large, milestone-M3, api, security, metadata]
+milestone: 3
 links:
   - "../../../packages/prices-api/src/assets/queries_ch.rs"
   - "../../../packages/prices-ingest-core/src/writer.rs"
 history:
+  - date: 2026-09-02
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Moved to **milestone 3**. Checked against Tranche 2's six acceptance
+      criteria — endpoint conformance, load test, cache TTL, verifiable VWAP and
+      two on history depth — and this task closes none of them. Tranche 3 is
+      "Production Launch & Validation" and lists a security review, which is
+      where it belongs. The M2 tag was set on the assumption that a
+      serious-sounding task belongs to the current milestone; checking says
+      otherwise. Priority within M3 stays high, and part 1 (populating
+      `home_domain`) is worth doing earlier on its own merits, since the column
+      is in the API contract and has always shipped empty. Also recorded the
+      response shape — `verified_domain`, `verification`, `issuers_with_this_code`
+      on both list and detail — and measured that the registry and visible issuer
+      counts diverge sharply (NFT: 2,176 vs 1), which makes the choice of number
+      a design decision rather than a detail.
   - date: 2026-09-02
     status: active
     who: stkrolikiewicz
@@ -515,6 +532,64 @@ Sizing: 1,953 issuers ÷ 50 per hourly run ≈ 1.6 days for a full cycle, so a
 An unverified claim must not be rendered the way a verified one is — which is the
 whole point of the `blackrock.co.com` finding above.
 
+### Response shape — 2026-09-02, also awaiting agreement
+
+Three fields, on **both** `AssetListItem` and `AssetDetail`:
+
+```json
+"verified_domain": "ultracapital.xyz",
+"verification":    "verified",
+"issuers_with_this_code": 25
+```
+
+**`verified_domain` is populated only when `verification = 'verified'`.** On any
+other verdict it stays empty and the enum says why. An unverified claim rendered
+the way a verified one is would be the `blackrock.co.com` mistake in a different
+place.
+
+**The enum is not optional decoration.** An empty `verified_domain` on its own
+collapses four different facts: no domain declared, toml unreachable, toml fine
+but asset not listed, and **not checked yet** — which is what every row will say
+for the first days after the writer ships. Without the enum, "we have not looked"
+is indistinguishable from "we looked and it failed".
+
+⚠️ **Soroban tokens need a fifth value.** They have no `home_domain` and no SEP-1
+equivalent, so `verified_domain` is permanently empty for them. Something like
+`not_applicable`, so they do not read as classic assets we simply have not got to
+yet.
+
+### ⚠️ `issuers_with_this_code` — which number, measured 2026-09-02
+
+The registry count and the API-visible count are wildly different, and they mean
+different things:
+
+| code | issuers in registry | visible through the API |
+|---|---|---|
+| NFT | 2,176 | **1** |
+| XRP | 683 | 60 |
+| BTC | 416 | 25 |
+| ETH | 317 | 13 |
+| USDC | 228 | 20 |
+
+**Leaning to the visible count**, because it is consistent with the same response:
+a consumer can page the list and confirm it. The registry count is a number they
+cannot act on from here.
+
+But note what that costs: `NFT` would publish **1**, which is true of this API and
+misleading about Stellar, where 2,176 accounts have issued something called NFT.
+Whichever is chosen, the field name has to carry it — `no_of_issuers` reads as
+"how many exist" and would be wrong under either reading. Hence
+`issuers_with_this_code`, documented as counting what this API can return.
+
+### Where the exposure actually is
+
+Both fields matter more on **detail** than on the listing. The listing
+`INNER JOIN`s `current_prices`, so a zero-volume impersonator never appears.
+`asset_detail` reads `FROM assets` with only `LEFT JOIN`s and has no such floor —
+`GET /v1/assets/CDPV3H7C…` returns `code: "USDC"` today for a contract that is not
+a SAC of USDC. Shipping these fields to the listing alone would leave the one
+surface where the problem is live untouched.
+
 ### Open questions for the next session
 
 1. **Table name** — `asset_verification` (names the act) or `asset_domain`
@@ -524,6 +599,9 @@ whole point of the `blackrock.co.com` finding above.
    constant, revisited if it proves too slow.
 3. **Scope to API-visible issuers only?** 1,953 visible against 59,332 in the
    registry. Leaning to visible-only: the rest cannot be handed to anyone.
+4. **`issuers_with_this_code` — visible or registry count?** See the measurement
+   above. Leaning to visible, with the field named and documented so the choice
+   is legible.
 
 Also note: `prices-clickhouse/src/lib.rs`'s statement-count guard will need
 bumping again (33 → 34) when this lands, as it did for [[0210]].
