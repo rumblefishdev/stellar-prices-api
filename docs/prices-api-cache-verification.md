@@ -22,13 +22,14 @@ route. The second is not achievable on this architecture.
 
 ## Verdict
 
-| claim                                                                  | result                                                               |
-| ---------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| Per-endpoint TTLs are as specified                                     | ✅ confirmed on the deployed stage — §6 corrected where it disagreed |
-| Consecutive identical requests inside the window are served from cache | ✅ demonstrated, 10 s and 60 s tiers                                 |
-| The cache **expires** when it says it does                             | ✅ demonstrated, both tiers                                          |
-| `POST /prices/batch` and `/health` are uncached                        | ✅ confirmed                                                         |
-| A response carries `X-Cache: Hit`                                      | ❌ **no such header exists on this API**                             |
+| claim                                                                  | result                                                                |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Per-endpoint TTLs are as specified                                     | ✅ confirmed on the deployed stage — §6 corrected where it disagreed  |
+| Consecutive identical requests inside the window are served from cache | ✅ demonstrated on **all six** key-gated cached routes                |
+| Cache hit rate under the load-test scenarios                           | ✅ derived — **≥ 98.20 %** in the AC scenario (bounds, see section 9) |
+| The cache **expires** when it says it does                             | ✅ demonstrated, both tiers                                           |
+| `POST /prices/batch` and `/health` are uncached                        | ✅ confirmed                                                          |
+| A response carries `X-Cache: Hit`                                      | ❌ **no such header exists on this API**                              |
 
 **Requested rewording:**
 
@@ -210,7 +211,57 @@ freshness boundary rather than a permanent store.
 `/v1/assets` costs **~950 ms** on a miss, roughly 4× a `/price` miss. That is
 what makes its cache key composition (below) worth attention.
 
-### 4. Hit and miss latency do not overlap
+### 4. Every remaining cached route
+
+The two sections above cover one route per TTL tier. The other four cached,
+key-gated routes were measured the same way. Because three of them key on the
+path alone, a miss cannot be forced with a parameter — each was filled, left for
+63 s to expire, then asked twice:
+
+| route                       | miss (expired) | hit     | ratio |
+| --------------------------- | -------------- | ------- | ----- |
+| `GET /v1/assets/{id}`       | 148.8 ms       | 44.9 ms | 3.3x  |
+| `GET /v1/assets/{id}/ohlcv` | 190.3 ms       | 70.0 ms | 2.7x  |
+| `GET /v1/oracles/{id}`      | 90.9 ms        | 54.8 ms | 1.7x  |
+| `GET /v1/backfill/status`   | 68.4 ms        | 48.9 ms | 1.4x  |
+
+All four behave correctly. **But the ratio column is the honest caveat on this
+whole method**: latency discriminates a hit from a miss in proportion to how
+expensive the underlying query is. On `/ohlcv` the gap is 120 ms and
+unmistakable; on `/backfill/status` it is **19.5 ms**, which is a real and
+repeatable difference but close enough to ordinary variance that a single pair of
+requests would not settle it. A header would not have this property. Where the
+evidence is thin, it is thin, and that is said here rather than averaged away.
+
+### 5. `/api-docs-json` — a hit cannot be distinguished, and that is expected
+
+Two consecutive requests returned **69.9 ms** and **75.3 ms**. With a 3600 s TTL
+and a document that is byte-identical for the life of a deployment, both were
+almost certainly hits, and **no miss can be induced**: the entry is only cleared
+when a deployment flushes it. This route is therefore confirmed as _configured_
+to cache (3600 s, no cache-key parameters) and is not claimed to be demonstrated
+by timing.
+
+One property was verified rather than assumed while doing so. The stage sets
+`requireAuthorizationForCacheControl: true` with
+`unauthorizedCacheControlHeaderStrategy: SUCCEED_WITH_RESPONSE_HEADER`, which the
+CDK relies on to stop an anonymous caller evicting this shared entry. Sending
+`Cache-Control: max-age=0` with no credentials returns `200` plus:
+
+```
+warning: 199 Cache-control headers were ignored because the caller was unauthorized.
+```
+
+The request succeeded, the cache was not busted, and the caller was told so. The
+protection works.
+
+⚠️ Note for anyone re-running this closer to submission: a caller **granted**
+`InvalidateCache` on the usage plan _can_ force a miss with that header, on any
+route including the path-only ones. That would make future verification cheaper
+than the 63-second waits used here. It is a deliberate permission grant, not a
+default, and was not needed for this pass.
+
+### 6. Hit and miss latency do not overlap
 
 Five consecutive misses forced with fresh parameter values: **77.8, 81.4, 84.1,
 87.5, 88.5 ms**. Cache hits across the same session: **45.1, 47.7, 49.5,
@@ -225,7 +276,7 @@ figures reproduce.
 > asset, with everything warm. **The two ranges are different measurements and
 > must not be quoted as one distribution.**
 
-### 5. Cache key composition
+### 7. Cache key composition
 
 API Gateway keys the cache **only on parameters declared as
 `cacheKeyParameters`** — not on the query string as a whole. Read per method
@@ -252,7 +303,7 @@ request to receive that caller's narrowed `sources` and reweighted `vwap_24h`
 for the remainder of the TTL. The rationale is recorded at
 `api-gateway-stack.ts:608-616`.
 
-### 6. Uncached routes
+### 8. Uncached routes
 
 `POST /v1/prices/batch` and `GET /health` both read `cachingEnabled: false` on
 the deployed stage.
@@ -260,6 +311,44 @@ the deployed stage.
 > ⚠️ This is established from the stage configuration alone. A timing check on
 > `/health` proves nothing: it is answered by a gateway MOCK integration and is
 > fast whether cached or not.
+
+### 9. Hit rate under the load-test scenarios
+
+The acceptance criteria ask for cache hit rate under the
+[100 req/s load test](./prices-api-load-test-100rps.md). **It is derived, not
+observed** — with no `X-Cache` header the hits were never counted — but the
+derivation is exact in one direction, because an entry can only miss once per TTL
+window:
+
+> over a run of `D` seconds at a TTL of `T`, a single cache key can miss at most
+> `D / T` times, whatever the request rate.
+
+At `D` = 300 s and `T` = 10 s that is **at most 30 misses per asset**, so pool
+size alone fixes the ceiling:
+
+| regime                  | pool  | max misses    | of requests | **min hit rate**          |
+| ----------------------- | ----- | ------------- | ----------- | ------------------------- |
+| 1 — cache               | 1     | 30            | 29,995      | **≥ 99.90 %**             |
+| 2 — **the AC scenario** | 18    | 540           | 30,001      | **≥ 98.20 %**             |
+| 3 — wide                | 4,301 | every request | 30,001      | **~0 %**, by construction |
+
+These are **lower bounds on the hit rate**, not measurements: real traffic could
+miss fewer times, never more. Regime 2 is the figure the acceptance criteria
+concern, and at ≥98.20 % it explains why regimes 1 and 2 are statistically
+indistinguishable at p95 — the AC scenario is measuring the cache, not the data
+path.
+
+🔴 **The arithmetic depends on a precondition that is not generally true.** It
+holds only because the k6 script sends no query string, so every request for one
+asset collapses onto a single cache key. As section 7 shows, the cache key on
+`/price` also includes `min_volume_usd`. **A client that varies that parameter
+gets a separate entry per value and none of these numbers apply to it.** The
+precondition has to travel with the figure.
+
+Regime 3's ~0 % is by design — the pool is 4,301 against `rate x TTL` = 1,000, so
+each asset is revisited well after its entry expires. It is not a health
+measurement: 94.38 % of those requests failed, and the run is described in the
+load test report as an incident, not a result.
 
 ---
 
