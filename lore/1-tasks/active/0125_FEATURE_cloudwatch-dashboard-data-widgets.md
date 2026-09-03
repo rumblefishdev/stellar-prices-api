@@ -2,7 +2,7 @@
 id: "0125"
 title: "CloudWatch dashboard — replace the empty prices-production-overview scaffold with real data widgets"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0007"]
 related_tasks: ["0056", "0093", "0121", "0128", "0026"]
 tags: [layer-infra, priority-medium, effort-medium, milestone-M2, observability, cloudwatch, dashboard]
@@ -36,6 +36,22 @@ history:
       `EnrichmentRowsRemainingAtVolumeZero` climbs permanently by design — it
       tracks the exotic-quote no-reference floor, not a backlog — so do not
       render it as a queue depth or alarm on its growth.
+  - date: 2026-09-03
+    status: active
+    who: akot
+    note: >
+      Activated. Precondition read against the live account: the dashboard is
+      still the 811-byte single-TextWidget scaffold (last modified 2026-07-06),
+      while `observability-stack.ts` now defines 18 alarms, not the seven this
+      task names — the widget set is built against the current alarm set.
+      The two source documents disagree on the §9 widget list: the SCF
+      submission (`prices-api-design-after-2nd-review.md:881`) says "DB CPU",
+      an RDS-era item ADR 0007 removed; the overview says "ClickHouse write
+      latency" + "mTLS cert NotAfter". Building to the overview list and
+      naming the substitution in the evidence. Of the six §9 topics only
+      ClickHouse write latency has no metric today; the rest already publish
+      via the probes. `production-soroban-explorer` (same account) is the
+      widget template.
 ---
 
 # CloudWatch dashboard with real data widgets
