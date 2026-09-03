@@ -81,6 +81,7 @@ import {
   LOGIN_ANCHOR,
   QUICKSTART,
   STELLAR_DISCORD_INVITE,
+  STELLAR_DISCORD_SERVER,
 } from '../landing/links';
 import { alpha } from '@mui/material/styles';
 
@@ -375,6 +376,11 @@ function LoginView({
   // now proves Discord membership, so the two verdicts that used to appear
   // only after pressing "Get my API key" can also end the sign-in itself.
   const notMember = outcome === 'not_member';
+  // Joined, rules not accepted — Discord's Membership Screening. Its own
+  // outcome since task 0254 (Adam, 2026-09-02): it used to arrive as
+  // `not_member`, and the "join the server" card sent a member to an invite
+  // that only told them they were already in.
+  const pendingRules = outcome === 'pending_rules';
   const unverified = outcome === 'unknown';
   // A deployment that cannot ask the eligibility question at all. Its own
   // literal since 2026-08-27 — it used to arrive as `unknown` and borrow the
@@ -750,7 +756,13 @@ function LoginView({
   //
   // Its sibling `unknown` deliberately stays a banner on the ordinary card.
   // See the comment there.
-  if (notMember) {
+  //
+  // `pending_rules` is the SAME screen with a different callout and a
+  // different button (task 0254, the same frame): one composition, two
+  // fillings, so the two refusals cannot drift apart in layout — and so the
+  // screening case, which used to be one sentence on this card, has a card
+  // whose one action is the click that actually changes its answer.
+  if (notMember || pendingRules) {
     return (
       <LoginCard
         title="Access not available"
@@ -766,26 +778,78 @@ function LoginView({
         {/* `neutral`, whose fallback glyph is already the frame's padlock.
             NOT the error skin: nothing failed — we asked, Discord answered,
             and the answer was no. Red would say the portal broke. */}
-        <Callout variant="neutral" title="Stellar Discord membership required">
-          <p data-testid="signin-not-member">
-            API keys are available to members of the Stellar Discord server.
-            Join the server and try again.{' '}
-            {/* ⚠️ The frame stops at the sentence above; this one is kept from
-                task 0189's wording (Adam, 2026-08-26) because it is the only
-                thing that explains the case where a visitor HAS joined and is
-                still refused. `pending: true` — on the server, still inside
-                its screening — is a refusal by `eligibility::membership`, and
-                without this line that visitor's only next step is a support
-                thread. */}
-            New members may need to complete the server&apos;s screening first.
-          </p>
-        </Callout>
-        {/* The invite, in Discord's own blurple — the same control the sign-in
-            state uses, because both hand the visitor to Discord and neither
-            should look like the rest of the site while doing it. */}
-        <DiscordButton href={STELLAR_DISCORD_INVITE}>
-          Join Stellar Discord
-        </DiscordButton>
+        {pendingRules ? (
+          <Callout
+            variant="neutral"
+            title="Stellar Discord accept rules required"
+          >
+            <p data-testid="signin-pending-rules">
+              Your Discord account is on the Stellar Developers server, but you
+              have not accepted its rules yet. Open Discord, accept the
+              server&apos;s rules, then sign in again.
+            </p>
+          </Callout>
+        ) : (
+          <Callout
+            variant="neutral"
+            title="Stellar Discord membership required"
+          >
+            <p data-testid="signin-not-member">
+              API keys are available to members of the{' '}
+              {/* The same invite the button below opens, and the same new
+                  tab. A link in the sentence as well as the button: the
+                  sentence is where the visitor reads what to do, and a
+                  reader who is scanning the copy should not have to hunt for
+                  the control to act on it. */}
+              <a
+                href={STELLAR_DISCORD_INVITE}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Stellar Developers Discord
+              </a>{' '}
+              server. Join the server and try again.
+            </p>
+          </Callout>
+        )}
+        {/* Discord's own blurple — the same control the sign-in state uses,
+            because both hand the visitor to Discord and neither should look
+            like the rest of the site while doing it.
+
+            The invite for a non-member; the SERVER for a member in screening —
+            a member following an invite is told they are already in and sent
+            nowhere, while opening the guild lands them on its rules prompt.
+
+            ⚠️ **Both open in a NEW TAB** (Adam, 2026-09-02), like the switch-
+            account link and unlike the sign-in button. The visitor has to do
+            something on Discord — join, or accept the rules — and then come
+            BACK here and sign in again; navigating this tab away would make
+            the return trip a browser-history problem, and the refusal that
+            explains what to do would be gone from the screen while they do
+            it. `target` also carries `rel="noopener noreferrer"` — see
+            `DiscordButton`. */}
+        {pendingRules ? (
+          <DiscordButton href={STELLAR_DISCORD_SERVER} target="_blank">
+            Open Stellar Discord
+          </DiscordButton>
+        ) : (
+          <DiscordButton href={STELLAR_DISCORD_INVITE} target="_blank">
+            Join Stellar Discord
+          </DiscordButton>
+        )}
+        {/* ⚠️ `pending_rules` only: the way back in is the SAME account, one
+            more time, after the rules are accepted in the other tab — so the
+            card says so with a control, not just with the sentence "then
+            sign in again" (PR #278 review: the copy pointed at a recovery
+            the card did not offer, since "Try different account" below leads
+            with switching accounts). Same tab, our own round-trip, meant to
+            replace this page — exactly what the sign-in button is. Kept
+            beside "Try different account" rather than instead of it (Adam,
+            2026-09-02): a visitor who signed in with the wrong account is
+            still a real case here. */}
+        {pendingRules && (
+          <SignInAgain href={signInUrl()} onClick={onSignInClick} />
+        )}
         {/* The quiet second action. A REFUSED sign-in leaves no session (see
             `portal/auth/mod.rs`), so there is nothing to sign out of and this
             is simply the round-trip again — where Discord's own account
@@ -915,11 +979,18 @@ function DiscordButton({
   href: string;
   onClick?: (event: MouseEvent<HTMLAnchorElement>) => void;
   /**
-   * `_blank` for the one caller that sends the visitor to discord.com to do
-   * something there and come BACK — switching account. `rel` is set from this
-   * rather than passed separately, because `noopener` is not optional on a
-   * `_blank` and leaving it to the call site is how one of them ends up
-   * without it.
+   * `_blank` for the callers that send the visitor to discord.com to do
+   * something there and come BACK: switching account, and — since task 0254 —
+   * the two refusal screens' buttons (join the server, accept its rules).
+   * What they have in common is that the page they leave is the page that
+   * explains the errand, and the visitor needs it again afterwards.
+   *
+   * The sign-in button is deliberately NOT one of them: OAuth is a top-level
+   * navigation that returns to this origin on its own.
+   *
+   * `rel` is set from this rather than passed separately, because `noopener`
+   * is not optional on a `_blank` and leaving it to the call site is how one
+   * of them ends up without it.
    */
   target?: '_blank';
   children: ReactNode;
@@ -965,6 +1036,47 @@ function DiscordButton({
  * and "less-than sign, try different account" is what a screen reader would
  * otherwise say.
  */
+/**
+ * The refusal screen's "sign in again" — the outlined secondary that
+ * `SwitchAccountDialog` also draws, lifted to the card for the one refusal
+ * whose remedy is the same account a second time (`pending_rules`).
+ *
+ * An `<a>` for the reason every sign-in control is one (see the sign-in
+ * button's comment): the round-trip is a top-level navigation and the
+ * `SameSite=Lax` cookie depends on it.
+ */
+function SignInAgain({
+  href,
+  onClick,
+}: {
+  href: string;
+  onClick: (event: MouseEvent<HTMLAnchorElement>) => void;
+}) {
+  return (
+    <Button
+      component="a"
+      href={href}
+      onClick={onClick}
+      fullWidth
+      variant="outlined"
+      data-testid="sign-in-again"
+      sx={{
+        minHeight: 48,
+        ...theme.typography.body1,
+        fontWeight: 700,
+        color: color.text.primary,
+        borderColor: color.stroke.default,
+        '&:hover': {
+          borderColor: color.text.primary,
+          backgroundColor: alpha(color.gray[50], 0.06),
+        },
+      }}
+    >
+      Sign in again
+    </Button>
+  );
+}
+
 function TryDifferentAccount({ onClick }: { onClick: () => void }) {
   return (
     <Button
@@ -1291,7 +1403,7 @@ function Dashboard({
    *
    * ⚠️ A landing that carries one keeps the ordinary dashboard, because the
    * revoked card cannot say what those outcomes say: `not_member`,
-   * `too_young`, `unknown` and `failed` are all reachable by an account whose
+   * `pending_rules`, `too_young`, `unknown` and `failed` are all reachable by an account whose
    * key is revoked, and each is a different reason the issue round-trip did
    * not produce one. Swallowing them behind a card that only knows a date
    * would leave the visitor with no explanation at all.
@@ -2406,6 +2518,8 @@ function ApiKey({
    */
   const { signin } = useOneShotParams(SIGNIN_PARAMS);
   const refusedNotMember = issue === 'not_member' || signin === 'not_member';
+  const refusedPendingRules =
+    issue === 'pending_rules' || signin === 'pending_rules';
   const refusedUnknown = issue === 'unknown' || signin === 'unknown';
   // Whether THIS landing is itself proof a key exists: the backend created
   // one before it redirected.
@@ -2658,13 +2772,42 @@ function ApiKey({
           you do not have a working key.
         </p>
       )}
+      {/* ⚠️ Both Discord links open in a NEW TAB, like the refusal screens'
+          buttons and for a sharper version of their reason: `useOneShotParams`
+          has already stripped `?issue=…` from the URL by the time either is
+          clicked, so a visitor who navigates this tab to Discord, does the
+          errand and presses Back returns to a dashboard with the refusal —
+          and its "try again" link — gone. The "try again" links stay
+          same-tab: they are our own round-trip and are meant to replace
+          this page. */}
       {refusedNotMember && (
         <p data-testid="issue-not-member">
           You need to be a member of the{' '}
-          <a href="https://discord.gg/stellardev">Stellar Developers Discord</a>{' '}
-          to get an API key — joining is an open invite, and new members may
-          need to complete the server&apos;s screening first. Once you are in,{' '}
+          <a
+            href={STELLAR_DISCORD_INVITE}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Stellar Developers Discord
+          </a>{' '}
+          to get an API key — joining is an open invite. Once you are in,{' '}
           <a href={issueUrl()}>try again</a>.
+        </p>
+      )}
+      {/* On the server, rules not accepted (task 0254). Names the server, not
+          the invite: this visitor is already a member. */}
+      {refusedPendingRules && (
+        <p data-testid="issue-pending-rules">
+          Your Discord account is on the{' '}
+          <a
+            href={STELLAR_DISCORD_SERVER}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Stellar Developers Discord
+          </a>
+          , but you have not accepted the server&apos;s rules yet. Accept them
+          on Discord, then <a href={issueUrl()}>try again</a>.
         </p>
       )}
       {issue === 'too_young' && (

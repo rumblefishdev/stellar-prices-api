@@ -40,27 +40,24 @@ cd "$(dirname "$0")/.."
 # Discord populates `pending` only for guilds with Membership Screening
 # enabled, so the guild is a variable of the experiment, not a detail.
 #
-#   Default — the scratch guild (`1536303837785362432`). You own it, which
-#   makes it the BETTER instrument: toggle Membership Screening in Server
-#   Settings → Members and run this twice, and the two runs measure both arms
-#   of `eligibility.rs`'s `match m.pending` — more than one observation
-#   against a server whose settings we cannot change would ever give.
+#   Default — `897514728459468821`, Stellar Developers: the official and only
+#   Stellar guild (Adam, 2026-09-02, task 0254), the one production gates on,
+#   and the one whose screening is MEASURED ON (`MEMBER_VERIFICATION_GATE_
+#   ENABLED` in its invite metadata, 2026-09-02 — `npm run
+#   discord:verify-guild` prints it). Needs an account that is a member of it;
+#   for the `pending: true` arm, an account that joined and has NOT accepted
+#   the rules.
 #
-#   ALREADY RUN, 2026-08-27: this guild answered `pending: false` (present).
-#   Recorded in task 0189's Step 0 table, item 2. Whether that was with
-#   screening on or off is UNCONFIRMED, and it is the whole difference
-#   between "item 2 answered" and "items 2 and 4 answered" — check the
-#   setting before running the other arm.
+#   GUILD=1536303837785362432 — the scratch guild (`stellar_test`). You own
+#   it, so you can toggle Membership Screening in Server Settings → Members
+#   and run this twice to see both arms of `eligibility.rs`'s `match
+#   m.pending` on a server whose settings you control. ALREADY RUN,
+#   2026-08-27: it answered `pending: false` (present); whether screening was
+#   on or off at the time is UNCONFIRMED.
 #
-#   GUILD=897514728459468821 — the real Stellar Developers guild, which is
-#   what production will gate on (task 0179 step 4). Needs an account that is
-#   a member of it. Run this once the scratch runs have told you what each
-#   arm looks like.
-#
-# What production ultimately turns on is whether the Stellar guild has
-# screening enabled — visible in its `features` (MEMBER_VERIFICATION_GATE_
-# ENABLED) without any OAuth round-trip at all.
-GUILD="${GUILD:-1536303837785362432}"
+# The verdicts below name the landing the callback chose. Since task 0254
+# `pending: true` lands on its own `pending_rules` rather than `not_member`.
+GUILD="${GUILD:-897514728459468821}"
 SECRET_FILE="${SECRET_FILE:-.portal-oauth.json}"
 PORT="${PORT:-8080}"
 LOG="${LOG:-/tmp/portal-pending-absent-$(date +%Y%m%dT%H%M%S).log}"
@@ -95,11 +92,11 @@ PORT="$PORT" RUST_LOG="${RUST_LOG:-info}" \
   cargo run -q -p prices-api --features local-server --bin serve >"$LOG" 2>&1 &
 SERVE=$!
 for _ in $(seq 1 60); do
-  curl -sf -m 2 "http://localhost:$PORT/api/api/config" >/dev/null && break
+  curl -sf -m 2 "http://localhost:$PORT/api/config" >/dev/null && break
   kill -0 $SERVE 2>/dev/null || { echo "serve died at start:"; tail -20 "$LOG"; exit 1; }
   sleep 1
 done
-curl -sf -m 2 "http://localhost:$PORT/api/api/config" >/dev/null || {
+curl -sf -m 2 "http://localhost:$PORT/api/config" >/dev/null || {
   echo "serve never answered /config:"; tail -20 "$LOG"; kill $SERVE; exit 1; }
 echo "serve up on :$PORT (pid $SERVE)"
 
@@ -121,6 +118,7 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   elif grep -q 'Unknown Guild (10004)'                 "$LOG"; then VERDICT=guild;   break
   elif grep -q 'membership could not be verified'      "$LOG"; then VERDICT=discord; break
   elif grep -q 'outcome="not_member"\|outcome = "not_member"' "$LOG"; then VERDICT=notmember; break
+  elif grep -q 'outcome="pending_rules"\|outcome = "pending_rules"' "$LOG"; then VERDICT=pending; break
   # The success path logs no "signed in" line of its own, so the positive
   # signal is anything that can only happen AFTER membership resolved to
   # `Member`: a key issued, the re-issue cap, or the age refusal.
@@ -161,6 +159,13 @@ case "$VERDICT" in
   notmember)
     echo "⚠️  NOT A MEASUREMENT — that account is not a member of guild $GUILD."
     echo "   Join it, or sign in with an account that is."
+    ;;
+  pending)
+    echo "✅ PRESENT, and TRUE — the object carried \`pending: true\`: on the server,"
+    echo "   rules not accepted. This is task 0254's arm, observed on the REST route."
+    echo "   Record it in 0254's step 0 with this line, then accept the rules on"
+    echo "   Discord and run again for the \`false\` arm:"
+    grep -n 'outcome="pending_rules"\|outcome = "pending_rules"' "$LOG" | head -2
     ;;
   *)
     echo "⏳ nothing conclusive within ${TIMEOUT_SECS}s. Read the log yourself:"

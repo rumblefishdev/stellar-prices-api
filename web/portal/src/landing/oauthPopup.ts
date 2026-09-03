@@ -165,6 +165,7 @@ export type SigninOutcome =
   | 'cancelled'
   | 'failed'
   | 'not_member'
+  | 'pending_rules'
   | 'unknown'
   | 'not_open';
 
@@ -173,6 +174,10 @@ const SIGNIN_OUTCOMES: readonly SigninOutcome[] = [
   'cancelled',
   'failed',
   'not_member',
+  // On the server, rules not accepted (task 0254). Split out of `not_member`
+  // because its remedy is a different click — see `PENDING_RULES_QUERY` in
+  // `portal/auth/mod.rs`.
+  'pending_rules',
   'unknown',
   // A deployment with no eligibility parameters wired — 0183's closed portal,
   // reached through the callback rather than through `/config`.

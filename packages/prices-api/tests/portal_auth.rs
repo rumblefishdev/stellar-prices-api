@@ -910,11 +910,14 @@ async fn a_non_member_cannot_sign_in() {
     assert_eq!(mock.member_calls(), 1);
 }
 
-/// `pending: true` — on the server but still inside its screening — is the
-/// same refusal, and is task 0189's rule rather than a new one: `decide` and
-/// `membership` share the single statement of it.
+/// `pending: true` — on the server but still inside its screening — is
+/// refused like a non-member, but lands on ITS OWN literal (task 0254): the
+/// page must be able to say "accept the rules" rather than "join". Modified
+/// from 0189's version, which asserted `not_member` here — the refusal is
+/// unchanged, the landing is split. `decide` and `membership` still share the
+/// single statement of it.
 #[tokio::test]
-async fn a_member_still_in_screening_cannot_sign_in() {
+async fn a_member_still_in_screening_is_refused_as_pending_rules() {
     let mock = MockDiscord::start_with(
         GRANTED_SCOPE,
         None,
@@ -927,8 +930,9 @@ async fn a_member_still_in_screening_cannot_sign_in() {
 
     let reply = sign_in_against(&app_against(&mock)).await;
 
-    assert_eq!(reply.location(), "/api/?signin=not_member");
+    assert_eq!(reply.location(), "/api/?signin=pending_rules");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
+    assert!(reply.clears(cookies::PENDING_COOKIE));
 }
 
 /// Every way of NOT KNOWING lands on `unknown`, never on `not_member`.

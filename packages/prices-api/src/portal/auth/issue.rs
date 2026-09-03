@@ -10,13 +10,14 @@
 //! # Every outcome is a redirect, and every redirect target is a literal
 //!
 //! The visitor is mid-navigation (Discord sent them here), so the answer is a
-//! `303` back to the portal. **Five of the seven are verdicts** — the outcomes
+//! `303` back to the portal. **Six of the eight are verdicts** — the outcomes
 //! of a completed eligibility check, and the only ones this module produces:
 //!
 //! | query | meaning |
 //! | --- | --- |
 //! | `?issue=ok` | the key exists and is on the plan — the page reveals it |
-//! | `?issue=not_member` | Discord confirmed no such membership (its own 10007/10004), or the member has not cleared screening |
+//! | `?issue=not_member` | Discord confirmed no such membership (its own 10007/10004) |
+//! | `?issue=pending_rules` | on the server, rules not accepted (Membership Screening, `pending: true`) — the remedy is a click on Discord, not an invite (task 0254) |
 //! | `?issue=too_young&wait_secs=N` | account below the threshold; `N` is the wait, so the page's copy follows the operator's setting |
 //! | `?issue=unknown` | membership could **not** be verified (throttle, outage, absent `pending`, unreadable parameter, or Discord failing the exchange or the identity read) — refused without accusation |
 //! | `?issue=failed` | our key service could not produce a key — the control plane refused, or issuance is not wired on this deployment. Never a statement about the visitor |
@@ -80,12 +81,13 @@ use crate::portal::keys::gateway::Gateway;
 /// decimal, so no request-derived byte can reach a `Location` header.
 pub(super) const ISSUE_OK_QUERY: &str = "?issue=ok";
 pub(super) const ISSUE_NOT_MEMBER_QUERY: &str = "?issue=not_member";
+pub(super) const ISSUE_PENDING_RULES_QUERY: &str = "?issue=pending_rules";
 pub(super) const ISSUE_UNKNOWN_QUERY: &str = "?issue=unknown";
 pub(super) const ISSUE_FAILED_QUERY: &str = "?issue=failed";
 
 /// The round-trip ended at Discord, before any check could run.
 ///
-/// These two are **not** a sixth and seventh verdict. The five above are the
+/// These two are **not** a seventh and eighth verdict. The six above are the
 /// outcomes of a *completed* eligibility check; these are what happens when
 /// the visitor never reaches one, and sign-in has had exactly this pair since
 /// task 0186 (`?signin=cancelled` / `?signin=failed`). Issue had neither, so
@@ -408,6 +410,10 @@ pub(super) async fn complete_issue(
             tracing::info!(outcome = "not_member", "portal issue refused");
             land(ISSUE_NOT_MEMBER_QUERY)
         }
+        Eligibility::PendingScreening => {
+            tracing::info!(outcome = "pending_rules", "portal issue refused");
+            land(ISSUE_PENDING_RULES_QUERY)
+        }
         Eligibility::TooYoung { wait_secs } => {
             tracing::info!(outcome = "too_young", wait_secs, "portal issue refused");
             land(&too_young_query(wait_secs))
@@ -562,9 +568,9 @@ pub(super) async fn after_sign_in(
         }
         // Membership was decided before the session was written; `decide`
         // re-derives the same answer from the same `MemberLookup`, so these
-        // two arms are unreachable. Land plain rather than panic — the
+        // three arms are unreachable. Land plain rather than panic — the
         // dashboard's issue control will re-ask and land the real verdict.
-        Eligibility::NotMember | Eligibility::Unknown => {
+        Eligibility::NotMember | Eligibility::PendingScreening | Eligibility::Unknown => {
             tracing::warn!("sign-in passed membership but `decide` did not; landing without a key");
             String::new()
         }
@@ -618,6 +624,7 @@ mod tests {
         let fixed = [
             ISSUE_OK_QUERY,
             ISSUE_NOT_MEMBER_QUERY,
+            ISSUE_PENDING_RULES_QUERY,
             ISSUE_UNKNOWN_QUERY,
             ISSUE_FAILED_QUERY,
             // Pre-check landings. Distinct from each other and from every

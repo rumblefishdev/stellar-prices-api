@@ -52,7 +52,10 @@ appears as an acceptance criterion in every iteration of our design response
     flag (that needs the `email` scope), no phone field at all, and no server membership.
     SDF's own SCF Dashboard does not treat a Discord account as sufficient either.
     **Scope therefore grows by two gates:** the flow now requests
-    `identify` + `guilds.members.read` and requires **membership of the Stellar Discord**,
+    `identify` + `guilds.members.read` and requires **membership of the Stellar Discord**
+    — Stellar Developers, `897514728459468821`, the official and only guild (Adam,
+    2026-09-02) — **with its Membership Screening cleared** (a joiner who has not accepted
+    the server's rules is `pending: true` and is refused as exactly that, task 0254),
     plus a **minimum Discord account age of 5 minutes** derived from the user's snowflake
     (free — no extra scope), matching Stellar's own server setting. Both are checked
     **once, at issuance** — nothing re-checks them, which is the consistent extension of
