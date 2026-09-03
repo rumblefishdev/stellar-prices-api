@@ -174,6 +174,23 @@ history:
       scenario, which cleared 200 ms with ~4x margin. Report states both side by
       side and warns against quoting the PASS alone. Raw exports including the
       failed run and the liveness probe archived under `docs/loadtest-results/`.
+  - date: 2026-09-03
+    status: active
+    who: stkrolikiewicz
+    note: >
+      **Read path recovered unattended** between 06:57:54 and 07:25:32 UTC —
+      19 to 47 minutes of outage. The range is a process failure of ours: the
+      liveness probe died after 16 checks and its restart failed silently, so
+      there is no observation across the gap. Nothing was changed on our side
+      and no load applied, so it recovered on its own or through BE action.
+      Verified on the **miss** path, not just the cache: five distinct cold
+      assets returned 200 in 163–238 ms.
+      **That recovery measurement is itself a finding.** A cache miss costs
+      ~170–240 ms with *zero* contention — already at the T2 200 ms bar and
+      about double the T3 100 ms one. So the wide regime was never going to
+      produce a passing p95 even had the database survived it, and the AC pass
+      rests entirely on the gateway cache concealing a data path that is
+      inherently too slow for T3. Recorded in the report.
 ---
 
 # Load test — 100 req/s on `GET /assets/{id}/price`

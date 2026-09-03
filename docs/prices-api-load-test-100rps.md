@@ -209,6 +209,27 @@ liveness probe:
 | ~06:40          | single sequential request     | 1 req      | `500`                                     |
 | 06:43:53        | liveness probe starts, 1/30 s | 2 req/30 s | `500` on `/price` **and** `/v1/assets`    |
 | 06:51:32        | 16th check                    | —          | still `500`                               |
+| 06:57:54        | last confirmed failure        | 1 req      | `500`                                     |
+| 07:25:32        | first confirmed recovery      | 1 req      | `200` on both routes                      |
+| ~07:26          | miss path re-checked          | 5 req      | 5 × `200`, cold assets, 163–238 ms        |
+
+**Outage duration: at least 19 minutes, at most 47.** It cannot be pinned closer,
+and the reason is a process failure worth owning: the 30-second liveness probe
+died after its 16th check and the restart failed silently, leaving no observation
+between 06:57:54 and 07:25:32. The recovery was unattended and its exact moment
+is unknown. Nothing was changed on our side in that gap and no load was applied,
+so the system either recovered on its own or was recovered from the BE side.
+
+Recovery is genuine, not a flicker: five distinct **cold** assets — cache misses,
+the exact path that collapsed — returned `200` in 163–238 ms at ~0.3 req/s.
+
+⚠️ **Those recovery numbers matter on their own.** A cache miss costs
+**~170–240 ms with no contention at all**. That is already at the Tranche 2
+200 ms bar and roughly double the Tranche 3 100 ms one, before a single
+concurrent request is added. It is the clearest evidence in this report that the
+wide-pool regime was never going to produce a passing p95 even had the database
+survived it — and it reframes the AC pass, which rests entirely on the gateway
+cache hiding a data path that is inherently too slow for the T3 target.
 
 Errors are `500 {"code":"db_error","message":"price lookup failed"}`, and the
 listing endpoint returns `500 {"code":"db_error","message":"asset list failed"}`
@@ -347,9 +368,9 @@ load-bearing.
 
 Ordered by urgency, not by AC order.
 
-- [ ] **Read path restored.** Down since ~06:38 UTC; still `500` at 06:51:32
-      after 16 liveness checks. This is a live production incident, not a test
-      artefact.
+- [x] **Read path restored** — recovered unattended between 06:57:54 and
+      07:25:32 UTC, verified on the miss path. Duration 19–47 min; see the
+      outage timeline for why it is a range.
 - [ ] **Root cause established: connection ceiling or query performance?** The
       whole remediation plan depends on the answer, and nothing above settles
       it. Needs someone with access to the ClickHouse box and to CloudWatch.
