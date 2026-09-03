@@ -16,6 +16,7 @@
 //! and a periodic re-aggregation is tracked as a follow-up.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use prices_ingest_core::{
     AssetRegistry, CandleAccumulator, OracleSample, Registries, decode_object, extract_trades,
@@ -26,6 +27,7 @@ use tracing::info;
 
 use crate::cursor::{Cursor, CursorError};
 use crate::galexie_key::ledger_s3_key;
+use crate::metrics::WriteLatency;
 use crate::object_fetcher::{FetchError, ObjectFetcher};
 use crate::sink::{CandleSink, SinkError};
 
@@ -47,6 +49,11 @@ pub struct RunStats {
     pub end_cursor: u64,
     pub ledgers_persisted: u64,
     pub rows_emitted: u64,
+    /// Candle-INSERT latency for this run, or `None` when the run wrote no
+    /// candles at all. `None` rather than a zeroed struct so an idle run
+    /// publishes no `ClickHouseWriteLatencyMs` datapoint instead of a 0 ms one
+    /// (task 0125).
+    pub ch_write: Option<WriteLatency>,
 }
 
 /// Warm per-container processing state: the surrogate-id registry (loaded from
@@ -159,6 +166,8 @@ where
                 end_cursor: start,
                 ledgers_persisted: 0,
                 rows_emitted: 0,
+                // Nothing was persisted, so no INSERT happened: no datapoint.
+                ch_write: None,
             });
         }
 
@@ -178,14 +187,29 @@ where
         // Flush + write candles/oracle, then advance the cursor LAST (barrier).
         let mut rows_emitted = 0u64;
 
+        // Task 0125: time the candle INSERTs — the ClickHouse-side write signal
+        // the cluster itself cannot give us (no metric stream, no `system.*`
+        // grant). Timed at the CALL SITE, not inside the sink, so the
+        // `CandleSink` trait and both impls stay untouched and no feature cfg
+        // leaks into the write path. Recorded only AFTER the `?`, so a failed
+        // write is not measured and no error path changes. Note that
+        // `ClickHouseSink::write_candles` wraps the write in
+        // `retry_with_backoff`, so a retried write folds its backoff sleeps in
+        // and reads as one long write.
+        let mut ch_write = WriteLatency::default();
+
         let sdex_candles = sdex.flush_all();
         rows_emitted += sdex_candles.len() as u64;
+        let t = Instant::now();
         self.sink.write_candles(&sdex_candles, "sdex").await?;
+        ch_write.record(t.elapsed().as_secs_f64() * 1000.0);
 
         for (source, mut acc) in amm {
             let candles = acc.flush_all();
             rows_emitted += candles.len() as u64;
+            let t = Instant::now();
             self.sink.write_candles(&candles, source).await?;
+            ch_write.record(t.elapsed().as_secs_f64() * 1000.0);
         }
 
         self.sink.write_oracle(&oracle).await?;
@@ -204,6 +228,7 @@ where
             end_cursor: current,
             ledgers_persisted: persisted,
             rows_emitted,
+            ch_write: (ch_write.count > 0).then_some(ch_write),
         })
     }
 }

@@ -19,15 +19,19 @@ use aws_lambda_events::sqs::{BatchItemFailure, SqsBatchResponse, SqsEvent};
 use lambda_runtime::{Error, LambdaEvent, run, service_fn};
 use prices_ledger_processor::{
     cursor::{ClickHouseCursor, Cursor, CursorError},
+    metrics,
     object_fetcher::S3Fetcher,
     reconcile::Reconciler,
     sink::ClickHouseSink,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 const ENV_BUCKET: &str = "BUCKET_NAME";
 const ENV_INITIAL_CURSOR: &str = "INITIAL_CURSOR";
 const ENV_MAX_ITERATIONS: &str = "MAX_ITERATIONS";
+/// Deployment environment, set on the function by CDK. Every custom metric in
+/// this account carries it as its `Environment` dimension.
+const ENV_NAME: &str = "ENV_NAME";
 const DEFAULT_MAX_ITERATIONS: usize = 16;
 /// Logical consumer key for this processor's row in `prices.ingest_cursor`.
 const CURSOR_ID: &str = "ledger-processor";
@@ -132,9 +136,21 @@ async fn main() -> Result<(), Error> {
         pool_registry,
     ));
 
+    // CloudWatch client for `ClickHouseWriteLatencyMs` (task 0125). Built once
+    // at cold start; the publish itself is best-effort per invocation and runs
+    // only after the cursor commit, so a CloudWatch failure never redelivers a
+    // doorbell.
+    let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .load()
+        .await;
+    let cw = Arc::new(aws_sdk_cloudwatch::Client::new(&aws_cfg));
+    let env_name = Arc::new(std::env::var(ENV_NAME).unwrap_or_else(|_| "unknown".to_string()));
+
     run(service_fn(move |event: LambdaEvent<SqsEvent>| {
         let r = reconciler.clone();
-        async move { handler(event, r, max_iterations).await }
+        let cw = cw.clone();
+        let env_name = env_name.clone();
+        async move { handler(event, r, max_iterations, cw, env_name).await }
     }))
     .await
 }
@@ -143,6 +159,8 @@ async fn handler(
     event: LambdaEvent<SqsEvent>,
     reconciler: Arc<R>,
     max_iterations: usize,
+    cw: Arc<aws_sdk_cloudwatch::Client>,
+    env_name: Arc<String>,
 ) -> Result<SqsBatchResponse, Error> {
     let (payload, _ctx) = event.into_parts();
     let mut batch_item_failures = Vec::new();
@@ -150,14 +168,27 @@ async fn handler(
     for msg in &payload.records {
         let message_id = msg.message_id.clone().unwrap_or_default();
         match reconciler.run(max_iterations).await {
-            Ok(stats) => info!(
-                message_id = %message_id,
-                start = stats.start_cursor,
-                end = stats.end_cursor,
-                persisted = stats.ledgers_persisted,
-                rows = stats.rows_emitted,
-                "doorbell processed"
-            ),
+            Ok(stats) => {
+                info!(
+                    message_id = %message_id,
+                    start = stats.start_cursor,
+                    end = stats.end_cursor,
+                    persisted = stats.ledgers_persisted,
+                    rows = stats.rows_emitted,
+                    "doorbell processed"
+                );
+
+                // Task 0125 — publish the candle-write latency. This sits in the
+                // `Ok` arm ON PURPOSE: reaching it means `reconcile` already
+                // committed the cursor, so the rows are durable and nothing here
+                // can reach the `Err` arm below, which is the sole path that
+                // pushes a `BatchItemFailure`. Best-effort: a CloudWatch failure
+                // is a warning, never a redelivered doorbell.
+                let m = metrics::write_latency_metrics(stats.ch_write);
+                if let Err(e) = metrics::publish(&cw, &env_name, &m).await {
+                    warn!(error = %e, "cloudwatch metric publish failed (non-fatal)");
+                }
+            }
             Err(e) => {
                 error!(
                     message_id = %message_id,
