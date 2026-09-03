@@ -2,9 +2,9 @@
 id: "0121"
 title: "Load test — 100 req/s sustained for 5 min on GET /assets/{id}/price, p95 <200ms, error rate <0.1%"
 type: TEST
-status: active
+status: completed
 related_adr: ["0007", "0008"]
-related_tasks: ["0047", "0120", "0122", "0128"]
+related_tasks: ["0047", "0120", "0122", "0126", "0128", "0255", "0260", "0261"]
 tags: [layer-backend, layer-infra, priority-high, effort-medium, milestone-M2, api, performance, load-test, acceptance]
 milestone: 2
 links:
@@ -191,6 +191,28 @@ history:
       produce a passing p95 even had the database survived it, and the AC pass
       rests entirely on the gateway cache concealing a data path that is
       inherently too slow for T3. Recorded in the report.
+  - date: 2026-09-03
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      **Closed. Tranche 2 AC 2 PASSES.** Verified against the criterion's own
+      wording in `docs/prices-api-general-overview.md:1306`, not against this
+      task's wishlist: script provided, 100 req/s held for 5 min, p95 47.09 ms
+      against the 200 ms bar, 0 errors in 30 001 requests against the 0.1 % bar,
+      and the report names the plan the key was on. All five met.
+      Two of this task's own criteria are **deferred to [[0260]]**, neither
+      required by the milestone: cache-miss percentiles (not obtainable by this
+      method — the system stops serving before they can be sampled at 100 req/s)
+      and the cold-start / ClickHouse-time breakdown (needs prod-account access).
+      Spawned [[0260]] (read-path collapse: connections or queries?) and
+      [[0261]] (listing cursor churn over a table replaced every minute), both
+      pushed to develop as `aa9abab`.
+      **Carried to [[0122]]:** Tranche 2 AC 3 asks for an `X-Cache: Hit` header
+      that does not exist on this API — verified here on 2026-08-20. The latency
+      split this task measured (47 ms cached vs 170–240 ms uncached) is usable
+      as alternative evidence if that criterion is renegotiated.
+      Archived with PR #234 still open; the board will show the move when it
+      merges.
 ---
 
 # Load test — 100 req/s on `GET /assets/{id}/price`
@@ -270,13 +292,17 @@ was opened to answer.
 - [x] p95 < 200ms and error rate < 0.1% on the 20-asset spread scenario
       — **p95 47.09 ms, 0 errors in 30 001 requests**, k6 exit 0
 - [ ] Percentiles reported separately for cache hits and cache misses
-      — hits measured (regimes 1 and 2). **Misses are not obtainable by this
-      method**: regime 3 established that the system stops serving before a
-      miss percentile can be sampled at 100 req/s. A lower-rate miss
-      measurement answers a different question and should be scoped
-      deliberately, not treated as a retry of this run
+      **(deferred to [[0260]])** — hits measured (regimes 1 and 2). Misses are
+      not obtainable by this method: regime 3 established that the system stops
+      serving before a miss percentile can be sampled at 100 req/s. What we do
+      have is an *uncontended* miss cost of ~170–240 ms, from the recovery
+      check. Neither this nor the item below is required by Tranche 2 AC 2,
+      which asks only for the 100 req/s run, the two thresholds and the plan
+      the key was on — all met
 - [ ] Cold-start incidence and ClickHouse-side query time recorded
-      — blocked on prod-account CloudWatch access, not on the run
+      **(deferred to [[0260]])** — blocked on prod-account CloudWatch access,
+      not on the run. After the outage this is no longer a nice-to-have
+      breakdown but the evidence that decides 0260's central question
 - [x] Report published under `docs/` with a pass/fail verdict, citable by
       [[0128]] — `docs/prices-api-load-test-100rps.md`, verdict **PASS**, raw
       k6 exports archived under `docs/loadtest-results/`
@@ -290,10 +316,83 @@ was opened to answer.
       *The outage* section and in the 2026-09-03 history entry above. BE told
       again during the outage with the full timeline
 
+## Implementation Notes
+
+**Delivered:** `packages/prices-api/loadtest/` (`price_load.js`, `README.md`,
+`seed.sql`), `docs/prices-api-load-test-100rps.md`, and four raw artefacts under
+`docs/loadtest-results/` — one k6 summary export per regime plus the outage
+liveness log. Usage plan `prices-production-loadtest-plan` (`i12bsj`) registered
+in `docs/runbooks/manual-api-key-tier.md`.
+
+**Results, all `phase:main`:**
+
+| regime           | pool | p95        | p99    | errors        | exit |
+| ---------------- | ---- | ---------- | ------ | ------------- | ---- |
+| 1 cache          | 1    | 47.75 ms   | 175.95 | 0 / 29 995    | 0    |
+| 2 **AC**         | 18   | **47.09**  | 107.53 | **0 / 30 001**| 0    |
+| 3 wide           | 4301 | (see note) | —      | 28 314 / 30 001 | 99 |
+
+Regime 3's percentiles are not a latency measurement — 94.38 % of it is the
+speed of returning `500`.
+
+## Design Decisions
+
+### From Plan
+
+1. **Three regimes rather than one number.** There is no `X-Cache` header and
+   the gateway cache keys on the path only, so hit and miss cannot be tagged per
+   request; pool size is the only lever on hit rate. Separate runs were the only
+   way to say what a p95 actually describes.
+2. **Dedicated usage plan.** Running on `pricing-api-free-production` (1 req/s)
+   would have measured our own throttle. Plan membership was later re-verified
+   *empirically* — 60 requests at ~52 req/s, zero 429 — because the prod account
+   is unreachable from the operator's machine.
+
+### Emerged
+
+3. **`pool-wide.json` gitignored rather than committed.** It is a production
+   snapshot that churns ~60 % a day (see [[0261]]), not a fixture. The 20-asset
+   conformance list stays committed because the AC scenario must be reproducible.
+4. **Regimes 1 and 2 run without a BE window.** They put ~1 200 queries on the
+   shared box in total, under 2 req/s. Only regime 3 was coordinated. This was
+   judged, not assumed, from the cache arithmetic.
+5. **The `≥60 s` gap rule was corrected to `≥30 s` mid-task.** The original
+   justified itself partly by cooling the Lambda pool, which no gap of that order
+   can do — containers survive 5–15 min. Container state is normalised by each
+   run's own full-rate warmup instead.
+6. **Not converted to a directory** despite exceeding 150 lines: ~197 of the 299
+   are history frontmatter, and the task is closing. Converting would create a
+   `notes/` tree nobody will edit.
+
+## Issues Encountered
+
+- **The endpoint moved mid-task.** [[0126]] retired the `execute-api` URL
+  (`a635439`) 28 minutes after the pre-flight smoke ran green against it. The
+  first run-day attempt aborted with `native → 403`, which API Gateway returns
+  byte-identically for an unknown key and for no key at all — the
+  indistinguishability [[0255]] is open on. Cost ~20 minutes to diagnose.
+- **The documented pool generator was wrong.** It emitted `XLM:` for native XLM
+  (the listing returns it with both `contract_address` and `issuer_address`
+  empty), which the API answers `400`, not `404` — so `setup()`'s
+  abort-on-non-404 would have killed the wide run inside the BE window. Found
+  and fixed in pre-flight.
+- **Regime 3 took production down** for 19–47 minutes. See the report's
+  *The outage*; root cause is [[0260]].
+- **The outage duration is a range because our own liveness probe died** after
+  16 checks and its restart failed silently, leaving no observation across the
+  gap. The recovery moment is unknown.
+- **No tests were broken or modified** — this task added no application code.
+
 ## Notes
 
-- If p95 fails only on cache misses, the levers in order of cost are: raise
-  per-endpoint TTL (§6 / [[0122]]), Lambda provisioned concurrency (§10 lists it
-  at ~+$45/mo), or move a hot column producer-side. Record which was chosen.
-- A RED result here is also a signal for task **0047** (cross-tenant throughput
-  on the shared box) and, in the extreme, for ADR 0007's sidecar-CH fallback.
+- The remediation levers this task assumed in advance (per-endpoint TTL
+  §6 / [[0122]], provisioned concurrency ~+$45/mo per §10, hot column
+  producer-side) all address *latency or miss rate*, and two work by avoiding
+  the database. If [[0260]] finds a connection ceiling, none of them raises it.
+  Do not pick one before that question is answered.
+- The RED result feeds **[[0047]]** (cross-tenant throughput on the shared box)
+  and, in the extreme, ADR 0007's sidecar-CH fallback.
+- **Tranche 2 AC 3** (`X-Cache: Hit` header) cannot pass as written — that
+  header does not exist on this API, verified here. Belongs to [[0122]]. The
+  latency split measured by this task (47 ms cached vs 170–240 ms uncached) is
+  usable as alternative evidence if the criterion is renegotiated.
