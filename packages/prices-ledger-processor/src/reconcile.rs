@@ -202,14 +202,23 @@ where
         rows_emitted += sdex_candles.len() as u64;
         let t = Instant::now();
         self.sink.write_candles(&sdex_candles, "sdex").await?;
-        ch_write.record(t.elapsed().as_secs_f64() * 1000.0);
+        // Only a write that had rows crossed the network: `write_candles`
+        // short-circuits on an empty slice, so timing that would fold a ~0 ms
+        // in-process no-op into the latency samples.
+        if !sdex_candles.is_empty() {
+            ch_write.record(t.elapsed().as_secs_f64() * 1000.0);
+        }
 
         for (source, mut acc) in amm {
             let candles = acc.flush_all();
             rows_emitted += candles.len() as u64;
             let t = Instant::now();
             self.sink.write_candles(&candles, source).await?;
-            ch_write.record(t.elapsed().as_secs_f64() * 1000.0);
+            // Same guard per AMM source — a source with no trades in the window
+            // is routine, and its no-op must not enter the samples.
+            if !candles.is_empty() {
+                ch_write.record(t.elapsed().as_secs_f64() * 1000.0);
+            }
         }
 
         self.sink.write_oracle(&oracle).await?;
@@ -228,7 +237,7 @@ where
             end_cursor: current,
             ledgers_persisted: persisted,
             rows_emitted,
-            ch_write: (ch_write.count > 0).then_some(ch_write),
+            ch_write: (!ch_write.samples_ms.is_empty()).then_some(ch_write),
         })
     }
 }

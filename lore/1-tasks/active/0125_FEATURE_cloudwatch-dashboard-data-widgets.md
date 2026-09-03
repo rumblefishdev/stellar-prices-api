@@ -317,11 +317,34 @@ asserts all of it against the synthesized template.
    inert. And setting `defaultInterval` together with `start` on the Dashboard
    throws at synth, so the global range is a default interval while the trend
    windows are per-widget. Both are now asserted by the synth script.
-9. **The StatisticSet shape was the one unverified API claim, and it held.**
-   `MetricDatum::builder().statistic_values(StatisticSet::builder()…)` exists in
-   `aws-sdk-cloudwatch` 1.116.0 and its `build()` is infallible, so no fallback
-   to a single value was needed and the metric keeps its intended meaning: the
-   per-invocation spread across 1+N INSERTs, not one number standing in for it.
+9. **The metric is published as raw `Values`, not as a StatisticSet — because
+   the dashboard asks it for percentiles.** The first implementation folded the
+   1+N INSERT timings into `MetricDatum.statistic_values` (SampleCount / Sum /
+   Minimum / Maximum). That shape exists in `aws-sdk-cloudwatch` 1.116.0 and
+   compiles, but CloudWatch keeps no distribution behind a statistic set, so
+   **`p50`/`p95` cannot be read back from it** — and `p95` is exactly what the
+   row-0 acceptance strip and the ingestion trend row query. Both panels would
+   have rendered "No data" for ever, with nothing failing at synth, at deploy or
+   at render. So `MetricDatum::builder().set_values(Some(values))` carries the
+   samples themselves (`_metric_datum.rs:196` in the installed crate; `Counts`
+   omitted, which defaults to 1 per value). The batching rationale survives —
+   the samples ride in ONE `PutMetricData` call — but `Values` accepts at most
+   **150 entries per datum**, so a longer run spills into further datums of the
+   same metric inside the same call. The samples are only real writes: an empty
+   candle slice short-circuits inside `write_candles` with no round-trip, so it
+   is not timed and cannot drag the minimum toward zero. The synth script now
+   fails if any `Prices/Ingest` widget asks for a `pNN` stat while
+   `metrics.rs` still publishes via `statistic_values(`.
+10. **The alarm strip is a `findAll()` walk, and only a comment enforces when it
+    runs.** `stackOwnAlarms` is derived by walking the construct tree at a fixed
+    point near the end of the constructor, so **every alarm must already have
+    been constructed** — an alarm added below that block is silently missing
+    from the strip, and nothing errors. The ordering is defended by a comment
+    alone. What catches a drop is the synth assertion `DashboardAlarmCount ==
+    own alarm resources in the template + 9 imported`: an alarm that falls out
+    of the walk still appears as a resource, so the two numbers diverge and the
+    check fails. It does not catch a reordering that removes and adds an equal
+    number of alarms, which is why the ordering comment stays load-bearing.
 
 ## Future Work
 

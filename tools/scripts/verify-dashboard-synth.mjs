@@ -27,18 +27,24 @@
  *      the probe defines both constants) and the `cleanup` worker's
  *      `FunctionName` (its EventBridge rule is disabled on purpose, so it has
  *      no Lambda metrics at all). Either would render as "No data".
- *   3. The alarm strip's coverage, published as the `DashboardAlarmCount`
+ *   3. No widget asks for a percentile statistic (p50/p95/...) on a
+ *      `Prices/Ingest` metric unless the ledger-processor publishes that metric
+ *      as raw `Values`. CloudWatch cannot compute a percentile from a
+ *      `StatisticSet`, so the panel renders "No data" with nothing failing —
+ *      the exact defect this script exists to catch, invisible to check 1
+ *      because the metric name IS in the body; only the statistic is unusable.
+ *   4. The alarm strip's coverage, published as the `DashboardAlarmCount`
  *      output, equals the number of alarm RESOURCES in this template plus the
  *      nine per-worker `-errors` alarms owned by EventBridgeStack and imported
  *      by ARN. Deriving the expected number from the template's own resources
  *      rather than hard-coding it is what keeps this honest when the alarm set
  *      changes — an alarm added or removed does not need this file edited, but
  *      an alarm dropped from the strip fails here.
- *   4. `periodOverride` is `inherit`. Its default is `auto`, which silently
+ *   5. `periodOverride` is `inherit`. Its default is `auto`, which silently
  *      overrides every per-widget period and makes the trend rows inert.
- *   5. The dashboard's physical name is unchanged — a rename replaces the CFN
+ *   6. The dashboard's physical name is unchanged — a rename replaces the CFN
  *      resource and changes the console URL handed to the reviewer.
- *   6. No `LoginProfile` appears anywhere in the template: the read-only viewer
+ *   7. No `LoginProfile` appears anywhere in the template: the read-only viewer
  *      identity must carry no password in source control.
  *
  * USAGE
@@ -161,7 +167,51 @@ for (const [label, fragment] of banned) {
   }
 }
 
-// -- 3. the alarm strip is complete and derived -----------------------------
+// -- 3. percentile stats only on metrics published as raw values ------------
+/**
+ * `[["Prices/Ingest","MetricName","Environment","production",{...,"stat":"p95"}]]`
+ * after the backslash strip above. `[^\]]*` keeps the match inside one metric
+ * entry, so a percentile belonging to a neighbouring widget cannot be
+ * attributed to this namespace.
+ */
+const INGEST_SOURCE = 'packages/prices-ledger-processor/src/metrics.rs';
+const percentileOnIngest = [
+  ...body.matchAll(
+    /"Prices\/Ingest","([A-Za-z0-9_]+)"[^\]]*"stat":"(p\d+(?:\.\d+)?)"/g,
+  ),
+].map(([, metric, stat]) => `${metric} (${stat})`);
+
+if (percentileOnIngest.length > 0) {
+  let ingestSource;
+  try {
+    ingestSource = readFileSync(INGEST_SOURCE, 'utf8');
+  } catch (err) {
+    failures.push(
+      `widgets ask for a percentile on Prices/Ingest (${[...new Set(percentileOnIngest)].join(', ')}) ` +
+        `but ${INGEST_SOURCE} could not be read to confirm how those metrics are published: ${err.message}`,
+    );
+    ingestSource = null;
+  }
+  if (ingestSource !== null) {
+    const unique = [...new Set(percentileOnIngest)].join(', ');
+    if (ingestSource.includes('statistic_values(')) {
+      failures.push(
+        `${INGEST_SOURCE} publishes via statistic_values(), but the dashboard asks for ${unique} — ` +
+          'a percentile stat on a StatisticSet-published metric renders "No data" forever ' +
+          '(CloudWatch keeps no distribution behind SampleCount/Sum/Minimum/Maximum). ' +
+          'Publish raw values (set_values) or drop the percentile from the widget.',
+      );
+    }
+    if (!ingestSource.includes('set_values(')) {
+      failures.push(
+        `the dashboard asks for ${unique} but ${INGEST_SOURCE} never calls set_values() — ` +
+          'a percentile stat on a metric not published as raw values renders "No data" forever.',
+      );
+    }
+  }
+}
+
+// -- 4. the alarm strip is complete and derived -----------------------------
 const ownAlarms = Object.values(template.Resources ?? {}).filter(
   (r) => r.Type === 'AWS::CloudWatch::Alarm',
 ).length;
@@ -182,7 +232,7 @@ if (!Number.isFinite(declared)) {
   );
 }
 
-// -- 4. the physical name is unchanged --------------------------------------
+// -- 5. the physical name is unchanged --------------------------------------
 const expectedName = `prices-${envName}-overview`;
 if (dashboard.Properties.DashboardName !== expectedName) {
   failures.push(
@@ -191,7 +241,7 @@ if (dashboard.Properties.DashboardName !== expectedName) {
   );
 }
 
-// -- 5. no password in the template -----------------------------------------
+// -- 6. no password in the template -----------------------------------------
 if (JSON.stringify(template).includes('LoginProfile')) {
   failures.push(
     'template contains a LoginProfile — the viewer identity must carry no password in source control; ' +
@@ -208,6 +258,9 @@ if (failures.length > 0) {
 console.log(`PASS: ${expectedName}`);
 console.log(`  ${required.length} required metric/dimension fragments present`);
 console.log(`  ${banned.length} known empty-panel dimension pairs absent`);
+console.log(
+  `  ${percentileOnIngest.length} percentile stat(s) on Prices/Ingest backed by raw-value publication`,
+);
 console.log(
   `  alarm strip covers ${declared} alarms (${ownAlarms} own + ${IMPORTED_WORKER_ERROR_ALARMS} imported)`,
 );
