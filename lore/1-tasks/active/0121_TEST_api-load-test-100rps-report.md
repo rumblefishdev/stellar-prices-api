@@ -140,6 +140,40 @@ history:
       and `EQL` on 404, a different pair from the pre-flight's `USDC`/`RON`, so
       the unservable set **drifts day to day** — a data-freshness property, not
       a fixed defect list. Relevant to [[0178]] and [[0210]].
+  - date: 2026-09-03
+    status: active
+    who: stkrolikiewicz
+    note: >
+      **Regime 3 took the production read path down. Incident, not just a failed
+      run.** Ran 06:32:17–06:38:54 UTC in a BE-agreed window, 4301-asset pool.
+      `setup()` was clean at ~65 req/s (4301 x 200, 5 x 404); the measured phase
+      at 100 req/s failed **28 314 of 30 001 requests (94.38 %)** with
+      `500 {"code":"db_error"}`. Since ~06:40 a **single** request with no
+      concurrency fails the same way, and `/v1/assets` returns
+      `"asset list failed"` — the whole ClickHouse read path, not one route.
+      Still 500 at 06:51:32 after 16 liveness checks. Load stopped on detection
+      and not resumed; BE told with the timeline.
+      **Why regime 3 and not 1 or 2**, which offered the same 100 req/s an hour
+      earlier and were clean: with 1- and 18-asset pools against the 10 s cache
+      TTL, ~98–99.9 % of those requests never reached ClickHouse. The
+      4301-asset pool defeats the cache by construction, so this was the first
+      run where 100 req/s actually arrived at the database.
+      **Hypothesis, not a conclusion:** failures return *fast* (p50 65 ms, max
+      457 ms) rather than timing out, which points at the connection layer —
+      `max_connections`, an exhausted pool, or mTLS setup — rather than query
+      execution. Cannot be confirmed without prod-account access.
+      **This changes the remediation plan.** The three levers this task listed
+      in advance (per-endpoint TTL, provisioned concurrency, hot column
+      producer-side) all address latency or miss rate; two of them work by
+      *avoiding* the database. If the ceiling is connections, none of them
+      raises it — they raise the measured p95 and move the failure to whenever
+      the hit rate drops. Root cause must be settled before any is chosen.
+      Straight to [[0047]], and in the extreme an argument for ADR 0007's
+      sidecar-CH fallback.
+      The Tranche 2 AC still **passes** — it is written against the 20-asset
+      scenario, which cleared 200 ms with ~4x margin. Report states both side by
+      side and warns against quoting the PASS alone. Raw exports including the
+      failed run and the liveness probe archived under `docs/loadtest-results/`.
 ---
 
 # Load test — 100 req/s on `GET /assets/{id}/price`
@@ -219,9 +253,11 @@ was opened to answer.
 - [x] p95 < 200ms and error rate < 0.1% on the 20-asset spread scenario
       — **p95 47.09 ms, 0 errors in 30 001 requests**, k6 exit 0
 - [ ] Percentiles reported separately for cache hits and cache misses
-      — hits measured (regimes 1 and 2); **misses need regime 3**, pending the
-      BE window. There is no `X-Cache` header, so this cannot be split within a
-      single run
+      — hits measured (regimes 1 and 2). **Misses are not obtainable by this
+      method**: regime 3 established that the system stops serving before a
+      miss percentile can be sampled at 100 req/s. A lower-rate miss
+      measurement answers a different question and should be scoped
+      deliberately, not treated as a retry of this run
 - [ ] Cold-start incidence and ClickHouse-side query time recorded
       — blocked on prod-account CloudWatch access, not on the run
 - [x] Report published under `docs/` with a pass/fail verdict, citable by
@@ -231,9 +267,11 @@ was opened to answer.
       recommendation if the gap is material — no gap at p95 on the measured
       regimes (47.09 ms vs the 100 ms bar), qualified as cache-dominated; p99
       already exceeds 100 ms
-- [ ] BE notified before the run; no BE-side alarm fired, or the incident is
-      recorded — window requested 2026-09-03, awaiting reply. Regimes 1 and 2
-      did not need one (~1 200 queries total, under 2 req/s)
+- [x] BE notified before the run; no BE-side alarm fired, or the incident is
+      recorded — BE notified beforehand, window agreed and kept to the specified
+      5 minutes. **An incident occurred and is recorded** in the report's
+      *The outage* section and in the 2026-09-03 history entry above. BE told
+      again during the outage with the full timeline
 
 ## Notes
 

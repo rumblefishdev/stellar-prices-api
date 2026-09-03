@@ -1,9 +1,12 @@
 # Load test — `GET /assets/{id}/price` at 100 req/s
 
-> **STATUS: regimes 1 and 2 run on 2026-09-03. The AC scenario PASSED.**
-> Regime 3 (wide pool, all cache misses) still waits on a BE-coordinated window
-> — it is the only one that puts real load on the shared ClickHouse box. The
-> cold-start / ClickHouse section remains blocked on prod-account credentials.
+> **STATUS: all three regimes run on 2026-09-03. The AC scenario PASSED — and
+> regime 3 took the production read path down.** Both results are real and
+> neither cancels the other: the acceptance criterion is written against the
+> 20-asset scenario, which passed with ~4× margin, while the wide-pool regime
+> that actually reaches the database failed 94.38 % of its requests and left the
+> API returning `500` to single requests. See _The outage_ before quoting the
+> PASS anywhere.
 
 Task [0121](../lore/1-tasks/active/0121_TEST_api-load-test-100rps-report.md) ·
 Tranche 2 AC 2 · script: [`packages/prices-api/loadtest/`](../packages/prices-api/loadtest/README.md)
@@ -26,10 +29,17 @@ The AC scenario (regime 2, the 20-asset spread) sustained 99.85 req/s for
 30 001 requests** against the 0.1 % bar. k6 exited **0**, so all four thresholds
 held.
 
-Two AC checklist items are not closed by this run: the cache-miss percentiles
-need regime 3 (pending a BE window), and cold-start / ClickHouse-side timing
-needs credentials this machine does not have. Neither can turn the verdict
-above — both regimes that ran cleared the bar with roughly 4× margin.
+**This PASS is narrow, and quoting it without the next sentence would be
+misleading.** The criterion is met on the scenario it names. On the wide-pool
+regime — the only one whose requests actually reach ClickHouse rather than the
+gateway cache — the same 100 req/s failed 94.38 % of requests and took the read
+path down for every consumer, not just the test. A reviewer signing off Tranche 2
+on this report is entitled to the pass; anyone reading it as "the API handles
+100 req/s" is reading it wrong.
+
+Two AC checklist items remain open: cache-**miss** percentiles were not obtained
+(the system stopped serving misses before they could be measured), and
+cold-start / ClickHouse-side timing needs credentials this machine does not have.
 
 ## Environment
 
@@ -123,10 +133,19 @@ and
 | ---------------------- | ----- | ----- | --------- | ------ | ------ | -------- |
 | 1 — cache (1 asset)    | 45.15 | 46.51 | 47.75     | 175.95 | 930.13 | 29 995   |
 | 2 — **AC (18 assets)** | 45.04 | 46.31 | **47.09** | 107.53 | 246.20 | 30 001   |
-| 3 — wide (3504 assets) | TBD   | TBD   | TBD       | TBD    | TBD    | TBD      |
+| 3 — wide (4301 assets) | 64.97 | 69.85 | _76.91_   | 183.16 | 456.75 | 30 001   |
 
-Regimes 1 and 3 bracket the cache-hit and cache-miss percentiles that the AC asks
-to be reported separately; regime 2 is the mixture the AC actually specifies.
+🚫 **Regime 3's latency row is not a latency measurement and must not be quoted
+as one.** 94.38 % of those requests returned `500`, and an error response is
+cheap to produce, so those percentiles largely describe how fast the API failed.
+The honest reading of regime 3 is in _The outage_ below, not in this table. It is
+printed only so the raw export and this report agree.
+
+Regimes 1 and 3 were meant to bracket the cache-hit and cache-miss percentiles
+the AC asks to be reported separately. **That bracket does not exist**: the
+cache-miss side could not be measured, because the system stopped serving cache
+misses before it could be. Regime 2 is the mixture the AC actually specifies and
+is unaffected.
 
 **Regimes 1 and 2 are statistically indistinguishable at p95** — 47.75 vs
 47.09 ms — which is the expected result and worth stating plainly: at a 20-asset
@@ -150,11 +169,11 @@ error bar would be unreachable if these were counted, which is exactly why
 
 ### Rate sustained and errors
 
-| regime | offered | achieved    | `dropped_iterations{phase:main}` | non-200 | error rate | exit  |
-| ------ | ------- | ----------- | -------------------------------- | ------- | ---------- | ----- |
-| 1      | 100/s   | 99.87 req/s | 0                                | 0       | **0.00 %** | **0** |
-| 2      | 100/s   | 99.85 req/s | 0                                | 0       | **0.00 %** | **0** |
-| 3      | 100/s   | TBD         | TBD                              | TBD     | TBD        | TBD   |
+| regime | offered | achieved    | `dropped_iterations{phase:main}` | non-200    | error rate  | exit   |
+| ------ | ------- | ----------- | -------------------------------- | ---------- | ----------- | ------ |
+| 1      | 100/s   | 99.87 req/s | 0                                | 0          | **0.00 %**  | **0**  |
+| 2      | 100/s   | 99.85 req/s | 0                                | 0          | **0.00 %**  | **0**  |
+| 3      | 100/s   | 94.28 req/s | 0                                | **28 314** | **94.38 %** | **99** |
 
 `dropped_iterations` is a gate, not a statistic: any drop means k6 could not hold
 the offered rate, so the run did **not** sustain 100 req/s and its p95 is not the
@@ -170,6 +189,62 @@ live case of it mattering.
 **Error-rate argument.** 30 001 requests, zero errors. The rule of three puts the
 95 % upper bound at 3/30 001 = **0.01 %** — a 10× margin under the 0.1 % AC. This
 holds only because all 30 001 samples are on the one endpoint under test.
+
+### The outage — regime 3 took the read path down
+
+**Regime 3 did not measure the data path. It exhausted it.** This is the most
+important result in this report, and it is a harder finding than the AC pass.
+
+Raw export:
+[`loadtest-results/2026-09-03-regime3-wide-FAILED.json`](loadtest-results/2026-09-03-regime3-wide-FAILED.json) ·
+liveness probe:
+[`loadtest-results/2026-09-03-outage-recovery-probe.log`](loadtest-results/2026-09-03-outage-recovery-probe.log)
+
+| time (UTC)      | phase                         | offered    | result                                    |
+| --------------- | ----------------------------- | ---------- | ----------------------------------------- |
+| 06:32:17        | run starts                    | —          | —                                         |
+| 06:32:17–33:23  | `setup()` probe, 4306 assets  | ~65 /s     | **clean** — 4301 × `200`, 5 × `404`       |
+| ~06:33:23–34    | warmup, excluded              | 100 /s     | —                                         |
+| ~06:34–06:38:54 | `phase:main`, 30 001 requests | 100 /s     | **28 314 failed (94.38 %)**, 1 687 served |
+| ~06:40          | single sequential request     | 1 req      | `500`                                     |
+| 06:43:53        | liveness probe starts, 1/30 s | 2 req/30 s | `500` on `/price` **and** `/v1/assets`    |
+| 06:51:32        | 16th check                    | —          | still `500`                               |
+
+Errors are `500 {"code":"db_error","message":"price lookup failed"}`, and the
+listing endpoint returns `500 {"code":"db_error","message":"asset list failed"}`
+— so **the whole ClickHouse read path is down, not one route**, and not only
+under load: a single request with no concurrency behind it fails the same way.
+
+**What separates regime 3 from the two that passed.** Regimes 1 and 2 also
+offered 100 req/s and were clean. The difference is not rate, it is _what
+reached the database_: with a 1- and 18-asset pool against a 10 s cache TTL,
+~98–99.9 % of those requests were served by the API Gateway cache and never
+touched ClickHouse. Regime 3's 4301-asset pool defeats that cache by
+construction, so it is the **first run in which 100 req/s actually arrived at the
+database**. It did not survive it.
+
+**Hypothesis, offered as a hypothesis.** The failures return _fast_ — p50 65 ms,
+max 457 ms — rather than timing out. A database saturated on query execution
+produces slow responses and timeouts; immediate `500`s point instead at the
+connection layer: a `max_connections` ceiling, an exhausted client pool, or mTLS
+session setup failing under concurrency. This is a direction for whoever has
+access to check, not a conclusion — it cannot be confirmed from here (see the
+credentials note below).
+
+**Why this matters beyond a failed run.** The remediation levers this task listed
+in advance — raising the per-endpoint TTL, Lambda provisioned concurrency, moving
+a hot column producer-side — all reduce _latency_ or _miss rate_. If the ceiling
+is connection-count rather than query performance, **none of them addresses it**;
+they only hide it behind a higher cache hit rate. That distinction should be
+settled before any of the three is chosen. It is squarely the question
+[0047](../lore/1-tasks/backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md)
+exists to answer, and in the extreme it is an argument for ADR 0007's sidecar
+ClickHouse fallback.
+
+**Coordination.** The window was agreed with BE beforehand and the run was kept
+to the specified duration. Load was stopped immediately on detection and has not
+been resumed; the only traffic since is one liveness request per 30 s, which is
+not load. BE were told during the outage, with the timeline above.
 
 ### Cold starts and ClickHouse-side time
 
@@ -200,21 +275,25 @@ at 47.75 ms. No lever needs pulling for Tranche 3 on this evidence.
 
 Two honest qualifications, because this number is easy to over-claim:
 
-1. **It is a cache-dominated number.** Both measured regimes hit the gateway
-   cache on ~98–99.9 % of requests. Tranche 3 AC 5 says "p95 <100 ms at
-   100 req/s" without qualifying the cache state; if a reviewer reads that as the
-   data path, regime 3 is the number that answers it and it is not yet measured.
-2. **p99 already exceeds 100 ms** in both regimes (175.95 and 107.53 ms). The
-   T3 bar is written at p95, so this does not breach it, but it shows the miss
-   path and cold starts land above 100 ms — which is what regime 3 will amplify
-   from ~2 % of requests to 100 %.
+1. **It is a cache-dominated number.** Both passing regimes hit the gateway cache
+   on ~98–99.9 % of requests. Tranche 3 AC 5 says "p95 <100 ms at 100 req/s"
+   without qualifying the cache state; read as the data path, the answer is not
+   47 ms — it is that the data path did not stay up at that rate.
+2. **p99 already exceeds 100 ms** in both (175.95 and 107.53 ms). The T3 bar is
+   written at p95 so this does not breach it, but the miss path and cold starts
+   already land above 100 ms at a ~2 % miss rate.
 
-If regime 3 lands above 100 ms but under 200 ms, the AC still passes and the T3
-gap becomes real; the levers in ascending cost are then raising the per-endpoint
-TTL (§6 /
+**The plan for closing a T3 gap needs revisiting before it is used.** This report
+previously assumed the gap would be a latency gap, to be closed by raising the
+per-endpoint TTL (§6 /
 [0122](../lore/1-tasks/backlog/0122_TEST_apigateway-cache-ttl-verification.md)),
 Lambda provisioned concurrency (~+$45/mo per §10), or moving a hot column
-producer-side. Record which was chosen and why.
+producer-side. Regime 3 suggests the binding constraint may not be latency at
+all. Two of those three levers work by _avoiding_ the database rather than making
+it cope — which raises the measured p95 while leaving the ceiling exactly where
+it is, and moves the failure to whenever the cache hit rate drops. Establish
+whether the ceiling is connections or query performance first; the answer decides
+whether any of these levers is even relevant.
 
 ## Why a window is needed
 
@@ -228,18 +307,28 @@ opened to answer. Two rules:
    here rather than dropping it quietly.
 2. Schedule away from our own OHLCV batch, and tell BE before starting.
 
-**Regimes 1 and 2 did not need the window and were run without one**, which is
-the reason they are already reported above. Between them they put roughly 1 200
-queries on the shared box across eleven minutes — under 2 req/s, below the noise
-floor of that machine. Regime 3 alone is ~36 500 queries at a sustained
-100 req/s, and it is the only run BE has to be told about.
+**Regimes 1 and 2 did not need the window and were run without one.** Between
+them they put roughly 1 200 queries on the shared box across eleven minutes —
+under 2 req/s, below that machine's noise floor. Regime 3 alone was ~37 300
+requests at a sustained 100 req/s, and it was the only run BE had to be told
+about.
 
-|                                | regimes 1 & 2 (2026-09-03)                 | regime 3                             |
-| ------------------------------ | ------------------------------------------ | ------------------------------------ |
-| BE notified                    | not required — see above                   | requested 2026-09-03, awaiting reply |
-| Window                         | none                                       | TBD                                  |
-| BE-side alarms                 | none observed on our side; not BE-verified | TBD                                  |
-| Runs discarded as contaminated | none                                       | TBD                                  |
+**The caution in this section turned out to be the correct call, and still
+understated the risk.** It was written expecting contention — a run that degrades
+a neighbour's p95 and has to be discarded. What actually happened is that the run
+took the shared read path down outright, for our own API as well. Anyone
+repeating regime 3 should treat it as a **potentially destructive test of the
+database tier**, not as a latency measurement that happens to be noisy, and
+should agree an abort signal and an owner who can see the box _before_ starting —
+neither of which existed this time.
+
+|                                | regimes 1 & 2 (2026-09-03)                 | regime 3 (2026-09-03)                            |
+| ------------------------------ | ------------------------------------------ | ------------------------------------------------ |
+| BE notified                    | not required — see above                   | **yes**, before the run; again during the outage |
+| Window                         | none                                       | agreed, 06:32–06:39 UTC, kept to the 5 min       |
+| BE-side alarms                 | none observed on our side; not BE-verified | not visible from here — no prod-account access   |
+| Runs discarded as contaminated | none                                       | none — the run is reported, not discarded        |
+| Outage caused                  | none                                       | **yes** — read path down from ~06:38, see above  |
 
 **Gap between regimes: 46 s** — regime 1 ended 06:09:37 UTC, regime 2 started
 06:10:23 UTC. At 4.6× the 10 s cache TTL the gateway cache was cold for every
@@ -256,11 +345,24 @@ load-bearing.
 
 ## Open items
 
-- [x] Regimes 1 and 2 run; `--summary-export` JSON captured
-- [ ] BE window agreed, regime 3 run, its JSON archived alongside this report
-- [ ] Cache-**miss** percentiles reported (regime 3 is the only source)
-- [ ] CloudWatch access to the production account obtained, or the window pulled
-      by someone who has it
-- [x] Verdict written — **PASS** on the AC
+Ordered by urgency, not by AC order.
+
+- [ ] **Read path restored.** Down since ~06:38 UTC; still `500` at 06:51:32
+      after 16 liveness checks. This is a live production incident, not a test
+      artefact.
+- [ ] **Root cause established: connection ceiling or query performance?** The
+      whole remediation plan depends on the answer, and nothing above settles
+      it. Needs someone with access to the ClickHouse box and to CloudWatch.
+- [ ] **Decide whether regime 3 is ever repeated**, and under what protocol —
+      it is now known to be capable of taking down shared infrastructure. If it
+      is repeated, agree an abort signal and an observer with eyes on the box.
+- [x] All three regimes run; every `--summary-export` archived under
+      `loadtest-results/`, the failed one included
+- [x] Verdict written — **PASS** on the AC, with the outage stated alongside it
+- [ ] Cache-**miss** percentiles — **not obtainable by this method**. The system
+      stops serving before a miss percentile can be sampled at 100 req/s. A
+      lower-rate miss measurement would answer a different question and should be
+      scoped deliberately rather than treated as a retry.
+- [ ] CloudWatch access to the production account obtained
 - [ ] Report cited by
       [0128](../lore/1-tasks/backlog/0128_DOCS_scf-milestone-2-verification-package.md)
