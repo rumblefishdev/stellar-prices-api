@@ -48,6 +48,24 @@ history:
       at load**. Regime 3 took the entire ClickHouse read path down for 19-47
       minutes on 2026-09-03 ([[0260]]). Verifying a TTL takes a handful of
       requests; there is no reason to go near that.
+  - date: 2026-09-03
+    status: active
+    who: okarcz
+    note: >
+      First measurement pass, all read-only. **AC 3 closed** — hit, expiry and
+      re-fill demonstrated on both the 10s and the 60s tier. AC 1, 5 and 7 have
+      full measured answers awaiting a write-up decision; AC 4 is confirmed from
+      stage config (its timing control is void — `/health` is a gateway MOCK).
+      🔴 **The "cache key is path-only" claim inherited from [[0121]] is
+      FALSIFIED**: `/price` keys on `min_volume_usd` too and `/v1/assets` on
+      seven params. Its real source is a stale comment in `price_load.js:16-18`,
+      not the CDK, which has been right since 2026-08-28. This makes a
+      guaranteed cache miss cost one request, which is how this pass avoided
+      load entirely. AC 1 resolves as **correct §6, not the code** — the
+      deployed stage, `CACHE_TTL` and `cache_control.rs` all agree and §6 is
+      wrong on two TTLs, on "cache key includes query params", and omits four
+      cached routes. Also logged: a bimodal miss distribution (a miss following
+      cache hits costs ~2x one following misses) as an explicit hypothesis.
 ---
 
 # API Gateway cache verification
@@ -190,13 +208,154 @@ go near that regime from this task.
   identical public data; confirm that is in fact what happens and that no
   key-scoped data exists on these routes).
 
+## Findings — first measurement pass (2026-09-03)
+
+All read-only. Control plane read with `--profile soroban-readonly`; the live
+requests were a handful of `curl`s, single-threaded, on the **free-tier key**
+(`pricing-api-free-production`, 1 req/s) — deliberately not the 0121 load-test
+key, and nowhere near [[0260]]'s regime.
+
+### AC 1 — the deployed stage, and §6 is the stale side
+
+Read from the deployed stage (`02mabge71l`, stage `production`, cache cluster
+0.5 GB `AVAILABLE`), not from CDK:
+
+| route | deployed TTL | §6 says |
+|---|---|---|
+| `GET /v1/assets` | 60 s | 60 s ✅ |
+| `GET /v1/assets/{id}` | 60 s | *not listed* |
+| `GET /v1/assets/{id}/ohlcv` | 60 s | 60 s ✅ |
+| `GET /v1/assets/{id}/price` | **10 s** | 15 s ❌ |
+| `GET /v1/oracles/{id}` | 60 s | *not listed* |
+| `GET /v1/backfill/status` | **60 s** | 30 s ❌ |
+| `GET /api-docs-json` | 3600 s | *not listed* |
+| `POST /v1/prices/batch` | uncached | uncached ✅ |
+| `GET /health` | uncached | *not listed* |
+
+**Three surfaces agree and §6 is the outlier**: the deployed stage matches
+`CACHE_TTL` (`api-gateway-stack.ts:53-59`), which matches the handler's tiers
+(`cache_control.rs`: `SHORT` = `max-age=10`, `MEDIUM` = `max-age=60`). A live
+`/price` response carries `cache-control: public, max-age=10`, so the app layer
+and the gateway state the same number to the caller. `/api-docs-json` is the one
+deliberate mismatch (3600 s gateway vs 300 s handler), already documented at
+`api-gateway-stack.ts:60-68`.
+
+So AC 1 resolves as **correct §6**, not the code. §6 lives at
+`docs/prices-api-general-overview.md:1194`. Two further errors there beyond the
+TTLs: it asserts *"Cache key includes query params"* as a blanket property (false
+for `/backfill/status` and both detail routes — see AC 5), and it omits four
+cached routes entirely.
+
+### 🔴 AC 5 — the cache key is NOT path-only
+
+**This overturns the claim inherited from [[0121]]** and recorded in the handover
+above. Measured per method on the deployed stage:
+
+| route | `cacheKeyParameters` |
+|---|---|
+| `/v1/assets` | `type, search, sort, order, cursor, limit, min_volume_usd` (**7**) |
+| `/v1/assets/{id}/ohlcv` | path + `timeframe, granularity, start, end, base_currency` |
+| `/v1/assets/{id}/price` | path + **`min_volume_usd`** |
+| `/v1/assets/{id}`, `/v1/oracles/{id}` | path only |
+| `/v1/backfill/status` | empty — path only |
+
+The CDK agrees (`api-gateway-stack.ts:621-648`). **The stale claim's actual
+source is the k6 script's own header comment**, which cites
+`addGet(price, [PATH_ID])`; the code has read
+`addGet(price, [PATH_ID, qs('min_volume_usd')])` since 2026-08-28, added after a
+measured cross-caller poisoning bug (`api-gateway-stack.ts:608-616` — one
+caller's `?min_volume_usd=200000` served its narrowed `sources` to the next
+param-less caller for a whole TTL). 0121's runs sent no query string, so the key
+did collapse to the path *for that experiment*; the generalisation is wrong.
+⚠️ **`packages/prices-api/loadtest/price_load.js:16-18` needs correcting** — it
+is the copy future readers will trust.
+
+Two consequences:
+
+1. **A guaranteed miss costs one request.** A fresh `?min_volume_usd=` value is a
+   new cache entry, so the TTL test needs no cold-asset hunting, no waiting and
+   no load. That is how the runs below were done.
+2. **The [[0118]] hit-rate risk is real, not theoretical.** `min_volume_usd` is a
+   continuous number in the key on two routes, and `/v1/assets` carries a
+   seven-parameter key space. Per the Notes below, the first lever is narrowing
+   the key, not resizing the 0.5 GB cluster.
+
+`x-api-key` is in no cache key, so **the cache is shared across API keys** — the
+correct outcome for identical public data, and now confirmed rather than assumed.
+
+### AC 2 + AC 3 — hit, expiry and re-fill, on both tiers
+
+Server time only (`time_starttransfer - time_appconnect`), so the ~45 ms TLS
+handshake a fresh `curl` pays each request is excluded — that is what makes
+these comparable to 0121's k6 figures, which reuse connections.
+
+`/price`, declared 10 s, same URL throughout except A7:
+
+| | server |
+|---|---|
+| A1 first ask (MISS) | 144.7 ms |
+| A2 +2 s (HIT) | 53.3 ms |
+| A3 +4 s (HIT) | 45.1 ms |
+| A4 +6 s (HIT) | 47.7 ms |
+| **A5 +13 s (MISS — expired)** | **139.7 ms** |
+| A6 +15 s (HIT) | 49.5 ms |
+| A7 fresh param (MISS) | 86.1 ms |
+
+`/v1/assets`, declared 60 s (first pass, wall-clock incl. TLS): first **234 ms**,
++2 s **154 ms**, +32 s **145 ms** (still hot), **+64 s 950 ms (expired)**, +66 s
+**146 ms**.
+
+Both tiers expire when they say they do, and re-fill immediately after. The hits
+cluster at **45-53 ms**, reproducing 0121's 45-47 ms independently.
+
+⚠️ **`/v1/assets` costs ~950 ms on a miss** — roughly 4x a `/price` miss. That is
+the number that makes the seven-parameter key space matter.
+
+### The miss distribution is bimodal — hypothesis, not a conclusion
+
+Five consecutive fresh-parameter misses ran **77.8 / 81.4 / 84.1 / 87.5 /
+88.5 ms**, but the two misses that *followed a run of cache hits* (A1, A5) cost
+**144.7** and **139.7 ms** — near double.
+
+Plausible mechanism: a cache hit is served by the gateway and **never reaches the
+Lambda**, so a stretch of hits leaves the handler's warm ClickHouse connection
+idle, and the next miss pays to re-establish it (§6 puts the mTLS hop at
+~80-130 ms RTT). Consecutive misses keep it hot. **Seven data points and no
+attempt to falsify it** — recorded because it would mean *published* miss
+latency depends on the hit rate preceding it, which is the opposite of the usual
+assumption. If it survives scrutiny it belongs to [[0260]], not here.
+
+⚠️ These misses (78-145 ms) are **faster than 0121's 163-238 ms**. Not a
+contradiction: 0121 measured 5 deliberately cold assets at ~0.3 req/s, these are
+`native` — the hottest asset — with everything warm. Do not quote the two ranges
+as one distribution.
+
+### AC 7 — there is no `X-Cache` header, confirmed independently
+
+Full response headers on a live `/price` 200 carry `x-amzn-requestid`,
+`x-amz-apigw-id`, `x-amzn-trace-id`, `cache-control`, `vary`,
+`access-control-allow-origin` — **and no `X-Cache`**. 0121's finding stands.
+The timing evidence above is what the criterion has to rest on instead, and the
+two are not equivalent: this shows *behaviour consistent with a cache*, not the
+cache asserting itself. Say which one it is in [[0128]].
+
+### AC 4 — confirmed from config; the `/health` timing control is weak
+
+`POST /v1/prices/batch` and `GET /health` both read `cachingEnabled: false` on
+the deployed stage. ⚠️ The timing control adds nothing: `/health` answered in
+133 ms then 143 ms, but it is a **gateway MOCK** ([[0126]]), so it is fast
+whether cached or not. Absence of caching there is established by the stage
+config alone — do not present the timings as evidence.
+
 ## Acceptance Criteria
 
 - [ ] Deployed per-endpoint TTLs match §6, or §6 is corrected with a recorded
       rationale
 - [ ] A cache **hit** is demonstrated for each cached endpoint
-- [ ] A cache **miss after expiry** is demonstrated for at least `/price` (15s)
-      and one 60s endpoint — proving the TTL is real
+- [x] A cache **miss after expiry** is demonstrated for at least `/price` (15s
+      — in fact **10s**) and one 60s endpoint — proving the TTL is real.
+      **Done 2026-09-03**: `/price` hot at +6s, expired at +13s; `/v1/assets`
+      hot at +32s, expired at +64s. Both re-filled immediately after.
 - [ ] `POST /prices/batch` and `/health` confirmed uncached
 - [ ] Cache-key composition documented, including the `?min_volume_usd=`
       interaction from [[0118]] and the `GET /assets` param matrix
