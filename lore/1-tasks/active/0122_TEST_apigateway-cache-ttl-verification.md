@@ -2,9 +2,9 @@
 id: "0122"
 title: "API Gateway cache verification — per-endpoint TTLs match §6 and repeat requests return X-Cache: Hit"
 type: TEST
-status: backlog
+status: active
 related_adr: ["0008"]
-related_tasks: ["0118", "0121", "0128"]
+related_tasks: ["0118", "0121", "0128", "0126", "0260", "0261"]
 tags: [layer-infra, priority-medium, effort-small, milestone-M2, api-gateway, caching, verification, acceptance]
 milestone: 2
 links:
@@ -33,6 +33,21 @@ history:
       there is no baseline to re-verify, and narrowed its scope to the one
       question its change raised (do the two hostnames share the stage cache).
       Everything else stays here.
+  - date: 2026-09-03
+    status: active
+    who: okarcz
+    note: >
+      Activated. [[0121]] closed the same day and handed this task the finding
+      that decides its method: **there is no `X-Cache` header on this API** —
+      verified 2026-08-20, still absent 2026-09-03. AC 2 as the Tranche 2
+      criterion words it ("consecutive identical requests within TTL window
+      return `X-Cache: Hit`") cannot pass against the deployed API, so the last
+      AC on this task — the one that anticipated exactly this — is now the live
+      question, not a contingency. Full handover in its own section below.
+      🔴 Carries a hard safety constraint from 0121: **do not drive cache misses
+      at load**. Regime 3 took the entire ClickHouse read path down for 19-47
+      minutes on 2026-09-03 ([[0260]]). Verifying a TTL takes a handful of
+      requests; there is no reason to go near that.
 ---
 
 # API Gateway cache verification
@@ -74,6 +89,85 @@ Two things make this worth a dedicated task rather than a line in [[0121]]:
    param and with `GET /assets`' `sort`/`order`/`cursor`/`limit` matrix: a
    high-cardinality key space silently destroys the hit rate that [[0121]]'s p95
    depends on. Measure it.
+
+## Handover from 0121 (2026-09-03)
+
+[[0121]] is **closed and archived**: Tranche 2 AC 2 passes — 100 req/s held for
+5 minutes, **p95 47.09 ms** against the 200 ms bar, **0 errors in 30,001
+requests**. Report at `docs/prices-api-load-test-100rps.md`, raw k6 exports in
+`docs/loadtest-results/`. It measured this task's subject in passing and the
+findings below are its handover, not this task's own work.
+
+### 🔴 The thing to settle first — there is no `X-Cache` header
+
+Verified 2026-08-20 and still absent 2026-09-03. The Tranche 2 criterion is
+worded *"consecutive identical requests within TTL window return `X-Cache:
+Hit`"*, and that **cannot pass against the current API**. Two ways out, and
+picking one is the first decision this task makes:
+
+1. Someone adds the header.
+2. The criterion is renegotiated with the reviewer.
+
+This task's last AC already anticipated the possibility; it is now the live
+question rather than a fallback.
+
+**If it is renegotiated, 0121 supplies the evidence to do it with.** The latency
+split is unambiguous — roughly 4x, with no overlap between the distributions:
+
+| measured | latency |
+|---|---|
+| served from gateway cache | **45-47 ms** (p50-p95, 60,000 requests) |
+| cache miss, uncontended | **163-238 ms** (5 cold assets, ~0.3 req/s) |
+
+A hit/miss verdict **by timing alone is therefore defensible**. It is a weaker
+claim than a header — it shows behaviour consistent with a cache rather than the
+cache asserting itself — but it is measured, reproducible and already written
+up. Say which of the two it is in [[0128]]; do not blur them.
+
+### Three things that shape the method
+
+- **The cache key is the path only.** 0121 states this and its whole
+  three-regime design rests on it, but it is **inherited, not independently
+  proven** — worth ~10 minutes of confirmation here, because AC 5 owns cache-key
+  composition anyway. ⚠️ If a query parameter *does* bust the cache, the TTL
+  test gets much easier, and the [[0118]] `?min_volume_usd=` interaction this
+  task already lists becomes a real hit-rate risk rather than a theoretical one.
+- **Pool size is the only lever on hit rate.** Over a 300 s run an asset can
+  miss at most 30 times at any offered rate. That arithmetic is what let 0121
+  build its 0% / 2% / 100% miss series.
+- **Regimes 1 and 2 ran through the custom domain**
+  (`prices-api.sorobanscan.rumblefish.dev`) and showed clean cache behaviour.
+  That is **weak positive evidence** for [[0126]]'s open cross-hostname question
+  recorded in the Notes below — an observation in passing, not an experiment.
+  The experiment still belongs here.
+
+### 🔴 Safety constraint — do not drive cache misses at load
+
+On 2026-09-03, driving 100 req/s of **cache misses** at `GET /assets/{id}/price`
+returned `500 db_error` on 94.38% of requests and took the whole ClickHouse read
+path down for **19-47 minutes** — `/price` and `/v1/assets` alike, failing even
+a single request with no concurrency behind it. It recovered unattended. Root
+cause unresolved, now [[0260]].
+
+⚠️ **[[0260]]'s open question bears directly on this task's conclusions**:
+whether the ceiling is connections or query cost decides whether *raising a TTL*
+is even a relevant lever. The Notes below suggest narrowing the key before
+resizing the cluster; 0260 may add that raising TTL only hides the ceiling
+behind a higher hit rate rather than removing it.
+
+**Verifying a TTL needs a handful of requests, not load.** There is no reason to
+go near that regime from this task.
+
+### Also inherited
+
+- **[[0261]]** — the asset listing churns heavily between full walks (two walks
+  a day apart returned 3,543 and 4,306 ids; 2,128 added, 1,365 removed) because
+  cursor pagination runs over a table the MV replaces every minute. **Relevant
+  only if this task enumerates assets** — which AC 5's `GET /assets` param
+  matrix might.
+- **The k6 script is reusable for single-asset work**:
+  `-e ASSET=native -e RATE=… -e DURATION=…`. See
+  `packages/prices-api/loadtest/README.md`.
 
 ## Implementation
 
