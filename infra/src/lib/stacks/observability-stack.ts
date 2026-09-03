@@ -9,12 +9,16 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 
 import type { EnvironmentConfig } from '../types.js';
-import { workerFunctionName } from '../lambda-baseline.js';
+import {
+  workerErrorAlarmName,
+  workerFunctionName,
+} from '../lambda-baseline.js';
 import {
   ingestDlqName,
   ingestQueueName,
   ledgerProcessorFunctionName,
 } from './compute-stack.js';
+import { restApiName } from './api-gateway-stack.js';
 
 /**
  * Physical name of the Tranche-1 ops-notification SNS topic (task 0056).
@@ -333,23 +337,22 @@ export class ObservabilityStack extends cdk.Stack {
 
     const { config } = props;
 
+    // Construct id and `dashboardName` are load-bearing and must not change: a
+    // rename replaces the CFN resource and changes the console URL handed to the
+    // Stellar reviewer (Tranche 3 AC 8). The widget set itself is built at the
+    // END of this constructor — it derives its alarm strip by walking the
+    // construct tree, so it has to run after the last alarm exists.
     this.dashboard = new cloudwatch.Dashboard(this, 'OverviewDashboard', {
       dashboardName: `prices-${config.envName}-overview`,
+      // Global range for the real-time rows. NOT `start`: setting both throws
+      // at synth (`BothPropertiesDefaultIntervalStart`). Trend rows carry their
+      // own longer window per widget instead.
+      defaultInterval: cdk.Duration.hours(3),
+      // Without this the per-widget periods below are silently overridden by
+      // CloudWatch's Auto period — the whole trend-row design goes inert and
+      // nothing fails at synth. Default is AUTO; it must be INHERIT.
+      periodOverride: cloudwatch.PeriodOverride.INHERIT,
     });
-
-    this.dashboard.addWidgets(
-      new cloudwatch.TextWidget({
-        markdown: [
-          `# prices-api / ${config.envName}`,
-          '',
-          'Scaffold dashboard. Widgets and alarms land in task 0056.',
-          '',
-          'See `infra/src/lib/stacks/observability-stack.ts` for the planned alarm set.',
-        ].join('\n'),
-        width: 24,
-        height: 4,
-      }),
-    );
 
     // Enrichment stall alarm (task 0026 / spec §5, re-designed in 0056). Fires
     // on *lack of progress*, not absolute backlog: a pass that enriched zero
@@ -1388,6 +1391,622 @@ export class ObservabilityStack extends cdk.Stack {
     cdk.Tags.of(this).add('Project', 'stellar-prices-api');
     cdk.Tags.of(this).add('ManagedBy', 'cdk');
     cdk.Tags.of(this).add('Environment', config.envName);
+
+    // =================================================================
+    // Overview dashboard widgets (task 0125).
+    //
+    // Built HERE, at the end of the constructor, on purpose: the alarm strip
+    // below is derived by walking this stack's construct tree, so every alarm
+    // must already exist. Moving this block earlier silently shrinks the strip.
+    //
+    // Every widget is built against a metric+dimension pair verified to carry
+    // live data in this account on 2026-09-03. The one exception is
+    // `ClickHouseWriteLatencyMs`, which the ledger-processor starts publishing
+    // only once ComputeStack is deployed — hence the deploy order Compute first,
+    // then Observability.
+    // =================================================================
+    const apiName = restApiName(config.envName);
+    const apiDims = { ApiName: apiName, Stage: config.envName };
+    const envDims = { Environment: config.envName };
+
+    const apiMetric = (
+      metricName: string,
+      statistic: string,
+      label: string,
+    ): cloudwatch.Metric =>
+      new cloudwatch.Metric({
+        namespace: 'AWS/ApiGateway',
+        metricName,
+        dimensionsMap: apiDims,
+        statistic,
+        label,
+        period: cdk.Duration.minutes(5),
+      });
+
+    const chWriteLatency = (statistic: string): cloudwatch.Metric =>
+      new cloudwatch.Metric({
+        namespace: 'Prices/Ingest',
+        metricName: 'ClickHouseWriteLatencyMs',
+        dimensionsMap: envDims,
+        statistic,
+        label: statistic,
+        period: cdk.Duration.minutes(5),
+      });
+
+    // 5xx as a percentage of all requests. `Count` is never zero in production
+    // (108 655 requests on 2026-09-02), so the division is safe; metric math
+    // yields no datapoint rather than an error if it ever were.
+    const errorRatePct = new cloudwatch.MathExpression({
+      expression: '100 * (e5xx / requests)',
+      usingMetrics: {
+        e5xx: apiMetric('5XXError', 'Sum', '5xx'),
+        requests: apiMetric('Count', 'Sum', 'requests'),
+      },
+      period: cdk.Duration.minutes(5),
+      label: '5xx error rate (%)',
+    });
+
+    const cacheHitRatioPct = new cloudwatch.MathExpression({
+      expression: '100 * (hits / (hits + misses))',
+      usingMetrics: {
+        hits: apiMetric('CacheHitCount', 'Sum', 'hits'),
+        misses: apiMetric('CacheMissCount', 'Sum', 'misses'),
+      },
+      period: cdk.Duration.minutes(5),
+      label: 'Cache hit ratio (%)',
+    });
+
+    // -----------------------------------------------------------------
+    // The alarm strip — DERIVED, never a list of names.
+    //
+    // Walking the construct tree covers every alarm this stack builds and needs
+    // no maintenance when one is added or removed. Collected BEFORE the imports
+    // below so an imported alarm can never be double-counted.
+    // -----------------------------------------------------------------
+    const stackOwnAlarms = this.node
+      .findAll()
+      .filter((c): c is cloudwatch.Alarm => c instanceof cloudwatch.Alarm);
+
+    // The remaining alarms in the account are the per-worker `-errors` alarms
+    // created inside `createWorkerLambda` and owned by EventBridgeStack, which
+    // never re-exports them. Imported BY ARN rather than by a cross-stack
+    // construct reference: a CFN reference would make Observability depend on
+    // EventBridge and destroy the independent deployability this stack defends
+    // everywhere else. The name comes from `workerErrorAlarmName`, the same
+    // helper that creates them.
+    const workersWithErrorAlarms = [
+      'asset-discovery',
+      'cleanup',
+      'supply',
+      'oracle',
+      'enrichment',
+      'coarse-sweep',
+      'backfill-freshness-probe',
+      'rollup-freshness-probe',
+      'mtls-notafter-probe',
+    ];
+    const importedWorkerErrorAlarms = workersWithErrorAlarms.map((name) => {
+      const idPrefix = name
+        .split('-')
+        .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+        .join('');
+      return cloudwatch.Alarm.fromAlarmArn(
+        this,
+        `ImportedWorkerErrorAlarm${idPrefix}`,
+        cdk.Stack.of(this).formatArn({
+          service: 'cloudwatch',
+          resource: 'alarm',
+          resourceName: workerErrorAlarmName(config.envName, name),
+          arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+        }),
+      );
+    });
+
+    const alarmStripCount =
+      stackOwnAlarms.length + importedWorkerErrorAlarms.length;
+
+    // Operationally useful, and the only cheap way to prove mechanically that
+    // the strip is complete and derived rather than typed out — the synth
+    // assertion compares it against the template's own alarm-resource count.
+    new cdk.CfnOutput(this, 'DashboardAlarmCount', {
+      value: String(alarmStripCount),
+      description: `Alarms covered by the ${config.envName} overview dashboard alarm strip`,
+    });
+
+    // -----------------------------------------------------------------
+    // Row 0 — the acceptance strip. This row alone must answer SCF Tranche 3
+    // AC 8 and the M2 acceptance criteria (p95 latency, error rate, cache hit
+    // rate on one screen), so it is first and both of its physical rows sit
+    // above the fold.
+    // -----------------------------------------------------------------
+    this.dashboard.addWidgets(
+      new cloudwatch.TextWidget({
+        markdown: [
+          `# prices-api — ${config.envName}`,
+          '',
+          'Acceptance strip: the M2 criteria (p95 latency, error rate, cache hit rate) and every alarm, on one screen.',
+        ].join('\n'),
+        width: 24,
+        height: 2,
+      }),
+    );
+
+    this.dashboard.addWidgets(
+      new cloudwatch.SingleValueWidget({
+        title: 'API latency p95 (ms)',
+        metrics: [apiMetric('Latency', 'p95', 'p95')],
+        width: 6,
+        height: 5,
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: '5xx error rate (%)',
+        metrics: [errorRatePct],
+        width: 6,
+        height: 5,
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: 'Cache hit ratio (%)',
+        metrics: [cacheHitRatioPct],
+        width: 6,
+        height: 5,
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: 'ClickHouse write latency p95 (ms)',
+        metrics: [chWriteLatency('p95')],
+        width: 6,
+        height: 5,
+      }),
+    );
+
+    // Two widgets rather than one so the cross-stack import is visible to a
+    // reader: what this stack owns, and what it borrows.
+    this.dashboard.addWidgets(
+      new cloudwatch.AlarmStatusWidget({
+        title: `Alarms owned by ObservabilityStack (${stackOwnAlarms.length})`,
+        alarms: stackOwnAlarms,
+        width: 16,
+        height: 6,
+      }),
+      new cloudwatch.AlarmStatusWidget({
+        title: `Worker -errors alarms, imported from EventBridgeStack (${importedWorkerErrorAlarms.length})`,
+        alarms: importedWorkerErrorAlarms,
+        width: 8,
+        height: 6,
+      }),
+    );
+
+    // -----------------------------------------------------------------
+    // Row 1 — API.
+    // -----------------------------------------------------------------
+    this.dashboard.addWidgets(
+      new cloudwatch.TextWidget({
+        markdown: [
+          '## API',
+          '',
+          'API Gateway publishes **no `Throttles` metric** — the namespace carries only `4XXError`, `5XXError`, `CacheHitCount`, `CacheMissCount`, `Count`, `IntegrationLatency` and `Latency`. Usage-plan and method 429s land inside `4XXError`. Lambda `Throttles` is a different namespace and appears in the workers row.',
+        ].join('\n'),
+        width: 24,
+        height: 3,
+      }),
+    );
+
+    this.dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'Latency p50 / p95 / p99 (ms)',
+        left: [
+          apiMetric('Latency', 'p50', 'p50'),
+          apiMetric('Latency', 'p95', 'p95'),
+          apiMetric('Latency', 'p99', 'p99'),
+        ],
+        width: 8,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Requests, 4xx and 5xx',
+        left: [apiMetric('Count', 'Sum', 'requests')],
+        right: [
+          apiMetric('4XXError', 'Sum', '4xx (includes 429 throttles)'),
+          apiMetric('5XXError', 'Sum', '5xx'),
+        ],
+        width: 8,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Cache hits / misses and ratio',
+        left: [
+          apiMetric('CacheHitCount', 'Sum', 'hits'),
+          apiMetric('CacheMissCount', 'Sum', 'misses'),
+        ],
+        right: [cacheHitRatioPct],
+        width: 8,
+        height: 6,
+      }),
+    );
+
+    // -----------------------------------------------------------------
+    // Row 2 — ingestion.
+    // -----------------------------------------------------------------
+    this.dashboard.addWidgets(
+      new cloudwatch.TextWidget({
+        markdown: [
+          '## Ingestion',
+          '',
+          '`ClickHouseWriteLatencyMs` is published by the ledger-processor itself (task 0125, Decision B2) and is empty until ComputeStack is deployed. It is timed at the candle-INSERT call site, so a write that `retry_with_backoff` retried folds its backoff sleeps in and reads as one long write.',
+        ].join('\n'),
+        width: 24,
+        height: 3,
+      }),
+    );
+
+    this.dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'Ingest queue — oldest message age (s)',
+        left: [
+          new cloudwatch.Metric({
+            namespace: 'AWS/SQS',
+            metricName: 'ApproximateAgeOfOldestMessage',
+            dimensionsMap: { QueueName: ingestQueue },
+            statistic: 'Maximum',
+            label: 'oldest doorbell age',
+            period: cdk.Duration.minutes(1),
+          }),
+        ],
+        width: 6,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Ingest DLQ — messages visible',
+        left: [
+          new cloudwatch.Metric({
+            namespace: 'AWS/SQS',
+            metricName: 'ApproximateNumberOfMessagesVisible',
+            dimensionsMap: { QueueName: ingestDlq },
+            statistic: 'Maximum',
+            label: 'DLQ depth',
+            period: cdk.Duration.minutes(1),
+          }),
+        ],
+        width: 6,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Ledger-processor — duration, errors, concurrency',
+        left: [
+          new cloudwatch.Metric({
+            namespace: 'AWS/Lambda',
+            metricName: 'Duration',
+            dimensionsMap: { FunctionName: ledgerProcessorFnName },
+            statistic: 'p95',
+            label: 'duration p95 (ms)',
+            period: cdk.Duration.minutes(5),
+          }),
+        ],
+        right: [
+          new cloudwatch.Metric({
+            namespace: 'AWS/Lambda',
+            metricName: 'Errors',
+            dimensionsMap: { FunctionName: ledgerProcessorFnName },
+            statistic: 'Sum',
+            label: 'errors',
+            period: cdk.Duration.minutes(5),
+          }),
+          new cloudwatch.Metric({
+            namespace: 'AWS/Lambda',
+            metricName: 'ConcurrentExecutions',
+            dimensionsMap: { FunctionName: ledgerProcessorFnName },
+            statistic: 'Maximum',
+            label: 'concurrent executions',
+            period: cdk.Duration.minutes(5),
+          }),
+        ],
+        width: 6,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'ClickHouse candle-write latency (ms)',
+        left: [
+          chWriteLatency('p50'),
+          chWriteLatency('p95'),
+          chWriteLatency('Maximum'),
+        ],
+        width: 6,
+        height: 6,
+      }),
+    );
+
+    // -----------------------------------------------------------------
+    // Row 3 — ClickHouse and backfill. A TREND row: every widget carries its
+    // own 14-day window and 1-hour period rather than moving the dashboard's
+    // global range, because the backfill trajectory is invisible at 1 hour and
+    // a latency spike is invisible at 2 weeks. `periodOverride: INHERIT` on the
+    // Dashboard above is what makes these take effect.
+    // -----------------------------------------------------------------
+    const trend14d = { start: '-P14D', period: cdk.Duration.hours(1) };
+    // The seven OHLCV tiers, taken from the same config the per-tier freshness
+    // alarms are built from, so a tier added there appears here too. Note
+    // `price_ohlcv_1m` and `price_ohlcv_1M` differ only in case.
+    const rollupTables = Object.keys(config.opsAlarms.rollupLagSeconds);
+
+    this.dashboard.addWidgets(
+      new cloudwatch.TextWidget({
+        markdown: [
+          '## ClickHouse and backfill — 14-day trend',
+          '',
+          '**Named substitution (Decision A).** The frozen SCF submission asks for "DB CPU". ADR 0007 replaced RDS with the shared Hetzner ClickHouse cluster, so that item is served here by the ClickHouse host and write-path metrics — free disk percentage plus `ClickHouseWriteLatencyMs`. Literal DB CPU is not readable: the runtime identities hold no grant on the ClickHouse system tables, and host CPU of a volume shared at a few percent says nothing about our write path.',
+        ].join('\n'),
+        width: 24,
+        height: 4,
+      }),
+    );
+
+    this.dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'ClickHouse host — free disk (%)',
+        left: [
+          new cloudwatch.Metric({
+            namespace: 'Prices/Rollup',
+            metricName: 'ClickHouseDiskFreePercent',
+            dimensionsMap: envDims,
+            statistic: 'Minimum',
+            label: 'free disk (%)',
+          }),
+        ],
+        width: 6,
+        height: 6,
+        ...trend14d,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Rollup lag per table (s)',
+        left: rollupTables.map(
+          (table) =>
+            new cloudwatch.Metric({
+              namespace: 'Prices/Rollup',
+              metricName: 'RollupLagSeconds',
+              dimensionsMap: { ...envDims, Table: table },
+              statistic: 'Maximum',
+              label: table,
+            }),
+        ),
+        width: 6,
+        height: 6,
+        ...trend14d,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Backfill push age (s) — soroban_amm',
+        left: [
+          new cloudwatch.Metric({
+            namespace: 'Prices/Backfill',
+            metricName: 'PushAgeSeconds',
+            // `soroban_amm` is the ONLY stream dimension that has ever
+            // published. The probe defines an archive stream constant too, but
+            // it has never emitted a datapoint, so a widget on it would render
+            // empty and fail AC 1.
+            dimensionsMap: { ...envDims, Stream: 'soroban_amm' },
+            statistic: 'Maximum',
+            label: 'push age',
+          }),
+        ],
+        width: 6,
+        height: 6,
+        ...trend14d,
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: 'mTLS client cert — days to NotAfter',
+        // `MinDaysToNotAfter` carries the `Environment` dimension ONLY. The
+        // per-role series is a different metric name; adding a Role dimension
+        // here yields nothing.
+        metrics: [
+          new cloudwatch.Metric({
+            namespace: 'Prices/Mtls',
+            metricName: 'MinDaysToNotAfter',
+            dimensionsMap: envDims,
+            statistic: 'Minimum',
+            label: 'days to expiry',
+          }),
+        ],
+        width: 6,
+        height: 6,
+        ...trend14d,
+      }),
+    );
+
+    // -----------------------------------------------------------------
+    // Row 4 — scheduled workers. A TREND row (7 days, 1-hour period): these run
+    // hourly to daily and would show three sparse points on the 3-hour range.
+    //
+    // The `cleanup` worker is EXCLUDED: its EventBridge rule is disabled on
+    // purpose, so it emits no `AWS/Lambda` metrics at all and would be a
+    // permanently empty series. It still appears in the alarm strip above.
+    // -----------------------------------------------------------------
+    const trend7d = { start: '-P7D', period: cdk.Duration.hours(1) };
+    const dashboardWorkers = [
+      'asset-discovery',
+      'supply',
+      'oracle',
+      'enrichment',
+      'coarse-sweep',
+      'backfill-freshness-probe',
+      'rollup-freshness-probe',
+      'mtls-notafter-probe',
+    ];
+    const workerMetric = (
+      metricName: string,
+      statistic: string,
+      suffix = '',
+    ): cloudwatch.Metric[] =>
+      dashboardWorkers.map(
+        (name) =>
+          new cloudwatch.Metric({
+            namespace: 'AWS/Lambda',
+            metricName,
+            dimensionsMap: {
+              FunctionName: workerFunctionName(config.envName, name),
+            },
+            statistic,
+            label: `${name}${suffix}`,
+          }),
+      );
+
+    this.dashboard.addWidgets(
+      new cloudwatch.TextWidget({
+        markdown: [
+          '## Scheduled workers — 7-day trend',
+          '',
+          'The `cleanup` worker is deliberately absent: its EventBridge rule is disabled, so it publishes no Lambda metrics at all. It is still covered by the alarm strip.',
+        ].join('\n'),
+        width: 24,
+        height: 3,
+      }),
+    );
+
+    this.dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'Worker duration p95 (ms)',
+        left: workerMetric('Duration', 'p95'),
+        width: 12,
+        height: 6,
+        ...trend7d,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Worker errors and throttles',
+        left: workerMetric('Errors', 'Sum'),
+        right: workerMetric('Throttles', 'Sum', ' (throttles)'),
+        width: 12,
+        height: 6,
+        ...trend7d,
+      }),
+    );
+
+    // -----------------------------------------------------------------
+    // Row 5 — enrichment and oracle. Same 7-day trend window.
+    // -----------------------------------------------------------------
+    const enrichmentMetric = (
+      metricName: string,
+      statistic: string,
+      label: string,
+    ): cloudwatch.Metric =>
+      new cloudwatch.Metric({
+        namespace: 'Prices/Enrichment',
+        metricName,
+        dimensionsMap: envDims,
+        statistic,
+        label,
+      });
+
+    this.dashboard.addWidgets(
+      new cloudwatch.TextWidget({
+        markdown: [
+          '## Enrichment and oracle — 7-day trend',
+          '',
+          '`EnrichmentRowsRemainingAtVolumeZero` is **permanent by design** and is NOT a backlog: it tracks the exotic-quote no-reference floor, which climbs forever. Read progress off `EnrichmentRowsEnriched` and the recency-bounded `EnrichmentRowsRemainingRecent` instead — those are what the stall alarm gates on.',
+        ].join('\n'),
+        width: 24,
+        height: 3,
+      }),
+    );
+
+    this.dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'Enrichment progress',
+        left: [
+          enrichmentMetric('EnrichmentRowsEnriched', 'Sum', 'rows enriched'),
+          enrichmentMetric('EnrichmentOracleMiss', 'Sum', 'oracle misses'),
+        ],
+        right: [
+          enrichmentMetric(
+            'EnrichmentRowsRemainingRecent',
+            'Maximum',
+            'recent backlog',
+          ),
+        ],
+        width: 8,
+        height: 6,
+        ...trend7d,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Enrichment pass and batch duration (ms)',
+        left: [
+          enrichmentMetric(
+            'EnrichmentPassDurationMs',
+            'Average',
+            'pass duration',
+          ),
+          enrichmentMetric(
+            'EnrichmentAvgBatchDurationMs',
+            'Average',
+            'avg batch duration',
+          ),
+        ],
+        width: 8,
+        height: 6,
+        ...trend7d,
+      }),
+      new cloudwatch.GraphWidget({
+        title:
+          'Volume-zero floor — permanent by design, NOT a backlog or a queue depth',
+        left: [
+          enrichmentMetric(
+            'EnrichmentRowsRemainingAtVolumeZero',
+            'Maximum',
+            'exotic-quote no-reference floor',
+          ),
+        ],
+        width: 4,
+        height: 6,
+        ...trend7d,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Oracle feed',
+        left: [
+          new cloudwatch.Metric({
+            namespace: 'Prices/Oracle',
+            metricName: 'OracleRowsWritten',
+            dimensionsMap: envDims,
+            statistic: 'Sum',
+            label: 'rows written',
+          }),
+        ],
+        right: [
+          new cloudwatch.Metric({
+            namespace: 'Prices/Oracle',
+            metricName: 'OracleTimestampRejected',
+            dimensionsMap: envDims,
+            statistic: 'Sum',
+            label: 'timestamps rejected',
+          }),
+        ],
+        width: 4,
+        height: 6,
+        ...trend7d,
+      }),
+    );
+
+    // -----------------------------------------------------------------
+    // Read-only viewer identity for the Stellar reviewer (Tranche 3 AC 8).
+    //
+    // An IAM *user*, not a cross-account role: there is no external principal
+    // to trust — none is known. A named substitution, like Decision A above.
+    //
+    // Exactly ONE managed policy, and deliberately not the account-wide
+    // `ReadOnlyAccess`, which would expose Secrets Manager metadata, S3
+    // listings and Lambda configuration.
+    //
+    // NO password is passed: `iam.User` creates a login profile only when one is
+    // supplied, and a password in the template is precisely what is being
+    // avoided. Creating the console login is an out-of-band operator step
+    // (`aws iam create-login-profile --password-reset-required`).
+    // -----------------------------------------------------------------
+    const stellarViewer = new iam.User(this, 'StellarDashboardViewer', {
+      userName: `prices-${config.envName}-stellar-viewer`,
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('CloudWatchReadOnlyAccess'),
+      ],
+    });
+
+    new cdk.CfnOutput(this, 'StellarViewerUserName', {
+      value: stellarViewer.userName,
+      description: `Read-only CloudWatch viewer IAM user for ${config.envName} (console login is created out of band)`,
+    });
 
     assertAlarmDescriptionsFitCloudWatch(this);
   }

@@ -105,6 +105,23 @@ export function workerFunctionName(
 }
 
 /**
+ * Name of the invocation-errors alarm {@link createWorkerLambda} creates for a
+ * scheduled worker.
+ *
+ * Same single-source-of-truth reasoning as {@link workerFunctionName}, one step
+ * further out: these alarms are owned by EventBridgeStack and never re-exported,
+ * so ObservabilityStack's dashboard imports them **by ARN** built from this
+ * helper (task 0125). A drift between the two would not error — the alarm strip
+ * would just silently cover nine fewer alarms than it claims.
+ */
+export function workerErrorAlarmName(
+  envName: string,
+  lambdaName: string,
+): string {
+  return `prices-${envName}-${lambdaName}-errors`;
+}
+
+/**
  * Creates an IAM role for a prices-api Lambda with the baseline
  * permissions applied (CloudWatch Logs + mTLS secrets + SSM read).
  *
@@ -307,7 +324,7 @@ export function createWorkerLambda(
   );
 
   const errorAlarm = new cloudwatch.Alarm(scope, `${idPrefix}ErrorAlarm`, {
-    alarmName: `prices-${env}-${name}-errors`,
+    alarmName: workerErrorAlarmName(env, name),
     alarmDescription,
     metric: fn.metricErrors({ period: alarmPeriod, statistic: 'Sum' }),
     threshold: 1,
