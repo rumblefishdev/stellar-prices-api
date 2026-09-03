@@ -361,9 +361,9 @@ Then delete the row from the table below.
 Keep this current. One row per **key**, so a customer mid-rotation has two;
 delete a row when its key is deleted, and the last one when the plan goes.
 
-| Customer     | Plan name | Plan ID | Key name | Key ID | Limits | Issued | Issued by |
-| ------------ | --------- | ------- | -------- | ------ | ------ | ------ | --------- |
-| _(none yet)_ |           |         |          |        |        |        |           |
+| Customer                       | Plan name                         | Plan ID  | Key name                                          | Key ID       | Limits                                | Issued     | Issued by      |
+| ------------------------------ | --------------------------------- | -------- | ------------------------------------------------- | ------------ | ------------------------------------- | ---------- | -------------- |
+| loadtest (internal, task 0121) | `prices-production-loadtest-plan` | `i12bsj` | `prices-production-loadtest-key-20260819T114230Z` | `lxrwlyhjm7` | 150 req/s, burst 300, 1,000,000/month | 2026-08-19 | stkrolikiewicz |
 
 **Key name** is a column because key names are not unique and now carry the issuing
 instant — during a rotation two rows may share a customer, and the name is what
