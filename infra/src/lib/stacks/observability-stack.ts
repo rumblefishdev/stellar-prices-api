@@ -1631,7 +1631,7 @@ export class ObservabilityStack extends cdk.Stack {
         markdown: [
           '## Ingestion',
           '',
-          '`ClickHouseWriteLatencyMs` is published by the ledger-processor itself (task 0125, Decision B2) and is empty until ComputeStack is deployed. It is timed at the candle-INSERT call site, so a write that `retry_with_backoff` retried folds its backoff sleeps in and reads as one long write.',
+          '`ClickHouseWriteLatencyMs` is published by the ledger-processor itself (task 0125, Decision B2): one raw value per candle INSERT, so p50/p95 are real percentiles. It is timed at the call site, so a write that `retry_with_backoff` retried folds its backoff sleeps in and reads as one long write.',
         ].join('\n'),
         width: 24,
         height: 3,
