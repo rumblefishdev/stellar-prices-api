@@ -51,8 +51,12 @@ web/portal/src/api/generated.ts
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
-.claude/worktrees
-.claude/settings.local.json
+# Claude Code: per-developer tooling (GSD install, agents, commands, hooks,
+# scripts, worktrees) is local, not shipped. The three shared project skills
+# and settings.json stay tracked — same shape as the .vscode rules above.
+.claude/*
+!.claude/settings.json
+!.claude/skills/
 
 # user editor settings
 # !.vscode/settings.json
@@ -109,3 +113,8 @@ conformance-0120-report-*.json
 
 # Load-test wide asset pool (task 0121) — a production snapshot, regenerated per run
 packages/prices-api/loadtest/pool-wide.json
+
+# GSD planning artifacts — local per-developer state; lore/ is the shared task system
+.planning/
+# GSD dispatch sentinel (run-scoped, per developer)
+.gsd/
