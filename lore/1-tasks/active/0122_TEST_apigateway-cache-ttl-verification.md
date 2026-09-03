@@ -66,6 +66,18 @@ history:
       wrong on two TTLs, on "cache key includes query params", and omits four
       cached routes. Also logged: a bimodal miss distribution (a miss following
       cache hits costs ~2x one following misses) as an explicit hypothesis.
+  - date: 2026-09-03
+    status: active
+    who: okarcz
+    note: >
+      PR #279 merged (`652bbd8`) — §6 corrected and the stale path-only claim
+      fixed at its source in `price_load.js`. **AC 1, 4 and 5 closed**; 4 of 7
+      ACs now done. Remaining: AC 2 (hits on the four cached routes not yet
+      probed — `/assets/{id}`, `/ohlcv`, `/oracles/{id}`, `/backfill/status`),
+      AC 6 (hit rate from 0121's pool arithmetic) and AC 7, which is not
+      measurement but a **decision** — add an `X-Cache` header or renegotiate
+      the criterion with the reviewer on the timing evidence. AC 7 is the one
+      that gates [[0128]].
 ---
 
 # API Gateway cache verification
@@ -349,16 +361,22 @@ config alone — do not present the timings as evidence.
 
 ## Acceptance Criteria
 
-- [ ] Deployed per-endpoint TTLs match §6, or §6 is corrected with a recorded
-      rationale
+- [x] Deployed per-endpoint TTLs match §6, or §6 is corrected with a recorded
+      rationale — **§6 corrected**, PR #279 merged 2026-09-03 (`652bbd8`).
+      The code was right on all three surfaces; §6 was the only wrong copy.
 - [ ] A cache **hit** is demonstrated for each cached endpoint
 - [x] A cache **miss after expiry** is demonstrated for at least `/price` (15s
       — in fact **10s**) and one 60s endpoint — proving the TTL is real.
       **Done 2026-09-03**: `/price` hot at +6s, expired at +13s; `/v1/assets`
       hot at +32s, expired at +64s. Both re-filled immediately after.
-- [ ] `POST /prices/batch` and `/health` confirmed uncached
-- [ ] Cache-key composition documented, including the `?min_volume_usd=`
-      interaction from [[0118]] and the `GET /assets` param matrix
+- [x] `POST /prices/batch` and `/health` confirmed uncached — both read
+      `cachingEnabled: false` on the deployed stage. ⚠️ From **config only**;
+      the timing control is void because `/health` is a gateway MOCK.
+- [x] Cache-key composition documented, including the `?min_volume_usd=`
+      interaction from [[0118]] and the `GET /assets` param matrix — measured
+      per method, written into §6 (PR #279) and the Findings above. Includes
+      that `x-api-key` is in no cache key, so the cache is shared across
+      callers.
 - [ ] Cache hit rate under the [[0121]] load scenarios recorded
 - [ ] If `X-Cache` is not emitted by the deployed stage, that is stated plainly
       with the alternative evidence used — no hand-waving in [[0128]]
