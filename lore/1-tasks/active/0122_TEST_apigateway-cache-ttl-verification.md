@@ -91,6 +91,21 @@ history:
       and AC 6 (hit rate, derivable from 0121's pool arithmetic — no new run).
       ⏳ The rewording still needs the reviewer's agreement; nothing else here
       depends on it.
+  - date: 2026-09-03
+    status: active
+    who: okarcz
+    note: >
+      **AC 2 and AC 6 closed — 7 of 7.** Hits demonstrated on all six key-gated
+      cached routes; `/api-docs-json` confirmed configured but explicitly not
+      claimed by timing, since its entry only clears on a deploy flush. Hit rate
+      derived as lower bounds (≥99.90 / ≥98.20 / ~0%) with the no-query-string
+      precondition stated. Report extended in PR #282. ⏳ **Not archived**: the
+      reworded criterion still needs the reviewer's agreement, which is the one
+      thing here nobody on this side can supply. ⚠️ Handover for [[0128]]: the
+      six routes are NOT uniformly strong evidence — `/backfill/status` has only
+      19.5 ms between miss and hit. ⚠️ [[0121]]'s report still carries the
+      falsified "caches on the path only" sentence at lines 75-77 and needs its
+      owner to correct it, or the submission package will contradict itself.
 ---
 
 # API Gateway cache verification
@@ -377,7 +392,13 @@ config alone — do not present the timings as evidence.
 - [x] Deployed per-endpoint TTLs match §6, or §6 is corrected with a recorded
       rationale — **§6 corrected**, PR #279 merged 2026-09-03 (`652bbd8`).
       The code was right on all three surfaces; §6 was the only wrong copy.
-- [ ] A cache **hit** is demonstrated for each cached endpoint
+- [x] A cache **hit** is demonstrated for each cached endpoint — **done
+      2026-09-03** on all six key-gated cached routes (PR #282). `/price`
+      53.3→45.1 ms, `/assets` 234→154 ms, `/assets/{id}` 148.8→44.9,
+      `/ohlcv` 190.3→70.0, `/oracles/{id}` 90.9→54.8, `/backfill/status`
+      68.4→48.9. ⚠️ `/api-docs-json` is confirmed **configured** (3600s, no key
+      params) but deliberately **not** claimed as demonstrated: its entry only
+      clears on a deploy flush, so no miss can be induced.
 - [x] A cache **miss after expiry** is demonstrated for at least `/price` (15s
       — in fact **10s**) and one 60s endpoint — proving the TTL is real.
       **Done 2026-09-03**: `/price` hot at +6s, expired at +13s; `/v1/assets`
@@ -390,7 +411,12 @@ config alone — do not present the timings as evidence.
       per method, written into §6 (PR #279) and the Findings above. Includes
       that `x-api-key` is in no cache key, so the cache is shared across
       callers.
-- [ ] Cache hit rate under the [[0121]] load scenarios recorded
+- [x] Cache hit rate under the [[0121]] load scenarios recorded — **derived,
+      not observed** (there is no `X-Cache` to count). An entry misses at most
+      once per TTL window, so pool size fixes the ceiling: regime 1 **≥99.90%**,
+      regime 2 (the AC scenario) **≥98.20%**, regime 3 ~0% by construction.
+      Lower bounds. 🔴 Precondition stated, not inherited: it holds only because
+      the k6 script sends no query string.
 - [x] If `X-Cache` is not emitted by the deployed stage, that is stated plainly
       with the alternative evidence used — no hand-waving in [[0128]].
       **Done 2026-09-03**: `docs/prices-api-cache-verification.md` (PR #281)
@@ -441,6 +467,26 @@ config alone — do not present the timings as evidence.
    [[0128]]: 0128 has not started, and the same reasoning [[0248]] settled
    applies — an evidence artefact that stands on its own should not be blocked
    behind an unstarted package. 0128 cites it, as it cites the load test report.
+
+4. **The method's discriminating power is route-dependent, and that is
+   published rather than averaged away.** The miss/hit ratio tracks how
+   expensive the underlying query is — 2.7x on `/ohlcv` (120 ms of daylight),
+   but only **1.4x on `/backfill/status`** (19.5 ms). Real and repeatable, yet
+   close enough to ordinary variance that a single pair of requests would not
+   settle it. This is a genuine weakness of the latency evidence relative to a
+   header, and [[0128]] must not present the six routes as uniformly strong.
+
+5. **A cheaper re-run exists and was deliberately not used.** The stage sets
+   `requireAuthorizationForCacheControl: true` with
+   `unauthorizedCacheControlHeaderStrategy: SUCCEED_WITH_RESPONSE_HEADER`, so a
+   caller **granted** `InvalidateCache` on the usage plan can force a miss on
+   any route — including the path-only ones — with `Cache-Control: max-age=0`,
+   instead of the 63-second waits this pass used. Not taken here because it
+   needs a deliberate permission grant. Worth knowing when 0128 re-runs this
+   close to submission. Verified in passing that the *unauthorised* case is
+   correctly refused: `200` plus `warning: 199 Cache-control headers were
+   ignored because the caller was unauthorized`, which `api-gateway-stack.ts:524`
+   asserts and nothing had measured.
 
 ## Notes
 
