@@ -13,9 +13,20 @@
 // API_KEY, VUS, MAX_VUS. k6 exits non-zero if a threshold is breached.
 //
 // ── Why the asset pool decides what you are measuring ───────────────────────
-// The gateway caches /price for 10 s keyed on the PATH ONLY (`addGet(price,
-// [PATH_ID])` in api-gateway-stack.ts) — no query parameter can bust it, so the
-// number of DISTINCT assets in the pool is the only lever on the hit rate.
+// The gateway caches /price for 10 s keyed on the path AND `min_volume_usd`
+// (`addGet(price, [PATH_ID, qs('min_volume_usd')])` in api-gateway-stack.ts).
+//
+// ⚠️ CORRECTED 2026-09-03 (task 0122). This comment previously said PATH ONLY,
+// citing `addGet(price, [PATH_ID])` — the code has not read that since
+// 2026-08-28, when the parameter was added to the key after a measured
+// cross-caller poisoning bug. The claim was inherited by 0121's report as
+// "the cache key is the path only", which is wrong as a general statement.
+//
+// It remains true OF THIS SCRIPT, which sends no query string: with the
+// parameter absent every request shares one entry per asset, so the number of
+// DISTINCT assets in the pool is still the only lever on the hit rate here. Do
+// not carry the claim outside this file — a caller that varies
+// `min_volume_usd` gets a separate cache entry per value.
 // Over a 300 s run each asset can miss at most 300/10 = 30 times, so:
 //
 //   pool size |  max misses  | of 30k requests | what the p95 mostly measures
