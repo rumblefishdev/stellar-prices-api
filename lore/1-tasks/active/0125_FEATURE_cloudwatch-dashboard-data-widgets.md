@@ -370,6 +370,22 @@ out of scope here because this task changes no alarms.
 
 The criteria code cannot close (1, 7 and 8) close here. In order:
 
+0. **Build the ledger-processor binary first.** `cdk synth` does NOT compile
+   it: `compute-stack.ts` packages the pre-built
+   `target/lambda/prices-ledger-processor/bootstrap` via `Code.fromAsset`
+   (see `docs/runbooks/deploy-ledger-processor.md`). A deploy without this
+   step ships the **previous** binary with the new IAM — exactly what
+   happened on the first deploy of this task (2026-09-03 12:34 UTC: 0 errors,
+   0 `publish failed` warnings, and no metric, because the code that
+   publishes was never on the Lambda).
+
+   ```bash
+   cargo lambda build -p prices-ledger-processor --release --arm64 --features lambda
+   grep -c -a 'Prices/Ingest' target/lambda/prices-ledger-processor/bootstrap   # must be > 0
+   ```
+
+   The grep is the check that the asset about to be packaged is the new
+   code. Then `npm run infra:synth:production` so the asset hash refreshes.
 1. Review `npm run infra:diff:production` on **Compute** and **Observability**.
    Compute should show one policy diff (the `PutMetricData` namespace condition
    and its `sid`) plus the ledger-processor code change; Observability should
@@ -380,7 +396,10 @@ The criteria code cannot close (1, 7 and 8) close here. In order:
 3. Wait for the next ledger (~5 s) and confirm the ClickHouse write-latency
    panel fills. If it stays empty, check the ledger-processor logs for
    `cloudwatch metric publish failed` — an AccessDenied there means the IAM
-   condition value and `METRIC_NAMESPACE` have drifted apart.
+   condition value and `METRIC_NAMESPACE` have drifted apart. **No warning
+   and no metric** means the deployed binary predates this task: download
+   it (`aws lambda get-function … --query Code.Location`) and grep it for
+   `Prices/Ingest`; if absent, go back to step 0.
 4. Walk every other widget and confirm it shows data rather than "No data".
    That observation is acceptance criterion 1.
 5. Capture the screenshot into `docs/scf/screenshots/` for [[0128]] and write
