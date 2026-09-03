@@ -13,9 +13,17 @@ real Lambda concurrency + cross-cloud mTLS to ClickHouse all in play):
 
 ```sh
 k6 run packages/prices-api/loadtest/price_load.js \
-  -e BASE_URL=https://<api-id>.execute-api.<region>.amazonaws.com/production \
+  -e BASE_URL=https://prices-api.sorobanscan.rumblefish.dev \
   -e API_KEY=<key on a plan that permits 100 req/s — see below>
 ```
+
+⚠️ **The `execute-api` URL is retired** — task 0126 disabled it on 2026-09-02
+(`a635439`). A run against the old
+`https://<api-id>.execute-api.<region>.amazonaws.com/production` now aborts at
+setup with `403`, which API Gateway returns byte-identically for an unknown key
+and for no key at all, so the failure reads as "bad key" rather than "dead
+endpoint". Check `apiBaseUrl` in `infra/envs/production.json` if in doubt — that
+is the authoritative value.
 
 No `-e ASSET=` here, deliberately: that flag pins one asset and turns the run
 into a measurement of the **gateway cache**, not of the AC scenario (see the
@@ -177,9 +185,15 @@ k6 run $K -e BASE_URL="$BASE_URL" -e API_KEY="$API_KEY" -e ASSETS=./pool-wide.js
   --summary-trend-stats="$S" --summary-export=loadtest-wide.json; echo "exit=$?"
 ```
 
-`exit=0` means every threshold held. Leave ≥ 60 s between regimes so the 10 s
-gateway cache and the warm Lambda pool from the previous run are not carried into
-the next one's warmup.
+`exit=0` means every threshold held.
+
+**Leave ≥ 30 s between regimes, to clear the gateway cache and nothing else.**
+The cache TTL is 10 s, so 30 s empties it three times over. Do not stretch the
+gap hoping to cool the Lambda pool — containers survive 5–15 minutes, so no
+practical gap cools them, and none needs to: **container state is normalised by
+each run's own 30 s warmup at full rate**, which is why that phase exists and why
+it is excluded from the thresholds. An earlier revision of this file claimed the
+gap covered both; it never could.
 
 ⚠️ **`ASSETS` is resolved relative to the *script*, not to your shell's cwd** —
 k6's `open()` works that way, which is also why the built-in default is the

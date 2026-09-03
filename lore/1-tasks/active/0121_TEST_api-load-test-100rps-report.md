@@ -106,6 +106,40 @@ history:
       `rumblefish-admin`/`rumblefish-readonly` (045028348791) return zero
       APIGateway/Lambda/CloudWatch resources in eu-central-1. The load run
       itself is unaffected (public endpoint + API key).
+  - date: 2026-09-03
+    status: active
+    who: stkrolikiewicz
+    note: >
+      **Regimes 1 and 2 run; the AC PASSES.** Regime 2 (the AC scenario)
+      sustained 99.85 req/s for 5 min at **p95 47.09 ms** against the 200 ms
+      bar with **0 errors in 30 001 requests**; k6 exit 0 on all four
+      thresholds. Regime 1 (single hot asset): p95 47.75 ms, 0 errors. Both are
+      also under the Tranche 3 100 ms bar at p95 — but both are
+      cache-dominated, so that is not yet an answer for T3, and p99 already
+      exceeds 100 ms (175.95 / 107.53 ms). Report filled in at
+      `docs/prices-api-load-test-100rps.md`, raw k6 exports archived under
+      `docs/loadtest-results/`.
+      Regimes 1 and 2 were run **without** a BE window and did not need one:
+      together ~1200 ClickHouse queries over eleven minutes, under 2 req/s.
+      Only regime 3 (~36 500 queries at a sustained 100 req/s) needs
+      coordination; window requested, awaiting BE.
+      **The endpoint moved under us.** [[0126]] retired the `execute-api` URL
+      in `a635439`, merged 2026-09-02 14:56 CEST — 28 minutes after the
+      pre-flight smoke. The first attempt today aborted at setup with
+      `native → 403`, which API Gateway returns byte-identically for an unknown
+      key and for no key at all, so it reads as "bad key" rather than "dead
+      endpoint" — the same indistinguishability [[0255]] is open on. Fixed by
+      pointing at `https://prices-api.sorobanscan.rumblefish.dev`; README and
+      report both updated. Plan membership re-verified empirically since the
+      console is unreachable: 60 requests at ~52 req/s, all 200, zero 429,
+      which rules out the 1 req/s free plan.
+      Two findings worth carrying: (1) regime 1 dropped 6 iterations, **all in
+      warmup, none in main** — the first live case of Oskar's `phase:main`
+      scoping mattering; unscoped it would have reported "did not sustain
+      100 req/s". (2) The 20-asset pool ran as **18**: `setup()` dropped `AUD`
+      and `EQL` on 404, a different pair from the pre-flight's `USDC`/`RON`, so
+      the unservable set **drifts day to day** — a data-freshness property, not
+      a fixed defect list. Relevant to [[0178]] and [[0210]].
 ---
 
 # Load test — 100 req/s on `GET /assets/{id}/price`
@@ -179,16 +213,27 @@ was opened to answer.
 - [x] Dedicated load-test API key / usage plan provisioned, sized above 100 req/s
       — the run does **not** use a key on `pricing-api-free-production` (1 req/s,
       100 000/month), which would measure our own throttle rather than the system
-- [ ] 100 req/s sustained for 5 minutes on `GET /assets/{id}/price` completes
-- [ ] p95 < 200ms and error rate < 0.1% on the 20-asset spread scenario
+- [x] 100 req/s sustained for 5 minutes on `GET /assets/{id}/price` completes
+      — 99.87 and 99.85 req/s achieved on regimes 1 and 2, zero
+      `dropped_iterations{phase:main}`
+- [x] p95 < 200ms and error rate < 0.1% on the 20-asset spread scenario
+      — **p95 47.09 ms, 0 errors in 30 001 requests**, k6 exit 0
 - [ ] Percentiles reported separately for cache hits and cache misses
+      — hits measured (regimes 1 and 2); **misses need regime 3**, pending the
+      BE window. There is no `X-Cache` header, so this cannot be split within a
+      single run
 - [ ] Cold-start incidence and ClickHouse-side query time recorded
-- [ ] Report published under `docs/` with a pass/fail verdict, citable by
-      [[0128]]
-- [ ] Distance to the Tranche 3 bar (p95 <100ms) stated explicitly, with a
-      recommendation if the gap is material
+      — blocked on prod-account CloudWatch access, not on the run
+- [x] Report published under `docs/` with a pass/fail verdict, citable by
+      [[0128]] — `docs/prices-api-load-test-100rps.md`, verdict **PASS**, raw
+      k6 exports archived under `docs/loadtest-results/`
+- [x] Distance to the Tranche 3 bar (p95 <100ms) stated explicitly, with a
+      recommendation if the gap is material — no gap at p95 on the measured
+      regimes (47.09 ms vs the 100 ms bar), qualified as cache-dominated; p99
+      already exceeds 100 ms
 - [ ] BE notified before the run; no BE-side alarm fired, or the incident is
-      recorded
+      recorded — window requested 2026-09-03, awaiting reply. Regimes 1 and 2
+      did not need one (~1 200 queries total, under 2 req/s)
 
 ## Notes
 
