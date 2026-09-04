@@ -4,7 +4,7 @@ title: "GET /backfill/status publishes an impossible state — 'completed, 0%, 6
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0088", "0072", "0136"]
+related_tasks: ["0127", "0263", "0088", "0072", "0136"]
 tags: [layer-api, priority-medium, effort-small, backfill, observability, consumer-facing]
 links: []
 history:
@@ -17,9 +17,44 @@ history:
       sdex_archive as completed AND 0.0% AND 63,795,748 ledgers remaining, and
       soroban_amm as running with a last push 28 days old. Two independent root
       causes, one surface. 0088's own notes had already predicted the second.
+  - date: 2026-09-04
+    status: backlog
+    who: okarcz
+    note: >
+      ⚠️ **Defect 1 is FIXED — but by [[0127]], not by this task, which nobody
+      read first.** PR #283 (`d9de725`) corrected `progress_pct` and
+      `ledgers_remaining` for the backward stream exactly as this task
+      prescribes, including the instruction not to repair the data: the reader
+      was changed, the stored `current_ledger = 1` was left alone. Found
+      independently while closing Tranche 2's backfill gate, so the two were
+      solved twice up to the point of discovery. **Defect 2 is untouched.**
+      Re-scope before starting: what remains here is the dead-run status and
+      the timestamp inconsistency, not the arithmetic.
 ---
 
 # `/backfill/status` publishes a self-contradictory state
+
+> ## 🗄️ Defect 1 is FIXED — 2026-09-04, PR #283 (`d9de725`)
+>
+> Corrected in `packages/prices-api/src/backfill/handlers.rs` exactly as this
+> task prescribes. `progress_pct` is now `(target − current) / (target − start)`
+> and `ledgers_remaining` is `current − start`; the completed archive reads
+> **100% with 0 remaining** instead of 0% with 63,795,748. 🔑 This task's
+> instruction was followed to the letter: **the reader was fixed and the stored
+> `current_ledger = 1` was left untouched.** Five unit tests plus the amended
+> integration test cover it.
+>
+> Two things this task did not anticipate, both now guarded:
+> a non-`completed` stream is held under 100% (a genesis-anchored chunk writes
+> `current_ledger = 1` while still `running`, which the corrected arithmetic
+> would otherwise read as finished — that residue is [[0263]]), and
+> `ledgers_remaining` is clamped to the span because `current > target` is
+> reachable.
+>
+> ⚠️ **Defect 2 below is untouched and is the whole remaining scope**: a dead
+> run that still advertises `running`, and `completed_at` predating
+> `last_push_at`. AC 1 and AC 4 are met; AC 2, 3 and 5 are not.
+
 
 ## Summary
 
@@ -103,13 +138,13 @@ that predates the last write is another signal a consumer cannot interpret.
 
 ## Acceptance Criteria
 
-- [ ] `/backfill/status` cannot publish `completed` together with a non-100%
+- [x] `/backfill/status` cannot publish `completed` together with a non-100%
       `progress_pct`, in either walk direction. Assert it as a test, not by
       inspection.
 - [ ] A stream whose last push is far in the past does not report `running`.
 - [ ] `completed_at >= last_push_at` holds, or the two fields are given
       meanings that make the ordering irrelevant and that is documented.
-- [ ] `sdex_archive`'s stored `current_ledger = 1` is **preserved**, not
+- [x] `sdex_archive`'s stored `current_ledger = 1` is **preserved**, not
       overwritten — the fix is in the read path. A test should pin this so a
       later "cleanup" does not silently reintroduce the bug by mutating data.
 - [ ] Prod re-checked after the fix and the actual output recorded.

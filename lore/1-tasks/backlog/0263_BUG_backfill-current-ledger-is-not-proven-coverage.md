@@ -107,6 +107,15 @@ self-contradiction without making the number true.
 
 ## Notes
 
+- ⚠️ **[[0176]] already owned the reader-arithmetic half of this and was not
+  read first.** It states the same diagnosis — *"the stored value is CORRECT,
+  the endpoint's arithmetic is wrong, do not repair the data"* — and PR #283
+  independently arrived at the same fix. The duplication cost little because
+  both reached the same answer, but it is a reminder to grep the backlog for
+  the surface, not only for the symptom. What is left in 0176 is its Defect 2
+  (a dead run still advertising `running`, and `completed_at` predating
+  `last_push_at`), which is unrelated to this task.
+
 - 🔴 **Do not "fix" this by loosening the status guard.** The 99.9 ceiling is
   what stops `progress_pct: 100.0` appearing beside `status: "running"`. It is
   crude, and it is the only thing currently preventing the optimistic reading
