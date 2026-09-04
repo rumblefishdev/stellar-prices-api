@@ -300,7 +300,13 @@ majority and say so, rather than discovering it in front of the reviewer.
       tiers. Six years under the bar. Both of the task's stated traps were
       checked and neither fired.
 - [ ] Month-by-month candle counts from 2022-01 to present recorded; every gap
-      explained or filled
+      explained or filled — **counts recorded 2026-09-04, and there are no
+      calendar gaps**: every day from 2022-01-01 to 2026-09-03 carries SDEX
+      candles, leap years included. Open on the *explained* half: three density
+      features still need accounting for — the simultaneous 2026-07 dip on both
+      streams, the SDEX-only 2024-10 dip, and 🔴 the AMM stream's stored
+      `earliest_data_available` (2024-02-20) preceding its first actual 1d
+      candle (2024-03-08) by 17 days.
 - [x] ~~🔴 BLOCKED BY [[0170]]~~ — `GET /assets/{USDC}/ohlcv?timeframe=all`
       returns 1d candles from 2022-01 or earlier through the deployed API —
       **satisfied 2026-09-04**: 2,042 points from **2021-02-01**, no gaps.
@@ -334,11 +340,72 @@ majority and say so, rather than discovering it in front of the reviewer.
       `status: "completed"` — the formula assumes a forward walk and this stream
       ran backward. Fix before submission; it is on the exact endpoint Tranche 2
       AC 5 sends the reviewer to.
-- [ ] §9's residual `sdex-cloud-push` language corrected per ADR 0009
+- [x] §9's residual `sdex-cloud-push` language corrected per ADR 0009 — **done
+      2026-09-04**, PR #284. All three §9 sites (Tranche 1 criterion 5, the
+      Tranche 2 and Tranche 3 backfill milestones), with the substance of each
+      left intact. Also §4.5's field table and two references in §10 and §11
+      that sat outside the §5.3 warning block's stated scope and were covered
+      by nothing. §5.3-§5.6 keep their warning block; the 2026-05-14 changelog
+      row stays as written.
 - [ ] `sdex.last_push_at` fresh within the configured cadence at review time —
       currently **2026-08-11**, 24 days ago, on a stream that completed
       2026-07-27. Decide whether freshness is even meaningful for a completed
       archive stream before asserting anything about it in [[0128]].
+
+### AC 2 — month-by-month coverage, 2022-01 → 2026-09
+
+Measured on `price_ohlcv_1d` 2026-09-04, all 57 months. Full table in
+`docs/` when [[0128]] needs it; the result is what matters here.
+
+🔑 **There are no calendar gaps.** `uniqExact(toDate(timestamp))` equals the
+calendar length of every month in the range — 31/31, 30/30, and the February
+rows land correctly on **29** for 2024 (leap) and **28** for 2022, 2025 and
+2026. 2026-09 shows 3 days because the query excluded `today()`. So **every day
+from 2022-01-01 to 2026-09-03 carries SDEX candles**, and the AC's "every gap
+explained or filled" has nothing to fill.
+
+That is a stronger statement than a monthly row count, and it is why the query
+counted distinct days rather than candles alone: one heavily-traded asset can
+hold a monthly total up while a week is missing underneath it.
+
+Density, by contrast, varies — and three features of the shape need saying
+rather than averaging away:
+
+| feature | reading |
+|---|---|
+| 2022-01 → 2022-03 sit at 178k-245k against a ~600-700k steady state | **Growth, not loss.** 22.4k assets against ~28k later. SDEX simply carried less. |
+| **AMM candles begin 2024-03** (47 rows), zero before | Correct by construction — Soroswap's first 1d candle is 2024-03-08, Phoenix 2024-03-21, Aquarius 2024-04-18. The venues did not exist earlier. ⚠️ But see the discrepancy below. |
+| AMM grows 47 → 8,508 monotonically to 2026-05 | Consistent with venue adoption; no step changes that would suggest a lost range. |
+
+#### ⚠️ Three things not yet explained
+
+1. **2026-07 dips on both streams at once** — SDEX **27.1%** below its
+   neighbours (498,222 vs a 683,660 mean) and AMM **41.7%** below (4,641 vs
+   7,954). ⚠️ [[0101]] already owns a **Soroswap hole spanning 2026-07-06 →
+   07-15**, which would explain the AMM half. It does not obviously explain the
+   SDEX half, and a simultaneous dip on two independent ingest paths is worth
+   one query rather than one assumption. 🔑 Note the coincidence: both
+   `backfill_progress` rows carry `newest_data_available = 2026-07-06 09:35:00`
+   — the same date the hole opens.
+
+2. **2024-10 dips on SDEX alone** — **35.4%** below its neighbours (491,814 vs
+   761,871) with a normal asset count (27,506, against 28,552 and 33,689
+   either side) and all 31 days present. So it is fewer *pairs per asset*, not
+   fewer days and not fewer assets. No known incident covers it.
+
+3. 🔴 **The AMM stream's stored `earliest_data_available` does not reconcile.**
+   `backfill_progress` says `soroban_amm` reaches **2024-02-20 17:00**, but the
+   earliest non-SDEX row in `price_ohlcv_1d` is **2024-03-08** (Soroswap).
+   **17 days of claimed coverage with no daily candle behind it.** This is the
+   same stored-vs-actual trap AC 1 cleared for the SDEX stream, failing on the
+   other stream — and `merge_min` is monotonic, so the value cannot correct
+   itself. Either 1m rows exist for late February that never rolled to 1d, or
+   the stored value is wrong. Both matter: the first is a rollup defect, the
+   second is an endpoint overstating coverage.
+
+⚠️ **Consequence for AC 4**: pick spot-check dates away from 2024-10 and
+2026-07 until 1 and 2 are explained, and away from any month whose asset count
+is thin (2026-06 at 19,411 and 2025-11 at 19,437 are the lowest in the range).
 
 ## Design Decisions
 
