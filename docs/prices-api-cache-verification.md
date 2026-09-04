@@ -7,9 +7,18 @@
 > reworded criterion and supplies the evidence to judge it on. See
 > [The `X-Cache` question](#the-x-cache-question) before quoting anything here.
 
-Task [0122](../lore/1-tasks/active/0122_TEST_apigateway-cache-ttl-verification.md) ·
+Task [0122](../lore/1-tasks/archive/0122_TEST_apigateway-cache-ttl-verification.md) ·
 Tranche 2 AC 3 · measured 2026-09-03 against
 `https://prices-api.sorobanscan.rumblefish.dev`
+
+> **The architectural decision behind this document is recorded as
+> [ADR 0012](../lore/2-adrs/0012_api-gateway-stage-cache-no-cloudfront-no-x-cache-header.md)**
+> (accepted 2026-09-04): the API Gateway regional stage cache stays, CloudFront
+> is **not** adopted at this point in the project, and **no `X-Cache` header is
+> emitted by any mechanism**. This document is the measurement and the request
+> for a reworded criterion; the ADR is why the architecture was not changed to
+> avoid asking. Read the ADR before proposing either alternative again — both
+> are closed there with reasons, not merely unchosen.
 
 ## The acceptance criterion
 
