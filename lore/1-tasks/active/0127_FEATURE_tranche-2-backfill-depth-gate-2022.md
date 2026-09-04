@@ -2,13 +2,13 @@
 id: "0127"
 title: "Tranche 2 backfill-depth gate — earliest_data_available ≤ 2022-01-01 and USDC 1d candles spot-checked"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0005", "0009"]
 related_tasks: ["0088", "0106", "0114", "0116", "0101", "0128", "0170", "0165"]
 tags: [layer-indexing, priority-high, effort-medium, milestone-M2, backfill, sdex, verification, acceptance]
 milestone: 2
 links:
-  - "../../../lore/1-tasks/active/0088_FEATURE_soroban-backfill-run-tracker/README.md"
+  - "../../../lore/1-tasks/archive/0088_FEATURE_soroban-backfill-run-tracker/README.md"
   - "../../../docs/prices-api-general-overview.md"
 history:
   - date: 2026-07-23
@@ -19,6 +19,22 @@ history:
       acceptance criteria 5 and 6 — the backfill-depth milestone and the
       independent-source spot-check of 1d candles. The **run** itself is
       [[0088]]; this task is the gate and the verification on top of it.
+  - date: 2026-09-04
+    status: active
+    who: okarcz
+    note: >
+      Activated. Picked as the last Tranche 2 acceptance gate still open to this
+      author — [[0121]], [[0122]] and [[0126]] are closed, [[0120]] belongs to
+      another developer, and [[0128]] cannot start until this one lands.
+      ⚠️ The Context section below is written as though the run were still in
+      flight; it is not. **[[0088]] is completed and archived**, so this task is
+      now purely measurement and write-up, with no waiting. Its two stated
+      dependencies are also cleared: [[0106]] (the stored-vs-computed
+      `earliest_data_available` design) and [[0114]] (the `close_usd = 0`
+      repair that AC 6's USDC spot-check would otherwise have failed against)
+      are both completed. Re-confirm the frontier from the data before trusting
+      any of this — the two traps recorded below are exactly the ones that
+      produced a wrong reading of this measurement before.
 ---
 
 # Tranche 2 backfill-depth gate
