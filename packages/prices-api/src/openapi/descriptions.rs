@@ -493,7 +493,11 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "SdexStream",
         "current_ledger",
-        "Last ledger sequence ingested.",
+        "The OLDEST ledger sequence reflected so far. This stream walks backward from the \
+         chain tip toward genesis, so it descends over the life of the run and reaches \
+         `start_ledger` when the archive is complete — it is not the newest ledger ingested. \
+         Caveat: it is the lowest completed run *start*, so it asserts a floor, not proven \
+         contiguous coverage between that floor and `target_ledger`.",
     ),
     (
         "SdexStream",
@@ -527,7 +531,8 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "SdexStream",
         "start_ledger",
-        "First ledger sequence of this run.",
+        "Low end of the span this stream covers — genesis (`1`) for the SDEX archive. Because \
+         the stream walks backward it is where the walk *ends*, not where it begins.",
     ),
     (
         "SdexStream",

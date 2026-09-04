@@ -752,7 +752,7 @@ Section 5.6). The response reflects both.
     "current_ledger": 34891234,
     "start_ledger": 1,
     "target_ledger": 57234198,
-    "progress_pct": 39.2,
+    "progress_pct": 39.04,
     "ledgers_remaining": 34891233,
     "last_push_at": "2026-06-15T11:30:00Z",
     "earliest_data_available": "2019-08-22T00:00:00Z"
