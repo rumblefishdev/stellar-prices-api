@@ -2,8 +2,8 @@
 id: "0262"
 title: "Tranche 2 AC 3 cannot pass as written — the `X-Cache: Hit` header does not exist and is not being added; the criterion needs the reviewer's agreement"
 type: DOCS
-status: backlog
-related_adr: ["0008"]
+status: active
+related_adr: ["0008", "0012"]
 related_tasks: ["0122", "0121", "0128", "0126"]
 tags: [layer-infra, priority-high, effort-small, milestone-M2, api-gateway, caching, acceptance, scf]
 milestone: 2
@@ -21,6 +21,18 @@ history:
       not to add. The engineering is finished; what is left is a conversation,
       so it is a task of its own rather than an open AC on a task that is done.
       To be discussed with the team before the milestone package is submitted.
+  - date: 2026-09-04
+    status: active
+    who: okarcz
+    note: >
+      Activated, and the engineering question is **decided by the operator**:
+      do **not** create CloudFront and do **not** add an `X-Cache` header on API
+      Gateway at this point in the project. Record the reasoning instead —
+      why the API Gateway stage cache is the right layer for where the project
+      is, and why a gateway with no built-in cache header means the header is
+      skipped rather than faked. Written up as **ADR 0012**. What remains is the
+      conversation this task always owned: the team, then the reviewer, on AC
+      3's wording — no code, and it must happen before submission.
 ---
 
 # Tranche 2 AC 3 — the `X-Cache: Hit` criterion, and why we are not satisfying it literally
@@ -205,33 +217,44 @@ rather than a retreat:
 
 ## Implementation
 
-There is no code. The work is:
+**The engineering question is settled — 2026-09-04, by the operator.** No
+CloudFront, no `X-Cache` header, at this point in the project. Recorded as
+**[ADR 0012](../../2-adrs/0012_api-gateway-stage-cache-no-cloudfront-no-x-cache-header.md)**,
+which carries the reasoning, the three rejected alternatives, and — the part
+that matters most for a future session — an explicit **"when to revisit"**
+list, with a warning that *"someone asked for `X-Cache` again"* is **not** on
+it.
 
-- Discuss with the team. The one-line version: *the header does not exist, the
+There is no code in this task and there never was. What is left:
+
+- 🔴 **Raise the wording with the reviewer, in writing, BEFORE the milestone
+  package is submitted.** Not declared inside [[0128]] and hoped through. Point
+  them at `docs/prices-api-cache-verification.md`, which is written for exactly
+  that reader, and at ADR 0012 if they ask why the edge was not built.
+- Brief the team first. The one-line version: *the header does not exist, the
   cheap fix would lie, and the expensive fix emits the wrong string anyway.*
-- Decide as a team whether to (a) propose the rewording to the reviewer, or
-  (b) commission the CloudFront work as a separate task. 0122 recommends (a).
-- If (a): raise it with the reviewer **before** the milestone package is
-  submitted, not by declaring it inside [[0128]] and hoping. Point at
-  `docs/prices-api-cache-verification.md`, which is written for that reader.
-- Record the outcome — in this task, and in [[0128]]'s criterion table.
-- If (b): open a new task for the CloudFront migration and carry §3's list into
-  it as the scope. Do not reopen [[0122]]; its verification work is done and
-  independent of which way this goes.
+- Record the reviewer's answer here, and in [[0128]]'s criterion table.
 
 ## Acceptance Criteria
 
-- [ ] The team has discussed the decision and chosen (a) rewording or (b) the
-      CloudFront build.
-- [ ] If (a): the reviewer has been asked, in writing, before submission, and
-      the answer is recorded here.
+- [x] The team has a decision on whether to reword or to build the edge —
+      **decided 2026-09-04: reword. No CloudFront, no `X-Cache`.**
+- [x] The reasoning is written down where a future session will find it before
+      re-opening the question — **ADR 0012**, accepted, cross-linked from this
+      task and from `docs/prices-api-cache-verification.md`.
+- [ ] 🔴 The reviewer has been asked, in writing, before submission, and the
+      answer is recorded here. **This is now the whole task.**
 - [ ] [[0128]]'s AC 3 entry states which observable the criterion was graded
       against, and labels the latency evidence as the weaker claim in those
       words — not blurred.
-- [ ] If (b): a CloudFront task exists carrying the scope from §3, and this
-      task records why the 3-5 days were judged worth spending given §4.
 
 ## Notes
+
+- 🗄️ **The alternatives are closed, not merely unchosen.** ADR 0012 records all
+  three — a handler-written header (reports the *opposite* of the truth), a
+  CloudFront distribution (emits `Hit from cloudfront`, so the literal wording
+  is still unmet after 3-5 days), and an `EDGE` endpoint type (CloudFront with
+  less control). Reopening any of them needs a new argument, not a re-reading.
 
 - **Do not reverse 0122's decision by accident.** "We should just add the
   header" is the intuition this task exists to answer; §2 and §4 are why it was
