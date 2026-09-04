@@ -2,9 +2,9 @@
 id: "0237"
 title: "The RFP types Current Price as a float and we ship a string — record the answer before a reviewer asks"
 type: DOCS
-status: backlog
+status: active
 related_adr: []
-related_tasks: ["0128", "0120", "0123", "0217"]
+related_tasks: ["0262", "0127", "0128", "0120", "0123", "0217"]
 tags: [layer-docs, priority-medium, effort-small, milestone-M2, scf, submission, evidence, api]
 milestone: 2
 links:
@@ -29,6 +29,22 @@ history:
       collision 0193 hit twice: the shared id sequence is allocated from a
       local view of the tree, so two branches in flight pick the same next
       free number. Nothing references the old id outside this branch.
+  - date: 2026-09-04
+    status: active
+    who: okarcz
+    note: >
+      Activated as the third instance of one pattern, now handled twice in a
+      day: a promise we cannot meet literally, for a good reason nobody wrote
+      down. The first two were Tranche 2 AC 3's `X-Cache` wording ([[0262]],
+      ADR 0012) and USDC's exclusion from the backfill spot-check ([[0127]],
+      `docs/prices-api-backfill-depth-verification.md` §6). All three land in
+      the same place — [[0128]]'s deviations section — so this is done before
+      0128 rather than discovered mid-write.
+      ⚠️ The evidence for the answer already exists and is only unconnected:
+      the 7e-8 price measured on prod during [[0123]], and [[0120]]'s
+      conformance assertions that every numeric string parses and that
+      `Decimal(38,14)` survives the JSON round-trip. This task is writing, not
+      measuring — resist re-deriving what is already recorded.
 ---
 
 # "Current Price (float USD)" vs our Decimal strings
