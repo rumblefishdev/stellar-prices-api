@@ -2,12 +2,13 @@
 id: "0237"
 title: "The RFP types Current Price as a float and we ship a string — record the answer before a reviewer asks"
 type: DOCS
-status: active
-related_adr: []
-related_tasks: ["0262", "0127", "0128", "0120", "0123", "0217"]
+status: completed
+related_adr: ["0011"]
+related_tasks: ["0262", "0127", "0248", "0128", "0120", "0123", "0217"]
 tags: [layer-docs, priority-medium, effort-small, milestone-M2, scf, submission, evidence, api]
 milestone: 2
 links:
+  - "../../../docs/scf/milestone-2-rfp-deviations.md"
   - "../../../docs/prices-api-general-overview.md"
   - "../../../docs/scf/milestone-1-evidence.md"
 history:
@@ -45,6 +46,28 @@ history:
       conformance assertions that every numeric string parses and that
       `Decimal(38,14)` survives the JSON round-trip. This task is writing, not
       measuring — resist re-deriving what is already recorded.
+  - date: 2026-09-04
+    status: completed
+    who: okarcz
+    note: >
+      Closed — 4 of 4. Deliverable is
+      `docs/scf/milestone-2-rfp-deviations.md` (PR #287, `9ca2729`), which
+      records the float-vs-decimal-string answer and gathers the other two M2
+      deviations already decided, so [[0128]] folds in one file rather than
+      three. 🔑 The argument leads with a **measured production defect**, not
+      with theory: ADR 0011's BTC 1h finding, where deriving through
+      `toFloat64` returned a `close` below its own `low` by 1.343e-11 — 0.92 of
+      one float64 ulp on a value carrying 19 significant digits against
+      float64's 15-16. One internal conversion did that; publishing floats
+      would impose it on every consumer, field and request. Supporting
+      citations: 7e-8 on RON ([[0123]]), a `close` of 5e-14 five ticks above the
+      `Decimal(38, 14)` floor, and [[0120]]'s verified *"Decimal(38,14) strings
+      parse everywhere"*. Two things nothing had recorded: the rule covers every
+      Decimal-valued field rather than the one the RFP names, and counts and
+      ledger sequences deliberately stay plain integers because they are exact
+      in a float — making it a precision decision, not a stylistic one. The
+      OpenAPI now states the reason on `price_usd` itself rather than only in
+      the API-level blurb. No API behaviour changed, as the task required.
 ---
 
 # "Current Price (float USD)" vs our Decimal strings
@@ -170,6 +193,18 @@ reviewer reads:
    descriptions, missed because it lives in the schema-summary table rather than
    the field table. Unrelated to this task's subject; too small and too adjacent
    to leave.
+
+
+## Future Work
+
+None spawned. The task was a recorded answer, and it is recorded.
+
+⚠️ **One thing for [[0128]] to carry, not a task**: the deviations document is
+written to be **folded in, not linked past**. Its §2 and §3 are deliberately
+summaries that point at the fuller reports
+(`prices-api-cache-verification.md`, `prices-api-backfill-depth-verification.md`);
+if 0128 reproduces those in full it will have three copies of each argument
+drifting apart. Cite the document, keep the pointers.
 
 
 ## Notes
