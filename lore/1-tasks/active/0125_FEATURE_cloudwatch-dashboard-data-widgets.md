@@ -368,8 +368,8 @@ out of scope here because this task changes no alarms.
 
 ## PR #280 review (karczuRF, 2026-09-04)
 
-Five findings; all addressed except the CI step, which waits on a
-`workflow`-scoped token (see WR-01 below). Fixed: the 5xx-rate tile now
+Five findings, all addressed (the CI step landed last, once the push token
+carried the `workflow` scope — see WR-01 below). Fixed: the 5xx-rate tile now
 `FILL`s its input like the graph beside it (it rendered `--` on a healthy
 quiet day — an M2 exhibit); one `aws_config` load shared by the S3 and
 CloudWatch clients, with the publish timeouts on the CloudWatch client's own
@@ -401,13 +401,10 @@ name helpers equal their literals). Fixed in one commit:
   concurrency 1 that is ingestion lag. Now connect 1 s / attempt 3 s /
   operation 6 s, 2 attempts.
 - **WR-01 (medium)** — `verify-dashboard-synth.mjs` claimed to run in CI and
-  did not. **Still open:** the two CI steps (this guard after `Synth
-  production app`, and a `cargo clippy --no-deps` gate for
-  `prices-ledger-processor`, IN-05) were written and then pulled from this
-  branch because the push token lacks the `workflow` scope GitHub requires
-  for `.github/workflows/` changes. Follow-up: add both steps in a separate
-  PR pushed with a `workflow`-scoped token. Until then the guard runs by
-  hand (`npm run infra:synth:production && npm run infra:verify-dashboard`).
+  did not. Now a step after `Synth production app` in `ci.yml`, plus a
+  `cargo clippy --no-deps` gate for `prices-ledger-processor` (IN-05). Landed
+  in a separate `ci(lore-0125)` commit once the push token carried the
+  `workflow` scope GitHub requires for `.github/workflows/` changes.
 - **WR-02/03** — the worker list lived in three places by hand. Single
   source: `SCHEDULED_WORKERS` / `SCHEDULE_DISABLED_WORKERS` in
   `lambda-baseline.ts`; `createWorkerLambda` throws on a name not in it, the
