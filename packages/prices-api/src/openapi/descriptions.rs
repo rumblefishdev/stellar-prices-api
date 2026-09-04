@@ -77,7 +77,8 @@ pub(super) const SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "SdexStream",
-        "Progress of the SDEX archive stream, which walks the ledger history in order.",
+        "Progress of the SDEX archive stream, which walks the ledger history BACKWARD, \
+         from the chain tip toward genesis.",
     ),
     (
         "SortCol",
@@ -207,7 +208,8 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "AssetListItem",
         "price_usd",
         "Latest USD price for the asset; `\"0\"` when none is available. Same meaning as \
-         `PriceResponse.price_usd`, including the `method` it is attributed to.",
+         `PriceResponse.price_usd`, including the `method` it is attributed to and the \
+         decimal-string form and its precision rationale.",
     ),
     (
         "AssetListItem",
@@ -452,7 +454,13 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          rate. `method` says which. `\"0\"` means neither was available.\n\nThe value is not \
          age-bounded: for an asset that has stopped trading it is the last close inside \
          the window, up to 24 hours old. `updated_at` is the time of the snapshot, not \
-         the age of the price.",
+         the age of the price.\n\n**A decimal string, not a JSON number.** Prices are \
+         `Decimal(38, 14)` and a JSON number is an IEEE-754 double in every mainstream \
+         parser — ~15-16 significant digits against the 19 a five-figure price at this \
+         scale carries, so a float round-trip silently drops low-order digits. Assets on \
+         this store trade as low as 7e-8, where those digits are the price. Parse with a \
+         decimal type; `parseFloat` still works if a float is genuinely wanted, but the \
+         reverse is not recoverable.",
     ),
     (
         "PriceResponse",
