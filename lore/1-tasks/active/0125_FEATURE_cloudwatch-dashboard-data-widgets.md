@@ -366,6 +366,49 @@ out of scope here because this task changes no alarms.
   nobody has taken; leaving it deployed and dark is the current default rather
   than a choice.
 
+## Deep review 2026-09-04 (pre-merge, cross-file)
+
+`gsd-code-reviewer` at `deep` over the 11 source files of PR #280: 1 critical,
+7 warnings, 5 info. All four brief invariants proved clean (no ledger-processor
+error path changed; publish only in the `Ok` arm; `lambda` feature gate tight;
+name helpers equal their literals). Fixed in one commit:
+
+- **CR-01 (high)** — the viewer carried `CloudWatchReadOnlyAccess`, which also
+  grants `logs:FilterLogEvents`/`logs:Get*` and `xray:Get*` on every log group
+  and trace in the account shared with the block explorer. Replaced by an
+  inline policy of exactly the CloudWatch `Get*`/`List*`/`Describe*` calls the
+  dashboard needs; the synth guard now fails on any managed `*ReadOnlyAccess`
+  on the viewer and on any non-read action in its inline policy. (The Chatbot
+  role in the same stack keeps that managed policy on purpose.)
+- **WR-04 (medium)** — the CloudWatch client had no timeout: a stalled
+  endpoint would hold the invocation to the 60 s limit, and with reserved
+  concurrency 1 that is ingestion lag. Now connect 1 s / attempt 3 s /
+  operation 6 s, 2 attempts.
+- **WR-01 (medium)** — `verify-dashboard-synth.mjs` claimed to run in CI and
+  did not. **Still open:** the two CI steps (this guard after `Synth
+  production app`, and a `cargo clippy --no-deps` gate for
+  `prices-ledger-processor`, IN-05) were written and then pulled from this
+  branch because the push token lacks the `workflow` scope GitHub requires
+  for `.github/workflows/` changes. Follow-up: add both steps in a separate
+  PR pushed with a `workflow`-scoped token. Until then the guard runs by
+  hand (`npm run infra:synth:production && npm run infra:verify-dashboard`).
+- **WR-02/03** — the worker list lived in three places by hand. Single
+  source: `SCHEDULED_WORKERS` / `SCHEDULE_DISABLED_WORKERS` in
+  `lambda-baseline.ts`; `createWorkerLambda` throws on a name not in it, the
+  strip import and the workers row derive from it, and the synth guard reads
+  the imported count off the body instead of a constant.
+- **WR-05/06** — the percentile check can no longer pass vacuously; threshold
+  lines are matched to their own widget by title.
+- **WR-07** — missing `ENV_NAME` now logs an error at startup (fallback kept:
+  ingestion must not stop over telemetry).
+- **IN-01/02/03/04/05** — fourth top-row tile on 24 h too; chunking note;
+  `--env` validation; `AWS::IAM::AccessKey` guard; the one clippy nit that
+  blocked a `--no-deps` gate on `prices-ledger-processor` fixed (the CI gate
+  itself waits with WR-01).
+
+Redeploy needed for both stacks: Compute (client timeouts — rebuild the
+bootstrap first, runbook step 0) and Observability (viewer policy, tile).
+
 ## Operator Runbook
 
 The criteria code cannot close (1, 7 and 8) close here. In order:

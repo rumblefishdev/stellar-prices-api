@@ -12,6 +12,8 @@ import type { EnvironmentConfig } from '../types.js';
 import {
   workerErrorAlarmName,
   workerFunctionName,
+  SCHEDULED_WORKERS,
+  SCHEDULE_DISABLED_WORKERS,
 } from '../lambda-baseline.js';
 import {
   ingestDlqName,
@@ -1483,18 +1485,7 @@ export class ObservabilityStack extends cdk.Stack {
     // EventBridge and destroy the independent deployability this stack defends
     // everywhere else. The name comes from `workerErrorAlarmName`, the same
     // helper that creates them.
-    const workersWithErrorAlarms = [
-      'asset-discovery',
-      'cleanup',
-      'supply',
-      'oracle',
-      'enrichment',
-      'coarse-sweep',
-      'backfill-freshness-probe',
-      'rollup-freshness-probe',
-      'mtls-notafter-probe',
-    ];
-    const importedWorkerErrorAlarms = workersWithErrorAlarms.map((name) => {
+    const importedWorkerErrorAlarms = SCHEDULED_WORKERS.map((name) => {
       const idPrefix = name
         .split('-')
         .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
@@ -1533,7 +1524,7 @@ export class ObservabilityStack extends cdk.Stack {
         markdown: [
           `# prices-api — ${config.envName}`,
           '',
-          'Top line: API latency, error rate and cache hit ratio over the last 24 hours, ClickHouse write latency over the selected range, and the current state of every alarm.',
+          'Top line: API latency, error rate, cache hit ratio and ClickHouse write latency over the last 24 hours, and the current state of every alarm.',
         ].join('\n'),
         width: 24,
         height: 2,
@@ -1566,10 +1557,12 @@ export class ObservabilityStack extends cdk.Stack {
         setPeriodToTimeRange: true,
       }),
       new cloudwatch.SingleValueWidget({
-        title: 'ClickHouse write latency p95 (ms)',
+        title: 'ClickHouse write latency p95 (ms) — last 24h',
         metrics: [chWriteLatency('p95')],
         width: 6,
         height: 5,
+        start: '-P1D',
+        setPeriodToTimeRange: true,
       }),
     );
 
@@ -1863,16 +1856,9 @@ export class ObservabilityStack extends cdk.Stack {
     // permanently empty series. It still appears in the alarm strip above.
     // -----------------------------------------------------------------
     const trend7d = { start: '-P7D', period: cdk.Duration.hours(1) };
-    const dashboardWorkers = [
-      'asset-discovery',
-      'supply',
-      'oracle',
-      'enrichment',
-      'coarse-sweep',
-      'backfill-freshness-probe',
-      'rollup-freshness-probe',
-      'mtls-notafter-probe',
-    ];
+    const dashboardWorkers = SCHEDULED_WORKERS.filter(
+      (name) => !SCHEDULE_DISABLED_WORKERS.includes(name),
+    );
     const workerMetric = (
       metricName: string,
       statistic: string,
@@ -2030,9 +2016,13 @@ export class ObservabilityStack extends cdk.Stack {
     // An IAM *user*, not a cross-account role: there is no external principal
     // to trust — none is known. A named substitution, like Decision A above.
     //
-    // Exactly ONE managed policy, and deliberately not the account-wide
-    // `ReadOnlyAccess`, which would expose Secrets Manager metadata, S3
-    // listings and Lambda configuration.
+    // A hand-written read policy, not `CloudWatchReadOnlyAccess`: that managed
+    // policy also grants `logs:FilterLogEvents` / `logs:Get*` and `xray:Get*`
+    // on every log group and trace in the account — which is shared with the
+    // block explorer. The dashboard has no log widgets, so the viewer needs
+    // exactly the dashboard, metric and alarm read calls below and nothing
+    // that can read log contents (task 0125 deep review CR-01). These
+    // CloudWatch read actions do not support resource-level scoping.
     //
     // NO password is passed: `iam.User` creates a login profile only when one is
     // supplied, and a password in the template is precisely what is being
@@ -2041,10 +2031,29 @@ export class ObservabilityStack extends cdk.Stack {
     // -----------------------------------------------------------------
     const stellarViewer = new iam.User(this, 'StellarDashboardViewer', {
       userName: `prices-${config.envName}-stellar-viewer`,
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('CloudWatchReadOnlyAccess'),
-      ],
     });
+    stellarViewer.attachInlinePolicy(
+      new iam.Policy(this, 'StellarDashboardViewerPolicy', {
+        policyName: `prices-${config.envName}-dashboard-read`,
+        statements: [
+          new iam.PolicyStatement({
+            sid: 'ReadDashboardsMetricsAndAlarms',
+            actions: [
+              'cloudwatch:GetDashboard',
+              'cloudwatch:ListDashboards',
+              'cloudwatch:GetMetricData',
+              'cloudwatch:GetMetricStatistics',
+              'cloudwatch:ListMetrics',
+              'cloudwatch:GetMetricWidgetImage',
+              'cloudwatch:DescribeAlarms',
+              'cloudwatch:DescribeAlarmHistory',
+              'cloudwatch:DescribeAlarmsForMetric',
+            ],
+            resources: ['*'],
+          }),
+        ],
+      }),
+    );
 
     new cdk.CfnOutput(this, 'StellarViewerUserName', {
       value: stellarViewer.userName,

@@ -148,9 +148,7 @@ where
                 // Soroban AMM trades + oracle samples.
                 let sob = process_ledger(lcm, &mut state.registries, &mut state.assets);
                 for (source, tick) in &sob.amm_ticks {
-                    amm.entry(source)
-                        .or_insert_with(CandleAccumulator::new)
-                        .merge(tick);
+                    amm.entry(source).or_default().merge(tick);
                 }
                 oracle.extend(sob.oracle);
                 obj_max = obj_max.max(ledger_sequence(lcm) as u64);

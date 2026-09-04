@@ -59,18 +59,22 @@ import { readFileSync } from 'node:fs';
 const args = process.argv.slice(2);
 const envIdx = args.indexOf('--env');
 const envName = envIdx === -1 ? 'production' : args[envIdx + 1];
+if (!envName || envName.startsWith('--')) {
+  console.error(
+    'usage: verify-dashboard-synth.mjs [--env <envName>]   (default: production)',
+  );
+  process.exit(2);
+}
 
 const TEMPLATE = `infra/cdk.out/Prices-${envName}-Observability.template.json`;
 
 /**
- * Per-worker `-errors` alarms created by `createWorkerLambda` and owned by
- * EventBridgeStack. They are imported into the strip by ARN (no cross-stack
- * CFN reference), so they are not resources in THIS template and have to be
- * added to the expected count by hand. Keep in step with the worker list in
- * `observability-stack.ts`.
+ * Per-worker `-errors` alarms are owned by EventBridgeStack and imported into
+ * the strip by ARN, so they are not resources in this template. Their count
+ * is read off the body (distinct `prices-<env>-<worker>-errors` names inside
+ * the alarm widgets) rather than kept as a constant here — a constant was the
+ * second hand-maintained copy of the worker list (deep review WR-02).
  */
-const IMPORTED_WORKER_ERROR_ALARMS = 9;
-
 /** Floor from the live account on 2026-09-03: 40 own + 9 imported. */
 const MIN_ALARMS = 49;
 
@@ -181,6 +185,13 @@ const percentileOnIngest = [
   ),
 ].map(([, metric, stat]) => `${metric} (${stat})`);
 
+if (percentileOnIngest.length === 0) {
+  failures.push(
+    'no widget asks for a percentile statistic on a Prices/Ingest metric — the write-latency p50/p95 ' +
+      'panels are gone, so the raw-values check below has nothing to protect (it must not pass vacuously)',
+  );
+}
+
 if (percentileOnIngest.length > 0) {
   let ingestSource;
   try {
@@ -211,24 +222,23 @@ if (percentileOnIngest.length > 0) {
   }
 }
 
-// -- 3b. the top-line API tiles read a 24-hour window ------------------------
+// -- 3b. the top-row tiles read a 24-hour window ---------------------------
 /**
- * At the dashboard's 3-hour default a quiet night shows `--` on the three API
- * tiles (no requests, no datapoint). Each tile carries its own 24-hour window
- * so the number is always there. Three tiles, three `-P1D` starts on
- * singleValue widgets.
+ * At the dashboard's 3-hour default a quiet night shows `--` on a single-value
+ * tile (no requests, no datapoint). Every tile in the top row carries its own
+ * 24-hour window so the number is always there. Split on widget boundaries —
+ * a metrics array holds `{...}` option objects, so a `[^}]*` span cannot be
+ * trusted to stay inside one widget.
  */
-// Split on widget boundaries; a metrics array holds `{...}` option objects, so
-// a `[^}]*` span cannot be trusted to stay inside one widget.
-const singleValue24h = body
-  .split('{"type":"')
-  .filter(
-    (w) => w.includes('"view":"singleValue"') && w.includes('"start":"-P1D"'),
-  ).length;
-if (singleValue24h < 3) {
+const widgets = body.split('{"type":"');
+const singleValue24h = widgets.filter(
+  (w) => w.includes('"view":"singleValue"') && w.includes('"start":"-P1D"'),
+).length;
+const TOP_ROW_TILES = 4;
+if (singleValue24h < TOP_ROW_TILES) {
   failures.push(
-    `expected 3 single-value API tiles with a 24-hour window ("start":"-P1D"), found ${singleValue24h} — ` +
-      'a quiet 3-hour range renders them as "--"',
+    `expected ${TOP_ROW_TILES} single-value tiles with a 24-hour window ("start":"-P1D"), found ${singleValue24h} — ` +
+      'a quiet 3-hour range renders the others as "--"',
   );
 }
 
@@ -249,19 +259,32 @@ try {
   );
 }
 if (opsAlarms) {
-  const annotationValues = [
-    ...body.matchAll(/"annotations":\{"horizontal":\[(.*?)\]\}/g),
-  ].flatMap(([, inner]) =>
-    [...inner.matchAll(/"value":(-?\d+(?:\.\d+)?)/g)].map(([, n]) => Number(n)),
-  );
-  for (const [key, label] of [
-    ['ledgerProcessorLagSeconds', 'ingest queue age'],
-    ['chDiskFreePercent', 'ClickHouse free disk'],
+  // Each threshold must sit on ITS widget (matched by title), not merely
+  // somewhere in the body — otherwise swapping the lag and disk lines would
+  // pass (deep review WR-06).
+  const annotationValuesOf = (titleFragment) => {
+    const w = widgets.find((x) => x.includes(`"title":"${titleFragment}`));
+    if (!w) return null;
+    const m = w.match(/"annotations":\{"horizontal":\[(.*?)\]\}/);
+    return m
+      ? [...m[1].matchAll(/"value":(-?\d+(?:\.\d+)?)/g)].map(([, n]) =>
+          Number(n),
+        )
+      : [];
+  };
+  for (const [key, titleFragment] of [
+    ['ledgerProcessorLagSeconds', 'Ingest queue'],
+    ['chDiskFreePercent', 'ClickHouse host'],
   ]) {
-    if (!annotationValues.includes(Number(opsAlarms[key]))) {
+    const values = annotationValuesOf(titleFragment);
+    if (values === null) {
       failures.push(
-        `no threshold line at ${opsAlarms[key]} (opsAlarms.${key}) on the ${label} graph — ` +
-          `annotation values present: [${annotationValues.join(', ')}]`,
+        `no widget titled "${titleFragment}…" found for the ${key} threshold line`,
+      );
+    } else if (!values.includes(Number(opsAlarms[key]))) {
+      failures.push(
+        `no threshold line at ${opsAlarms[key]} (opsAlarms.${key}) on the "${titleFragment}…" widget — ` +
+          `annotation values there: [${values.join(', ')}]`,
       );
     }
   }
@@ -277,6 +300,17 @@ if (opsAlarms) {
 const ownAlarms = Object.values(template.Resources ?? {}).filter(
   (r) => r.Type === 'AWS::CloudWatch::Alarm',
 ).length;
+const importedNames = new Set(
+  [
+    ...body.matchAll(new RegExp(`prices-${envName}-([a-z0-9-]+)-errors`, 'g')),
+  ].map(([, w]) => w),
+);
+const IMPORTED_WORKER_ERROR_ALARMS = importedNames.size;
+if (IMPORTED_WORKER_ERROR_ALARMS === 0) {
+  failures.push(
+    'no imported worker -errors alarm found in the dashboard body — the EventBridgeStack import is gone',
+  );
+}
 const declared = Number(template.Outputs?.DashboardAlarmCount?.Value);
 const expected = ownAlarms + IMPORTED_WORKER_ERROR_ALARMS;
 
@@ -304,11 +338,59 @@ if (dashboard.Properties.DashboardName !== expectedName) {
 }
 
 // -- 6. no password in the template -----------------------------------------
-if (JSON.stringify(template).includes('LoginProfile')) {
+for (const bad of ['LoginProfile', 'AWS::IAM::AccessKey']) {
+  if (JSON.stringify(template).includes(bad)) {
+    failures.push(
+      `template contains ${bad} — the viewer identity must carry no credential in source control; ` +
+        'the console login is created out of band with `aws iam create-login-profile --password-reset-required`',
+    );
+  }
+}
+// CR-01: the VIEWER must not carry CloudWatchReadOnlyAccess — it grants
+// logs:FilterLogEvents / logs:Get* and xray:Get* account-wide. Scoped to the
+// viewer user: the AWS Chatbot role in this same stack legitimately carries
+// that policy, so a template-wide grep would always fail.
+const viewerUsers = Object.entries(template.Resources ?? {}).filter(
+  ([, r]) =>
+    r.Type === 'AWS::IAM::User' &&
+    String(r.Properties?.UserName ?? '').endsWith('-stellar-viewer'),
+);
+if (viewerUsers.length !== 1) {
   failures.push(
-    'template contains a LoginProfile — the viewer identity must carry no password in source control; ' +
-      'the console login is created out of band with `aws iam create-login-profile --password-reset-required`',
+    `expected exactly one *-stellar-viewer IAM user, found ${viewerUsers.length}`,
   );
+} else {
+  const [viewerId, viewer] = viewerUsers[0];
+  const managed = JSON.stringify(viewer.Properties?.ManagedPolicyArns ?? []);
+  if (
+    managed.includes('CloudWatchReadOnlyAccess') ||
+    managed.includes('ReadOnlyAccess')
+  ) {
+    failures.push(
+      'viewer user carries a managed *ReadOnlyAccess policy — that reads every log group and trace ' +
+        'in the shared account; use the scoped dashboard-read inline policy',
+    );
+  }
+  const attached = Object.values(template.Resources ?? {}).filter(
+    (r) =>
+      r.Type === 'AWS::IAM::Policy' &&
+      JSON.stringify(r.Properties?.Users ?? []).includes(viewerId),
+  );
+  const actions = attached.flatMap((p) =>
+    p.Properties.PolicyDocument.Statement.flatMap((s) => [].concat(s.Action)),
+  );
+  const forbidden = actions.filter(
+    (a) => !/^cloudwatch:(Get|List|Describe)/.test(a),
+  );
+  if (attached.length === 0) {
+    failures.push(
+      'viewer user has no inline policy — it could not open the dashboard',
+    );
+  } else if (forbidden.length > 0) {
+    failures.push(
+      `viewer inline policy grants non-read or non-CloudWatch actions: ${forbidden.join(', ')}`,
+    );
+  }
 }
 
 if (failures.length > 0) {
@@ -321,7 +403,7 @@ console.log(`PASS: ${expectedName}`);
 console.log(`  ${required.length} required metric/dimension fragments present`);
 console.log(`  ${banned.length} known empty-panel dimension pairs absent`);
 console.log(
-  `  3 API tiles on a 24-hour window; 2 series filled to zero; threshold lines match opsAlarms`,
+  `  ${TOP_ROW_TILES} top-row tiles on a 24-hour window; 2 series filled to zero; threshold lines match opsAlarms per widget`,
 );
 console.log(
   `  ${percentileOnIngest.length} percentile stat(s) on Prices/Ingest backed by raw-value publication`,

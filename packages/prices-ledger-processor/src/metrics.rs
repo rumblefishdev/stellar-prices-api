@@ -40,6 +40,9 @@ pub const CH_WRITE_LATENCY: &str = "ClickHouseWriteLatencyMs";
 /// a run with more INSERTs than that spills into further datums of the same
 /// metric rather than being truncated (or, worse, aggregated back into
 /// something percentiles cannot read).
+/// In production a run records `1 + <AMM sources>` samples — a handful — so
+/// the spill into a second datum is a defence against the API limit, not a
+/// path that is expected to run. Do not size anything against it.
 pub const MAX_VALUES_PER_DATUM: usize = 150;
 
 /// CloudWatch unit for a [`Metric`]. Only the one the ingest path emits — a

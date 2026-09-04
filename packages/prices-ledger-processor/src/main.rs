@@ -140,11 +140,34 @@ async fn main() -> Result<(), Error> {
     // at cold start; the publish itself is best-effort per invocation and runs
     // only after the cursor commit, so a CloudWatch failure never redelivers a
     // doorbell.
+    //
+    // Bounded on purpose: the publish is best-effort, but without a timeout a
+    // stalled CloudWatch endpoint would hold the invocation open until the
+    // 60 s Lambda limit — and with reserved concurrency 1 that is ingestion
+    // lag, not a dropped metric. Worst case with these numbers is ~6 s
+    // (2 attempts x 3 s), well inside the ~5 s ledger cadence's slack.
     let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .timeout_config(
+            aws_config::timeout::TimeoutConfig::builder()
+                .connect_timeout(std::time::Duration::from_secs(1))
+                .operation_attempt_timeout(std::time::Duration::from_secs(3))
+                .operation_timeout(std::time::Duration::from_secs(6))
+                .build(),
+        )
+        .retry_config(aws_config::retry::RetryConfig::standard().with_max_attempts(2))
         .load()
         .await;
     let cw = Arc::new(aws_sdk_cloudwatch::Client::new(&aws_cfg));
-    let env_name = Arc::new(std::env::var(ENV_NAME).unwrap_or_else(|_| "unknown".to_string()));
+    let env_name = Arc::new(std::env::var(ENV_NAME).unwrap_or_else(|_| {
+        // Every datapoint would land on `Environment=unknown`, a dimension no
+        // widget or alarm reads. Loud, but not fatal: ingestion must not stop
+        // over telemetry.
+        tracing::error!(
+            var = ENV_NAME,
+            "environment variable missing — write-latency metrics will be tagged Environment=unknown and no dashboard will show them"
+        );
+        "unknown".to_string()
+    }));
 
     run(service_fn(move |event: LambdaEvent<SqsEvent>| {
         let r = reconciler.clone();
