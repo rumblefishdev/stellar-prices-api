@@ -21,6 +21,14 @@ impl S3Fetcher {
             bucket: bucket.into(),
         }
     }
+
+    /// Build from the ambient AWS config (Lambda execution role).
+    pub async fn from_env(bucket: impl Into<String>) -> Self {
+        let cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
+        Self::new(Client::new(&cfg), bucket)
+    }
 }
 
 impl ObjectFetcher for S3Fetcher {
