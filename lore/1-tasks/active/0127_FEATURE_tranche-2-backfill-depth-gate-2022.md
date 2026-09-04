@@ -115,6 +115,13 @@ a tool that was retired.
 
 ## ⚠️ Two ACs are blocked by [[0170]] — no amount of backfill fixes them
 
+> 🗄️ **SUPERSEDED 2026-09-04 — [[0170]] is completed and this section is
+> falsified by measurement.** `GET /assets/{USDC}/ohlcv?timeframe=all` no
+> longer returns `data: []`; it returns 2,042 daily points from 2021-02-01.
+> Kept for the mechanism it records, which is still the reason USDC has no
+> real candles. What replaced the empty response is a *derived* one — see
+> the Findings below, which is the section to act on.
+
 Established 2026-08-10, from code plus [[0165]]'s existing prod measurement:
 **`GET /assets/{USDC}/ohlcv` returns `200 OK` with `data: []` in every mode**, at
 every timeframe, at any backfill depth.
@@ -131,25 +138,207 @@ asset_id = <USDC>` → **0 candles**, unconditional on quote.
 reads. Do not schedule this task off the back of [[0088]] finishing; that
 unblocks AC 1–2 only.
 
+## Findings — reconciliation pass (2026-09-04)
+
+All read-only. Control plane and the deployed API read with the free-tier key
+(`pricing-api-free-production`, 1 req/s), a handful of `curl`s; ClickHouse read
+by the operator on prod. No load, no writes.
+
+### ✅ AC 1 — the three views agree, and AC 5 of Tranche 2 passes
+
+| view | oldest SDEX data |
+|---|---|
+| `GET /backfill/status` → `sdex.earliest_data_available` | `2015-11-18T03:47:00Z` |
+| stored `prices.backfill_progress` row (`FINAL`) | `2015-11-18 03:47:00` |
+| **actual `min(timestamp)`, `price_ohlcv_1d`, `source='sdex'`** | **`2015-11-18 00:00:00`** (the day bucket of that minute) |
+| oldest active partition, **every** `price_ohlcv_*` tier | **`201511`** |
+
+The bar is 2022-01-01. We clear it by **six years**, and the depth is not thin:
+
+| year | 1d SDEX candles | assets |
+|---|---|---|
+| 2021 | 914,679 | 41,829 |
+| **2022** | **4,048,196** | **82,096** |
+
+🔑 **Both traps the task warns about were checked and neither fired.** That is
+worth stating as a result rather than an absence:
+
+1. **The stored value is a monotonic high-water mark and can never move
+   forward.** `sink.rs:229` merges it with `merge_min` — *"Monotonic window:
+   never narrow what a prior run already recorded."* So a deletion would leave
+   it untouched and the endpoint would keep asserting coverage it no longer has.
+   The task warns the stored value can *lag* reality; it can also **overstate**
+   it, and that is the direction that fails a reviewer. Here it does not: real
+   rows corroborate it on the minute.
+2. **Markers outliving their data** is ruled out independently by the partition
+   census — `201511` is the oldest *active* partition on all seven tiers, so
+   the 2015 rows are physically present, not implied by a progress row.
+
+### 🔴 AC 3/AC 4 — [[0170]] shipped, but what it unblocked is *derived*, not measured
+
+**The blocker section above is now falsified and must not be read as current.**
+It states `GET /assets/{USDC}/ohlcv` returns `200 OK` with `data: []` in every
+mode. Measured 2026-09-04, it returns **`200` with 2,042 daily points spanning
+2021-02-01 → today**. [[0170]] is completed and the self-pair problem is gone.
+
+What came back is a different problem, and a worse one for AC 4:
+
+| | USDC | `native` (control) |
+|---|---|---|
+| points, `timeframe=all` | 2,042 | 2,414 |
+| span | 2021-02-01 → 2026-09-04 | 2018-05-15 → 2026-09-04 |
+| **points with `trade_count > 0`** | **0** | **2,414 (all)** |
+| points with `volume_base > 0` | 0 | all |
+| `derived: true` | **all 2,042** | — |
+| distinct `close` values | 177 — **1,865 of them exactly `1`** | real market values |
+| method mix | `peg` 1,864 / `oracle` 178 | — |
+
+**Not one USDC candle has a trade behind it.** 2021 through 2025 is 100%
+`method: peg` — a flat, asserted `1`. Only from mid-2026 does `oracle` produce
+varying values, and those still carry `trade_count: 0`.
+
+The `native` control is what makes this specific rather than general: real
+candles with real trade counts back to 2018, so the pipeline is fine. It is
+**structural to USDC** — it is our top-preference *quote* asset, so it
+essentially never appears as a base, so there are no candles, so the peg fill
+covers the whole history. Same root cause as [[0165]].
+
+#### 🔴 The date that fails us
+
+Tranche 2 AC 6 asks for *"correct 1d candles verifiable against known USDC price
+history — **spot-check dates provided by reviewer**"*. **We do not choose the
+date.** The most famous date in USDC's price history is **2023-03-11**, when it
+broke its peg to roughly **$0.87-0.88** after the Silicon Valley Bank failure —
+precisely the date a reviewer who knows the space would pick, because it is the
+one that distinguishes a price feed from an assumption.
+
+```
+2023-03-10  close=1  method=peg  trades=0
+2023-03-11  close=1  method=peg  trades=0   ← reality was ~$0.87
+2023-03-12  close=1  method=peg  trades=0
+```
+
+`native` on the same day shows the market genuinely moving
+(`0.0782 → 0.0588 → 0.0836`, 36,208 trades), so the underlying data exists — we
+simply do not use it for USDC. **We would return `1` no matter what the truth
+was.** That is not a defect in the peg fill; it is what a peg fill *is*. But it
+means the word *"correct"* in AC 6 is not something we can promise for a
+reviewer-chosen date, and the mitigation already sketched in AC 4 below
+(spot-check non-peg assets, state why USDC is excluded) is now the **likely**
+path rather than the fallback.
+
+⚠️ Do not present this as "USDC pricing is broken" — for ~99% of dates the
+answer is right. The claim is narrower and must stay narrow: **it is right by
+construction rather than by measurement, and on at least one well-known date it
+is wrong.**
+
+### ⚠️ `GET /backfill/status` contradicts itself on the endpoint AC 5 points at
+
+The number the reviewer is asked to check is correct. Everything printed beside
+it says the backfill never started:
+
+```json
+"sdex": { "status": "completed", "progress_pct": 0.0,
+          "ledgers_remaining": 63795748, "current_ledger": 1, "start_ledger": 1 }
+```
+
+`progress_pct` (`backfill/handlers.rs:72`) computes
+`(current - start) / (target - start)` and its doc comment asserts
+*"`current_ledger` advances upward from `start_ledger`"*. The SDEX archive
+stream walks **downward** to genesis — `sink.rs`'s `resolve_current`: *"a
+forward stream keeps the max, a backward stream the min"*. At `current_ledger:
+1` the stream is finished, and the formula reads that as 0%. `ledgers_remaining`
+is wrong for the same reason.
+
+Cheap to fix and worth fixing before submission: a completed stream reporting
+**0.0% and 63.8 M ledgers remaining** is the kind of thing a reviewer stops on.
+
+⚠️ Also visible on the same response: `soroban_amm` is `status: "running"` with
+`last_push_at` of **2026-07-14** — seven weeks stale — at 63,352,611 of
+63,475,475. Not AC 5's subject, but it is on the same reviewer-facing payload.
+
+### ⚠️ USD coverage in the historical span is thin, and thinnest where it is oldest
+
+`close_usd = 0` on `price_ohlcv_1d`, SDEX, by year:
+
+| year | candles | `close_usd = 0` | share |
+|---|---|---|---|
+| 2015 | 5 | 5 | 100% |
+| 2016 | 66 | 66 | 100% |
+| 2017 | 2,025 | 2,025 | 100% |
+| 2018 | 29,003 | 28,982 | 99.93% |
+| 2019 | 67,839 | 67,774 | 99.90% |
+| 2020 | 66,944 | 64,338 | 96.11% |
+| 2021 | 914,679 | 121,873 | 13.32% |
+| **2022** | **4,048,196** | **1,465,252** | **36.20%** |
+
+The 2015-2020 rows exist as candles but carry **no USD price at all**. That does
+not endanger AC 5 (depth is depth) and it does not endanger the USDC
+spot-check (peg-filled, so USD by construction). It endangers **AC 4's
+"≥2 assets"**: pick a long-tail asset in 2022 and there is a ~1-in-3 chance its
+daily candle has no USD close. Choose the spot-check assets from the priced
+majority and say so, rather than discovering it in front of the reviewer.
+
+### Not this task's, recorded in passing
+
+- The **six `price_ohlcv_*_bak` tables are still on prod**, unchanged at
+  296,740,338 rows across `202402`-`202607`. Row counts match [[0177]]'s table
+  exactly, so nothing has moved since it was filed. Already owned by [[0105]]
+  and [[0177]] — no new task, but the shared-disk cost is still being paid.
+- `newest_data_available` reads `2026-07-06 09:35:00` on **both** streams while
+  `price_ohlcv_1d` holds rows through 2026-09-04. Consistent, not a defect:
+  `backfill_progress` is written by the backfill, and the live ingest path does
+  not touch it. It is deliberately not surfaced by the API (`dto.rs`).
+
 ## Acceptance Criteria
 
-- [ ] `GET /backfill/status` reports `sdex.earliest_data_available` ≤
-      2022-01-01, and the stored value is reconciled against real candle rows
+- [x] `GET /backfill/status` reports `sdex.earliest_data_available` ≤
+      2022-01-01, and the stored value is reconciled against real candle rows —
+      **done 2026-09-04**. `2015-11-18T03:47:00Z` on the endpoint, the same in
+      the stored `backfill_progress` row, `min(timestamp) = 2015-11-18` in
+      `price_ohlcv_1d`, and `201511` as the oldest active partition on all seven
+      tiers. Six years under the bar. Both of the task's stated traps were
+      checked and neither fired.
 - [ ] Month-by-month candle counts from 2022-01 to present recorded; every gap
       explained or filled
-- [ ] 🔴 **BLOCKED BY [[0170]]** — `GET /assets/{USDC}/ohlcv?timeframe=all`
-      returns 1d candles from 2022-01 or earlier through the deployed API
-- [ ] 🔴 **BLOCKED BY [[0170]]** (USDC is the reviewer's named example) —
+- [x] ~~🔴 BLOCKED BY [[0170]]~~ — `GET /assets/{USDC}/ohlcv?timeframe=all`
+      returns 1d candles from 2022-01 or earlier through the deployed API —
+      **satisfied 2026-09-04**: 2,042 points from **2021-02-01**, no gaps.
+      ⚠️ Ticked on its literal wording only. Every one of those points is
+      `derived: true` with `trade_count: 0`, and 1,865 of them are exactly `1`.
+      This criterion asks whether candles are *returned*; AC 4 below asks
+      whether they are *right*, and that is where the peg fill bites.
+- [ ] ~~🔴 BLOCKED BY [[0170]]~~ (USDC is the reviewer's named example) —
       spot-check table published: ≥5 dates × ≥2 assets, our close vs an
-      independent public source, deltas explained. *Mitigation if 0170 slips:
-      spot-check two non-peg assets and state explicitly why USDC is excluded —
-      but that is a weaker package, since USDC is the easiest close for a
-      reviewer to verify independently.*
+      independent public source, deltas explained. **Unblocked, but now at risk
+      for a different reason** (2026-09-04): USDC's series is peg-derived, so it
+      is right by construction rather than by measurement, and on **2023-03-11**
+      — the SVB depeg, when USDC traded ~$0.87-0.88 — we return exactly `1`.
+      The reviewer picks the dates. The mitigation below is therefore the
+      **likely** path, not the fallback: *spot-check two non-peg assets and
+      state explicitly why USDC is excluded — a weaker package, since USDC is
+      the easiest close for a reviewer to verify independently.* 🔑 Choose those
+      assets from the USD-priced majority; ~36% of 2022 daily candles carry
+      `close_usd = 0`.
 - [ ] USD-denominated fields are non-zero for the spot-checked span (depends on
-      [[0114]]'s repair reaching it) — or the limitation is stated explicitly
-- [ ] `backfill_note` present and accurate while `sdex.status = "running"`
+      [[0114]]'s repair reaching it) — or the limitation is stated explicitly.
+      **Measured 2026-09-04**: `close_usd = 0` on **36.20%** of 2022 daily SDEX
+      candles, 13.32% of 2021, and **96-100% of 2015-2020**. The span is
+      covered; the *estate within it* is not uniformly priced. Open until the
+      spot-checked assets are chosen and their own coverage confirmed.
+- [ ] `backfill_note` present and accurate while `sdex.status = "running"` —
+      ⚠️ **the precondition no longer holds**: `sdex.status` is `completed`
+      (`completed_at` 2026-07-27). Re-read this as "the note is correct for a
+      completed stream", or retire it. 🔴 Separately, the same payload publishes
+      `progress_pct: 0.0` and `ledgers_remaining: 63795748` beside
+      `status: "completed"` — the formula assumes a forward walk and this stream
+      ran backward. Fix before submission; it is on the exact endpoint Tranche 2
+      AC 5 sends the reviewer to.
 - [ ] §9's residual `sdex-cloud-push` language corrected per ADR 0009
-- [ ] `sdex.last_push_at` fresh within the configured cadence at review time
+- [ ] `sdex.last_push_at` fresh within the configured cadence at review time —
+      currently **2026-08-11**, 24 days ago, on a stream that completed
+      2026-07-27. Decide whether freshness is even meaningful for a completed
+      archive stream before asserting anything about it in [[0128]].
 
 ## Notes
 
