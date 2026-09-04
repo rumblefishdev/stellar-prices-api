@@ -134,13 +134,13 @@ const required = [
   ['enrichment pass duration', 'EnrichmentPassDurationMs'],
   ['enrichment avg batch duration', 'EnrichmentAvgBatchDurationMs'],
   // The volume-zero floor must be labelled, not rendered as a queue depth.
-  ['volume-zero caveat', 'permanent by design'],
+  ['volume-zero caveat', 'by design and is not a backlog'],
   // Oracle.
   ['oracle rows written', 'OracleRowsWritten'],
   ['oracle timestamps rejected', 'OracleTimestampRejected'],
-  // The Decision A substitution has to be readable ON the dashboard, because
-  // the reviewer reads the dashboard, not the evidence file.
-  ['Decision A substitution', 'ADR 0007'],
+  // A quiet hour must draw zeros, not gaps, where absence means zero.
+  ['5xx filled to zero', 'FILL(e5xx, 0)'],
+  ['DLQ depth filled to zero', 'FILL(dlq, 0)'],
   // Trend rows only work with the override set.
   ['period override', '"periodOverride":"inherit"'],
 ];
@@ -211,6 +211,68 @@ if (percentileOnIngest.length > 0) {
   }
 }
 
+// -- 3b. the top-line API tiles read a 24-hour window ------------------------
+/**
+ * At the dashboard's 3-hour default a quiet night shows `--` on the three API
+ * tiles (no requests, no datapoint). Each tile carries its own 24-hour window
+ * so the number is always there. Three tiles, three `-P1D` starts on
+ * singleValue widgets.
+ */
+// Split on widget boundaries; a metrics array holds `{...}` option objects, so
+// a `[^}]*` span cannot be trusted to stay inside one widget.
+const singleValue24h = body
+  .split('{"type":"')
+  .filter(
+    (w) => w.includes('"view":"singleValue"') && w.includes('"start":"-P1D"'),
+  ).length;
+if (singleValue24h < 3) {
+  failures.push(
+    `expected 3 single-value API tiles with a 24-hour window ("start":"-P1D"), found ${singleValue24h} — ` +
+      'a quiet 3-hour range renders them as "--"',
+  );
+}
+
+// -- 3c. threshold lines match the alarm config -----------------------------
+/**
+ * The annotation lines are built from the same `opsAlarms` keys as the alarms.
+ * Read the env config and require each threshold to appear as an annotation
+ * value in the body, so a threshold changed in config without a synth shows
+ * up here, and a hard-coded line that drifted from its alarm fails.
+ */
+const CONFIG = `infra/envs/${envName}.json`;
+let opsAlarms;
+try {
+  opsAlarms = JSON.parse(readFileSync(CONFIG, 'utf8')).opsAlarms;
+} catch (err) {
+  failures.push(
+    `could not read ${CONFIG} to check annotation thresholds: ${err.message}`,
+  );
+}
+if (opsAlarms) {
+  const annotationValues = [
+    ...body.matchAll(/"annotations":\{"horizontal":\[(.*?)\]\}/g),
+  ].flatMap(([, inner]) =>
+    [...inner.matchAll(/"value":(-?\d+(?:\.\d+)?)/g)].map(([, n]) => Number(n)),
+  );
+  for (const [key, label] of [
+    ['ledgerProcessorLagSeconds', 'ingest queue age'],
+    ['chDiskFreePercent', 'ClickHouse free disk'],
+  ]) {
+    if (!annotationValues.includes(Number(opsAlarms[key]))) {
+      failures.push(
+        `no threshold line at ${opsAlarms[key]} (opsAlarms.${key}) on the ${label} graph — ` +
+          `annotation values present: [${annotationValues.join(', ')}]`,
+      );
+    }
+  }
+  const mtls = `alarm below ${opsAlarms.mtlsNotAfterDaysThreshold}`;
+  if (!body.includes(mtls)) {
+    failures.push(
+      `mTLS tile title does not state the alarm threshold ("${mtls}")`,
+    );
+  }
+}
+
 // -- 4. the alarm strip is complete and derived -----------------------------
 const ownAlarms = Object.values(template.Resources ?? {}).filter(
   (r) => r.Type === 'AWS::CloudWatch::Alarm',
@@ -258,6 +320,9 @@ if (failures.length > 0) {
 console.log(`PASS: ${expectedName}`);
 console.log(`  ${required.length} required metric/dimension fragments present`);
 console.log(`  ${banned.length} known empty-panel dimension pairs absent`);
+console.log(
+  `  3 API tiles on a 24-hour window; 2 series filled to zero; threshold lines match opsAlarms`,
+);
 console.log(
   `  ${percentileOnIngest.length} percentile stat(s) on Prices/Ingest backed by raw-value publication`,
 );

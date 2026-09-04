@@ -1446,6 +1446,15 @@ export class ObservabilityStack extends cdk.Stack {
       label: '5xx error rate (%)',
     });
 
+    // A quiet hour publishes no 5xx datapoint at all, which the graph draws as
+    // a gap. For an error count a gap means zero, so say zero.
+    const fiveXxFilled = new cloudwatch.MathExpression({
+      expression: 'FILL(e5xx, 0)',
+      usingMetrics: { e5xx: apiMetric('5XXError', 'Sum', '5xx') },
+      period: cdk.Duration.minutes(5),
+      label: '5xx',
+    });
+
     const cacheHitRatioPct = new cloudwatch.MathExpression({
       expression: '100 * (hits / (hits + misses))',
       usingMetrics: {
@@ -1524,7 +1533,7 @@ export class ObservabilityStack extends cdk.Stack {
         markdown: [
           `# prices-api — ${config.envName}`,
           '',
-          'Acceptance strip: the M2 criteria (p95 latency, error rate, cache hit rate) and every alarm, on one screen.',
+          'Top line: API latency, error rate and cache hit ratio over the last 24 hours, ClickHouse write latency over the selected range, and the current state of every alarm.',
         ].join('\n'),
         width: 24,
         height: 2,
@@ -1533,22 +1542,28 @@ export class ObservabilityStack extends cdk.Stack {
 
     this.dashboard.addWidgets(
       new cloudwatch.SingleValueWidget({
-        title: 'API latency p95 (ms)',
+        title: 'API latency p95 (ms) — last 24h',
         metrics: [apiMetric('Latency', 'p95', 'p95')],
         width: 6,
         height: 5,
+        start: '-P1D',
+        setPeriodToTimeRange: true,
       }),
       new cloudwatch.SingleValueWidget({
-        title: '5xx error rate (%)',
+        title: '5xx error rate (%) — last 24h',
         metrics: [errorRatePct],
         width: 6,
         height: 5,
+        start: '-P1D',
+        setPeriodToTimeRange: true,
       }),
       new cloudwatch.SingleValueWidget({
-        title: 'Cache hit ratio (%)',
+        title: 'Cache hit ratio (%) — last 24h',
         metrics: [cacheHitRatioPct],
         width: 6,
         height: 5,
+        start: '-P1D',
+        setPeriodToTimeRange: true,
       }),
       new cloudwatch.SingleValueWidget({
         title: 'ClickHouse write latency p95 (ms)',
@@ -1583,7 +1598,7 @@ export class ObservabilityStack extends cdk.Stack {
         markdown: [
           '## API',
           '',
-          'API Gateway publishes **no `Throttles` metric** — the namespace carries only `4XXError`, `5XXError`, `CacheHitCount`, `CacheMissCount`, `Count`, `IntegrationLatency` and `Latency`. Usage-plan and method 429s land inside `4XXError`. Lambda `Throttles` is a different namespace and appears in the workers row.',
+          'Public API traffic on API Gateway: request latency (p50 / p95 / p99), request count with 4xx and 5xx errors (rate-limit 429s are counted under 4xx), and response-cache hits, misses and hit ratio.',
         ].join('\n'),
         width: 24,
         height: 3,
@@ -1606,7 +1621,7 @@ export class ObservabilityStack extends cdk.Stack {
         left: [apiMetric('Count', 'Sum', 'requests')],
         right: [
           apiMetric('4XXError', 'Sum', '4xx (includes 429 throttles)'),
-          apiMetric('5XXError', 'Sum', '5xx'),
+          fiveXxFilled,
         ],
         width: 8,
         height: 6,
@@ -1631,7 +1646,7 @@ export class ObservabilityStack extends cdk.Stack {
         markdown: [
           '## Ingestion',
           '',
-          '`ClickHouseWriteLatencyMs` is published by the ledger-processor itself (task 0125, Decision B2): one raw value per candle INSERT, so p50/p95 are real percentiles. It is timed at the call site, so a write that `retry_with_backoff` retried folds its backoff sleeps in and reads as one long write.',
+          'Live ledger ingestion: age of the oldest ledger notification waiting in the ingest queue, dead-letter queue depth, ledger-processor duration / errors / concurrency, and how long each candle INSERT into ClickHouse takes (p50, p95, max). A retried write is measured as one long write.',
         ].join('\n'),
         width: 24,
         height: 3,
@@ -1651,19 +1666,37 @@ export class ObservabilityStack extends cdk.Stack {
             period: cdk.Duration.minutes(1),
           }),
         ],
+        // The same number the ledger-processor-lag alarm fires on, read from
+        // the same config key, so the line and the alarm cannot drift apart.
+        leftAnnotations: [
+          {
+            value: config.opsAlarms.ledgerProcessorLagSeconds,
+            label: `alarm at ${config.opsAlarms.ledgerProcessorLagSeconds}s`,
+            color: '#d13212',
+          },
+        ],
         width: 6,
         height: 6,
       }),
       new cloudwatch.GraphWidget({
         title: 'Ingest DLQ — messages visible',
+        // SQS stops publishing for a queue that has been idle for hours, so an
+        // empty DLQ would show as "No data". For a dead-letter queue no data
+        // means empty, so draw the zero.
         left: [
-          new cloudwatch.Metric({
-            namespace: 'AWS/SQS',
-            metricName: 'ApproximateNumberOfMessagesVisible',
-            dimensionsMap: { QueueName: ingestDlq },
-            statistic: 'Maximum',
-            label: 'DLQ depth',
+          new cloudwatch.MathExpression({
+            expression: 'FILL(dlq, 0)',
+            usingMetrics: {
+              dlq: new cloudwatch.Metric({
+                namespace: 'AWS/SQS',
+                metricName: 'ApproximateNumberOfMessagesVisible',
+                dimensionsMap: { QueueName: ingestDlq },
+                statistic: 'Maximum',
+                period: cdk.Duration.minutes(1),
+              }),
+            },
             period: cdk.Duration.minutes(1),
+            label: 'DLQ depth',
           }),
         ],
         width: 6,
@@ -1732,10 +1765,10 @@ export class ObservabilityStack extends cdk.Stack {
         markdown: [
           '## ClickHouse and backfill — 14-day trend',
           '',
-          '**Named substitution (Decision A).** The frozen SCF submission asks for "DB CPU". ADR 0007 replaced RDS with the shared Hetzner ClickHouse cluster, so that item is served here by the ClickHouse host and write-path metrics — free disk percentage plus `ClickHouseWriteLatencyMs`. Literal DB CPU is not readable: the runtime identities hold no grant on the ClickHouse system tables, and host CPU of a volume shared at a few percent says nothing about our write path.',
+          'The ClickHouse host and the data behind the API: free disk on the host, how far each OHLCV rollup table lags behind the 1-minute source, time since the last backfill push for the soroban_amm stream, and days left on the mTLS client certificate.',
         ].join('\n'),
         width: 24,
-        height: 4,
+        height: 3,
       }),
     );
 
@@ -1750,6 +1783,15 @@ export class ObservabilityStack extends cdk.Stack {
             statistic: 'Minimum',
             label: 'free disk (%)',
           }),
+        ],
+        // Same key the ch-disk-free alarm reads.
+        leftAnnotations: [
+          {
+            value: config.opsAlarms.chDiskFreePercent,
+            label: `alarm below ${config.opsAlarms.chDiskFreePercent}%`,
+            color: '#d13212',
+            fill: cloudwatch.Shading.BELOW,
+          },
         ],
         width: 6,
         height: 6,
@@ -1791,7 +1833,9 @@ export class ObservabilityStack extends cdk.Stack {
         ...trend14d,
       }),
       new cloudwatch.SingleValueWidget({
-        title: 'mTLS client cert — days to NotAfter',
+        // A single-value tile has no annotation line, so the threshold the
+        // mtls-notafter alarm fires on goes into the title, from the same key.
+        title: `mTLS client cert — days to NotAfter (alarm below ${config.opsAlarms.mtlsNotAfterDaysThreshold})`,
         // `MinDaysToNotAfter` carries the `Environment` dimension ONLY. The
         // per-role series is a different metric name; adding a Role dimension
         // here yields nothing.
@@ -1852,7 +1896,7 @@ export class ObservabilityStack extends cdk.Stack {
         markdown: [
           '## Scheduled workers — 7-day trend',
           '',
-          'The `cleanup` worker is deliberately absent: its EventBridge rule is disabled, so it publishes no Lambda metrics at all. It is still covered by the alarm strip.',
+          'Duration (p95) and error / throttle counts for every scheduled worker Lambda: asset discovery, supply, oracle, enrichment, coarse sweep and the three probes. The `cleanup` worker is not charted — its schedule is disabled, so it publishes no metrics.',
         ].join('\n'),
         width: 24,
         height: 3,
@@ -1898,7 +1942,7 @@ export class ObservabilityStack extends cdk.Stack {
         markdown: [
           '## Enrichment and oracle — 7-day trend',
           '',
-          '`EnrichmentRowsRemainingAtVolumeZero` is **permanent by design** and is NOT a backlog: it tracks the exotic-quote no-reference floor, which climbs forever. Read progress off `EnrichmentRowsEnriched` and the recency-bounded `EnrichmentRowsRemainingRecent` instead — those are what the stall alarm gates on.',
+          'USD enrichment of candles and the Reflector oracle feed: rows enriched per pass, oracle misses and the recent backlog, pass and batch duration, the volume-zero floor (candles with no USD reference — this number only ever grows by design and is not a backlog), and oracle rows written vs. timestamps rejected.',
         ].join('\n'),
         width: 24,
         height: 3,
@@ -1942,8 +1986,7 @@ export class ObservabilityStack extends cdk.Stack {
         ...trend7d,
       }),
       new cloudwatch.GraphWidget({
-        title:
-          'Volume-zero floor — permanent by design, NOT a backlog or a queue depth',
+        title: 'Volume-zero floor (grows by design, not a backlog)',
         left: [
           enrichmentMetric(
             'EnrichmentRowsRemainingAtVolumeZero',
