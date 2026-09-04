@@ -98,14 +98,79 @@ reviewer reads:
 
 ## Acceptance Criteria
 
-- [ ] The position is recorded with its reasoning and its evidence citations
-      (0123's 7e-8 measurement, 0120's round-trip assertions)
-- [ ] [[0128]]'s package carries a "deviations from the RFP" entry naming
-      `Current Price (float USD)` and quoting the RFP line
-- [ ] `price_usd`'s published OpenAPI description states the string form and
-      the precision reason
-- [ ] The entry states that the answer covers every Decimal-valued field, not
-      just this one
+- [x] The position is recorded with its reasoning and its evidence citations —
+      **done 2026-09-04**, `docs/scf/milestone-2-rfp-deviations.md` §1 (PR #287).
+      🔑 Carries a **stronger citation than this task knew about**: ADR 0011
+      records a *measured production defect* from exactly this mechanism —
+      deriving through `toFloat64` returned a `close` **below its own `low`** by
+      **1.343e-11** at BTC 1h, 0.92 of one float64 ulp, on a value carrying 19
+      significant digits against float64's 15-16. That was one internal
+      conversion; publishing floats imposes it on every consumer, every field,
+      every request. Plus the two citations this task listed: 7e-8 on RON
+      ([[0123]]) and [[0120]]'s verified *"`Decimal(38,14)` strings parse
+      everywhere"*. A third turned up alongside — a `close` of `5e-14`, five
+      ticks above the `Decimal(38, 14)` floor.
+- [x] A "deviations from the RFP" entry names `Current Price (float USD)` and
+      quotes the RFP line — **done 2026-09-04**. ⚠️ Written **standalone** at
+      `docs/scf/milestone-2-rfp-deviations.md` rather than into [[0128]], which
+      has not started: the same reasoning [[0248]] and [[0122]] settled — an
+      evidence artefact that stands on its own should not be blocked behind an
+      unstarted package. 🔑 It also gathers the **other two** M2 deviations
+      already decided (the `X-Cache` wording, USDC's exclusion), so 0128 folds
+      in one file rather than three.
+- [x] `price_usd`'s published OpenAPI description states the string form and
+      the precision reason — **done 2026-09-04** (PR #287). It was already
+      stated at the **API level** (`openapi/mod.rs`) and on `PriceResponse`'s
+      schema summary, but **not on the field itself**, which is what a reader
+      following a `price_usd` reference actually lands on. Now carries the
+      `Decimal(38, 14)` vs IEEE-754 digit counts, the 7e-8 floor, and the
+      guidance to parse with a decimal type. `AssetListItem.price_usd` points at
+      it rather than repeating it.
+- [x] The entry states that the answer covers every Decimal-valued field, not
+      just this one — **done 2026-09-04**. Named explicitly: `vwap_24h`,
+      `volume_24h_usd`, the per-venue `sources` values and every OHLCV
+      `open`/`high`/`low`/`close`. 🔑 It also states the converse, which nothing
+      had recorded: **counts and ledger sequences stay plain JSON integers**,
+      because they are exact in a float and nothing is lost — so the rule is a
+      precision decision, not a blanket stylistic one.
+
+## Design Decisions
+
+### Emerged
+
+1. **The deviations document is standalone, not written into [[0128]].**
+   [[0128]] has not started, and the same reasoning [[0248]] and [[0122]]
+   settled applies: an evidence artefact that stands on its own should not be
+   blocked behind an unstarted package. 0128 cites it, as it cites the load
+   test, cache and backfill-depth reports.
+
+2. **It hosts all three M2 deviations, not only this one.** This task owns the
+   float-vs-string answer; the `X-Cache` wording ([[0262]], ADR 0012) and USDC's
+   exclusion ([[0127]]) were already decided and written elsewhere. Gathering
+   them into one document with §2 and §3 as summaries-plus-pointers means 0128
+   folds in **one** file, and a reviewer reading about deviations finds all of
+   them in one place. The source documents are not duplicated or rewritten.
+
+3. **The argument leads with the measured defect, not with the theory.** The
+   obvious way to write this is "floats have 53-bit mantissas, therefore…".
+   ADR 0011's BTC 1h finding is stronger: it is *our own system*, on
+   *production*, already broken once by exactly this mechanism, with the ulp
+   arithmetic done. A reviewer can dismiss a general principle; a measurement
+   from the codebase under review is harder to wave away.
+
+4. **The "strictly more capable" framing is deliberate.** `parseFloat` on our
+   string yields exactly what the RFP's literal reading would have delivered,
+   while the reverse is unrecoverable. That reframes the deviation from *"we
+   did not do what was asked"* to *"we delivered a superset"*, which is both
+   true and the right thing for a reviewer to hear first.
+
+5. **A leftover from PR #283 was fixed in passing.** The `SdexStream` schema
+   description still read *"walks the ledger history in order"* — the same
+   forward-orientation error #283 corrected in the route summary and the field
+   descriptions, missed because it lives in the schema-summary table rather than
+   the field table. Unrelated to this task's subject; too small and too adjacent
+   to leave.
+
 
 ## Notes
 
