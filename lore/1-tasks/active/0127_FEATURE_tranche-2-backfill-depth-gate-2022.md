@@ -299,14 +299,16 @@ majority and say so, rather than discovering it in front of the reviewer.
       `price_ohlcv_1d`, and `201511` as the oldest active partition on all seven
       tiers. Six years under the bar. Both of the task's stated traps were
       checked and neither fired.
-- [ ] Month-by-month candle counts from 2022-01 to present recorded; every gap
-      explained or filled — **counts recorded 2026-09-04, and there are no
-      calendar gaps**: every day from 2022-01-01 to 2026-09-03 carries SDEX
-      candles, leap years included. Open on the *explained* half: three density
-      features still need accounting for — the simultaneous 2026-07 dip on both
-      streams, the SDEX-only 2024-10 dip, and 🔴 the AMM stream's stored
-      `earliest_data_available` (2024-02-20) preceding its first actual 1d
-      candle (2024-03-08) by 17 days.
+- [x] Month-by-month candle counts from 2022-01 to present recorded; every gap
+      explained or filled — **done 2026-09-04**. All 57 months recorded, and
+      **there are no calendar gaps**: every day from 2022-01-01 to 2026-09-03
+      carries SDEX candles, leap years included. The three density features are
+      accounted for — 2024-10 and 2026-07 are uniformly lower with **zero**
+      zero-days and no cliff (breadth, not loss), and the AMM stream's early
+      `earliest_data_available` is a real defect, spawned as [[0264]]. ⚠️ Two
+      caveats carried, not buried: the aggregate AMM column cannot see
+      [[0101]]'s Soroswap-only hole and is not evidence against it, and
+      2026-07-21's 2.11x spike is unexplained.
 - [x] ~~🔴 BLOCKED BY [[0170]]~~ — `GET /assets/{USDC}/ohlcv?timeframe=all`
       returns 1d candles from 2022-01 or earlier through the deployed API —
       **satisfied 2026-09-04**: 2,042 points from **2021-02-01**, no gaps.
@@ -406,6 +408,41 @@ rather than averaging away:
 ⚠️ **Consequence for AC 4**: pick spot-check dates away from 2024-10 and
 2026-07 until 1 and 2 are explained, and away from any month whose asset count
 is thin (2026-06 at 19,411 and 2025-11 at 19,437 are the lowest in the range).
+
+#### The three are resolved — 2026-09-04
+
+**1 and 2 are not gaps.** Daily counts for both suspect months, `price_ohlcv_1d`:
+
+| | days | zero-days | min/day | mean/day | max/day | min ÷ mean |
+|---|---|---|---|---|---|---|
+| 2024-10 SDEX | 31 | **0** | 13,182 | 15,865 | 18,663 | 0.83 |
+| 2026-07 SDEX | 31 | **0** | 10,820 | 16,072 | 33,910 | 0.67 |
+| 2026-07 AMM | 31 | **0** | 112 | 150 | 358 | 0.75 |
+
+No zero-days, no cliff, no step — both months are **uniformly** lower than
+their neighbours rather than holed. 2024-10 ran at ~15.9k candles/day against
+23.2k in September and 27.6k in November; 2026-07 at ~16.1k against 23.4k and
+21.4k. That is a change in trading breadth, **not data loss**, and it is what
+AC 2 needed to establish. Whether the market was genuinely quieter is outside
+this task.
+
+⚠️ **The AMM column cannot see [[0101]]'s hole and does not refute it.** It
+sums Soroswap, Phoenix and Aquarius; a Soroswap-only outage is masked by the
+other two. Nothing here says 0101's 2026-07-06 → 07-15 hole is absent — only
+that no *aggregate* AMM day is empty. Do not cite this as evidence against 0101.
+
+⚠️ **2026-07-21 is a 2.11x spike**, not a dip — 33,910 SDEX candles against a
+16,072 month mean, with a *below*-average asset count (3,230). More pairs per
+asset on one day. Unexplained, benign for this AC (a spike cannot fail a
+coverage claim), recorded so it is not rediscovered as a mystery.
+
+**3 is a real defect, and it is now [[0264]].** `price_ohlcv_1m` was queried
+directly for non-SDEX rows before 2024-03-08 and returned **zero rows** — so
+this is not a rollup that failed to propagate, the data exists at no
+granularity and `soroban_amm.earliest_data_available` is simply wrong by 17
+days. It sits in the same reviewer-facing payload as the SDEX value Tranche 2
+AC 5 is graded on. 🔑 The SDEX value **is** correct and independently
+corroborated; do not let 0264 cast doubt on it.
 
 ## Design Decisions
 
