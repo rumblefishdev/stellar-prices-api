@@ -316,43 +316,67 @@ majority and say so, rather than discovering it in front of the reviewer.
       `derived: true` with `trade_count: 0`, and 1,865 of them are exactly `1`.
       This criterion asks whether candles are *returned*; AC 4 below asks
       whether they are *right*, and that is where the peg fill bites.
-- [ ] ~~🔴 BLOCKED BY [[0170]]~~ (USDC is the reviewer's named example) —
-      spot-check table published: ≥5 dates × ≥2 assets, our close vs an
-      independent public source, deltas explained. **Unblocked, but now at risk
-      for a different reason** (2026-09-04): USDC's series is peg-derived, so it
-      is right by construction rather than by measurement, and on **2023-03-11**
-      — the SVB depeg, when USDC traded ~$0.87-0.88 — we return exactly `1`.
-      The reviewer picks the dates. The mitigation below is therefore the
-      **likely** path, not the fallback: *spot-check two non-peg assets and
-      state explicitly why USDC is excluded — a weaker package, since USDC is
-      the easiest close for a reviewer to verify independently.* 🔑 Choose those
-      assets from the USD-priced majority; ~36% of 2022 daily candles carry
-      `close_usd = 0`.
-- [ ] USD-denominated fields are non-zero for the spot-checked span (depends on
-      [[0114]]'s repair reaching it) — or the limitation is stated explicitly.
-      **Measured 2026-09-04**: `close_usd = 0` on **36.20%** of 2022 daily SDEX
-      candles, 13.32% of 2021, and **96-100% of 2015-2020**. The span is
-      covered; the *estate within it* is not uniformly priced. Open until the
-      spot-checked assets are chosen and their own coverage confirmed.
-- [ ] `backfill_note` present and accurate while `sdex.status = "running"` —
-      ⚠️ **the precondition no longer holds**: `sdex.status` is `completed`
-      (`completed_at` 2026-07-27). Re-read this as "the note is correct for a
-      completed stream", or retire it. 🔴 Separately, the same payload publishes
-      `progress_pct: 0.0` and `ledgers_remaining: 63795748` beside
-      `status: "completed"` — the formula assumes a forward walk and this stream
-      ran backward. Fix before submission; it is on the exact endpoint Tranche 2
-      AC 5 sends the reviewer to.
+- [x] Spot-check table published: ≥5 dates × ≥2 assets, our close vs an
+      independent public source, deltas explained — **done 2026-09-04**,
+      `docs/prices-api-backfill-depth-verification.md` (PR #285). Reference is
+      **Binance daily klines** (`data-api.binance.vision`, public, no key,
+      history predating 2022, off-Stellar and sharing no price source with us).
+      Delivered wider than asked: **28 dates** per asset, not 5.
+
+      | asset | median \|Δ\| | within 5% |
+      |---|---|---|
+      | XLM (`native`) | **0.06%** | 27 / 28 |
+      | yBTC | **0.48%** | 27 / 28 |
+
+      🔒 **USDC excluded, per the operator's decision 2026-09-04**, with the
+      reason stated in full in §6 of the report rather than omitted quietly:
+      its series is entirely peg-derived (`trade_count: 0` on all 2,042 points,
+      1,865 of them exactly `1`), so on the SVB depeg it returns `1` where
+      reality was ~$0.87. It is right by construction rather than by
+      measurement — it cannot fail the check, which is why it cannot pass it.
+      Pricing it properly is [[0265]], deliberately scheduled for M3.
+      ⚠️ The exception is published, not averaged away: on **2023-03-11** and
+      **2023-03-15** both assets dislocate by the *same* ratio with every
+      neighbouring day clean, which is a shared cause rather than noise —
+      [[0266]]. The obvious peg explanation is recorded as **refuted**, since it
+      requires USDC at ~$1.34 when USDC fell.
+- [x] USD-denominated fields are non-zero for the spot-checked span — **done
+      2026-09-04**. Both spot-check assets carry a non-zero USD close on **every
+      one of the 28 sampled dates**, with real trade counts behind each. ⚠️ The
+      limitation is stated rather than hidden: across the whole estate
+      `close_usd = 0` on **36.20%** of 2022 daily SDEX candles, 13.32% of 2021
+      and **96-100% of 2015-2020**. The span is covered; the estate within it is
+      not uniformly priced. 🔑 That is exactly why the spot-check assets were
+      chosen from the priced majority — deliberately, and said so — rather than
+      picked first and checked afterwards.
+- [x] `backfill_note` present and accurate while `sdex.status = "running"` —
+      **resolved 2026-09-04**. ⚠️ The precondition no longer holds: `sdex.status`
+      is `completed` (`completed_at` 2026-07-27), so the live API **cannot**
+      exhibit the note, and its absence is the correct behaviour rather than a
+      missing feature. Verified on both sides: the live `?timeframe=all`
+      response omits `backfill_note` entirely, and the gate
+      (`assets/handlers.rs:681`) emits it only when `timeframe=all`, the data is
+      non-empty **and** `sdex_backfill_running()` finds `status == "running"`.
+      Both branches are covered by `tests/ohlcv_it.rs:190,211`. 🔴 The
+      `progress_pct: 0.0` / `ledgers_remaining: 63795748` contradiction noted
+      here earlier is **fixed and merged** — PR #283 (`d9de725`).
 - [x] §9's residual `sdex-cloud-push` language corrected per ADR 0009 — **done
-      2026-09-04**, PR #284. All three §9 sites (Tranche 1 criterion 5, the
-      Tranche 2 and Tranche 3 backfill milestones), with the substance of each
-      left intact. Also §4.5's field table and two references in §10 and §11
-      that sat outside the §5.3 warning block's stated scope and were covered
-      by nothing. §5.3-§5.6 keep their warning block; the 2026-05-14 changelog
-      row stays as written.
-- [ ] `sdex.last_push_at` fresh within the configured cadence at review time —
-      currently **2026-08-11**, 24 days ago, on a stream that completed
-      2026-07-27. Decide whether freshness is even meaningful for a completed
-      archive stream before asserting anything about it in [[0128]].
+      2026-09-04**, PR #284 (`ae2776d`). All three §9 sites (Tranche 1 criterion
+      5, the Tranche 2 and Tranche 3 backfill milestones), with the substance of
+      each left intact. Also §4.5's field table and two references in §10 and
+      §11 that sat outside the §5.3 warning block's stated scope and so were
+      covered by nothing. §5.3-§5.6 keep their warning block; the 2026-05-14
+      changelog row stays as written.
+- [x] `sdex.last_push_at` fresh within the configured cadence at review time —
+      **decided 2026-09-04: the criterion does not apply and [[0128]] must say
+      so rather than quote a number.** `last_push_at` is **2026-08-11** on a
+      stream that reached `completed` on **2026-07-27**. A freshness threshold
+      measures whether an *in-progress* backfill is still advancing; against a
+      finished archive it can only ever go stale, and asserting freshness for it
+      would be asserting something meaningless. ⚠️ The corollary is an ops
+      question, not this task's: the Tranche 1 alarm on this column will now
+      fire forever unless it is gated on `status != completed`. Recorded for
+      whoever owns that alarm.
 
 ### AC 2 — month-by-month coverage, 2022-01 → 2026-09
 
