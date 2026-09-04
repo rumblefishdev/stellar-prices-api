@@ -57,10 +57,15 @@ pub struct SdexStream {
     pub start_ledger: u64,
     #[schema(maximum = 4_294_967_295u64)]
     pub target_ledger: u64,
-    /// `(current - start) / (target - start) * 100`, computed at read time.
+    /// `(target - current) / (target - start) * 100`, computed at read time.
+    /// Backward: this stream's `current_ledger` is the OLDEST ledger reflected
+    /// and descends toward `start_ledger` (genesis), so the covered span is
+    /// `[current, target]`. See `handlers::progress_pct`.
     pub progress_pct: f64,
-    /// `target_ledger - current_ledger`, computed at read time. Bounded by the
-    /// same ledger-sequence ceiling, being a difference of two of them.
+    /// `current_ledger - start_ledger`, computed at read time — how far the
+    /// archive's floor still sits above genesis. Backward, for the same reason
+    /// as `progress_pct`. Bounded by the ledger-sequence ceiling, being a
+    /// difference of two of them.
     #[schema(maximum = 4_294_967_295u64)]
     pub ledgers_remaining: u64,
     /// Most recent successful push (`null` until the first push).

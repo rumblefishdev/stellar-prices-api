@@ -63,14 +63,22 @@ pub async fn execute(
     // The sdex_archive progress denominator (`target_ledger`) is the LIVE chain
     // tip. In a sdex-only tail run `--end` is the activation boundary, not the
     // tip, so `--tip <live tip>` must be passed explicitly; when it is omitted
-    // `tip` defaults to `--end` (≈ activation), which would make progress_pct
-    // read against the wrong denominator and over-report the archive. A tip at or
-    // below activation is the tell-tale of a forgotten flag.
+    // `tip` defaults to `--end` (≈ activation) and progress_pct reads against
+    // the wrong denominator. A tip at or below activation is the tell-tale of a
+    // forgotten flag.
+    //
+    // The direction of the error is not fixed. `progress_pct` is
+    // `(target - current) / (target - start)` (task 0127 — the archive walks
+    // backward), so a collapsed `target` can push it either way: a terminal
+    // update that carries `current` down to the run start reports ~100% of a
+    // span that stops at activation, while a mid-run `Current::Keep` leaving a
+    // stored floor at or above the collapsed target reports 0%. Both are wrong
+    // about the real archive; neither is reliably conservative.
     if mode == ExtractMode::SdexOnly && tip <= activation_ledger {
         warn!(
             tip,
             activation_ledger,
-            "sdex-only run without a live --tip: backfill_progress.target_ledger is the activation boundary, not the chain tip, so /backfill/status progress_pct will over-report — pass --tip <live tip>"
+            "sdex-only run without a live --tip: backfill_progress.target_ledger is the activation boundary, not the chain tip, so /backfill/status progress_pct will misreport (either direction) — pass --tip <live tip>"
         );
     }
 

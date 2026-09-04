@@ -340,18 +340,24 @@ async fn backfill_status_maps_both_streams() {
     assert_eq!(json["realtime_tip_ledger"], 57234198u64);
     assert_eq!(json["sdex"]["status"], "running");
     assert_eq!(json["sdex"]["current_ledger"], 34891234u64);
-    // remaining = target - current = 57234198 - 34891234
-    assert_eq!(json["sdex"]["ledgers_remaining"], 22342964u64);
+    // The archive walks BACKWARD (tip -> genesis), so `current_ledger` is the
+    // oldest ledger reflected and what remains is the stretch still BELOW it:
+    // remaining = current - start = 34891234 - 1
+    assert_eq!(json["sdex"]["ledgers_remaining"], 34891233u64);
     assert_eq!(json["sdex"]["last_push_at"], "2026-06-15T11:30:00Z");
     // earliest_data_available = oldest OHLCV row this stream has landed (AC 6)
     assert_eq!(
         json["sdex"]["earliest_data_available"],
         "2015-11-18T03:47:00Z"
     );
-    // done = (current - start) / (target - start) * 100
-    //      = (34891234 - 1) / (57234198 - 1) * 100 ≈ 60.96
+    // covered = (target - current) / (target - start) * 100
+    //         = (57234198 - 34891234) / (57234198 - 1) * 100 ≈ 39.04
+    //
+    // Changed from 60.96 with the backward-direction fix (task 0127): the old
+    // forward form reported the COMPLEMENT of the covered span, which read a
+    // finished archive (current == start == 1) as 0.0% on production.
     let pct = json["sdex"]["progress_pct"].as_f64().unwrap();
-    assert!((pct - 60.96).abs() < 0.1, "pct={pct}");
+    assert!((pct - 39.04).abs() < 0.1, "pct={pct}");
 
     assert_eq!(json["soroban_amm"]["status"], "completed");
     assert_eq!(json["soroban_amm"]["completed_at"], "2026-04-14T08:23:11Z");
