@@ -419,7 +419,8 @@ One row per backfill stream (`sdex_archive`, `soroban_amm`). Both rows are
 seeded at provisioning time. Per ADRs 0001 and 0005, both canonical streams
 are populated by workstation-local processes, so the cloud row is updated by
 a push step — not by a continuously-running cloud-side task. For
-`sdex_archive` the writer is `sdex-cloud-push` (runs in tip-backward chunks);
+`sdex_archive` the writer is the `sdex-backfill` CLI itself, writing directly to
+Hetzner over mTLS (ADR 0009; runs in tip-backward chunks);
 for `soroban_amm` the writer is the one-shot AMM CLI when it completes its
 push to cloud. The `GET /backfill/status` endpoint reads both rows and
 returns them as the nested `sdex` and `soroban_amm` objects (see Section 4.5).
@@ -766,17 +767,17 @@ Section 5.6). The response reflects both.
 }
 ```
 
-| Field                                 | Description                                                                                                                                                                                                                        |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sdex.status`                         | `running`, `paused`, `completed`, or `error` — SDEX archive backfill                                                                                                                                                               |
-| `sdex.current_ledger`                 | Oldest ledger reflected in the cloud DB after the most recent `sdex-cloud-push`. Advances at push cadence, not CLI cadence.                                                                                                        |
-| `sdex.progress_pct`                   | `(target_ledger - current_ledger) / (target_ledger - start_ledger) * 100`, computed at read time                                                                                                                                   |
-| `sdex.ledgers_remaining`              | `current_ledger - start_ledger`, computed at read time                                                                                                                                                                             |
-| `sdex.last_push_at`                   | Timestamp of the most recent successful `sdex-cloud-push`. The CloudWatch freshness alarm fires when this is older than the configured push-cadence threshold for the active tranche. `null` until the first push.                 |
-| `sdex.earliest_data_available`        | Stored timestamp of the oldest SDEX OHLCV row known for this stream — recorded by the push step when it first lands a candle for a given timestamp, **not** computed live via `MIN(timestamp)`. Returned as-is, so reads are O(1). |
-| `soroban_amm.status`                  | Typically `completed` from Tranche 1 onwards                                                                                                                                                                                       |
-| `soroban_amm.last_push_at`            | Timestamp of the one-shot AMM CLI's completion push (ADR 0001). `null` until the push happens.                                                                                                                                     |
-| `soroban_amm.earliest_data_available` | Same semantics as `sdex.earliest_data_available` — stored, not computed. Lands at the Soroban activation date (~Nov 2023) once the one-time backfill completes.                                                                    |
+| Field                                 | Description                                                                                                                                                                                                                                                                                                |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sdex.status`                         | `running`, `paused`, `completed`, or `error` — SDEX archive backfill                                                                                                                                                                                                                                       |
+| `sdex.current_ledger`                 | Oldest ledger reflected on Hetzner after the most recent backfill write (ADR 0009 — direct write, no separate push step). ⚠️ It is the lowest completed run **start**, so it asserts a floor, not proven contiguous coverage up to `target_ledger` (task 0263).                                            |
+| `sdex.progress_pct`                   | `(target_ledger - current_ledger) / (target_ledger - start_ledger) * 100`, computed at read time                                                                                                                                                                                                           |
+| `sdex.ledgers_remaining`              | `current_ledger - start_ledger`, computed at read time                                                                                                                                                                                                                                                     |
+| `sdex.last_push_at`                   | Timestamp of the most recent successful **direct write** to Hetzner by the backfill CLI (ADR 0009; the column name predates that ADR and is retained). The CloudWatch freshness alarm fires when this is older than the configured cadence threshold for the active tranche. `null` until the first write. |
+| `sdex.earliest_data_available`        | Stored timestamp of the oldest SDEX OHLCV row known for this stream — recorded by the push step when it first lands a candle for a given timestamp, **not** computed live via `MIN(timestamp)`. Returned as-is, so reads are O(1).                                                                         |
+| `soroban_amm.status`                  | Typically `completed` from Tranche 1 onwards                                                                                                                                                                                                                                                               |
+| `soroban_amm.last_push_at`            | Timestamp of the one-shot AMM CLI's completion push (ADR 0001). `null` until the push happens.                                                                                                                                                                                                             |
+| `soroban_amm.earliest_data_available` | Same semantics as `sdex.earliest_data_available` — stored, not computed. Lands at the Soroban activation date (~Nov 2023) once the one-time backfill completes.                                                                                                                                            |
 
 ---
 
@@ -1334,8 +1335,11 @@ on ClickHouse, that machinery is not part of the prices-api budget at any traffi
    successive pushes (tip-backward direction). `soroban_amm.status` is `"running"` early in
    Tranche 1 and transitions to `"completed"` once the AMM stream finishes (see Section 4.5
    for the canonical response shape)
-5. CloudWatch alarm test: skip a scheduled `sdex-cloud-push` cycle → freshness alarm fires
-   once `sdex.last_push_at` exceeds the configured Tranche 1 threshold
+5. CloudWatch alarm test: let a scheduled backfill write cycle lapse → freshness alarm fires
+   once `sdex.last_push_at` exceeds the configured Tranche 1 threshold. (Tool name
+   corrected per ADR 0009 — there is no `sdex-cloud-push` step; `last_push_at` is
+   the timestamp of the CLI's most recent **direct write** to Hetzner. The test
+   itself is unchanged: it exercises the freshness alarm, not the tool.)
 6. `sdex.earliest_data_available` in `GET /backfill/status` shows a date approximately 6 months ago
 
 **Budget: $XX,XXX (Tranche 1)**
@@ -1361,10 +1365,11 @@ on ClickHouse, that machinery is not part of the prices-api budget at any traffi
 - Input validation: asset identifier format enforced, param ranges validated, 400 on invalid input
 
 **Backfill milestone for Tranche 2:**
-By the end of Week 9, the operator has run additional tip-backward `sdex-backfill` chunks
-and `sdex-cloud-push` cycles covering approximately **January 2022 to present** (4+ years of
+By the end of Week 9, the operator has run additional tip-backward `sdex-backfill` chunks —
+writing **directly to Hetzner `prices.*` over mTLS** (ADR 0009; there is no separate
+`sdex-cloud-push` step) — covering approximately **January 2022 to present** (4+ years of
 SDEX history, including all of the Soroban era plus 2 years of pre-Soroban SDEX data). The
-pushed range and freshness are visible via `GET /backfill/status` (`sdex.earliest_data_available`,
+covered range and freshness are visible via `GET /backfill/status` (`sdex.earliest_data_available`,
 `sdex.last_push_at`). Local CLI per-ledger rate (~311 ledgers/s per task 0022) is well above
 what is required for this coverage given the workstation uptime through Tranche 2; see §5.6
 for the full local-CLI metrics.
@@ -1404,9 +1409,9 @@ for the full local-CLI metrics.
 - GitHub repository made public with README, architecture docs, deploy instructions
 
 **Backfill milestone for Tranche 3:**
-By the end of Week 13, the operator has run additional tip-backward `sdex-backfill` chunks
-and `sdex-cloud-push` cycles covering approximately **January 2018 to present** (8+ years of
-SDEX history). Per ADR 0005 §9, full historical completion (ledger 1 to current tip) is
+By the end of Week 13, the operator has run additional tip-backward `sdex-backfill` chunks —
+direct-write per ADR 0009, as above — covering approximately **January 2018 to present**
+(8+ years of SDEX history). Per ADR 0005 §9, full historical completion (ledger 1 to current tip) is
 **not** a Tranche 3 deliverable — the operator continues pushing older ranges in the
 background post-delivery.
 
@@ -1469,8 +1474,10 @@ post-delivery monitoring.
 
 Per ADRs 0001 and 0005, **both** historical backfill streams run as local Rust CLIs on the
 operator's workstation, not as continuous ECS Fargate tasks. The Hetzner CH cluster sees
-only bursty push steps: the Stream 2 `sdex-cloud-push` (tip-backward chunks) and the
-Stream 1 `soroban-amm-backfill` one-shot completion push. AWS-billed line items are
+only bursty write traffic: the Stream 2 `sdex-backfill` CLI's tip-backward chunks and the
+Stream 1 `soroban-amm-backfill` one-shot run, both writing **directly** over mTLS
+(ADR 0009 — the `sdex-cloud-push` step this paragraph described no longer exists; the
+burst profile is unchanged, only its source). AWS-billed line items are
 essentially unchanged from steady-state since the writes happen against Hetzner, not
 AWS-side storage. Workstation electricity, ISP bandwidth, and local ClickHouse disk for
 the Stream 1 prep step are operator-paid and outside this table.
@@ -1601,6 +1608,6 @@ with strict per-database isolation via ClickHouse's native multi-tenant primitiv
 runtime or data coupling with the Block Explorer at the backfill layer. The only BE
 artefact consumed is the `xdr-parser` crate, pinned as a git Cargo library dependency
 and compiled read-only into the `sdex-backfill` binary on the operator's workstation. The
-final `sdex-cloud-push` step lands rows into the shared Hetzner CH — that single hop
-introduces the same shared-host coupling as the live path, governed by the same Cluster
-A/B/C/D agreements.
+CLI writes rows directly into the shared Hetzner CH as it decodes (ADR 0009, replacing the
+`sdex-cloud-push` step this paragraph described) — that hop introduces the same shared-host
+coupling as the live path, governed by the same Cluster A/B/C/D agreements.
