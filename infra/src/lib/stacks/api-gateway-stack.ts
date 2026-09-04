@@ -10,6 +10,19 @@ import type { Construct } from 'constructs';
 
 import type { EnvironmentConfig } from '../types.js';
 
+/**
+ * Physical name of the public REST API.
+ *
+ * Single source of truth: {@link ApiGatewayStack} sets `restApiName` from this,
+ * and ObservabilityStack builds the dashboard's `ApiName` metric dimension from
+ * it (task 0125). API Gateway metrics are addressed by name, so a rename that
+ * updated only this stack would leave every API widget rendering "No data" with
+ * nothing failing at synth.
+ */
+export function restApiName(envName: string): string {
+  return `prices-${envName}-api`;
+}
+
 export interface ApiGatewayStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
   /**
@@ -363,7 +376,7 @@ export class ApiGatewayStack extends cdk.Stack {
     const cacheEnabled = config.apiGatewayCacheEnabled;
 
     this.api = new apigateway.RestApi(this, 'Api', {
-      restApiName: `prices-${config.envName}-api`,
+      restApiName: restApiName(config.envName),
       description: `prices-api public REST API (${config.envName})`,
       deployOptions: {
         stageName: config.envName,
