@@ -2,14 +2,15 @@
 id: "0127"
 title: "Tranche 2 backfill-depth gate — earliest_data_available ≤ 2022-01-01 and USDC 1d candles spot-checked"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0005", "0009"]
-related_tasks: ["0088", "0106", "0114", "0116", "0101", "0128", "0170", "0165"]
+related_tasks: ["0088", "0106", "0114", "0116", "0101", "0128", "0170", "0165", "0263", "0264", "0265", "0266"]
 tags: [layer-indexing, priority-high, effort-medium, milestone-M2, backfill, sdex, verification, acceptance]
 milestone: 2
 links:
   - "../../../lore/1-tasks/archive/0088_FEATURE_soroban-backfill-run-tracker/README.md"
   - "../../../docs/prices-api-general-overview.md"
+  - "../../../docs/prices-api-backfill-depth-verification.md"
 history:
   - date: 2026-07-23
     status: backlog
@@ -35,6 +36,32 @@ history:
       are both completed. Re-confirm the frontier from the data before trusting
       any of this — the two traps recorded below are exactly the ones that
       produced a wrong reading of this measurement before.
+  - date: 2026-09-04
+    status: completed
+    who: okarcz
+    note: >
+      Closed — 8 of 8 acceptance criteria. Both Tranche 2 criteria this task
+      owns are answered. AC 5 passes by six years: `earliest_data_available`
+      reports 2015-11-18 against a 2022-01-01 bar, reconciled against the stored
+      row, `min(timestamp)` on `price_ohlcv_1d` and the oldest active partition
+      on all seven tiers rather than taken on trust — it matters because the
+      writer's monotonic merge means an overstatement would have been permanent
+      and invisible. Continuity established by counting distinct DAYS, not
+      candles: every calendar day from 2022-01-01 to 2026-09-03 carries SDEX
+      candles, leap years included, so there were no gaps to explain. AC 6
+      answered with XLM and yBTC against Binance daily klines over 28 dates
+      rather than the five asked for — median absolute deviation 0.06% and
+      0.48%, 27 of 28 within 5% on each. Deliverables: three merged PRs (#283
+      the progress_pct direction fix, #284 the ADR 0009 language retirement,
+      #285 the evidence report at
+      `docs/prices-api-backfill-depth-verification.md`). Four follow-ups
+      spawned, none of them cosmetic: [[0263]] `current_ledger` asserts a floor
+      not proven coverage, [[0264]] the AMM stream's stored watermark claims 17
+      days that exist at no granularity, [[0265]] USDC is priced by assertion
+      and cannot report a depeg (M3), [[0266]] two unrelated assets dislocate by
+      an identical ratio on stablecoin-stress dates. 🔒 Operator decisions:
+      milestone-1 evidence stays exactly as submitted, and USDC is excluded from
+      the spot-check with the reason stated in full rather than omitted.
 ---
 
 # Tranche 2 backfill-depth gate
@@ -502,6 +529,34 @@ corroborated; do not let 0264 cast doubt on it.
    it is the same row read correctly. If M2 reproduces this endpoint, say so
    in one line rather than letting a reviewer discover an unexplained
    discontinuity between the two packages.
+
+
+## Future Work
+
+Four spawned, all on `develop`. None is a tidy-up; each was found by measuring
+something this task had to measure anyway.
+
+- **[[0263]]** — `backfill_progress.current_ledger` asserts a **floor**, not
+  proven contiguous coverage. A genesis-anchored chunk sets it to `1` while
+  `status` correctly stays `running`. PR #283 contains the symptom with a
+  status guard; the column is still not a coverage proof.
+- **[[0264]]** — `soroban_amm.earliest_data_available` claims 2024-02-20 while
+  the first AMM candle is 2024-03-08. `price_ohlcv_1m` holds **zero** non-SDEX
+  rows before that date, so it is not a rollup that failed to propagate. Second
+  column found asserting more than the data supports.
+- **[[0265]]** (M3) — USDC is priced by **assertion**. All 2,042 points are
+  `derived: true` with `trade_count: 0`, and on the SVB depeg it returns `1`.
+  Structural, not a patch: USDC is the top-preference quote asset, so pricing it
+  in USD from USDC-denominated candles is circular.
+- **[[0266]]** — on 2023-03-11 and 2023-03-15 two unrelated assets dislocate by
+  the **same** ratio with every neighbouring day clean. Shared cause, mechanism
+  unidentified, and the obvious peg explanation is recorded as *refuted* rather
+  than assumed.
+
+⚠️ **Not spawned, handed over as prose because it belongs to whoever owns the
+alarm**: the Tranche 1 CloudWatch alarm on `sdex.last_push_at` will fire forever
+now that the stream is `completed`, unless it is gated on `status != completed`.
+See AC 8.
 
 
 ## Notes
