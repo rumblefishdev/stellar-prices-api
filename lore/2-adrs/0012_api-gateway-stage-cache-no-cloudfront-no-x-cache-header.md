@@ -17,6 +17,15 @@ history:
       Operator instruction, verbatim in intent: do not create CloudFront and do
       not add an `X-Cache` header on API Gateway at this point in the project;
       record why in a document. This ADR is that record.
+  - date: 2026-09-04
+    status: accepted
+    who: okarcz
+    note: >
+      **Confirmed by the team lead** on the same day, after review of this
+      record. The decision is therefore the team's and not one person's, which
+      is the standing it needs before it is put to the SCF reviewer in [[0262]].
+      No change to the decision or the reasoning — this entry records
+      ratification only.
 ---
 
 # ADR 0012: The API Gateway stage cache stays; no CloudFront, no `X-Cache` header

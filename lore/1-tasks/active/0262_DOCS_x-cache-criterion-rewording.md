@@ -239,6 +239,8 @@ There is no code in this task and there never was. What is left:
 
 - [x] The team has a decision on whether to reword or to build the edge —
       **decided 2026-09-04: reword. No CloudFront, no `X-Cache`.**
+      ✅ **Ratified by the team lead the same day**, so what goes to the
+      reviewer is a team position rather than one developer's call.
 - [x] The reasoning is written down where a future session will find it before
       re-opening the question — **ADR 0012**, accepted, cross-linked from this
       task and from `docs/prices-api-cache-verification.md`.
