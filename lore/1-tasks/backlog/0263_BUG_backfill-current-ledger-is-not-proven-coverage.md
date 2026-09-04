@@ -116,6 +116,7 @@ self-contradiction without making the number true.
   under the **old forward formula** (`progress_pct: 79.47`,
   `ledgers_remaining: 13032807`) and describes the stream as *"~79 % through the
   chain"*. Under the corrected arithmetic the same row is **20.53%** — the
-  submitted prose overstates coverage by roughly 4x. That is submitted evidence
-  and its handling is a call for the operator and the team, tracked in
-  [[0127]], not here.
+  submitted prose overstates coverage by roughly 4x. 🔒 **Decided 2026-09-04:
+  that file is left exactly as submitted — no correction, no annotation.** The
+  reasoning is in [[0127]]'s Design Decisions; do not reopen it here. The place
+  to be accurate is [[0128]].

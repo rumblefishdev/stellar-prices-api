@@ -340,6 +340,42 @@ majority and say so, rather than discovering it in front of the reviewer.
       2026-07-27. Decide whether freshness is even meaningful for a completed
       archive stream before asserting anything about it in [[0128]].
 
+## Design Decisions
+
+### Emerged
+
+1. **🔒 `docs/scf/milestone-1-evidence.md` is left exactly as submitted — no
+   correction, no annotation.** Decided with the operator 2026-09-04.
+
+   The finding is real and is not in dispute: Figure 7 captures a live
+   `/backfill/status` response under the **old forward formula** —
+   `current_ledger: 50457424`, `progress_pct: 79.47`,
+   `ledgers_remaining: 13032807` — and the prose beneath reads *"The `sdex`
+   stream is ~79 % through the chain."* Under the arithmetic PR #283 corrects,
+   the same row is **20.53%**, and the corrected number is the truthful one:
+   `current_ledger` sat at the Soroban activation boundary, so real coverage was
+   `[50457424, 63490231]`. The same paragraph also calls
+   `earliest_data_available` *"the public archive floor … not the ingested
+   depth"*, which `backfill/dto.rs` records as a corrected misreading.
+
+   **It stays as it is.** M1 is submitted and accepted; the document is a record
+   of what was sent, not a live description of the system. Editing submitted
+   evidence after the fact changes what the record says was claimed, which is a
+   worse failure than the overstatement it would fix.
+
+   🔴 **Do not "helpfully" annotate this file in a later session.** A future pass
+   re-reading Figure 7 against a corrected endpoint will find the same
+   discrepancy and reach for the same fix; this entry is the answer. The place
+   to be accurate is [[0128]], the M2 package, which is not yet written.
+
+   ⚠️ **Consequence to carry into [[0128]]**: re-running that same `curl` for an
+   M2 exhibit will show a number that looks like a regression against M1's
+   Figure 7 (79.47 → 20.53, then 100 once the archive completed). It is not —
+   it is the same row read correctly. If M2 reproduces this endpoint, say so
+   in one line rather than letting a reviewer discover an unexplained
+   discontinuity between the two packages.
+
+
 ## Notes
 
 - Do **not** let this task drive the backfill run itself — that is [[0088]],
