@@ -511,13 +511,18 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "SdexStream",
         "ledgers_remaining",
-        "`target_ledger − current_ledger`.",
+        "`current_ledger − start_ledger` — how far the archive's floor still sits above \
+         genesis. This stream walks backward, so what remains is below `current_ledger`, \
+         not above it.",
     ),
     (
         "SdexStream",
         "progress_pct",
-        "Share of the ledger span consumed, in percent: `(current_ledger − start_ledger) / \
-         (target_ledger − start_ledger) × 100`; `0` while the span is unknown.",
+        "Share of the ledger span covered, in percent: `(target_ledger − current_ledger) / \
+         (target_ledger − start_ledger) × 100`. The SDEX archive walks backward from the tip \
+         toward genesis, so `current_ledger` is the OLDEST ledger reflected and the covered \
+         span is `[current_ledger, target_ledger]`; `0` while the span is unknown or nothing \
+         has been reflected yet.",
     ),
     (
         "SdexStream",
