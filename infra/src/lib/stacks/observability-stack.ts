@@ -1302,6 +1302,21 @@ export class ObservabilityStack extends cdk.Stack {
     // detection window. Neither can silently disarm an alarm. Threading the
     // functions through was judged not worth the stack coupling — see
     // §Design Decisions in task 0112.
+    // Not every scheduled worker has these two platform alarms. The three
+    // without are listed HERE, by name, so the gap is a decision on record and
+    // the assertion below forces one for any worker added later:
+    // - cleanup: its rule is DISABLED (task 0200) — a no-invocations alarm
+    //   would fire forever.
+    // - asset-discovery, supply: run hourly/daily with a cheap, bounded body;
+    //   their `-errors` alarm (createWorkerLambda) is the coverage today.
+    //   asset-discovery is the subject of task 0256 (the ledger scan has never
+    //   run on production) — revisit both there. Recorded in task 0125 Future
+    //   Work.
+    const workersWithoutHealthAlarms: readonly string[] = [
+      'cleanup',
+      'asset-discovery',
+      'supply',
+    ];
     const workerHealth: Array<WorkerHealthAlarmProps> = [
       {
         name: 'enrichment',
@@ -1378,6 +1393,29 @@ export class ObservabilityStack extends cdk.Stack {
       },
     ];
 
+    // Every scheduled worker is either covered here or named above — nothing
+    // falls through silently (deep review WR-02, PR #280 review finding 2).
+    {
+      const covered = new Set<string>(workerHealth.map((w) => w.name));
+      for (const name of SCHEDULED_WORKERS) {
+        const has = covered.has(name);
+        const exempt = workersWithoutHealthAlarms.includes(name);
+        if (has === exempt) {
+          throw new Error(
+            `ObservabilityStack: worker "${name}" must be in exactly one of workerHealth or workersWithoutHealthAlarms ` +
+              `(in workerHealth: ${has}, exempt: ${exempt})`,
+          );
+        }
+      }
+      for (const name of [...covered, ...workersWithoutHealthAlarms]) {
+        if (!(SCHEDULED_WORKERS as readonly string[]).includes(name)) {
+          throw new Error(
+            `ObservabilityStack: "${name}" is not a SCHEDULED_WORKER (lambda-baseline.ts)`,
+          );
+        }
+      }
+    }
+
     this.workerHealthAlarms = Object.fromEntries(
       workerHealth.map((w) => [
         w.name,
@@ -1438,8 +1476,12 @@ export class ObservabilityStack extends cdk.Stack {
     // 5xx as a percentage of all requests. `Count` is never zero in production
     // (108 655 requests on 2026-09-02), so the division is safe; metric math
     // yields no datapoint rather than an error if it ever were.
+    // FILL on the 5xx input: a quiet period publishes no 5xx datapoint, and
+    // metric math yields nothing when an input is absent — so without it the
+    // tile reads "--" in exactly the healthy case it exists to show. The
+    // `requests` input is left bare: no requests at all is genuinely undefined.
     const errorRatePct = new cloudwatch.MathExpression({
-      expression: '100 * (e5xx / requests)',
+      expression: '100 * (FILL(e5xx, 0) / requests)',
       usingMetrics: {
         e5xx: apiMetric('5XXError', 'Sum', '5xx'),
         requests: apiMetric('Count', 'Sum', 'requests'),

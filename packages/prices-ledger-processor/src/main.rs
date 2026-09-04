@@ -54,14 +54,18 @@ async fn main() -> Result<(), Error> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_MAX_ITERATIONS);
 
-    // Build the S3 fetcher and the mTLS sink concurrently — they are
-    // independent (ambient AWS config load vs. Secrets-extension fetch +
-    // mTLS handshake), so joining them shaves their latency off cold start.
-    let (fetcher, sink) = tokio::join!(
-        S3Fetcher::from_env(&bucket),
+    // Load the ambient AWS config ONCE and share it between every SDK client
+    // in this binary (S3 below, CloudWatch further down): each load builds its
+    // own credential-provider chain and HTTP client, and this Lambda runs at
+    // reserved concurrency 1, so cold-start latency is ingestion lag. Joined
+    // with the mTLS sink init — the two are independent (config load vs.
+    // Secrets-extension fetch + mTLS handshake) — so they overlap.
+    let (aws_cfg, sink) = tokio::join!(
+        aws_config::defaults(aws_config::BehaviorVersion::latest()).load(),
         ClickHouseSink::from_lambda_env()
     );
     let sink = sink?;
+    let fetcher = S3Fetcher::new(aws_sdk_s3::Client::new(&aws_cfg), &bucket);
 
     // Three independent ClickHouse reads on the cold path — the durable cursor
     // (task 0064) plus the two registries — joined so they overlap instead of
@@ -146,18 +150,23 @@ async fn main() -> Result<(), Error> {
     // 60 s Lambda limit — and with reserved concurrency 1 that is ingestion
     // lag, not a dropped metric. Worst case with these numbers is ~6 s
     // (2 attempts x 3 s), well inside the ~5 s ledger cadence's slack.
-    let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+    //
+    // The bounds live on the CloudWatch client's own config, not on the shared
+    // `aws_cfg`, so they never apply to the S3 ledger downloads or to
+    // credential resolution.
+    let cw_conf = aws_sdk_cloudwatch::config::Builder::from(&aws_cfg)
         .timeout_config(
-            aws_config::timeout::TimeoutConfig::builder()
+            aws_sdk_cloudwatch::config::timeout::TimeoutConfig::builder()
                 .connect_timeout(std::time::Duration::from_secs(1))
                 .operation_attempt_timeout(std::time::Duration::from_secs(3))
                 .operation_timeout(std::time::Duration::from_secs(6))
                 .build(),
         )
-        .retry_config(aws_config::retry::RetryConfig::standard().with_max_attempts(2))
-        .load()
-        .await;
-    let cw = Arc::new(aws_sdk_cloudwatch::Client::new(&aws_cfg));
+        .retry_config(
+            aws_sdk_cloudwatch::config::retry::RetryConfig::standard().with_max_attempts(2),
+        )
+        .build();
+    let cw = Arc::new(aws_sdk_cloudwatch::Client::from_conf(cw_conf));
     let env_name = Arc::new(std::env::var(ENV_NAME).unwrap_or_else(|_| {
         // Every datapoint would land on `Environment=unknown`, a dimension no
         // widget or alarm reads. Loud, but not fatal: ingestion must not stop

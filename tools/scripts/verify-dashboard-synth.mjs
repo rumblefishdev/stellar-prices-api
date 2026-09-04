@@ -69,13 +69,10 @@ if (!envName || envName.startsWith('--')) {
 const TEMPLATE = `infra/cdk.out/Prices-${envName}-Observability.template.json`;
 
 /**
- * Per-worker `-errors` alarms are owned by EventBridgeStack and imported into
- * the strip by ARN, so they are not resources in this template. Their count
- * is read off the body (distinct `prices-<env>-<worker>-errors` names inside
- * the alarm widgets) rather than kept as a constant here — a constant was the
- * second hand-maintained copy of the worker list (deep review WR-02).
+ * Floor from the live account on 2026-09-03: 40 own + 9 imported. A
+ * deliberately hand-maintained number — it exists to make an alarm REMOVAL a
+ * decision someone edits here, not a synth detail.
  */
-/** Floor from the live account on 2026-09-03: 40 own + 9 imported. */
 const MIN_ALARMS = 49;
 
 let template;
@@ -300,6 +297,11 @@ if (opsAlarms) {
 const ownAlarms = Object.values(template.Resources ?? {}).filter(
   (r) => r.Type === 'AWS::CloudWatch::Alarm',
 ).length;
+// Per-worker `-errors` alarms are owned by EventBridgeStack and imported into
+// the strip by ARN, so they are not resources in this template. Their count
+// is read off the body (distinct `prices-<env>-<worker>-errors` names inside
+// the alarm widgets) rather than kept as a constant — a constant was the
+// second hand-maintained copy of the worker list (deep review WR-02).
 const importedNames = new Set(
   [
     ...body.matchAll(new RegExp(`prices-${envName}-([a-z0-9-]+)-errors`, 'g')),

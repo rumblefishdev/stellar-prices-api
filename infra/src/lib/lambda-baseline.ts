@@ -124,10 +124,16 @@ export function workerErrorAlarmName(
 /**
  * Every scheduled worker EventBridgeStack creates through
  * {@link createWorkerLambda}, by name — the ONE list the dashboard's alarm
- * strip, the workers row and the per-worker health alarms are all derived
- * from (task 0125 review WR-02/03). `createWorkerLambda` refuses a name that
- * is not here, so adding a tenth worker fails the synth until this list is
- * updated, and then every consumer follows automatically.
+ * strip and its workers row are derived from (task 0125 review WR-02/03).
+ * `createWorkerLambda` refuses a name that is not here, so adding a tenth
+ * worker fails the synth until this list is updated, and then those consumers
+ * follow automatically.
+ *
+ * The per-worker duration / no-invocations health alarms are NOT derived from
+ * it: they carry hand-written timeout, cadence and impact text per worker in
+ * `observability-stack.ts` (`workerHealth`), and three workers deliberately
+ * have none. That stack asserts every name here is either in `workerHealth`
+ * or in its explicit exemption list, so a new worker cannot fall through.
  */
 export const SCHEDULED_WORKERS = [
   'asset-discovery',

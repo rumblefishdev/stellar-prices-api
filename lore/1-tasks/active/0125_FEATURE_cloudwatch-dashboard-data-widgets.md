@@ -366,6 +366,22 @@ out of scope here because this task changes no alarms.
   nobody has taken; leaving it deployed and dark is the current default rather
   than a choice.
 
+## PR #280 review (karczuRF, 2026-09-04)
+
+Five findings; all addressed except the CI step, which waits on a
+`workflow`-scoped token (see WR-01 below). Fixed: the 5xx-rate tile now
+`FILL`s its input like the graph beside it (it rendered `--` on a healthy
+quiet day — an M2 exhibit); one `aws_config` load shared by the S3 and
+CloudWatch clients, with the publish timeouts on the CloudWatch client's own
+config so they never touch ledger downloads; the `SCHEDULED_WORKERS` docstring
+no longer claims the health alarms derive from it — instead the stack lists
+the three workers without duration/no-invocations alarms (`cleanup`,
+`asset-discovery`, `supply`) by name and asserts every worker is in exactly one
+of the two sets; the misplaced JSDoc above `MIN_ALARMS` moved to the count it
+describes. **Future Work:** health alarms for `asset-discovery` and `supply`
+are a decision for [[0256]] (asset-discovery) and its own task (supply), not
+this one — the `-errors` alarm is their coverage today.
+
 ## Deep review 2026-09-04 (pre-merge, cross-file)
 
 `gsd-code-reviewer` at `deep` over the 11 source files of PR #280: 1 critical,
