@@ -2,9 +2,9 @@
 id: "0122"
 title: "API Gateway cache verification — per-endpoint TTLs match §6 and repeat requests return X-Cache: Hit"
 type: TEST
-status: active
+status: completed
 related_adr: ["0008"]
-related_tasks: ["0118", "0121", "0128", "0126", "0260", "0261"]
+related_tasks: ["0118", "0121", "0128", "0126", "0260", "0261", "0262"]
 tags: [layer-infra, priority-medium, effort-small, milestone-M2, api-gateway, caching, verification, acceptance]
 milestone: 2
 links:
@@ -106,6 +106,28 @@ history:
       19.5 ms between miss and hit. ⚠️ [[0121]]'s report still carries the
       falsified "caches on the path only" sentence at lines 75-77 and needs its
       owner to correct it, or the submission package will contradict itself.
+  - date: 2026-09-04
+    status: completed
+    who: okarcz
+    note: >
+      Closed — 7 of 7 acceptance criteria. Three docs PRs: #279 corrected §6's
+      TTL table and the falsified path-only cache-key claim in the k6 script,
+      #281 added the reviewer-facing evidence document
+      `docs/prices-api-cache-verification.md`, #282 completed it with the four
+      remaining cached routes and the derived hit rate. Verified with a handful
+      of `curl`s on the free-tier key — no load, per [[0121]]'s warning and
+      [[0260]]. Key results: the deployed stage, CDK `CACHE_TTL` and
+      `cache_control.rs` all agree and §6 was the only wrong copy; the cache key
+      is NOT path-only (that claim's source was the k6 script's own header
+      comment) and `x-api-key` is in no key, so the cache is correctly shared;
+      hits 45-53 ms against misses 78-145 ms with no overlap, and expiry
+      demonstrated on both the 10s and 60s tiers. The one thing this task could
+      not deliver is the criterion's literal wording: there is no `X-Cache`
+      header, the handler cannot produce one honestly (API Gateway replays a
+      cached response byte for byte), and CloudFront emits `Hit from cloudfront`
+      rather than `Hit`, so the 3-5 day edge rebuild would not satisfy it
+      either. That is a conversation, not engineering, and it is spawned as
+      [[0262]] rather than held open here.
 ---
 
 # API Gateway cache verification
@@ -487,6 +509,18 @@ config alone — do not present the timings as evidence.
    correctly refused: `200` plus `warning: 199 Cache-control headers were
    ignored because the caller was unauthorized`, which `api-gateway-stack.ts:524`
    asserts and nothing had measured.
+
+## Future Work
+
+- **[[0262]] — Tranche 2 AC 3's wording still needs the reviewer's agreement.**
+  Everything measurable in this task is done, but the criterion is worded around
+  a header that does not exist and that we decided not to add. 0262 carries the
+  decision, the proposed rewording, the proof that a handler-set header would
+  lie, the CloudFront costing, and the argument that settles it — CloudFront
+  emits `X-Cache: Hit from cloudfront`, not `X-Cache: Hit`, so option (b) fails
+  the literal wording too. To be discussed with the team, then raised with the
+  reviewer **before** the milestone package is submitted.
+
 
 ## Notes
 
