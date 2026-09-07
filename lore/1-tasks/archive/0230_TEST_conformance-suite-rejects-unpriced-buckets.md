@@ -2,7 +2,7 @@
 id: "0230"
 title: "The 0120 conformance suite fails by design on ADR 0011 §5 unpriced buckets — and flakes, because enrichment lag decides which assets have one"
 type: TEST
-status: backlog
+status: completed
 related_adr: ["0011"]
 related_tasks: ["0120", "0170", "0225", "0128", "0145"]
 tags: ["priority-medium", "effort-small", "testing", "api", "read-surface", "ohlcv", "milestone-M2"]
@@ -10,6 +10,20 @@ milestone: 2
 links:
   - "../../../tools/scripts/conformance-0120.mjs"
 history:
+  - date: 2026-09-07
+    status: completed
+    who: okarcz
+    note: >
+      ✅ **Delivered inside [[0120]], PR #290, and archived with it.** The suite
+      now classifies each OHLCV bucket priced / unpriced / mixed and asserts an
+      unpriced one against the ADR 0011 §5 contract (`method` and `derived`
+      null, `volume_base` and `trade_count` real) instead of failing it for not
+      being a decimal string. A part-priced bucket still fails. **Proof, not
+      assertion:** two production runs 29 minutes apart, 1,032 checks compared
+      pairwise — **1,032 identical verdicts, 0 changed, 53 details moved**.
+      `native`, `EURC`, `AQUA` and `BTC` each went `0 of 169 unpriced` →
+      `1 of 168`, which under the old assertion flips PASS→FAIL. That is the
+      flake, captured rather than argued.
   - date: 2026-09-07
     status: backlog
     who: okarcz
