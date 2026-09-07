@@ -27,8 +27,9 @@
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
-use enrichment_worker::ch_enrich::{ChEnrichConfig, UsdResetSpec};
+use enrichment_worker::ch_enrich::{ChEnrichConfig, UsdResetSpec, external_window_s};
 use enrichment_worker::repair::{CoarseRepairConfig, CoarseRepairDriver};
+use prices_clickhouse::USDC_ORACLE_EPOCH_S;
 use tracing::{info, warn};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -133,6 +134,39 @@ struct Args {
     #[arg(long, requires = "reset_quote_asset_id")]
     reset_not_before: Option<u32>,
 
+    /// **Exclusive** epoch (unix seconds) above which stored USD values are left
+    /// alone (task 0268). Omitted, the reset is unbounded above — task 0182's
+    /// behaviour, unchanged.
+    ///
+    /// When `--reset-require-external-rate` is passed and this is omitted, it
+    /// defaults to `prices_clickhouse::USDC_ORACLE_EPOCH_S`
+    /// (**2026-03-11 14:00 UTC**), the first instant `prices.usd_rate` holds a
+    /// measured oracle row for canonical USDC. That default is not a
+    /// convenience: it is the SAME constant the API's read-time label arm keys
+    /// on, so the rows this reset re-opens are exactly the rows `/ohlcv` will
+    /// report as `method = 'external'`. Two hand-typed epochs would let the wire
+    /// label and the reset window drift, and nothing would fail loudly.
+    ///
+    /// It is also what makes the oracle-shadow guard usable here: USDC has held
+    /// live oracle rows since that instant, so an unbounded reset of the
+    /// 2020-2025 history is refused by rows it could never have touched.
+    #[arg(long, requires = "reset_quote_asset_id")]
+    reset_not_after: Option<u32>,
+
+    /// Task 0268 mode: narrow the reset to the peg tier's exact signature
+    /// (`close_usd = close`) on the days task 0267's imported USDC/USD series
+    /// actually covers.
+    ///
+    /// This is task 0182's lesson as a predicate rather than an epoch. 0182's
+    /// reset epoch sat 19 hours before its reference market's first candle and
+    /// **157 candles were zeroed with nothing able to refill them**. A bucket
+    /// with no imported rate is not re-opened at all under this flag.
+    ///
+    /// Refused outright when `prices.usd_rate` holds zero `external` rows — the
+    /// tool does not run and quietly do nothing.
+    #[arg(long, requires = "reset_quote_asset_id")]
+    reset_require_external_rate: bool,
+
     /// Assert that the FREEZE snapshots for this span already exist.
     ///
     /// Required to combine `--skip-snapshot` with `--reset-*`. On prod that
@@ -231,6 +265,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .into());
         }
+        // 3. The same footgun for the 0268 external tier — except it cannot fire.
+        //    That tier's staleness bound is DERIVED from the table
+        //    (`external_window_s` = max(1 day, bucket width)), not configured, so
+        //    there is no flag an operator can set too short. This is an
+        //    assert-shaped guard over that derivation: if someone later turns the
+        //    bound into a knob, the refusal is already here rather than being
+        //    remembered.
+        if args.reset_require_external_rate {
+            let derived = external_window_s(&args.table);
+            if derived < min_window {
+                return Err(format!(
+                    "the external tier's derived staleness bound ({derived} s) is shorter \
+                     than {}'s bucket width ({min_window} s). This is unreachable while the \
+                     bound is derived from the table; if it has been made configurable, \
+                     restore the max(1 day, bucket width) floor before running a reset.",
+                    args.table
+                )
+                .into());
+            }
+        }
+    }
+
+    // The reset's upper bound, resolved once and logged, because it decides which
+    // rows are re-opened and it has a non-obvious default. See --reset-not-after.
+    let not_after = args.reset_not_after.or_else(|| {
+        args.reset_require_external_rate
+            .then_some(USDC_ORACLE_EPOCH_S)
+    });
+    if args.reset_quote_asset_id.is_some() {
+        match not_after {
+            Some(na) => info!(
+                reset_not_after = na,
+                defaulted = args.reset_not_after.is_none(),
+                require_external_rate = args.reset_require_external_rate,
+                "USD reset upper bound"
+            ),
+            None => info!("USD reset is unbounded above (task 0182 behaviour)"),
+        }
     }
 
     let enrich = ChEnrichConfig {
@@ -251,6 +323,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             (Some(quote_asset_id), Some(not_before)) => Some(UsdResetSpec {
                 quote_asset_id,
                 not_before,
+                not_after,
+                require_external_rate: args.reset_require_external_rate,
             }),
             // clap's `requires` makes the mixed cases unreachable.
             _ => None,
@@ -376,6 +450,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (reset, enriched) = (summary.total_reset(), summary.total_enriched());
     if reset > 0 {
         println!("{reset} row(s) re-opened by the USD reset, {enriched} recomputed");
+        if args.reset_require_external_rate {
+            println!(
+                "This was the task 0268 external mode. Finish the campaign with \
+                 Appendix B of docs/runbooks/repair-coarse-usd-values.md: the \
+                 after-check (native on 2023-03-11 must read ~3% below its \
+                 USDC-denominated close, on every granularity) is what closes \
+                 acceptance criteria 1 and 2, and it is not implied by a clean run \
+                 here."
+            );
+        }
         if reset > enriched {
             eprintln!(
                 "\n!! {} row(s) were re-opened but NOT recomputed. They now hold \

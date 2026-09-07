@@ -1283,6 +1283,11 @@ async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
     c.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 3,
         not_before: t_new,
+        // The 0182 shape, stated at every site rather than defaulted: unbounded
+        // above and no reference join. Task 0268 added both fields precisely so
+        // each caller has to say which repair it is running.
+        not_after: None,
+        require_external_rate: false,
     });
     let stats = ChEnrichmentPass::new(c).run().await.unwrap();
 
@@ -1354,6 +1359,8 @@ async fn the_usd_reset_refuses_a_quote_leg_that_no_tier_can_reprice() {
     c.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 10,
         not_before: t_new,
+        not_after: None,
+        require_external_rate: false,
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
 
@@ -1391,6 +1398,11 @@ async fn the_usd_reset_refuses_a_bounded_pass() {
     c.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 3,
         not_before: t_new,
+        // The 0182 shape, stated at every site rather than defaulted: unbounded
+        // above and no reference join. Task 0268 added both fields precisely so
+        // each caller has to say which repair it is running.
+        not_after: None,
+        require_external_rate: false,
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
 
@@ -1419,6 +1431,12 @@ async fn the_usd_reset_refuses_a_bounded_pass() {
 /// would be undone by the very next statement in the same pass — and the run
 /// would report a healthy repair over unchanged values, now labelled
 /// `method = 'oracle'`. The pass must refuse instead.
+///
+/// ⚠️ **This test now pins the UNBOUNDED half of the guard.** Task 0268 scoped
+/// the count to `[not_before, not_after)`; with `not_after = None` — the spec
+/// this test builds — it still counts to the end of time, so 0182's all-time
+/// refusal is unchanged. The bounded half is
+/// `the_bounded_usd_reset_is_not_refused_by_oracle_rows_above_its_window`.
 #[tokio::test]
 #[ignore]
 async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_leg() {
@@ -1443,6 +1461,11 @@ async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_l
     c.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 3,
         not_before: t_new,
+        // The 0182 shape, stated at every site rather than defaulted: unbounded
+        // above and no reference join. Task 0268 added both fields precisely so
+        // each caller has to say which repair it is running.
+        not_after: None,
+        require_external_rate: false,
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
 
@@ -1945,6 +1968,240 @@ async fn external_tier_leaves_a_bucket_with_no_usable_rate_on_the_peg_value() {
     assert!(
         stats.rows_enriched > 0,
         "the pass still prices the other tiers' candles"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+// ---- task 0268: the external-scoped reset --------------------------------
+
+/// FOO/USDC candles carrying the peg tier's EXACT signature (`close_usd = close`,
+/// `volume_quote_usd = volume_quote`) — the population task 0268 re-opens. One
+/// falls on a day the imported series covers, one does not.
+async fn setup_0268(db: &str, t_covered: u32, t_uncovered: u32) -> Client {
+    let client = setup_scratch(db).await;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (1,'XLM','classic','',''), (2,'USDC','classic','{USDC_ISSUER}',''), \
+             (10,'FOO','classic','GFOO','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({t_covered},   10, 2,'sdex', 4,4,4,4, 1, 4, 4, 4, 4, 1,1), \
+             ({t_uncovered}, 10, 2,'sdex', 4,4,4,4, 1, 4, 4, 4, 4, 1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+}
+
+fn external_reset() -> UsdResetSpec {
+    UsdResetSpec {
+        quote_asset_id: 2,
+        not_before: 0,
+        not_after: Some(prices_clickhouse::USDC_ORACLE_EPOCH_S),
+        require_external_rate: true,
+    }
+}
+
+/// 🔑 **THE 157-CANDLE REGRESSION.** Task 0182's reset epoch sat 19 hours before
+/// its reference market's first candle. 157 candles were zeroed, nothing could
+/// refill them, and they were left publishing `close_usd = 0` — which ~130
+/// unguarded `argMax(close_usd, …)` sites read as a real price of zero. That is
+/// strictly worse than the wrong-but-visible number the repair set out to fix.
+///
+/// An epoch cannot express "a reference exists HERE". A semi-join can, and this
+/// is the test that it does: two candles with identical signatures, one on a day
+/// the imported series covers and one not. The covered candle is re-priced at the
+/// measured rate; the uncovered one comes out EXACTLY as it went in.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_external_reset_never_zeroes_a_bucket_it_cannot_refill() {
+    let db = "it_enrich_0268_reset";
+    let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
+    let client = setup_0268(db, covered, uncovered).await;
+    // Day start of `covered` (2020-09-13) only. `uncovered` (2020-09-18) has no row.
+    seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(external_reset());
+    let stats = ChEnrichmentPass::new(c).run().await.unwrap();
+
+    assert_eq!(
+        stats.rows_reset, 1,
+        "exactly the covered candle should have been re-opened — re-opening the \
+         uncovered one is the 0182 incident"
+    );
+
+    let fixed = close_usd(&client, db, 10, 2, covered).await;
+    assert!(
+        (fixed - 3.8724).abs() < 1e-4,
+        "the covered candle must be re-priced at the measured rate \
+         (4 x 0.9681 = 3.8724), got {fixed}"
+    );
+
+    let untouched = close_usd(&client, db, 10, 2, uncovered).await;
+    assert!(
+        (untouched - 4.0).abs() < 1e-4,
+        "the uncovered candle must be EXACTLY as it was, got {untouched}. \
+         0.0 is the 0182 incident reproduced: zeroed with nothing able to refill it"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// D-03: with no `external` rows loaded the tool refuses, rather than running and
+/// silently doing nothing. A clean, healthy, entirely empty repair is the same
+/// green all-clear that hid task 0182 for a month.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_external_reset_refuses_when_no_external_rates_are_loaded() {
+    let db = "it_enrich_0268_no_rates";
+    let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
+    let client = setup_0268(db, covered, uncovered).await;
+    // usd_rate deliberately left empty.
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(external_reset());
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+
+    assert!(
+        matches!(err, ChEnrichError::ResetRequiresExternalRates { quote_asset_id }
+                 if quote_asset_id == 2),
+        "expected a refusal when 0267's series is not loaded, got {err:?}"
+    );
+
+    // And it refused BEFORE writing anything.
+    for ts in [covered, uncovered] {
+        let v = close_usd(&client, db, 10, 2, ts).await;
+        assert!(
+            (v - 4.0).abs() < 1e-4,
+            "a refused reset must not have written anything at {ts}, got {v}"
+        );
+    }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// D-06, both halves. The oracle-shadow guard counts inside
+/// `[not_before, not_after)` only.
+///
+/// Canonical USDC has held live oracle rows since 2026-03-11. An all-time count
+/// therefore refuses every reset of the 2020-2025 history those rows cannot
+/// reach — a guard applied where its own premise is false. Bounded below them,
+/// the reset RUNS. Move a single oracle row inside the window and it is refused
+/// again, because there the premise holds: the oracle tier runs first, wins, and
+/// would re-apply the very value the reset removed.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_bounded_usd_reset_is_not_refused_by_oracle_rows_above_its_window() {
+    let db = "it_enrich_0268_bounded_guard";
+    let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
+    let client = setup_0268(db, covered, uncovered).await;
+    seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
+
+    // A live USDC oracle row ABOVE the reset's upper bound — prod's actual shape.
+    let above = prices_clickhouse::USDC_ORACLE_EPOCH_S + 3_600;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES ({above}, 2, 'reflector', 1.0001, '{{}}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(external_reset());
+    let stats = ChEnrichmentPass::new(c).run().await.unwrap();
+    assert_eq!(
+        stats.rows_reset, 1,
+        "an oracle row above the window must not refuse a reset below it"
+    );
+
+    // Now one INSIDE the window: the premise holds again, so it must refuse.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES ({covered}, 2, 'reflector', 1.0001, '{{}}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let mut c2 = cfg(db);
+    c2.one_shot = true;
+    c2.usd_reset = Some(external_reset());
+    let err = ChEnrichmentPass::new(c2).run().await.unwrap_err();
+    assert!(
+        matches!(err, ChEnrichError::ResetBlockedByOracleRows { quote_asset_id, .. }
+                 if quote_asset_id == 2),
+        "an oracle row inside the window must still refuse, got {err:?}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// The reset obeys `time_window` (the 0111/0114 partition bound), so the repair
+/// driver's month-at-a-time walk stays month-at-a-time. A reset that leaked past
+/// its window would discard values in months the operator never snapshotted, and
+/// the rollback point would not cover them.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_external_reset_touches_only_the_bounded_month() {
+    let db = "it_enrich_0268_month_bound";
+    // 2020-09-13 and 2020-10-02 — different monthly partitions, both covered by
+    // an imported rate, so the ONLY thing that can separate them is the window.
+    let (sep, oct) = (1_600_000_000u32, 1_601_600_000u32);
+    let client = setup_0268(db, sep, oct).await;
+    seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
+    seed_external_rate(&client, db, 1_601_596_800, DEPEG_RATE).await;
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(external_reset());
+    // [2020-09-01, 2020-10-01)
+    c.time_window = Some((1_598_918_400, 1_601_510_400));
+    let stats = ChEnrichmentPass::new(c).run().await.unwrap();
+
+    assert_eq!(
+        stats.rows_reset, 1,
+        "only September's candle is in the window"
+    );
+    let s = close_usd(&client, db, 10, 2, sep).await;
+    assert!((s - 3.8724).abs() < 1e-4, "September re-priced, got {s}");
+    let o = close_usd(&client, db, 10, 2, oct).await;
+    assert!(
+        (o - 4.0).abs() < 1e-4,
+        "October is outside the window and must be untouched, got {o}"
     );
 
     client

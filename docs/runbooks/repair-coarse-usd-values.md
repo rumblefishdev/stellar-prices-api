@@ -445,7 +445,7 @@ ALTER TABLE prices.<table> ATTACH PARTITION <month>
 > always available until you unfreeze. Automating this as a `--revert` flag is a
 > tracked follow-up.
 
-## Appendix — reset mode, for a _wrong_ value rather than a missing one (task 0182)
+## Appendix A — reset mode, for a _wrong_ value rather than a missing one (task 0182)
 
 Everything above fills zeros and is purely additive. This appendix covers the one
 mode that **discards a stored value**. Read it in full before using the flags.
@@ -632,6 +632,232 @@ refilled rows and re-opens them again, recomputing values that are already
 correct. It is value-idempotent but it is not free and it bumps `version` each
 time. Run it once per table, verify, and move on. The recurring hourly sweep pins
 the reset off and can never inherit it.
+
+## Appendix B — re-enrich USDC-quoted candles from the measured rate (task 0268)
+
+The appendix above corrects a value that was wrong because a tier used the wrong
+_reference_. This one corrects a value that was wrong because a tier used **no
+reference at all**.
+
+### When this applies
+
+Every USDC-quoted candle stamped before **2026-03-11 14:00 UTC** carries
+`close_usd = close × $1.00`, written by the peg tier, because until task 0268
+nothing in the enrichment could read a measured USDC/USD rate. USDC is not a
+dollar: it closed at **0.9681** on 2023-03-11 and traded as low as ~0.88
+intraday. Task 0247 measured **654,291** such candles on prod with an implied
+rate of exactly 1.0.
+
+This is a wrong value, not a missing one, so — exactly as in Appendix A — the
+normal repair cannot see it: every tier filters on `close_usd = 0`.
+
+The difference from Appendix A, and the whole point of the mode: the reset is
+scoped to buckets the imported series can actually refill. A bucket with no
+imported rate is **not re-opened at all**. See "The dry run is the gate" below
+for why that matters more than it sounds.
+
+### Preconditions
+
+All five, in order. None is optional.
+
+1. **Task 0267's `external` rows are loaded.** A count of **0 is a hard
+   refusal**, not a no-op — the tool exits with
+   `ResetRequiresExternalRates` and writes nothing.
+
+   ```sql
+   SELECT count() AS rows, min(timestamp) AS first, max(timestamp) AS last
+   FROM prices.usd_rate FINAL
+   WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+     AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+     AND contract_address = '' AND method = 'external'
+   ```
+
+   `first` must reach back at least as far as the earliest month you intend to
+   repair. Rows above that floor are simply not re-opened; rows below it never
+   were.
+
+2. **Confirm 0267 stamps its daily rows at the START of the UTC day.** The tier
+   resolves the rate at the bucket's END with an ASOF `rts < bend`, so a
+   day-start stamp gives every bucket in a day that day's rate. A day-END
+   convention resolves every bucket to the **previous day's** rate — an
+   off-by-one-day error that produces entirely plausible numbers and fails
+   nowhere.
+
+   ```sql
+   SELECT DISTINCT toString(toTime(timestamp)) AS time_of_day
+   FROM prices.usd_rate FINAL
+   WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+     AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+     AND contract_address = '' AND method = 'external'
+   LIMIT 10
+   ```
+
+   Expect `1970-01-01 00:00:00` (midnight). Anything else — 23:00, 23:59 — stop
+   and settle the convention with whoever owns 0267 before running.
+
+3. **Confirm `usd_rate` holds no `oracle` row for USDC before the epoch.** This
+   is the assumption the API's read-time label arm rests on: a scaled
+   USDC-quoted candle below `USDC_ORACLE_EPOCH_S` is reported as
+   `method: external`, and that is only true if no poll could have priced it.
+   It is in-repo prose, not a live measurement — this query is the measurement.
+
+   ```sql
+   SELECT count() FROM prices.usd_rate FINAL
+   WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+     AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+     AND contract_address = '' AND method = 'oracle'
+     AND timestamp < toDateTime(1773237600)
+   ```
+
+   Must be **0**. A non-zero count does not block the repair, but it does mean
+   `/ohlcv` will label some genuinely oracle-priced candles `external`. Record
+   it and raise it before proceeding.
+
+4. **The cleanup worker stays DARK.** Its EventBridge rule is disabled on
+   purpose — it shredded the 0182/0201 repair campaign. Confirm it is still
+   disabled before starting, exactly as Appendix A requires.
+
+5. **FREEZE snapshots exist and were verified.** Same rule, same reason, same
+   `--snapshots-verified` assertion as Appendix A. A reset with no rollback
+   point is not a repair.
+
+### The granularities that actually hold deep history
+
+`price_ohlcv_1h`, `_4h`, `_1d`, `_1w`, `_1M`. Do not attempt the others:
+
+- `_15m` has a 30-day retention, so it holds no 2023 rows to repair;
+- `_1m` was largely dropped by the cleanup worker for 2025-02 → 2026-02, and
+  `--table price_ohlcv_1m` is refused by the tool outright — it is the live base
+  table the scheduled Lambda owns.
+
+### The flags
+
+```bash
+--reset-quote-asset-id <USDC_ID>    # canonical USDC's asset_id on prod
+--reset-not-before 0                # all of deep history
+--reset-not-after 1773237600        # 2026-03-11 14:00 UTC (defaulted; see below)
+--reset-require-external-rate       # the 0268 mode
+```
+
+`--reset-not-after` defaults to `1773237600` whenever
+`--reset-require-external-rate` is passed, and it is the **same constant** the
+API's `external` label arm keys on (`prices_clickhouse::USDC_ORACLE_EPOCH_S`).
+Pass it explicitly only if you mean something else; two hand-typed epochs are how
+the wire label and the reset window drift apart with nothing failing loudly.
+
+`--reset-require-external-rate` narrows the candidate set to
+`close_usd = close` (the peg tier's exact signature) **on the days the imported
+series covers**. Both halves matter: the first keeps oracle- and external-priced
+candles out, the second is task 0182's lesson as a predicate.
+
+Dry run first, one table at a time:
+
+```bash
+./coarse-repair --table price_ohlcv_1d \
+  --start-month 202001 --end-month 202603 \
+  --reset-quote-asset-id <USDC_ID> --reset-not-before 0 \
+  --reset-require-external-rate \
+  --dry-run
+```
+
+Then the real run, dropping `--dry-run` and adding `--skip-snapshot
+--snapshots-verified` per Appendix A's rules. Repeat for `_1h`, `_4h`, `_1w`,
+`_1M`.
+
+### ⚠️ The dry run is the gate — and zero candidates is a STOP
+
+**A dry run reporting ZERO candidate months is not an all-clear.** That exact
+false green is how task 0182 stayed invisible for a month: the driver enumerated
+one predicate while the statement acted on another, so a table with 44,657 wrong
+values reported "no months with enrichable zeros" and looked identical to a
+clean one.
+
+Expected order of magnitude, so you can tell a real result from a silent
+mismatch: task 0247 measured **654,291** pre-oracle USDC-quoted candles at an
+implied rate of exactly 1.0 across all granularities, and 0182's comparable
+campaign touched **567,232** rows in about **4 hours**. If a dry run over
+2020-2026 reports zero months, or a few dozen rows, something is wrong with the
+predicate or with precondition 1 — do not proceed.
+
+### The baseline (before)
+
+Per table, the population about to change:
+
+```sql
+SELECT count() AS pegged
+FROM prices.price_ohlcv_1d AS p FINAL
+INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
+             WHERE asset_code = 'USDC' AND contract_address = ''
+               AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+           ) AS u ON u.asset_id = p.quote_asset_id
+WHERE p.close_usd = p.close AND p.close_usd > 0
+  AND p.timestamp < toDateTime(1773237600)
+```
+
+And the falsifier's own row, per granularity, before the run:
+
+```sql
+SELECT toFloat64(close_usd) / toFloat64(close) AS implied_rate
+FROM prices.price_ohlcv_1d AS p FINAL
+INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
+             WHERE asset_code = 'XLM' AND issuer_address = ''
+               AND contract_address = '' ) AS x ON x.asset_id = p.asset_id
+INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
+             WHERE asset_code = 'USDC' AND contract_address = ''
+               AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+           ) AS u ON u.asset_id = p.quote_asset_id
+WHERE p.timestamp >= toDateTime(1678492800) AND p.timestamp < toDateTime(1678579200)
+```
+
+It must read **exactly 1.0** before the run. It is the number the after-check
+compares against.
+
+### The abort signal
+
+`rows_reset` far exceeding `rows_enriched` means values were discarded and not
+recomputed — the one outcome worse than the defect. The tool prints this itself
+and tells you to stop. **Do not continue to the next table.** Roll the current
+one back from its FREEZE snapshot and work out why the reset re-opened rows the
+external tier could not refill: under this mode the predicates are shared, so a
+large shortfall points at precondition 2 (a day-end stamping convention) rather
+than at the reset.
+
+### After — the falsifier
+
+`native` on 2023-03-11 must now read **~3% below** its USDC-denominated close, on
+every granularity. As SQL, per table, it is the baseline query above: the implied
+rate must have moved from `1.0` to **~0.9681**.
+
+As a test, which also checks the control date:
+
+```bash
+CLICKHOUSE_URL=... CH_DATABASE=prices \
+  cargo test -p enrichment-worker --test post_run_0268_it -- --ignored
+```
+
+Both tests are expected to FAIL before the pass and pass after it. The second
+one (`usdc_is_back_at_par_a_few_days_later`) exists so the first cannot be
+satisfied by a table priced uniformly low.
+
+Then walk `/ohlcv` for a non-USDC asset over the repaired span and confirm the
+`method` field reads `external` on the scaled pre-epoch buckets and
+`assumed-par` on any bucket the series did not cover. Requesting
+`USDC:<issuer>` itself still returns `peg` — that is USDC's own series and is
+deliberately unchanged.
+
+### Rollback
+
+Identical to Appendix A: `ALTER TABLE … ATTACH PARTITION … FROM …` out of the
+frozen copies, per month. The reset is a versioned INSERT, never a mutation, so
+the pre-reset rows are still on disk under their old version.
+
+### Run it once
+
+Reset mode is **not a fixed point across invocations** — the same warning as
+Appendix A, with one addition specific to this mode: a second run re-opens the
+already-corrected rows and rewrites them from the same imported series, so the
+values do not change but `version` climbs and the FREEZE rollback point becomes
+less useful with every pass. Run it once per table, verify, move on.
 
 ## Notes
 

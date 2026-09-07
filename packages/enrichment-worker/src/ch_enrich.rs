@@ -136,19 +136,50 @@ pub enum ChEnrichError {
     /// meant to remove — and re-labels it `method = 'oracle'`, which a consumer
     /// reads as *more* authoritative than the placeholder it replaced.
     #[error(
-        "USD reset refused: prices.oracle_prices still holds {rows} row(s) for \
-         quote asset_id {quote_asset_id} under oracle '{oracle_name}'.\n\
+        "USD reset refused: prices.oracle_prices holds {rows} row(s) for \
+         quote asset_id {quote_asset_id} under oracle '{oracle_name}' inside the \
+         reset's own window {window}.\n\
          The oracle tier runs before the peg-pivot tier and wins where it applies, \
          so resetting now would re-apply the oracle's rate to every row this reset \
          zeroes — and label it method='oracle'.\n\
-         Purge those rows first (task 0196), verify the count is 0, then re-run.\n\
+         If the window is all time: purge those rows first (task 0196), verify the \
+         count is 0, then re-run.\n\
+         If the window is bounded: the overlap is real — narrow --reset-not-after \
+         below the first oracle row, or widen --reset-not-before above the last \
+         one, so the reset and the oracle tier do not both claim the same span.\n\
          See lore/1-tasks/active/0182_BUG_close-usd-overstated-7x-on-usdt-quoted-candles.md."
     )]
     ResetBlockedByOracleRows {
         quote_asset_id: u32,
         oracle_name: String,
         rows: u64,
+        /// The `[not_before, not_after)` span the count was taken over, rendered
+        /// for the operator. Without it the message names a number with no
+        /// denominator, and "widen or narrow?" is unanswerable.
+        window: String,
     },
+
+    /// A [`UsdResetSpec`] asked for `require_external_rate` while
+    /// `prices.usd_rate` holds **no** `method = 'external'` row at all (task
+    /// 0268) — i.e. task 0267's series is not loaded.
+    ///
+    /// An error, never a `warn!`. With no external rows the day-set predicate
+    /// matches nothing, so the reset would zero nothing and the run would report
+    /// a clean, healthy, entirely empty repair — the same green all-clear that
+    /// hid task 0182 for a month. Worse, if the predicate were ever relaxed, the
+    /// rows it zeroed would be refilled with the same `$1` by the peg tier:
+    /// `version` churn, a spent FREEZE rollback point, and no change in value.
+    #[error(
+        "USD reset refused: --reset-require-external-rate was passed, but \
+         prices.usd_rate holds 0 rows with method = 'external' for canonical USDC.\n\
+         Task 0267's measured USDC/USD series is not loaded, so this reset can \
+         refill nothing: it would re-open rows only for the peg tier to write the \
+         same $1 back, bumping version and spending the FREEZE rollback point for \
+         no change in value.\n\
+         Load and verify 0267's series first — see docs/runbooks/repair-coarse-usd-values.md, \
+         Appendix B, precondition 2 — then re-run."
+    )]
+    ResetRequiresExternalRates { quote_asset_id: u32 },
 
     /// A [`UsdResetSpec`] named a quote leg that **no tier can price**, so every
     /// row it zeroed would stay at `close_usd = 0` permanently.
@@ -228,6 +259,29 @@ pub struct UsdResetSpec {
     /// Earliest candle `timestamp` (unix seconds) eligible for reset. Rows older
     /// than this keep whatever they hold — see the epoch note above.
     pub not_before: u32,
+    /// **Exclusive** upper bound on candle `timestamp` (task 0268). `None` keeps
+    /// the pre-0268 behaviour exactly: unbounded above.
+    ///
+    /// The reset is scoped BELOW the window where the oracle tier operates, and
+    /// that is what makes [`ChEnrichmentPass::assert_reset_not_shadowed_by_oracle`]'s
+    /// premise false there. Without it, USDC's live oracle rows from 2026-03-11
+    /// onward refuse a reset of 2020-2025 history the oracle cannot reach — an
+    /// all-time guard applied to a bounded operation.
+    pub not_after: Option<u32>,
+    /// When true (task 0268), the candidate set is additionally
+    /// `close_usd = close` — the peg tier's EXACT signature, so nothing the
+    /// oracle or external tier priced is re-opened — **and** a `usd_rate` row
+    /// with `method = 'external'` must exist for the bucket's UTC day.
+    ///
+    /// ## Why a predicate and not an epoch
+    ///
+    /// This is task 0182's lesson encoded in the only form that can express it.
+    /// 0182's reset epoch sat 19 hours before the reference market's first
+    /// candle, and 157 candles were zeroed with nothing able to refill them. An
+    /// epoch asserts "a reference exists from here on" — a claim about the whole
+    /// span, made once, by hand. A semi-join asks "does a reference exist for
+    /// THIS bucket" and cannot be wrong.
+    pub require_external_rate: bool,
 }
 
 /// The steady-state candidate shape: a row missing either USD column, with
@@ -242,12 +296,65 @@ pub const CANDIDATE_PRED: &str = "(volume_quote_usd = 0 OR close_usd = 0) AND vo
 /// loop terminate — a reset row zeroes both columns and immediately stops
 /// matching. It also mirrors the pivot's `volume_quote > 0` so the reset cannot
 /// zero a row the pivot is structurally unable to refill.
-pub fn reset_pending_pred(spec: &UsdResetSpec) -> String {
-    format!(
+pub fn reset_pending_pred(db: &str, spec: &UsdResetSpec) -> String {
+    let mut pred = format!(
         "quote_asset_id = {q} AND timestamp >= toDateTime({nb}) \
          AND (close_usd > 0 OR volume_quote_usd > 0) AND volume_quote > 0",
         q = spec.quote_asset_id,
         nb = spec.not_before,
+    );
+    // Both extensions APPEND, so a spec that asks for neither renders exactly the
+    // pre-0268 string — the 0182 repair path, which has already run against
+    // production, must not change by a byte.
+    if let Some(na) = spec.not_after {
+        pred.push_str(&format!(" AND timestamp < toDateTime({na})"));
+    }
+    if spec.require_external_rate {
+        pred.push_str(&format!(
+            " AND close_usd = close AND {}",
+            external_rate_day_pred(db)
+        ));
+    }
+    pred
+}
+
+/// **"An imported rate exists for this bucket's UTC day"** — written ONCE, and
+/// spliced verbatim into [`reset_pending_pred`], [`reset_sql`] and (through
+/// [`repair_target_pred`]) the repair driver's month enumeration.
+///
+/// One definition because the three must agree. When they did not — the driver
+/// enumerating one predicate while the statement acted on another — a `--dry-run`
+/// reported "no months with enrichable zeros" over 44,657 wrong values, and task
+/// 0182 stayed invisible for a month. The strings cannot drift if there is only
+/// one of them.
+///
+/// ## Why UNCORRELATED
+///
+/// `repair::months_with_zeros` splices `repair_target_pred` into the bare `WHERE`
+/// of its own grouped scan, where no outer alias is in scope. A correlated
+/// `EXISTS (… WHERE r.day = p.day)` or a JOIN is not a stylistic preference
+/// there — it is a syntax error. An uncorrelated `IN (SELECT …)` is legal in all
+/// three contexts unchanged, which is what lets one string serve all of them.
+///
+/// ## Why the DAY, and why under-reaching is the safe direction
+///
+/// The grain is the UTC day because task 0267's series is daily. For `_1w` and
+/// `_1M` this is deliberately NARROWER than the tier's own rule: the tier
+/// resolves at the bucket's END and accepts an anchor up to a bucket old, while
+/// this demands a row on the bucket's FIRST day. So a monthly candle whose only
+/// covering rate falls mid-month is skipped by the reset even though the tier
+/// could have refilled it.
+///
+/// That asymmetry is chosen, not overlooked. The reset skipping a refillable row
+/// costs one stale value that a later run can still fix; the reset zeroing an
+/// unrefillable row is the incident. Only one of those two errors is
+/// recoverable, so the predicate is biased toward the recoverable one.
+fn external_rate_day_pred(db: &str) -> String {
+    format!(
+        "toDate(timestamp) IN (SELECT toDate(timestamp) FROM {db}.usd_rate FINAL \
+         WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+           AND issuer_address = '{USDC_ISSUER}' AND contract_address = '' \
+           AND method = 'external')"
     )
 }
 
@@ -268,10 +375,10 @@ pub fn reset_pending_pred(spec: &UsdResetSpec) -> String {
 /// bumps `version` each time. The reset is therefore a deliberate one-off
 /// operator action — never wired into the recurring sweep, which pins
 /// `usd_reset: None` for exactly this reason.
-pub fn repair_target_pred(reset: Option<&UsdResetSpec>) -> String {
+pub fn repair_target_pred(db: &str, reset: Option<&UsdResetSpec>) -> String {
     match reset {
         None => CANDIDATE_PRED.to_string(),
-        Some(spec) => format!("({CANDIDATE_PRED}) OR ({})", reset_pending_pred(spec)),
+        Some(spec) => format!("({CANDIDATE_PRED}) OR ({})", reset_pending_pred(db, spec)),
     }
 }
 
@@ -648,7 +755,7 @@ impl ChEnrichmentPass {
              WHERE {pred} AND timestamp <= toDateTime(?){win}",
             db = self.cfg.database,
             tbl = self.cfg.table,
-            pred = reset_pending_pred(spec),
+            pred = reset_pending_pred(&self.cfg.database, spec),
             win = self.window_pred("timestamp"),
         );
         Ok(self
@@ -688,9 +795,22 @@ impl ChEnrichmentPass {
         })
     }
 
-    /// Refuse the reset while `oracle_prices` still holds rows for the quote leg
-    /// being reset — task 0182's first ordering constraint, as a gate rather than
-    /// a warning.
+    /// Refuse the reset while `oracle_prices` holds rows for the quote leg being
+    /// reset **inside the reset's own `[not_before, not_after)` window** — task
+    /// 0182's first ordering constraint, as a gate rather than a warning.
+    ///
+    /// ## Why the window, and not all time (task 0268)
+    ///
+    /// The guard exists because the oracle tier runs first and wins, so it only
+    /// needs to refuse where the oracle tier can actually REACH. An all-time
+    /// count answers a different question than the one that matters, and answers
+    /// it wrongly in the one case 0268 needs: canonical USDC has held live oracle
+    /// rows since 2026-03-11, so an unbounded count refuses every reset of the
+    /// 2020-2025 history those rows cannot touch. Counting inside the window
+    /// keeps the guard's meaning and drops only the false positives.
+    ///
+    /// A spec with `not_after = None` still counts to the end of time, so the
+    /// 0182 path keeps its all-time refusal byte for byte.
     ///
     /// A warning would not do. The failure is silent and it *looks like success*:
     /// the reset zeroes the rows, the oracle tier (which runs first, and wins
@@ -702,11 +822,17 @@ impl ChEnrichmentPass {
         &self,
         spec: &UsdResetSpec,
     ) -> Result<(), ChEnrichError> {
+        let upper = match spec.not_after {
+            Some(na) => format!(" AND timestamp < toDateTime({na})"),
+            None => String::new(),
+        };
         let sql = format!(
             "SELECT count() FROM {db}.oracle_prices \
-             WHERE asset_id = {q} AND oracle_name = ?",
+             WHERE asset_id = {q} AND oracle_name = ? \
+               AND timestamp >= toDateTime({nb}){upper}",
             db = self.cfg.database,
             q = spec.quote_asset_id,
+            nb = spec.not_before,
         );
         let rows = self
             .client
@@ -719,6 +845,37 @@ impl ChEnrichmentPass {
                 quote_asset_id: spec.quote_asset_id,
                 oracle_name: self.cfg.oracle_name.clone(),
                 rows,
+                window: match spec.not_after {
+                    Some(na) => format!("[{}, {})", spec.not_before, na),
+                    None => format!("[{}, all time)", spec.not_before),
+                },
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuse a `require_external_rate` reset when `prices.usd_rate` holds no
+    /// `method = 'external'` row for canonical USDC at all (task 0268).
+    ///
+    /// The fourth refusal, and the cheapest possible check for the most likely
+    /// operator error: running the 0268 mode before task 0267's series has been
+    /// loaded. Doing nothing quietly is the failure mode this exists to prevent —
+    /// see [`ChEnrichError::ResetRequiresExternalRates`].
+    async fn assert_external_rates_are_loaded(
+        &self,
+        spec: &UsdResetSpec,
+    ) -> Result<(), ChEnrichError> {
+        let sql = format!(
+            "SELECT count() FROM {db}.usd_rate FINAL \
+             WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+               AND issuer_address = '{USDC_ISSUER}' AND contract_address = '' \
+               AND method = 'external'",
+            db = self.cfg.database,
+        );
+        let rows = self.client.query(&sql).fetch_one::<u64>().await?;
+        if rows == 0 {
+            return Err(ChEnrichError::ResetRequiresExternalRates {
+                quote_asset_id: spec.quote_asset_id,
             });
         }
         Ok(())
@@ -741,6 +898,12 @@ impl ChEnrichmentPass {
         }
         self.assert_reset_target_is_priceable(spec).await?;
         self.assert_reset_not_shadowed_by_oracle(spec).await?;
+        // Fourth refusal (task 0268), last because it costs one more count and
+        // only applies to the 0268 mode. Same property as the other three:
+        // nothing is zeroed unless a tier in THIS pass can put a value back.
+        if spec.require_external_rate {
+            self.assert_external_rates_are_loaded(spec).await?;
+        }
 
         let pending_before = self.count_reset_pending(spec, watermark).await?;
         if pending_before == 0 {
@@ -1334,7 +1497,7 @@ fn bucket_end_expr(table: &str, col: &str) -> String {
 /// write and no way for an operator to reach the destructive combination. It
 /// also avoids threading a knob nobody should turn through six
 /// `ChEnrichConfig` literal sites.
-fn external_window_s(table: &str) -> u32 {
+pub fn external_window_s(table: &str) -> u32 {
     bucket_width_s(table).max(86_400)
 }
 
@@ -1452,6 +1615,22 @@ fn external_sql(db: &str, tbl: &str, usdc_id: u32, window: &str) -> String {
 ///
 /// Bound parameters, in SQL order: the snapshot watermark, then the `LIMIT`.
 fn reset_sql(db: &str, tbl: &str, spec: &UsdResetSpec, window: &str) -> String {
+    // Task 0268's two extensions, appended so a spec that asks for neither leaves
+    // the 0182 statement byte-identical. The fragments carry BARE column names,
+    // not `p.`-qualified ones, on purpose: that makes the external predicate the
+    // same string here as in `reset_pending_pred` and the month enumeration, and
+    // "the same string" is the only form of agreement a test can prove. There is
+    // one table in scope, so the resolution is unambiguous.
+    let mut bounds = String::new();
+    if let Some(na) = spec.not_after {
+        bounds.push_str(&format!(" AND p.timestamp < toDateTime({na})"));
+    }
+    if spec.require_external_rate {
+        bounds.push_str(&format!(
+            " AND close_usd = close AND {}",
+            external_rate_day_pred(db)
+        ));
+    }
     format!(
         "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
          SELECT \
@@ -1464,7 +1643,7 @@ fn reset_sql(db: &str, tbl: &str, spec: &UsdResetSpec, window: &str) -> String {
              p.version + 1 AS version \
          FROM {db}.{tbl} AS p FINAL \
          WHERE p.quote_asset_id = {q} \
-           AND p.timestamp >= toDateTime({nb}) \
+           AND p.timestamp >= toDateTime({nb}){bounds} \
            AND (p.close_usd > 0 OR p.volume_quote_usd > 0) \
            AND p.volume_quote > 0 \
            AND p.timestamp <= toDateTime(?){window} \
@@ -1472,6 +1651,7 @@ fn reset_sql(db: &str, tbl: &str, spec: &UsdResetSpec, window: &str) -> String {
          LIMIT ?",
         q = spec.quote_asset_id,
         nb = spec.not_before,
+        bounds = bounds,
     )
 }
 
@@ -1536,11 +1716,167 @@ mod tests {
 
     // -- task 0182: the USD reset ------------------------------------------
 
+    // ---- task 0268: the external-scoped reset -----------------------------
+
+    /// A 0268-shaped spec: USDC's quote leg, bounded above by the oracle epoch,
+    /// and only where the imported series can refill what it zeroes.
+    fn usdc_external_reset() -> UsdResetSpec {
+        UsdResetSpec {
+            quote_asset_id: 2,
+            not_before: 0,
+            not_after: Some(prices_clickhouse::USDC_ORACLE_EPOCH_S),
+            require_external_rate: true,
+        }
+    }
+
+    /// 🔑 D-06's LOCKSTEP REQUIREMENT. The loop's termination test
+    /// (`reset_pending_pred`), the statement that zeroes (`reset_sql`) and the
+    /// month enumeration (`repair_target_pred`, spliced into `repair.rs`) must
+    /// carry the SAME predicate.
+    ///
+    /// Two halves of this disagreeing is what hid task 0182 for a month: the
+    /// driver enumerated `CANDIDATE_PRED`, every row 0182 targeted had
+    /// `close_usd > 0`, so `--dry-run` reported "no months with enrichable
+    /// zeros" — a green all-clear over 44,657 wrong values. One definition,
+    /// asserted present in all three renderings.
+    #[test]
+    fn the_external_predicate_is_one_definition_used_by_all_three_sites() {
+        let spec = usdc_external_reset();
+        let frag = external_rate_day_pred("prices");
+        assert!(
+            reset_pending_pred("prices", &spec).contains(&frag),
+            "pending"
+        );
+        assert!(
+            reset_sql("prices", "price_ohlcv_1d", &spec, "").contains(&frag),
+            "reset_sql"
+        );
+        assert!(
+            repair_target_pred("prices", Some(&spec)).contains(&frag),
+            "repair_target_pred"
+        );
+    }
+
+    /// The predicate must be an UNCORRELATED day-set. `months_with_zeros` splices
+    /// `repair_target_pred` into a bare `WHERE` of its own grouped scan, with no
+    /// outer alias in scope, so a correlated `EXISTS` or a JOIN is not merely
+    /// stylistically different — it is illegal there.
+    #[test]
+    fn external_rate_day_pred_is_an_uncorrelated_day_set() {
+        let frag = external_rate_day_pred("prices");
+        assert!(
+            frag.starts_with("toDate(timestamp) IN (SELECT toDate(timestamp)"),
+            "{frag}"
+        );
+        assert!(frag.contains("prices.usd_rate FINAL"), "{frag}");
+        assert!(frag.contains("method = 'external'"), "{frag}");
+        assert!(frag.contains("asset_kind = 'credit'"), "{frag}");
+        assert!(frag.contains("asset_code = 'USDC'"), "{frag}");
+        assert!(
+            frag.contains(&format!("issuer_address = '{USDC_ISSUER}'")),
+            "{frag}"
+        );
+        assert!(frag.contains("contract_address = ''"), "{frag}");
+        assert!(
+            !frag.contains("p."),
+            "a correlated reference is illegal in months_with_zeros: {frag}"
+        );
+        assert!(!frag.contains("EXISTS"), "{frag}");
+    }
+
+    /// D-04: the reset's candidate set carries the peg tier's EXACT signature, so
+    /// a candle the oracle or external tier already priced is never re-opened.
+    /// And it still terminates: a zeroed row stops matching
+    /// `(close_usd > 0 OR volume_quote_usd > 0)`.
+    #[test]
+    fn the_external_reset_narrows_to_the_par_signature_and_still_terminates() {
+        let pred = reset_pending_pred("prices", &usdc_external_reset());
+        assert!(pred.contains("close_usd = close"), "{pred}");
+        assert!(
+            pred.contains("(close_usd > 0 OR volume_quote_usd > 0)"),
+            "the termination term must survive: {pred}"
+        );
+    }
+
+    /// `not_after` bounds the reset above; `None` adds nothing at all.
+    #[test]
+    fn not_after_bounds_the_reset_above_and_none_adds_nothing() {
+        let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
+        let bounded = reset_pending_pred("prices", &usdc_external_reset());
+        assert!(
+            bounded.contains(&format!("timestamp < toDateTime({epoch})")),
+            "{bounded}"
+        );
+        let sql = reset_sql("prices", "price_ohlcv_1d", &usdc_external_reset(), "");
+        assert!(
+            sql.contains(&format!("timestamp < toDateTime({epoch})")),
+            "{sql}"
+        );
+
+        let unbounded = reset_pending_pred("prices", &usdt_reset());
+        assert!(
+            !unbounded.contains("timestamp < toDateTime("),
+            "{unbounded}"
+        );
+    }
+
+    /// 🔑 THE 0182 PATH PROVABLY DOES NOT CHANGE. A spec with
+    /// `require_external_rate = false` and `not_after = None` renders
+    /// byte-identically to the pre-0268 statement in all three sites. Anything
+    /// less than byte equality here means 0268 quietly altered the behaviour of a
+    /// repair mode that has already run against production.
+    #[test]
+    fn a_0182_shaped_spec_renders_byte_identically_to_the_pre_0268_statement() {
+        let spec = usdt_reset();
+        assert_eq!(
+            reset_pending_pred("prices", &spec),
+            "quote_asset_id = 111 AND timestamp >= toDateTime(1612656000) \
+             AND (close_usd > 0 OR volume_quote_usd > 0) AND volume_quote > 0"
+        );
+        assert_eq!(
+            repair_target_pred("prices", Some(&spec)),
+            format!(
+                "({CANDIDATE_PRED}) OR (quote_asset_id = 111 \
+                 AND timestamp >= toDateTime(1612656000) \
+                 AND (close_usd > 0 OR volume_quote_usd > 0) AND volume_quote > 0)"
+            )
+        );
+        let sql = reset_sql("prices", "price_ohlcv_1h", &spec, "");
+        assert!(
+            !sql.contains("usd_rate"),
+            "no reference join on the 0182 path: {sql}"
+        );
+        assert!(!sql.contains("close_usd = close"), "{sql}");
+        assert!(!sql.contains("toDate("), "{sql}");
+        assert!(!sql.contains("timestamp < toDateTime("), "{sql}");
+    }
+
+    /// The 0114 partition bound still reaches the outer `WHERE`, and the reset is
+    /// still a versioned insert rather than a mutation — so a FREEZE stays a
+    /// rollback point. Mirrors `reset_sql_threads_the_partition_window`.
+    #[test]
+    fn the_external_reset_keeps_the_partition_window_and_the_versioned_insert() {
+        let win = " AND p.timestamp >= toDateTime(100) AND p.timestamp < toDateTime(200)";
+        let sql = reset_sql("prices", "price_ohlcv_1d", &usdc_external_reset(), win);
+        assert!(sql.contains(win), "{sql}");
+        assert!(sql.contains("p.version + 1 AS version"), "{sql}");
+        assert!(!sql.contains("ALTER TABLE"), "{sql}");
+        assert_eq!(
+            sql.matches('?').count(),
+            2,
+            "binds stay watermark, limit: {sql}"
+        );
+    }
+
     fn usdt_reset() -> UsdResetSpec {
         // 2021-02-07, the start of USDT's USDC market.
         UsdResetSpec {
             quote_asset_id: 111,
             not_before: 1_612_656_000,
+            // Task 0182's shape, stated rather than defaulted: unbounded above,
+            // and no reference join. This fixture is what pins that path.
+            not_after: None,
+            require_external_rate: false,
         }
     }
 
@@ -1609,7 +1945,7 @@ mod tests {
     /// and the pass would spin to its batch ceiling on every run.
     #[test]
     fn reset_pending_pred_stops_matching_once_a_row_is_zeroed() {
-        let pred = reset_pending_pred(&usdt_reset());
+        let pred = reset_pending_pred("prices", &usdt_reset());
         assert!(pred.contains("(close_usd > 0 OR volume_quote_usd > 0)"));
         assert!(pred.contains("quote_asset_id = 111"));
         assert!(pred.contains("volume_quote > 0"));
@@ -1619,7 +1955,7 @@ mod tests {
     /// so the 0114 historical repair and the hourly sweep are unchanged.
     #[test]
     fn repair_target_pred_is_unchanged_without_a_reset() {
-        assert_eq!(repair_target_pred(None), CANDIDATE_PRED);
+        assert_eq!(repair_target_pred("prices", None), CANDIDATE_PRED);
     }
 
     /// The regression that made 0182 invisible: the driver enumerated
@@ -1628,7 +1964,7 @@ mod tests {
     /// With a spec the enumeration must admit the written-value rows too.
     #[test]
     fn repair_target_pred_sees_months_that_hold_only_written_values() {
-        let pred = repair_target_pred(Some(&usdt_reset()));
+        let pred = repair_target_pred("prices", Some(&usdt_reset()));
         assert!(pred.contains(CANDIDATE_PRED));
         assert!(pred.contains("(close_usd > 0 OR volume_quote_usd > 0)"));
         // Still an OR, not a replacement — a reset run must not stop finding
