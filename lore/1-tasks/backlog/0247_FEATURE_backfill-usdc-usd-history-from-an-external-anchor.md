@@ -20,6 +20,14 @@ history:
       window can be FILLED. Raised as "the candles must know the real rate" —
       measured on prod and disproved, which is what identified the only route
       that does work: an anchor from outside the USDC-denominated system.
+  - date: 2026-09-07
+    status: backlog
+    who: akot
+    note: >
+      [[0265]] chose the anchor (Chainlink USDC/USD rounds, Bitstamp fallback)
+      and proved the composed series over 2021-01-25 → 2026-03-10. This task's
+      loading path and acceptance criteria are folded into [[0267]] as its
+      step 1; implement there, close this one when 0267 ships.
 ---
 
 # Deep history is denominated in USDC, so it cannot price USDC

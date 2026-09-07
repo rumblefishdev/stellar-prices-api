@@ -19,3 +19,6 @@ lore/**/evidence/*.json
 # Emitted by `npm run portal:api-types` from the published OpenAPI document.
 # Reformatting it would diff on every regeneration.
 web/portal/src/api/generated.ts
+
+# k6 load-test output (task 0121) — generated per run, kept verbatim
+docs/loadtest-results/*.json
