@@ -2,9 +2,9 @@
 id: "0128"
 title: "SCF Milestone 2 verification package — evidence doc, form answers, video scenario"
 type: DOCS
-status: backlog
+status: active
 related_adr: []
-related_tasks: ["0102", "0117", "0120", "0121", "0122", "0123", "0124", "0125", "0126", "0127", "0237", "0248"]
+related_tasks: ["0102", "0117", "0120", "0121", "0122", "0123", "0124", "0125", "0126", "0127", "0237", "0248", "0262"]
 tags: [layer-docs, priority-high, effort-medium, milestone-M2, scf, submission, evidence]
 milestone: 2
 links:
@@ -20,6 +20,16 @@ history:
       `milestone-1-form-answers.md`, `milestone-1-video-scenario.md`) and was
       accepted. Last task in the M2 sequence — it consumes every other task's
       output.
+  - date: 2026-09-07
+    status: active
+    who: okarcz
+    note: >
+      Activated alongside [[0262]], which is the last input this package was
+      waiting on. 0262 produced the Tranche 2 AC 3 position: the criterion is
+      graded against a reworded observable, declared in
+      `docs/scf/milestone-2-rfp-deviations.md` rather than negotiated with the
+      reviewer in advance. AC 3's entry in this package must name that
+      observable and label the latency evidence as the weaker claim.
 ---
 
 # SCF Milestone 2 verification package
