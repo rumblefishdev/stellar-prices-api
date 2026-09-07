@@ -2,7 +2,7 @@
 id: "0270"
 title: "The \"OpenAPI JSON\" link renders the document instead of downloading it — `download` is ignored cross-origin, so ship the spec as a static file in the portal bundle"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0124", "0185", "0194", "0195", "0269"]
 tags: [portal, frontend, openapi, docs, priority-low, effort-small]
@@ -14,6 +14,10 @@ history:
     status: backlog
     who: adam-kot
     note: "Task created"
+  - date: "2026-09-07"
+    status: active
+    who: akot
+    note: "Activated; taken by akot. Approach settled: the spec ships as a static asset in the portal bundle."
 ---
 
 # The "OpenAPI JSON" link should download the document, not render it
