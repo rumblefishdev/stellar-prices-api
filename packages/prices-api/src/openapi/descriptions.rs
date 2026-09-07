@@ -613,13 +613,30 @@ mod tests {
     /// client generated from the schema must never meet a value the contract
     /// does not name — that was true before 0268 split the vocabulary, and the
     /// split dropped `peg` from the list while the self-series kept emitting it.
+    ///
+    /// The candle-path vocabulary is READ OFF THE EMITTER (review IN-13): the
+    /// single-quoted literals of `usd_method_expr`'s rendered `multiIf` are the
+    /// labels it can return, so a sixth arm added there fails here until the
+    /// description names it. Only `peg` — emitted by the self-series builder,
+    /// whose SQL carries many unrelated literals — is still listed by hand.
     #[test]
     fn candle_method_description_names_every_value_either_emitter_produces() {
         let (_, _, text) = FIELDS
             .iter()
             .find(|(schema, field, _)| *schema == "Candle" && *field == "method")
             .expect("Candle.method is described");
-        for value in ["assumed-par", "external", "oracle", "traded", "peg"] {
+        let rendered = crate::assets::queries_ch::usd_method_expr(2, &[7]);
+        let emitted: Vec<&str> = rendered
+            .split('\'')
+            .skip(1)
+            .step_by(2)
+            .filter(|lit| !lit.is_empty())
+            .collect();
+        assert!(
+            emitted.len() >= 4,
+            "the emitter renders its labels as quoted literals: {rendered}"
+        );
+        for value in emitted.iter().copied().chain(["peg"]) {
             assert!(
                 text.contains(&format!("`{value}`")),
                 "Candle.method description does not name `{value}`:\n{text}"

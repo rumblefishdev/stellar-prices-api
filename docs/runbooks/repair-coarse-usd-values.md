@@ -712,23 +712,33 @@ to check.
    Expect `1970-01-01 00:00:00` (midnight). Anything else — 23:00, 23:59 — stop
    and settle the convention with whoever owns 0267 before running.
 
-3. **Confirm `usd_rate` holds no `oracle` row for USDC before the epoch.** This
-   is the assumption the API's read-time label arm rests on: a scaled
-   USDC-quoted candle below `USDC_ORACLE_EPOCH_S` is reported as
-   `method: external`, and that is only true if no poll could have priced it.
-   It is in-repo prose, not a live measurement — this query is the measurement.
+3. **Confirm `oracle_prices` holds no canonical-USDC reading before the epoch.
+   BLOCKING.** Two things rest on "no poll priced USDC before
+   `USDC_ORACLE_EPOCH_S`": the API's read-time label (a scaled USDC-quoted
+   candle below the epoch is reported `method: external`), and the external
+   tier's recomputation of `volume_quote_usd` on every pre-epoch candidate
+   (its "oracle values win" argument is that no oracle reading exists there
+   to win). The epoch was measured on `usd_rate`, but the oracle tier READS
+   `prices.oracle_prices`, and `usd_rate`'s oracle rows are copied out of it
+   behind a watermark — so the table to ask is `oracle_prices`:
 
    ```sql
-   SELECT count() FROM prices.usd_rate FINAL
-   WHERE asset_kind = 'credit' AND asset_code = 'USDC'
-     AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
-     AND contract_address = '' AND method = 'oracle'
+   SELECT count() AS pre_epoch_readings, min(timestamp) AS first
+   FROM prices.oracle_prices
+   WHERE asset_id = ( SELECT asset_id FROM prices.assets FINAL
+                      WHERE asset_code = 'USDC' AND contract_address = ''
+                        AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN' )
+     AND oracle_name = 'reflector'
      AND timestamp < toDateTime({epoch:UInt32})
    ```
 
-   Must be **0**. A non-zero count does not block the repair, but it does mean
-   `/ohlcv` will label some genuinely oracle-priced candles `external`. Record
-   it and raise it before proceeding.
+   Must be **0**. A non-zero count is a STOP for this mode: the tool refuses
+   the run with `ResetBlockedByPreEpochOracleRows` (it runs this exact count,
+   independent of `--reset-not-before`), and do not work around it — triage
+   the rows first (purge a mis-attribution as task 0196 did, or move the
+   epoch, which is a code change with its own test). Zero here also settles
+   the `usd_rate` premise the label arm rests on, since every `usd_rate`
+   oracle row originates in this table.
 
 4. **The cleanup worker stays DARK.** Its EventBridge rule is disabled on
    purpose — it shredded the 0182/0201 repair campaign. Confirm it is still
@@ -758,11 +768,11 @@ Issues 8.
 ```bash
 --reset-quote-asset-id <USDC_ID>    # canonical USDC's asset_id on prod
 --reset-not-before 0                # all of deep history
---reset-not-after <EPOCH>           # DEFAULTED — do not pass it; see below
 --reset-require-external-rate       # the 0268 mode
 ```
 
-`--reset-not-after` defaults to `prices_clickhouse::USDC_ORACLE_EPOCH_S`
+There is a fourth flag, `--reset-not-after`, and it is deliberately NOT in the
+block above: it defaults to `prices_clickhouse::USDC_ORACLE_EPOCH_S`
 whenever `--reset-require-external-rate` is passed — the **same constant** the
 API's `external` label arm keys on and the value you set as `param_epoch`
 above. The tool logs the resolved value at startup (`reset_not_after`,
@@ -839,8 +849,41 @@ INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
 WHERE p.timestamp >= toDateTime(1678492800) AND p.timestamp < toDateTime(1678579200)
 ```
 
-It must read **exactly 1.0** before the run. It is the number the after-check
-compares against.
+It must read **exactly 1.0** before the run. On `_1h`/`_4h`/`_1d` the
+after-check expects it to have moved to ~0.9681.
+
+On `_1w` and `_1M` it will read ~1.0 AFTER the run too — the tier prices a
+bucket from ONE rate resolved at the bucket's END (decision G), and the week
+containing 03-11 ends on 03-13, the month on 04-01, when USDC was back at par.
+The depeg is invisible at those grains by construction; `_1d` is the coarsest
+grain that can carry it. So for those two the after-check verifies the
+MECHANISM instead, and needs the bucket's `max(version)` from before the run.
+**Record both numbers** — the after-check takes them as input and refuses to
+pass without them:
+
+```sql
+SELECT max(version) AS version_before_1w
+FROM prices.price_ohlcv_1w AS p FINAL
+INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
+             WHERE asset_code = 'XLM' AND issuer_address = ''
+               AND contract_address = '' ) AS x ON x.asset_id = p.asset_id
+INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
+             WHERE asset_code = 'USDC' AND contract_address = ''
+               AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+           ) AS u ON u.asset_id = p.quote_asset_id
+WHERE p.timestamp = toDateTime(1678060800);   -- 2023-03-06, the week of the depeg
+
+SELECT max(version) AS version_before_1M
+FROM prices.price_ohlcv_1M AS p FINAL
+INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
+             WHERE asset_code = 'XLM' AND issuer_address = ''
+               AND contract_address = '' ) AS x ON x.asset_id = p.asset_id
+INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
+             WHERE asset_code = 'USDC' AND contract_address = ''
+               AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+           ) AS u ON u.asset_id = p.quote_asset_id
+WHERE p.timestamp = toDateTime(1677628800);   -- 2023-03-01, the month of the depeg
+```
 
 ### The abort signal
 
@@ -854,21 +897,36 @@ than at the reset.
 
 ### After — the falsifier
 
-`native` on 2023-03-11 must now read **~3% below** its USDC-denominated close, on
-every granularity. As SQL, per table, it is the baseline query above: the implied
-rate must have moved from `1.0` to **~0.9681** on `_1h`/`_4h`/`_1d`. The test
-holds each grain UNDER a ceiling par cannot satisfy — `0.99` for the
-daily-or-shorter grains, `0.999` for `_1w` (it blends six recovered days),
-`0.9995` for `_1M` (thirty) — rather than inside a band around 0.9681, because
-a band wide enough for the monthly blend contains 1.0, and a PARTIAL pass lands
-a few bps under par. It also counts rows at `close_usd = 0` over the same span:
-any such row is the 0182 outcome (reset, never refilled) and fails the check
-outright.
+`native` on 2023-03-11 must now read **~3% below** its USDC-denominated close
+on every grain whose bucket ENDS inside the depeg — `_1h`, `_4h`, `_1d`. As SQL,
+per table, it is the baseline query above: the implied rate must have moved
+from `1.0` to **0.9681** (exactly, against a daily series; lower if 0267 ships
+hourly rows for the stress days). The test holds those grains UNDER `0.99` — a
+ceiling par cannot satisfy and a PARTIAL pass (a few bps under par) cannot
+either — rather than inside a band around 0.9681, because a band wide enough
+to be safe contains 1.0.
+
+`_1w` and `_1M` are judged by the MECHANISM, not the rate (see "The baseline"
+above for why the rate cannot show anything there): the bucket's `max(version)`
+must exceed the value you recorded before the run, no row with volume may sit at
+`close_usd = 0`, and the par signature `close_usd = close` may survive only if
+the imported series' own rate at the bucket end is exactly 1.0 — in which case
+the stored value is right and `/ohlcv` will nonetheless label it `assumed-par`
+(task file, Issues 9; a known ambiguity of the read-time label, not a repair
+defect). Hand the two recorded versions to the test as environment variables.
+
+On every grain the test also counts rows at `close_usd = 0` **with volume** over
+the same window: any such row is the 0182 outcome (reset, never refilled) and
+fails the check outright. Rows at zero WITHOUT volume are the permanent
+volume-zero floor no tier prices; they are reported as context, never as a
+failure.
 
 As a test, which also checks the control date:
 
 ```bash
 CLICKHOUSE_URL=... CH_DATABASE=prices \
+POST_RUN_0268_VERSION_BEFORE_1W=<version_before_1w> \
+POST_RUN_0268_VERSION_BEFORE_1M=<version_before_1M> \
   cargo test -p enrichment-worker --test post_run_0268_it -- --ignored
 ```
 

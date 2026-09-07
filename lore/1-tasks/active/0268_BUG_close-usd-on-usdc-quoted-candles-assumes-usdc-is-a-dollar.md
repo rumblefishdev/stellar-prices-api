@@ -305,6 +305,49 @@ exact-equality checks already prove the 0182 shape; a full-string pin of
 `reset_sql` would fail on every whitespace edit for no added proof. **IN-02**
 and **IN-04** are scope decisions, recorded as Issues 7 and 8.
 
+**Review round 2** (`gsd-code-reviewer`, standard depth, cross-file,
+2026-09-07, on `9732c07`: 1 blocker, 3 warnings, 7 info — one commit, every
+fix with a test that would have caught it). **CR-02** the falsifier's `_1w`
+and `_1M` ceilings (0.999 / 0.9995) came from a "blending" model decision G
+does not produce: ONE rate at the bucket END prices the whole bucket, the
+March-2023 week ends 03-13 and the month 04-01, so a correctly repaired `_1M`
+reads ~1.0 and the gate reported a false failure with a FREEZE rollback
+advised beside it. `_1d` is the coarsest grain that can carry the depeg;
+`_1h`/`_4h`/`_1d` keep a 0.99 ceiling, `_1w`/`_1M` are judged by the
+MECHANISM — `max(version)` past the value the runbook's "before" step now
+records (handed in as `POST_RUN_0268_VERSION_BEFORE_1W`/`_1M`, missing = a
+finding), no zero with volume, and the par signature only if the series'
+bucket-end rate is exactly 1.0. That last clause is the label ambiguity of
+Issue 9. Every "blends N days" sentence is gone from the module doc and the
+runbook; `judge` stays pure, 13 CI-run tests. **WR-08** `zeros` now mirrors the
+tiers' predicate (`close_usd = 0 AND volume_quote > 0`); zero-volume rows are
+`unpriceable`, reported as context, never a failure, never masking the rate
+check. **WR-09** the "oracle wins" argument named the wrong table: the epoch
+is defined on `usd_rate`, the oracle tier reads `oracle_prices`, and the copy
+runs behind a watermark. Doc block and Design Decision 16 now name
+`oracle_prices` and state the residual exposure; Appendix B precondition 3
+queries `oracle_prices` and is BLOCKING; and the reset mode refuses on the same
+count (`assert_no_pre_epoch_oracle_rows`, `ResetBlockedByPreEpochOracleRows`),
+unbounded below because the external tier's reach is — SQL-string unit test
+plus an `#[ignore]` fixture with the reading below `not_before`. The recompute
+(option B) stays. **WR-10** two `#[ignore]` fixtures execute the `'UTC'`
+calendar branch on the tables the campaign targets: a `_1d` bucket at day
+start with rates at day start and +1d (the +1d rate must not win), and a
+`_1M` bucket with rates on 09-01, 09-30 and 10-01 (09-30 must win; a 31-day
+end would pick 10-01). `every_timezone_sensitive_expression_pins_utc` now
+says it inspects the two 0268 builders only — Issue 10. **IN-08** a unit test
+walks `GRAINS` and pins the zero-slack pairing (`max(width, 1 day) <=
+external_window_s`). **IN-09** one `pub const GRAINS` next to `bucket_width_s`;
+the cross-check iterates it, so a grain missing from `bucket_end_expr` fails.
+**IN-10** the "intraday buckets average lower still" comment replaced with
+the true statement (exactly 0.9681 against a daily series; lower only if 0267
+ships hourly rows). **IN-11** the `PARTIAL` assertion is real: par and a
+partial pass now produce different findings. **IN-13** the `Candle.method`
+test reads the labels off `usd_method_expr`'s rendered `multiIf`
+(`pub(crate)` now) instead of a hand list. **IN-14** `--reset-not-after` moved
+out of the copy-pasteable flag block into the prose. **IN-12** left, recorded
+as Issue 11.
+
 ## Design Decisions
 
 ### From Plan
@@ -395,13 +438,25 @@ and **IN-04** are scope decisions, recorded as Issues 7 and 8.
     reviewer's option A (skip those rows), hand them to the peg tier AFTER the
     reset step has already run, so the operator's one-shot campaign would end
     with rows carrying the par signature and AC 1 would fail after a run the
-    runbook says to do once. The invariant survives by a different mechanism:
-    WR-04's epoch bound. `USDC_ORACLE_EPOCH_S` is by definition the first
-    oracle row for canonical USDC, so no candidate row can carry an oracle-set
-    value, and the reset run's oracle-shadow guard refuses the run outright if
-    that premise is ever false on prod. The behavioural test
-    `external_tier_never_overwrites_a_candle_the_oracle_tier_priced` still
-    proves the outcome; `external_tier_recomputes_a_half_priced_row_from_the_one_reference`
+    runbook says to do once. For `close_usd` the invariant holds by the
+    candidate filter alone (an oracle-priced row is never `close_usd = 0`).
+    For `volume_quote_usd` it rests on WR-04's epoch bound — with a caveat
+    review round 2 (WR-09) made explicit: `USDC_ORACLE_EPOCH_S` is defined
+    against `usd_rate`'s first `oracle` row, but the oracle tier reads
+    **`oracle_prices`**, and `usd_rate`'s oracle rows are copied out of it
+    behind a watermark, so `oracle_prices` may hold an earlier USDC reading.
+    The residual exposure is exactly one shape: a row enriched before
+    `close_usd` existed, whose `volume_quote_usd` the oracle tier set from
+    such a reading, is a candidate and has that column recomputed from the
+    bucket-end rate; its two USD columns then agree, which is the property
+    wanted. On the operator's campaign the exposure is zero by measurement:
+    the 0268 reset mode refuses (`ResetBlockedByPreEpochOracleRows`) if
+    `oracle_prices` holds ANY canonical-USDC reading below the epoch, a count
+    independent of `--reset-not-before` because the tier's reach is too, and
+    Appendix B precondition 3 is the same query, now blocking. The behavioural
+    test `external_tier_never_overwrites_a_candle_the_oracle_tier_priced`
+    still proves the `close_usd` outcome;
+    `external_tier_recomputes_a_half_priced_row_from_the_one_reference`
     proves the coherence.
 
 ## Issues Encountered
@@ -474,6 +529,42 @@ and **IN-04** are scope decisions, recorded as Issues 7 and 8.
    bucket by hand if it matters; do not move the bound to the bucket END —
    that would make the reset and the label disagree, which is the worse
    error. Not changed in this task.
+9. **The read-time label is ambiguous at exactly par — a known limitation of
+   decision E, not a repair defect (review round 2, CR-02).** The label arm
+   keys on the signature `close_usd = close`. A bucket whose external rate at
+   the bucket end is *exactly* 1.0 — common for USDC on calm days, and the
+   likely value for the March-2023 `_1M` bucket, which ends on 04-01 — is
+   priced correctly by the external tier and then reported `assumed-par` by
+   `/ohlcv`, because a measured 1.0 and an assumed 1.0 leave the same bytes.
+   **Decision: no tolerance on the `multiIf`.** A tolerance cannot separate
+   the two either (both produce exactly `close_usd = close`); it would only
+   relabel near-par measured rates as `assumed-par` too, widening the
+   ambiguity rather than closing it, so the arm stays an exact comparison and
+   nothing was widened silently. The falsifier tolerates the case because it
+   can read the series (`bucket_end_rate == 1.0`); the wire cannot. Closing
+   it needs stored provenance — a `method` column on the candle tables, which
+   D-05 put out of 0268's scope — or a documented reading of `assumed-par` on
+   a pre-epoch USDC leg as "the input rate was 1.0, assumed or measured".
+   **For Adam to route**; the OpenAPI text was not changed here.
+10. **`repair::months_with_zeros` derives its per-month windows in the SERVER
+    zone (review WR-10).** `toStartOfMonth` / `addMonths` / `toYYYYMM` there
+    are unpinned, matching the tables' `toYYYYMM(timestamp)` partition key,
+    which is server-zone too. The reset and the refill share one such window
+    inside a month pass, so they stay paired, and pinning the enumeration to
+    UTC while the partition key is not would split months across partitions
+    on a non-UTC server. The unit test `every_timezone_sensitive_expression_pins_utc`
+    now states that it inspects the two 0268 builders only. Not changed; the
+    right fix, if any, is a server-zone assertion at startup, which is the
+    0114 driver's concern.
+11. **`the_runbook_hand_types_the_oracle_epoch_once_and_it_is_the_constant`
+    `include_str!`s the runbook from two directories above the crate (review
+    IN-12).** It is the only thing keeping IN-06 closed, and it fails to
+    COMPILE the crate's tests if the runbook moves, and fails if a log excerpt
+    containing the epoch is ever pasted into the runbook. Left as is: the
+    crate is not published, the repo's other cross-file guards live in
+    `tools/scripts/` and are not run by `cargo test`, and a pasted second copy
+    of the epoch is exactly the drift the test exists to refuse. Revisit if
+    the runbook is ever split.
 
 ## Run-day checklist (operator)
 
@@ -485,13 +576,17 @@ Nothing below can be done from the branch. Work Appendix B of
 2. **Settle the stamping convention** — precondition 2. If 0267 stamps daily
    rows at day END rather than day START, stop: every bucket would resolve to
    the previous day's rate. This is Issue 3.
-3. **Confirm no pre-epoch `oracle` row for USDC** — precondition 3. This is
-   Issue 2, and it is the one check that validates the `/ohlcv` label rather
-   than the stored value.
+3. **Confirm no pre-epoch `oracle_prices` reading for USDC** — precondition 3,
+   now BLOCKING and mirrored in the tool (`ResetBlockedByPreEpochOracleRows`).
+   This is Issue 2, and it validates both the `/ohlcv` label and the external
+   tier's `volume_quote_usd` recompute (Design Decision 16).
 4. **Confirm the cleanup worker is still dark** (precondition 4) and that the
    **FREEZE snapshots exist and were verified** (precondition 5).
 5. **Record the baseline**, per table, including the `native` 2023-03-11 implied
-   rate — which must read exactly 1.0 before the run.
+   rate — which must read exactly 1.0 before the run — and, for `_1w` and
+   `_1M`, the `max(version)` of the bucket containing the depeg day. The
+   after-check takes those two as `POST_RUN_0268_VERSION_BEFORE_1W` / `_1M`
+   and refuses to pass without them.
 6. **Dry run each of `_1h`, `_4h`, `_1d`, `_1w`, `_1M`.** ⚠️ Zero candidate
    months is a STOP, not an all-clear. Expect the order of magnitude 0247
    measured: ~654,291 candles.
@@ -499,8 +594,11 @@ Nothing below can be done from the branch. Work Appendix B of
    `rows_enriched`; roll that table back from its snapshot before touching the
    next.
 8. **After-check**: the SQL falsifier per granularity, plus
-   `cargo test -p enrichment-worker --test post_run_0268_it -- --ignored`. This
-   closes **AC 1 and AC 2**.
+   `cargo test -p enrichment-worker --test post_run_0268_it -- --ignored` with
+   the two recorded versions in the environment. `_1h`/`_4h`/`_1d` are judged
+   by the rate (under 0.99); `_1w`/`_1M` by the mechanism (version moved, no
+   zero with volume, par signature only if the series says exactly 1.0 at the
+   bucket end). This closes **AC 1 and AC 2**.
 9. **Record runtime and rows touched in this file**, as [[0182]] did. This
    closes **AC 5**.
 10. **Re-measure [[0266]]'s dislocation table** and record the result there.

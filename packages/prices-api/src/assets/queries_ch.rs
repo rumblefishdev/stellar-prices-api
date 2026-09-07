@@ -1024,7 +1024,7 @@ pub async fn ohlcv_peg_series(
 ///    a ClickHouse syntax error, and the label is optional.
 /// 5. `''` -> the fallback, which [`ohlcv`]'s `nullIf` turns into a JSON `null`.
 ///    A `multiIf` with no else is an error, so this arm always closes the list.
-fn usd_method_expr(usdc: u32, pivots: &[u32]) -> String {
+pub(crate) fn usd_method_expr(usdc: u32, pivots: &[u32]) -> String {
     let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
     let traded_arm = if pivots.is_empty() {
         String::new()
