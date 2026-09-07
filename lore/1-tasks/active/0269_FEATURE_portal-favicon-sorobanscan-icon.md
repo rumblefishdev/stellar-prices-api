@@ -2,7 +2,7 @@
 id: "0269"
 title: "Portal favicon — replace the placeholder icon at sorobanscan.rumblefish.dev/api/ with the SorobanScan icon"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0185", "0194", "0195"]
 tags: [portal, frontend, branding, priority-low, effort-small]
@@ -13,6 +13,15 @@ history:
     status: backlog
     who: adam-kot
     note: "Task created"
+  - date: "2026-09-07"
+    status: active
+    who: claude
+    note: >
+      Icons shipped on docs/0269_portal-favicon-sorobanscan-icon (PR #291):
+      favicon.svg from the SorobanScan mark, favicon.ico (16/32/48) and
+      apple-touch-icon.png rendered from it, index.html wired. Build verified
+      to emit /api/-prefixed hrefs. Deploy (sync-portal-explorer) is the
+      operator's step; AC 1 and 4 close after it.
 ---
 
 # Portal favicon — replace the placeholder icon at sorobanscan.rumblefish.dev/api/ with the SorobanScan icon
@@ -72,11 +81,34 @@ Keep the root-relative `href="/favicon.ico"`. If an SVG icon is added, add
 
 - [ ] `https://sorobanscan.rumblefish.dev/api/favicon.ico` serves the
       SorobanScan icon; the browser tab on `/api/` and on a sub-route shows it
-- [ ] `web/portal/public/favicon.ico` replaced; old file in `.trash/`
-- [ ] `index.html` keeps the root-relative href and its explanatory comment
+- [x] `web/portal/public/favicon.ico` replaced; old file in `.trash/`
+- [x] `index.html` keeps the root-relative href and its explanatory comment
 - [ ] Icon matches the mark used by the explorer's own tab
+
+## Implementation Notes
+
+- Source: the SorobanScan mark handed over as an SVG (dark circle, white
+  glyph), copied verbatim to `web/portal/public/favicon.svg`.
+- `favicon.ico` (16/32/48, PNG-compressed frames) and
+  `apple-touch-icon.png` (180 px) rendered from that SVG with cairosvg +
+  Pillow; no tooling added to the repo.
+- `index.html`: SVG `<link rel="icon">` first, `.ico` second, touch icon
+  third. All root-relative; `pnpm nx build portal` emits them as
+  `/api/favicon.svg`, `/api/favicon.ico`, `/api/apple-touch-icon.png`.
+- Old `favicon.ico` moved to `.trash/` (gitignored), so it leaves git.
+
+## Design Decisions
+
+### Emerged
+
+1. **Ship the SVG alongside the .ico**: the mark is a simple two-colour
+   vector, so the SVG is crisp at every DPR and 989 bytes; the `.ico`
+   stays for the browsers that ignore SVG icons.
+2. **Did not check the explorer repo's icon set**: the SVG was supplied
+   directly, so it is the reference; if the explorer tab differs, the
+   explorer is the one to align.
 
 ## Notes
 
-Cosmetic; no API change. Cheapest path if the explorer repo already has an
-`.ico`: copy it byte-for-byte.
+Cosmetic; no API change. Deploy with `make -C infra sync-portal-explorer`
+and invalidate CloudFront for `/api/favicon.*` if the old icon sticks.
