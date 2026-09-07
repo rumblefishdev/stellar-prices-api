@@ -24,6 +24,23 @@ history:
     status: active
     who: okarcz
     note: >
+      📦 **Package drafted — 9 of 10 ACs closed.** Four deliverables:
+      `milestone-2-evidence.md` (999 lines, 18-page PDF),
+      `milestone-2-form-answers.md`, `milestone-2-video-scenario.md`, and
+      queries (10)-(22) appended to `ch-demo-queries.sql`. `build-pdf.sh` is
+      now parameterised (`./build-pdf.sh 2`) instead of hardcoded to M1.
+      ⏳ **Only "re-run every cited figure close to submission" is open**, by
+      design. 🔑 Two contradictions inside the package were found and fixed
+      rather than shipped: the load-test report and its README both claimed the
+      gateway "caches on the path only", which [[0122]] had falsified (the
+      arithmetic survives because the k6 script sends no query string, but the
+      precondition now travels with the figure); and `docs/scf/README.md` still
+      forbade screenshotting the dashboard as an empty scaffold, which [[0125]]
+      replaced the same morning.
+  - date: 2026-09-07
+    status: active
+    who: okarcz
+    note: >
       📥 **AC 1 evidence is in — [[0120]] closed the same day, and with it the
       last unmet Tranche 2 criterion.** Cite: **1032 pass, 0 fail, 0 skip**,
       exit 0, on production 2026-09-07 at 10:40 and again at 11:09 UTC,
@@ -116,9 +133,11 @@ review, the public repo, and the 7-day post-launch report.
 
 ## Acceptance Criteria
 
-- [ ] `milestone-2-evidence.md` covers all 6 Tranche 2 ACs, each with
-      reproducible evidence
-- [ ] 🔴 **AC 3's entry names the observable the criterion was graded against,
+- [x] `milestone-2-evidence.md` covers all 6 Tranche 2 ACs, each with
+      reproducible evidence — **written 2026-09-07, 999 lines**, §5. Each
+      criterion carries measured figures, a runnable command, and its own
+      stated limits rather than a footnote.
+- [x] 🔴 **DONE — AC 3's entry names the observable the criterion was graded against,
       and labels the latency evidence as the weaker claim in those words** —
       *a header would be the cache asserting itself; latency is behaviour
       consistent with a cache*. Not blurred, not softened. **Inherited from
@@ -127,18 +146,32 @@ review, the public repo, and the 7-day post-launch report.
       `docs/scf/milestone-2-rfp-deviations.md` §2 and noted in place against
       AC 3 in `docs/prices-api-general-overview.md` §12). ⚠️ Fold §2 in **by
       reference**; reproducing its argument makes a fourth copy that drifts.
-- [ ] Every §9 Tranche 2 work bullet addressed, including those without a
-      numbered AC
-- [ ] The three M1-deferred items ([[0124]], [[0125]], [[0126]]) are shown as
-      delivered, or their non-delivery is stated in the not-claimed section
-- [ ] "What is deliberately not claimed" section present, with a destination
-      for every row
-- [ ] Live endpoints + access table current (custom domain, dashboard role, API
-      key request path)
-- [ ] `milestone-2-form-answers.md` and `milestone-2-video-scenario.md` complete
-- [ ] `ch-demo-queries.sql` refreshed for M2 additions
-- [ ] All cited figures re-run within days of submission
-- [ ] No claim in the package lacks a task, query, or URL behind it
+- [x] Every §9 Tranche 2 work bullet addressed, including those without a
+      numbered AC — **§6**: the VWAP formula and threshold, outlier detection,
+      Aquarius as a named source, input validation. ⚠️ §6.1 corrects §9's own
+      wording: the formula runs in a ClickHouse MV, not a "Current Price
+      Updater Lambda".
+- [x] The three M1-deferred items ([[0124]], [[0125]], [[0126]]) are shown as
+      delivered — **§7**, all three, with the dashboard screenshots embedded
+      and both deploy failures during 0126 disclosed.
+- [x] "What is deliberately not claimed" section present, with a destination
+      for every row — **§8, 18 rows**, each pointing at a task or a tranche.
+- [x] Live endpoints + access table current — **§9**. Custom domain
+      throughout, `/api-docs-json` marked anonymous, dashboard viewer listed,
+      and a note that the retired `execute-api` URLs in the M1 package were
+      amended in place rather than left dead.
+- [x] `milestone-2-form-answers.md` and `milestone-2-video-scenario.md`
+      complete — form answers across all four fields with the deviations
+      declared in Field 1 body; video scenario is 8 scenes, 6-7 min, entirely
+      against the deployed API, with scene 6 built around stating the missing
+      header honestly.
+- [x] `ch-demo-queries.sql` refreshed for M2 additions — **queries (10)-(22)**
+      appended under a MILESTONE 2 banner. Column names verified against
+      `init.sql` rather than assumed (two were wrong on the first pass).
+- [ ] ⏳ **All cited figures re-run within days of submission** — the only
+      criterion that cannot be closed early by design. Checklist is at the
+      foot of `milestone-2-form-answers.md`.
+- [x] No claim in the package lacks a task, query, or URL behind it.
 
 ## Notes
 

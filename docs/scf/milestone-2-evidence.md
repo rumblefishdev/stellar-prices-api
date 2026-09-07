@@ -32,8 +32,8 @@ margin:
 > Explorer** already operates — a shared AWS sub-account and a shared Hetzner
 > ClickHouse cluster. The Soroban Block Explorer is abbreviated **SBE** below.
 >
-> Screenshot placeholders in this source are replaced with inline evidence images
-> in the published PDF.
+> Evidence images are embedded inline in the published PDF and referenced from
+> `screenshots/` in the Markdown source.
 
 ## Table of contents
 
@@ -824,8 +824,18 @@ Milestone 1. It now carries six rows: an acceptance strip of API p95 latency, 5x
 rate, cache-hit ratio and ClickHouse write latency, then the alarm strip, then API,
 ingestion, ClickHouse and backfill, workers, and enrichment and oracle panels.
 
-Screenshots are in `docs/scf/screenshots/ac8-dashboard-*.png`. A synth-time
-assertion runs in CI so the dashboard cannot silently lose a widget.
+A synth-time assertion runs in CI so the dashboard cannot silently lose a
+widget.
+
+![The acceptance strip — API p95 latency, 5xx rate, cache-hit ratio and ClickHouse write latency — above the alarm status strip covering all 49 prices-production alarms](./screenshots/ac8-dashboard-1-acceptance-strip-and-alarms.png){width=95%}
+
+![API row: request count, latency percentiles and error rates per route group on the production stage](./screenshots/ac8-dashboard-2-api.png){width=95%}
+
+![Ingestion row, including the ClickHouseWriteLatencyMs metric added by this task](./screenshots/ac8-dashboard-3-ingestion-write-latency.png){width=95%}
+
+![ClickHouse and backfill row over a 14-day window, beside the per-worker panel over 7 days](./screenshots/ac8-dashboard-4-clickhouse-backfill-workers.png){width=95%}
+
+![Enrichment and oracle row, carrying all six Prices/Enrichment metrics](./screenshots/ac8-dashboard-5-enrichment-oracle.png){width=95%}
 
 **The alarm strip covers 49 alarms**, derived from the construct tree rather than
 hard-coded, so the count maintains itself as alarms are added.
