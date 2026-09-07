@@ -2,7 +2,7 @@
 id: "0268"
 title: "close_usd on every USDC-quoted candle before 2026-03-11 assumes USDC = $1 — re-enrich 654,291 candles from the external rate, and stop stamping method: peg on assets that are not stablecoins"
 type: BUG
-status: backlog
+status: active
 related_adr: ["0011"]
 related_tasks: ["0265", "0267", "0168", "0182", "0111", "0266", "0247"]
 tags: [layer-backend, priority-medium, effort-large, milestone-M3, clickhouse, enrichment, data-correctness, stablecoin, history]
@@ -22,6 +22,10 @@ history:
       USDC's own series (defect A) and leaves this one, because it is a
       re-enrichment of stored candles, not an INSERT. Sized from the sweep in
       0265 phase 0 (135 of 232 assets carry method: peg).
+  - date: 2026-09-07
+    status: active
+    who: akot
+    note: "Activated; taken by akot after closing 0265."
 ---
 
 # Stored USD prices assume USDC is a dollar
