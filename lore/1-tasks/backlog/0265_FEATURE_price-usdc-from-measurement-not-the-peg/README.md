@@ -4,12 +4,13 @@ title: "USDC's whole price history is asserted, not measured — every candle is
 type: FEATURE
 status: backlog
 related_adr: ["0011"]
-related_tasks: ["0127", "0165", "0170", "0128", "0197", "0172"]
+related_tasks: ["0127", "0165", "0170", "0128", "0197", "0172", "0247", "0168", "0173", "0111", "0125"]
 tags: [layer-backend, layer-api, priority-medium, effort-large, milestone-M3, pricing, enrichment, data-correctness, stablecoin]
 milestone: 3
 links:
-  - "../../../packages/prices-clickhouse/schema/views.sql"
-  - "../../../docs/prices-api-general-overview.md"
+  - "../../../../packages/prices-clickhouse/schema/views.sql"
+  - "../../../../docs/prices-api-general-overview.md"
+  - "notes/memo.md"
 history:
   - date: 2026-09-04
     status: backlog
@@ -19,6 +20,16 @@ history:
       the Tranche 2 spot-check table and state why, rather than block the
       milestone on this. Deferred to M3 deliberately: the fix is structural, not
       a patch. Measured 2026-09-04 against the deployed API, not inferred.
+  - date: 2026-09-04
+    status: backlog
+    who: akot
+    note: >
+      Research delivered on feat/0265 (phases 0–6 of the brief): root cause
+      located in code, 232-asset sweep, 7 key-less sources fetched and
+      compared, 10 stablecoins on Chainlink, composition rule run over
+      2021-01-25 → today, guardrails with 6 passing tests, decision memo.
+      Status stays backlog until the promotion lands on develop (no commits
+      on the branch yet, by agreement). Converted to directory form.
 ---
 
 # USDC is priced by assertion, and the one date that would prove it wrong says $1.00
@@ -122,6 +133,56 @@ Sketch, not a plan — the first job is deciding which of these is right.
 - [ ] A consumer can tell an asserted price from a measured one without reading
       the source — decide whether `method` + `derived` + `trade_count: 0`
       already suffice, and record the answer either way.
+
+## Research delivered 2026-09-04 (branch `feat/0265_…`)
+
+Read in this order; every number is reproducible with `analysis/run.sh`.
+
+| phase | note | one line |
+|---|---|---|
+| 0 | [notes/S-phase0-root-cause.md](notes/S-phase0-root-cause.md) | the 1.0 is ours: `handlers.rs:643` → `queries_ch.rs:933`; 232-asset sweep: USDC is the only fully synthetic series, but `method: peg` sits on 135 assets incl. `native` |
+| 1 | [notes/R-source-candidates.md](notes/R-source-candidates.md), [data/sources.csv](data/sources.csv) | 19 candidates; Chainlink primary, Bitstamp fallback, Kraken cross-check; USDT-quoted venues sit 20–30 bps off in stress |
+| 2 | [notes/R-peer-stablecoins.md](notes/R-peer-stablecoins.md) | no peer is a proxy: DAI corr 0.994 (collateral), USDT −0.81 (flight-to), the rest idiosyncratic |
+| 3 | [notes/S-composition-rule.md](notes/S-composition-rule.md) | primary + flagged fallback/dispute, no averaging, no forward fill; `source`/`quality`/`n_obs` on the wire |
+| 4 | [notes/S-guardrails.md](notes/S-guardrails.md), `analysis/guardrails.py` | `trade_count = 0` is the only standalone discriminator; thresholds 2–4× outside the noisiest real window; 6 tests green |
+| 5 | [notes/S-backfill-migration.md](notes/S-backfill-migration.md) | full backfill via [[0247]]'s `usd_rate` path, view first, rows never deleted |
+| 6 | `analysis/compose_usdc.py`, `figures/` | composed series 2021-01-25 → today: 98.6 % measured, 1.2 % fallback, 0.2 % disputed; 2023-03-11 close 0.9681 |
+| memo | [notes/memo.md](notes/memo.md) | ADR draft: decision, rationale, alternatives, next-ticket plan |
+
+**The number for the top of the memo:** 1-day 99 % VaR of our series 0 bps;
+measured 6 bps, ES 25 bps, worst day 300 bps.
+
+## Design Decisions
+
+### From Plan
+
+1. **Chainlink rounds as the primary anchor**, Bitstamp fallback, Kraken
+   cross-check — chosen on measured dispersion, not on preference.
+2. **Backfill via [[0247]]'s design** (`usd_rate`, `method='external'`, view
+   first) rather than a second mechanism.
+
+### Emerged
+
+3. **No GSD for this task** — a research memo has no executor to dispatch;
+   worked directly in the session.
+4. **Peers measured on Chainlink, not on venues**, so the correlation table
+   has one source and one method; hourly-heartbeat feeds sampled every 2nd–4th
+   round (`stride` column), daily closes unaffected.
+5. **Coin Metrics kept as analysis-only** because of CC BY-NC.
+6. **Large reproducible CSVs gitignored** (`data/.gitignore`: Kraken trades
+   28 MB, four peer round files ≈ 1 MB each); everything else in `data/` is
+   versioned so the notes' numbers can be checked without refetching.
+7. **The `.gitignore` root entry `.claude/`** was added on request; the four
+   already-tracked files under `.claude/` stay tracked until a `git rm --cached`.
+
+## Future Work (to file as backlog tasks on develop — needs a push)
+
+- Implementation ticket for the memo's plan (loader, `ohlcv_peg_series`
+  accepting `external`, DTO fields, CI fixture, alarms). Could be [[0247]]
+  re-scoped rather than a new id.
+- Defect B: re-enrichment of `close_usd` on USDC-quoted candles and the
+  `method` vocabulary change (`peg` on non-stablecoins) — against [[0111]].
+- Peer-basket alarm (USDC vs DAI beta) once the phase-4 alarms exist.
 
 ## Notes
 

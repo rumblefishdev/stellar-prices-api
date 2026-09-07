@@ -53,6 +53,7 @@ web/portal/src/api/generated.ts
 !.vscode/extensions.json
 .claude/worktrees
 .claude/settings.local.json
+.claude/
 
 # user editor settings
 # !.vscode/settings.json
@@ -109,3 +110,11 @@ conformance-0120-report-*.json
 
 # Load-test wide asset pool (task 0121) — a production snapshot, regenerated per run
 packages/prices-api/loadtest/pool-wide.json
+
+# 0265 research: raw data and reproduction scripts stay local (see analysis/run.sh); notes, figures and sources.csv are versioned
+lore/1-tasks/backlog/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/*
+!lore/1-tasks/backlog/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/sources.csv
+lore/1-tasks/backlog/0265_FEATURE_price-usdc-from-measurement-not-the-peg/analysis/*
+!lore/1-tasks/backlog/0265_FEATURE_price-usdc-from-measurement-not-the-peg/analysis/guardrails.py
+.planning/
+.gsd/
