@@ -24,6 +24,21 @@ history:
     status: active
     who: okarcz
     note: >
+      📥 **AC 1 evidence is in — [[0120]] closed the same day, and with it the
+      last unmet Tranche 2 criterion.** Cite: **1032 pass, 0 fail, 0 skip**,
+      exit 0, on production 2026-09-07 at 10:40 and again at 11:09 UTC,
+      reproducible with `npm run conformance:0120`. Reports are gitignored as
+      regenerable, so the numbers in 0120 are the citation. ⚠️ **Two things
+      this package must state rather than smooth over**: the check count rose
+      886 → 1032 because assertions were *added*, and **no production code
+      changed** — every failure that disappeared was a defect in the test, not
+      a fix to the API. Also fold in [[0230]]'s determinism proof (1,032
+      identical verdicts across two runs while 53 details moved), because it is
+      what makes the report citable rather than a snapshot.
+  - date: 2026-09-07
+    status: active
+    who: okarcz
+    note: >
       Activated alongside [[0262]], which is the last input this package was
       waiting on. 0262 produced the Tranche 2 AC 3 position: the criterion is
       graded against a reworded observable, declared in
