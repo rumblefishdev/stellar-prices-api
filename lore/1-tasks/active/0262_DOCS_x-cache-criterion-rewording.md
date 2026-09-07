@@ -1,6 +1,6 @@
 ---
 id: "0262"
-title: "Tranche 2 AC 3 cannot pass as written — the `X-Cache: Hit` header does not exist and is not being added; the criterion needs the reviewer's agreement"
+title: "Tranche 2 AC 3 cannot pass as written — the `X-Cache: Hit` header does not exist and is not being added; the criterion is amended in place and justified in the repo"
 type: DOCS
 status: active
 related_adr: ["0008", "0012"]
@@ -33,6 +33,19 @@ history:
       skipped rather than faked. Written up as **ADR 0012**. What remains is the
       conversation this task always owned: the team, then the reviewer, on AC
       3's wording — no code, and it must happen before submission.
+  - date: 2026-09-07
+    status: active
+    who: okarcz
+    note: >
+      🔒 **Second decision by the operator: the reviewer is not messaged.** The
+      criterion is amended in place and the amendment is justified in the repo,
+      inside the submission package. Delivered: `milestone-2-rfp-deviations.md`
+      §2 expanded from 22 lines to the full argument (~146), an in-place
+      amendment note on AC 3 in the overview's criteria list matching the one
+      AC 2 already carries, and the cache-verification document reframed from
+      requesting a rewording to declaring one. [[0128]] activated the same day
+      so the remaining AC has somewhere to land. ⚠️ The engineering decision of
+      2026-09-04 is untouched — no CloudFront, no header; see ADR 0012.
 ---
 
 # Tranche 2 AC 3 — the `X-Cache: Hit` criterion, and why we are not satisfying it literally
@@ -225,15 +238,31 @@ that matters most for a future session — an explicit **"when to revisit"**
 list, with a warning that *"someone asked for `X-Cache` again"* is **not** on
 it.
 
-There is no code in this task and there never was. What is left:
+**The delivery question is settled too — 2026-09-07, by the operator.** The
+reviewer is **not** messaged. The amendment is declared and justified *in the
+repo*, carried to the reviewer by the submission package itself. The reasoning
+is that the argument is long and evidence-led and already written down; a chat
+message would be a lossy second copy of it that then drifts. M1 was accepted
+carrying an *"In-tranche scope refinements"* section of exactly this shape.
 
-- 🔴 **Raise the wording with the reviewer, in writing, BEFORE the milestone
-  package is submitted.** Not declared inside [[0128]] and hoped through. Point
-  them at `docs/prices-api-cache-verification.md`, which is written for exactly
-  that reader, and at ADR 0012 if they ask why the edge was not built.
-- Brief the team first. The one-line version: *the header does not exist, the
-  cheap fix would lie, and the expensive fix emits the wrong string anyway.*
-- Record the reviewer's answer here, and in [[0128]]'s criterion table.
+⚠️ This supersedes, but does not contradict, the earlier plan above. Nothing
+about the **engineering** decision changed — ADR 0012 stands unedited.
+
+There is no code in this task and there never was. Delivered 2026-09-07:
+
+- **`docs/scf/milestone-2-rfp-deviations.md` §2 — the artefact that does the
+  work.** Was a 22-line pointer; now the full argument. States the reworded
+  criterion verbatim, names the weakened claim in those words, proves the
+  handler-written header would report `Miss` on every genuine hit (body-hash
+  table), shows CloudFront emits the wrong string, gives the precedent for
+  amending in place, presents the latency evidence, and names
+  `/backfill/status` as the weakest route rather than letting a reader find it.
+- **`docs/prices-api-general-overview.md` §12** — AC 3 now carries an in-place
+  amendment note, the same treatment AC 2 already has for [[0157]].
+- **`docs/prices-api-cache-verification.md`** — reframed from *requests a
+  rewording* to *declares one*. Evidence untouched.
+
+What is left: [[0128]] must carry the AC 3 entry. Activated 2026-09-07.
 
 ## Acceptance Criteria
 
@@ -244,11 +273,29 @@ There is no code in this task and there never was. What is left:
 - [x] The reasoning is written down where a future session will find it before
       re-opening the question — **ADR 0012**, accepted, cross-linked from this
       task and from `docs/prices-api-cache-verification.md`.
-- [ ] 🔴 The reviewer has been asked, in writing, before submission, and the
-      answer is recorded here. **This is now the whole task.**
+- [x] 🔴 ~~The reviewer has been asked, in writing, before submission~~ —
+      **superseded 2026-09-07 by the operator: no message is sent.** The
+      amendment is *declared and justified in the repo*, where the submission
+      package carries it, rather than negotiated in advance. Reason: the
+      argument is long, evidence-led and already written; a chat message would
+      be a lossy second copy of it, and M1 was accepted on exactly this
+      discipline of declaring in-tranche refinements in the package itself.
+- [x] The justification a reviewer reads is written and is part of the M2
+      package — `docs/scf/milestone-2-rfp-deviations.md` §2, rewritten from a
+      20-line pointer into the full argument: the reworded criterion verbatim,
+      why the header cannot exist, both closed alternatives with their
+      measurements, the precedent for amending in place, and the evidence with
+      its weakest route named.
+- [x] The criteria list itself carries an in-place amendment note against AC 3
+      — `docs/prices-api-general-overview.md` §12, matching the note AC 2
+      already carries about [[0157]].
+- [x] The two artefacts no longer describe a conversation that will not happen
+      — `docs/prices-api-cache-verification.md` reframed from *requests a
+      rewording* to *declares one*; ADR 0012 unchanged, it was already written
+      as a decision.
 - [ ] [[0128]]'s AC 3 entry states which observable the criterion was graded
       against, and labels the latency evidence as the weaker claim in those
-      words — not blurred.
+      words — not blurred. **0128 activated 2026-09-07**; this closes there.
 
 ## Notes
 
