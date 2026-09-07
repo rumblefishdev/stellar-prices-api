@@ -1759,6 +1759,11 @@ pub fn external_window_s(table: &str) -> u32 {
 /// The 0268 reset run refuses outright if `oracle_prices` holds ANY canonical
 /// USDC reading below the epoch (`assert_no_pre_epoch_oracle_rows`), so on the
 /// operator's campaign the exposure is zero by measurement, not by prose.
+/// The SCHEDULED pass carries no such guard (review round 3, IN-17): its
+/// exposure needs the very same pre-epoch `oracle_prices` reading, which is
+/// the count Appendix B precondition 3 blocks the campaign on, so an operator
+/// who ran the precondition has also bounded the Lambda's pass; if that count
+/// ever becomes non-zero, the guard belongs in `run()` as well.
 /// `external_tier_never_overwrites_a_candle_the_oracle_tier_priced` proves the
 /// `close_usd` outcome end to end.
 fn external_sql(db: &str, tbl: &str, usdc_id: u32, window: &str) -> String {

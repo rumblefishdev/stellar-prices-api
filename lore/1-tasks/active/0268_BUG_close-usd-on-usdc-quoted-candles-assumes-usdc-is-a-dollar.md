@@ -348,6 +348,21 @@ test reads the labels off `usd_method_expr`'s rendered `multiIf`
 out of the copy-pasteable flag block into the prose. **IN-12** left, recorded
 as Issue 11.
 
+**Review round 3** (`gsd-code-reviewer`, 2026-09-07, on `df6fdf6`: 0
+blockers, 1 warning, 4 info — verdict "ready for PR"; the nine invariants
+re-proved on the final tree). **WR-11** the CI test for the version-baseline
+variable mutated the process environment with `unsafe set_var`, which under
+`--include-ignored` could race the operator's after-check and hand `_1M` a
+fake baseline; the name derivation and the parser are now two pure functions
+tested without touching the environment. **IN-17** the scheduled Lambda's
+external tier runs without the pre-epoch guard the reset run has; the doc
+block now says so and why precondition 3 covers it. **IN-15** (`max(version)`
+proves the pass reached the bucket, not that it covered every row), **IN-16**
+(runbook "before" queries and `measure` aggregate over different row sets)
+and **IN-18** ("unset" and "unparsable" share one finding) are recorded here
+and left as they are: the first two are properties of the mechanism check by
+design, the third is wording.
+
 ## Design Decisions
 
 ### From Plan

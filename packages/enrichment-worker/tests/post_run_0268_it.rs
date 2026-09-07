@@ -283,12 +283,23 @@ async fn bucket_end_rate(ch: &Client, bucket_end: u32) -> Option<f64> {
 /// the variable is unset or unparsable — which [`judge`] reports as a finding,
 /// never as a pass.
 fn version_before_from_env(table: &str) -> Option<u64> {
+    let name = version_before_var_name(table)?;
+    parse_version_before(std::env::var(name).ok().as_deref())
+}
+
+/// The variable name the runbook's "before" step must export for `table`;
+/// `None` for anything that is not a `price_ohlcv_*` grain.
+fn version_before_var_name(table: &str) -> Option<String> {
     let suffix = table.strip_prefix("price_ohlcv_")?.to_ascii_uppercase();
-    std::env::var(format!("POST_RUN_0268_VERSION_BEFORE_{suffix}"))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+    Some(format!("POST_RUN_0268_VERSION_BEFORE_{suffix}"))
+}
+
+/// Pure parser for the baseline: unset, blank or unparsable is `None`, and
+/// [`judge`] turns `None` into a finding, never a pass. Kept free of the
+/// process environment so the CI test cannot race the falsifier under
+/// `--include-ignored` (review round 3, WR-11).
+fn parse_version_before(raw: Option<&str>) -> Option<u64> {
+    raw?.trim().parse().ok()
 }
 
 /// 🔑 THE JUDGEMENT, pure so CI can test it. `None` is a pass; `Some` is the
@@ -685,13 +696,20 @@ fn every_window_covers_the_depeg_day_and_the_mechanism_windows_are_one_bucket() 
 /// `POST_RUN_0268_VERSION_BEFORE_1W` / `_1M` and this file cannot drift apart.
 #[test]
 fn the_version_baseline_is_read_from_a_per_table_variable() {
-    // SAFETY-adjacent: tests in this binary do not otherwise touch the env, and
-    // the two names are unique to this test.
-    unsafe {
-        std::env::set_var("POST_RUN_0268_VERSION_BEFORE_1M", " 7 ");
-        std::env::remove_var("POST_RUN_0268_VERSION_BEFORE_1W");
-    }
-    assert_eq!(version_before_from_env("price_ohlcv_1M"), Some(7));
-    assert_eq!(version_before_from_env("price_ohlcv_1w"), None);
-    assert_eq!(version_before_from_env("not_a_table"), None);
+    // Pure on both sides: the name derivation and the parser are tested
+    // without touching the process environment, so this test cannot hand the
+    // falsifier a fake baseline when the binary runs with --include-ignored.
+    assert_eq!(
+        version_before_var_name("price_ohlcv_1M").as_deref(),
+        Some("POST_RUN_0268_VERSION_BEFORE_1M")
+    );
+    assert_eq!(
+        version_before_var_name("price_ohlcv_1w").as_deref(),
+        Some("POST_RUN_0268_VERSION_BEFORE_1W")
+    );
+    assert_eq!(version_before_var_name("not_a_table"), None);
+    assert_eq!(parse_version_before(Some(" 7 ")), Some(7));
+    assert_eq!(parse_version_before(Some("")), None);
+    assert_eq!(parse_version_before(Some("seven")), None);
+    assert_eq!(parse_version_before(None), None);
 }
