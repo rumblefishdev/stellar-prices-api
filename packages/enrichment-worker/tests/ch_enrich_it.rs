@@ -13,7 +13,7 @@ use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPa
 use enrichment_worker::repair::{
     CoarseRepairConfig, CoarseRepairDriver, CoarseSweepConfig, run_coarse_sweep,
 };
-use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
+use prices_clickhouse::{USDC_ISSUER, USDC_ORACLE_EPOCH_S, USDT_ISSUER};
 
 fn ch_url() -> String {
     std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string())
@@ -1968,6 +1968,149 @@ async fn external_tier_leaves_a_bucket_with_no_usable_rate_on_the_peg_value() {
     assert!(
         stats.rows_enriched > 0,
         "the pass still prices the other tiers' candles"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Read `volume_quote_usd` from the 1m base table, the companion of [`close_usd`].
+async fn volume_quote_usd(client: &Client, db: &str, asset: u32, quote: u32, ts: u32) -> f64 {
+    client
+        .query(&format!(
+            "SELECT toFloat64(volume_quote_usd) FROM {db}.price_ohlcv_1m FINAL \
+             WHERE asset_id = ? AND quote_asset_id = ? AND timestamp = ?"
+        ))
+        .bind(asset)
+        .bind(quote)
+        .bind(ts)
+        .fetch_one::<f64>()
+        .await
+        .unwrap()
+}
+
+/// Insert one FOO/USDC candle into the 1m base table with the USD columns as
+/// given, so a test can stage a row in a specific pre-enrichment state.
+async fn seed_foo_usdc_candle(client: &Client, db: &str, ts: u32, close: f64, vqu: f64) {
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES ({ts}, 10, 2, 'sdex', {close}, {close}, {close}, {close}, \
+                     1, {close}, {vqu}, 0, {close}, 1, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// (d) 🔑 REVIEW CR-01. A `_1m` candle at **23:30 UTC** resolves to ITS OWN
+/// day's rate, not the next day's.
+///
+/// The first `bucket_end_expr` floored every sub-daily grain to `+ 3600`, so a
+/// 23:30 one-minute bucket got `bend = 00:30` next day and the ASOF `rts < bend`
+/// picked the NEXT day's row from a series stamped at day start. On the depeg
+/// day that is 0.99 instead of 0.9681 — a plausible number, ~2% wrong in the
+/// wrong direction, on the scheduled Lambda's own table. Two rates a day apart,
+/// distinguishable by value, and the candle in the last hour of the first day.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_one_minute_bucket_in_the_last_hour_of_a_day_gets_that_days_rate() {
+    let db = "it_enrich_external_day_boundary";
+    let client = setup_scratch(db).await;
+    seed_assets_and_candles(&client, db).await;
+    // 23:30 UTC on the deep fixture's day (2020-09-13).
+    let late = DEEP_DAY_START + 23 * 3_600 + 30 * 60;
+    seed_foo_usdc_candle(&client, db, late, 4.0, 0.0).await;
+    seed_external_rate(&client, db, DEEP_DAY_START, DEPEG_RATE).await;
+    seed_external_rate(&client, db, DEEP_DAY_START + 86_400, 0.99).await;
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let got = close_usd(&client, db, 10, 2, late).await;
+    assert!(
+        (got - 4.0 * DEPEG_RATE).abs() < 1e-4,
+        "a 23:30 bucket belongs to its own day: expected 4 × 0.9681 = 3.8724, got {got} \
+         — 3.96 means the bucket end overshot midnight and the next day's rate was used"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// (e) 🔑 REVIEW WR-04. Above `USDC_ORACLE_EPOCH_S` the external tier does NOT
+/// run, even with a covering imported rate and no oracle reading.
+///
+/// The API labels every scaled USDC-quoted candle at or after the epoch
+/// `oracle`. If the tier priced a post-epoch oracle miss from the import, the
+/// wire would report a Reflector poll that never happened. The candle must fall
+/// to the peg tier instead, where its `close_usd = close` signature reads as
+/// `assumed-par` — the truth.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn external_tier_never_prices_a_candle_above_the_oracle_epoch() {
+    let db = "it_enrich_external_epoch_bound";
+    let client = setup_scratch(db).await;
+    seed_assets_and_candles(&client, db).await;
+    // 2026-03-12 01:00 UTC: the day after the epoch, with a rate for that day.
+    let day_after = USDC_ORACLE_EPOCH_S + 36_000;
+    let post = day_after + 3_600;
+    seed_foo_usdc_candle(&client, db, post, 6.0, 0.0).await;
+    seed_external_rate(&client, db, day_after, 0.90).await;
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let got = close_usd(&client, db, 10, 2, post).await;
+    assert!(
+        (got - 6.0).abs() < 1e-4,
+        "above the epoch the tier must not write: expected the peg tier's 6 × $1 = 6.0, \
+         got {got} — 5.4 means the import priced a candle the wire will label `oracle`"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// (f) 🔑 REVIEW WR-06. A row enriched before `close_usd` existed
+/// (`volume_quote_usd = volume_quote × $1`, `close_usd = 0`) comes out with BOTH
+/// USD columns from the one imported rate — never `close_usd` at 0.9681 beside a
+/// `volume_quote_usd` still at par.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn external_tier_recomputes_a_half_priced_row_from_the_one_reference() {
+    let db = "it_enrich_external_half_priced";
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    // volume_quote_usd already at ×$1 (4.0), close_usd still 0.
+    seed_foo_usdc_candle(&client, db, DEEP_TS, 4.0, 4.0).await;
+    seed_external_rate(&client, db, DEEP_DAY_START, DEPEG_RATE).await;
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let c = close_usd(&client, db, 10, 2, DEEP_TS).await;
+    let v = volume_quote_usd(&client, db, 10, 2, DEEP_TS).await;
+    assert!(
+        (c - 3.8724).abs() < 1e-4,
+        "close_usd from the measured rate, got {c}"
+    );
+    assert!(
+        (v - 3.8724).abs() < 1e-4,
+        "volume_quote_usd must be recomputed from the SAME rate, got {v} — 4.0 is the \
+         half-priced row: two USD figures for one candle at different rates"
     );
 
     client

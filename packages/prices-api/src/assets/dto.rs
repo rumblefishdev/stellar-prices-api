@@ -316,6 +316,11 @@ pub struct Candle {
     ///   cosmetic distinction from `assumed-par`.
     /// - `oracle` — a measured Reflector reading.
     /// - `traded` — priced through a reference asset's own traded candles.
+    /// - `peg` — **only on the synthesized USDC self-series**
+    ///   (`GET /assets/USDC:<issuer>/ohlcv`, [`crate::assets::queries_ch::ohlcv_peg_series`]):
+    ///   no measured USDC/USD observation covered the bucket, so the $1
+    ///   fallback was rendered — 0165's original meaning, which still holds
+    ///   there. Never on a quote leg, where the same situation is `assumed-par`.
     ///
     /// Every value names the INPUT the rate came from, never the outcome: a
     /// bucket reading exactly 1.0 under `external` or `oracle` is a measurement

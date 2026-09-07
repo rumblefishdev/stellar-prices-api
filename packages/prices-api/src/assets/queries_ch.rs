@@ -1040,6 +1040,7 @@ fn usd_method_expr(usdc: u32, pivots: &[u32]) -> String {
          '') AS meth"
     )
 }
+
 /// Read merged candles for one asset at the chosen grain, denominated per
 /// [ADR 0011].
 ///

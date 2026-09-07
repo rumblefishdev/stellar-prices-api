@@ -316,7 +316,10 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          measured; the literal 1.0 supplied the value, i.e. USDC was taken at 1 USD.\n* \
          `external` — an imported, measured USDC/USD series supplied the rate.\n* `oracle` — \
          a measured Reflector reading supplied the rate.\n* `traded` — priced through a \
-         reference asset's own trades.\n\nEach value names the INPUT the rate came from, so \
+         reference asset's own trades.\n* `peg` — only on the synthesized USDC self-series \
+         (`GET /assets/USDC:<issuer>/ohlcv`): no measured USDC/USD observation covered the \
+         bucket, so the $1 fallback was rendered. Never appears on a quote leg — there the \
+         same situation is `assumed-par`.\n\nEach value names the INPUT the rate came from, so \
          `assumed-par` and `external` are never interchangeable: one is an assumption, the \
          other a measurement that may sit percent off par.\n\n`null` when the price fields \
          are `null`, and always `null` for `base_currency=XLM`, where nothing is \
@@ -595,5 +598,36 @@ impl Modify for Descriptions {
                 describe(property, text);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `method` value the API can put on the wire is named in the
+    /// published description (task 0268 review, WR-03). Two emitters feed the
+    /// one `Candle` schema: `queries_ch::usd_method_expr` (the candle path:
+    /// `assumed-par` / `external` / `oracle` / `traded`) and
+    /// `queries_ch::ohlcv_peg_series` (USDC's own series: `peg` / `oracle`). A
+    /// client generated from the schema must never meet a value the contract
+    /// does not name — that was true before 0268 split the vocabulary, and the
+    /// split dropped `peg` from the list while the self-series kept emitting it.
+    #[test]
+    fn candle_method_description_names_every_value_either_emitter_produces() {
+        let (_, _, text) = FIELDS
+            .iter()
+            .find(|(schema, field, _)| *schema == "Candle" && *field == "method")
+            .expect("Candle.method is described");
+        for value in ["assumed-par", "external", "oracle", "traded", "peg"] {
+            assert!(
+                text.contains(&format!("`{value}`")),
+                "Candle.method description does not name `{value}`:\n{text}"
+            );
+        }
+        // And `peg` is scoped to where it can appear, so nobody reads it as a
+        // quote-leg value again.
+        assert!(text.contains("USDC:<issuer>"), "{text}");
+        assert!(text.contains("Never appears on a quote leg"), "{text}");
     }
 }

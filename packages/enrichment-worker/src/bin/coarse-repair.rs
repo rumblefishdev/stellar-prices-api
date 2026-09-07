@@ -320,12 +320,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         one_shot: true,
         time_window: None,
         usd_reset: match (args.reset_quote_asset_id, args.reset_not_before) {
-            (Some(quote_asset_id), Some(not_before)) => Some(UsdResetSpec {
-                quote_asset_id,
-                not_before,
-                not_after,
-                require_external_rate: args.reset_require_external_rate,
-            }),
+            (Some(quote_asset_id), Some(not_before)) => {
+                let spec = UsdResetSpec {
+                    quote_asset_id,
+                    not_before,
+                    not_after,
+                    require_external_rate: args.reset_require_external_rate,
+                };
+                // 4. An empty [not_before, not_after) window (task 0268 review,
+                //    WR-05). Refused HERE, before a connection is opened, and
+                //    not only inside the library's reset_step: the driver
+                //    enumerates months with the same predicate first, an
+                //    unsatisfiable predicate finds no month, and reset_step is
+                //    never reached — the run would end green having touched
+                //    nothing. Applies to dry runs too; a dry run over an empty
+                //    window is the false all-clear, not a rehearsal.
+                spec.validate()?;
+                Some(spec)
+            }
             // clap's `requires` makes the mixed cases unreachable.
             _ => None,
         },

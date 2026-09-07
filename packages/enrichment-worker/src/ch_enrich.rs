@@ -181,6 +181,25 @@ pub enum ChEnrichError {
     )]
     ResetRequiresExternalRates { quote_asset_id: u32 },
 
+    /// A [`UsdResetSpec`] whose `[not_before, not_after)` window is empty (task
+    /// 0268 review, WR-05). See [`UsdResetSpec::validate`] for why this is an
+    /// error and not a no-op.
+    #[error(
+        "USD reset refused: --reset-not-before {not_before} is at or above the \
+         reset's upper bound {not_after} (quote asset_id {quote_asset_id}). The \
+         window [{not_before}, {not_after}) is empty, so the reset would match \
+         nothing and report a clean run having touched nothing.\n\
+         --reset-not-after defaults to USDC_ORACLE_EPOCH_S ({epoch}) when \
+         --reset-require-external-rate is passed; check the two values are in \
+         seconds, not milliseconds, and in the right flags.",
+        epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S
+    )]
+    ResetWindowEmpty {
+        quote_asset_id: u32,
+        not_before: u32,
+        not_after: u32,
+    },
+
     /// A [`UsdResetSpec`] named a quote leg that **no tier can price**, so every
     /// row it zeroed would stay at `close_usd = 0` permanently.
     ///
@@ -284,6 +303,36 @@ pub struct UsdResetSpec {
     pub require_external_rate: bool,
 }
 
+impl UsdResetSpec {
+    /// Refuse a window that can match nothing (task 0268 review, WR-05).
+    ///
+    /// `reset_pending_pred` renders `timestamp >= not_before AND timestamp <
+    /// not_after`; with `not_before >= not_after` that is unsatisfiable, so
+    /// `count_reset_pending` returns 0, [`ChEnrichmentPass`] reports `Ok(0)`, and
+    /// the repair driver's month enumeration — which runs BEFORE `reset_step`
+    /// and splices the same predicate — finds no month worth visiting. The run
+    /// then completes green having discarded and repaired nothing: the exact
+    /// "clean, healthy, entirely empty repair" that hid task 0182 for a month.
+    ///
+    /// A mistyped year, a millisecond timestamp, or the epoch copied into the
+    /// wrong flag all produce that shape. Every other footgun in the reset path
+    /// is refused rather than warned about; this one is too. Pure, so the CLI
+    /// can refuse before it opens a connection and the library refuses even
+    /// when driven by something other than the CLI.
+    pub fn validate(&self) -> Result<(), ChEnrichError> {
+        if let Some(na) = self.not_after
+            && self.not_before >= na
+        {
+            return Err(ChEnrichError::ResetWindowEmpty {
+                quote_asset_id: self.quote_asset_id,
+                not_before: self.not_before,
+                not_after: na,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// The steady-state candidate shape: a row missing either USD column, with
 /// volume to price. Shared by [`ChEnrichmentPass::count_candidates`] and the task
 /// 0114 repair driver's month enumeration.
@@ -349,9 +398,18 @@ pub fn reset_pending_pred(db: &str, spec: &UsdResetSpec) -> String {
 /// costs one stale value that a later run can still fix; the reset zeroing an
 /// unrefillable row is the incident. Only one of those two errors is
 /// recoverable, so the predicate is biased toward the recoverable one.
+///
+/// ## Why `'UTC'` is spelled out
+///
+/// `timestamp` is a bare `DateTime`, so `toDate(timestamp)` uses the SERVER
+/// timezone and nothing in this repo pins it. On a non-UTC server a rate
+/// stamped 00:00 UTC and a candle at 23:30 UTC land on different local dates,
+/// and the day-set slides by the UTC offset. `views.sql`'s position is that
+/// correctness must not depend on the server timezone; this predicate takes the
+/// same position by naming the zone at the expression.
 fn external_rate_day_pred(db: &str) -> String {
     format!(
-        "toDate(timestamp) IN (SELECT toDate(timestamp) FROM {db}.usd_rate FINAL \
+        "toDate(timestamp, 'UTC') IN (SELECT toDate(timestamp, 'UTC') FROM {db}.usd_rate FINAL \
          WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
            AND issuer_address = '{USDC_ISSUER}' AND contract_address = '' \
            AND method = 'external')"
@@ -891,6 +949,9 @@ impl ChEnrichmentPass {
         // Three refusals, in increasing cost order. Every one of them protects
         // the same property: nothing is zeroed unless a tier in THIS pass can
         // put a value back.
+        // Zeroth, and free: an empty window (WR-05). The CLI refuses it too,
+        // before the driver's month enumeration silently finds nothing.
+        spec.validate()?;
         if !self.cfg.one_shot {
             return Err(ChEnrichError::ResetRequiresOneShot {
                 quote_asset_id: spec.quote_asset_id,
@@ -1470,12 +1531,35 @@ fn bucket_width_s(table: &str) -> u32 {
 /// fixed days: `timestamp + 2_678_400` overshoots every 30-day month and every
 /// February by days, so the ASOF resolves against the wrong day's rate for
 /// eleven months of twelve. It produces a plausible number and fails nowhere.
+///
+/// ⚠️ **Each fixed grain uses its OWN width — never a floor.** `bend` is the
+/// ASOF's upper bound (`r.rts < p.bend`), not a staleness allowance (that is
+/// [`external_window_s`]), so widening it changes WHICH rate is selected. The
+/// first version of this fn floored every sub-daily grain at one hour; a `_1m`
+/// candle at 23:30 UTC then got `bend = 00:30` the next day and, with a daily
+/// series stamped at day start, resolved to the NEXT day's rate — 59 of 1440
+/// one-minute buckets and 3 of 96 fifteen-minute buckets per UTC day, priced
+/// from the wrong day, on the default table of the scheduled Lambda. Only an
+/// UNKNOWN table (width 0) falls back to an hour, and only because there is no
+/// right answer for it; `bucket_end_and_width_agree_for_every_known_grain`
+/// pins the rest.
+///
+/// ⚠️ **`'UTC'` is spelled out on the calendar functions.** `timestamp` is a
+/// bare `DateTime`, so `addDays`/`addWeeks`/`addMonths` would otherwise use the
+/// SERVER timezone, which nothing pins. Across a DST fall-back `addDays(ts, 1)`
+/// in a local zone is 25 hours, `bend - rts` then exceeds the one-day staleness
+/// bound, and an anchor that exists is dropped — the reset has already zeroed
+/// that row, so it falls to the peg tier and silently regresses to $1.00 on DST
+/// days. Under `'UTC'` there is no DST and a day is 86 400 s.
 fn bucket_end_expr(table: &str, col: &str) -> String {
     match table {
-        "price_ohlcv_1d" => format!("addDays({col}, 1)"),
-        "price_ohlcv_1w" => format!("addWeeks({col}, 1)"),
-        "price_ohlcv_1M" => format!("addMonths({col}, 1)"),
-        other => format!("{col} + {}", bucket_width_s(other).max(3_600)),
+        "price_ohlcv_1d" => format!("addDays({col}, 1, 'UTC')"),
+        "price_ohlcv_1w" => format!("addWeeks({col}, 1, 'UTC')"),
+        "price_ohlcv_1M" => format!("addMonths({col}, 1, 'UTC')"),
+        other => match bucket_width_s(other) {
+            0 => format!("{col} + 3600"),
+            w => format!("{col} + {w}"),
+        },
     }
 }
 
@@ -1545,18 +1629,57 @@ pub fn external_window_s(table: &str) -> u32 {
 /// and every unmatched bucket would be written `close_usd = 0 * close = 0` —
 /// re-zeroing rows another tier had already priced.
 ///
-/// `volume_quote_usd` is write-once (`if(p.volume_quote_usd > 0, …)`), which is
-/// the guard that makes the ORACLE tier win: a candle it priced keeps its
-/// depeg-aware value even if this statement reaches the row.
+/// ## Why the reference needs no `GROUP BY rts` (unlike `ohlcv_peg_series`)
+///
+/// The read side wraps its `usd_rate` scan in `argMax(rate, rts) … GROUP BY
+/// rts` because it reads `method = 'oracle'` rows through a projection that
+/// may later be widened. Here `method` is pinned to one value and `method` is
+/// the LAST column of `usd_rate`'s sorting key, so `FINAL` yields at most one
+/// row per `rts` and the ASOF is unambiguous. ⚠️ That holds only while the
+/// `method` filter stays a single equality: relax it to an `IN` and two rows
+/// can share an `rts`, at which point this needs the read side's `GROUP BY`.
+///
+/// ## Why the candidate side is ALSO bounded above by `USDC_ORACLE_EPOCH_S`
+///
+/// The API labels a scaled USDC-quoted candle by its timestamp alone: below the
+/// epoch `external`, at or above it `oracle` (`queries_ch::usd_method_expr`,
+/// decision E). That label is only true if this tier never writes above the
+/// epoch — otherwise a post-epoch candle the oracle tier missed (a Reflector
+/// outage, a poll gap wider than `window_s`) would be priced from the import
+/// and reported as a poll that never happened, the mis-attribution task 0247
+/// forbids. Bounding the tier to the SAME constant makes the two populations
+/// identical by construction; a post-epoch oracle miss falls to the peg tier
+/// and is reported as `assumed-par`, which is the truth.
+///
+/// ## Why BOTH USD columns are recomputed from the one reference
+///
+/// The other tiers keep `volume_quote_usd` write-once. This one does not,
+/// because its candidate set includes rows enriched before `close_usd` existed
+/// (`volume_quote_usd > 0`, `close_usd = 0`), and on a USDC leg below the epoch
+/// that `volume_quote_usd` can only have been `volume_quote × $1.00` — no
+/// oracle had priced USDC yet. Keeping it beside a `close_usd` at 0.9681 is the
+/// row `reset_sql`'s doc block rejects: two USD figures for one candle derived
+/// from different rates, incoherent no matter which a consumer reads. And a
+/// write-once guard here would leave those rows for the peg tier, giving them
+/// the par signature AFTER the reset step has already run — so the operator's
+/// one-shot campaign would end with rows AC 1 says must not exist.
+///
+/// "Oracle values win" still holds, by a different mechanism: the epoch bound
+/// above. `USDC_ORACLE_EPOCH_S` is by definition the first oracle row for
+/// canonical USDC, so no candidate row can carry an oracle-set value; and the
+/// reset run's oracle-shadow guard refuses the run outright if that premise is
+/// ever false on prod. `external_tier_never_overwrites_a_candle_the_oracle_tier_priced`
+/// proves the outcome end to end.
 fn external_sql(db: &str, tbl: &str, usdc_id: u32, window: &str) -> String {
     let bend = bucket_end_expr(tbl, "timestamp");
+    let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
     format!(
         "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
          SELECT \
              p.timestamp, p.asset_id, p.quote_asset_id, p.source, \
              p.open, p.high, p.low, p.close, \
              p.volume_base, p.volume_quote, \
-             if(p.volume_quote_usd > 0, p.volume_quote_usd, CAST(r.usd * p.volume_quote AS Decimal(38, 14))) AS volume_quote_usd, \
+             CAST(r.usd * p.volume_quote AS Decimal(38, 14)) AS volume_quote_usd, \
              CAST(r.usd * p.close AS Decimal(38, 14)) AS close_usd, \
              p.vwap, p.trade_count, \
              p.version + 1 AS version \
@@ -1572,6 +1695,7 @@ fn external_sql(db: &str, tbl: &str, usdc_id: u32, window: &str) -> String {
              WHERE close_usd = 0 \
                AND volume_quote > 0 \
                AND quote_asset_id = {usdc_id} \
+               AND timestamp < toDateTime({epoch}) \
                AND timestamp <= toDateTime(?){window} \
          ) AS p \
          ASOF LEFT JOIN ( \
@@ -1765,7 +1889,7 @@ mod tests {
     fn external_rate_day_pred_is_an_uncorrelated_day_set() {
         let frag = external_rate_day_pred("prices");
         assert!(
-            frag.starts_with("toDate(timestamp) IN (SELECT toDate(timestamp)"),
+            frag.starts_with("toDate(timestamp, 'UTC') IN (SELECT toDate(timestamp, 'UTC')"),
             "{frag}"
         );
         assert!(frag.contains("prices.usd_rate FINAL"), "{frag}");
@@ -2074,24 +2198,104 @@ mod tests {
     /// calendar functions. A `_1M` bucket is not 31 fixed days — a fixed-seconds
     /// end lands in the wrong month for eleven months of twelve, and every one of
     /// those buckets then resolves against the wrong day's rate. Nothing errors.
+    ///
+    /// Every grain is listed, including the two the first version of this test
+    /// left out — `_1m` and `_15m` were floored to `+ 3600` and nothing noticed
+    /// (review CR-01). The calendar functions carry `'UTC'` (review WR-07).
     #[test]
     fn bucket_end_expr_uses_calendar_functions_for_calendar_grains() {
+        assert_eq!(
+            bucket_end_expr("price_ohlcv_1m", "timestamp"),
+            "timestamp + 60"
+        );
+        assert_eq!(
+            bucket_end_expr("price_ohlcv_15m", "timestamp"),
+            "timestamp + 900"
+        );
         assert_eq!(
             bucket_end_expr("price_ohlcv_1h", "timestamp"),
             "timestamp + 3600"
         );
         assert_eq!(
+            bucket_end_expr("price_ohlcv_4h", "timestamp"),
+            "timestamp + 14400"
+        );
+        assert_eq!(
             bucket_end_expr("price_ohlcv_1d", "timestamp"),
-            "addDays(timestamp, 1)"
+            "addDays(timestamp, 1, 'UTC')"
         );
         assert_eq!(
             bucket_end_expr("price_ohlcv_1w", "timestamp"),
-            "addWeeks(timestamp, 1)"
+            "addWeeks(timestamp, 1, 'UTC')"
         );
         assert_eq!(
             bucket_end_expr("price_ohlcv_1M", "timestamp"),
-            "addMonths(timestamp, 1)"
+            "addMonths(timestamp, 1, 'UTC')"
         );
+        // Only a table this module does not know falls back to an hour.
+        assert_eq!(
+            bucket_end_expr("not_a_table", "timestamp"),
+            "timestamp + 3600"
+        );
+    }
+
+    /// 🔑 CR-01's regression guard, and the guard for the next grain added.
+    /// `bend` is the ASOF's UPPER BOUND, not a staleness allowance, so for every
+    /// known fixed grain the end must be exactly `start + bucket_width_s` — a
+    /// floor there changes WHICH rate is selected, and at a UTC day boundary it
+    /// picks the next day's. The calendar grains are pinned to their calendar
+    /// function with the zone spelled out. Nothing else is acceptable.
+    #[test]
+    fn bucket_end_and_width_agree_for_every_known_grain() {
+        for t in [
+            "price_ohlcv_1m",
+            "price_ohlcv_15m",
+            "price_ohlcv_1h",
+            "price_ohlcv_4h",
+        ] {
+            let w = bucket_width_s(t);
+            assert!(w > 0, "{t}: a known grain has a width");
+            assert_eq!(
+                bucket_end_expr(t, "ts"),
+                format!("ts + {w}"),
+                "{t}: the bucket end must be exactly one bucket width after the start"
+            );
+        }
+        for (t, f) in [
+            ("price_ohlcv_1d", "addDays"),
+            ("price_ohlcv_1w", "addWeeks"),
+            ("price_ohlcv_1M", "addMonths"),
+        ] {
+            assert!(bucket_width_s(t) >= 86_400, "{t}: a calendar grain");
+            assert_eq!(bucket_end_expr(t, "ts"), format!("{f}(ts, 1, 'UTC')"));
+        }
+    }
+
+    /// WR-07: no timezone-dependent function in the write path is left to the
+    /// server's zone. `views.sql` already refuses that assumption; so does this.
+    #[test]
+    fn every_timezone_sensitive_expression_pins_utc() {
+        for t in ["price_ohlcv_1d", "price_ohlcv_1w", "price_ohlcv_1M"] {
+            let sql = external_sql("prices", t, 3, "");
+            for f in ["addDays(", "addWeeks(", "addMonths(", "toDate("] {
+                for (i, _) in sql.match_indices(f) {
+                    let tail = &sql[i..];
+                    let close = tail.find(')').unwrap();
+                    assert!(
+                        tail[..close].ends_with("'UTC'"),
+                        "{t}: {f} without an explicit 'UTC': {}",
+                        &tail[..close + 1]
+                    );
+                }
+            }
+        }
+        let pred = external_rate_day_pred("prices");
+        assert_eq!(
+            pred.matches("toDate(timestamp, 'UTC')").count(),
+            2,
+            "both sides of the day-set predicate name the zone: {pred}"
+        );
+        assert!(!pred.contains("toDate(timestamp)"), "{pred}");
     }
 
     /// The staleness bound is DERIVED from the table, never configured: one day
@@ -2166,14 +2370,58 @@ mod tests {
         assert!(sql.contains("quote_asset_id = 3"), "{sql}");
     }
 
-    /// 🔑 THE "oracle wins" GUARD. `volume_quote_usd` is write-once, so the
-    /// depeg-aware value the oracle tier set survives a later external pass.
+    /// 🔑 THE "oracle wins" GUARD, by its 0268-review mechanism (WR-04): the
+    /// candidate side is bounded above by the SAME constant the API's label arm
+    /// keys on, so the tier can never write a row the wire would call `oracle`,
+    /// and never a row an oracle could have priced. The bound sits on the
+    /// candidate side with the watermark, not on the reference.
     #[test]
-    fn external_sql_preserves_an_oracle_set_volume_quote_usd() {
+    fn external_sql_is_bounded_above_by_the_usdc_oracle_epoch() {
+        let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
+        let sql = external_sql("prices", "price_ohlcv_1d", 3, "");
+        let bound = format!("timestamp < toDateTime({epoch})");
+        assert_eq!(sql.matches(&bound).count(), 1, "{sql}");
+        let inner = sql.find("FROM prices.price_ohlcv_1d FINAL").unwrap();
+        let asof = sql.find("ASOF LEFT JOIN").unwrap();
+        let at = sql.find(&bound).unwrap();
+        assert!(
+            inner < at && at < asof,
+            "the epoch bound belongs to the candidate subquery: {sql}"
+        );
+        // The bound adds no bind param — it is the shared constant, inlined, so
+        // the reset window, the label arm and this tier read ONE value.
+        assert_eq!(sql.matches('?').count(), 3, "{sql}");
+    }
+
+    /// WR-06: BOTH USD columns come from the one reference. A write-once
+    /// `volume_quote_usd` here would leave a row enriched before `close_usd`
+    /// existed (`volume_quote_usd = volume_quote × $1`, `close_usd = 0`) carrying
+    /// two USD figures at different rates — the incoherent row `reset_sql`'s doc
+    /// block rejects — and would hand it to the peg tier after the reset step has
+    /// already run, so the operator's one-shot campaign ends with par rows.
+    #[test]
+    fn external_sql_recomputes_both_usd_columns_from_the_one_reference() {
         let sql = external_sql("prices", "price_ohlcv_1d", 3, "");
         assert!(
-            sql.contains("if(p.volume_quote_usd > 0, p.volume_quote_usd,"),
+            sql.contains("CAST(r.usd * p.volume_quote AS Decimal(38, 14)) AS volume_quote_usd"),
             "{sql}"
+        );
+        assert!(
+            sql.contains("CAST(r.usd * p.close AS Decimal(38, 14)) AS close_usd"),
+            "{sql}"
+        );
+        assert!(
+            !sql.contains("if(p.volume_quote_usd > 0"),
+            "a write-once guard here is the half-priced-row bug: {sql}"
+        );
+        // The safety of the overwrite rests on the epoch bound; the two must
+        // travel together, so this test asserts both.
+        assert!(
+            sql.contains(&format!(
+                "timestamp < toDateTime({})",
+                prices_clickhouse::USDC_ORACLE_EPOCH_S
+            )),
+            "recomputing volume_quote_usd is only safe below the oracle epoch: {sql}"
         );
     }
 
@@ -2246,13 +2494,105 @@ mod tests {
     #[test]
     fn external_sql_resolves_the_rate_at_the_bucket_end() {
         let sql = external_sql("prices", "price_ohlcv_1d", 3, "");
-        assert!(sql.contains("addDays(timestamp, 1) AS bend"), "{sql}");
+        assert!(
+            sql.contains("addDays(timestamp, 1, 'UTC') AS bend"),
+            "{sql}"
+        );
         assert!(sql.contains("ON r.k = p.k AND r.rts < p.bend"), "{sql}");
         let monthly = external_sql("prices", "price_ohlcv_1M", 3, "");
         assert!(
-            monthly.contains("addMonths(timestamp, 1) AS bend"),
+            monthly.contains("addMonths(timestamp, 1, 'UTC') AS bend"),
             "{monthly}"
         );
+        // CR-01: the scheduled Lambda's own table. `+ 3600` here is the bug.
+        let minute = external_sql("prices", "price_ohlcv_1m", 3, "");
+        assert!(minute.contains("timestamp + 60 AS bend"), "{minute}");
+    }
+
+    // ---- task 0268 review: WR-05, the empty window --------------------------
+
+    /// An inverted or empty `[not_before, not_after)` is refused, not run.
+    #[test]
+    fn a_reset_window_that_can_match_nothing_is_refused() {
+        let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
+        let inverted = UsdResetSpec {
+            not_before: epoch + 1,
+            ..usdc_external_reset()
+        };
+        assert!(matches!(
+            inverted.validate(),
+            Err(ChEnrichError::ResetWindowEmpty { not_before, not_after, .. })
+                if not_before == epoch + 1 && not_after == epoch
+        ));
+        // Equal bounds are an empty half-open window too.
+        let empty = UsdResetSpec {
+            not_before: epoch,
+            ..usdc_external_reset()
+        };
+        assert!(matches!(
+            empty.validate(),
+            Err(ChEnrichError::ResetWindowEmpty { .. })
+        ));
+        // The realistic typo — a year, or the epoch pasted into the wrong flag
+        // — is any value above the bound; clap already rejects a millisecond
+        // timestamp as out of range for u32.
+        let above = UsdResetSpec {
+            not_before: u32::MAX,
+            ..usdc_external_reset()
+        };
+        assert!(above.validate().is_err());
+        // The message tells the operator where the default came from.
+        let msg = inverted.validate().unwrap_err().to_string();
+        assert!(msg.contains("USDC_ORACLE_EPOCH_S"), "{msg}");
+        assert!(msg.contains(&epoch.to_string()), "{msg}");
+    }
+
+    /// A well-formed bounded window and every unbounded spec (the 0182 shape)
+    /// pass, so the pre-0268 path is untouched by the new refusal.
+    #[test]
+    fn well_formed_and_unbounded_reset_windows_are_accepted() {
+        usdc_external_reset().validate().unwrap();
+        usdt_reset().validate().unwrap();
+        let wide = UsdResetSpec {
+            not_before: u32::MAX,
+            not_after: None,
+            ..usdt_reset()
+        };
+        wide.validate().unwrap();
+    }
+
+    // ---- task 0268 review: IN-06, the runbook's epoch ------------------------
+
+    /// The runbook (`docs/runbooks/repair-coarse-usd-values.md`, Appendix B)
+    /// hand-types the oracle epoch ONCE, as a client `param`, and every query
+    /// reads `{epoch:UInt32}`. This pins that single literal to the constant,
+    /// because a drifted literal there produces a precondition query over the
+    /// wrong window that reports 0 — a green all-clear over the one assumption
+    /// the label arm rests on.
+    #[test]
+    fn the_runbook_hand_types_the_oracle_epoch_once_and_it_is_the_constant() {
+        const RUNBOOK: &str = include_str!("../../../docs/runbooks/repair-coarse-usd-values.md");
+        let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S.to_string();
+        assert_eq!(
+            RUNBOOK.matches(&epoch).count(),
+            1,
+            "the epoch appears exactly once in the runbook, as `SET param_epoch`"
+        );
+        assert!(
+            RUNBOOK.contains(&format!("SET param_epoch = {epoch}")),
+            "the one occurrence is the client parameter"
+        );
+        // Every place that USED to carry the literal now reads the parameter.
+        assert!(
+            RUNBOOK.matches("toDateTime({epoch:UInt32})").count() >= 2,
+            "the precondition and baseline queries read the parameter"
+        );
+        // And no other 2026-era ten-digit epoch sneaks in beside it.
+        let stray = RUNBOOK
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|w| w.len() == 10 && w.starts_with("177") && *w != epoch)
+            .count();
+        assert_eq!(stray, 0, "a second hand-typed 2026 epoch in the runbook");
     }
 
     #[test]

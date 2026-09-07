@@ -273,6 +273,38 @@ the operator's after-check, expected to fail until the prod pass has run.
 `docs/database-schema/database-schema-overview.md`,
 `docs/runbooks/repair-coarse-usd-values.md`.
 
+**Review round 1** (`gsd-code-reviewer`, standard depth, 2026-09-07: 1
+critical, 7 warnings, 7 info — all closed in one commit, every fix with a test
+that would have caught it). **CR-01** `bucket_end_expr` floored every
+sub-daily grain to `+ 3600`, so a `_1m` candle at 23:30 UTC resolved to the
+NEXT day's rate — each fixed grain now uses its own width, an all-grain
+cross-check test pins it, and a `_1m` fixture at 23:30 with two daily rates
+proves it. **WR-01/02** the operator falsifier could not deserialise its own
+`Nullable(Float64)` aggregate and its `±0.04` band contained 1.0 — rewritten
+around a typed row (`rate`, `rows`, `zeros`), a per-grain ceiling par cannot
+satisfy, a `close_usd = 0` count (the 0182 outcome), and the judgement
+extracted into a pure fn with six CI-run unit tests. **WR-03** `peg` is back
+in the `Candle.method` documentation (OpenAPI and DTO), scoped to the USDC
+self-series, with a test over `FIELDS`. **WR-04** the external tier's
+candidate set is bounded by `USDC_ORACLE_EPOCH_S`, so the population it
+writes and the population the label arm calls `external` are identical by
+construction. **WR-05** `UsdResetSpec::validate()` refuses an empty
+`[not_before, not_after)` window, called from `reset_step` AND from the CLI
+before any connection — the driver enumerates months with the same predicate
+before `reset_step` runs, so a library-only check would never fire. **WR-06**
+both USD columns are recomputed from the one reference (Emerged 16).
+**WR-07** `addDays`/`addWeeks`/`addMonths`/`toDate` carry an explicit `'UTC'`.
+**IN-03** a comment: the read side needs `GROUP BY rts` because it may widen
+its `method` filter; here `method` is pinned and last in the sorting key, so
+`FINAL` yields one row per `rts` — not a correctness risk while the filter is a
+single equality. **IN-05** blank line. **IN-06** the runbook hand-types the
+epoch once, as `SET param_epoch`; every query reads `{epoch:UInt32}` and a
+unit test pins the literal to the constant. **IN-07** table and span are one
+array of pairs. **IN-01** left as is: the negative assertions plus the two
+exact-equality checks already prove the 0182 shape; a full-string pin of
+`reset_sql` would fail on every whitespace edit for no added proof. **IN-02**
+and **IN-04** are scope decisions, recorded as Issues 7 and 8.
+
 ## Design Decisions
 
 ### From Plan
@@ -353,6 +385,24 @@ the operator's after-check, expected to fail until the prod pass has run.
 15. **The existing runbook appendix was retitled "Appendix A".** The new one is
     Appendix B and refers to it by name nine times; leaving the original as a
     bare "Appendix" would have made every one of those references dangle.
+16. **The external tier recomputes BOTH USD columns from the one reference
+    (review WR-06, option B) — a deliberate departure from the BRIEF §5
+    mechanism.** The BRIEF named the write-once `volume_quote_usd > 0` guard as
+    how "oracle values win". Keeping it would leave a row enriched before
+    `close_usd` existed (`volume_quote_usd = volume_quote × $1`, `close_usd =
+    0`) with `close_usd` at 0.9681 beside a `volume_quote_usd` at par — the
+    incoherent row `reset_sql`'s own doc block rejects — or, under the
+    reviewer's option A (skip those rows), hand them to the peg tier AFTER the
+    reset step has already run, so the operator's one-shot campaign would end
+    with rows carrying the par signature and AC 1 would fail after a run the
+    runbook says to do once. The invariant survives by a different mechanism:
+    WR-04's epoch bound. `USDC_ORACLE_EPOCH_S` is by definition the first
+    oracle row for canonical USDC, so no candidate row can carry an oracle-set
+    value, and the reset run's oracle-shadow guard refuses the run outright if
+    that premise is ever false on prod. The behavioural test
+    `external_tier_never_overwrites_a_candle_the_oracle_tier_priced` still
+    proves the outcome; `external_tier_recomputes_a_half_priced_row_from_the_one_reference`
+    proves the coherence.
 
 ## Issues Encountered
 
@@ -392,6 +442,38 @@ the operator's after-check, expected to fail until the prod pass has run.
    peg. Deliberate (Emerged 12 — it keeps the metric mapping unchanged), but it
    means Appendix B's abort signal is a whole-pass figure. **For Adam to route
    if the breakdown is wanted.**
+7. **Three `usd_rate` reads are unbounded by `time_window` (review IN-02).**
+   Constraint §5 says every statement is bounded by the month partition. The
+   candle side of every new statement is; the `usd_rate` side is not, in three
+   places: the day-set subquery inside `external_rate_day_pred` (re-run on
+   every batch of `count_reset_pending` and inside every `reset_sql`), the
+   ASOF reference in `external_sql`, and `assert_external_rates_are_loaded`
+   (once per month of the campaign). The reference side being unbounded is
+   correct and deliberate — a month's first buckets need an anchor in an
+   earlier partition, `pivot_sql`'s proven shape. The other two are unbounded
+   for simplicity: `usd_rate` holds ~2,000 `external` rows for USDC, the
+   identity tuple is a sorting-key prefix, and the scans are negligible.
+   **Recommendation:** leave as is and record the constraint's letter and the
+   code as intentionally divergent here; revisit only if 0267's series grows
+   by orders of magnitude (hourly for all of history), at which point the
+   day-set subquery could take `toYYYYMM(timestamp) IN (month, month - 1)`.
+   Not changed in this task.
+8. **`not_after` bounds the bucket START, so a `_1w`/`_1M` bucket can straddle
+   the epoch (review IN-04).** The March-2026 monthly bucket starts 2026-03-01,
+   below `USDC_ORACLE_EPOCH_S`, so it is eligible for reset; ten of its days
+   sit above the epoch, where the oracle priced things. If it carries the par
+   signature it is zeroed and repriced from the last `external` row — a
+   measurement, and the label arm keys on the same bucket start so wire and
+   store agree — but a blend the operator did not ask for. Narrow; the
+   `_1d`-and-shorter grains cannot straddle. Related: `external_window_s` for
+   `_1M` is 31 days, so a sparse series lets a monthly bucket resolve to a rate
+   at the bucket's START while still passing the staleness filter — harmless
+   with a daily series, a trap if 0267's series ever has month-long gaps.
+   **Recommendation:** for `_1w` and `_1M`, end the campaign at
+   `--end-month 202602` (now in Appendix B) and inspect the one straddling
+   bucket by hand if it matters; do not move the bound to the bucket END —
+   that would make the reset and the label disagree, which is the worse
+   error. Not changed in this task.
 
 ## Run-day checklist (operator)
 

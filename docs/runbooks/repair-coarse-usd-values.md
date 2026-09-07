@@ -660,6 +660,23 @@ for why that matters more than it sounds.
 
 All five, in order. None is optional.
 
+**Set the epoch ONCE, first.** Every query below that mentions the oracle epoch
+reads it as the client parameter `{epoch:UInt32}`, so the value is typed one
+time in this session and nowhere else:
+
+```sql
+SET param_epoch = 1773237600   -- prices_clickhouse::USDC_ORACLE_EPOCH_S, 2026-03-11 14:00 UTC
+```
+
+(`clickhouse-client` keeps it for the session; over HTTP pass `?param_epoch=`
+on each request.) The tool logs the same value at startup as `reset_not_after`;
+if the two differ, stop. The literal above is the only hand-typed copy in this
+runbook, and a unit test
+(`the_runbook_hand_types_the_oracle_epoch_once_and_it_is_the_constant`) pins
+it to the constant — two hand-typed epochs are how a precondition ends up
+measuring the wrong window and reporting 0 over the exact assumption it exists
+to check.
+
 1. **Task 0267's `external` rows are loaded.** A count of **0 is a hard
    refusal**, not a no-op — the tool exits with
    `ResetRequiresExternalRates` and writes nothing.
@@ -706,7 +723,7 @@ All five, in order. None is optional.
    WHERE asset_kind = 'credit' AND asset_code = 'USDC'
      AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
      AND contract_address = '' AND method = 'oracle'
-     AND timestamp < toDateTime(1773237600)
+     AND timestamp < toDateTime({epoch:UInt32})
    ```
 
    Must be **0**. A non-zero count does not block the repair, but it does mean
@@ -730,20 +747,33 @@ All five, in order. None is optional.
   `--table price_ohlcv_1m` is refused by the tool outright — it is the live base
   table the scheduled Lambda owns.
 
+For `_1w` and `_1M`, end the campaign at `--end-month 202602`, not `202603`:
+the bucket that STARTS in early March 2026 straddles the epoch (its start is
+below it, so it is eligible; ten of its days are above it, where the oracle
+priced things). Inspect that one bucket by hand if it matters — task file,
+Issues 8.
+
 ### The flags
 
 ```bash
 --reset-quote-asset-id <USDC_ID>    # canonical USDC's asset_id on prod
 --reset-not-before 0                # all of deep history
---reset-not-after 1773237600        # 2026-03-11 14:00 UTC (defaulted; see below)
+--reset-not-after <EPOCH>           # DEFAULTED — do not pass it; see below
 --reset-require-external-rate       # the 0268 mode
 ```
 
-`--reset-not-after` defaults to `1773237600` whenever
-`--reset-require-external-rate` is passed, and it is the **same constant** the
-API's `external` label arm keys on (`prices_clickhouse::USDC_ORACLE_EPOCH_S`).
-Pass it explicitly only if you mean something else; two hand-typed epochs are how
-the wire label and the reset window drift apart with nothing failing loudly.
+`--reset-not-after` defaults to `prices_clickhouse::USDC_ORACLE_EPOCH_S`
+whenever `--reset-require-external-rate` is passed — the **same constant** the
+API's `external` label arm keys on and the value you set as `param_epoch`
+above. The tool logs the resolved value at startup (`reset_not_after`,
+`defaulted = true`). Pass it explicitly only if you mean something else; two
+hand-typed epochs are how the wire label and the reset window drift apart with
+nothing failing loudly.
+
+The tool refuses a window that can match nothing: `--reset-not-before` at or
+above `--reset-not-after` (a mistyped year, the epoch pasted into the wrong
+flag) exits with `ResetWindowEmpty` before a connection is opened, dry run or
+not. Without that refusal the run would report a clean, empty repair.
 
 `--reset-require-external-rate` narrows the candidate set to
 `close_usd = close` (the peg tier's exact signature) **on the days the imported
@@ -791,7 +821,7 @@ INNER JOIN ( SELECT asset_id FROM prices.assets FINAL
                AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
            ) AS u ON u.asset_id = p.quote_asset_id
 WHERE p.close_usd = p.close AND p.close_usd > 0
-  AND p.timestamp < toDateTime(1773237600)
+  AND p.timestamp < toDateTime({epoch:UInt32})
 ```
 
 And the falsifier's own row, per granularity, before the run:
@@ -826,7 +856,14 @@ than at the reset.
 
 `native` on 2023-03-11 must now read **~3% below** its USDC-denominated close, on
 every granularity. As SQL, per table, it is the baseline query above: the implied
-rate must have moved from `1.0` to **~0.9681**.
+rate must have moved from `1.0` to **~0.9681** on `_1h`/`_4h`/`_1d`. The test
+holds each grain UNDER a ceiling par cannot satisfy — `0.99` for the
+daily-or-shorter grains, `0.999` for `_1w` (it blends six recovered days),
+`0.9995` for `_1M` (thirty) — rather than inside a band around 0.9681, because
+a band wide enough for the monthly blend contains 1.0, and a PARTIAL pass lands
+a few bps under par. It also counts rows at `close_usd = 0` over the same span:
+any such row is the 0182 outcome (reset, never refilled) and fails the check
+outright.
 
 As a test, which also checks the control date:
 
