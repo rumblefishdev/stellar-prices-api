@@ -3,8 +3,11 @@
 > **STATUS: the cache is verified working and every TTL is confirmed against the
 > deployed stage. The acceptance criterion cannot be satisfied as literally
 > worded, because this API emits no `X-Cache` header and cannot be made to emit a
-> truthful one without an edge re-architecture.** This document requests a
-> reworded criterion and supplies the evidence to judge it on. See
+> truthful one without an edge re-architecture.** The criterion is therefore
+> **amended in place and graded against the reworded observable below**, declared
+> to the reviewer in
+> [`scf/milestone-2-rfp-deviations.md`](scf/milestone-2-rfp-deviations.md) §2.
+> This document is the evidence that rewording is judged on. See
 > [The `X-Cache` question](#the-x-cache-question) before quoting anything here.
 
 Task [0122](../lore/1-tasks/archive/0122_TEST_apigateway-cache-ttl-verification.md) ·
@@ -15,9 +18,9 @@ Tranche 2 AC 3 · measured 2026-09-03 against
 > [ADR 0012](../lore/2-adrs/0012_api-gateway-stage-cache-no-cloudfront-no-x-cache-header.md)**
 > (accepted 2026-09-04): the API Gateway regional stage cache stays, CloudFront
 > is **not** adopted at this point in the project, and **no `X-Cache` header is
-> emitted by any mechanism**. This document is the measurement and the request
-> for a reworded criterion; the ADR is why the architecture was not changed to
-> avoid asking. Read the ADR before proposing either alternative again — both
+> emitted by any mechanism**. This document is the measurement behind the
+> reworded criterion; the ADR is why the architecture was not changed to avoid
+> needing one. Read the ADR before proposing either alternative again — both
 > are closed there with reasons, not merely unchosen.
 
 ## The acceptance criterion
@@ -40,7 +43,8 @@ route. The second is not achievable on this architecture.
 | `POST /prices/batch` and `/health` are uncached                        | ✅ confirmed                                                          |
 | A response carries `X-Cache: Hit`                                      | ❌ **no such header exists on this API**                              |
 
-**Requested rewording:**
+**The criterion is graded against this wording instead** — declared in
+[`scf/milestone-2-rfp-deviations.md`](scf/milestone-2-rfp-deviations.md) §2:
 
 > _"Cache confirmed: consecutive identical requests within the TTL window are
 > served from the API Gateway stage cache, and a request after the window is not.
@@ -131,7 +135,7 @@ the reason for the decision either way.
 
 **CloudFront's header reads `X-Cache: Hit from cloudfront`, not `X-Cache: Hit`.**
 Even after the full re-architecture, the criterion's literal wording would still
-not be met, and the same conversation with the reviewer would still be needed.
+not be met, and this same declaration would still have to be written.
 
 Spending a week of Tranche 2 on an edge layer, re-opening settled decisions, to
 arrive at a header that still does not match the words — against presenting the
@@ -414,8 +418,12 @@ a 1 req/s key. Verifying a TTL needs a handful of requests, not load.
 
 ## Open items
 
-- **The criterion itself.** The rewording proposed at the top of this document
-  needs the reviewer's agreement. Nothing else here depends on it.
+- **The criterion itself.** The rewording at the top of this document is
+  **declared** in the Milestone 2 deviations document rather than agreed in
+  advance, so the reviewer judges it at review time. If the literal header is
+  required after all, that is the CloudFront project costed in
+  [Why we are not doing it](#why-we-are-not-doing-it) and it becomes separate
+  scope. Nothing else in this document depends on the outcome.
 - **Hit rate under load** is derived, not directly observed: with a path-scoped
   key and a 10 s TTL, an asset can miss at most `duration / TTL` times, which is
   what produced the load test's 0 % / 2 % / 100 % miss series by pool size.

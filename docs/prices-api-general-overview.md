@@ -1384,6 +1384,17 @@ for the full local-CLI metrics.
    per `docs/runbooks/manual-api-key-tier.md`; the report must state which plan the
    key was on (task 0121)
 3. Cache confirmed: consecutive identical requests within TTL window return `X-Cache: Hit` header
+   — **amended, and graded against the reworded criterion below.** This API emits no
+   `X-Cache` header on any route and cannot be made to emit a truthful one: API Gateway
+   has no such feature, a handler-written header would report `Miss` on every genuine
+   hit, and CloudFront writes `Hit from cloudfront`, so the literal string is unmet even
+   after an edge rebuild. Graded instead as: _"consecutive identical requests within the
+   TTL window are served from the API Gateway stage cache, and a request after the window
+   is not. Demonstrated by response latency, which separates cleanly, and by the deployed
+   per-method cache configuration."_ The amendment weakens the claim from the cache
+   asserting itself to behaviour consistent with a cache, which is stated rather than
+   blurred. Evidence in `docs/prices-api-cache-verification.md`, decision in ADR 0012,
+   declared to the reviewer in `docs/scf/milestone-2-rfp-deviations.md` §2 (tasks 0122, 0262)
 4. VWAP calculation verifiable against raw `price_ohlcv` rows for at least 3 assets
 5. `GET /backfill/status` shows `earliest_data_available` ≤ 2022-01-01
 6. OHLCV data for `?timeframe=all` on USDC returns data points from at least January 2022,
