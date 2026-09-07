@@ -200,7 +200,24 @@
 --                        label is a measurement that happened to be at par.
 --   Without this column a consumer cannot tell a real 1.0000 from a fallback
 --   1.0000 — the `close_usd = 0` mistake (one value meaning several things) in
---   a new surface. ⚠️ This is an APPENDED column: arity changed, order did not.
+--   a new surface.
+--
+--   ⚠️ THIS ENUM IS NOT THE /ohlcv CANDLE ENUM. Task 0268 split the candle-path
+--   vocabulary into 'assumed-par' (the literal 1.0 was the input) and 'external'
+--   (an imported measured USDC/USD series was the input), and retired 'peg'
+--   there. The three values above are unchanged and keep 0165's meanings: this
+--   view labels how a BUCKET's close_usd was arrived at, not how one candle's
+--   quote leg was priced. Do not assume the two surfaces share one enum.
+--
+--   ⚠️ After 0268's re-enrichment the deep-history USDC-quoted rows change which
+--   arm of THIS view they arrive through. Today they reach 'peg' via arm B, the
+--   $1 fallback, because their stored close_usd is close x 1.00 and no measured
+--   rate exists for the bucket. Once the external tier has scaled them they
+--   carry a real USD value and aggregate through arm A as 'traded' instead. The
+--   'peg' arms below are therefore expected to SHRINK on prod after that pass,
+--   without their definition changing.
+--
+--   ⚠️ This is an APPENDED column: arity changed, order did not.
 --   Anything decoding POSITIONALLY off `SELECT *` gets an extra column; pin an
 --   explicit column list.
 --

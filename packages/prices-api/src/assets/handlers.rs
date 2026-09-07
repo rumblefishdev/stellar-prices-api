@@ -703,6 +703,12 @@ pub async fn get_ohlcv(
 
 /// Canonical USDC's natural identity — the same `(code, issuer)` pair the
 /// enrichment peg tier and `views.sql` key on, so the three cannot drift.
+///
+/// The companion TIME boundary — the first instant `usd_rate` holds a measured
+/// `oracle` row for this identity — is [`prices_clickhouse::USDC_ORACLE_EPOCH_S`],
+/// beside `USDC_ISSUER` in the same crate rather than here, because the
+/// enrichment worker's 0268 reset reads it too and cannot see a private fn in
+/// this crate.
 fn usdc_identifier() -> AssetIdentifier {
     AssetIdentifier::Classic {
         code: "USDC".to_string(),

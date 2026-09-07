@@ -982,6 +982,64 @@ pub async fn ohlcv_peg_series(
     q.bind(usdc_issuer).fetch_all::<Candle>().await
 }
 
+/// The candle-path USD provenance classification, as a whole
+/// `multiIf(...) AS meth` fragment.
+///
+/// Extracted from [`ohlcv`]'s projection for one reason: its arm ORDER is
+/// load-bearing and unobservable from the outside. `multiIf` takes the FIRST
+/// matching arm, every arm here is valid SQL in any order, and a reordering
+/// relabels whole populations on the wire without failing at compile time, at
+/// query time or at render time. Pinning the order needs a string a unit test
+/// can read, and that needs a function.
+///
+/// ## The arms, in order, and why each sits where it does
+///
+/// 1. `quote_asset_id = usdc AND close_usd = close` -> **`assumed-par`**. The
+///    peg tier multiplied by exactly $1, so the equality is exact integer
+///    arithmetic on the stored decimals — no division and no float error. The
+///    word names the INPUT (the literal 1.0 was the value) rather than the
+///    outcome, matching how `external`, `oracle` and `traded` are defined.
+///    Task 0268 retired the older spelling here; `ohlcv_peg_series` keeps it,
+///    because on USDC's OWN series it means 0165's "no measured rate was
+///    available" and that is still true.
+/// 2. `quote_asset_id = usdc AND timestamp < USDC_ORACLE_EPOCH_S` ->
+///    **`external`**. Reached only when arm 1 missed, i.e. the candle carries a
+///    SCALED `close_usd` on a USDC leg. Before the epoch the only thing that can
+///    have scaled it is task 0267's imported USDC/USD series, applied by the
+///    enrichment worker's external tier (task 0268).
+///
+///    ⚠️ **This arm is sound only because `prices.usd_rate` holds no `oracle`
+///    row for canonical USDC before that instant.** That claim is in-repo prose
+///    (this file's oracle-window notes, `views.sql`'s 0165 block), NOT a live
+///    measurement — which makes it falsifiable, and it is falsified the moment a
+///    single pre-epoch `oracle` row exists: such a candle would be labelled
+///    `external` while a poll priced it. The 0268 runbook's Appendix B
+///    precondition 3 is the query that confirms it on prod before the pass runs,
+///    and it is recorded as an open assumption in the task file.
+/// 3. `quote_asset_id = usdc` -> **`oracle`**. Everything arms 1 and 2 left: a
+///    scaled USDC-quoted candle at or after the epoch, which the oracle tier
+///    priced from a measured Reflector reading.
+/// 4. `quote_asset_id IN (pivots)` -> **`traded`** (ADR 0011 §4; see [`ohlcv`]).
+///    Omitted ENTIRELY when no pivot reference is tracked — an empty `IN ()` is
+///    a ClickHouse syntax error, and the label is optional.
+/// 5. `''` -> the fallback, which [`ohlcv`]'s `nullIf` turns into a JSON `null`.
+///    A `multiIf` with no else is an error, so this arm always closes the list.
+fn usd_method_expr(usdc: u32, pivots: &[u32]) -> String {
+    let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
+    let traded_arm = if pivots.is_empty() {
+        String::new()
+    } else {
+        let ids: Vec<String> = pivots.iter().map(|i| i.to_string()).collect();
+        format!("quote_asset_id IN ({}), 'traded', ", ids.join(", "))
+    };
+    format!(
+        "multiIf(quote_asset_id = {usdc} AND close_usd = close, 'assumed-par', \
+         quote_asset_id = {usdc} AND timestamp < toDateTime({epoch}), 'external', \
+         quote_asset_id = {usdc}, 'oracle', \
+         {traded_arm}\
+         '') AS meth"
+    )
+}
 /// Read merged candles for one asset at the chosen grain, denominated per
 /// [ADR 0011].
 ///
@@ -1012,8 +1070,8 @@ pub async fn ohlcv_peg_series(
 ///
 /// | quote leg | signature | n | method |
 /// |---|---|---|---|
-/// | USDC, pre-oracle | `close_usd = close` | 522,321 (100%) | `peg` |
-/// | USDC, oracle window | `close_usd = close` | 134,193 | `peg` |
+/// | USDC, pre-oracle | `close_usd = close` | 522,321 (100%) | `assumed-par` |
+/// | USDC, oracle window | `close_usd = close` | 134,193 | `assumed-par` |
 /// | USDC, oracle window | scaled | 121,474 | `oracle` |
 /// | XLM / USDT | scaled | 11,038,372 | `traded` |
 /// | anything else | `close_usd = 0` | 13,114,668 (100%) | — no USD fields |
@@ -1023,6 +1081,20 @@ pub async fn ohlcv_peg_series(
 /// no dividing by a near-zero `close`. Pre-oracle USDC came back 100% pegged with
 /// zero scaled rows, which is what makes this a classification rather than a
 /// guess.
+///
+/// ⚠️ **The measurement is dated, and its first row is the population task 0268
+/// removes.** Those 522,321 pre-oracle USDC-quoted candles are `close x $1.00`
+/// with nothing measured behind them, and USDC closed at **0.9681** on
+/// 2023-03-11. After 0268's prod pass the ones whose bucket the imported
+/// USDC/USD series covers carry a SCALED `close_usd`, so they stop matching arm
+/// 1 and classify through [`usd_method_expr`]'s `external` arm instead. Rows the
+/// series does not cover keep the par signature and keep saying `assumed-par` —
+/// deliberately, since nothing measured them. Re-measure this table after that
+/// pass rather than assuming these counts still hold.
+///
+/// The two words that changed here changed on the WIRE too, in the same commit
+/// as the OpenAPI text, so the schema and the response can never disagree about
+/// what they mean.
 ///
 /// ⚠️ **`traded` covers the pivot.** ADR 0011 §4 forbids coining a fourth word,
 /// and 0165 defines `traded` as a volume-weighted aggregate of candles a venue
@@ -1039,8 +1111,9 @@ pub async fn ohlcv_peg_series(
 /// Measured: 2,139 XLM-quoted and 3,782 USDT-quoted such rows.
 ///
 /// They are excluded from the USD aggregation rather than labelled, because
-/// every available label would be a false claim — `peg` asserts a peg that does
-/// not exist on that leg. A bucket left with no valid row still returns, with
+/// every available label would be a false claim — `assumed-par` asserts a $1
+/// assumption that was never applied to that leg, and `external` asserts a
+/// measured USDC/USD rate that has nothing to do with it. A bucket left with no valid row still returns, with
 /// its price fields absent (§5); it does not vanish. The underlying rows are
 /// [`0227`]/[`0182`] territory.
 pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhouse::error::Error> {
@@ -1071,14 +1144,9 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
         Denomination::Usd(ref refs) => {
             let usdc = refs.usdc;
             let floor = PRECISION_FLOOR;
-            // Omitted entirely when neither pivot reference is tracked — an
-            // empty `IN ()` is a syntax error, and the label is optional.
-            let traded_arm = if refs.pivots.is_empty() {
-                String::new()
-            } else {
-                let ids: Vec<String> = refs.pivots.iter().map(|i| i.to_string()).collect();
-                format!("quote_asset_id IN ({}), 'traded', ", ids.join(", "))
-            };
+            // The whole classification, extracted so its arm ORDER is testable
+            // without a ClickHouse — see [`usd_method_expr`].
+            let meth_arm = usd_method_expr(usdc, &refs.pivots);
             (
                 // Per-row scaling — see the ordering note above. `valid` gates
                 // both the arithmetic and the classification, so a row that
@@ -1094,10 +1162,7 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
                      toDecimal128OrNull(toString(toFloat64(low)  * rate), 14) AS l_x, \
                      close_usd AS c_x, \
                      toDecimal128OrNull(toString(toFloat64(vwap) * rate), 14) AS w_x, \
-                     multiIf(quote_asset_id = {usdc} AND close_usd = close, 'peg', \
-                             quote_asset_id = {usdc}, 'oracle', \
-                             {traded_arm}\
-                             '') AS meth"
+                     {meth_arm}"
                 ),
                 // `countIf(valid) = 0` is what produces §5's price-less bucket:
                 // NULL across every price field, while the volume columns below
@@ -1203,6 +1268,98 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The word this task RETIRES from the candle path, built from characters so
+    /// no test, plan or grep-able string in this file carries the quoted literal
+    /// and accidentally satisfies its own search.
+    fn retired_label() -> String {
+        ['\'', 'p', 'e', 'g', '\''].iter().collect()
+    }
+
+    /// Arm 1 is the exact-equality signature arm and it now names the INPUT (the
+    /// literal 1.0) rather than the outcome. The retired word must not survive
+    /// anywhere in the candle-path fragment — `ohlcv_peg_series` keeps it, this
+    /// expression does not.
+    #[test]
+    fn usd_method_expr_first_arm_is_the_par_signature_and_retires_the_old_word() {
+        let sql = usd_method_expr(2, &[]);
+        assert!(
+            sql.contains("close_usd = close"),
+            "the exact-equality signature is the par arm's whole condition: {sql}"
+        );
+        assert!(
+            sql.contains("'assumed-par'"),
+            "the par arm must name the assumption: {sql}"
+        );
+        assert!(
+            !sql.contains(&retired_label()),
+            "the retired candle-path label must not survive: {sql}"
+        );
+    }
+
+    /// Arm 2 is the timestamp arm (task 0268): a USDC-quoted candle scaled by a
+    /// rate and stamped before the first measured oracle row was priced by the
+    /// IMPORTED series, not by a poll.
+    #[test]
+    fn usd_method_expr_second_arm_keys_on_the_usdc_oracle_epoch() {
+        let sql = usd_method_expr(7, &[]);
+        let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
+        assert!(
+            sql.contains(&format!(
+                "quote_asset_id = 7 AND timestamp < toDateTime({epoch})"
+            )),
+            "the external arm pins the USDC quote id and the named epoch: {sql}"
+        );
+        assert!(sql.contains("'external'"), "{sql}");
+    }
+
+    /// ⚠️ Arm ORDER is load-bearing and `multiIf` takes the FIRST match. Swap the
+    /// par arm below the timestamp arm and every pre-epoch pegged candle
+    /// relabels `external`; swap the timestamp arm below the bare-USDC arm and
+    /// every pre-epoch scaled candle relabels `oracle`. Neither errors — the SQL
+    /// stays valid and the wire quietly lies. Byte offsets are the only cheap
+    /// way to pin it.
+    #[test]
+    fn usd_method_expr_arm_order_is_par_then_external_then_oracle() {
+        let sql = usd_method_expr(2, &[]);
+        let par = sql.find("'assumed-par'").expect("par arm present");
+        let ext = sql.find("'external'").expect("external arm present");
+        let orc = sql.find("'oracle'").expect("oracle arm present");
+        assert!(par < ext, "par must be tested before external: {sql}");
+        assert!(ext < orc, "external must be tested before oracle: {sql}");
+    }
+
+    /// An empty `IN ()` is a ClickHouse syntax error, so the traded arm is
+    /// omitted whole rather than emitted empty — and the fallback still closes
+    /// the `multiIf`, because a `multiIf` without an else is also an error.
+    #[test]
+    fn usd_method_expr_omits_the_traded_arm_when_no_pivot_is_tracked() {
+        let sql = usd_method_expr(2, &[]);
+        assert!(
+            !sql.contains("IN ("),
+            "no empty IN list may be emitted: {sql}"
+        );
+        assert!(!sql.contains("'traded'"), "{sql}");
+        assert!(
+            sql.contains("'') AS meth"),
+            "the fallback arm closes it: {sql}"
+        );
+    }
+
+    #[test]
+    fn usd_method_expr_joins_pivot_ids_when_present() {
+        let sql = usd_method_expr(2, &[4, 9]);
+        assert!(
+            sql.contains("quote_asset_id IN (4, 9), 'traded'"),
+            "pivot ids are joined by ', ': {sql}"
+        );
+        let ext = sql.find("'external'").unwrap();
+        let traded = sql.find("'traded'").unwrap();
+        assert!(
+            ext < traded,
+            "the USDC arms are tested before traded: {sql}"
+        );
+    }
 
     #[test]
     fn identity_where_native_is_literal_no_binds() {

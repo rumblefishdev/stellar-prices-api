@@ -67,7 +67,10 @@ async fn setup(db: &str) -> Client {
     // 2. `close_usd = close` is exactly the $1 peg signature, so the derived
     //    rate is 1 and every scaled value equals the stored one. The merge
     //    assertions are therefore unchanged from the pre-0170 fixture, and it
-    //    also pins `method = "peg"`.
+    //    also pins the candle path's par label — which task 0268 renamed from
+    //    the 0165 spelling to `assumed-par`, because on a quote leg the word
+    //    has to name the ASSUMPTION rather than borrow USDC's own-series
+    //    meaning. `ohlcv_peg_series` (a `USDC:...` request) still says `peg`.
     admin
         .query(&format!(
             "INSERT INTO {db}.price_ohlcv_1h \
@@ -377,7 +380,14 @@ async fn ohlcv_peg_signature_on_a_pivot_leg_is_not_labelled_peg() {
         c["method"].is_null() && c["close"].is_null(),
         "an XLM-leg row at exactly 1x must not be priced or labelled, got {c}"
     );
+    // Both par spellings, because task 0268 renamed this label on the candle
+    // path: asserting only the retired word would leave the guard vacuously
+    // true — the exact way a regression here would slip through unnoticed.
     assert_ne!(c["method"], "peg", "there is no peg on an XLM leg");
+    assert_ne!(
+        c["method"], "assumed-par",
+        "no $1 assumption was ever applied to an XLM leg"
+    );
 
     teardown(db).await;
 }
@@ -1560,6 +1570,108 @@ async fn ohlcv_at_1m_carries_a_measurement_across_the_oracle_poll_gap() {
          is older than ORACLE_POLL_FLOOR_S it must fall back and say so"
     );
     approx(&data[5]["close"], 1.0);
+
+    teardown(db).await;
+}
+
+/// 🔑 Task 0268: the candle path's three USDC labels, in one scratch DB.
+///
+/// `method` is not stored — it is reconstructed from the quote leg, the
+/// `close_usd = close` signature and the candle's timestamp
+/// (`queries_ch::usd_method_expr`). The arms are ordered, every one of them is
+/// valid SQL in any order, and a reordering relabels whole populations on the
+/// wire without failing anywhere. This pins all three against a real query
+/// planner rather than against the emitted string.
+///
+/// The three cases, all on a **non-USDC base** so the request takes the candle
+/// path and not `ohlcv_peg_series` (a `USDC:...` request, which still says
+/// `peg` and is asserted elsewhere in this file):
+///
+/// 1. **pre-epoch, `close_usd = close`** -> `assumed-par`. Nothing measured it;
+///    the literal 1.0 supplied the value.
+/// 2. **pre-epoch, scaled** -> `external`. Before the first measured oracle row
+///    the only thing that can have scaled a USDC leg is task 0267's imported
+///    series. The rate seeded here is USDC's real 2023-03-11 close, 0.9681 —
+///    the 3% the whole task exists to stop discarding.
+/// 3. **post-epoch, scaled** -> `oracle`. Same signature as case 2, different
+///    side of the epoch, and that is the ONLY thing separating them.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_usdc_leg_labels_par_external_and_oracle_by_signature_and_epoch() {
+    let db = "it_ohlcv_labels_0268";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+
+    // asset_id=3 (FOO) quoted in asset_id=2 (USDC). `close = 10` throughout, so
+    // the only difference between rows is close_usd and the timestamp.
+    //
+    // The epoch is 2026-03-11T14:00:00Z (prices_clickhouse::USDC_ORACLE_EPOCH_S).
+    // 2026-03-11 13:00 is the last bucket BELOW it and 15:00 the first above —
+    // deliberately adjacent, so an off-by-an-hour in the arm's comparison shows
+    // up here rather than on prod.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2023-03-11 12:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 50, 10,    10, 1, 1), \
+             ('2026-03-11 13:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 48, 9.681, 10, 1, 1), \
+             ('2026-03-11 15:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 48, 9.681, 10, 1, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    for (ts, expected, why) in [
+        (
+            "2023-03-11T12:00:00Z",
+            "assumed-par",
+            "close_usd = close exactly: the $1 assumption supplied the value and \
+             nothing measured it",
+        ),
+        (
+            "2026-03-11T13:00:00Z",
+            "external",
+            "scaled below the epoch: only the imported USDC/USD series can have \
+             priced this, so calling it 'oracle' would claim a poll that never \
+             happened",
+        ),
+        (
+            "2026-03-11T15:00:00Z",
+            "oracle",
+            "same signature as the row above, two hours later: at or after the \
+             epoch a scaled USDC leg was priced by a measured Reflector reading",
+        ),
+    ] {
+        let uri = format!(
+            "/v1/assets/FOO:{}/ohlcv?granularity=1h&start={ts}&end={ts}&base_currency=USD",
+            iss()
+        );
+        let (status, json) =
+            get(Client::default().with_url(ch_url()).with_database(db), &uri).await;
+        assert_eq!(status, StatusCode::OK, "body={json}");
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1, "{ts}: one bucket expected: {json}");
+        assert_eq!(data[0]["method"], expected, "{ts}: {why}");
+    }
+
+    // The retired word must not reach the wire on a quote leg at all — a
+    // regression that reinstated it would otherwise only show as an unexpected
+    // string in one of the three assertions above.
+    let uri = format!(
+        "/v1/assets/FOO:{}/ohlcv?granularity=1h&start=2023-03-11T00:00:00Z\
+         &end=2026-03-12T00:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    for c in json["data"].as_array().unwrap() {
+        assert_ne!(
+            c["method"], "peg",
+            "0268 retired this label from the candle path; it survives only on \
+             USDC's own series: {c}"
+        );
+    }
 
     teardown(db).await;
 }

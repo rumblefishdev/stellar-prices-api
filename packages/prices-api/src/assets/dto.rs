@@ -303,12 +303,23 @@ pub struct Candle {
     /// magnitude below it, so it never binds in practice.
     #[schema(maximum = 9_007_199_254_740_991u64)]
     pub trade_count: u64,
-    /// Where the USD rate behind this bucket came from — [`0165`]'s existing
-    /// vocabulary, reused rather than re-coined (ADR 0011 §4):
+    /// Where the USD rate behind this bucket came from — [`0165`]'s vocabulary,
+    /// reused rather than re-coined (ADR 0011 §4), split by task 0268 so a $1
+    /// assumption and a measurement stop sharing one word:
     ///
-    /// - `peg` — no measured rate was available; the $1 USDC assumption applied.
+    /// - `assumed-par` — nothing was measured; the literal 1.0 supplied the
+    ///   value, i.e. the $1 USDC assumption applied. Task 0268 renamed this from
+    ///   0165's spelling **on the candle path only**; see the note below.
+    /// - `external` — an imported, measured USDC/USD series supplied the rate
+    ///   (task 0267's `usd_rate` rows, applied by the enrichment worker's
+    ///   external tier). USDC closed at 0.9681 on 2023-03-11, so this is not a
+    ///   cosmetic distinction from `assumed-par`.
     /// - `oracle` — a measured Reflector reading.
     /// - `traded` — priced through a reference asset's own traded candles.
+    ///
+    /// Every value names the INPUT the rate came from, never the outcome: a
+    /// bucket reading exactly 1.0 under `external` or `oracle` is a measurement
+    /// that happened to be at par, which is precisely what `assumed-par` is not.
     ///
     /// Derived from the candle's quote leg and rate signature, not stored: the
     /// candle tables carry `close_usd` with no companion provenance column. See
@@ -331,7 +342,11 @@ pub struct Candle {
     /// ⚠️ **On the synthesized peg-asset path (§6) nothing is measured, `close`
     /// included.** Canonical USDC has no candles of its own, so every field is
     /// the `usd_rate` observation for the bucket — or the $1 fallback when none
-    /// precedes it, which [`Candle::method`] reports as `peg`. Do not read
+    /// precedes it, which [`Candle::method`] reports as `peg`. That value
+    /// belongs to USDC's OWN synthesized series and not to any quote leg: 0268
+    /// retired `peg` from the candle path in favour of `assumed-par`, but kept
+    /// 0165's meaning here, where "no measured rate was available" is still
+    /// exactly what happened. Do not read
     /// `derived: true` as "only the extremes are reconstructed"; read it as "not
     /// measured on this market".
     ///

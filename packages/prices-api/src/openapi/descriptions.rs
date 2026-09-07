@@ -312,10 +312,14 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "Candle",
         "method",
-        "Where the USD rate behind this bucket came from:\n\n* `peg` — no measured rate was \
-         available; USDC was taken at 1 USD.\n* `oracle` — a measured oracle reading.\n* \
-         `traded` — priced through a reference asset's own trades.\n\n`null` when the price \
-         fields are `null`, and always `null` for `base_currency=XLM`, where nothing is \
+        "Where the USD rate behind this bucket came from:\n\n* `assumed-par` — nothing was \
+         measured; the literal 1.0 supplied the value, i.e. USDC was taken at 1 USD.\n* \
+         `external` — an imported, measured USDC/USD series supplied the rate.\n* `oracle` — \
+         a measured Reflector reading supplied the rate.\n* `traded` — priced through a \
+         reference asset's own trades.\n\nEach value names the INPUT the rate came from, so \
+         `assumed-par` and `external` are never interchangeable: one is an assumption, the \
+         other a measurement that may sit percent off par.\n\n`null` when the price fields \
+         are `null`, and always `null` for `base_currency=XLM`, where nothing is \
          converted.",
     ),
     (
