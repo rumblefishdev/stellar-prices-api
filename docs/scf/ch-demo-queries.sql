@@ -1,4 +1,8 @@
--- SCF Milestone 1 — ClickHouse demo / evidence queries (stellar-prices-api)
+-- SCF Milestones 1 and 2 — ClickHouse demo / evidence queries
+-- (stellar-prices-api)
+--
+-- Queries (1)-(9) back milestone-1-evidence.md. Queries (10)-(22), from the
+-- MILESTONE 2 banner onward, back milestone-2-evidence.md.
 --
 -- Run by the operator against PRODUCTION ClickHouse over mTLS, from their own
 -- shell. Outputs are pasted back into milestone-1-evidence.md (replacing the
@@ -190,3 +194,184 @@ SELECT venue, count() AS pools
 FROM prices.pool_registry FINAL
 GROUP BY venue
 ORDER BY venue;
+
+-- ===========================================================================
+-- MILESTONE 2 — Public API (added 2026-09-07, task 0128)
+-- ===========================================================================
+--
+-- Everything below backs a claim in milestone-2-evidence.md. Same rules as
+-- above: READ-ONLY, run by the operator against PRODUCTION ClickHouse over
+-- mTLS, database `prices`.
+--
+-- Most of Milestone 2's evidence is HTTP rather than SQL, because the
+-- deliverable is an API. The commands for those live next to their claims in
+-- milestone-2-evidence.md §5. What follows is the part a reviewer can only
+-- check from the database side.
+--
+-- Query numbering continues from the Milestone 1 set.
+
+-- ---------------------------------------------------------------------------
+-- AC 4 — VWAP verifiable against raw price_ohlcv rows
+-- ---------------------------------------------------------------------------
+
+-- (10) The published row for one asset, as the API serves it.
+--      Compare `sources` and `vwap_24h` against query (11) recomputed by hand.
+--      Expect: `sources` names each venue with its own price and 24h volume.
+SELECT asset_id, price_usd, price_xlm, vwap_24h, volume_24h_usd,
+       change_24h_pct, sources, method, updated_at
+FROM prices.current_prices FINAL
+WHERE asset_id = 4;
+
+-- (11) The raw candles the published figure is derived from.
+--      This is the capture that task 0123 re-aggregated in plain Python,
+--      independent of the materialised view's own SQL. Pin the window: the MV
+--      refreshes every minute, so an unpinned comparison proves nothing.
+--      Expect: ~29,000 rows for six assets over 24 h.
+SELECT timestamp, asset_id, quote_asset_id, source,
+       close, close_usd, volume_quote_usd
+FROM prices.price_ohlcv_1m FINAL
+WHERE asset_id IN (4, 5, 70, 108, 430, 741)
+  AND timestamp >= toDateTime('2026-08-25 13:22:00')
+  AND timestamp <= toDateTime('2026-08-26 13:22:00');
+
+-- (12) Ties across quote legs — why "the latest priced close" is a SET.
+--      Expect: several assets with cnt > 1. This is common, not exotic, and it
+--      is why the reconciliation asserts set membership rather than equality.
+SELECT asset_id, max(timestamp) AS newest_priced, count() AS cnt
+FROM prices.price_ohlcv_1m FINAL
+WHERE close_usd > 0
+  AND timestamp >= now() - INTERVAL 1 HOUR
+GROUP BY asset_id
+HAVING cnt > 1
+ORDER BY cnt DESC
+LIMIT 20;
+
+-- ---------------------------------------------------------------------------
+-- AC 5 — earliest_data_available <= 2022-01-01, reconciled four ways
+-- ---------------------------------------------------------------------------
+
+-- (13) What the API reports, read from the row the endpoint reads.
+--      Expect: sdex.earliest_data_available = 2015-11-18 03:47:00.
+SELECT task_name, status, current_ledger, target_ledger,
+       last_push_at, completed_at, earliest_data_available
+FROM prices.backfill_progress FINAL
+ORDER BY task_name;
+
+-- (14) What the candles actually contain — the independent check.
+--      The stored value above is a monotonic high-water mark and CANNOT correct
+--      itself downward, so an overstatement would be permanent and invisible.
+--      That is the whole reason this query exists.
+--      Expect: 2015-11-18, matching (13).
+SELECT min(timestamp) AS oldest_sdex_candle,
+       max(timestamp) AS newest_sdex_candle,
+       count()        AS daily_candles
+FROM prices.price_ohlcv_1d
+WHERE source = 'sdex';
+
+-- (15) Oldest ACTIVE partition on every candle tier — the third view.
+--      Expect: 201511 on all seven tiers.
+SELECT table, min(partition) AS oldest_partition
+FROM system.parts
+WHERE database = 'prices'
+  AND table LIKE 'price_ohlcv_%'
+  AND active
+GROUP BY table
+ORDER BY table;
+
+-- (16) Continuity, month by month, across the criterion's window.
+--      Depth alone is not coverage. Expect: days_with_candles equal to the
+--      calendar length of every month from 2022-01 onward, leap day included.
+SELECT toYYYYMM(timestamp)            AS month,
+       uniqExact(toDate(timestamp))   AS days_with_candles,
+       count()                        AS candles,
+       uniqExact(asset_id)            AS assets
+FROM prices.price_ohlcv_1d
+WHERE source = 'sdex'
+  AND timestamp >= toDate('2022-01-01')
+  AND timestamp <  today()
+GROUP BY month
+ORDER BY month;
+
+-- ---------------------------------------------------------------------------
+-- AC 6 — the USDC exclusion, stated with the data behind it
+-- ---------------------------------------------------------------------------
+
+-- (17) Why USDC cannot serve as the spot-check asset.
+--      Expect: zero candles. USDC is our top-preference QUOTE asset, so pairs
+--      canonicalise as base=X/quote=USDC and USDC essentially never appears as
+--      a base leg. With no candles of its own, the published series is filled
+--      from the peg. See milestone-2-evidence.md §5 AC 6 and task 0265.
+SELECT count() AS usdc_base_leg_candles
+FROM prices.price_ohlcv_1d
+WHERE asset_id = (SELECT asset_id FROM prices.assets FINAL
+                  WHERE asset_code = 'USDC'
+                    AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+                  LIMIT 1);
+
+-- (18) The control: the substitute spot-check assets DO have measured trades
+--      on the dates the report compares against Binance.
+--      Expect: real trade_count and non-zero close_usd on each date.
+SELECT toDate(timestamp) AS day, asset_id, source,
+       close, close_usd, trade_count
+FROM prices.price_ohlcv_1d
+WHERE asset_id = 4
+  AND toDate(timestamp) IN ('2022-01-03', '2022-06-15', '2023-03-11',
+                            '2024-07-01', '2026-06-15')
+ORDER BY day, source;
+
+-- (19) ⚠️ The caveat the report states rather than hides: USD coverage is thin,
+--      and thinnest where it is oldest. The spot-check assets were chosen from
+--      the priced majority, deliberately.
+--      Expect: ~36% of 2022 daily SDEX candles carry close_usd = 0, ~13% of
+--      2021, and effectively all of 2015-2020.
+SELECT toYear(timestamp)                              AS year,
+       count()                                        AS candles,
+       countIf(close_usd = 0)                         AS unpriced,
+       round(100 * countIf(close_usd = 0) / count(), 2) AS unpriced_pct
+FROM prices.price_ohlcv_1d
+WHERE source = 'sdex'
+GROUP BY year
+ORDER BY year;
+
+-- ---------------------------------------------------------------------------
+-- Work items without a numbered criterion (evidence doc §6)
+-- ---------------------------------------------------------------------------
+
+-- (20) The minimum-volume source threshold, and why it had to be CONDITIONAL.
+--      Applied unconditionally a $100 floor would have blanked the VWAP on
+--      96.5% of priced assets, because most venues carry a dollar a day or
+--      less. Expect: the vast majority of venues in the two lowest buckets.
+SELECT multiIf(v <= 1, '1. <= $1',
+               v <= 10, '2. $1-10',
+               v <= 100, '3. $10-100',
+               v <= 1000, '4. $100-1k',
+               v <= 10000, '5. $1k-10k',
+                           '6. > $10k')  AS bucket,
+       count()                            AS venues
+FROM (
+    SELECT asset_id, source, sum(volume_quote_usd) AS v
+    FROM prices.price_ohlcv_1m FINAL
+    WHERE timestamp >= now() - INTERVAL 24 HOUR
+      AND close_usd > 0
+    GROUP BY asset_id, source
+)
+GROUP BY bucket
+ORDER BY bucket;
+
+-- (21) The outlier filter can empty the source set while a price still
+--      publishes — a documented property, not a defect. The median
+--      interpolates on an even count, so four values 1,1,3,3 give a median of
+--      2 and every element deviates by 50%.
+--      Expect: a non-zero count here is EXPECTED. See §6.2 and task 0238.
+SELECT count() AS priced_but_no_sources
+FROM prices.current_prices FINAL
+WHERE price_usd > 0
+  AND (sources = '' OR sources = '{}');
+
+-- (22) Aquarius appears as a named source with real volume (§6.3).
+--      Expect: aquarius present alongside sdex/soroswap/phoenix.
+SELECT source, count() AS candles, round(sum(volume_quote_usd), 2) AS volume_24h_usd
+FROM prices.price_ohlcv_1m FINAL
+WHERE timestamp >= now() - INTERVAL 24 HOUR
+GROUP BY source
+ORDER BY volume_24h_usd DESC;
