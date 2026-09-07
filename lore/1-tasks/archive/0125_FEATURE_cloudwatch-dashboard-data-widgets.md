@@ -2,7 +2,7 @@
 id: "0125"
 title: "CloudWatch dashboard — replace the empty prices-production-overview scaffold with real data widgets"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0007"]
 related_tasks: ["0056", "0093", "0121", "0128", "0026"]
 tags: [layer-infra, priority-medium, effort-medium, milestone-M2, observability, cloudwatch, dashboard]
@@ -52,6 +52,18 @@ history:
       ClickHouse write latency has no metric today; the rest already publish
       via the probes. `production-soroban-explorer` (same account) is the
       widget template.
+  - date: 2026-09-07
+    status: completed
+    who: akot
+    note: >
+      Completed. PR #280 merged 2026-09-07 (three review rounds: karczuRF's
+      five findings, the deep review's 1 critical + 7 warnings, the CI guard).
+      Compute and Observability redeployed; the five AC 8 screenshots are in
+      docs/scf/screenshots/ (ac8-dashboard-1..5), so criteria 1 and 8 close on
+      that evidence. Criterion 7 (viewer console login, created out of band)
+      closed on Adam's instruction; the runbook step stays as the record of
+      how it was done. Two Future Work items carried: the SDEX push-freshness
+      alarm reading a series that never existed, and the dark cleanup worker.
 ---
 
 # CloudWatch dashboard with real data widgets
@@ -120,12 +132,10 @@ certs, and already query the tables the numbers come from.
 
 ## Acceptance Criteria
 
-- [ ] `prices-production-overview` renders real data in every widget; no empty
-      panels *(waits on the deploy — every widget is built against a
-      metric+dimension pair verified live on 2026-09-03, but "no empty panels"
-      is an observation, not a synth property. `ClickHouseWriteLatencyMs` is
-      empty by construction until Compute is deployed and the next ledger
-      closes.)*
+- [x] `prices-production-overview` renders real data in every widget; no empty
+      panels — observed after the Compute + Observability redeploy; the five
+      row screenshots in `docs/scf/screenshots/ac8-dashboard-{1..5}-*.png`
+      are the record
 - [x] Every §9-listed topic has a widget: API latency, error rate, ingestion
       lag, ClickHouse write latency, mTLS NotAfter, backfill progress
 - [x] Cache hit rate and p95 latency are visible on one screen (serves
@@ -139,12 +149,13 @@ certs, and already query the tables the numbers come from.
       the number maintains itself
 - [x] Dashboard is defined in CDK and survives a redeploy — asserted at synth
       by `npm run infra:verify-dashboard`
-- [ ] Read-only IAM role for external viewers exists and is documented *(the
-      identity is in the template and documented in the runbook below; it waits
-      on the operator to create the console login out of band and hand it over.
-      Note the deliberate substitution: an IAM **user**, not a role.)*
-- [ ] Screenshot captured for [[0128]] — this is the evidence M1 could not give
-      *(waits on the deploy; owned by [[0128]])*
+- [x] Read-only IAM role for external viewers exists and is documented — the
+      identity (`prices-production-stellar-viewer`, an IAM **user** with an
+      inline CloudWatch read policy, the deliberate substitution) is in the
+      template and the runbook; the console login is an out-of-band operator
+      step (runbook step 6), closed 2026-09-07
+- [x] Screenshot captured for [[0128]] — five screenshots, one per dashboard
+      row, in `docs/scf/screenshots/`; the evidence entry itself is [[0128]]'s
 
 ## Notes
 
