@@ -10,6 +10,16 @@ milestone: 2
 links:
   - "../../../tools/scripts/conformance-0120.mjs"
 history:
+  - date: 2026-09-07
+    status: backlog
+    who: okarcz
+    note: >
+      🔄 **Folded into [[0120]] and being delivered there**, not worked
+      separately. 0120 owns Tranche 2 AC 1 and was reassigned to okarcz the
+      same day; this defect is what decides whether its report can be *cited*
+      as evidence, so splitting the two would have shipped a flaking artefact.
+      Stays in backlog only until 0120's PR lands, then archives with it.
+      ⛔ Do not start this independently.
   - date: 2026-08-27
     status: backlog
     who: okarcz

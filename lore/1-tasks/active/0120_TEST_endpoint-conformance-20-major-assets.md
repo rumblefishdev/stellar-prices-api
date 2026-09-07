@@ -2,16 +2,33 @@
 id: "0120"
 title: "Endpoint conformance — all 7 route groups return correct, schema-valid responses for 20 major assets"
 type: TEST
-status: blocked
-by: ["0178"]
+status: active
+by: []
 related_adr: ["0008"]
-related_tasks: ["0072", "0118", "0119", "0124", "0128", "0135", "0170", "0178", "0225"]
+related_tasks: ["0072", "0118", "0119", "0124", "0128", "0135", "0170", "0178", "0225", "0230"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M2, api, testing, verification, acceptance]
 milestone: 2
 links:
   - "../../../packages/prices-api/src/lib.rs"
   - "../../../docs/prices-api-general-overview.md"
 history:
+  - date: 2026-09-07
+    status: active
+    who: okarcz
+    note: >
+      🔄 **Reassigned from stkrolikiewicz to okarcz, with the operator
+      informing him directly.** Unblocked: `by` still named [[0178]], which
+      completed and archived, so nothing open blocked this task. It owns
+      Tranche 2 AC 1 — **the only Tranche 2 criterion still unmet** — and it
+      gates the one part of [[0128]] that cannot be written today.
+      🔑 **[[0230]] is folded into this task**, not left in the backlog. 0230
+      is what makes the report *citable*: the suite asserts every OHLCV price
+      field is a decimal string, which ADR 0011 §5 made deliberately false for
+      a traded-but-unpriced bucket, so results move with enrichment. Those are
+      the 11 failures that did not reproduce 40 minutes later in the
+      2026-09-02 run. Scope taken on: method-aware stub assertion, the 0230
+      null-bucket contract, the batch/single minute-boundary skips, then a
+      clean production re-run.
   - date: 2026-09-02
     status: blocked
     who: stkrolikiewicz
@@ -161,11 +178,25 @@ after 0072 and [[0119]].
       identifier forms
 - [x] All 7 route groups exercised for every asset; every response validates
       against the OpenAPI spec (0 schema failures in the 2026-08-19 run)
-- [ ] No documented response field is a stub/sentinel for a liquid asset
-      (**failing on production** — deferred to [[0135]], [[0170]]; ⚠️ **needs
-      rewording, see the 2026-09-02 run**: [[0178]] has landed and deliberately
-      publishes `vwap_24h 0` / `sources {}` for a quote-only asset, so as
-      written this criterion can never go green — it must account for `method`)
+- [ ] **Reworded 2026-09-07.** No documented response field is a stub/sentinel
+      for a liquid asset **except where the contract says otherwise, in which
+      case the suite asserts the documented sentinel rather than its absence**.
+      The two declared cases: [[0178]]'s `vwap_24h 0` / `sources {}` for a
+      quote-only asset, and ADR 0011 §5's null price fields on a traded but
+      not-yet-priced bucket. ⚠️ The original wording could never go green —
+      it read a *decided* sentinel as a *pending* defect.
+- [ ] 🔑 **Folded in from [[0230]] — the suite's result does not move with
+      enrichment.** A bucket whose price fields are null is asserted against
+      the *unpriced* contract (`volume_base` and `trade_count` real, price
+      fields null, `method` null) rather than failed for not being a decimal
+      string. Proven by running the suite twice across an enrichment catch-up
+      and getting the same verdict — the 2026-08-27 counter-example was
+      USDCAllow, VELO and SHX failing at 13:26 and passing at 13:38 on
+      unchanged code.
+- [ ] **The batch/single check covers all priced assets, not 8 of 19.** Both
+      calls pinned to the same `updated_at`, or retried inside the minute, so
+      the comparison stops declining itself at a minute boundary
+      (`current_prices` refreshes every minute; the suite paces at 1 rps).
 - [x] OHLCV invariants asserted (OHLC ordering, bucket alignment, no dupes —
       all pass wherever data exists)
 - [x] Cursor pagination on `GET /assets` proven exhaustive and duplicate-free
@@ -174,6 +205,9 @@ after 0072 and [[0119]].
       (all 19 priced assets equal at matching timestamps)
 - [x] Suite is re-runnable (`npm run conformance:0120`) and its JSON report is
       citable evidence for [[0128]]
+- [ ] A **clean production re-run** is recorded, with its report committed and
+      cited by [[0128]] for Tranche 2 AC 1. Any residual failure is either
+      fixed or has a task that owns it, named in the run notes.
 - [x] Any defect found is fixed or spawned as its own task — spawned
       [[0210]] and [[0211]]; three interim spawns were retired the
       same day after a cross-check showed okarcz's [[0135]], [[0170]] and
