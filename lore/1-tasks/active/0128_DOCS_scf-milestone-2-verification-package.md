@@ -103,6 +103,15 @@ review, the public repo, and the 7-day post-launch report.
 
 - [ ] `milestone-2-evidence.md` covers all 6 Tranche 2 ACs, each with
       reproducible evidence
+- [ ] 🔴 **AC 3's entry names the observable the criterion was graded against,
+      and labels the latency evidence as the weaker claim in those words** —
+      *a header would be the cache asserting itself; latency is behaviour
+      consistent with a cache*. Not blurred, not softened. **Inherited from
+      [[0262]], which closed on this hand-off** — 0262 settled everything else
+      (ADR 0012; the amendment declared in
+      `docs/scf/milestone-2-rfp-deviations.md` §2 and noted in place against
+      AC 3 in `docs/prices-api-general-overview.md` §12). ⚠️ Fold §2 in **by
+      reference**; reproducing its argument makes a fourth copy that drifts.
 - [ ] Every §9 Tranche 2 work bullet addressed, including those without a
       numbered AC
 - [ ] The three M1-deferred items ([[0124]], [[0125]], [[0126]]) are shown as

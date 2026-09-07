@@ -2,7 +2,7 @@
 id: "0262"
 title: "Tranche 2 AC 3 cannot pass as written — the `X-Cache: Hit` header does not exist and is not being added; the criterion is amended in place and justified in the repo"
 type: DOCS
-status: active
+status: completed
 related_adr: ["0008", "0012"]
 related_tasks: ["0122", "0121", "0128", "0126"]
 tags: [layer-infra, priority-high, effort-small, milestone-M2, api-gateway, caching, acceptance, scf]
@@ -46,6 +46,18 @@ history:
       requesting a rewording to declaring one. [[0128]] activated the same day
       so the remaining AC has somewhere to land. ⚠️ The engineering decision of
       2026-09-04 is untouched — no CloudFront, no header; see ADR 0012.
+  - date: 2026-09-07
+    status: completed
+    who: okarcz
+    note: >
+      Closed. 4 of 5 criteria met; the fifth is **deferred to [[0128]]**, where
+      it is now written as a numbered acceptance criterion rather than left as
+      prose, because the artefact it applies to (`milestone-2-evidence.md`) is
+      0128's deliverable and does not exist yet. PR #288 merged (4 files,
+      +238/-44): `milestone-2-rfp-deviations.md` §2 22 → ~146 lines,
+      an in-place amendment note on AC 3 in the overview's criteria list, and
+      `prices-api-cache-verification.md` reframed from requesting a rewording
+      to declaring one. No code, as designed. ADR 0012 unedited.
 ---
 
 # Tranche 2 AC 3 — the `X-Cache: Hit` criterion, and why we are not satisfying it literally
@@ -295,7 +307,68 @@ What is left: [[0128]] must carry the AC 3 entry. Activated 2026-09-07.
       as a decision.
 - [ ] [[0128]]'s AC 3 entry states which observable the criterion was graded
       against, and labels the latency evidence as the weaker claim in those
-      words — not blurred. **0128 activated 2026-09-07**; this closes there.
+      words — not blurred. **(deferred to [[0128]])** — 0128 was activated
+      2026-09-07 and now carries this as its own numbered acceptance criterion,
+      quoting the required sentence. The artefact it applies to,
+      `docs/scf/milestone-2-evidence.md`, is 0128's deliverable and does not
+      exist yet, so this could not be satisfied here.
+
+## Implementation Notes
+
+**PR #288**, merged 2026-09-07 — 4 files, +238/-44. No code, by design.
+
+| file | change |
+| --- | --- |
+| `docs/scf/milestone-2-rfp-deviations.md` §2 | 22 → ~146 lines: the reworded criterion verbatim, the weakened claim named, the body-hash proof, CloudFront's wrong string, the amendment precedent, the latency evidence with its weakest route named |
+| `docs/prices-api-general-overview.md` §12 | in-place amendment note against AC 3, matching AC 2's note about [[0157]] |
+| `docs/prices-api-cache-verification.md` | reframed from *requests a rewording* to *declares one*; measurements untouched |
+
+**Verified before citing**, rather than repeated from this task file: M1's
+accepted `milestone-1-form-answers.md` really does carry an *"In-tranche scope
+refinements"* section; Tranche 2 AC 2 in the overview really does carry an
+in-place amendment note about 0157; AC 6 really does defer its spot-check dates
+to the reviewer. All three are load-bearing for the argument in §2.
+
+## Design Decisions
+
+### From Plan
+
+1. **The criterion is amended, not built to.** ADR 0012 stands: no CloudFront,
+   no `X-Cache` header. Nothing here reopened it.
+
+### Emerged
+
+2. **🔒 The reviewer is not messaged — operator decision, 2026-09-07.** This
+   supersedes the plan this task was written around, which was to raise the
+   wording in writing before submission. The amendment is instead *declared and
+   justified in the repo*, carried by the submission package. Reason: the
+   argument is long and evidence-led and already written; a message would be a
+   lossy second copy of it that then drifts out of step with the package.
+3. **No new document was created.** The instruction was to write the
+   justification down, and the obvious reading was a new file. Rejected: the
+   argument already lived in three places, and a fourth copy is precisely the
+   drift this project has been bitten by. §2 of the deviations document was
+   expanded instead — it is the file that is already *in* the M2 package.
+4. **The criteria list itself was annotated.** Not asked for. Added because a
+   reviewer reading the criteria in the overview would otherwise meet AC 3
+   unqualified, and AC 2 already establishes the pattern.
+5. **The two older artefacts were reframed, not left alone.** Both still said
+   the rewording *"needs the reviewer's agreement"*. Left as-is they would have
+   described a conversation that is not going to happen, and a future session
+   would have re-opened it.
+
+## Issues Encountered
+
+- **This task's own framing was stale in three files at once** — its title, its
+  Implementation section and two `docs/` artefacts all described the reviewer
+  ask. 🔑 A decision recorded in one place while the other copies still state
+  the old plan is not recorded; that is the same failure mode already on record
+  for a decision left contradicted by a code comment.
+
+## Future Work
+
+None spawned. The single remaining item is deferred to [[0128]], which is
+active and carries it as a numbered criterion.
 
 ## Notes
 
