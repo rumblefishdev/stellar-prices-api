@@ -13,14 +13,35 @@
 //!
 //! ## USD-close reference tiers (task 0061 §12.1)
 //!
-//! `close_usd` (and the still-missing `volume_quote_usd`) are filled in two
-//! ordered tiers, run inside [`ChEnrichmentPass::run`]:
+//! `close_usd` (and the still-missing `volume_quote_usd`) are filled in three
+//! ordered tiers, run inside [`ChEnrichmentPass::run`]. The order is an evidence
+//! ranking: a reading we polled, then a reading someone else measured, then an
+//! assumption. Each tier only ever touches rows the tiers above left at
+//! `close_usd = 0`.
 //!
 //! 1. **Recent-window oracle tier** ([`ChEnrichmentPass::enrich_batch`]) — the
 //!    `ASOF LEFT JOIN oracle_prices`. Sets the USD columns wherever a Reflector
 //!    row exists for the candle's `quote_asset_id` within the staleness window.
 //!    This is the depeg-aware tier and it wins where it applies.
-//! 2. **Peg-pivot tier** ([`ChEnrichmentPass::enrich_peg_pivot_step`]) — the
+//! 2. **External tier** ([`ChEnrichmentPass::run_external_tier`], task 0268) —
+//!    a USDC-quoted candle is priced from the MEASURED USDC/USD rate task 0267
+//!    imports into `prices.usd_rate` (`method = 'external'`), resolved at the
+//!    bucket's END. USDC closed at **0.9681** on 2023-03-11, so this is the tier
+//!    that stops ~654,291 deep-history candles being stored 3% wrong.
+//!
+//!    ⚠️ **It is not the oracle tier, and that is deliberate.** The obvious
+//!    shortcut — insert the imported series into `oracle_prices` under a pseudo
+//!    oracle name and let tier 1 price it — is rejected twice over: task 0247
+//!    forbids publishing an import as `oracle`, since `oracle` means "we polled
+//!    Reflector"; and `oracle_prices` staying untouched is what preserves the
+//!    meaning of the 0182 reset's oracle-shadow guard, which refuses to re-open
+//!    a quote leg the oracle can re-price.
+//!
+//!    The tier writes only the USD columns — candles store no `method`. It is
+//!    visible on the wire because `/ohlcv` reconstructs provenance at read time
+//!    and labels a scaled pre-epoch USDC leg `external`
+//!    (`prices-api`'s `queries_ch::usd_method_expr`).
+//! 3. **Peg-pivot tier** ([`ChEnrichmentPass::enrich_peg_pivot_step`]) — the
 //!    deep-history backbone for candles the oracle tier left at `close_usd = 0`:
 //!    - **peg:** a USDC-quoted candle gets `close_usd = close × $1`, exact and
 //!      oracle-free, back to SDEX genesis;
@@ -35,6 +56,12 @@
 //! Stellar USDT depegged in June 2022 and trades at ~$0.13, so that overstated
 //! `close_usd` by ~7.4x on 44,657 candles across 495 base assets. It is now
 //! priced by measurement through the pivot, exactly like XLM.
+//!
+//! A USDC-quoted candle with no imported rate for its bucket still reaches the
+//! peg tier and is still valued at `close × $1`. That is the correct outcome —
+//! it is the best available — and it is also why the 0268 reset joins the
+//! external row before zeroing anything: a row no tier can refill must never be
+//! re-opened (the 157 candles task 0182 destroyed).
 //!
 //! Candles whose quote is none of USDC/XLM/USDT (and had no oracle) keep
 //! `close_usd = 0` — never a wrong non-NULL value (the view's `no_reference`).
@@ -933,6 +960,62 @@ impl ChEnrichmentPass {
     /// **0111** is open on for full-table scans. `pivot_sql` pins `quote_asset_id`
     /// to the reference id so each pivot prunes on the sort key's 2nd column.
     ///
+    /// Tier 2 (task 0268) — price USDC-quoted candles from the MEASURED rate.
+    ///
+    /// Loops [`external_sql`] to a fixed point, exactly as
+    /// [`ChEnrichmentPass::run_peg_pivot_tier`] does: run one statement, re-count,
+    /// stop as soon as a batch flips nothing out of the zero-set. On a table with
+    /// no `external` rows in `usd_rate` — every scheduled path today, until task
+    /// 0267's series is loaded on prod — the first batch makes no progress and the
+    /// loop breaks immediately, so the recurring pass is unchanged.
+    ///
+    /// The no-progress case is `info!` rather than `warn!`: "these candles have no
+    /// imported rate for their bucket" is the EXPECTED steady state, not a defect.
+    /// The peg tier below still prices them at $1, which is what the 0268 reset is
+    /// then careful never to zero.
+    ///
+    /// Returns the updated `(remaining, batches)`.
+    async fn run_external_tier(
+        &self,
+        usdc_id: u32,
+        watermark: u32,
+        mut remaining: u64,
+        mut batches: u32,
+    ) -> Result<(u64, u32), ChEnrichError> {
+        let sql = external_sql(
+            &self.cfg.database,
+            &self.cfg.table,
+            usdc_id,
+            &self.window_pred("timestamp"),
+        );
+        let stale = external_window_s(&self.cfg.table);
+        for _ in 0..self.effective_max_batches() {
+            if remaining == 0 {
+                break;
+            }
+            self.client
+                .query(&sql)
+                .bind(watermark)
+                .bind(stale)
+                .bind(self.cfg.batch_size)
+                .execute()
+                .await?;
+            let after = self.count_candidates(watermark).await?;
+            batches += 1;
+            if after >= remaining {
+                info!(
+                    remaining = after,
+                    table = %self.cfg.table,
+                    "external tier drained — remaining candles have no imported USD rate for their bucket"
+                );
+                remaining = after;
+                break;
+            }
+            remaining = after;
+        }
+        Ok((remaining, batches))
+    }
+
     /// Returns the updated `(remaining, batches)`.
     async fn run_peg_pivot_tier(
         &self,
@@ -1074,14 +1157,38 @@ impl ChEnrichmentPass {
                  deferring peg-pivot tier so unreached oracle candles are not pegged"
             );
         } else if remaining > 0 {
+            // Resolved ONCE and shared by both tiers below — two calls would be
+            // two round-trips for the same answer.
             let refs = self.resolve_reference_ids().await?;
-            if refs.has_any() {
+
+            // Tier 2 — external (task 0268): USDC-quoted candles priced from the
+            // MEASURED USDC/USD rate task 0267 imports into `usd_rate`.
+            //
+            // Ordered BEFORE the peg tier and gated on the SAME `oracle_drained`
+            // flag, for the same two reasons: an un-drained oracle tier may still
+            // hold an unapplied in-window oracle price, and once `close_usd > 0` a
+            // row never re-enters the oracle tier on a later pass. It runs after
+            // the oracle tier because a polled Reflector reading is the better
+            // evidence where both exist, and before the peg tier because a
+            // measured rate is better evidence than a $1 assumption anywhere.
+            //
+            // `remaining`/`batches` are handed down, so the peg tier below only
+            // ever sees what NEITHER of the two tiers above could price.
+            if let Some(usdc_id) = refs.usdc {
+                let (r, b) = self
+                    .run_external_tier(usdc_id, watermark, remaining, batches)
+                    .await?;
+                remaining = r;
+                batches = b;
+            }
+
+            if remaining > 0 && refs.has_any() {
                 let (r, b) = self
                     .run_peg_pivot_tier(&refs, watermark, remaining, batches)
                     .await?;
                 remaining = r;
                 batches = b;
-            } else {
+            } else if !refs.has_any() {
                 warn!(
                     "no USDC/USDT/XLM reference assets in prices.assets — peg-pivot tier skipped"
                 );
@@ -1168,6 +1275,155 @@ fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32], window: &str) -> Option<Stri
          ORDER BY p.timestamp \
          LIMIT ?"
     ))
+}
+
+/// A candle table's bucket width in seconds. `0` for a name that is not one of
+/// the seven grains — callers floor it, so an unknown table can only ever widen
+/// a bound, never narrow one.
+fn bucket_width_s(table: &str) -> u32 {
+    match table {
+        "price_ohlcv_1m" => 60,
+        "price_ohlcv_15m" => 900,
+        "price_ohlcv_1h" => 3_600,
+        "price_ohlcv_4h" => 14_400,
+        "price_ohlcv_1d" => 86_400,
+        "price_ohlcv_1w" => 604_800,
+        "price_ohlcv_1M" => 2_678_400,
+        _ => 0,
+    }
+}
+
+/// The SQL expression for a bucket's END, given the table and the column holding
+/// its START (task 0268, decision G).
+///
+/// `timestamp` is the bucket's START but `close` is the period's LAST close, so
+/// a rate resolved at `timestamp` prices a weekly or monthly candle with the
+/// rate from the day the period OPENED — up to a month stale, and systematically
+/// so. The bucket end is the settled rule on both surfaces already
+/// (`views.sql`'s `price_usd_series`, `queries_ch::ohlcv_peg_series`); this
+/// reuses it rather than coining a third convention.
+///
+/// ⚠️ **Calendar functions for the calendar grains.** A `_1M` bucket is not 31
+/// fixed days: `timestamp + 2_678_400` overshoots every 30-day month and every
+/// February by days, so the ASOF resolves against the wrong day's rate for
+/// eleven months of twelve. It produces a plausible number and fails nowhere.
+fn bucket_end_expr(table: &str, col: &str) -> String {
+    match table {
+        "price_ohlcv_1d" => format!("addDays({col}, 1)"),
+        "price_ohlcv_1w" => format!("addWeeks({col}, 1)"),
+        "price_ohlcv_1M" => format!("addMonths({col}, 1)"),
+        other => format!("{col} + {}", bucket_width_s(other).max(3_600)),
+    }
+}
+
+/// How stale an `external` rate may be, relative to the bucket's end, before the
+/// external tier refuses to use it. **Derived from the table, deliberately not a
+/// [`ChEnrichConfig`] knob.**
+///
+/// The floor of one day is task 0267's series cadence: it is daily, so a bucket
+/// whose anchor is the previous day's observation is the normal case, not a
+/// stale one. Grains wider than a day take their own width instead, because
+/// there the anchor is by construction up to one bucket old.
+///
+/// ## Why derived and not configured
+///
+/// `pivot_window_s` IS configurable, and that is exactly why `coarse-repair`
+/// needs an explicit refusal for a value shorter than the bucket width: with a
+/// reset in play, too narrow a window discards a stored value and then fails to
+/// recompute it. A derived bound cannot be set wrong, so there is no refusal to
+/// write and no way for an operator to reach the destructive combination. It
+/// also avoids threading a knob nobody should turn through six
+/// `ChEnrichConfig` literal sites.
+fn external_window_s(table: &str) -> u32 {
+    bucket_width_s(table).max(86_400)
+}
+
+/// External statement (task 0268): a USDC-quoted candle the oracle tier left at
+/// `close_usd = 0` is priced from the MEASURED USDC/USD rate task 0267 imports
+/// into `prices.usd_rate`, instead of falling through to the peg tier's `× $1`.
+///
+/// USDC closed at **0.9681** on 2023-03-11. The peg tier's assumption is wrong
+/// by up to 3% daily and 12% intraday on ~654,291 stored candles, and this is
+/// the statement that stops storing that error.
+///
+/// ## Bind order (positional)
+///
+/// 1. the snapshot watermark — inside the CANDIDATE subquery, not the outer
+///    `WHERE`, because the candidate side is where it bounds the scan;
+/// 2. the staleness bound in seconds ([`external_window_s`]);
+/// 3. the `LIMIT` (batch size).
+///
+/// ## Why the candidate side is bounded and the reference side is not
+///
+/// `window` carries the 0114/0111 partition bound and is spliced into the
+/// candidate subquery only. The `usd_rate` reference stays unbounded so the
+/// month's FIRST buckets can still ASOF back to an anchor in an earlier
+/// partition — bounding it would leave the first day or two of every month
+/// unpriced. This is `pivot_sql`'s proven shape.
+///
+/// ## Why `FINAL` plus an explicit `method`, and never `argMax`
+///
+/// `method` is part of `usd_rate`'s sorting key, deliberately, so an `oracle`
+/// row and an `external` row at the same (identity, timestamp) COEXIST rather
+/// than one replacing the other. `argMax(usd_rate, timestamp)` across methods
+/// would therefore let part read order decide which one prices the candle. The
+/// filter picks the series by name.
+///
+/// ## Why the bucket's end
+///
+/// See [`bucket_end_expr`]. The `bend` is materialized in the candidate subquery
+/// rather than written into the `ASOF ON` clause because ASOF wants a column for
+/// its inequality — the same reason `ohlcv_peg_series` projects `bend`.
+///
+/// ## Why `r.usd > 0` and never `IS NULL`
+///
+/// `join_use_nulls = 0` on prod: an unmatched ASOF yields the column DEFAULT,
+/// which for `Decimal(38, 14)` is `0`, not NULL. A null test would never fire
+/// and every unmatched bucket would be written `close_usd = 0 * close = 0` —
+/// re-zeroing rows another tier had already priced.
+///
+/// `volume_quote_usd` is write-once (`if(p.volume_quote_usd > 0, …)`), which is
+/// the guard that makes the ORACLE tier win: a candle it priced keeps its
+/// depeg-aware value even if this statement reaches the row.
+fn external_sql(db: &str, tbl: &str, usdc_id: u32, window: &str) -> String {
+    let bend = bucket_end_expr(tbl, "timestamp");
+    format!(
+        "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
+         SELECT \
+             p.timestamp, p.asset_id, p.quote_asset_id, p.source, \
+             p.open, p.high, p.low, p.close, \
+             p.volume_base, p.volume_quote, \
+             if(p.volume_quote_usd > 0, p.volume_quote_usd, CAST(r.usd * p.volume_quote AS Decimal(38, 14))) AS volume_quote_usd, \
+             CAST(r.usd * p.close AS Decimal(38, 14)) AS close_usd, \
+             p.vwap, p.trade_count, \
+             p.version + 1 AS version \
+         FROM ( \
+             SELECT \
+                 timestamp, asset_id, quote_asset_id, source, \
+                 open, high, low, close, \
+                 volume_base, volume_quote, volume_quote_usd, close_usd, vwap, \
+                 trade_count, version, \
+                 1 AS k, \
+                 {bend} AS bend \
+             FROM {db}.{tbl} FINAL \
+             WHERE close_usd = 0 \
+               AND volume_quote > 0 \
+               AND quote_asset_id = {usdc_id} \
+               AND timestamp <= toDateTime(?){window} \
+         ) AS p \
+         ASOF LEFT JOIN ( \
+             SELECT 1 AS k, timestamp AS rts, usd_rate AS usd \
+             FROM {db}.usd_rate FINAL \
+             WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+               AND issuer_address = '{USDC_ISSUER}' AND contract_address = '' \
+               AND method = 'external' \
+         ) AS r \
+             ON r.k = p.k AND r.rts < p.bend \
+         WHERE r.usd > 0 \
+           AND (toUInt32(p.bend) - toUInt32(r.rts)) <= ? \
+         ORDER BY p.timestamp \
+         LIMIT ?"
+    )
 }
 
 /// Re-open already-written USD columns for the quote leg a [`UsdResetSpec`]
@@ -1474,6 +1730,193 @@ mod tests {
         );
         // Inlining adds no bind params: still watermark, window, watermark, limit.
         assert_eq!(sql.matches('?').count(), 4, "window adds no bind params");
+    }
+
+    // ---- task 0268: the external tier -------------------------------------
+
+    /// D-07: the rate resolves at the bucket's END, and the calendar grains need
+    /// calendar functions. A `_1M` bucket is not 31 fixed days — a fixed-seconds
+    /// end lands in the wrong month for eleven months of twelve, and every one of
+    /// those buckets then resolves against the wrong day's rate. Nothing errors.
+    #[test]
+    fn bucket_end_expr_uses_calendar_functions_for_calendar_grains() {
+        assert_eq!(
+            bucket_end_expr("price_ohlcv_1h", "timestamp"),
+            "timestamp + 3600"
+        );
+        assert_eq!(
+            bucket_end_expr("price_ohlcv_1d", "timestamp"),
+            "addDays(timestamp, 1)"
+        );
+        assert_eq!(
+            bucket_end_expr("price_ohlcv_1w", "timestamp"),
+            "addWeeks(timestamp, 1)"
+        );
+        assert_eq!(
+            bucket_end_expr("price_ohlcv_1M", "timestamp"),
+            "addMonths(timestamp, 1)"
+        );
+    }
+
+    /// The staleness bound is DERIVED from the table, never configured: one day
+    /// (task 0267's series is daily) or the grain's own width, whichever is
+    /// wider. A bound shorter than the bucket width drops the reference for every
+    /// bucket whose anchor is the previous one — the failure `--pivot-window-s`
+    /// needs an explicit refusal for precisely because it IS configurable.
+    #[test]
+    fn external_window_s_floors_at_one_day_and_widens_to_the_grain() {
+        assert_eq!(external_window_s("price_ohlcv_1m"), 86_400);
+        assert_eq!(external_window_s("price_ohlcv_1d"), 86_400);
+        assert_eq!(external_window_s("price_ohlcv_1w"), 604_800);
+        assert_eq!(external_window_s("price_ohlcv_1M"), 2_678_400);
+        for t in [
+            "price_ohlcv_1m",
+            "price_ohlcv_15m",
+            "price_ohlcv_1h",
+            "price_ohlcv_4h",
+            "price_ohlcv_1d",
+            "price_ohlcv_1w",
+            "price_ohlcv_1M",
+        ] {
+            assert!(
+                external_window_s(t) >= bucket_width_s(t),
+                "{t}: the staleness bound can never be shorter than the bucket width"
+            );
+        }
+    }
+
+    /// ⚠️ `method` is part of `usd_rate`'s SORTING KEY, so an `oracle` row at the
+    /// same (identity, timestamp) coexists with the `external` one. `argMax`
+    /// across methods would let part read order decide which wins. `FINAL` plus an
+    /// explicit `method = 'external'` is the only correct read.
+    #[test]
+    fn external_sql_reads_usd_rate_final_with_an_explicit_method_never_argmax() {
+        let sql = external_sql("prices", "price_ohlcv_1d", 3, "");
+        assert!(sql.contains("usd_rate FINAL"), "{sql}");
+        assert!(sql.contains("method = 'external'"), "{sql}");
+        assert!(
+            !sql.contains("argMax"),
+            "argMax across methods lets part read order pick the winner: {sql}"
+        );
+    }
+
+    /// All four conjuncts of the identity tuple. A missing `contract_address = ''`
+    /// silently matches a Soroban USDC row — a different asset with the same code
+    /// and issuer — and prices the whole deep history off it.
+    #[test]
+    fn external_sql_pins_the_full_usdc_identity_tuple() {
+        let sql = external_sql("prices", "price_ohlcv_1d", 3, "");
+        assert!(sql.contains("asset_kind = 'credit'"), "{sql}");
+        assert!(sql.contains("asset_code = 'USDC'"), "{sql}");
+        assert!(
+            sql.contains(&format!("issuer_address = '{USDC_ISSUER}'")),
+            "{sql}"
+        );
+        assert!(sql.contains("contract_address = ''"), "{sql}");
+    }
+
+    /// The peg tier's narrow candidate filter, NOT the oracle tier's `OR` form:
+    /// the external tier fills only what the oracle tier left at zero, so an
+    /// oracle-priced candle is never a candidate in the first place.
+    #[test]
+    fn external_sql_targets_only_what_the_oracle_tier_left() {
+        let sql = external_sql("prices", "price_ohlcv_1d", 3, "");
+        assert!(sql.contains("close_usd = 0"), "{sql}");
+        assert!(
+            !sql.contains("volume_quote_usd = 0 OR"),
+            "the oracle tier's wider OR form would re-price oracle rows: {sql}"
+        );
+        assert!(sql.contains("volume_quote > 0"), "{sql}");
+        assert!(sql.contains("quote_asset_id = 3"), "{sql}");
+    }
+
+    /// 🔑 THE "oracle wins" GUARD. `volume_quote_usd` is write-once, so the
+    /// depeg-aware value the oracle tier set survives a later external pass.
+    #[test]
+    fn external_sql_preserves_an_oracle_set_volume_quote_usd() {
+        let sql = external_sql("prices", "price_ohlcv_1d", 3, "");
+        assert!(
+            sql.contains("if(p.volume_quote_usd > 0, p.volume_quote_usd,"),
+            "{sql}"
+        );
+    }
+
+    /// The 0111 partition bound goes on the CANDIDATE side only. The `usd_rate`
+    /// reference stays unbounded so a month's first buckets keep an anchor —
+    /// `pivot_sql_bounds_only_the_candidate_side_not_the_reference`'s rule, and
+    /// the same occurrence count is what proves it.
+    #[test]
+    fn external_sql_bounds_only_the_candidate_side_not_the_reference() {
+        let win = " AND timestamp >= toDateTime(100) AND timestamp < toDateTime(200)";
+        let sql = external_sql("prices", "price_ohlcv_1d", 3, win);
+        assert!(sql.contains(win), "{sql}");
+        assert_eq!(
+            sql.matches("toDateTime(100)").count(),
+            1,
+            "the partition lower bound appears once — on the candidate side only: {sql}"
+        );
+        let unbounded = external_sql("prices", "price_ohlcv_1d", 3, "");
+        assert!(!unbounded.contains(">= toDateTime("), "{unbounded}");
+        assert_eq!(
+            sql.matches('?').count(),
+            3,
+            "the window adds no bind params"
+        );
+    }
+
+    /// ⚠️ `join_use_nulls = 0` on prod: an unmatched ASOF yields the column
+    /// DEFAULT, which for `Decimal(38, 14)` is 0 and not NULL. `IS NULL` would
+    /// therefore never fire, and every unmatched bucket would be written with
+    /// `close_usd = 0 * close = 0` — re-zeroing rows the peg tier had priced.
+    #[test]
+    fn external_sql_tests_the_rate_positively_never_is_null() {
+        let sql = external_sql("prices", "price_ohlcv_1d", 3, "");
+        assert!(sql.contains("r.usd > 0"), "{sql}");
+        assert!(
+            !sql.contains("IS NULL") && !sql.contains("IS NOT NULL"),
+            "under join_use_nulls = 0 a null test silently never fires: {sql}"
+        );
+    }
+
+    /// A versioned INSERT, never a mutation, so a FREEZE stays a rollback point.
+    #[test]
+    fn external_sql_is_a_versioned_insert_not_a_mutation() {
+        let sql = external_sql("prices", "price_ohlcv_1d", 3, "");
+        assert!(
+            sql.starts_with("INSERT INTO prices.price_ohlcv_1d"),
+            "{sql}"
+        );
+        assert!(sql.contains("p.version + 1 AS version"), "{sql}");
+        assert!(!sql.contains("ALTER TABLE"), "{sql}");
+    }
+
+    /// Bind order, as documented on the fn: candidate watermark (inside the inner
+    /// subquery), staleness seconds, batch size. Positional binds — a reordering
+    /// binds the batch size as a timestamp and fails at RUN time, on prod.
+    #[test]
+    fn external_sql_bind_order_is_watermark_then_staleness_then_limit() {
+        let sql = external_sql("prices", "price_ohlcv_1d", 3, "");
+        let wm = sql.find("timestamp <= toDateTime(?)").unwrap();
+        let stale = sql.find(") <= ?").unwrap();
+        let lim = sql.find("LIMIT ?").unwrap();
+        assert!(
+            wm < stale && stale < lim,
+            "bind order: watermark, staleness, limit: {sql}"
+        );
+    }
+
+    /// D-07 end to end: the ASOF resolves against the bucket's END, and for a
+    /// daily grain that end is a calendar day later — not `timestamp` itself.
+    #[test]
+    fn external_sql_resolves_the_rate_at_the_bucket_end() {
+        let sql = external_sql("prices", "price_ohlcv_1d", 3, "");
+        assert!(sql.contains("addDays(timestamp, 1) AS bend"), "{sql}");
+        assert!(sql.contains("ON r.k = p.k AND r.rts < p.bend"), "{sql}");
+        let monthly = external_sql("prices", "price_ohlcv_1M", 3, "");
+        assert!(
+            monthly.contains("addMonths(timestamp, 1) AS bend"),
+            "{monthly}"
+        );
     }
 
     #[test]

@@ -1772,3 +1772,184 @@ async fn a_backfill_into_an_exhausted_month_reopens_it() {
         "drift correction closed the loop — the backfilled row is enriched"
     );
 }
+
+// ---- task 0268: the external tier ---------------------------------------
+
+/// Seed one `method = 'external'` row for canonical USDC into a scratch
+/// `usd_rate`, with the writer's exact column list.
+///
+/// ⚠️ **`ts` is stamped at the START of the UTC day, and that pins task 0267's
+/// convention.** The tier resolves at the bucket's END with an ASOF
+/// `rts < bend`, so a day-start stamp is the same day's rate for every bucket in
+/// that day. If 0267 instead stamps its daily rows at day END, every bucket
+/// resolves to the PREVIOUS day's rate — an off-by-one-day error that produces
+/// entirely plausible numbers and fails nowhere. This helper is the thing that
+/// will catch it: 0268's runbook Appendix B, precondition 2, is the query that
+/// confirms the convention on prod before the pass runs.
+async fn seed_external_rate(client: &Client, db: &str, ts: u32, rate: f64) {
+    client
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, \
+              timestamp, usd_rate, method, reference_asset, hops, version) VALUES \
+             ('credit', 'USDC', '{USDC_ISSUER}', '', {ts}, {rate}, 'external', '', 0, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+async fn seed_assets_and_candles(client: &Client, db: &str) {
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&CANDLES.replace("{db}", db))
+        .execute()
+        .await
+        .unwrap();
+}
+
+// The deep FOO/USDC fixture candle (`close = 4`, `volume_quote = 4`) and the
+// start of its UTC day, 2020-09-13.
+const DEEP_TS: u32 = 1_600_000_000;
+const DEEP_DAY_START: u32 = 1_599_955_200;
+// The recent oracle-covered FOO/USDC candle (`close = 5`) and its day start.
+const RECENT_TS: u32 = 1_700_000_000;
+const RECENT_DAY_START: u32 = 1_699_920_000;
+// USDC's real close on 2023-03-11 — the number this whole task exists for.
+const DEPEG_RATE: f64 = 0.9681;
+
+/// (a) A USDC-quoted candle the oracle tier left at zero is priced from the
+/// MEASURED rate, not from `× $1`, and `volume_quote_usd` is scaled by the same
+/// rate. `4 × 0.9681 = 3.8724` — the 3.19% the peg tier used to discard.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn external_tier_prices_a_usdc_leg_from_the_measured_rate() {
+    let db = "it_enrich_external_measured";
+    let client = setup_scratch(db).await;
+    seed_assets_and_candles(&client, db).await;
+    seed_external_rate(&client, db, DEEP_DAY_START, DEPEG_RATE).await;
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let got = close_usd(&client, db, 10, 2, DEEP_TS).await;
+    assert!(
+        (got - 3.8724).abs() < 1e-4,
+        "close_usd must be close × the measured rate (4 × 0.9681 = 3.8724), got {got} \
+         — 4.0 means the peg tier priced it and the external tier never ran"
+    );
+
+    let vqu: f64 = client
+        .query(&format!(
+            "SELECT toFloat64(volume_quote_usd) FROM {db}.price_ohlcv_1m FINAL \
+             WHERE asset_id = 10 AND quote_asset_id = 2 AND timestamp = {DEEP_TS}"
+        ))
+        .fetch_one::<f64>()
+        .await
+        .unwrap();
+    assert!(
+        (vqu - 3.8724).abs() < 1e-4,
+        "volume_quote_usd scales by the same rate, got {vqu}"
+    );
+
+    // (d) Idempotent: the tier's candidate filter is `close_usd = 0`, so a second
+    // pass must not find the row again — and must not re-scale an already-scaled
+    // value into 4 × 0.9681².
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+    let again = close_usd(&client, db, 10, 2, DEEP_TS).await;
+    assert!(
+        (again - 3.8724).abs() < 1e-4,
+        "a second pass must leave the value alone, got {again}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// (b) 🔑 THE ORACLE WINS. A polled Reflector reading and an imported rate both
+/// cover the same bucket at DIFFERENT rates: the oracle value is what lands,
+/// because the oracle tier runs first and the external tier's candidate filter
+/// is `close_usd = 0`. A second pass does not move it.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn external_tier_never_overwrites_a_candle_the_oracle_tier_priced() {
+    let db = "it_enrich_external_oracle_wins";
+    let client = setup_scratch(db).await;
+    seed_assets_and_candles(&client, db).await;
+    // The oracle says 1.0012; the imported series says 0.90 for the same day.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES ({RECENT_TS}, 2, 'reflector', 1.0012, '{{}}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    seed_external_rate(&client, db, RECENT_DAY_START, 0.90).await;
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let got = close_usd(&client, db, 10, 2, RECENT_TS).await;
+    assert!(
+        (got - 5.006).abs() < 1e-4,
+        "the oracle value (5 × 1.0012 = 5.006) must win over the import \
+         (5 × 0.90 = 4.5), got {got}"
+    );
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+    let again = close_usd(&client, db, 10, 2, RECENT_TS).await;
+    assert!((again - 5.006).abs() < 1e-4, "idempotent, got {again}");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// (c) 🔑 NO REFERENCE, NO CHANGE — and this is the case task 0268's reset must
+/// never zero.
+///
+/// The only `external` row is 200 days before the candle's bucket, far outside
+/// the derived staleness bound, so the external tier cannot price it. The candle
+/// falls through to the peg tier and keeps `close × $1 = 4.0` exactly. It is not
+/// left at 0, and the pass still makes progress.
+///
+/// This is the 0182 lesson in the write path: task 0182's reset epoch sat 19
+/// hours before the reference market's first candle, so 157 candles were zeroed
+/// and then could not be recomputed. A row with no usable reference must come
+/// out of the pass exactly as it went in.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn external_tier_leaves_a_bucket_with_no_usable_rate_on_the_peg_value() {
+    let db = "it_enrich_external_no_reference";
+    let client = setup_scratch(db).await;
+    seed_assets_and_candles(&client, db).await;
+    seed_external_rate(&client, db, DEEP_DAY_START - 200 * 86_400, DEPEG_RATE).await;
+
+    let stats = ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let got = close_usd(&client, db, 10, 2, DEEP_TS).await;
+    assert!(
+        (got - 4.0).abs() < 1e-4,
+        "with no in-window external rate the peg tier's close × $1 = 4.0 must \
+         stand, got {got} — 0.0 would be the 0182 failure and 3.8724 would mean \
+         the staleness bound never bit"
+    );
+    assert!(
+        stats.rows_enriched > 0,
+        "the pass still prices the other tiers' candles"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
