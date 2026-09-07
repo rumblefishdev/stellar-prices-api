@@ -4,7 +4,7 @@ title: "Serve USDC's measured USD history from the Chainlink anchor — load ext
 type: FEATURE
 status: backlog
 related_adr: ["0011"]
-related_tasks: ["0265", "0247", "0168", "0173", "0111", "0125", "0127", "0266"]
+related_tasks: ["0265", "0247", "0168", "0173", "0111", "0125", "0127", "0266", "0268"]
 tags: [layer-backend, layer-api, priority-high, effort-medium, milestone-M3, pricing, enrichment, data-correctness, stablecoin]
 milestone: 3
 links:
@@ -113,7 +113,7 @@ The acceptance fixture is the falsifying date: **2023-03-11 must close at
 ## Out of scope
 
 - Correcting stored `close_usd` on USDC-quoted candles and removing
-  `method: peg` from non-stablecoins (defect B) — file against [[0111]];
+  `method: peg` from non-stablecoins (defect B) — [[0268]];
   [[0266]]'s ~25 % dislocations on stress dates are a different mechanism
   and stay their own task.
 - Any asset other than canonical USDC.
