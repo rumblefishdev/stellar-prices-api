@@ -445,11 +445,16 @@ export class ComputeStack extends cdk.Stack {
 
     this.ledgerProcessorRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
-        sid: 'PublishLagMetric',
+        sid: 'PublishIngestMetrics',
         actions: ['cloudwatch:PutMetricData'],
         resources: ['*'],
         conditions: {
-          StringEquals: { 'cloudwatch:namespace': 'PricesApi/LedgerProcessor' },
+          // MUST equal `METRIC_NAMESPACE` in
+          // packages/prices-ledger-processor/src/metrics.rs — a mismatch makes
+          // every publish fail with AccessDenied and the dashboard widget stays
+          // empty forever with nothing failing loudly (task 0125). The previous
+          // value, `PricesApi/LedgerProcessor`, was never published to.
+          StringEquals: { 'cloudwatch:namespace': 'Prices/Ingest' },
         },
       }),
     );
