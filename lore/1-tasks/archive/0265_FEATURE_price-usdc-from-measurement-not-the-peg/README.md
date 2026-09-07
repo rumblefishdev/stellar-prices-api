@@ -2,9 +2,9 @@
 id: "0265"
 title: "USDC's whole price history is asserted, not measured — every candle is peg-derived with zero trades, and a real depeg reads as $1.00"
 type: FEATURE
-status: backlog
+status: completed
 related_adr: ["0011"]
-related_tasks: ["0127", "0165", "0170", "0128", "0197", "0172", "0247", "0168", "0173", "0111", "0125"]
+related_tasks: ["0127", "0165", "0170", "0128", "0197", "0172", "0247", "0168", "0173", "0111", "0125", "0267", "0268"]
 tags: [layer-backend, layer-api, priority-medium, effort-large, milestone-M3, pricing, enrichment, data-correctness, stablecoin]
 milestone: 3
 links:
@@ -30,6 +30,17 @@ history:
       2021-01-25 → today, guardrails with 6 passing tests, decision memo.
       Status stays backlog until the promotion lands on develop (no commits
       on the branch yet, by agreement). Converted to directory form.
+  - date: 2026-09-07
+    status: completed
+    who: akot
+    note: >
+      Completed as research. PR #289 carries the deliverables (memo, 6 notes,
+      6 figures, sources.csv, guardrails.py with 6 passing tests). The
+      behavioural criteria are deferred to the two tasks this spawned:
+      [[0267]] (USDC's own series: external rate into usd_rate, read path,
+      DTO fields, CI fixture, alarms) and [[0268]] (re-enrich close_usd on
+      USDC-quoted candles, retire `peg` on non-stablecoins). 0247 folded
+      into 0267.
 ---
 
 # USDC is priced by assertion, and the one date that would prove it wrong says $1.00
@@ -123,16 +134,24 @@ Sketch, not a plan — the first job is deciding which of these is right.
 
 - [ ] `GET /v1/assets/USDC:GA5Z…/ohlcv` on **2023-03-11** returns a close that
       reflects the actual depeg, or returns no point — but does **not** return
-      `1` as though it were measured.
-- [ ] The independent reference used is documented, per era, with the date its
-      coverage begins and what is published before that date.
-- [ ] The circularity is addressed explicitly: whatever prices USDC does not
-      itself depend on USDC being $1.
-- [ ] The other pegged assets are audited the same way, and USDC/USDT are
-      consistent with each other.
-- [ ] A consumer can tell an asserted price from a measured one without reading
-      the source — decide whether `method` + `derived` + `trade_count: 0`
-      already suffice, and record the answer either way.
+      `1` as though it were measured. *(deferred to [[0267]]; the composed
+      series gives 0.9681 and is the fixture there)*
+- [x] The independent reference used is documented, per era, with the date its
+      coverage begins and what is published before that date — Chainlink
+      rounds from 2021-02-17, Bitstamp for 2021-01-25 → 02-16 and 24 sparse
+      days, own oracle from 2026-03-11 (`notes/S-composition-rule.md`).
+- [x] The circularity is addressed explicitly: the anchor is on-chain
+      Chainlink USDC/USD, which never reads our USDC-denominated candles
+      (`notes/S-phase0-root-cause.md`, `notes/memo.md`).
+- [x] The other pegged assets are audited the same way — 232-asset sweep and
+      10 stablecoins on Chainlink (`notes/R-peer-stablecoins.md`); USDC and
+      USDT are consistent once both are measured: USDT's `/ohlcv` is already
+      measured, its `method: peg` label is defect B → [[0268]].
+- [x] Decided: `method` + `derived` + `trade_count: 0` do **not** suffice,
+      because `peg` also appears on `native` and USDT meaning "USD assumed".
+      Answer recorded in `notes/S-composition-rule.md`: add `source` and
+      `quality` per point ([[0267]]) and split the `method` vocabulary
+      ([[0268]]).
 
 ## Research delivered 2026-09-04 (branch `feat/0265_…`)
 
@@ -175,14 +194,14 @@ measured 6 bps, ES 25 bps, worst day 300 bps.
 7. **The `.gitignore` root entry `.claude/`** was added on request; the four
    already-tracked files under `.claude/` stay tracked until a `git rm --cached`.
 
-## Future Work (to file as backlog tasks on develop — needs a push)
+## Future Work — filed
 
-- Implementation ticket for the memo's plan (loader, `ohlcv_peg_series`
-  accepting `external`, DTO fields, CI fixture, alarms). Could be [[0247]]
-  re-scoped rather than a new id.
-- Defect B: re-enrichment of `close_usd` on USDC-quoted candles and the
-  `method` vocabulary change (`peg` on non-stablecoins) — against [[0111]].
-- Peer-basket alarm (USDC vs DAI beta) once the phase-4 alarms exist.
+- [[0267]] — the memo's plan: loader, `ohlcv_peg_series` accepting
+  `external`, DTO fields, CI fixture, alarms. [[0247]] folded in as step 1.
+- [[0268]] — defect B: re-enrich `close_usd` on USDC-quoted candles and
+  split the `method` vocabulary so `peg` stops meaning "USD assumed".
+- Peer-basket alarm (USDC vs DAI beta): listed in 0267 step 5's follow-up,
+  not its own task until the four alarms exist.
 
 ## Notes
 

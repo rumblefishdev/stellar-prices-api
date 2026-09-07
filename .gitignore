@@ -120,7 +120,7 @@ packages/prices-api/loadtest/pool-wide.json
 .gsd/
 
 # 0265 research: raw data and reproduction scripts stay local (see analysis/run.sh); notes, figures and sources.csv are versioned
-lore/1-tasks/backlog/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/*
-!lore/1-tasks/backlog/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/sources.csv
-lore/1-tasks/backlog/0265_FEATURE_price-usdc-from-measurement-not-the-peg/analysis/*
-!lore/1-tasks/backlog/0265_FEATURE_price-usdc-from-measurement-not-the-peg/analysis/guardrails.py
+lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/*
+!lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/sources.csv
+lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/analysis/*
+!lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/analysis/guardrails.py
