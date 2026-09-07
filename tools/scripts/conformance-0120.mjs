@@ -298,6 +298,58 @@ const singlePrices = new Map(); // id -> price body (for the batch comparison)
 // Groups 1–4 + oracles, per asset.
 for (const a of ASSETS) {
   const enc = encodeURIComponent(a.id);
+
+  // ---------- when did this asset last trade? ----------
+  // The 20-asset fixture was ranked by volume on 2026-08-19 and the market has
+  // moved since: RON last traded 2026-09-03 and EQL 2026-08-28. Assertions
+  // phrased as "a liquid asset must have X" therefore encoded a market state
+  // rather than the contract, and fail on a date nobody chose. Both of the
+  // assertions below now derive from this asset's OWN most recent candle, so
+  // the verdict moves only when the API changes — the same principle task 0230
+  // applies to enrichment.
+  let lastTradeMs = null;
+  let lastTradeWidthMs = 86400e3;
+  {
+    const wideEnd = new Date();
+    const wideStart = new Date(wideEnd.getTime() - 90 * 86400e3);
+    const rw = await api(
+      `/v1/assets/${enc}/ohlcv?granularity=1d&start=${wideStart.toISOString()}&end=${wideEnd.toISOString()}`,
+    );
+    const wide = rw.status === 200 ? rw.json.data || [] : [];
+    if (wide.length) lastTradeMs = Date.parse(wide[wide.length - 1].timestamp);
+    record(
+      'ohlcv:probe',
+      a.id,
+      'asset has a reachable candle history (1d over 90 days)',
+      wide.length > 0,
+      `${wide.length} buckets, last ${wide.length ? wide[wide.length - 1].timestamp : 'none'}`,
+    );
+  }
+  // 🔑 A candle's timestamp is its bucket START, not the trade instant. A trade
+  // anywhere inside 2026-09-06 reads as `2026-09-06T00:00:00Z`, up to a full
+  // day earlier than it happened — which is how AUD came out "no trade in 24 h"
+  // at 34.6 h by bucket start while its bucket had ended 10.6 h before. Refine
+  // to the hour whenever the daily probe lands anywhere near the boundary.
+  if (lastTradeMs !== null && Date.now() - lastTradeMs <= 3 * 86400e3) {
+    const fEnd = new Date();
+    const fStart = new Date(fEnd.getTime() - 3 * 86400e3);
+    const rf = await api(
+      `/v1/assets/${enc}/ohlcv?granularity=1h&start=${fStart.toISOString()}&end=${fEnd.toISOString()}`,
+    );
+    const fine = rf.status === 200 ? rf.json.data || [] : [];
+    if (fine.length) {
+      lastTradeMs = Date.parse(fine[fine.length - 1].timestamp);
+      lastTradeWidthMs = 3600e3;
+    }
+  }
+
+  // Three-valued, deliberately. The residual band is one bucket wide and cannot
+  // be resolved from candles at all, so it asserts the weaker "either documented
+  // response" rather than pretending to know which.
+  const tradedWithin = (ms) =>
+    lastTradeMs !== null && Date.now() - lastTradeMs <= ms;
+  const notTradedWithin = (ms) =>
+    lastTradeMs === null || Date.now() - (lastTradeMs + lastTradeWidthMs) > ms;
   console.log(`## ${a.code || a.id.slice(0, 8)} (${a.form})`);
 
   // GET /v1/assets/{id} — detail
@@ -351,12 +403,31 @@ for (const a of ASSETS) {
   // GET /v1/assets/{id}/price
   {
     const r = await api(`/v1/assets/${enc}/price`);
+    // handlers.rs:98 documents 404 as "No current price for the asset:
+    // unknown, or not priced yet". So 404 is part of the contract, and the
+    // question is whether it is JUSTIFIED — an asset that traded in the last
+    // 24 h must carry a current price, and one that did not need not. An
+    // actively-traded asset that 404s still fails, which is the regression
+    // this check exists to catch.
+    const mustPrice = tradedWithin(86400e3);
+    const mustNotPrice = notTradedWithin(86400e3);
+    const lastSeen = lastTradeMs
+      ? new Date(lastTradeMs).toISOString()
+      : 'none in 90d';
     record(
       'price',
       a.id,
-      'returns 200',
-      r.status === 200,
-      `status ${r.status}`,
+      mustPrice
+        ? 'returns 200 for an asset that traded in the last 24h'
+        : mustNotPrice
+          ? 'returns a documented 404, consistent with no trade in the last 24h'
+          : 'returns 200 or a documented 404 (last trade inside the boundary bucket)',
+      mustPrice
+        ? r.status === 200
+        : mustNotPrice
+          ? r.status === 404
+          : r.status === 200 || r.status === 404,
+      `status ${r.status}, last trade ${lastSeen}`,
     );
     if (
       r.status === 200 &&
@@ -486,12 +557,33 @@ for (const a of ASSETS) {
     ) {
       allPropsPresent(tag, a.id, 'OhlcvResponse', r.json);
       const data = r.json.data || [];
+      // Same reasoning as `/price` above: an empty window is only a defect if
+      // the asset actually traded inside it. EQL's last trade precedes the
+      // 7-day 1h window, so nothing is the correct answer there — and a
+      // non-empty window AFTER the last trade would be a real bug, which the
+      // negative branch asserts rather than waving through.
+      const tradedInWindow =
+        lastTradeMs !== null && lastTradeMs >= start.getTime();
+      const missedWindow =
+        lastTradeMs === null ||
+        lastTradeMs + lastTradeWidthMs <= start.getTime();
+      const lastSeen = lastTradeMs
+        ? new Date(lastTradeMs).toISOString()
+        : 'none in 90d';
       record(
         tag,
         a.id,
-        'window is non-empty for a liquid asset',
-        data.length > 0,
-        `${data.length} buckets`,
+        tradedInWindow
+          ? 'window is non-empty for an asset that traded in it'
+          : missedWindow
+            ? 'window is empty, consistent with the last trade preceding it'
+            : 'window may be empty (last trade inside the boundary bucket)',
+        tradedInWindow
+          ? data.length > 0
+          : missedWindow
+            ? data.length === 0
+            : true,
+        `${data.length} buckets; last trade ${lastSeen}`,
       );
       let ordered = true,
         aligned = true,
