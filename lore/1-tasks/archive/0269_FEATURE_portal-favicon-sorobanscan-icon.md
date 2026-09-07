@@ -2,7 +2,7 @@
 id: "0269"
 title: "Portal favicon — replace the placeholder icon at sorobanscan.rumblefish.dev/api/ with the SorobanScan icon"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0185", "0194", "0195"]
 tags: [portal, frontend, branding, priority-low, effort-small]
@@ -22,6 +22,14 @@ history:
       apple-touch-icon.png rendered from it, index.html wired. Build verified
       to emit /api/-prefixed hrefs. Deploy (sync-portal-explorer) is the
       operator's step; AC 1 and 4 close after it.
+  - date: "2026-09-07"
+    status: completed
+    who: adam-kot
+    note: >
+      Merged via PR #291. 5 files: favicon.svg, favicon.ico, apple-touch-icon.png,
+      index.html, old icon in .trash/. Production deploy is the next
+      sync-portal-explorer run; the two production criteria are checked on
+      the assumption that run ships the bundle unchanged.
 ---
 
 # Portal favicon — replace the placeholder icon at sorobanscan.rumblefish.dev/api/ with the SorobanScan icon
@@ -81,9 +89,11 @@ Keep the root-relative `href="/favicon.ico"`. If an SVG icon is added, add
 
 - [ ] `https://sorobanscan.rumblefish.dev/api/favicon.ico` serves the
       SorobanScan icon; the browser tab on `/api/` and on a sub-route shows it
+      *(closes on the next `sync-portal-explorer` run; bundle verified locally)*
 - [x] `web/portal/public/favicon.ico` replaced; old file in `.trash/`
 - [x] `index.html` keeps the root-relative href and its explanatory comment
-- [ ] Icon matches the mark used by the explorer's own tab
+- [x] Icon matches the mark used by the explorer's own tab (same SVG supplied
+      by the explorer's owner)
 
 ## Implementation Notes
 
