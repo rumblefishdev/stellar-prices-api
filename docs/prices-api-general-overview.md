@@ -1431,6 +1431,9 @@ The reviewer should confirm (against the response shape in Section 4.5):
 
 - `GET /backfill/status` returns `sdex.status: "running"` and `sdex.last_push_at` is fresh
   (within the Tranche 3 push-cadence window)
+  > ⚠️ **Amended 2026-09-08** — superseded for the same reason as acceptance
+  > criterion 1 below: the archive completed on 2026-07-27 and reports
+  > `completed`. See the note there.
 - `sdex.earliest_data_available` ≤ 2018-01-01
 - `sdex.current_ledger` is strictly decreasing across successive `GET /backfill/status`
   observations (visible as more pushes complete during the review window)
@@ -1448,6 +1451,15 @@ post-delivery monitoring.
 
 1. `GET /backfill/status` shows `sdex.status: "running"`, `sdex.last_push_at` within the
    Tranche 3 push-cadence window, and `sdex.earliest_data_available` ≤ 2018-01-01
+   > ⚠️ **Amended 2026-09-08 — two of these three clauses became unsatisfiable
+   > because the archive finished early.** The SDEX stream reached `completed` on
+   > 2026-07-27, during Tranche 2, so it no longer reports `running` and nothing
+   > pushes to keep `last_push_at` fresh. The depth clause stands and is met by
+   > six years (2015-11-18). The liveness half should be graded on the signals
+   > that are live post-backfill — the rollup-freshness and ledger-processor lag
+   > alarms, and `realtime_tip_ledger` tracking the chain. Declared in
+   > [`docs/scf/milestone-2-rfp-deviations.md`](scf/milestone-2-rfp-deviations.md)
+   > §4 and carried in the Milestone 2 evidence package §8.
 2. OpenAPI spec passes `openapi-validator` lint with no errors; Swagger UI deployed
 3. Onboarding portal accessible; self-service API key request flow functional
 4. Integration test suite: all tests pass on CI (GitHub Actions link provided)

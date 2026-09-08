@@ -111,6 +111,27 @@ The work it names:
 approximately January 2022 to present, written directly to Hetzner over mTLS per
 ADR 0009, with the covered range visible through `GET /backfill/status`.
 
+**Both ingestion streams have completed their ranges, ahead of where the design
+document placed them.** The SDEX archive walked from the chain tip to genesis and
+reports `completed` as of 2026-07-27; its depth reaches 2015-11-18 — six years
+beyond the criterion — reconciled four ways in §5, with every calendar day from
+2022-01 to 2026-09 carrying candles. The Soroban AMM stream covered the Soroban
+era from the Protocol 20 activation ledger to the boundary where live ingestion
+takes over, and every month from 2024-03 to the present carries AMM candles.
+
+The design document expected the archive to still be running well past this
+point: its Tranche 3 acceptance criteria ask a reviewer to confirm
+`sdex.status: "running"` with a fresh `last_push_at`. The archive finished during
+Tranche 2 instead, which makes that wording unsatisfiable rather than merely
+early — declared as §4 of the deviations document and carried in §8 below.
+
+**The ingestion path was carried over from the Soroban Block Explorer rather than
+built here.** Candles are written straight to the shared Hetzner ClickHouse over
+mTLS with no local staging (ADR 0009); the Block Explorer's
+`backfill-runner --target=clickhouse` was consumed as-is; and the `stellar-xdr`
+parsing crate is compiled into both projects' processors. The design document
+costs that reuse at roughly 3–5 and 5–7 developer days respectively.
+
 ## 3. Architecture
 
 Unchanged in shape from Milestone 1, extended at the API tier. The full
@@ -924,26 +945,28 @@ open work, and this submission does not claim them. They are listed so a reviewe
 can calibrate what "complete" means here — the same discipline Milestone 1 was
 accepted on.
 
-| Item                                                                      | Status                                                                                                                                                           | Where it lands    |
-| ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
-| Swagger **UI**                                                            | The OpenAPI **document** is served and rendered as an API reference (§7.1). An interactive Swagger UI is not deployed.                                           | Tranche 3         |
-| Self-service onboarding portal                                            | Key issuance is operator-run today, per a documented runbook.                                                                                                    | Tranche 3         |
-| Integration suite running **in CI**                                       | The conformance suite is operator-run against production and is deliberately not a CI job; a database service container in CI was decided against.               | Tranche 3         |
-| Security review                                                           | Not performed.                                                                                                                                                   | Tranche 3         |
-| Public repository                                                         | The repository is private.                                                                                                                                       | Tranche 3         |
-| 7-day post-launch report                                                  | Not applicable until launch.                                                                                                                                     | Tranche 3         |
-| **Cache hit and miss percentiles reported separately**                    | Hits measured. Misses are **not obtainable by the load-test method** — the system stops serving before a miss percentile can be sampled at 100 req/s (§5, AC 2). | Task 0260         |
-| **Cold-start incidence and ClickHouse query time**                        | Blocked on production CloudWatch access, not on the run.                                                                                                         | Task 0260         |
-| **Root cause of the read-path collapse** under a zero-hit-rate load       | Not established. The outage is reported in full in §5, AC 2.                                                                                                     | Task 0260         |
-| **USDC priced by measurement rather than assertion**                      | Its entire series is peg-derived and returns `1` through a real depeg (§5, AC 6).                                                                                | Task 0265, M3     |
-| **The 2023-03 dislocation** on two unrelated assets at an identical ratio | Real, reproducible, mechanism **not established**. The peg explanation is refuted.                                                                               | Task 0266         |
-| **`soroban_amm.earliest_data_available` overstates by 17 days**           | In the same reviewer-facing payload as AC 5.                                                                                                                     | Tasks 0263, 0264  |
-| Aquarius **concentrated** pool decoding                                   | 20 mainnet pools held back from the registry seed; their volume is absent from the source figure (§6.3).                                                         | Task 0080         |
-| Outlier filtering of the **headline price**                               | Deliberate gap: §7 scopes outlier detection to the VWAP. The asymmetry is documented (§6.2).                                                                     | Task 0217         |
-| Dust-trade candles producing absurd closes                                | The volume threshold filters a **source**, not a **candle**.                                                                                                     | Task 0116         |
-| Pagination cursor bound to its sort order                                 | Switching sort mid-walk yields a wrong page (§6.4).                                                                                                              | Task 0206         |
-| **SDEX push-freshness alarm watches a series that has never existed**     | A stalled SDEX backfill would not fire it (§7.2).                                                                                                                | Unfiled; see 0125 |
-| `info.license` emitted empty in the OpenAPI document                      | Licensing decision open.                                                                                                                                         | Task 0155         |
+| Item                                                                      | Status                                                                                                                                                                                                                                                       | Where it lands         |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------- |
+| Swagger **UI**                                                            | The OpenAPI **document** is served and rendered as an API reference (§7.1). An interactive Swagger UI is not deployed.                                                                                                                                       | Tranche 3              |
+| Self-service onboarding portal                                            | Key issuance is operator-run today, per a documented runbook.                                                                                                                                                                                                | Tranche 3              |
+| Integration suite running **in CI**                                       | The conformance suite is operator-run against production and is deliberately not a CI job; a database service container in CI was decided against.                                                                                                           | Tranche 3              |
+| Security review                                                           | Not performed.                                                                                                                                                                                                                                               | Tranche 3              |
+| Public repository                                                         | The repository is private.                                                                                                                                                                                                                                   | Tranche 3              |
+| 7-day post-launch report                                                  | Not applicable until launch.                                                                                                                                                                                                                                 | Tranche 3              |
+| **Cache hit and miss percentiles reported separately**                    | Hits measured. Misses are **not obtainable by the load-test method** — the system stops serving before a miss percentile can be sampled at 100 req/s (§5, AC 2).                                                                                             | Task 0260              |
+| **Cold-start incidence and ClickHouse query time**                        | Blocked on production CloudWatch access, not on the run.                                                                                                                                                                                                     | Task 0260              |
+| **Root cause of the read-path collapse** under a zero-hit-rate load       | Not established. The outage is reported in full in §5, AC 2.                                                                                                                                                                                                 | Task 0260              |
+| **USDC priced by measurement rather than assertion**                      | Its entire series is peg-derived and returns `1` through a real depeg (§5, AC 6).                                                                                                                                                                            | Task 0265, M3          |
+| **The 2023-03 dislocation** on two unrelated assets at an identical ratio | Real, reproducible, mechanism **not established**. The peg explanation is refuted.                                                                                                                                                                           | Task 0266              |
+| **`soroban_amm.earliest_data_available` overstates by 17 days**           | In the same reviewer-facing payload as AC 5.                                                                                                                                                                                                                 | Tasks 0263, 0264       |
+| Aquarius **concentrated** pool decoding                                   | 20 mainnet pools held back from the registry seed; their volume is absent from the source figure (§6.3).                                                                                                                                                     | Task 0080              |
+| Outlier filtering of the **headline price**                               | Deliberate gap: §7 scopes outlier detection to the VWAP. The asymmetry is documented (§6.2).                                                                                                                                                                 | Task 0217              |
+| Dust-trade candles producing absurd closes                                | The volume threshold filters a **source**, not a **candle**.                                                                                                                                                                                                 | Task 0116              |
+| Pagination cursor bound to its sort order                                 | Switching sort mid-walk yields a wrong page (§6.4).                                                                                                                                                                                                          | Task 0206              |
+| **SDEX push-freshness alarm watches a series that has never existed**     | A stalled SDEX backfill would not fire it (§7.2).                                                                                                                                                                                                            | Unfiled; see 0125      |
+| `info.license` emitted empty in the OpenAPI document                      | Licensing decision open.                                                                                                                                                                                                                                     | Task 0155              |
+| **Soroswap candles absent 2026-07-06 → 07-11**                            | A five-day gap in one AMM venue, in the range live ingestion owns; Phoenix and Aquarius run continuously through the same window. Cause under investigation.                                                                                                 | Fixed before Tranche 3 |
+| **Tranche 3 AC 1 is unsatisfiable as worded**                             | It asks a reviewer to confirm `sdex.status: "running"` with a fresh `last_push_at`. The archive reached `completed` during Tranche 2, so two of its three clauses cannot be met — because the work finished early, not because it is missing. Deviations §4. | Amend before Tranche 3 |
 
 _Table — out-of-scope and known-open items, stated explicitly._
 
