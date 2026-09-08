@@ -83,7 +83,12 @@ Scroll to `paths` and let the seven route groups be visible.
 
 Switch to tab B briefly.
 
-> "The same document is rendered here as a reference."
+> "The same document is rendered here as a reference — this page is Adam's work,
+> and it is the surface most integrators will actually live in rather than the
+> raw JSON. It lays the generated specification out to be read: the route groups,
+> the schemas, and the field descriptions in the reader's own terms. And because
+> it renders that document rather than a copy of it, it inherits the same
+> guarantee — it cannot describe a route the API does not serve."
 
 ---
 
