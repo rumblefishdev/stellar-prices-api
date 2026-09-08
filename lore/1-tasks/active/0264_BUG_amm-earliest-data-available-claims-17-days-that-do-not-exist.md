@@ -18,7 +18,12 @@ history:
       Found by [[0127]]'s AC 2 pass. The SDEX stream's stored watermark
       reconciled against real rows on the minute; the AMM stream's does not.
       Measured, not inferred — `price_ohlcv_1m` was queried directly for
-      non-SDEX rows before 2024-03-08 and returned **nothing**.
+      non-SDEX rows before 2024-03-08 and returned **nothing**. ⚠️ That evidence
+      was later found unsound (2026-09-08): `_1m` holds no AMM rows before
+      2026-07-01 at all, so the query could not have returned otherwise. The
+      **conclusion survives** — re-measured against `_1d` and `_1h`, which hold
+      the durable AMM history: zero AMM rows before 2024-03-08 at every
+      granularity, and the overclaim is exactly 17 days.
   - date: 2026-09-08
     status: active
     who: okarcz
@@ -112,11 +117,24 @@ Not established — this is where to start, not a conclusion.
 - [ ] The writer path that produced `2024-02-20 17:00` is identified and
       recorded — observation or assumption, said plainly.
 - [ ] `soroban_amm.earliest_data_available` matches the earliest actual AMM
-      candle, verified against `price_ohlcv_1m` and not only against `_1d`.
+      candle, verified against `price_ohlcv_1d` / `_1h`. ⚠️ **CORRECTED
+      2026-09-08 — this criterion said "against `price_ohlcv_1m` and not only
+      against `_1d`", which is backwards and unsatisfiable.** `_1m` holds no
+      non-SDEX rows before 2026-07-01: the AMM backfill pre-rolled into the
+      coarse tables and never populated it, while SDEX history in the same table
+      reaches 201511. A `_1m` query for a 2024 date returns zero whether or not
+      the data ever existed, so it cannot support the conclusion it was used for.
+      See [[amm-history-is-not-in-price-ohlcv-1m]].
 - [ ] The correction survives a subsequent backfill run — `merge_min` does not
       re-widen it to the wrong value.
-- [ ] Something detects the general case: a stored watermark that precedes the
-      data behind it, on either stream.
+- [ ] ⏸️ **DEFERRED to [[0272]]** — something detects the general case: a stored
+      watermark that precedes the data behind it, on either stream. Deferred
+      rather than met, deliberately: the end-of-run check first proposed is
+      **vacuous** after this task's writer fix, because the claim a run writes is
+      the earliest minute that run landed, so comparing the two compares a value
+      to itself. The useful check is stored-claim vs candle tables on a timer,
+      which is 0272's whole scope. A one-off manual reconciliation when the data
+      correction lands confirms *this* row without waiting on it.
 - [ ] [[0127]] and [[0128]] are told the AMM figure is trustworthy, or told
       plainly that it is not and excluded from the package.
 
