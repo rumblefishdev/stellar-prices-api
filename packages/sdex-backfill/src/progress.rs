@@ -186,10 +186,33 @@ pub fn progress_updates(
                 start_ledger: 1,
                 target_ledger: tip as u64,
                 // Backward: oldest reflected = the run's floor, known only at
-                // the end.
+                // the end — and only carried down when the run actually proved
+                // coverage from genesis (task 0263).
+                //
+                // `SetBackward(start)` used to be written unconditionally at
+                // `Phase::Completed`, while `reached_genesis` gated only
+                // `status`. So the chunking pattern this module's own doc
+                // comment recommends — `--start 1 --end 20_000_000` — wrote
+                // `current_ledger = 1` while `[20_000_000, activation)` had
+                // never been touched. `status` correctly stayed `running`; the
+                // two disagreed, and only `status` was telling the truth.
+                //
+                // The column is a floor claim that `/backfill/status` reads as
+                // proven coverage: `progress_pct` and `ledgers_remaining` are
+                // both derived from it. Gating it on the same condition keeps
+                // the two fields consistent by construction.
+                //
+                // ⚠️ Trade-off, deliberate: a chunked run now never advances
+                // the floor, because `reached_genesis` requires one run to both
+                // start at genesis AND reach the activation boundary. That
+                // under-claims — the stored floor stays where it is — which is
+                // the safe direction. 0263 records the alternative (carry the
+                // floor when it is adjacent to the stored one) as the follow-up
+                // if chunked runs ever become the normal path.
                 current_ledger: match phase {
                     Phase::Running => Current::Keep,
-                    Phase::Completed => Current::SetBackward(start as u64),
+                    Phase::Completed if reached_genesis => Current::SetBackward(start as u64),
+                    Phase::Completed => Current::Keep,
                 },
                 status: match phase {
                     Phase::Completed if reached_genesis => ProgressStatus::Completed,
@@ -378,7 +401,10 @@ mod tests {
             Phase::Completed,
         );
         let sdex = row(&rows, SDEX_ARCHIVE);
-        assert_eq!(sdex.current_ledger, Current::SetBackward(40_000_000));
+        // CHANGED by task 0263: was `SetBackward(40_000_000)`. A run that did
+        // not start at genesis has not proven coverage below its own floor, so
+        // it no longer carries one down. Under-claims rather than over-claims.
+        assert_eq!(sdex.current_ledger, Current::Keep);
         assert_eq!(sdex.status, ProgressStatus::Running);
     }
 
@@ -395,7 +421,13 @@ mod tests {
             Phase::Completed,
         );
         let sdex = row(&rows, SDEX_ARCHIVE);
-        assert_eq!(sdex.current_ledger, Current::SetBackward(1));
+        // CHANGED by task 0263 — this assertion WAS the defect. It pinned
+        // `SetBackward(1)`: a chunk that touched nothing above 20,000,000 wrote
+        // a genesis floor, and `/backfill/status` read it as a complete
+        // archive. `status` said `running` at the same time. Only `status` was
+        // right, and the corrected arithmetic (PR #283) would have turned the
+        // disagreement from a pessimistic 0.0% into an optimistic 100%.
+        assert_eq!(sdex.current_ledger, Current::Keep);
         assert_eq!(
             sdex.status,
             ProgressStatus::Running,
@@ -407,5 +439,74 @@ mod tests {
     fn status_ch_strings_match_schema_enum() {
         assert_eq!(ProgressStatus::Running.as_ch(), "running");
         assert_eq!(ProgressStatus::Completed.as_ch(), "completed");
+    }
+
+    /// The floor and the status now move together, in every reachable shape.
+    /// They disagreed before task 0263, and `/backfill/status` derives
+    /// `progress_pct` and `ledgers_remaining` from the floor while publishing
+    /// the status beside them — so a consumer saw two fields contradict.
+    #[test]
+    fn the_floor_advances_only_when_the_status_completes() {
+        let cases = [
+            // (start, highest_indexed, should_complete)
+            (1, ACTIVATION - 1, true),       // full genesis pass
+            (1, 20_000_000, false),          // genesis-anchored chunk, stops short
+            (40_000_000, 45_000_000, false), // mid-range chunk
+        ];
+        for (start, highest, should_complete) in cases {
+            let rows = progress_updates(
+                ExtractMode::SdexOnly,
+                start,
+                TIP,
+                ACTIVATION,
+                observed(highest),
+                Phase::Completed,
+            );
+            let sdex = row(&rows, SDEX_ARCHIVE);
+            let completed = sdex.status == ProgressStatus::Completed;
+            let carried = sdex.current_ledger != Current::Keep;
+            assert_eq!(
+                completed, should_complete,
+                "status for start={start} highest={highest}"
+            );
+            assert_eq!(
+                carried, completed,
+                "floor and status disagreed for start={start} highest={highest}"
+            );
+        }
+    }
+
+    /// The production row must survive the stricter writer. `sdex_archive`
+    /// really did walk to genesis, corroborated in task 0127 against
+    /// `min(timestamp) = 2015-11-18` and the `201511` partition, so a run that
+    /// reaches the boundary must still carry the floor down to 1.
+    #[test]
+    fn a_genuine_full_pass_still_reaches_genesis() {
+        let rows = progress_updates(
+            ExtractMode::SdexOnly,
+            1,
+            TIP,
+            ACTIVATION,
+            observed(ACTIVATION - 1),
+            Phase::Completed,
+        );
+        let sdex = row(&rows, SDEX_ARCHIVE);
+        assert_eq!(sdex.current_ledger, Current::SetBackward(1));
+        assert_eq!(sdex.status, ProgressStatus::Completed);
+    }
+
+    /// Mid-run is untouched: nothing is truthful per-partition for a backward
+    /// walk, so the floor stays put regardless of the gate.
+    #[test]
+    fn a_running_pass_still_keeps_the_stored_floor() {
+        let rows = progress_updates(
+            ExtractMode::SdexOnly,
+            1,
+            TIP,
+            ACTIVATION,
+            observed(20_000_000),
+            Phase::Running,
+        );
+        assert_eq!(row(&rows, SDEX_ARCHIVE).current_ledger, Current::Keep);
     }
 }
