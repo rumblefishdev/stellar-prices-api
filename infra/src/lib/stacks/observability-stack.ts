@@ -697,30 +697,44 @@ export class ObservabilityStack extends cdk.Stack {
 
     // Same metric, the other stream (task 0176 defect 2).
     //
-    // The AMM import died mid-run on 2026-07-14 and its row went on reporting
-    // `status: running` for eight weeks with nobody paged. The probe was
-    // publishing the whole time — `soroban_amm` is in fact the ONLY stream
-    // dimension that has ever emitted a datapoint, because the probe's
+    // ⚠️ This alarm is only correct ALONGSIDE the writer fix in
+    // `sdex-backfill`'s `progress.rs`. Do not deploy it on its own.
+    //
+    // The AMM import did NOT die on 2026-07-14 — it finished. The combined
+    // run's `--end` is the SDEX live handoff floor, not the chain tip, so
+    // `reached_tip` is unreachable in ordinary operation and `running` was the
+    // only outcome left for a run that completed its planned range. The stream
+    // reported itself as working, by construction, forever. Production's
+    // `current_ledger` of 63,352,611 matches the runbook's documented floor to
+    // the ledger.
+    //
+    // That is why no alarm existed here. The probe's own comment justified the
+    // omission — the AMM stream "completes in a single push then transitions to
+    // `completed`, ongoing freshness is not meaningful" — and the premise was
+    // simply false: it never transitions, because it never reaches the tip.
+    // Wiring an alarm to a status that can never clear would have paged forever.
+    //
+    // With the writer fix a finished run writes `paused`, which the probe's
+    // `status = 'running'` gate excludes, so a resting stream publishes no
+    // datapoint and this alarm stays OK on missing data. What remains published
+    // is a row still claiming `running` with an ageing push — a run hard-killed
+    // mid-flight, which is worth paging on and previously could not be seen.
+    //
+    // 🔴 The stored production row still reads `running` and will until a run
+    // writes it or an operator does. Ship this only after that row says
+    // `paused`, or it goes straight to ALARM and stays there.
+    //
+    // Footnote on how this was missed: `soroban_amm` is the ONLY stream
+    // dimension that has ever emitted a datapoint, because the same
     // `status = 'running'` gate excludes `sdex_archive`, which is `completed`.
-    // So the one alarm that existed watched a series that has never published,
-    // and the series that does publish had no alarm. Exactly inverted.
-    //
-    // The probe's own comment justified the omission: the AMM stream
-    // "completes in a single push then transitions to `completed`, ongoing
-    // freshness is not meaningful". That assumption is what broke — it did not
-    // complete, and a run that dies mid-flight is precisely the case the
-    // exemption assumed away.
-    //
-    // Missing data stays non-breaching for the same reason as the SDEX alarm:
-    // once the stream genuinely reaches `completed` the probe stops emitting,
-    // and a one-shot import that has finished is not stale.
+    // The one alarm that existed watched a series that has never published.
     this.ammPushFreshnessAlarm = new cloudwatch.Alarm(
       this,
       'AmmPushFreshnessAlarm',
       {
         alarmName: `prices-${config.envName}-amm-push-freshness`,
         alarmDescription:
-          'soroban_amm.last_push_at has aged past the freshness threshold while the stream still reports running — the one-shot AMM import has stalled or died mid-run. Nothing writes a terminal state when a run dies, so the row cannot be trusted to report this itself. Threshold is operator-tunable via config.opsAlarms.ammPushFreshnessSeconds.',
+          'soroban_amm.last_push_at has aged past the freshness threshold while the row still reports running — an AMM backfill run was hard-killed mid-flight. A run that finishes normally writes paused and stops publishing this metric, so a rising age here means a run that never got to write its terminal state. Threshold is operator-tunable via config.opsAlarms.ammPushFreshnessSeconds.',
         metric: new cloudwatch.Metric({
           namespace: 'Prices/Backfill',
           metricName: 'PushAgeSeconds',
