@@ -83,12 +83,11 @@ Scroll to `paths` and let the seven route groups be visible.
 
 Switch to tab B briefly.
 
-> "The same document is rendered here as a reference — this page is Adam's work,
-> and it is the surface most integrators will actually live in rather than the
-> raw JSON. It lays the generated specification out to be read: the route groups,
-> the schemas, and the field descriptions in the reader's own terms. And because
-> it renders that document rather than a copy of it, it inherits the same
-> guarantee — it cannot describe a route the API does not serve."
+> "The same document is rendered here as a reference — the surface most
+> integrators will use rather than the raw JSON, with the route groups, schemas
+> and field descriptions laid out to be read. It renders that document rather
+> than a copy, so it inherits the same guarantee: it cannot describe a route the
+> API does not serve."
 
 ---
 
@@ -119,7 +118,7 @@ curl -sS -H "x-api-key: $KEY" "$API/v1/assets/native/price?min_volume_usd=200000
 > thinner venues and leaves the one that clears the bar."
 
 ```bash
-curl -sS -H "x-api-key: $KEY" "$API/v1/assets/native/ohlcv?granularity=1d&timeframe=1y" | jq '.data | length, .data[-1]'
+curl -sS -H "x-api-key: $KEY" "$API/v1/assets/native/ohlcv?granularity=1d&timeframe=1y" | jq '(.data | length), .data[-1]'
 curl -sS -H "x-api-key: $KEY" -X POST "$API/v1/prices/batch" \
   -H 'content-type: application/json' -d '{"assets":["native","USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"]}' | jq
 curl -sS -H "x-api-key: $KEY" "$API/v1/oracles/native" | jq
