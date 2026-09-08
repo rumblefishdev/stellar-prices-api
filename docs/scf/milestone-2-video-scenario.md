@@ -26,7 +26,7 @@ local runs; keep that.
 
 ### ⚠️ Secrets — read this before you hit record
 
-- **Export `$KEY` out of frame**, or set it from a file:
+- **Export** `$KEY` **out of frame**, or set it from a file:
   `export KEY=$(cat ~/.prices-api-key)`. Never let the key appear in a frame, in
   scrollback, or in a `curl` line typed on camera.
 - **Check the browser address bar** before every tab switch. A key pasted as a
