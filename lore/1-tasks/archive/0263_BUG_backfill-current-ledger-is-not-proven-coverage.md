@@ -2,7 +2,7 @@
 id: "0263"
 title: "backfill_progress.current_ledger asserts a floor, not contiguous coverage — a genesis-anchored chunk makes /backfill/status claim a complete archive"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0127", "0088", "0128", "0176"]
 tags: [layer-backend, layer-api, priority-medium, effort-medium, milestone-M2, backfill, api, verification]
@@ -33,6 +33,20 @@ history:
       genuine fix and is surgical: the production row stays correct because
       that run really did reach genesis. Ships in one `sdex-backfill` release
       with [[0264]].
+  - date: 2026-09-08
+    status: completed
+    who: okarcz
+    note: >
+      **CLOSED — merged (PR #294) and deployed to production 2026-09-08.** All
+      five criteria met. One arm of `progress.rs` changed; the floor is now
+      gated on the same `reached_genesis` condition as `status`, so the two
+      cannot disagree. 27 tests pass, no new clippy findings. ⚠️ Two existing
+      tests were asserting the defect and were changed deliberately. Production
+      re-read after deploy: `sdex_archive` still `completed` with
+      `current_ledger = 1`, and the endpoint now returns `progress_pct: 100.0`
+      with `ledgers_remaining: 0`. `PCT_RUNNING_CEILING` kept and documented as
+      a second line of defence rather than removed — a durable table can still
+      hold pre-fix rows.
 ---
 
 # `current_ledger` is a floor claim, not a coverage proof
@@ -105,17 +119,75 @@ self-contradiction without making the number true.
 
 ## Acceptance Criteria
 
-- [ ] A decision is recorded between documenting the limitation, gating the
+- [x] A decision is recorded between documenting the limitation, gating the
       writer, and deriving true coverage — with the reason, not just the choice.
-- [ ] A genesis-anchored partial run (`--start 1 --end N`, N below activation)
+- [x] A genesis-anchored partial run (`--start 1 --end N`, N below activation)
       no longer produces a `/backfill/status` payload that overstates coverage,
       by whichever mechanism was chosen.
-- [ ] The `covered + remaining <= span` invariant still holds across every
+- [x] The `covered + remaining <= span` invariant still holds across every
       reachable row shape, with the [[0176]] assertion kept green.
-- [ ] The production row is re-read after any writer change and still reports
+- [x] The production row is re-read after any writer change and still reports
       the archive as complete — it is genuinely complete, per [[0127]].
-- [ ] `PCT_RUNNING_CEILING` in `backfill/handlers.rs` is either removed as
+- [x] `PCT_RUNNING_CEILING` in `backfill/handlers.rs` is either removed as
       redundant or documented as a deliberate second line of defence.
+
+
+## Implementation Notes
+
+Shipped as PR #294, merged 2026-09-08, deployed the same day.
+
+**One arm changed**, `packages/sdex-backfill/src/progress.rs`, `ExtractMode::SdexOnly`:
+
+```rust
+current_ledger: match phase {
+    Phase::Running => Current::Keep,
+    Phase::Completed if reached_genesis => Current::SetBackward(start as u64),
+    Phase::Completed => Current::Keep,
+},
+```
+
+`reached_genesis` already existed two lines below, gating `status`. The floor and
+the status now move together by construction rather than by a downstream guard.
+
+27 tests pass, no new clippy findings.
+
+## Issues Encountered
+
+- **Two existing tests asserted the defect.**
+  `sdex_only_genesis_chunk_that_stops_short_does_not_complete` pinned
+  `SetBackward(1)` — the exact overclaim this task exists to remove — as expected
+  behaviour, and `sdex_only_partial_tail_does_not_complete` pinned a floor for a
+  run that never started at genesis. Both changed to `Current::Keep`, with
+  in-place comments saying what changed and why. Intentional, not regressions.
+- **The `Combined` arm was left alone deliberately.** Its `SetBackward(start)` is
+  honest — the floor is the run's own start, as its comment argues — and this
+  task's reproduction is sdex-only. Changing it would have been scope creep on a
+  correct code path.
+
+## Design Decisions
+
+### From Plan
+
+1. **Option 2, gate the writer** — chosen over documenting the limitation or
+   deriving true coverage from `backfill_sdex_ledgers`. It is the genuine fix and
+   it is surgical, and the production row stays correct because that run really
+   did reach genesis. Deriving coverage would have cost the O(1) read the
+   endpoint is designed around.
+
+### Emerged
+
+2. **Under-claiming accepted as the trade-off.** A chunked run now never advances
+   the floor at all, because `reached_genesis` requires one run to both start at
+   genesis and reach the activation boundary. That under-claims, which is the
+   safe direction; over-claiming was the defect. The alternative — carry the
+   floor when adjacent to the stored one — is recorded in this task's
+   Implementation section as the follow-up if chunked runs become the normal path.
+3. **`PCT_RUNNING_CEILING` kept, not removed.** The criterion allowed either.
+   Kept because the writer fix only protects rows written by a binary carrying
+   it, and `backfill_progress` is a durable table, not a queue — a pre-fix row
+   could still publish 100% beside `running` on a reviewer-facing endpoint.
+   Documented in `handlers.rs` rather than left implicit. That commit went on the
+   0176 branch so two branches would not both edit the same file.
 
 ## Notes
 
