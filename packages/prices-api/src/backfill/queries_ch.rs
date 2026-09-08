@@ -20,7 +20,22 @@ pub struct ProgressRow {
     /// Lambda and ClickHouse — the same reasoning `backfill-freshness-probe`
     /// applies to its `PushAgeSeconds` metric, and the two must not disagree
     /// about whether a stream is stalled.
+    ///
+    /// ⚠️ The column is **table-qualified** in the SQL. `last_push_at` is also
+    /// the alias of the formatted `String` projection above it, and an
+    /// unqualified reference resolves to that alias, not the `DateTime` column
+    /// — `dateDiff` then fails with `Code: 43 ILLEGAL_TYPE_OF_ARGUMENT` at
+    /// runtime. The unit tests cannot catch it; only a query against a real
+    /// ClickHouse can.
     pub push_age_seconds: Option<i64>,
+    /// Newest ledger the live processor has durably committed
+    /// (`prices.ingest_cursor`), carried on every row by a scalar subquery.
+    ///
+    /// `0` when the cursor table is empty — a fresh deployment before the first
+    /// batch. This is the real chain tip; the SDEX `target_ledger` is only the
+    /// tip as it stood when the backfill last pushed, which on 2026-09-08 was
+    /// 534,222 ledgers behind (task 0176).
+    pub live_tip_ledger: u64,
 }
 
 /// Fetch all backfill-progress rows (latest per stream via `FINAL`).
@@ -37,8 +52,11 @@ pub async fn all_progress(ch: &Client) -> Result<Vec<ProgressRow>, clickhouse::e
                     formatDateTime(completed_at, '%Y-%m-%dT%H:%i:%SZ')) AS completed_at, \
                  if(isNull(earliest_data_available), NULL, \
                     formatDateTime(earliest_data_available, '%Y-%m-%dT%H:%i:%SZ')) AS earliest_data_available, \
-                 if(isNull(last_push_at), NULL, \
-                    toInt64(dateDiff('second', last_push_at, now()))) AS push_age_seconds \
+                 if(isNull(backfill_progress.last_push_at), NULL, \
+                    toInt64(dateDiff('second', \
+                      backfill_progress.last_push_at, now()))) AS push_age_seconds, \
+                 (SELECT ifNull(max(ledger), 0) FROM ingest_cursor FINAL) \
+                   AS live_tip_ledger \
                FROM backfill_progress FINAL \
                ORDER BY task_name";
     ch.query(sql).fetch_all::<ProgressRow>().await

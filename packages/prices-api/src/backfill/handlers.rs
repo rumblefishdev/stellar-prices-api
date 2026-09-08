@@ -56,7 +56,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
         earliest_data_available: r.earliest_data_available.clone(),
     });
 
-    let realtime_tip_ledger = sdex.as_ref().map(|s| s.target_ledger).unwrap_or(0);
+    let realtime_tip_ledger = realtime_tip(&rows, sdex.as_ref().map(|s| s.target_ledger));
 
     let body = BackfillStatus {
         realtime_tip_ledger,
@@ -66,6 +66,30 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
     let mut resp = Json(body).into_response();
     cache_control::attach(&mut resp, cache_control::MEDIUM);
     resp
+}
+
+/// The chain tip to publish as `realtime_tip_ledger`.
+///
+/// Reads the live processor's durable cursor (`prices.ingest_cursor`), which
+/// advances every batch, and falls back to the SDEX `target_ledger` only when
+/// the cursor is unset — a fresh deployment before the first batch.
+///
+/// The fallback used to be the *only* source, and it is not a chain tip: the
+/// backfill sink rewrites `target_ledger` when it pushes, so the value freezes
+/// the moment the backfill stops. The SDEX archive last pushed on 2026-08-11,
+/// so a field named `realtime_tip_ledger` was publishing a tip **534,222
+/// ledgers** — 28 days — behind reality (task 0176).
+///
+/// ⚠️ Deliberately NOT used as the denominator in [`progress_pct`]. The archive
+/// completed against the tip as it stood when it ran; denominating a finished
+/// archive by a live tip would drag it below 100% further every ledger.
+fn realtime_tip(rows: &[ProgressRow], sdex_target: Option<u64>) -> u64 {
+    rows.iter()
+        .map(|r| r.live_tip_ledger)
+        .max()
+        .filter(|&tip| tip > 0)
+        .or(sdex_target)
+        .unwrap_or(0)
 }
 
 /// Push age past which a `running` stream is republished as [`STATUS_STALLED`].
@@ -218,6 +242,7 @@ mod tests {
             completed_at: None,
             earliest_data_available: None,
             push_age_seconds: None,
+            live_tip_ledger: 0,
         }
     }
 
@@ -393,5 +418,32 @@ mod tests {
         r.current_ledger = 1;
         assert_eq!(effective_status(&r), STATUS_STALLED);
         assert!(progress_pct(&r) <= PCT_RUNNING_CEILING);
+    }
+
+    /// The live cursor wins over the SDEX `target_ledger`. On 2026-09-08 the
+    /// two differed by 534,222 ledgers — 28 days — because the backfill stopped
+    /// pushing and froze the column the tip used to be read from.
+    #[test]
+    fn the_tip_comes_from_the_live_cursor_not_the_backfill_column() {
+        let mut r = row(1, 1, 63_795_749, "completed");
+        r.live_tip_ledger = 64_329_971;
+        assert_eq!(realtime_tip(&[r], Some(63_795_749)), 64_329_971);
+    }
+
+    /// Before the live processor has committed its first batch the cursor table
+    /// is empty and the subquery yields 0. Falling back keeps the endpoint
+    /// answering rather than publishing a tip of zero.
+    #[test]
+    fn an_unset_cursor_falls_back_to_the_backfill_target() {
+        let r = row(1, 1, 63_795_749, "completed");
+        assert_eq!(r.live_tip_ledger, 0);
+        assert_eq!(realtime_tip(&[r], Some(63_795_749)), 63_795_749);
+    }
+
+    /// Neither source available — no rows at all — is 0, the same empty-state
+    /// answer the endpoint gave before.
+    #[test]
+    fn no_rows_and_no_target_is_zero() {
+        assert_eq!(realtime_tip(&[], None), 0);
     }
 }

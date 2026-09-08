@@ -36,7 +36,13 @@ use utoipa::ToSchema;
 /// `GET /backfill/status` response.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BackfillStatus {
-    /// Approximate current chain tip (SDEX `target_ledger`).
+    /// Current chain tip — the newest ledger the live processor has durably
+    /// committed (`prices.ingest_cursor`), which advances every batch.
+    ///
+    /// Falls back to the SDEX `target_ledger` only when that cursor is unset.
+    /// It was previously read from `target_ledger` alone, which is not a tip:
+    /// the backfill rewrites it when it pushes, so it freezes when the backfill
+    /// stops.
     #[schema(maximum = 4_294_967_295u64)]
     pub realtime_tip_ledger: u64,
     /// SDEX archive stream (absent if its row is missing).
