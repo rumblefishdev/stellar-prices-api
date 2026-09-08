@@ -724,10 +724,20 @@ export class ObservabilityStack extends cdk.Stack {
     // writes it or an operator does. Ship this only after that row says
     // `paused`, or it goes straight to ALARM and stays there.
     //
-    // Footnote on how this was missed: `soroban_amm` is the ONLY stream
-    // dimension that has ever emitted a datapoint, because the same
-    // `status = 'running'` gate excludes `sdex_archive`, which is `completed`.
-    // The one alarm that existed watched a series that has never published.
+    // ⚠️ CORRECTED 2026-09-08 against CloudWatch, having first been asserted
+    // from the code alone: `sdex_archive` HAS published — 23 daily datapoints,
+    // 2026-07-05 to 2026-07-27, stopping exactly when the stream reached
+    // `completed`. The SDEX alarm is not watching a series that never existed;
+    // it worked, and then correctly went quiet.
+    //
+    // 🔴 The real gap is worse and outlives the backfill. `resolve_status`
+    // below refuses to downgrade a stored `completed` to `running` or `paused`,
+    // so `sdex_archive` can never return to `running`, the probe can never
+    // publish for it again, and `prices-{env}-sdex-push-freshness` can never
+    // fire — a FUTURE SDEX backfill would run with no freshness cover at all.
+    //
+    // This alarm does not inherit that: `paused -> running` is not a downgrade,
+    // so a later AMM run publishes again and is covered.
     this.ammPushFreshnessAlarm = new cloudwatch.Alarm(
       this,
       'AmmPushFreshnessAlarm',
