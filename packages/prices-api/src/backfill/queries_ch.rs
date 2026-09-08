@@ -35,6 +35,19 @@ pub struct ProgressRow {
     /// batch. This is the real chain tip; the SDEX `target_ledger` is only the
     /// tip as it stood when the backfill last pushed, which on 2026-09-08 was
     /// 534,222 ledgers behind (task 0176).
+    ///
+    /// 🔴 **`assumeNotNull` is load-bearing.** A ClickHouse *scalar subquery* is
+    /// `Nullable` regardless of what it selects — `ifNull(max(ledger), 0)` still
+    /// types as `Nullable(UInt64)`. Deserialised into a plain `u64`, RowBinary
+    /// reads the null-flag byte as data, the row drifts one byte, and the NEXT
+    /// row's `task_name` fails with `string is not valid utf8`. That took
+    /// `/backfill/status` down on 2026-09-08 for the minutes between deploy and
+    /// this fix.
+    ///
+    /// ⚠️ A `FORMAT TSVWithNames` query over HTTP does **not** reproduce it —
+    /// text formats carry no null-flag byte, so the SQL looks perfectly healthy
+    /// when checked by hand. Only the RowBinary path the client uses shows it.
+    /// `backfill-freshness-probe` documents the same trap on its own age column.
     pub live_tip_ledger: u64,
 }
 
@@ -55,7 +68,8 @@ pub async fn all_progress(ch: &Client) -> Result<Vec<ProgressRow>, clickhouse::e
                  if(isNull(backfill_progress.last_push_at), NULL, \
                     toInt64(dateDiff('second', \
                       backfill_progress.last_push_at, now()))) AS push_age_seconds, \
-                 (SELECT ifNull(max(ledger), 0) FROM ingest_cursor FINAL) \
+                 assumeNotNull( \
+                   (SELECT ifNull(max(ledger), 0) FROM ingest_cursor FINAL)) \
                    AS live_tip_ledger \
                FROM backfill_progress FINAL \
                ORDER BY task_name";
