@@ -240,6 +240,17 @@ export interface EnvironmentConfig {
      * (604800) — the first-chunk push covers ~6 months of history (§5.6).
      */
     readonly sdexPushFreshnessSeconds: number;
+    /**
+     * Freshness threshold (seconds) for `soroban_amm` push age. Default 7 days
+     * (604800), matching the SDEX threshold and `STALE_PUSH_SECONDS` in the
+     * API's backfill handler — the endpoint and the alarm must agree on what
+     * "stalled" means.
+     *
+     * Kept separate from `sdexPushFreshnessSeconds` because the two streams
+     * have different cadences: SDEX pushes per chunk on a schedule, the AMM
+     * import is one-shot. Tuning one must not silently retune the other.
+     */
+    readonly ammPushFreshnessSeconds: number;
     /** Days-to-NotAfter below which the mTLS cert-expiry alarm fires (30). */
     readonly mtlsNotAfterDaysThreshold: number;
     /**
@@ -751,6 +762,14 @@ export function validateConfig(config: EnvironmentConfig): void {
     ) {
       errors.push(
         `opsAlarms.sdexPushFreshnessSeconds must be a positive integer (seconds), got: ${ops.sdexPushFreshnessSeconds}`,
+      );
+    }
+    if (
+      !Number.isInteger(ops.ammPushFreshnessSeconds) ||
+      ops.ammPushFreshnessSeconds < 1
+    ) {
+      errors.push(
+        `opsAlarms.ammPushFreshnessSeconds must be a positive integer (seconds), got: ${ops.ammPushFreshnessSeconds}`,
       );
     }
     if (

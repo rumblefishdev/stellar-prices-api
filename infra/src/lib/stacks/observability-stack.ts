@@ -268,6 +268,7 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly opsAlarmsSlackChannel?: chatbot.SlackChannelConfiguration;
   /** SDEX push-freshness alarm (§5.6 / Tranche-1 AC #5). */
   public readonly sdexPushFreshnessAlarm: cloudwatch.Alarm;
+  public readonly ammPushFreshnessAlarm: cloudwatch.Alarm;
   /** mTLS client-cert expiry alarm (§7 / §11.4). */
   public readonly mtlsNotAfterAlarm: cloudwatch.Alarm;
   /**
@@ -693,6 +694,53 @@ export class ObservabilityStack extends cdk.Stack {
     );
     this.sdexPushFreshnessAlarm.addAlarmAction(snsAction);
     this.sdexPushFreshnessAlarm.addOkAction(snsAction);
+
+    // Same metric, the other stream (task 0176 defect 2).
+    //
+    // The AMM import died mid-run on 2026-07-14 and its row went on reporting
+    // `status: running` for eight weeks with nobody paged. The probe was
+    // publishing the whole time — `soroban_amm` is in fact the ONLY stream
+    // dimension that has ever emitted a datapoint, because the probe's
+    // `status = 'running'` gate excludes `sdex_archive`, which is `completed`.
+    // So the one alarm that existed watched a series that has never published,
+    // and the series that does publish had no alarm. Exactly inverted.
+    //
+    // The probe's own comment justified the omission: the AMM stream
+    // "completes in a single push then transitions to `completed`, ongoing
+    // freshness is not meaningful". That assumption is what broke — it did not
+    // complete, and a run that dies mid-flight is precisely the case the
+    // exemption assumed away.
+    //
+    // Missing data stays non-breaching for the same reason as the SDEX alarm:
+    // once the stream genuinely reaches `completed` the probe stops emitting,
+    // and a one-shot import that has finished is not stale.
+    this.ammPushFreshnessAlarm = new cloudwatch.Alarm(
+      this,
+      'AmmPushFreshnessAlarm',
+      {
+        alarmName: `prices-${config.envName}-amm-push-freshness`,
+        alarmDescription:
+          'soroban_amm.last_push_at has aged past the freshness threshold while the stream still reports running — the one-shot AMM import has stalled or died mid-run. Nothing writes a terminal state when a run dies, so the row cannot be trusted to report this itself. Threshold is operator-tunable via config.opsAlarms.ammPushFreshnessSeconds.',
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Backfill',
+          metricName: 'PushAgeSeconds',
+          dimensionsMap: {
+            Environment: config.envName,
+            Stream: 'soroban_amm',
+          },
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(15),
+        }),
+        threshold: config.opsAlarms.ammPushFreshnessSeconds,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ammPushFreshnessAlarm.addAlarmAction(snsAction);
+    this.ammPushFreshnessAlarm.addOkAction(snsAction);
 
     // Rollup freshness, one alarm per OHLCV granularity (task 0137).
     //
