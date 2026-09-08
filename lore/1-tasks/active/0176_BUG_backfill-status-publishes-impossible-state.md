@@ -235,10 +235,20 @@ Closes PR #283's arithmetic (merged 2026-09-04, never deployed) plus 0176's
 stalled-status and live-tip fixes. One deploy, three fixes.
 
 ```bash
-# 2a — build the Rust binary FIRST. `build-production` does NOT do this.
+# 2a — build BOTH Rust binaries FIRST. `build-production` does NOT do this.
 cd ~/Projects/stellar/stellar-prices-api
 git checkout develop && git pull --ff-only origin develop
-cargo lambda build -p prices-api --release --arm64 --features lambda
+cargo lambda build -p prices-api              --release --arm64 --features lambda
+cargo lambda build -p prices-ledger-processor --release --arm64 --features lambda
+
+# 2a-check — TIMESTAMP BOTH against the live functions. A changed S3Key in the
+# diff says the asset DIFFERS; it does NOT say which direction.
+ls -l --time-style=+'%F %T' target/lambda/prices-api/bootstrap \
+                            target/lambda/prices-ledger-processor/bootstrap
+aws lambda get-function-configuration --function-name prices-production-api-handler \
+  --query LastModified --output text
+aws lambda get-function-configuration --function-name prices-production-ledger-processor \
+  --query LastModified --output text
 
 # 2b — inspect the change before applying it
 cd infra
@@ -247,6 +257,23 @@ make diff-production
 # 2c — deploy (chains flush-production-cache, needed for the OpenAPI TTL)
 make deploy-production-compute
 ```
+
+🔴 **The Compute stack holds BOTH functions, so a deploy ships both.** On
+2026-09-08 only `prices-api` had been rebuilt; the ledger-processor artifact on
+disk was from 2026-09-02, **older than the 2026-09-04 deployment**. Its `S3Key`
+changed in the diff and that read as an upgrade — it was a two-day **rollback**
+that would have silently removed `ClickHouseWriteLatencyMs`, the metric behind a
+dashboard tile whose screenshots ship in the Milestone 2 package. Caught by the
+timestamp check above, not by the diff.
+
+⚠️ **Verifying that a ClickHouse query runs is not verifying that it
+deserialises.** The same deploy took `/backfill/status` down for 46 seconds: a
+scalar subquery types as `Nullable` while the struct declared a bare `u64`, so
+RowBinary drifted one byte and the *next* row failed on an unrelated column. The
+pre-deploy check used `FORMAT TSVWithNames`, which carries no null-flag byte and
+cannot show it. Type-check every projected expression with `toTypeName()` against
+its struct field before shipping a query change — see
+[[clickhouse-scalar-subquery-is-always-nullable]].
 
 🔴 **2a is load-bearing.** `build-production` builds only the CDK TypeScript. The
 Lambda is a pre-built asset at `../target/lambda/prices-api`; skip 2a and CDK
