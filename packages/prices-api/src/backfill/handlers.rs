@@ -154,6 +154,25 @@ const STATUS_COMPLETED: &str = "completed";
 /// backward stream finishes at a *low* `current_ledger`, and a partial run
 /// writes exactly that while still `running`, so the arithmetic alone cannot
 /// tell a finished archive from a genesis-anchored chunk.
+///
+/// 🔒 **Kept deliberately as a second line of defence, not redundant** (task
+/// 0263's acceptance criterion asks this to be settled either way).
+///
+/// 0263 fixed the *writer*: `sdex-backfill`'s `progress.rs` now gates
+/// `Current::SetBackward(start)` on the same `reached_genesis` condition that
+/// gates `status`, so a genesis-anchored chunk no longer writes a floor of 1
+/// while still `running`. That closes the source of the contradiction — but
+/// only for rows written by a backfill binary carrying the fix.
+///
+/// The reader cannot know which binary wrote the row in front of it.
+/// `backfill_progress` is a durable table, not a queue: a row predating the
+/// writer fix, or written by an older build still in someone's path, keeps the
+/// old shape indefinitely. Removing the ceiling would let exactly those rows
+/// publish `progress_pct: 100.0` beside `status: "running"` on a
+/// reviewer-facing endpoint.
+///
+/// Remove it only once no row of the old shape can reach this code — which in
+/// practice means never, since nothing rewrites historical rows.
 const PCT_RUNNING_CEILING: f64 = 99.9;
 
 /// Fraction of the ledger span the SDEX archive has covered, in percent.
