@@ -174,8 +174,12 @@ SELECT *
 FROM prices.backfill_progress FINAL
 ORDER BY task_name;
 
--- (10) Oracle reference prices are ingested but never set a price.
---      Shown only to demonstrate the reference feeds are live.
+-- (10) Oracle reference prices are ingested as a cross-reference and never set
+--      a CANDLE price. They do set the published current price for the small
+--      number of assets that cannot be priced from trades — one asset, USDC, as
+--      of 2026-09-08 — and `current_prices.method` names the provenance on every
+--      row (`traded`, `oracle`, or unset). Query (26) below counts them.
+--      Shown here to demonstrate the reference feeds are live.
 --      Expect two oracles: reflector (SEP-40, also drives quote->USD conversion)
 --      and redstone. Neither ever sets a candle price.
 SELECT
@@ -375,3 +379,14 @@ FROM prices.price_ohlcv_1m FINAL
 WHERE timestamp >= now() - INTERVAL 24 HOUR
 GROUP BY source
 ORDER BY volume_24h_usd DESC;
+
+-- (26) Provenance of every published price. The `method` column is what stops
+--      an oracle-derived number being read as a traded one.
+--      Expect: `traded` dominant, `oracle` on the handful that cannot be traded-
+--      priced, and a blank group for rows written before the column existed.
+SELECT
+    method,
+    count() AS assets
+FROM prices.current_prices FINAL
+GROUP BY method
+ORDER BY assets DESC;

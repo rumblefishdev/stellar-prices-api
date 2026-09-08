@@ -125,8 +125,12 @@ curl -sS -H "x-api-key: $KEY" "$API/v1/oracles/native" | jq
 ```
 
 > "Candles at a chosen granularity, a batch endpoint for several assets in one
-> call, and the oracle cross-reference. We ingest two reference oracles, but
-> neither one ever sets a price — prices come from observed trades."
+> call, and the oracle cross-reference. Look at the `method` field on each batch
+> row: XLM reads `traded`, priced from the three venues we just saw. USDC reads
+> `oracle`, because we cannot price it from trades here — and the response says
+> so rather than quietly presenting one number as if it were the other. We ingest
+> two reference oracles; they never set a candle price, and where one does set a
+> published price the field names it."
 
 ---
 
