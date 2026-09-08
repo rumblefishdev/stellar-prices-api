@@ -543,7 +543,9 @@ The capture query is `benchmark/q-raw.sql`, and the public-API leg is
 **Verdict: met, by six years.** The criterion asks for 2022-01-01. The store
 reaches **2015-11-18**. Measured 2026-09-04
 ([`prices-api-backfill-depth-verification.md`](../prices-api-backfill-depth-verification.md),
-task 0127).
+task 0127) and **re-verified unchanged on 2026-09-08**, after the endpoint
+changes described in the limits below were deployed. All four views below were
+re-run; none moved.
 
 The figure is reconciled four ways, deliberately, because the endpoint reports a
 stored value rather than querying the candles:
@@ -579,20 +581,33 @@ issued a short-lived read-only client certificate on request.
   downward.** An overstatement would be permanent and invisible. It does not
   overstate here, but that property is exactly why the reconciliation above
   exists rather than trusting the endpoint alone.
-- ⚠️ **The endpoint contradicted itself on this very field and was fixed during
-  the tranche.** The SDEX stream reported `completed` alongside `progress_pct: 0`
-  and a ledger count implying nothing had been done, because the archive walk
-  runs _downward_ toward genesis while the progress arithmetic assumed upward.
-  Fixed and merged as PR #283.
-- ⚠️ **A neighbouring field in the same payload overstates.** The AMM stream
-  claims data from 2024-02-20 while the first actual AMM candle is 2024-03-08.
-  That is 17 days claimed at no granularity. Deferred as task 0263 and task 0264
-  rather than quietly corrected.
+- ⚠️ **The endpoint contradicted itself on this very field, and the fix is now
+  live.** The SDEX stream reported `completed` alongside `progress_pct: 0` and a
+  ledger count implying nothing had been done, because the archive walk runs
+  _downward_ toward genesis while the progress arithmetic assumed upward. Fixed
+  as PR #283 and **deployed 2026-09-08**; the same row now returns
+  `progress_pct: 100.0` with `ledgers_remaining: 0`. A companion defect found
+  while deploying it — `realtime_tip_ledger` was read from a backfill bookkeeping
+  column that freezes when the backfill stops, leaving it 534,222 ledgers behind
+  — was fixed in the same release and now tracks the live ingest cursor.
+- ✅ **A neighbouring field in the same payload overstated by 17 days, and no
+  longer does.** The AMM stream claimed data from 2024-02-20 while the first
+  actual AMM candle is 2024-03-08 19:00. The cause was a true observation of the
+  wrong population: a combined backfill run lands SDEX and AMM candles from one
+  parse and stamped a single shared watermark on both rows, so the AMM stream
+  inherited the earliest **SDEX** minute at the Soroban activation boundary —
+  where production holds 141 SDEX candles and zero AMM ones. Fixed at the writer
+  (task 0264), the stored row corrected, and **both streams now reconcile to zero
+  days overclaimed** against `min(timestamp)` in `price_ohlcv_1d`. The companion
+  floor-claim defect on `current_ledger` was fixed as task 0263.
 - 🔑 **The `sdex.last_push_at` freshness criterion no longer applies**, and this
   package says so rather than quoting a number. The value is 2026-08-11 on a
-  stream that reached `completed` on 2026-07-27. A corollary for operations: the
-  Tranche 1 alarm watching that column will fire forever unless it is gated on the
-  stream's status.
+  stream that reached `completed` on 2026-07-27. The corollary for operations is
+  the opposite of what it first appears: the Tranche 1 alarm on that column does
+  not fire forever — it is already gated on the stream's status, so it went quiet
+  when the archive completed and, because a stored `completed` is never
+  downgraded, it can never fire again. See §7.2 and §8; the gap is future
+  coverage, not a false page.
 - `backfill_note` is correctly **absent** for the same reason, its precondition
   having lapsed. Both branches are covered by integration tests.
 
