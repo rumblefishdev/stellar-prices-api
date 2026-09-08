@@ -166,6 +166,129 @@ that predates the last write is another signal a consumer cannot interpret.
       later "cleanup" does not silently reintroduce the bug by mutating data.
 - [ ] Prod re-checked after the fix and the actual output recorded.
 
+
+# 📕 DEPLOY RUNBOOK
+
+Written 2026-09-08. Covers 0176, 0263 and 0264 — they share one sequence.
+Nothing below has been run; production is untouched.
+
+## Step 0 — no `sdex-backfill` release exists to cut [nothing to do]
+
+`sdex-backfill` is **not deployed anywhere** — no Lambda, no stack, no schedule.
+It is an operator CLI built locally
+(`cargo build --release -p sdex-backfill --features aws-mtls`) and run with
+`--transport hetzner`. So [[0263]] and [[0264]]'s writer fixes need no ship.
+
+Consequence: the ordering worry — "the write must come after the writer fix, or
+the next run re-stamps it" — is already satisfied. The fix is on `develop`, and
+any future run built from `develop` carries it. ⚠️ **The only real requirement is
+that nobody runs a backfill from a binary built before 2026-09-08.**
+
+## Step 1 — correct the stored `soroban_amm` row [prod CH, via `CHQ`]
+
+Needs INSERT; `dev_read`/`chq` is read-only and cannot do this. Run from the
+operator's shell. `backfill_progress` is `ReplacingMergeTree(updated_at)` keyed on
+`task_name`, so this is an insert with a later `updated_at`, selected from the
+existing row so no other column is retyped or lost.
+
+```bash
+CHQ <<'SQL'
+INSERT INTO prices.backfill_progress
+SELECT
+    task_name,
+    start_ledger,
+    target_ledger,
+    current_ledger,
+    'paused'                                   AS status,
+    last_push_at,
+    toDateTime('2024-03-08 19:00:00')          AS earliest_data_available,
+    newest_data_available,
+    started_at,
+    completed_at,
+    now()                                      AS updated_at
+FROM prices.backfill_progress FINAL
+WHERE task_name = 'soroban_amm';
+SQL
+```
+
+Two changes only: `status` `running` → `paused` (the run finished at the live
+handoff floor — [[0176]]), and `earliest_data_available` `2024-02-20 17:00` →
+`2024-03-08 19:00`, the first real AMM candle ([[0264]]).
+
+**Verify:**
+
+```bash
+CHQ <<'SQL'
+SELECT task_name, status, earliest_data_available, current_ledger
+FROM prices.backfill_progress FINAL ORDER BY task_name;
+SQL
+```
+
+Expect `soroban_amm | paused | 2024-03-08 19:00:00 | 63352611`.
+
+⚠️ This must land **before** step 3, or the AMM freshness alarm goes straight to
+ALARM and stays there.
+
+## Step 2 — deploy the api-handler [local machine, repo root then `infra/`]
+
+Closes PR #283's arithmetic (merged 2026-09-04, never deployed) plus 0176's
+stalled-status and live-tip fixes. One deploy, three fixes.
+
+```bash
+# 2a — build the Rust binary FIRST. `build-production` does NOT do this.
+cd ~/Projects/stellar/stellar-prices-api
+git checkout develop && git pull --ff-only origin develop
+cargo lambda build -p prices-api --release --arm64 --features lambda
+
+# 2b — inspect the change before applying it
+cd infra
+make diff-production
+
+# 2c — deploy (chains flush-production-cache, needed for the OpenAPI TTL)
+make deploy-production-compute
+```
+
+🔴 **2a is load-bearing.** `build-production` builds only the CDK TypeScript. The
+Lambda is a pre-built asset at `../target/lambda/prices-api`; skip 2a and CDK
+packages a stale bootstrap, the deploy goes green, and production keeps serving
+the old code. That is task [[0141]] and it caused an outage once.
+
+**Verify — the running process, not the file you built:**
+
+```bash
+curl -sS -H "x-api-key: $KEY" "$API/v1/backfill/status" | jq
+```
+
+| field | before | expect after |
+|-------|--------|--------------|
+| `realtime_tip_ledger` | 63795749 | ~64.3M and rising |
+| `sdex.progress_pct` | 0.0 | 100.0 |
+| `sdex.ledgers_remaining` | 63795748 | 0 |
+| `soroban_amm.status` | running | paused (from step 1) |
+
+## Step 3 — deploy the AMM freshness alarm [local machine, `infra/`]
+
+**Only after step 1 is verified.**
+
+```bash
+cd ~/Projects/stellar/stellar-prices-api/infra
+make diff-production                     # expect: 1 new alarm resource
+make deploy-production-observability
+```
+
+Then confirm `prices-production-amm-push-freshness` is `OK`, not `ALARM`. If it
+is in ALARM, step 1 did not take — re-read the row before doing anything else.
+
+## Step 4 — close out [local machine]
+
+- Re-read `/backfill/status` and paste the output into [[0128]]'s freshness
+  checklist; §5 AC 5 quotes several of these values.
+- Run the one-off reconciliation from [[0272]]: stored `earliest_data_available`
+  vs `min(timestamp)` per source in `price_ohlcv_1d`. Confirms the correction
+  took. 0272 itself stays backlog.
+- Archive [[0263]] and [[0264]]; 0264 closes with its AC 4 deferred to [[0272]].
+
+
 ## Notes
 
 - Found closing 0088's last AC. `backfill_status_maps_both_streams`
