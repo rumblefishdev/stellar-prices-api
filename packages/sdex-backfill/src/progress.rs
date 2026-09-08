@@ -92,9 +92,14 @@ pub struct ProgressUpdate {
 pub struct Observed {
     /// Highest ledger fully indexed so far this run (forward watermark).
     pub highest_indexed: u32,
-    /// Oldest / newest candle-minute landed so far (unix seconds).
-    pub earliest_minute: Option<u32>,
-    pub newest_minute: Option<u32>,
+    /// Oldest / newest candle-minute landed so far (unix seconds), **per
+    /// stream**. Each `backfill_progress` row is stamped with its own stream's
+    /// window; a mixed window is what made `soroban_amm` claim 17 days of
+    /// coverage that exists at no granularity (task 0264).
+    pub sdex_earliest: Option<u32>,
+    pub sdex_latest: Option<u32>,
+    pub amm_earliest: Option<u32>,
+    pub amm_latest: Option<u32>,
 }
 
 /// Compute the `backfill_progress` rows this run should write, given its mode,
@@ -121,7 +126,8 @@ pub fn progress_updates(
     observed: Observed,
     phase: Phase,
 ) -> Vec<ProgressUpdate> {
-    let (earliest, newest) = (observed.earliest_minute, observed.newest_minute);
+    let (sdex_earliest, sdex_newest) = (observed.sdex_earliest, observed.sdex_latest);
+    let (amm_earliest, amm_newest) = (observed.amm_earliest, observed.amm_latest);
     match mode {
         ExtractMode::Combined => {
             // Completed only once the forward pass actually reached the tip — a
@@ -143,8 +149,13 @@ pub fn progress_updates(
                         Phase::Completed if reached_tip => ProgressStatus::Completed,
                         _ => ProgressStatus::Running,
                     },
-                    earliest_minute: earliest,
-                    newest_minute: newest,
+                    // AMM-only window. This row used to be stamped with the
+                    // run's mixed window, and since a Combined run lands SDEX
+                    // and AMM candles from one parse — SDEX predating AMM in
+                    // every Soroban-era range — it inherited the earliest SDEX
+                    // minute at the activation boundary (task 0264).
+                    earliest_minute: amm_earliest,
+                    newest_minute: amm_newest,
                 },
                 // Backward stream: recent SDEX is reflected down to the run
                 // floor once the pass is done (the floor is `start`, not a
@@ -167,8 +178,8 @@ pub fn progress_updates(
                         Phase::Running => ProgressStatus::Running,
                         Phase::Completed => ProgressStatus::Paused,
                     },
-                    earliest_minute: earliest,
-                    newest_minute: newest,
+                    earliest_minute: sdex_earliest,
+                    newest_minute: sdex_newest,
                 },
             ]
         }
@@ -218,8 +229,8 @@ pub fn progress_updates(
                     Phase::Completed if reached_genesis => ProgressStatus::Completed,
                     _ => ProgressStatus::Running,
                 },
-                earliest_minute: earliest,
-                newest_minute: newest,
+                earliest_minute: sdex_earliest,
+                newest_minute: sdex_newest,
             }]
         }
     }
@@ -235,8 +246,10 @@ mod tests {
     fn observed(highest: u32) -> Observed {
         Observed {
             highest_indexed: highest,
-            earliest_minute: Some(1_700_000_000),
-            newest_minute: Some(1_720_000_000),
+            sdex_earliest: Some(1_700_000_000),
+            sdex_latest: Some(1_720_000_000),
+            amm_earliest: Some(1_710_000_000),
+            amm_latest: Some(1_720_000_000),
         }
     }
 
@@ -508,5 +521,72 @@ mod tests {
             Phase::Running,
         );
         assert_eq!(row(&rows, SDEX_ARCHIVE).current_ledger, Current::Keep);
+    }
+
+    /// 🔴 The production defect, pinned. A `Combined` run lands SDEX and AMM
+    /// candles from one parse, and SDEX predates AMM in every Soroban-era
+    /// window, so a single mixed watermark stamped the earliest **SDEX** minute
+    /// onto `soroban_amm`.
+    ///
+    /// Production carried `2024-02-20 17:00` — the activation boundary, where
+    /// prod holds 141 SDEX candles and zero AMM ones — while the first real AMM
+    /// candle is `2024-03-08 19:00`. 17 days of coverage claimed at no
+    /// granularity, measured 2026-09-08 (task 0264).
+    #[test]
+    fn the_amm_row_is_stamped_with_amm_candles_not_sdex_ones() {
+        const SDEX_FIRST: u32 = 1_708_448_400; // 2024-02-20 17:00 UTC
+        const AMM_FIRST: u32 = 1_709_924_400; // 2024-03-08 19:00 UTC
+        const NEWEST: u32 = 1_788_825_600; // 2026-09-08 00:00 UTC
+
+        let rows = progress_updates(
+            ExtractMode::Combined,
+            ACTIVATION,
+            TIP,
+            ACTIVATION,
+            Observed {
+                highest_indexed: TIP,
+                sdex_earliest: Some(SDEX_FIRST),
+                sdex_latest: Some(NEWEST),
+                amm_earliest: Some(AMM_FIRST),
+                amm_latest: Some(NEWEST),
+            },
+            Phase::Completed,
+        );
+
+        assert_eq!(
+            row(&rows, SOROBAN_AMM).earliest_minute,
+            Some(AMM_FIRST),
+            "the AMM row must carry the first AMM candle, not the first SDEX one"
+        );
+        assert_eq!(
+            row(&rows, SDEX_ARCHIVE).earliest_minute,
+            Some(SDEX_FIRST),
+            "the SDEX row keeps its own window"
+        );
+    }
+
+    /// A `Combined` run that lands SDEX candles but no AMM ones leaves the AMM
+    /// window unset rather than borrowing the SDEX one. `sink.rs` merges with
+    /// `merge_min`, which treats `None` as "no claim" — so an empty window
+    /// stays empty instead of writing a coverage claim the stream cannot back.
+    #[test]
+    fn a_run_with_no_amm_candles_claims_no_amm_window() {
+        let rows = progress_updates(
+            ExtractMode::Combined,
+            ACTIVATION,
+            TIP,
+            ACTIVATION,
+            Observed {
+                highest_indexed: TIP,
+                sdex_earliest: Some(1_708_448_400),
+                sdex_latest: Some(1_788_825_600),
+                amm_earliest: None,
+                amm_latest: None,
+            },
+            Phase::Completed,
+        );
+        assert_eq!(row(&rows, SOROBAN_AMM).earliest_minute, None);
+        assert_eq!(row(&rows, SOROBAN_AMM).newest_minute, None);
+        assert!(row(&rows, SDEX_ARCHIVE).earliest_minute.is_some());
     }
 }

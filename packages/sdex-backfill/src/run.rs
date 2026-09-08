@@ -180,8 +180,10 @@ pub async fn execute(
             totals.oracle_rows += stats.oracle_rows;
             totals.candles_written += stats.candles_written;
             totals.total_bytes += stats.total_bytes;
-            totals.earliest_minute = merge_min(totals.earliest_minute, stats.earliest_minute);
-            totals.latest_minute = merge_max(totals.latest_minute, stats.latest_minute);
+            totals.sdex_earliest = merge_min(totals.sdex_earliest, stats.sdex_earliest);
+            totals.sdex_latest = merge_max(totals.sdex_latest, stats.sdex_latest);
+            totals.amm_earliest = merge_min(totals.amm_earliest, stats.amm_earliest);
+            totals.amm_latest = merge_max(totals.amm_latest, stats.amm_latest);
             totals.unresolved.append(&mut stats.unresolved);
 
             // Forward watermark = this partition's clamped upper bound.
@@ -194,8 +196,10 @@ pub async fn execute(
             // covered time-window advances for both streams.
             let observed = Observed {
                 highest_indexed,
-                earliest_minute: totals.earliest_minute,
-                newest_minute: totals.latest_minute,
+                sdex_earliest: totals.sdex_earliest,
+                sdex_latest: totals.sdex_latest,
+                amm_earliest: totals.amm_earliest,
+                amm_latest: totals.amm_latest,
             };
             for u in progress_updates(
                 mode,
@@ -322,8 +326,10 @@ pub async fn execute(
     // `completed`), completing only when a sdex-only run reached genesis.
     let observed = Observed {
         highest_indexed,
-        earliest_minute: totals.earliest_minute,
-        newest_minute: totals.latest_minute,
+        sdex_earliest: totals.sdex_earliest,
+        sdex_latest: totals.sdex_latest,
+        amm_earliest: totals.amm_earliest,
+        amm_latest: totals.amm_latest,
     };
     for u in progress_updates(
         mode,
