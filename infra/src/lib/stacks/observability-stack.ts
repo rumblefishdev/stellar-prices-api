@@ -268,6 +268,7 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly opsAlarmsSlackChannel?: chatbot.SlackChannelConfiguration;
   /** SDEX push-freshness alarm (§5.6 / Tranche-1 AC #5). */
   public readonly sdexPushFreshnessAlarm: cloudwatch.Alarm;
+  public readonly ammPushFreshnessAlarm: cloudwatch.Alarm;
   /** mTLS client-cert expiry alarm (§7 / §11.4). */
   public readonly mtlsNotAfterAlarm: cloudwatch.Alarm;
   /**
@@ -693,6 +694,77 @@ export class ObservabilityStack extends cdk.Stack {
     );
     this.sdexPushFreshnessAlarm.addAlarmAction(snsAction);
     this.sdexPushFreshnessAlarm.addOkAction(snsAction);
+
+    // Same metric, the other stream (task 0176 defect 2).
+    //
+    // ⚠️ This alarm is only correct ALONGSIDE the writer fix in
+    // `sdex-backfill`'s `progress.rs`. Do not deploy it on its own.
+    //
+    // The AMM import did NOT die on 2026-07-14 — it finished. The combined
+    // run's `--end` is the SDEX live handoff floor, not the chain tip, so
+    // `reached_tip` is unreachable in ordinary operation and `running` was the
+    // only outcome left for a run that completed its planned range. The stream
+    // reported itself as working, by construction, forever. Production's
+    // `current_ledger` of 63,352,611 matches the runbook's documented floor to
+    // the ledger.
+    //
+    // That is why no alarm existed here. The probe's own comment justified the
+    // omission — the AMM stream "completes in a single push then transitions to
+    // `completed`, ongoing freshness is not meaningful" — and the premise was
+    // simply false: it never transitions, because it never reaches the tip.
+    // Wiring an alarm to a status that can never clear would have paged forever.
+    //
+    // With the writer fix a finished run writes `paused`, which the probe's
+    // `status = 'running'` gate excludes, so a resting stream publishes no
+    // datapoint and this alarm stays OK on missing data. What remains published
+    // is a row still claiming `running` with an ageing push — a run hard-killed
+    // mid-flight, which is worth paging on and previously could not be seen.
+    //
+    // 🔴 The stored production row still reads `running` and will until a run
+    // writes it or an operator does. Ship this only after that row says
+    // `paused`, or it goes straight to ALARM and stays there.
+    //
+    // ⚠️ CORRECTED 2026-09-08 against CloudWatch, having first been asserted
+    // from the code alone: `sdex_archive` HAS published — 23 daily datapoints,
+    // 2026-07-05 to 2026-07-27, stopping exactly when the stream reached
+    // `completed`. The SDEX alarm is not watching a series that never existed;
+    // it worked, and then correctly went quiet.
+    //
+    // 🔴 The real gap is worse and outlives the backfill. `resolve_status`
+    // below refuses to downgrade a stored `completed` to `running` or `paused`,
+    // so `sdex_archive` can never return to `running`, the probe can never
+    // publish for it again, and `prices-{env}-sdex-push-freshness` can never
+    // fire — a FUTURE SDEX backfill would run with no freshness cover at all.
+    //
+    // This alarm does not inherit that: `paused -> running` is not a downgrade,
+    // so a later AMM run publishes again and is covered.
+    this.ammPushFreshnessAlarm = new cloudwatch.Alarm(
+      this,
+      'AmmPushFreshnessAlarm',
+      {
+        alarmName: `prices-${config.envName}-amm-push-freshness`,
+        alarmDescription:
+          'soroban_amm.last_push_at has aged past the freshness threshold while the row still reports running — an AMM backfill run was hard-killed mid-flight. A run that finishes normally writes paused and stops publishing this metric, so a rising age here means a run that never got to write its terminal state. Threshold is operator-tunable via config.opsAlarms.ammPushFreshnessSeconds.',
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Backfill',
+          metricName: 'PushAgeSeconds',
+          dimensionsMap: {
+            Environment: config.envName,
+            Stream: 'soroban_amm',
+          },
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(15),
+        }),
+        threshold: config.opsAlarms.ammPushFreshnessSeconds,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ammPushFreshnessAlarm.addAlarmAction(snsAction);
+    this.ammPushFreshnessAlarm.addOkAction(snsAction);
 
     // Rollup freshness, one alarm per OHLCV granularity (task 0137).
     //

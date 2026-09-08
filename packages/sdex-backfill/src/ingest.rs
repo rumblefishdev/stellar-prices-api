@@ -22,6 +22,10 @@ const ORACLE_FLUSH_THRESHOLD: usize = 50_000;
 /// `lore/3-wiki/project/stellar-pubnet-ledger-archive.md`.
 pub const SOROBAN_ACTIVATION_LEDGER: u32 = 50_457_424;
 
+/// The `source` string classic SDEX candles are written under. Everything else
+/// this backfill writes is an AMM venue (`soroswap`, `phoenix`, `aquarius`).
+pub const SDEX_SOURCE: &str = "sdex";
+
 #[derive(Debug, Clone, Default)]
 pub struct PartitionStats {
     pub indexed: usize,
@@ -33,12 +37,28 @@ pub struct PartitionStats {
     pub total_bytes: u64,
     pub wall_clock: Duration,
     /// Oldest / newest candle `minute_start` (unix seconds) landed this
-    /// partition, or `None` if none were written. Merged up into the run's
-    /// `earliest_data_available` / `newest_data_available` — the covered
-    /// time-window (§4.5 + task 0053). Both advance monotonically in the forward
-    /// pass, so per-partition updates stay truthful for either stream.
-    pub earliest_minute: Option<u32>,
-    pub latest_minute: Option<u32>,
+    /// partition, **per stream**, or `None` if that stream wrote none. Merged up
+    /// into each stream's `earliest_data_available` / `newest_data_available` —
+    /// the covered time-window (§4.5 + task 0053).
+    ///
+    /// 🔴 **Split by stream deliberately (task 0264).** A single mixed window
+    /// used to be stamped onto BOTH `backfill_progress` rows. In `Combined`
+    /// mode the run lands SDEX and AMM candles from one parse, and SDEX
+    /// predates AMM in every Soroban-era window, so `soroban_amm` inherited the
+    /// earliest *SDEX* minute: production carried
+    /// `soroban_amm.earliest_data_available = 2024-02-20 17:00`, the activation
+    /// boundary, while the first real AMM candle is 2024-03-08 19:00 — 17 days
+    /// of coverage claimed at no granularity. The value was a true observation
+    /// of the wrong population.
+    ///
+    /// ⚠️ `sink.rs` merges these with `merge_min`, which only ever moves the
+    /// stored value *older*. A window that is wrong-too-early is therefore
+    /// permanent until something rewrites the row deliberately — fixing the
+    /// writer does not repair the stored value.
+    pub sdex_earliest: Option<u32>,
+    pub sdex_latest: Option<u32>,
+    pub amm_earliest: Option<u32>,
+    pub amm_latest: Option<u32>,
     /// Per-ledger records of swaps dropped for an unregistered pool. Aggregated
     /// and re-checked against the final registry at run end (see `run.rs`).
     pub unresolved: Vec<UnresolvedPoolSwap>,
@@ -46,15 +66,26 @@ pub struct PartitionStats {
 
 impl PartitionStats {
     /// Record a batch of just-written candles: bump the count and widen the
-    /// [earliest, latest] minute window. Single seam so every write site keeps
-    /// the count and the window in sync.
-    fn note_candles(&mut self, candles: &[OhlcvCandle]) {
+    /// [earliest, latest] minute window **of the stream that wrote them**.
+    /// Single seam so every write site keeps the count and the window in sync.
+    ///
+    /// `source` is the same string handed to `Sink::write_candles`, so the
+    /// classification cannot drift from what actually landed in the `source`
+    /// column. `OhlcvCandle` carries no source of its own — the call site is
+    /// the only place that knows, which is why this takes it as an argument
+    /// (task 0264).
+    fn note_candles(&mut self, candles: &[OhlcvCandle], source: &str) {
         self.candles_written += candles.len();
+        let (earliest, latest) = if source == SDEX_SOURCE {
+            (&mut self.sdex_earliest, &mut self.sdex_latest)
+        } else {
+            (&mut self.amm_earliest, &mut self.amm_latest)
+        };
         if let Some(lo) = candles.iter().map(|c| c.minute_start).min() {
-            self.earliest_minute = Some(self.earliest_minute.map_or(lo, |cur| cur.min(lo)));
+            *earliest = Some(earliest.map_or(lo, |cur| cur.min(lo)));
         }
         if let Some(hi) = candles.iter().map(|c| c.minute_start).max() {
-            self.latest_minute = Some(self.latest_minute.map_or(hi, |cur| cur.max(hi)));
+            *latest = Some(latest.map_or(hi, |cur| cur.max(hi)));
         }
     }
 }
@@ -157,13 +188,13 @@ pub async fn index_partition(
             let candles = sdex.flush_older_than(current_minute);
             if !candles.is_empty() {
                 sink.write_candles(&candles, "sdex").await?;
-                stats.note_candles(&candles);
+                stats.note_candles(&candles, SDEX_SOURCE);
             }
             for (source, acc) in amm.iter_mut() {
                 let c = acc.flush_older_than(current_minute);
                 if !c.is_empty() {
                     sink.write_candles(&c, *source).await?;
-                    stats.note_candles(&c);
+                    stats.note_candles(&c, source);
                 }
             }
             if oracle_buf.len() >= ORACLE_FLUSH_THRESHOLD {
@@ -179,13 +210,13 @@ pub async fn index_partition(
     let remaining = sdex.flush_all();
     if !remaining.is_empty() {
         sink.write_candles(&remaining, "sdex").await?;
-        stats.note_candles(&remaining);
+        stats.note_candles(&remaining, SDEX_SOURCE);
     }
     for (source, acc) in amm.iter_mut() {
         let c = acc.flush_all();
         if !c.is_empty() {
             sink.write_candles(&c, *source).await?;
-            stats.note_candles(&c);
+            stats.note_candles(&c, source);
         }
     }
     if !oracle_buf.is_empty() {
