@@ -125,7 +125,7 @@ defensible.
   rule used to read _"never screenshot the CloudWatch dashboard —
   `prices-production-overview` is a scaffold with no data widgets"_, and that
   was correct for Milestone 1. Task 0125 (PR #280, merged 2026-09-07) replaced
-  the scaffold with six widget rows over 49 alarms. Screenshots live in
+  the scaffold with six widget rows over 50 alarms. Screenshots live in
   `screenshots/ac8-dashboard-*.png` and are cited from
   `milestone-2-evidence.md` §7.2. **The M1 rule still applies to the M1
   package**, which does not claim the dashboard.

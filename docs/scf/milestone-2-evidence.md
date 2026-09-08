@@ -875,7 +875,7 @@ widget.
 
 ![Enrichment and oracle row, carrying all six Prices/Enrichment metrics](./screenshots/ac8-dashboard-5-enrichment-oracle.png){width=95%}
 
-**The alarm strip covers 49 alarms**, derived from the construct tree rather than
+**The alarm strip covers 50 alarms**, derived from the construct tree rather than
 hard-coded, so the count maintains itself as alarms are added.
 
 **Cost, which the task was asked to record:** roughly 450,000 metric publications

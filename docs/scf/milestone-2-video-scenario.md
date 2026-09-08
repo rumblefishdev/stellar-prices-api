@@ -232,7 +232,7 @@ curl -sS -H "x-api-key: $KEY" "$API/v1/backfill/status" | jq '.sdex.earliest_dat
 > "And the CloudWatch dashboard, which Milestone 1 explicitly did not claim
 > because it was an empty scaffold. It now carries an acceptance strip, API,
 > ingestion, ClickHouse, worker and enrichment panels, and an alarm strip covering
-> 49 alarms that derives itself from the infrastructure code."
+> 50 alarms that derives itself from the infrastructure code."
 
 ---
 

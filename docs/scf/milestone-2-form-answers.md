@@ -53,7 +53,7 @@
 >    running in continuous integration.
 > 7. **The three items Milestone 1 deferred are delivered.** The OpenAPI document
 >    is served anonymously through the gateway, the CloudWatch dashboard has real
->    data widgets over 49 alarms, and the API edge is settled: a custom domain,
+>    data widgets over 50 alarms, and the API edge is settled: a custom domain,
 >    CORS preflight on all seven routes verified in a real browser, and a
 >    recorded decision against a WAF with four named reversal triggers.
 >
