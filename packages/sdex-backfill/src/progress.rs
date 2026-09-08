@@ -110,6 +110,10 @@ pub struct Observed {
 ///   recent SDEX is not under-reported — carries `sdex_archive.current` down to
 ///   the run floor at completion, leaving that stream `paused` (the "between the
 ///   two runs" resting state) so the freshness alarm doesn't false-fire.
+///   `soroban_amm` rests the same way once its run finishes short of the tip,
+///   which is the normal outcome: the documented `--end` is the live handoff
+///   floor, not the tip, so `reached_tip` is unreachable in ordinary operation
+///   and `completed` is reserved for a run that genuinely caught the chain.
 /// - **SdexOnly** (`[1, activation)`) advances only `sdex_archive`; it completes
 ///   the stream only when the run covered the whole pre-Soroban tail — started
 ///   at genesis (`start == 1`) and reached the activation boundary.
@@ -145,8 +149,31 @@ pub fn progress_updates(
                     start_ledger: activation as u64,
                     target_ledger: tip as u64,
                     current_ledger: Current::SetForward(soroban_current),
+                    // `running` used to be the only non-completed outcome here,
+                    // and `reached_tip` is unreachable in the documented
+                    // operating model: the combined run stops at the live
+                    // handoff floor (`--end` = SDEX live floor − 1), never at
+                    // the tip, because the range above it belongs to the live
+                    // processor. So a run that finished its planned range
+                    // reported `running` forever.
+                    //
+                    // Production sat exactly there: `current_ledger` =
+                    // 63,352,611, the documented floor to the ledger, with
+                    // `status: running` and no push since 2026-07-14. The run
+                    // had not died — it had finished, and nothing could say so.
+                    //
+                    // `paused` is the same resting state the sdex_archive row
+                    // below already uses for "between the two runs", and it is
+                    // what stops the freshness alarm firing on a stream that is
+                    // deliberately at rest (task 0176).
+                    //
+                    // ⚠️ Gated on having indexed something. A `Completed` run
+                    // that advanced nothing — every remaining partition
+                    // S3-incomplete — is not resting, it is failing, and must
+                    // keep reporting `running` so the alarm still sees it.
                     status: match phase {
                         Phase::Completed if reached_tip => ProgressStatus::Completed,
+                        Phase::Completed if observed.highest_indexed > 0 => ProgressStatus::Paused,
                         _ => ProgressStatus::Running,
                     },
                     // AMM-only window. This row used to be stamped with the
@@ -322,10 +349,15 @@ mod tests {
         );
         let amm = row(&rows, SOROBAN_AMM);
         assert_eq!(amm.current_ledger, Current::SetForward(50_600_000));
+        // CHANGED by task 0176: was `Running`. A finished run that stopped short
+        // of the tip has reached its planned end — the live handoff floor — so
+        // it rests, exactly as the sdex_archive row beside it does. Reporting
+        // `running` was what made a completed stream look like a live one
+        // forever.
         assert_eq!(
             amm.status,
-            ProgressStatus::Running,
-            "did not reach tip → not completed"
+            ProgressStatus::Paused,
+            "finished short of the tip → resting at the handoff, not working"
         );
 
         let sdex = row(&rows, SDEX_ARCHIVE);
@@ -350,6 +382,9 @@ mod tests {
         );
         let amm = row(&rows, SOROBAN_AMM);
         assert_eq!(amm.current_ledger, Current::SetForward(0));
+        // Deliberately still `Running`, not `Paused`: a run that indexed nothing
+        // is failing, not resting, and `paused` would silence the freshness
+        // alarm on it (task 0176).
         assert_eq!(amm.status, ProgressStatus::Running);
     }
 
@@ -588,5 +623,35 @@ mod tests {
         assert_eq!(row(&rows, SOROBAN_AMM).earliest_minute, None);
         assert_eq!(row(&rows, SOROBAN_AMM).newest_minute, None);
         assert!(row(&rows, SDEX_ARCHIVE).earliest_minute.is_some());
+    }
+
+    /// The production shape, to the ledger. The combined run stops at the
+    /// documented live handoff floor — `soroban_amm.current_ledger` read
+    /// exactly 63,352,611 on 2026-09-08, with `target_ledger` 63,475,475 being
+    /// only the tip as it stood at the last push, not a goal.
+    ///
+    /// Before task 0176 this shape reported `running` indefinitely, and the
+    /// 122,864-ledger difference read as a stalled backfill rather than the
+    /// deliberate margin handed to live ingestion.
+    #[test]
+    fn the_production_handoff_shape_rests_rather_than_running() {
+        const LIVE_FLOOR: u32 = 63_352_611;
+        const TIP_AT_LAST_PUSH: u32 = 63_475_475;
+
+        let rows = progress_updates(
+            ExtractMode::Combined,
+            ACTIVATION,
+            TIP_AT_LAST_PUSH,
+            ACTIVATION,
+            observed(LIVE_FLOOR),
+            Phase::Completed,
+        );
+        let amm = row(&rows, SOROBAN_AMM);
+        assert_eq!(amm.current_ledger, Current::SetForward(LIVE_FLOOR as u64));
+        assert_eq!(
+            amm.status,
+            ProgressStatus::Paused,
+            "stopped at the live handoff floor → resting, not working"
+        );
     }
 }
