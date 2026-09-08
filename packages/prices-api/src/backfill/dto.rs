@@ -8,8 +8,12 @@
 //! is NOT the floor of the public ledger archive. (An earlier revision of this
 //! note said the opposite; the writer, `schema/init.sql`, and the schema
 //! overview §3.5 all agree on the definition above.) `realtime_tip_ledger` is
-//! derived from the SDEX stream's `target_ledger` (best available proxy; there
-//! is no live chain-tip table in the prices schema).
+//! read from the live ingest cursor (`prices.ingest_cursor`), which advances
+//! every batch, falling back to the SDEX `target_ledger` only while that cursor
+//! is unset. ⚠️ An earlier revision of this note said there was "no live
+//! chain-tip table in the prices schema" and derived the tip from
+//! `target_ledger` alone; that column freezes when the backfill stops, and on
+//! 2026-09-08 it was 534,222 ledgers — 28 days — behind reality (task 0176).
 //!
 //! `newest_data_available` — the other end of the covered window — exists in
 //! `prices.backfill_progress` but is deliberately not surfaced here yet: it is

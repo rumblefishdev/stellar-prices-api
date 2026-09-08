@@ -119,7 +119,12 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "AmmStream",
         "status",
-        "`running`, `paused`, `completed` or `error`.",
+        "`running`, `paused`, `completed`, `error`, or `stalled`. `stalled` is \
+         derived at read time, not stored: a stream still recorded as \
+         `running` whose last push is more than 7 days old is reported as \
+         `stalled`, because nothing writes a terminal state when a run is \
+         killed. `paused` is the normal resting state of a finished run \
+         that stopped at its planned end rather than at the chain tip.",
     ),
     (
         "AssetDetail",
@@ -252,8 +257,12 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "BackfillStatus",
         "realtime_tip_ledger",
-        "Approximate current ledger sequence of the network — the SDEX stream's \
-         `target_ledger`; `0` when that stream has not reported.",
+        "Current ledger sequence of the network, from the live ingest cursor, \
+         which advances every batch. Falls back to the SDEX stream's \
+         `target_ledger` only while that cursor is unset, and is `0` when \
+         neither is available. It was previously read from `target_ledger` \
+         alone, which is not a chain tip: the backfill rewrites that column \
+         when it pushes, so it freezes when the backfill stops.",
     ),
     (
         "BackfillStatus",
@@ -545,7 +554,12 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "SdexStream",
         "status",
-        "`running`, `paused`, `completed` or `error`.",
+        "`running`, `paused`, `completed`, `error`, or `stalled`. `stalled` is \
+         derived at read time, not stored: a stream still recorded as \
+         `running` whose last push is more than 7 days old is reported as \
+         `stalled`, because nothing writes a terminal state when a run is \
+         killed. `paused` is the normal resting state of a finished run \
+         that stopped at its planned end rather than at the chain tip.",
     ),
     (
         "SdexStream",
