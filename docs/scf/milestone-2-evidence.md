@@ -57,7 +57,7 @@ and both amendments are declared in §4 with their reasoning rather than assumed
 
 | AC  | Criterion                                         | Result                                             |
 | --- | ------------------------------------------------- | -------------------------------------------------- |
-| 1   | 7 endpoint groups, schema-valid, ≥ 20 assets      | **1032 checks pass, 0 fail, 0 skip**               |
+| 1   | 7 endpoint groups, schema-valid, ≥ 20 assets      | **1021 checks pass, 0 fail, 0 skip**               |
 | 2   | 100 req/s for 5 min, p95 < 200 ms, errors < 0.1 % | **p95 47.09 ms, 0 errors in 30,001 requests**      |
 | 3   | Cache confirmed within the TTL window             | **hits 45-53 ms, misses 78-145 ms, no overlap**    |
 | 4   | VWAP verifiable against raw rows, ≥ 3 assets      | **41 of 41 checks, 4 assets, worst delta 1.4e-11** |
@@ -179,7 +179,7 @@ not claimed"_ list.
 
 ### AC 1 — All 7 endpoint groups return correct, schema-valid responses for ≥ 20 major assets
 
-**Verdict: met. 1032 checks pass, 0 fail, 0 skip**, against the deployed
+**Verdict: met. 1021 checks pass, 0 fail, 0 skip**, against the deployed
 production API on **2026-09-07 at 10:40 UTC**, and again at **11:09 UTC** with an
 identical verdict.
 
@@ -220,15 +220,20 @@ individual check.
 | 2026-08-19, first pass | 752      | 55    | 0     |
 | 2026-08-25             | 847      | 13    | 11    |
 | 2026-09-02             | 870      | 16    | 0     |
-| **2026-09-07, 10:40**  | **1032** | **0** | **0** |
-| **2026-09-07, 11:09**  | **1032** | **0** | **0** |
+| 2026-09-07, 10:40      | 1032     | 0     | 0     |
+| 2026-09-07, 11:09      | 1032     | 0     | 0     |
+| **2026-09-08, 14:42**  | **1021** | **0** | **0** |
 
 🔑 **Two things must be read alongside that table, and we would rather state them
 than have them noticed.**
 
-**The check count rose, 886 to 1032.** Nothing was relaxed to reach zero. Every
-change on 2026-09-07 _added_ assertions, and each one replaced an assumption with
-a measurement.
+**The check count rose, 886 to 1032, then settled at 1021.** Nothing was relaxed
+to reach zero. Every change on 2026-09-07 _added_ assertions, and each one
+replaced an assumption with a measurement. The later dip is not a removal: checks
+are generated per asset **per condition**, so an asset that has not traded inside
+the liquidity window yields fewer assertions rather than a skip. **Zero failures
+across all three zero-fail runs is the claim; the total is a function of the
+market on the day.**
 
 **No production code changed on 2026-09-07.** Every failure that disappeared that
 day was a defect in the test, not a fix to the API. Three of them were the same
@@ -263,9 +268,12 @@ assertion those four flip from pass to fail.**
 
 - **The reports are gitignored as regenerable.** The citable artefact is the
   figures above plus the one-command reproduction, not a committed file.
-- **The pagination walk moves between runs** — 19 pages and 3,725 distinct assets
-  here, against 18 / 3,567 and 20 / 3,880 earlier. Exhaustive and duplicate-free
-  each time; the traded population itself is what moves. Owned by task 0261.
+- **The pagination walk moves between runs, and by more than a little** — **27
+  pages and 5,353 distinct assets** on 2026-09-08, against 19 / 3,725, 18 / 3,567
+  and 20 / 3,880 on earlier runs. Exhaustive and duplicate-free each time; the
+  traded population itself is what moves, and it grew by roughly 44% in a day.
+  A reviewer reproducing this should expect their own figure, not ours. Owned by
+  task 0261.
 - **One assertion is deliberately weaker than the rest.** A candle's timestamp is
   its bucket _start_, so "did this asset trade in the last 24 hours" cannot be
   answered exactly from candles alone. The liquidity test is three-valued:
@@ -385,20 +393,29 @@ a cache.** That is a weaker form of proof than the criterion asked for.
 `/price`, declared 10-second TTL, same URL throughout. Server time only, so the
 TLS handshake a fresh client pays is excluded.
 
+Re-measured 2026-09-08 with the recipe below, exactly as printed:
+
 | request   | expected          | server time  |
 | --------- | ----------------- | ------------ |
-| first ask | miss              | 144.7 ms     |
-| +2 s      | hit               | 53.3 ms      |
-| +4 s      | hit               | 45.1 ms      |
-| +6 s      | hit               | 47.7 ms      |
-| **+13 s** | **miss, expired** | **139.7 ms** |
-| +15 s     | hit               | 49.5 ms      |
+| first ask | miss              | 171.6 ms     |
+| +2 s      | hit               | 40.9 ms      |
+| +4 s      | hit               | 50.0 ms      |
+| **+13 s** | **miss, expired** | **132.4 ms** |
+| +15 s     | hit               | 47.5 ms      |
 
-**Hits fall between 45 and 53 ms, misses between 78 and 145 ms, and the two
-ranges do not overlap.** Expiry is demonstrated on both TTL tiers: `/v1/assets`
-at a 60-second TTL was still hot at +32 s and expired at +64 s. Both refilled
-immediately. These hit figures independently reproduce the load test's 45 to
-47 ms, from a different tool on a different day.
+**Hits fall between 41 and 50 ms, misses between 132 and 172 ms, and the two
+ranges do not overlap** — a gap of more than 80 ms. Expiry is demonstrated on
+both TTL tiers: `/v1/assets` at a 60-second TTL was still hot at +32 s and
+expired at +64 s. Both refilled immediately. These hit figures independently
+reproduce the load test's 45 to 47 ms, from a different tool on a different day.
+
+⚠️ **Corrected 2026-09-08.** An earlier revision of this table carried six rows,
+including a `+6 s` hit that the printed recipe does not produce — it issues five
+requests, not six. A reviewer following the instructions would have got five rows
+and wondered what they had done wrong. The table above is one run of the recipe
+as written. The earlier figures (misses 139.7 / 144.7 ms, hits 45.1–53.3 ms) show
+the same separation on a different day; absolute latency moves with Lambda warmth
+and the separation is the claim, not the numbers.
 
 All six key-gated cached routes show the pattern. The deployed per-method
 configuration was read straight off the production stage, and three surfaces
