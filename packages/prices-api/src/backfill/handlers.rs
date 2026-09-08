@@ -18,7 +18,10 @@ use crate::state::AppState;
     summary = "`GET /backfill/status` — progress of the historical backfill streams.",
     description = "Progress of the two streams that load history: the SDEX archive, which walks \
      backward\nfrom the chain tip toward genesis, and the one-shot Soroban AMM import, which walks \
-     forward.\nA stream that has never reported is absent from the response.",
+     forward.\nA stream that has never reported is absent from the response.\n\nA stream \
+     recorded as `running` whose last push is more than 7 days old is reported as `stalled`: \
+     nothing writes a terminal state when a run dies, so `running` alone cannot be trusted to \
+     mean the stream is making progress.",
     responses(
         (status = 200, description = "Backfill progress", body = BackfillStatus),
         (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
@@ -36,7 +39,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
     let find = |name: &str| rows.iter().find(|r| r.task_name == name);
 
     let sdex = find("sdex_archive").map(|r| SdexStream {
-        status: r.status.clone(),
+        status: effective_status(r),
         current_ledger: r.current_ledger,
         start_ledger: r.start_ledger,
         target_ledger: r.target_ledger,
@@ -47,7 +50,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
     });
 
     let soroban_amm = find("soroban_amm").map(|r| AmmStream {
-        status: r.status.clone(),
+        status: effective_status(r),
         last_push_at: r.last_push_at.clone(),
         completed_at: r.completed_at.clone(),
         earliest_data_available: r.earliest_data_available.clone(),
@@ -63,6 +66,51 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
     let mut resp = Json(body).into_response();
     cache_control::attach(&mut resp, cache_control::MEDIUM);
     resp
+}
+
+/// Push age past which a `running` stream is republished as [`STATUS_STALLED`].
+///
+/// 604 800 s (7 days), deliberately the same value as
+/// `opsAlarms.sdexPushFreshnessSeconds` in `infra/envs/production.json` — what
+/// the `prices-{env}-sdex-push-freshness` alarm fires on. The endpoint and the
+/// alarm must not disagree about whether a stream is stalled, so retune the two
+/// together.
+const STALE_PUSH_SECONDS: i64 = 604_800;
+
+/// Stored status for a stream that believes it is working.
+const STATUS_RUNNING: &str = "running";
+
+/// Published in place of `running` when the last push has aged past
+/// [`STALE_PUSH_SECONDS`].
+///
+/// Task 0176 defect 2: `resolve_status` in `sdex-backfill`'s sink only
+/// transitions on a push **from a live run**, so a crashed or killed run leaves
+/// its row asserting `running` indefinitely — `soroban_amm` did exactly that
+/// from 2026-07-14, and anything gating on `status != 'running'` waits forever.
+///
+/// This is a read-model correction. The stored row is deliberately left alone:
+/// 0176 forbids hand-patching `backfill_progress`, because that repairs one row
+/// and leaves the mechanism that produced it intact.
+const STATUS_STALLED: &str = "stalled";
+
+/// The status to publish for `row`.
+///
+/// Every stored status passes through unchanged except a `running` stream whose
+/// last push has aged past [`STALE_PUSH_SECONDS`], which becomes
+/// [`STATUS_STALLED`].
+///
+/// A stream that has **never** pushed (`push_age_seconds` is `NULL`) is not
+/// stalled — it is a seeded row that has yet to start. That is the same case
+/// `backfill-freshness-probe` excludes from its metric, and for the same
+/// reason: "backfill overdue" and "no backfill at all" are different states,
+/// and conflating them was the go-live false-page.
+fn effective_status(r: &ProgressRow) -> String {
+    match r.push_age_seconds {
+        Some(age) if r.status == STATUS_RUNNING && age > STALE_PUSH_SECONDS => {
+            STATUS_STALLED.to_string()
+        }
+        _ => r.status.clone(),
+    }
 }
 
 /// The seeded `current_ledger` placeholder meaning "nothing reflected yet".
@@ -169,11 +217,20 @@ mod tests {
             last_push_at: None,
             completed_at: None,
             earliest_data_available: None,
+            push_age_seconds: None,
         }
     }
 
     fn running(start: u64, current: u64, target: u64) -> ProgressRow {
         row(start, current, target, "running")
+    }
+
+    /// A stream that has pushed, `age` seconds ago.
+    fn pushed(status: &str, age: i64) -> ProgressRow {
+        let mut r = row(1, 1, 63_795_749, status);
+        r.last_push_at = Some("2026-07-14T17:54:24Z".to_string());
+        r.push_age_seconds = Some(age);
+        r
     }
 
     /// The production row on 2026-09-04: the archive walked all the way to
@@ -272,5 +329,69 @@ mod tests {
                 ledgers_remaining(r)
             );
         }
+    }
+
+    /// The `soroban_amm` production row: `running` since 2026-07-14 with no
+    /// push in eight weeks. `resolve_status` never writes a terminal state for
+    /// a run that dies, so the row asserts it is working indefinitely.
+    #[test]
+    fn a_long_dead_running_stream_publishes_stalled() {
+        let r = pushed(STATUS_RUNNING, 56 * 86_400);
+        assert_eq!(effective_status(&r), STATUS_STALLED);
+    }
+
+    /// A run pushing on cadence is untouched — the threshold matches the
+    /// production freshness alarm, so anything it would not page on stays
+    /// `running`.
+    #[test]
+    fn a_recently_pushing_stream_stays_running() {
+        let r = pushed(STATUS_RUNNING, 3_600);
+        assert_eq!(effective_status(&r), STATUS_RUNNING);
+    }
+
+    /// Exactly at the threshold is not yet stalled; one second past it is. The
+    /// comparison is strictly greater-than, matching the alarm's
+    /// `GREATER_THAN_THRESHOLD`.
+    #[test]
+    fn the_threshold_is_exclusive_and_matches_the_alarm() {
+        assert_eq!(
+            effective_status(&pushed(STATUS_RUNNING, STALE_PUSH_SECONDS)),
+            STATUS_RUNNING
+        );
+        assert_eq!(
+            effective_status(&pushed(STATUS_RUNNING, STALE_PUSH_SECONDS + 1)),
+            STATUS_STALLED
+        );
+    }
+
+    /// A seeded row that has never pushed is not stalled — it has not started.
+    /// Conflating "overdue" with "never ran" was the go-live false-page the
+    /// freshness probe had to unpick.
+    #[test]
+    fn a_stream_that_never_pushed_is_not_stalled() {
+        let r = running(1, CURRENT_UNSET, 63_795_749);
+        assert_eq!(r.push_age_seconds, None);
+        assert_eq!(effective_status(&r), STATUS_RUNNING);
+    }
+
+    /// Only `running` is rewritten. A finished stream whose last push is long
+    /// past is simply an old completed archive, not a stalled one — the SDEX
+    /// row has read `completed` with an ageing push since 2026-08-11.
+    #[test]
+    fn a_completed_stream_is_never_relabelled_however_old() {
+        let r = pushed(STATUS_COMPLETED, 365 * 86_400);
+        assert_eq!(effective_status(&r), STATUS_COMPLETED);
+        assert_eq!(effective_status(&pushed("paused", 365 * 86_400)), "paused");
+    }
+
+    /// A stalled stream is still not `completed`, so the running ceiling keeps
+    /// applying to it — relabelling the status must not hand a dead
+    /// genesis-anchored chunk a 100% claim (task 0263).
+    #[test]
+    fn a_stalled_stream_still_cannot_publish_one_hundred_percent() {
+        let mut r = pushed(STATUS_RUNNING, 56 * 86_400);
+        r.current_ledger = 1;
+        assert_eq!(effective_status(&r), STATUS_STALLED);
+        assert!(progress_pct(&r) <= PCT_RUNNING_CEILING);
     }
 }

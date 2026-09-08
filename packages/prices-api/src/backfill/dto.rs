@@ -50,6 +50,14 @@ pub struct BackfillStatus {
 /// SDEX archive backfill progress.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SdexStream {
+    /// One of `running`, `completed`, `paused`, `failed`, or **`stalled`**.
+    ///
+    /// `stalled` is derived at read time, not stored: a stream still recorded
+    /// as `running` whose last push is more than 7 days old is republished as
+    /// `stalled`. Nothing writes a terminal state when a backfill run dies, so
+    /// without this a crashed run advertises `running` indefinitely. Treat
+    /// `stalled` as "not making progress" — it is not a value the writer can
+    /// ever produce.
     pub status: String,
     #[schema(maximum = 4_294_967_295u64)]
     pub current_ledger: u64,
@@ -78,8 +86,25 @@ pub struct SdexStream {
 /// Soroban AMM (one-shot) backfill progress.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AmmStream {
+    /// One of `running`, `completed`, `paused`, `failed`, or **`stalled`**.
+    ///
+    /// `stalled` is derived at read time, not stored: a stream still recorded
+    /// as `running` whose last push is more than 7 days old is republished as
+    /// `stalled`. Nothing writes a terminal state when a backfill run dies, so
+    /// without this a crashed run advertises `running` indefinitely. Treat
+    /// `stalled` as "not making progress" — it is not a value the writer can
+    /// ever produce.
     pub status: String,
     pub last_push_at: Option<String>,
+    /// When the most recent run to reach a terminal state finished; `null`
+    /// while no run has.
+    ///
+    /// ⚠️ This may legitimately predate `last_push_at`. The two measure
+    /// different things: `completed_at` belongs to the run that completed,
+    /// `last_push_at` to the last write by **any** run. A stream walked in more
+    /// than one pass — the SDEX archive completed a pass on 2026-07-27 and
+    /// pushed again on 2026-08-11 — therefore reports the earlier completion
+    /// beside the later push, and that ordering is not a defect.
     pub completed_at: Option<String>,
     /// Timestamp of the oldest OHLCV row this stream has landed; see the module
     /// note. `null` until the stream lands its first candle.
