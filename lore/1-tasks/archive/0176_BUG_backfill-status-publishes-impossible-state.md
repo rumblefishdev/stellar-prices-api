@@ -2,7 +2,7 @@
 id: "0176"
 title: "GET /backfill/status publishes an impossible state — 'completed, 0%, 63.8M remaining' for SDEX and a 28-day-dead soroban_amm still reading 'running'"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0127", "0263", "0088", "0072", "0136"]
 tags: [layer-api, priority-medium, effort-small, backfill, observability, consumer-facing]
@@ -47,6 +47,24 @@ history:
       exemption comment (`lib.rs:47-53`, "completes in a single push then
       transitions to `completed`") is the falsified assumption that created
       the gap.
+  - date: 2026-09-08
+    status: completed
+    who: okarcz
+    note: >
+      **CLOSED — merged (PRs #296, #295, #297) and verified on production
+      2026-09-08.** All five criteria met. 🔑 The diagnosis changed during the
+      work: the AMM run did not die mid-flight, it FINISHED — `reached_tip` is
+      unreachable because the combined run stops at the live handoff floor, so
+      `running` was structural. Fixed at both ends: the writer rests a finished
+      run at `paused`, the reader republishes a long-stale `running` as
+      `stalled`. `realtime_tip_ledger` was 534,222 ledgers behind and now reads
+      the live cursor. AMM freshness alarm wired, `OK` at 13:33:20 UTC.
+      ⚠️ Two production incidents en route, both in Issues Encountered: a 46 s
+      outage from a `Nullable` scalar subquery that `FORMAT TSVWithNames` could
+      not reveal, and a near-rollback of the ledger-processor caught by
+      timestamping artifacts. Both folded into the deploy runbook. ⚠️ This
+      task's "series that has never existed" claim was wrong and is corrected
+      here and in the M2 package.
 ---
 
 # `/backfill/status` publishes a self-contradictory state
@@ -158,14 +176,119 @@ that predates the last write is another signal a consumer cannot interpret.
 - [x] `/backfill/status` cannot publish `completed` together with a non-100%
       `progress_pct`, in either walk direction. Assert it as a test, not by
       inspection.
-- [ ] A stream whose last push is far in the past does not report `running`.
-- [ ] `completed_at >= last_push_at` holds, or the two fields are given
+- [x] A stream whose last push is far in the past does not report `running`.
+      Fixed at BOTH ends: the writer now rests a finished run at `paused`
+      (the root cause), and the reader republishes a long-stale `running` as
+      `stalled` (the guard, for a run hard-killed before it can write a
+      terminal state).
+- [x] `completed_at >= last_push_at` holds, or the two fields are given
       meanings that make the ordering irrelevant and that is documented.
+      **Second branch taken, documented in `dto.rs`:** `completed_at` belongs to
+      the run that completed, `last_push_at` to the last write by *any* run, so
+      on a stream walked in more than one pass the earlier completion beside the
+      later push is correct, not a defect. Forcing the ordering would have
+      destroyed true information.
 - [x] `sdex_archive`'s stored `current_ledger = 1` is **preserved**, not
       overwritten — the fix is in the read path. A test should pin this so a
       later "cleanup" does not silently reintroduce the bug by mutating data.
-- [ ] Prod re-checked after the fix and the actual output recorded.
+- [x] Prod re-checked after the fix and the actual output recorded.
 
+      ```json
+      {
+        "realtime_tip_ledger": 64332242,
+        "sdex": { "status": "completed", "current_ledger": 1,
+                  "progress_pct": 100.0, "ledgers_remaining": 0,
+                  "earliest_data_available": "2015-11-18T03:47:00Z" },
+        "soroban_amm": { "status": "paused", "completed_at": null,
+                         "earliest_data_available": "2024-03-08T19:00:00Z" }
+      }
+      ```
+
+      Was, before: `realtime_tip_ledger` 63,795,749 (28 days stale),
+      `progress_pct` 0.0, `ledgers_remaining` 63,795,748,
+      `soroban_amm.status` `running`, watermark `2024-02-20T17:00:00Z`.
+
+
+
+## Implementation Notes
+
+Shipped across three PRs, all merged and deployed 2026-09-08: **#296** (reader,
+tip, alarm, ceiling doc), **#295** (the `paused` writer fix, riding with 0264),
+**#297** (the hotfix below).
+
+- `handlers.rs` — `effective_status()` republishes a long-stale `running` as
+  `stalled` at 604,800 s, deliberately the same value as
+  `opsAlarms.sdexPushFreshnessSeconds` so endpoint and alarm cannot disagree.
+  `realtime_tip()` reads the chain tip from `ingest_cursor` instead of the
+  backfill's frozen `target_ledger`.
+- `queries_ch.rs` — push age computed **server-side** (clock-skew immune), live
+  tip carried as a scalar subquery rather than a second round trip.
+- `progress.rs` — a finished run short of the tip writes `paused`, gated on
+  having indexed something.
+- `observability-stack.ts` — `prices-{env}-amm-push-freshness` with its own
+  tunable; reached `OK` at 13:33:20 UTC on deploy.
+
+194 prices-api tests, 30 sdex-backfill tests, clippy clean.
+
+## Issues Encountered
+
+- 🔴 **The reader fix took `/backfill/status` down for 46 seconds** (15:17:47 →
+  15:18:33 UTC, 2 failed requests). A ClickHouse **scalar subquery is `Nullable`
+  regardless of what it selects**, so `(SELECT ifNull(max(ledger), 0) …)` typed
+  as `Nullable(UInt64)` against a bare `u64` field; RowBinary drifted one byte
+  and the *next* row failed on an unrelated column. Fixed with `assumeNotNull`
+  (PR #297) — the pattern `backfill-freshness-probe` already documents.
+  ⚠️ **The pre-deploy check could not have caught it:** it used
+  `FORMAT TSVWithNames`, and text formats carry no null-flag byte. See
+  [[clickhouse-scalar-subquery-is-always-nullable]].
+- 🔴 **A Compute deploy nearly rolled the ledger-processor back two days.** That
+  stack holds both Lambdas; only `prices-api` had been rebuilt, and the
+  ledger-processor artifact on disk predated the deployed one. Its `S3Key`
+  changed in the diff and read as an upgrade. Would have silently removed
+  `ClickHouseWriteLatencyMs`, the metric behind a dashboard tile whose
+  screenshots ship in the M2 package. Caught by timestamping the artifacts
+  against the live functions; both traps folded into the runbook above.
+- ⚠️ **A claim in this task and in the M2 package was wrong.** "The SDEX
+  push-freshness alarm watches a series that has never existed" — CloudWatch
+  shows 23 daily datapoints, 2026-07-05 to 2026-07-27, stopping when the stream
+  completed. Corrected in `observability-stack.ts` and evidence §7.2/§8. The
+  real gap is worse and now disclosed: `resolve_status` never downgrades a
+  stored `completed`, so that alarm can never fire again and a **future** SDEX
+  backfill would run uncovered.
+
+## Design Decisions
+
+### From Plan
+
+1. **Derive in the reader, wire the alarm** — chosen over a reaper that mutates
+   `backfill_progress`. This task forbids hand-patching the table: it repairs one
+   row and leaves the mechanism intact.
+
+### Emerged
+
+2. **The diagnosis was wrong and was replaced.** The AMM run did not die
+   mid-flight — it *finished*. `reached_tip` is unreachable in the documented
+   operating model, because the combined run's `--end` is the live handoff floor,
+   not the tip. Production's `current_ledger` of 63,352,611 matches the runbook's
+   floor to the ledger, and the 122,864-ledger difference is the deliberate
+   margin handed to live ingestion. So `running` was structural, not a crash.
+3. **`paused` added at the writer as the root-cause fix**, mirroring what the
+   `sdex_archive` row in the same function already did. The reader's `stalled`
+   derivation was kept as the guard for a genuinely hard-killed run — the two
+   compose, and `stalled` never touches `paused`.
+4. **`paused` gated on having indexed something.** A completed run that advanced
+   nothing is failing, not resting, and `paused` would silence the alarm on it.
+5. **The alarm deploy gated on the data correction.** Shipping it against a
+   `running` row would have paged permanently. Recorded in the code comment, not
+   only in conversation.
+6. **`realtime_tip_ledger` deliberately not used in `progress_pct`.** The archive
+   completed against the tip as it stood; denominating a finished archive by a
+   live tip would drag it below 100% further every ledger.
+
+## Future Work
+
+- [[0272]] — the SDEX freshness alarm can never fire again, so a future SDEX
+  backfill would run without cover. Disclosed in M2 evidence §8.
 
 # 📕 DEPLOY RUNBOOK
 
