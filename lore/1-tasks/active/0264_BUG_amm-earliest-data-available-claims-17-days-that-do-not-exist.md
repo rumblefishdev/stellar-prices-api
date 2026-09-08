@@ -2,7 +2,7 @@
 id: "0264"
 title: "soroban_amm.earliest_data_available claims 2024-02-20 while the first AMM candle is 2024-03-08 — 17 days of coverage that exists at no granularity"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0127", "0263", "0128", "0106"]
 tags: [layer-backend, layer-api, priority-medium, effort-small, milestone-M2, backfill, api, data-correctness]
@@ -19,6 +19,17 @@ history:
       reconciled against real rows on the minute; the AMM stream's does not.
       Measured, not inferred — `price_ohlcv_1m` was queried directly for
       non-SDEX rows before 2024-03-08 and returned **nothing**.
+  - date: 2026-09-08
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active for the Milestone 2 pre-submission pass ([[0128]]).
+      Blocks nothing in Tranche 2 AC 5 — that criterion is graded on the SDEX
+      watermark, which is correct and independently corroborated — but this
+      value sits in the same reviewer-facing payload. ⚠️ The correction must
+      bypass `merge_min`, which only ever moves the value *older*, so a normal
+      run cannot write it and a careless fix gets silently undone. Ships in
+      one `sdex-backfill` release with [[0263]].
 ---
 
 # The AMM stream's `earliest_data_available` is 17 days early

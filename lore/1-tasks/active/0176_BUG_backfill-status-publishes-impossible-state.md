@@ -2,7 +2,7 @@
 id: "0176"
 title: "GET /backfill/status publishes an impossible state — 'completed, 0%, 63.8M remaining' for SDEX and a 28-day-dead soroban_amm still reading 'running'"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0127", "0263", "0088", "0072", "0136"]
 tags: [layer-api, priority-medium, effort-small, backfill, observability, consumer-facing]
@@ -30,6 +30,23 @@ history:
       solved twice up to the point of discovery. **Defect 2 is untouched.**
       Re-scope before starting: what remains here is the dead-run status and
       the timestamp inconsistency, not the arithmetic.
+  - date: 2026-09-08
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active for the Milestone 2 pre-submission pass ([[0128]]).
+      ⚠️ **Scope is Defect 2 only** — Defect 1 was fixed by [[0127]]/PR #283.
+      What remains: a dead run still advertising `running`, and `completed_at`
+      predating `last_push_at`. Operator decision 2026-09-08: **derive the
+      stalled state in the reader and wire the missing alarm**, not a reaper
+      that mutates the table (0176's own note forbids hand-patching the row).
+      🔑 Found while scoping: `backfill-freshness-probe` publishes
+      `PushAgeSeconds` for `soroban_amm` and has done for eight weeks, but the
+      alarm at `observability-stack.ts:678` is pinned to
+      `Stream: 'sdex_archive'` — nothing was watching. The probe's own
+      exemption comment (`lib.rs:47-53`, "completes in a single push then
+      transitions to `completed`") is the falsified assumption that created
+      the gap.
 ---
 
 # `/backfill/status` publishes a self-contradictory state

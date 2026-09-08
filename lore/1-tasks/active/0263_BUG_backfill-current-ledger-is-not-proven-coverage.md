@@ -2,7 +2,7 @@
 id: "0263"
 title: "backfill_progress.current_ledger asserts a floor, not contiguous coverage — a genesis-anchored chunk makes /backfill/status claim a complete archive"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0127", "0088", "0128", "0176"]
 tags: [layer-backend, layer-api, priority-medium, effort-medium, milestone-M2, backfill, api, verification]
@@ -21,6 +21,18 @@ history:
       containment, not the fix: the underlying column still cannot distinguish a
       finished archive from a genesis-anchored chunk, and the endpoint it feeds
       is the one Tranche 2 AC 5 sends a reviewer to.
+  - date: 2026-09-08
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active for the Milestone 2 pre-submission pass ([[0128]]).
+      Operator decision 2026-09-08: **option 2 — gate the writer.** Gate
+      `SetBackward(start)` on the same `reached_genesis` condition that
+      already gates `status`, rather than only documenting the limitation or
+      deriving coverage from `backfill_sdex_ledgers`. Chosen because it is the
+      genuine fix and is surgical: the production row stays correct because
+      that run really did reach genesis. Ships in one `sdex-backfill` release
+      with [[0264]].
 ---
 
 # `current_ledger` is a floor claim, not a coverage proof
