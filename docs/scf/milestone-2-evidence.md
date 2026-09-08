@@ -557,12 +557,14 @@ stored value rather than querying the candles:
 | `min(timestamp)` on `price_ohlcv_1d`                   | `2015-11-18 00:00:00`  |
 | oldest active partition, all seven candle tiers        | `201511`               |
 
-**Depth alone is not coverage, so continuity was checked too.** Every month from
-2022-01 to 2026-09 carries SDEX candles on **every calendar day** — all 57 months,
-leap day included. In the criterion's own year there are **4,048,196 daily SDEX
-candles across 82,096 assets**. Two visibly lower-density months were examined day
-by day and showed no empty days and no cliff: breadth of assets varying, not data
-loss.
+**Depth alone is not coverage, so continuity was checked too.** Every **complete**
+month from 2022-01 to 2026-08 carries SDEX candles on **every calendar day** — all
+**56** of them, leap day included — and the current month is complete to date. The
+distinction matters only because a reviewer running the check mid-month sees the
+in-progress month return fewer days than it will hold; that is the calendar, not a
+gap. In the criterion's own year there are **4,048,196 daily SDEX candles across
+82,096 assets**. Two visibly lower-density months were examined day by day and
+showed no empty days and no cliff: breadth of assets varying, not data loss.
 
 #### Reproduce it
 
