@@ -905,10 +905,15 @@ fn peg_series_sql(args: &OhlcvArgs, in_xlm: bool, table: &str, conds: &[String])
     //     throughout.
     //
     //     ⚠️ `price_usd_series_1h` buckets the rate strictly by the HOUR and has
-    //     NO such net (views.sql). With hourly rows loaded the two surfaces
-    //     agree everywhere, which is what task 0246's cross-surface criterion
-    //     asserts; the difference is observable ONLY on a daily-only load, and
-    //     it is stated in the views' own comment rather than left implicit.
+    //     NO such net (views.sql). With hourly rows loaded, and with the net
+    //     bounded by the epoch below, the two surfaces agree everywhere — which
+    //     is what task 0246's cross-surface criterion asserts. Two cases used to
+    //     break that: a daily-only load (stated in the views' own comment), and
+    //     the oracle epoch's own day, where the import ends at 13:00 and the
+    //     epoch is 14:00 — an hour at or after 14:00 with no poll in its window
+    //     took the 13:00 import through the day-wide net and published it as
+    //     `external` while the view published `1`/`peg`. The `bo.bkt` bound
+    //     closes the second.
     //
     //     ⚠️ `'UTC'` is NAMED (review round 2, CR-02). `usd_rate.timestamp` and
     //     `price_ohlcv_*.timestamp` are bare `DateTime`, so an unzoned
@@ -941,7 +946,29 @@ fn peg_series_sql(args: &OhlcvArgs, in_xlm: bool, table: &str, conds: &[String])
     // holds under both `join_use_nulls` settings (see the sentinel note in
     // `ohlcv_peg_series`), and the timestamp test is the window.
     let o_ok = format!("(ifNull(bo.om, '') != '' AND bo.orts >= {floor})");
-    let e_ok = "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt, 'UTC'))".to_string();
+    // ⚠️ The external side is bounded by the BUCKET, not by the imported row.
+    //
+    // The imported series stops below `USDC_ORACLE_EPOCH_S` — the loader and
+    // `promote_statement` both refuse a row at or above it — so a bound on
+    // `re.erts` would be a no-op against real data. The leak is on the other
+    // side: `toStartOfDay(bo.bkt, 'UTC')` is a DAY-wide net, and on the epoch
+    // day itself the import ends at 13:00 while the epoch is 14:00. A bucket at
+    // or after 14:00 that day whose own oracle window found nothing therefore
+    // reached back to the 13:00 import and published it as `external`, while
+    // `price_usd_series_1h` published the $1 peg for the same hour: the two read
+    // surfaces disagreed, and the candle path was the one claiming a measurement
+    // for an hour the imported series does not cover. It is the same post-epoch
+    // mis-attribution `ch_enrich::external_sql` bounds itself against.
+    //
+    // Bounding `bo.bkt` closes it at every grain and for all time: a bucket
+    // wholly below the epoch keeps the day-wide net, the epoch day's 1d bucket
+    // (whose `bkt` is 00:00) keeps it and still loses to the oracle rank, and no
+    // bucket at or after the epoch can take an import at all.
+    let e_ok = format!(
+        "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt, 'UTC') \
+          AND bo.bkt < toDateTime({epoch}))",
+        epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S
+    );
     let rate = format!("multiIf({o_ok}, bo.orate, {e_ok}, re.erate, toDecimal128(1, 14))");
 
     let val = if in_xlm {
@@ -1860,7 +1887,11 @@ mod tests {
     fn peg_series_sql_ranks_a_valid_oracle_reading_over_the_whole_bucket() {
         let sql = peg_sql();
         let o_ok = "(ifNull(bo.om, '') != '' AND bo.orts >= bo.bkt)";
-        let e_ok = "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt, 'UTC'))";
+        let e_ok = &format!(
+            "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt, 'UTC') \
+          AND bo.bkt < toDateTime({}))",
+            prices_clickhouse::USDC_ORACLE_EPOCH_S
+        );
         assert!(
             sql.contains(&format!(
                 "multiIf({o_ok}, bo.orate, {e_ok}, re.erate, toDecimal128(1, 14))"
@@ -1964,7 +1995,11 @@ mod tests {
     fn peg_series_sql_nulls_the_provenance_outside_an_imported_rate() {
         let sql = peg_sql();
         let o_ok = "(ifNull(bo.om, '') != '' AND bo.orts >= bo.bkt)";
-        let e_ok = "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt, 'UTC'))";
+        let e_ok = &format!(
+            "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt, 'UTC') \
+          AND bo.bkt < toDateTime({}))",
+            prices_clickhouse::USDC_ORACLE_EPOCH_S
+        );
         for (alias, col) in [("src", "esource"), ("qual", "equality")] {
             let want = format!(
                 "if(o IS NULL OR {o_ok} OR NOT {e_ok}, NULL, nullIf(re.{col}, '')) AS {alias},"

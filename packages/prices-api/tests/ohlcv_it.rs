@@ -523,6 +523,89 @@ async fn seed_peg_rate(db: &str, admin: &Client) {
         .unwrap();
 }
 
+/// 🔑 The epoch-day gap hour: the one bucket where the day-wide external net
+/// used to outlive the oracle epoch.
+///
+/// The imported series stops at 13:00 on 2026-03-11 and the first poll is at
+/// 14:00 (`USDC_ORACLE_EPOCH_S`). `e_ok` floored an imported row at
+/// `toStartOfDay(bkt, 'UTC')`, so an hour at or after 14:00 THAT DAY whose own
+/// oracle window found nothing reached back to the 13:00 import and published it
+/// as a measurement — while `price_usd_series_1h`, which buckets strictly by
+/// hour, published the $1 peg for the same hour. Two read surfaces, two
+/// different answers for one bucket, and the candle path was the one claiming a
+/// measurement for an hour the imported series does not cover.
+///
+/// A bound on the imported ROW cannot fix this: the offending row is at 13:00,
+/// already below the epoch. The bucket is what must be bounded.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_peg_series_stops_importing_across_the_oracle_epoch() {
+    let db = "it_ohlcv_epoch_gap_0267";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+
+    // The last imported hour (13:00) and a poll at 15:05 — leaving 14:00 and
+    // 15:00 with no poll inside their own window, which is the gap.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2026-03-11 13:00:00', 0.99123400000000, \
+              'external', 'chainlink', 'measured', 0, 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // Buckets for the series to render, on the reference market.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-03-11 13:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-03-11 15:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2026-03-11T13:00:00Z\
+         &end=2026-03-11T15:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+
+    let at = |ts: &str| {
+        data.iter()
+            .find(|c| c["timestamp"] == ts)
+            .unwrap_or_else(|| panic!("{ts} missing: {json}"))
+            .clone()
+    };
+
+    // 13:00 is below the epoch and the import covers it: measured.
+    let below = at("2026-03-11T13:00:00Z");
+    assert_eq!(below["method"], "external", "the imported hour: {below}");
+    approx(&below["close"], 0.991234);
+
+    // 15:00 is above the epoch with no poll in its window. The imported series
+    // holds nothing there, so the only honest answer is the labelled $1 peg.
+    let above = at("2026-03-11T15:00:00Z");
+    assert_eq!(
+        above["method"], "peg",
+        "an hour above the oracle epoch must not be priced from an import \
+         stamped below it — the imported series does not cover it: {above}"
+    );
+    approx(&above["close"], 1.0);
+
+    teardown(db).await;
+}
+
 /// 🔑 BRIEF acceptance criterion 4, and the falsifier for the whole of task
 /// 0267: **2023-03-11 must stop publishing a dollar.**
 ///
