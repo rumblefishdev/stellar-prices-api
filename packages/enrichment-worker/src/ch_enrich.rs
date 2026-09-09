@@ -1855,18 +1855,33 @@ fn pre_epoch_oracle_rows_sql(db: &str, usdc_id: u32) -> String {
 /// Bound parameters, in SQL order: the snapshot watermark, then the `LIMIT`.
 fn reset_sql(db: &str, tbl: &str, spec: &UsdResetSpec, window: &str) -> String {
     // Task 0268's two extensions, appended so a spec that asks for neither leaves
-    // the 0182 statement byte-identical. The fragments carry BARE column names,
-    // not `p.`-qualified ones, on purpose: that makes the external predicate the
-    // same string here as in `reset_pending_pred` and the month enumeration, and
-    // "the same string" is the only form of agreement a test can prove. There is
-    // one table in scope, so the resolution is unambiguous.
+    // the 0182 statement byte-identical.
+    //
+    // ⚠️ The par signature MUST be `p.`-qualified here, and only here. This
+    // statement's own projection declares `CAST(0 AS Decimal(38, 14)) AS
+    // close_usd`, and ClickHouse resolves an identifier against SELECT aliases
+    // BEFORE table columns (`prefer_column_name_to_alias` defaults to 0 — that
+    // setting exists for exactly this collision). A bare `close_usd = close`
+    // therefore evaluates as `0 = close`, matches nothing, and the campaign
+    // exits 0 having reset no rows: `count_reset_pending` reports the full
+    // population, the reset writes nothing, and the run logs only "made no
+    // progress". Verified on ClickHouse 26.3.10.60:
+    //     SELECT CAST(0 AS Decimal(38,14)) AS close_usd, p.close AS close
+    //     FROM (SELECT toDecimal128(5,14) AS close_usd,
+    //                  toDecimal128(5,14) AS close) AS p
+    //     WHERE close_usd = close        -- EMPTY: evaluated 0 = 5
+    //     WHERE p.close_usd = p.close    -- 1 row
+    // `reset_pending_pred` and the month enumeration keep the BARE form: they
+    // render into alias-free statements with no `p` in scope, where a `p.`
+    // prefix would be a syntax error. The day-set fragment is shared verbatim by
+    // all three, which is what the invariant test can still prove.
     let mut bounds = String::new();
     if let Some(na) = spec.not_after {
         bounds.push_str(&format!(" AND p.timestamp < toDateTime({na})"));
     }
     if spec.require_external_rate {
         bounds.push_str(&format!(
-            " AND close_usd = close AND {}",
+            " AND p.close_usd = p.close AND {}",
             external_rate_day_pred(db)
         ));
     }
@@ -2021,6 +2036,39 @@ mod tests {
             "a correlated reference is illegal in months_with_zeros: {frag}"
         );
         assert!(!frag.contains("EXISTS"), "{frag}");
+    }
+
+    /// ⚠️ The par signature must be `p.`-qualified in [`reset_sql`] and BARE in
+    /// [`reset_pending_pred`], because only `reset_sql` declares a `close_usd`
+    /// alias in its own projection — and ClickHouse resolves aliases before
+    /// columns, so the bare form there silently becomes `0 = close` and the
+    /// campaign resets nothing while reporting a full population. This is the
+    /// regression that shipped through three review rounds and was caught only
+    /// by a live ClickHouse; the string test that guarded this file compared the
+    /// two fragments for EQUALITY, which is precisely what must not hold.
+    #[test]
+    fn the_reset_statement_qualifies_the_par_signature_against_its_own_alias() {
+        let spec = usdc_external_reset();
+        let sql = reset_sql("prices", "price_ohlcv_1h", &spec, "");
+        assert!(
+            sql.contains("CAST(0 AS Decimal(38, 14)) AS close_usd"),
+            "the projection still declares the colliding alias: {sql}"
+        );
+        assert!(
+            sql.contains("AND p.close_usd = p.close AND"),
+            "the reset must compare COLUMNS, not its own zero alias: {sql}"
+        );
+        assert!(
+            !sql.contains(" AND close_usd = close AND"),
+            "an unqualified par signature here resolves to the alias: {sql}"
+        );
+        // The alias-free sites keep the bare form: `p` is not in scope there.
+        let pred = reset_pending_pred("prices", &spec);
+        assert!(
+            pred.contains(" AND close_usd = close AND"),
+            "the pending predicate has no table alias to qualify: {pred}"
+        );
+        assert!(!pred.contains("p.close_usd"), "{pred}");
     }
 
     /// D-04: the reset's candidate set carries the peg tier's EXACT signature, so
