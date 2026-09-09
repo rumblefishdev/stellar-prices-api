@@ -957,3 +957,25 @@ than read. The `#[ignore]`d suites had never been run — three of them were red
 23. **`--dry-run` still contacts no server**, so it cannot report the grain
     gate. Keeping dry-run offline was judged worth more than early warning; the
     gate fires before the first INSERT and the help says so.
+
+### Round 4, second pass — the first pass's own fix was too weak
+
+An adversarial re-review of the round-4 changes, again against a live
+ClickHouse, falsified one of them:
+
+- **`bo.bkt < epoch` bounded the wrong end.** Every bucket that SPANS the epoch
+  (1d of 2026-03-11, 1w from 2026-03-09, 1M of March 2026) starts below it and
+  kept the day-wide net. The oracle rank normally takes those buckets, so
+  nothing shows — but in an oracle gap the import wins, and `granularity=1M` for
+  March 2026 publishes the 13:00 import of the 11th as a measurement over twenty
+  days the series does not hold. Measured: 0.991234/`external`/chainlink/
+  measured with the start bound, 1.0/`peg` with `bo.bend <= epoch`. The comment
+  claiming the start bound closed it "at every grain and for all time" was false
+  in three places, and is corrected.
+- The epoch test's fixture comment described an oracle poll at 15:05 that does
+  not exist in the fixture and would have inverted the test's own assertion. The
+  absence of a poll is the point: the bound cannot be tested through a surface
+  that outranks it. The 14:00 bucket alone does not pin `bend<=` against `bkt<`
+  — both exclude it — so the spanning 1d bucket now carries the proof.
+- `Candle.method`'s published text documented two causes of `null`; the code
+  emits a third, which this branch's own integration case asserts. Documented.
