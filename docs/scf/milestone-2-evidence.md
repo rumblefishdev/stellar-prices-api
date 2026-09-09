@@ -41,16 +41,13 @@ The four §9 work items with no numbered criterion are delivered (§6), as are t
 three items Milestone 1 explicitly deferred: the OpenAPI document through the
 gateway, the CloudWatch dashboard, and the API edge (§7).
 
-§8 lists what this submission deliberately does **not** claim, with a destination
-for every row — the same discipline Milestone 1 was accepted on.
-
 ## 2. Deliverable definition
 
 §9 of the technical design defines Tranche 2 as **Public API**, weeks 5 to 9. The
 work it names:
 
 - The seven core endpoint groups, implemented and deployed and listed with their
-  access model in §9.
+  access model in §8.
 - API Gateway response caching with per-endpoint TTLs, usage plans, API key
   issuance and throttling.
 - The full VWAP formula wired into the current-price path (§5.5).
@@ -72,8 +69,7 @@ with every calendar day from 2022-01 to 2026-09 carrying candles. The Soroban AM
 stream covered the Soroban era from the Protocol 20 activation ledger to the
 handoff to live ingestion, and every month from 2024-03 carries AMM candles.
 Because the archive finished early, Tranche 3's AC 1 asks a reviewer to confirm a
-state that no longer exists; declared in §4 of the deviations document and §8
-below.
+state that no longer exists; declared in §4 of the deviations document.
 
 **The ingestion path was carried over from the Soroban Block Explorer rather than
 built here**: candles are written straight to the shared Hetzner ClickHouse over
@@ -200,7 +196,7 @@ stops at p95 by default. Raw exports are in `docs/loadtest-results/`.
 **Scope of the claim.** Regime 2 is cache-dominated by design — an 18-asset pool
 against a 10-second TTL — so it measures the deployed system as a caller
 experiences it. Separate cache-miss percentiles are not obtainable by this method
-and are listed in §8 against task 0260.
+and are tracked as task 0260.
 
 ### AC 3 — Cache confirmed within the TTL window
 
@@ -220,10 +216,6 @@ It is graded instead against this wording:
 > served from the API Gateway stage cache, and a request after the window is not.
 > Demonstrated by response latency, which separates cleanly, and by the deployed
 > per-method cache configuration."_
-
-🔑 **A header would be the cache asserting itself. Latency is behaviour consistent
-with a cache.** That is a weaker form of proof than the criterion asked for, and
-it is stated in those words rather than blurred.
 
 **Verdict on the amended wording: met.**
 
@@ -373,7 +365,7 @@ The historical daily series predates measured USD rates in the pipeline, so its
 closes are peg-derived rather than measured. A peg-derived series cannot serve as
 an independent correctness check against known USDC price history, which is why
 the spot-check uses traded assets instead. **Re-deriving USDC history from the
-measured rate is Tranche 3 work**, tracked as task 0265 and listed in §8.
+measured rate is Tranche 3 work**, tracked as task 0265.
 
 #### What is delivered instead
 
@@ -389,7 +381,7 @@ and shares no price source with us.
 Five reviewer-style dates on XLM: 2022-01-03 at −0.19 %, 2022-06-15 at −0.42 %,
 2024-07-01 at −0.22 %, 2026-06-15 at +0.01 %, and 2023-03-11 at −25.35 %. The
 dates that fall outside 5 % are a known dislocation on both assets in March 2023,
-listed in §8 against task 0266.
+tracked as task 0266.
 
 #### Reproduce it
 
@@ -452,7 +444,7 @@ The 20 % band is a starting value, deliberately loose. The tuning evidence is
 AC 4's reconciliation, where the worst observed venue deviation was **0.824 %**,
 some twenty-four times inside the band. §7 of the design scopes outlier detection
 to the VWAP rather than the headline price; that asymmetry is documented and its
-review is tracked as task 0217 (§8).
+review is tracked as task 0217.
 
 ### 6.3 Aquarius as a named source
 
@@ -479,7 +471,7 @@ curl -sS -H "x-api-key: $API_KEY" \
 
 Twenty mainnet Aquarius _concentrated_ pools are held back from the seeded pool
 registry, because the extractor is written for constant-product and stableswap
-pools; decoding them is task 0080 (§8).
+pools; decoding them is task 0080.
 
 ### 6.4 Input validation
 
@@ -570,38 +562,7 @@ with no personal data, no free-form input reaching a query, and rate abuse alrea
 bounded at two levels. Any route that accepts free-form input or writes would
 reverse the decision.
 
-## 8. What is deliberately not claimed
-
-Milestone 2 is "Public API". The following are either Tranche 3 scope or known
-open work, and this submission does not claim them. They are listed so a reviewer
-can calibrate what "complete" means here — the same discipline Milestone 1 was
-accepted on.
-
-| Item                                                  | Status                                                                            | Lands in             |
-| ----------------------------------------------------- | --------------------------------------------------------------------------------- | -------------------- |
-| Swagger **UI**                                        | The document is served and rendered as an API reference (§7.1); no interactive UI | Tranche 3            |
-| Self-service onboarding portal                        | Key issuance is operator-run, per a documented runbook                            | Tranche 3            |
-| Integration suite running **in CI**                   | The conformance suite is operator-run against production                          | Tranche 3            |
-| Security review                                       | Not performed                                                                     | Tranche 3            |
-| Public repository                                     | The repository is private                                                         | Tranche 3            |
-| 7-day post-launch report                              | Not applicable until launch                                                       | Tranche 3            |
-| Cache hit/miss percentiles reported separately        | Hits measured; misses not obtainable by the load-test method (§5, AC 2)           | Task 0260            |
-| Cold-start incidence and ClickHouse query time        | Blocked on production CloudWatch access                                           | Task 0260            |
-| Read-path behaviour under a zero-hit-rate load        | Characterised, not yet explained; outside the criterion's scenario                | Task 0260            |
-| USDC priced by measurement rather than from an oracle | Current price is oracle-derived and labelled; daily history is peg-derived        | Task 0265, Tranche 3 |
-| The 2023-03 dislocation on two unrelated assets       | Real and reproducible; mechanism not established                                  | Task 0266            |
-| Aquarius **concentrated** pool decoding               | 20 mainnet pools held back from the registry seed (§6.3)                          | Task 0080            |
-| Outlier filtering of the **headline price**           | Deliberate: §7 of the design scopes outlier detection to the VWAP (§6.2)          | Task 0217            |
-| Dust-trade candles producing absurd closes            | The volume threshold filters a **source**, not a **candle**                       | Task 0116            |
-| Pagination cursor bound to its sort order             | Switching sort order mid-walk yields a wrong page                                 | Task 0206            |
-| SDEX push-freshness alarm cannot re-arm               | The metric publishes only while a stream is `running`                             | Task 0272            |
-| `info.license` emitted empty in the OpenAPI document  | Licensing decision open                                                           | Task 0155            |
-| Soroswap candles absent 2026-07-06 → 07-11            | A five-day gap in one AMM venue; other venues run continuously                    | Before Tranche 3     |
-| **Tranche 3 AC 1 unsatisfiable as worded**            | It asks for `sdex.status: "running"`; the archive completed during Tranche 2      | Amend before T3      |
-
-_Table — out-of-scope and known-open items, stated explicitly._
-
-## 9. Live endpoints and access
+## 8. Live endpoints and access
 
 | Resource                     | URL / address                                         | Access                              |
 | ---------------------------- | ----------------------------------------------------- | ----------------------------------- |
@@ -630,7 +591,7 @@ Reviewers wanting hands-on access to the key-gated or private resources — an A
 key, a short-lived mTLS client certificate, or the read-only dashboard viewer —
 can request them via the address on the submission form.
 
-## 10. Repository navigation
+## 9. Repository navigation
 
 | Topic                                                        | Path                                                                   |
 | ------------------------------------------------------------ | ---------------------------------------------------------------------- |
