@@ -221,13 +221,24 @@ srv "$P"; sleep 2; srv "$P"; sleep 9; srv "$P"; sleep 2; srv "$P"
 **On screen:** Terminal A.
 
 ```bash
-curl -sS -H "x-api-key: $KEY" "$API/v1/backfill/status" | jq '.sdex.earliest_data_available'
+curl -sS -H "x-api-key: $KEY" "$API/v1/backfill/status" | jq '{sdex, soroban_amm}'
 ```
 
 > "The tranche target for historical depth is January 2022. We reach November
 > 2015, and we reconcile that four ways rather than trusting the endpoint's own
 > stored value — against the candles, against the stored row, and against the
 > oldest partition on every tier."
+
+> "Both streams have finished, so this endpoint is now a progress report on
+> completed work rather than something anyone needs to poll — the archive is
+> done. The criterion asks for it, so here it is, and what it reports is
+> correct: SDEX reads `completed`, at a hundred percent, with zero ledgers
+> remaining."
+
+> "The AMM stream reads `paused` rather than `completed` because its run
+> deliberately stopped at the ledger where live ingestion takes over, so it can
+> never reach a chain tip it was never asked to reach — `paused` is the resting
+> state between runs here, not a stall."
 
 > "On load: 100 requests a second for five minutes gave a p95 of 47 milliseconds
 > against a 200 millisecond bar, with zero errors in thirty thousand requests. The
@@ -269,6 +280,6 @@ curl -sS -H "x-api-key: $KEY" "$API/v1/backfill/status" | jq '.sdex.earliest_dat
 - Confirm no frame shows a route returning an unexpected 404 without the
   narration covering it.
 - Upload with public link sharing, and paste the URL into Field 2 of
-  [`milestone-2-form-answers.md`](./milestone-2-form-answers.md).
+  `[milestone-2-form-answers.md](./milestone-2-form-answers.md)`.
 - If any figure changed between recording and submission, update the evidence
   document rather than re-shooting, and make sure the two do not disagree.
