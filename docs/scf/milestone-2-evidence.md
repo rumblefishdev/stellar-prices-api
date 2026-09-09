@@ -338,7 +338,7 @@ hit rate cannot fall below 98.20 %, so 47.09 ms is substantially the gateway
 cache answering, not the data path. Regimes 1 and 2 are statistically
 indistinguishable at p95.
 
-**An uncontended cache miss costs roughly 170 to 240 ms.** That is already at the
+**An uncontended cache miss costs roughly 170 to 280 ms.** That is already at the
 Tranche 2 bar and about twice the Tranche 3 bar of 100 ms. The pass rests on the
 cache concealing a data path that is, on today's measurements, too slow for
 Tranche 3. **p99 already exceeds 100 ms in both passing regimes.**
@@ -396,21 +396,30 @@ a cache.** That is a weaker form of proof than the criterion asked for.
 `/price`, declared 10-second TTL, same URL throughout. Server time only, so the
 TLS handshake a fresh client pays is excluded.
 
-Re-measured 2026-09-08 with the recipe below, exactly as printed:
+Re-measured 2026-09-09 with the recipe below, exactly as printed:
 
 | request   | expected          | server time  |
 | --------- | ----------------- | ------------ |
-| first ask | miss              | 171.6 ms     |
-| +2 s      | hit               | 40.9 ms      |
-| +4 s      | hit               | 50.0 ms      |
-| **+13 s** | **miss, expired** | **132.4 ms** |
-| +15 s     | hit               | 47.5 ms      |
+| first ask | miss              | 947.5 ms     |
+| +2 s      | hit               | 38.1 ms      |
+| +4 s      | hit               | 54.1 ms      |
+| **+13 s** | **miss, expired** | **282.4 ms** |
+| +15 s     | hit               | 37.2 ms      |
 
-**Hits fall between 41 and 50 ms, misses between 132 and 172 ms, and the two
-ranges do not overlap** — a gap of more than 80 ms. Expiry is demonstrated on
+**Hits fall between 37 and 54 ms, misses between 282 and 948 ms, and the two
+ranges do not overlap** — a gap of more than 200 ms. Expiry is demonstrated on
 both TTL tiers: `/v1/assets` at a 60-second TTL was still hot at +32 s and
-expired at +64 s. Both refilled immediately. These hit figures independently
-reproduce the load test's 45 to 47 ms, from a different tool on a different day.
+expired at +64 s on 2026-09-08. Both refilled immediately. These hit figures
+still bracket the load test's 45 to 47 ms, from a different tool on a different
+day.
+
+⚠️ **The 947.5 ms first ask on this run is a cold Lambda start, and it is
+reported as measured rather than quietly dropped.** It is not a representative
+miss: the expiry miss thirteen seconds later, on the same warm function, is
+282.4 ms, and the 2026-09-08 run put a warm miss at 132 to 172 ms. Absolute
+latency moves with Lambda warmth across an order of magnitude, which is exactly
+why **the separation between hit and miss is the claim and not the numbers**. No
+run to date has produced overlapping ranges.
 
 ⚠️ **Corrected 2026-09-08.** An earlier revision of this table carried six rows,
 including a `+6 s` hit that the printed recipe does not produce — it issues five
@@ -563,9 +572,9 @@ The capture query is `benchmark/q-raw.sql`, and the public-API leg is
 **Verdict: met, by six years.** The criterion asks for 2022-01-01. The store
 reaches **2015-11-18**. Measured 2026-09-04
 ([`prices-api-backfill-depth-verification.md`](../prices-api-backfill-depth-verification.md),
-task 0127) and **re-verified unchanged on 2026-09-08**, after the endpoint
-changes described in the limits below were deployed. All four views below were
-re-run; none moved.
+task 0127), **re-verified unchanged on 2026-09-08** after the endpoint changes
+described in the limits below were deployed, and **re-run again on 2026-09-09**.
+All four views below were re-run on each of those dates; none has moved.
 
 The figure is reconciled four ways, deliberately, because the endpoint reports a
 stored value rather than querying the candles:
@@ -638,9 +647,11 @@ issued a short-lived read-only client certificate on request.
 **Verdict: the literal half is met. The spot-check uses different assets, and
 that substitution is declared, not slipped in.**
 
-`GET /v1/assets/USDC:GA5Z…/ohlcv?timeframe=all` returns **2,042 daily points
-spanning 2021-02-01 to 2026-09-04**, with no gaps. That satisfies the criterion's
-first clause as written.
+`GET /v1/assets/USDC:GA5Z…/ohlcv?timeframe=all` returns **2,047 daily points
+spanning 2021-02-01 to 2026-09-09**, with no gaps. That satisfies the criterion's
+first clause as written. (Measured 2026-09-09; the series grows by one point a
+day, so a reviewer running it later should expect a larger count and a later end
+date, not ours.)
 
 #### 🔴 Why USDC is excluded from the correctness half
 
@@ -650,10 +661,15 @@ stating precisely.
 
 |                                   | USDC                                    | `native` (control)     |
 | --------------------------------- | --------------------------------------- | ---------------------- |
-| points returned                   | 2,042                                   | 2,414                  |
-| **points with `trade_count > 0`** | **0**                                   | **2,414, all of them** |
-| marked `derived`                  | all 2,042                               | —                      |
-| distinct closing values           | **177, of which 1,865 are exactly `1`** | real market values     |
+| points returned                   | 2,047                                   | 2,419                  |
+| **points with `trade_count > 0`** | **0**                                   | **2,419, all of them** |
+| marked `derived`                  | all 2,047                               | —                      |
+| distinct closing values _(09-04)_ | **177, of which 1,865 are exactly `1`** | real market values     |
+
+The first three rows were re-measured 2026-09-09. The closing-value distribution
+is carried from the 2026-09-04 measurement and is marked as such: it is a
+structural property of a peg-derived series rather than a figure that moves, but
+it was not re-run, and saying so costs less than being asked.
 
 **Not one of those points has a trade behind it.** The series is peg-derived. The
 falsifying case is the obvious one: on **2023-03-11**, when USDC broke its peg to
@@ -741,10 +757,14 @@ Live evidence, all four responses pinned to one refresh tick on XLM:
 
 | request                  | sources returned         | `vwap_24h`         |
 | ------------------------ | ------------------------ | ------------------ |
-| no parameter             | aquarius, sdex, soroswap | `0.18374529364442` |
-| `?min_volume_usd=100`    | aquarius, sdex, soroswap | `0.18374529364442` |
-| `?min_volume_usd=5000`   | aquarius, sdex           | `0.18374945623882` |
-| `?min_volume_usd=200000` | aquarius                 | `0.18383237183385` |
+| no parameter             | aquarius, sdex, soroswap | `0.18946111857203` |
+| `?min_volume_usd=100`    | aquarius, sdex, soroswap | `0.18946111857203` |
+| `?min_volume_usd=5000`   | aquarius, sdex           | `0.18946070194562` |
+| `?min_volume_usd=200000` | aquarius                 | `0.18946105702432` |
+
+Re-measured 2026-09-09. The absolute prices move with the market; the shape is
+the claim — the threshold drops sources monotonically, and the $100 floor is a
+no-op on this asset because every one of its venues clears it.
 
 ```bash
 curl -sS -H "x-api-key: $API_KEY" \
@@ -795,14 +815,22 @@ Delivered, and visible in the public response rather than only in the pipeline:
 
 ```json
 "sources": {
-  "aquarius": { "price": "0.18206086877515", "volume_24h": "302077.47208850593463" },
-  "phoenix":  { ... }, "sdex": { ... }, "soroswap": { ... }
+  "aquarius": { "price": "0.18946105702432", "volume_24h": "392976.06047392378807" },
+  "sdex":     { "price": "0.18945941005452", "volume_24h": "108010.21063405009136" },
+  "soroswap": { "price": "0.18951739892386", "volume_24h": "3708.64979176103103" }
 }
 ```
 
-That is a live payload for XLM. Aquarius appears with a real price and real
-24-hour volume, and at a `?min_volume_usd=200000` filter it is the last source
-standing.
+That is a live payload for XLM, captured 2026-09-09. Aquarius appears with a real
+price and real 24-hour volume, and at a `?min_volume_usd=200000` filter it is the
+last source standing — it is the largest of the three, ahead of SDEX.
+
+⚠️ **Phoenix is absent from this payload, and that is the asset, not the venue.**
+An earlier capture of this section showed four sources including Phoenix. Phoenix
+is ingesting normally — across all assets it carried 44 candles and $122.38 of
+volume in the same 24 hours — but it held no XLM volume in this window, so the
+response does not name it. A source appears here when it has traded the asset
+being asked about, which is the intended behaviour and not a coverage gap.
 
 ```bash
 curl -sS -H "x-api-key: $API_KEY" \
