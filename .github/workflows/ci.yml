@@ -313,3 +313,13 @@ jobs:
       # a `servers` block the deployed one does not have. Compare the two.
       - name: Verify OpenAPI servers match the deployed handler
         run: npm run openapi:verify-servers
+
+      # The portal bundle carries its own copy of this document
+      # (web/portal/public/openapi.json): the "OpenAPI JSON" link on
+      # /api/docs needs a SAME-ORIGIN href for `download` to be honoured, and
+      # on the shared host the API is on another hostname (task 0270). A
+      # second copy is a copy that can go stale, and nothing else would
+      # notice — the rendered reference still fetches the live document, so
+      # the page looks right while the file behind the link is old.
+      - name: Verify the bundled OpenAPI document has not drifted
+        run: npm run openapi:verify-bundled
