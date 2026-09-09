@@ -681,6 +681,14 @@ to check.
    refusal**, not a no-op — the tool exits with
    `ResetRequiresExternalRates` and writes nothing.
 
+   The procedure that produces those rows is
+   `docs/runbooks/load-external-usdc-rate.md` — run it to completion first.
+   ⚠️ It writes in two steps: a shadow load under
+   `method = 'external-candidate'`, then a promote to `method = 'external'`.
+   **This query counts only the promoted word.** So a count of 0 here alongside
+   rows under `external-candidate` does not mean the load failed — it means the
+   promote has not run, and the fix is that runbook's step 5, not a re-load.
+
    ```sql
    SELECT count() AS rows, min(timestamp) AS first, max(timestamp) AS last
    FROM prices.usd_rate FINAL

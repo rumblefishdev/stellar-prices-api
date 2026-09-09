@@ -979,4 +979,61 @@ mod tests {
             "an INSERT with no VALUES is a syntax error, not a no-op"
         );
     }
+    // ---- the runbook's one hand-typed epoch --------------------------------
+
+    /// The operator runbook hand-types the oracle epoch ONCE, as a client
+    /// `param`, and every query in it reads `{epoch:UInt32}`. This pins that
+    /// single literal to the constant.
+    ///
+    /// A mirror of `ch_enrich`'s
+    /// `the_runbook_hand_types_the_oracle_epoch_once_and_it_is_the_constant`,
+    /// and it exists for the same reason: a drifted literal produces a
+    /// verification query over the WRONG window that reports a clean count — a
+    /// green all-clear over the one boundary the whole load depends on. It lives
+    /// beside the loader rather than beside 0268's tier because it pins the
+    /// loader's runbook, and it is in this task's LAST commit because
+    /// `include_str!` of a file that does not yet exist does not compile.
+    #[test]
+    fn the_runbook_hand_types_the_oracle_epoch_once_and_it_is_the_constant() {
+        const RUNBOOK: &str = include_str!("../../../docs/runbooks/load-external-usdc-rate.md");
+        let epoch = USDC_ORACLE_EPOCH_S.to_string();
+
+        assert_eq!(
+            RUNBOOK.matches(&epoch).count(),
+            1,
+            "the epoch must appear exactly once, as `SET param_epoch`"
+        );
+        assert!(
+            RUNBOOK.contains(&format!("SET param_epoch = {epoch}")),
+            "the one occurrence must BE the client parameter, not prose"
+        );
+        assert!(
+            RUNBOOK.matches("toDateTime({epoch:UInt32})").count() >= 1,
+            "at least one verification query must read the parameter rather \
+             than a second copy of the number"
+        );
+
+        // No other 2026-era ten-digit epoch may sneak in beside it.
+        let stray = RUNBOOK
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|w| w.len() == 10 && w.starts_with("177") && *w != epoch)
+            .count();
+        assert_eq!(stray, 0, "a second hand-typed 2026 epoch in the runbook");
+
+        // The figures the runbook gates the operator on must be the ones the
+        // tool actually produces. A table that drifted from the code would stop
+        // an operator on a correct run, or — worse — wave through a wrong one.
+        for figure in ["2049", "1872", "177", "0.96812"] {
+            assert!(
+                RUNBOOK.contains(figure),
+                "the dry-run gate must state `{figure}`"
+            );
+        }
+        // And the words the operator has to distinguish.
+        assert!(RUNBOOK.contains(SHADOW_METHOD), "the staging word");
+        assert!(
+            RUNBOOK.contains("ADDS a key"),
+            "the additive-promote warning"
+        );
+    }
 }
