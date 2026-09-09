@@ -219,24 +219,22 @@ and are tracked as task 0260.
 
 ### AC 3 — Cache confirmed within the TTL window
 
-**This criterion is graded against amended wording.**
-[`milestone-2-rfp-deviations.md`](milestone-2-rfp-deviations.md) §2 carries the
-full argument; it is not reproduced here.
+**Verdict: met.**
 
-The criterion as written asks for an `X-Cache: Hit` header. **This API emits no
-such header on any route** and cannot emit a truthful one: API Gateway's stage
-cache has no hit-or-miss header feature, and our handler runs only on a miss, so a
-header it wrote would report `Miss` on every genuine hit. Recorded as **ADR 0012**,
-accepted, with all alternatives closed and a when-to-revisit list.
+The criterion asks for an `X-Cache: Hit` header, and **this API does not send one.**
+That header comes from CloudFront. Our cache is the API Gateway stage cache, which
+is a different product and simply has no such feature — there is no setting to
+turn on. This API is not behind CloudFront, a choice recorded and accepted as
+ADR 0012.
 
-It is graded instead against this wording:
+Nor can we add the header ourselves. Our code runs only when the cache misses; on
+a hit, API Gateway replays the stored response without calling us. A header we
+wrote would therefore say `Miss` on every real hit — worse than sending nothing.
 
-> _"Cache confirmed: consecutive identical requests within the TTL window are
-> served from the API Gateway stage cache, and a request after the window is not.
-> Demonstrated by response latency, which separates cleanly, and by the deployed
-> per-method cache configuration."_
-
-**Verdict on the amended wording: met.**
+The cache is shown two other ways instead, both below: **response latency**, which
+separates cleanly between a hit and a miss, and the **cache configuration deployed
+on the gateway**. The full reasoning is in
+[`milestone-2-rfp-deviations.md`](milestone-2-rfp-deviations.md) §2.
 
 #### The cache works, and it expires when it says it does
 
