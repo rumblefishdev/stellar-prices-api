@@ -2,7 +2,7 @@
 id: "0128"
 title: "SCF Milestone 2 verification package — evidence doc, form answers, video scenario"
 type: DOCS
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0102", "0117", "0120", "0121", "0122", "0123", "0124", "0125", "0126", "0127", "0237", "0248", "0262"]
 tags: [layer-docs, priority-high, effort-medium, milestone-M2, scf, submission, evidence]
@@ -62,6 +62,41 @@ history:
       `docs/scf/milestone-2-rfp-deviations.md` rather than negotiated with the
       reviewer in advance. AC 3's entry in this package must name that
       observable and label the latency evidence as the weaker claim.
+  - date: 2026-09-09
+    status: completed
+    who: okarcz
+    note: >
+      ✅ **Submitted-ready. All 10 ACs met; the checklist is 16 of 16.** The
+      video was shot this morning with **every command run live on camera**, so
+      the freshness pass and the take are the same day's data. Re-measured and
+      written back: conformance **1014/0/0** at 08:12 UTC, the five-row cache
+      table, all four AC 5 views (`earliest_data_available` unmoved at
+      2015-11-18T03:47:00Z, all seven candle tiers still oldest-active at
+      partition 201511), `timeframe=all` at 2,047 USDC / 2,419 XLM points, the
+      `min_volume_usd` threshold table and the §6.3 sources payload. PDF is 20
+      pages and **verified byte-identical on Google Drive** (md5 9c3bb905…)
+      anonymously downloadable. Field 4 decided as `—`. Video reviewed
+      frame-wise for secrets: clean.
+      🔑 **Five contradictions the re-run exposed rather than confirmed**, all
+      fixed: AC 1's headline dated the 1021 figure to the 09-07 run's
+      timestamps; the pagination bullet claimed one-way population growth when
+      it fell 5,353 → 3,900 the next day; §6.3 pasted a four-source payload
+      including Phoenix while §6.1 four pages earlier listed three (Phoenix
+      simply held no XLM volume — it is ingesting, 44 candles / $122.38 across
+      all assets); the dashboard screenshots were dated 2026-09-07 in both the
+      checklist and `.gitkeep` when git says **2026-09-03, Adam's commit
+      a6d3147**, byte-identical since; and the checklist still said to retarget
+      `build-pdf.sh`, done two days earlier.
+      ⚠️ **The first cache request measured 947.5 ms — a cold Lambda start.**
+      Reported as measured with the cold start named, because the separation
+      (hits 37-54, misses 282-948) is the claim and hiding the outlier would
+      weaken it. It also widened AC 2's uncontended-miss band to 170-280 ms.
+      🔴 **Two defects carried forward rather than fixed here**: 15 of the 26
+      branch commits carry an AI co-author trailer that `CLAUDE.md` forbids —
+      unfixable without a force-push, so **PR #292 is squash-merged**, a
+      deliberate one-off deviation from this repo's merge-commit convention;
+      and `ch-demo-queries.sql` restarts its M2 numbering at (10)/(11),
+      colliding with M1's, then ends at (26) after (22) — see Future Work.
 ---
 
 # SCF Milestone 2 verification package
@@ -168,10 +203,22 @@ review, the public repo, and the 7-day post-launch report.
 - [x] `ch-demo-queries.sql` refreshed for M2 additions — **queries (10)-(22)**
       appended under a MILESTONE 2 banner. Column names verified against
       `init.sql` rather than assumed (two were wrong on the first pass).
-- [ ] ⏳ **All cited figures re-run within days of submission** — the only
-      criterion that cannot be closed early by design. Checklist is at the
-      foot of `milestone-2-form-answers.md`.
+- [x] **All cited figures re-run 2026-09-09**, the day the video was shot —
+      the only criterion that could not be closed early by design. Conformance
+      **1014/0/0**, the cache recipe, all four AC 5 views, `timeframe=all`, the
+      threshold table and the §6.3 sources payload. The checklist at the foot
+      of `milestone-2-form-answers.md` is 16 of 16.
 - [x] No claim in the package lacks a task, query, or URL behind it.
+
+## Future Work
+
+- **`ch-demo-queries.sql` numbering collides.** The Milestone 2 block restarts
+  at (10) and (11), which Milestone 1 already uses, and its last query is (26)
+  after (22) — against a header that says the numbering continues from the M1
+  set. A reviewer told to "see query (10)" finds two different queries. Nothing
+  cross-references the numbers, so renumbering the M2 block to (12)-(24) is
+  safe. Offered three times during this task and deferred each time; it does
+  not block submission. → [[0273]]
 
 ## Notes
 

@@ -214,12 +214,12 @@
 - [x] `curl -sS https://prices-api.sorobanscan.rumblefish.dev/api-docs-json`
       returns **HTTP 200** and the OpenAPI 3.1 document anonymously — verified
       2026-09-09.
-- [~] No API key, certificate, or other secret material. The **PDF text and all
-  four Markdown deliverables were scanned clean** 2026-09-09 — no AWS access
-  keys, no Stellar secret seeds, no private-key blocks, no literal
-  `x-api-key` values, and no personal usernames. ⏳ **The video frames and
-  the screenshots still need a human pass** — address bar, tab titles,
-  terminal scrollback, autocomplete dropdowns.
+- [x] No API key, certificate, or other secret material. The **PDF text and all
+      four Markdown deliverables were scanned clean** 2026-09-09 — no AWS access
+      keys, no Stellar secret seeds, no private-key blocks, no literal
+      `x-api-key` values, and no personal usernames. **The video was reviewed
+      frame by frame by the operator on 2026-09-09 and is clean** — no key
+      rotation needed.
 - [x] Field 4 — **decided 2026-09-09: `—`, no support needed.** Nothing in the
       package is blocked on SDF; every §8 gap has a task or a tranche behind it.
       Same answer as the accepted Milestone 1 submission, chosen rather than
