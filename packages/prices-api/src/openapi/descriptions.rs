@@ -321,7 +321,12 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          bucket, so the $1 fallback was rendered. Never appears on a quote leg — there the \
          same situation is `assumed-par`.\n\nEach value names the INPUT the rate came from, so \
          `assumed-par` and `external` are never interchangeable: one is an assumption, the \
-         other a measurement that may sit percent off par.\n\n`null` when the price fields \
+         other a measurement that may sit percent off par.\n\nOn the USDC self-series a \
+         bucket that holds both a Reflector reading and an imported one reports `oracle`, \
+         whichever was observed later. The imported series is DAILY: an `external` row \
+         prices every bucket of its UTC day at every `granularity`, so an hourly request \
+         over an imported day reports `external` for all twenty-four hours, not for the \
+         midnight bucket alone.\n\n`null` when the price fields \
          are `null`, and always `null` for `base_currency=XLM`, where nothing is \
          converted.",
     ),
@@ -354,9 +359,11 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          Present only on the synthesized USDC self-series \
          (`GET /assets/USDC:<issuer>/ohlcv`), and there only for buckets whose `method` is \
          `external`. It is `null` on every other asset — not because those candles lack \
-         provenance, but because the stored candles carry no column to report it from — and \
-         `null` on the `peg` fallback, where no series was consulted at all, and whenever the \
-         price fields are `null`.",
+         provenance, but because the stored candles carry no column to report it from — \
+         `null` on an `oracle` bucket (a poll has no outside series, even where an outranked \
+         import shares the bucket), `null` on the `peg` fallback, where no series was \
+         consulted at all, and whenever the price fields are `null`. Never the empty \
+         string.",
     ),
     (
         "Candle",

@@ -37,8 +37,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 use enrichment_worker::external_rate::{
-    LoadPlan, PROMOTED_METHOD, SHADOW_METHOD, check_identity, insert_statements, parse_csv,
-    partition, promote_statement,
+    DEPEG_DAY_START_S, LoadPlan, PROMOTED_METHOD, SHADOW_METHOD, check_identity, insert_statements,
+    parse_csv, partition, promote_statement,
 };
 use prices_clickhouse::{USDC_ISSUER, USDC_ORACLE_EPOCH_S};
 use tracing::info;
@@ -144,8 +144,7 @@ fn print_plan(plan: &LoadPlan, dry_run: bool) {
 
     // 2023-03-11 00:00:00 UTC. Printed by name because it is the falsifier for
     // this whole task: if this row is absent or reads 1.0, do not load.
-    const DEPEG_TS: u32 = 1_678_492_800;
-    match plan.loadable.iter().find(|r| r.ts == DEPEG_TS) {
+    match plan.loadable.iter().find(|r| r.ts == DEPEG_DAY_START_S) {
         Some(r) => println!(
             "{:>28}  {} ({}, {})",
             "2023-03-11 close", r.rate, r.source, r.quality
@@ -201,7 +200,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let text = std::fs::read_to_string(&args.csv)
         .map_err(|e| format!("could not read {}: {e}", args.csv.display()))?;
-    let plan = partition(parse_csv(&text).map_err(|e| e.to_string())?);
+    let plan =
+        partition(parse_csv(&args.csv.display().to_string(), &text).map_err(|e| e.to_string())?);
     print_plan(&plan, args.dry_run);
 
     if args.dry_run {

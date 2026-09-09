@@ -534,11 +534,13 @@ async fn seed_peg_rate(db: &str, admin: &Client) {
 /// CSV's source in `reference_asset` and its quality in `quality`.
 ///
 /// ⚠️ The close is asserted as the STORED decimal, not as `0.9681`. The column
-/// is `Decimal(38, 14)` and the value is returned through `toString`, so the
-/// wire carries the full fourteen-place form — `0.9681` is a four-significant-
-/// figure QUOTATION of it from the task text, and an equality assertion against
-/// that string WILL fail. The prefix check plus the numeric check together say
-/// what matters: the right number, at full stored precision.
+/// is `Decimal(38, 14)` and the value is returned through `toString`, which
+/// TRIMS trailing zeros — so the wire carries `0.96812`, not
+/// `0.96812000000000` (review WR-02; `views_it.rs` pins the same trimming for
+/// the views). `0.9681` is a four-significant-figure QUOTATION of it from the
+/// task text, and an equality assertion against that string WILL fail. The
+/// exact string plus the numeric check together say what matters: the right
+/// number, at full stored precision, in the form the operator's runbook expects.
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
 async fn ohlcv_usdc_publishes_the_imported_measurement_for_the_2023_depeg() {
@@ -585,10 +587,10 @@ async fn ohlcv_usdc_publishes_the_imported_measurement_for_the_2023_depeg() {
     let row = &data[0];
 
     let close = row["close"].as_str().expect("close is a string");
-    assert!(
-        close.starts_with("0.96812"),
-        "the depeg day must publish the MEASURED rate. `1` means the imported \
-         row is not being read at all: {close}"
+    assert_eq!(
+        close, "0.96812",
+        "the depeg day must publish the MEASURED rate, trailing zeros trimmed. \
+         `1` means the imported row is not being read at all"
     );
     approx(&row["close"], 0.96812);
 
@@ -607,11 +609,19 @@ async fn ohlcv_usdc_publishes_the_imported_measurement_for_the_2023_depeg() {
 /// no cross-contamination in either direction.**
 ///
 /// Task 0267 loads history strictly BELOW `USDC_ORACLE_EPOCH_S` and our own
-/// polling is primary from it, so the two populations meet at exactly one
-/// instant. This seeds one bucket on each side and asserts each reports its OWN
-/// provenance — an import must never be relabelled as a poll (which would claim
-/// we measured a day we did not) and a poll must never be relabelled as an
-/// import (which would attach an outside source to our own reading).
+/// polling is primary from it. The two populations share NO key, but they DO
+/// share one daily bucket (review IN-01): the epoch is 14:00 UTC, the composed
+/// series' last loadable row is the 00:00 of that same day, so the 1d bucket of
+/// the epoch day holds one `external` row and the day's `oracle` rows. That is
+/// the one bucket in production on which the preference rule does real work,
+/// and it is the seam seeded here: the day before (import only) must read as
+/// the import it is, and the epoch day (import at 00:00, poll at 14:00) must
+/// read as the POLL, with the import's provenance nowhere on the wire.
+///
+/// ⚠️ `source`/`quality` on the polled bucket are asserted `null`, not `""`
+/// (review CR-01): a poll's `reference_asset` is `''` and its `quality` the
+/// column DEFAULT, and `toNullable('')` is `''`. Before the fix this assertion
+/// could never have held.
 ///
 /// ⚠️ Every timestamp is DERIVED from the shared constant, in SQL, rather than
 /// typed. Two hand-written epochs is precisely the drift the constant exists to
@@ -626,8 +636,12 @@ async fn ohlcv_usdc_reads_each_side_of_the_oracle_epoch_with_its_own_method() {
     let client = setup(db).await;
     let admin = Client::default().with_url(ch_url()).with_database(db);
 
-    // The imported day: the day START one day below the epoch. The polled
-    // reading: the epoch instant itself, which is the first one prod holds.
+    // Two imported days: the day START one day below the epoch, and the day
+    // START of the epoch day itself — the last row the loader admits (it is
+    // 00:00, strictly below a 14:00 epoch). The polled reading: the epoch
+    // instant, which is the first one prod holds. The epoch-day import is
+    // planted at a value no measured USDC rate could hold, so a rank regression
+    // shows in the NUMBER, not only in the label.
     admin
         .query(&format!(
             "INSERT INTO {db}.usd_rate \
@@ -636,6 +650,10 @@ async fn ohlcv_usdc_reads_each_side_of_the_oracle_epoch_with_its_own_method() {
              SELECT 'credit', 'USDC', '{i}', '', \
                     toStartOfDay(toDateTime({EPOCH} - 86400)), 0.98765, 'external', \
                     'chainlink', 'measured-disputed', 0, 1 \
+             UNION ALL \
+             SELECT 'credit', 'USDC', '{i}', '', \
+                    toStartOfDay(toDateTime({EPOCH})), 0.5, 'external', \
+                    'bitstamp', 'fallback', 0, 1 \
              UNION ALL \
              SELECT 'credit', 'USDC', '{i}', '', \
                     toDateTime({EPOCH}), 1.00042, 'oracle', '', '', 0, 1",
@@ -701,14 +719,16 @@ async fn ohlcv_usdc_reads_each_side_of_the_oracle_epoch_with_its_own_method() {
     assert_eq!(
         polled["method"], "oracle",
         "the bucket holding our own first reading must read as a POLL, not as \
-         an import bleeding across the seam: {json}"
+         the import that shares its day: {json}"
     );
     approx(&polled["close"], 1.00042);
     assert_eq!(
         polled["source"],
         Value::Null,
         "a polled reading has no outside series, and naming one would attach a \
-         provenance nobody measured: {json}"
+         provenance nobody measured. `\"\"` here is the '' DEFAULT leaking \
+         through `toNullable` (review CR-01); `bitstamp` is the outranked \
+         import's provenance leaking across methods: {json}"
     );
     assert_eq!(polled["quality"], Value::Null, "{json}");
 
@@ -717,6 +737,181 @@ async fn ohlcv_usdc_reads_each_side_of_the_oracle_epoch_with_its_own_method() {
     for row in data {
         assert_ne!(row["method"], "peg", "{json}");
     }
+
+    teardown(db).await;
+}
+
+/// 🔑 Review WR-05 — a valid ORACLE reading wins the WHOLE bucket, even when
+/// an import is stamped LATER in it; and `/ohlcv` and `price_usd_series`
+/// resolve that bucket by the SAME rule.
+///
+/// This is `views_it.rs`'s `an_oracle_row_outranks_an_imported_row_in_the_same_
+/// bucket` fixture, run through the API. Before the fix the peg series ranked
+/// oracle only WITHIN one instant and let the ASOF's recency choose across
+/// instants, so this seed published `0.5`/`external` here while the view
+/// published `1.00066…`/`oracle` for the same bucket. The loader's day-start
+/// stamping hid the divergence in production; a rule held only by another
+/// tool's invariant is not a rule either surface can be trusted on.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_usdc_oracle_outranks_a_later_import_in_the_same_bucket() {
+    let db = "it_ohlcv_0267_oracle_outranks_import";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    prices_clickhouse::apply_sql(
+        &Client::default().with_url(ch_url()),
+        &rewrite(prices_clickhouse::VIEWS_SQL, db),
+    )
+    .await
+    .unwrap();
+
+    const ORACLE: &str = "1.00066784838102";
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2026-08-10 23:30:00', {ORACLE}, 'oracle', '', '', 0, 1), \
+             ('credit', 'USDC', '{i}', '', '2026-08-10 23:45:00', 0.5, 'external', \
+              'chainlink', 'measured', 0, 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-08-10 00:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1d&start=2026-08-10T00:00:00Z\
+         &end=2026-08-10T00:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "{json}");
+    let row = &data[0];
+
+    assert_eq!(
+        row["close"], ORACLE,
+        "the POLLED rate must win a bucket that holds both. `0.5` means recency \
+         decided across instants and the later import outranked the poll: {json}"
+    );
+    assert_eq!(row["method"], "oracle", "{json}");
+    assert_eq!(
+        row["source"],
+        Value::Null,
+        "the outranked import's provenance must not leak onto the oracle's bucket: {json}"
+    );
+    assert_eq!(row["quality"], Value::Null, "{json}");
+
+    // And the view says the same — the cross-surface criterion of task 0246,
+    // now on a bucket that holds two provenances.
+    let (view_close, view_method) = admin
+        .query(&format!(
+            "SELECT toString(close_usd), method FROM {db}.price_usd_series \
+             WHERE asset_code = ? AND issuer_address = ? AND bucket = toDateTime(?)"
+        ))
+        .bind("USDC")
+        .bind(iss())
+        .bind("2026-08-10 00:00:00")
+        .fetch_one::<(String, String)>()
+        .await
+        .unwrap();
+    assert_eq!(row["close"], view_close.as_str(), "{json}");
+    assert_eq!(row["method"], view_method.as_str(), "{json}");
+
+    teardown(db).await;
+}
+
+/// 🔑 Review WR-06 — an imported day prices EVERY bucket of its UTC day, at a
+/// finer grain than the daily row it came from.
+///
+/// The composed series is daily and stamped at 00:00. Task 0268's external tier
+/// prices every hourly XLM/USDC candle of 2023-03-11 from that one row, so an
+/// hourly candle's `close_usd` at 13:00 says USDC was worth 0.96812. Before this
+/// fix USDC's OWN hourly series said `1`/`peg` for the same hour — a one-bucket
+/// staleness window on a daily row served the 00:00 hour only. The two surfaces
+/// must agree on what USDC was worth at 13:00.
+///
+/// The window still ends at the day's end: the next midnight, with no row of
+/// its own, falls back to the labelled peg. Forward-filling a daily import
+/// past its day would be task 0246's defect returning in a new place.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_usdc_serves_an_imported_day_at_every_hour_of_it() {
+    let db = "it_ohlcv_0267_hourly_import_window";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2023-03-11 00:00:00', 0.96812, 'external', \
+              'chainlink', 'measured', 0, 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // Three hours of the depeg day and the first hour of the next.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2023-03-11 00:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2023-03-11 13:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2023-03-11 23:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2023-03-12 00:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2023-03-11T00:00:00Z\
+         &end=2023-03-12T00:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 4, "{json}");
+
+    for row in &data[..3] {
+        let ts = row["timestamp"].as_str().unwrap();
+        assert_eq!(
+            row["close"], "0.96812",
+            "{ts}: every hour of an imported day carries that day's rate. `1` \
+             means the import's window is one bucket wide and only 00:00 saw it: {json}"
+        );
+        assert_eq!(row["method"], "external", "{ts}: {json}");
+        assert_eq!(row["source"], "chainlink", "{ts}: {json}");
+        assert_eq!(row["quality"], "measured", "{ts}: {json}");
+    }
+
+    let next = &data[3];
+    assert_eq!(next["timestamp"], "2023-03-12T00:00:00Z", "{json}");
+    assert_eq!(
+        next["method"], "peg",
+        "the day AFTER has no row of its own and must not inherit the \
+         previous day's import: {json}"
+    );
+    assert_eq!(next["close"], "1", "{json}");
+    assert_eq!(next["source"], Value::Null, "{json}");
+    assert_eq!(next["quality"], Value::Null, "{json}");
 
     teardown(db).await;
 }

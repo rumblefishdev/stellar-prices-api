@@ -75,6 +75,74 @@ differ, stop.
 
 ---
 
+## Preconditions
+
+Three things, and the first is the one a first-time operator hits: **every
+INSERT the tool renders names the `quality` column**, so on a cluster that has
+not yet had this task's `init.sql` applied, step 3 fails on its first chunk
+with `No such column quality` — loudly, with nothing half-written, but with no
+hint of why. Check before you build.
+
+1. **The schema and the views from this branch are applied to the cluster.**
+   The real tool is `prices-clickhouse-init` — there is no `apply-schema`
+   binary. Read the caveat in
+   [`0142-rollup-mv-reapply.md`](0142-rollup-mv-reapply.md) ("Re-creating by
+   re-applying the file") first, because the binary does **not** apply one
+   statement: it unconditionally re-lands **all of `init.sql`** (every
+   `CREATE TABLE IF NOT EXISTS` and every `ALTER TABLE … ADD COLUMN IF NOT
+EXISTS`, including the one this task adds to `prices.usd_rate`), **seeds
+   `backfill_progress`** (idempotent, `NOT IN`-guarded), and **`CREATE OR
+REPLACE`s all six views in `views.sql` from your working tree** — which
+   needs the `DROP VIEW` grant, so it runs as the container's `default` user on
+   the host over the loopback port, never as `prices_writer`/`prices_reader`
+   and never from a laptop (that runbook's "Where these commands run").
+
+   Run it from a checkout of **this branch**, so the two widened
+   `price_usd_series` grains land with the column:
+
+   ```bash
+   # On the Hetzner host; build for the host target and copy up, or build there.
+   read -rs CH_PW
+   CLICKHOUSE_URL=http://localhost:8123 CLICKHOUSE_USER=default \
+   CLICKHOUSE_PASSWORD="$CH_PW" ./prices-clickhouse-init
+   ```
+
+   Applying the widened views **before** the load is harmless and deliberate:
+   they read `method = 'external'`, which holds no rows until step 5's promote,
+   so until then they publish exactly what they publish today. The promote is
+   the single switch.
+
+   Confirm the column landed — this is the check step 3 depends on:
+
+   ```sql
+   SELECT count() AS has_quality
+   FROM system.columns
+   WHERE database = 'prices' AND table = 'usd_rate' AND name = 'quality'
+   ```
+
+   Expect `1`. And confirm both view grains carry the widened predicate — a
+   DDL-text check, not a read of `usd_rate`:
+
+   ```sql
+   SELECT name FROM system.tables
+   WHERE database = 'prices'
+     AND name IN ('price_usd_series', 'price_usd_series_1h')
+     AND position(create_table_query, 'method IN (\'oracle\', \'external\')') > 0
+   ```
+
+   Expect **both** names. Then `prices-clickhouse-drift` exits 0.
+
+2. **The four mTLS variables and `CH_DATABASE`** are exported (section 1
+   below lists them). The tool refuses `--transport hetzner` without
+   `CH_DOMAIN`.
+
+3. **`SET param_epoch`** is in your `clickhouse-client` session (section 0
+   above). Every verification query below reads `{epoch:UInt32}`; a session
+   without it fails on the first one rather than silently checking the wrong
+   window.
+
+---
+
 ## 1. Build the tool
 
 `load-external-rate` is behind `required-features = ["aws-mtls"]`, so a plain
@@ -175,15 +243,18 @@ an off-by-one-day error that produces entirely plausible numbers and fails
 nowhere.
 
 ```sql
-SELECT DISTINCT toString(toTime(timestamp)) AS time_of_day
+SELECT countIf(timestamp != toStartOfDay(timestamp)) AS not_midnight,
+       count() AS rows
 FROM prices.usd_rate FINAL
 WHERE asset_kind = 'credit' AND asset_code = 'USDC'
   AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
   AND contract_address = '' AND method = 'external-candidate'
 ```
 
-Expect exactly one row: `1970-01-01 00:00:00` (midnight). Anything else — stop
-and do not promote.
+Expect `not_midnight = 0`, `rows = 1872`. Anything else — stop and do not
+promote. (Not `toTime()`: that function anchors the time-of-day to
+**1970-01-02**, not 01-01, so an expectation written against it halts a
+correct load; comparing against `toStartOfDay` has no anchor to get wrong.)
 
 **4c. The depeg day reads back correctly.** The falsifier for the whole task.
 
@@ -196,9 +267,11 @@ WHERE asset_kind = 'credit' AND asset_code = 'USDC'
   AND timestamp = toDateTime('2023-03-11 00:00:00')
 ```
 
-Expect `rate = 0.96812000000000`, `source = chainlink`, `quality = measured`.
-The column is `Decimal(38, 14)`, so the full fourteen-place form is correct —
-`0.9681` as quoted in the task text is a rounding, not the stored value.
+Expect `rate = 0.96812`, `source = chainlink`, `quality = measured`. The
+column is `Decimal(38, 14)` and ClickHouse prints a Decimal with its trailing
+zeros **trimmed**, so `0.96812` — not `0.96812000000000` — is the printed form
+of the stored value; compare numerically if in doubt. `0.9681` as quoted in the
+task text is a rounding, not the stored value, and does not match either.
 
 ---
 
@@ -235,27 +308,39 @@ promote did not finish.
 
 ---
 
-## 6. Apply the schema and the views
+## 6. Confirm the read path sees the rows
 
-The rows are useless until the read path can see them.
+The schema and the views were applied in **Preconditions** (there is no
+separate apply step and no `apply-schema` binary); the promote is what made
+the rows visible to them. Confirm on the data, not the DDL:
 
-```bash
-# `quality` column on prices.usd_rate (idempotent ALTER), then the widened views.
-cargo run -p prices-clickhouse --bin apply-schema   # or your usual schema-apply path
+```sql
+SELECT toString(close_usd) AS close, method
+FROM prices.price_usd_series
+WHERE asset_code = 'USDC'
+  AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+  AND bucket = toDateTime('2023-03-11 00:00:00')
 ```
 
-Both `price_usd_series` grains and `queries_ch::ohlcv_peg_series` now read
-`method IN ('oracle', 'external')`. Where a bucket somehow held both, `oracle`
-wins by an explicit rank — not by timestamp.
+Expect `0.96812`, `external`. `1`, `peg` means the promote has not run (step 5) or the views on the cluster predate this branch (Preconditions).
+
+Both `price_usd_series` grains and `queries_ch::ohlcv_peg_series` read
+`oracle` and `external` rows, and where one bucket holds both, `oracle` wins
+**across the whole bucket** by an explicit rank — never by timestamp. That is
+not a hypothetical: the composed series' last loadable row is `2026-03-11
+00:00`, the epoch is `14:00` the same day, so the **1d bucket of 2026-03-11
+holds both** and reads `oracle`.
 
 ---
 
 ## 7. Deploy the API
 
 `Candle` gained two nullable fields (`source`, `quality`) and the response schema
-grew with them. Deploy `prices-api` after the views are applied: an old binary
-against new views is harmless (it simply does not select the two columns), but a
-new binary against old views cannot find `quality` and will error.
+grew with them. Deploy `prices-api` after the Preconditions: the new binary
+reads `usd_rate.quality` directly (`queries_ch::ohlcv_peg_series` queries the
+**table**, not the views), so a new binary against a cluster without the
+column errors on every canonical-USDC `/ohlcv` request. The old binary against
+the new column is harmless — it simply does not select it.
 
 ---
 
@@ -271,16 +356,30 @@ Expect:
 ```json
 {
   "timestamp": "2023-03-11T00:00:00Z",
-  "close": "0.96812000000000",
+  "close": "0.96812",
   "method": "external",
   "source": "chainlink",
   "quality": "measured"
 }
 ```
 
-`"close": "1.00000000000000"` with `"method": "peg"` means the read path is not
-seeing the rows: re-check step 5's counts (a shadow load that was never
-promoted looks exactly like this) and then that the views were applied.
+(Trailing zeros trimmed, as in step 4c.) `"close": "1"` with `"method": "peg"`
+means the read path is not seeing the rows: re-check step 5's counts (a shadow
+load that was never promoted looks exactly like this) and then the
+Preconditions.
+
+**Grains.** The import is daily, and `/ohlcv` serves an imported row for
+**every bucket of its UTC day at every grain** — `granularity=1h` on
+2023-03-11 returns `0.96812`/`external` for all twenty-four hours, the same
+rate task 0268's external tier writes into that day's hourly candles. ⚠️
+`price_usd_series_1h` does **not**: it buckets the rate by the hour and
+publishes `1`/`peg` for the twenty-three hours after midnight. That
+disagreement is recorded as an open issue in the task file; do not "fix" it in
+this procedure.
+
+**Provenance.** `source` and `quality` are `null` — not `""` — on every bucket
+whose rate came from a poll or from the peg. An empty string there is a
+defect, not a value.
 
 Then spot-check a `fallback` and a `measured-disputed` day and confirm `quality`
 reports them — those 28 days are the whole reason the column exists.

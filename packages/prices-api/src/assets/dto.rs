@@ -372,9 +372,12 @@ pub struct Candle {
     /// is deliberately out of scope here; a value invented for those rows would
     /// be a claim nothing measured.
     ///
-    /// Also `None` where the price fields are absent, and where the bucket fell
+    /// Also `None` where the price fields are absent, where the bucket fell
     /// back to the $1 peg — a fallback has no source, and naming one would make
-    /// an assumption indistinguishable from an observation.
+    /// an assumption indistinguishable from an observation — and where an
+    /// `oracle` reading won the bucket, even if an outranked import shares it.
+    /// Never `Some("")`: the column DEFAULT is collapsed to NULL in the query
+    /// (review CR-01).
     ///
     /// ⚠️ Positional RowBinary: this and [`Candle::quality`] are the LAST two
     /// fields, and the two outer projections plus all three aggregate arms in

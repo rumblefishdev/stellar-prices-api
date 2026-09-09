@@ -117,24 +117,32 @@ which.
       here, and an `#[ignore]` integration test
       (`ohlcv_usdc_publishes_the_imported_measurement_for_the_2023_depeg`)
       asserts exactly this against a seeded ClickHouse. ⚠️ The wire value is
-      `0.96812000000000` — the column is `Decimal(38, 14)` and the value is
-      returned through `toString`, so `0.9681` is a rounded QUOTATION and an
-      equality assertion on it fails.)*
+      `0.96812` — the column is `Decimal(38, 14)`, the value is returned
+      through `toString`, and ClickHouse TRIMS a Decimal's trailing zeros, so
+      neither `0.96812000000000` nor the rounded QUOTATION `0.9681` matches;
+      see Emerged decision 10.)*
 - [ ] No bucket of that series carries `method = peg` between 2021-01-25 and
       2026-03-10; `trade_count`/`n_obs` reflect rounds, not 0
-      *(DEPLOY-GATED for the first half. ⚠️ The second half is DESCOPED:
-      `n_obs` was not added to `usd_rate` or to `Candle` — see Emerged
-      decision 9. `trade_count` stays 0 on this synthesized series by the
+      *(DEPLOY-GATED for the first half. ⚠️ The second half is DESCOPED and
+      SETTLED: `n_obs` was not added to `usd_rate` or to `Candle`, and Adam
+      confirmed on 2026-09-09 that it is not needed — see Emerged decision 9.
+      Not a deferred item; do not file a follow-up. `trade_count` stays 0 on this synthesized series by the
       pre-existing design, because USDC is not traded as a base and reporting
       its quote volume here would answer a different question.)*
 - [x] `usd_rate` carries the external rows with `method = 'external'`, no key
       overlapping an `oracle` row; `price_usd_series` and `_1h` publish them
       and there is no discontinuity artefact at 2026-03-11 *(from [[0247]])* —
       the loader partitions strictly below `USDC_ORACLE_EPOCH_S` so the two
-      populations cannot overlap; both grains widened in one commit with an
-      explicit oracle-wins rank; the seam is asserted by
-      `ohlcv_usdc_reads_each_side_of_the_oracle_epoch_with_its_own_method` and
-      by `an_oracle_row_outranks_an_imported_row_in_the_same_bucket`
+      populations share no KEY — but the epoch is 14:00 and the import is
+      stamped at 00:00, so the **1d bucket of 2026-03-11 holds both** and the
+      oracle-wins rank does real work there from day one (review IN-01;
+      pinned by `the_last_loadable_day_is_the_epoch_day_itself_so_one_daily_
+      bucket_holds_both`); both grains widened in one commit with an explicit
+      oracle-wins rank, and since review round 1 `/ohlcv` applies the same
+      bucket-wide rule; the seam is asserted by
+      `ohlcv_usdc_reads_each_side_of_the_oracle_epoch_with_its_own_method`
+      (which now seeds that very bucket) and by
+      `an_oracle_row_outranks_an_imported_row_in_the_same_bucket`
 - [x] Rollback verified: reverting the preference order restores today's output
       byte for byte; rows are not deleted — the promote ADDS a
       ReplacingMergeTree key rather than moving one (`method` is in the
@@ -170,7 +178,7 @@ which.
 | 0247 criterion | Status |
 |---|---|
 | `usd_rate` carries canonical-USDC rows 2021-01-25 → `2026-03-11 14:00` with a `method` distinct from `'oracle'` | **deploy-gated** — the tool, the method word and the range are all here; the rows are not loaded |
-| No overlap with our own readings; one row per bucket either side; no discontinuity artefact | **closed** — strict `<` partition at the shared epoch constant, plus the rank rule for a bucket holding both |
+| No overlap with our own readings; one row per bucket either side; no discontinuity artefact | **closed** — strict `<` partition at the shared epoch constant (no shared key); the ONE daily bucket that holds both (the epoch day) is settled by the rank rule on every surface |
 | Both `price_usd_series` grains publish the imported rate and stop reporting `peg` for covered buckets | **closed** — both grains widened in one commit, with a single-grain-edit guard |
 | The March 2023 SVB window reads materially below par | **deploy-gated** — asserted at `0.96812` by an `#[ignore]` test and by the runbook's curl |
 | Source, granularity and fetch date recorded in the task file | **closed** — Implementation Notes below |
@@ -290,6 +298,52 @@ only the PROMOTED word — so an operator who finds zero `external` rows beside
 1872 `external-candidate` ones knows the fix is the promote, not a re-load. No
 epoch literal, no second `177…` number, no appendix renumbered.
 
+**Review round 1 (2026-09-09, `gsd-code-reviewer` at `standard`: 1 critical,
+6 warnings, 5 info — all twelve addressed in one commit).** The Rust half held;
+the wire and the operator path did not. What changed:
+
+- **CR-01, the wire.** `source`/`quality` were `toNullable(…)` over columns
+  whose oracle value is `''`, so every oracle-priced USDC bucket — every live
+  bucket in production — would have carried `"source": ""` against the OpenAPI
+  text, and the `#[ignore]` epoch-seam test's `Value::Null` assertion could
+  never have held. Now `nullIf(…, '')`, and provenance is emitted ONLY when
+  the imported row won the bucket (an outranked import's `bitstamp` must not
+  leak onto the oracle's bucket either). Pinned by
+  `peg_series_sql_nulls_the_provenance_outside_an_imported_rate`.
+- **WR-05 and WR-06 together, one rewrite of `ohlcv_peg_series`.** The single
+  `IN ('oracle', 'external')` subquery — rank inside the instant, ASOF recency
+  across instants — became TWO method-specific ASOF joins, nested rather than
+  chained: `ro` (newest `oracle` before the bucket end, window unchanged from
+  0246) and `re` (newest `external` before the bucket end, valid for its WHOLE
+  UTC DAY). A valid oracle reading wins the bucket outright — the views' rule,
+  and the rule the one overlapping production bucket needs — and an imported
+  day now prices every bucket of that day at every grain, which is what 0268's
+  external tier already does to the same day's candles. Each side is a single
+  method, so nothing needs a collapse before the join and the "no longer
+  degenerate `argMax`" is gone with its comment. Issuer binds twice. SQL-string
+  tests for both rules and the floors at `1m`/`1h`/`1d`; `#[ignore]` cases
+  `ohlcv_usdc_oracle_outranks_a_later_import_in_the_same_bucket` (the
+  `views_it` fixture through the API, cross-checked against the view) and
+  `ohlcv_usdc_serves_an_imported_day_at_every_hour_of_it` (three hours of the
+  depeg day plus the next midnight, which must fall back to `peg`).
+- **WR-01..04, the runbook.** A `## Preconditions` section: the schema and
+  the widened views are applied FIRST with `prices-clickhouse-init` (named
+  with the 0142 caveat of what it re-lands — all of `init.sql`,
+  `backfill_progress`, all six views, `DROP VIEW` grant, host loopback as
+  `default`), then a `system.columns` check for `quality`; applying the views
+  before the promote is harmless because they read a method word that holds no
+  rows yet. Step 6 became a data check instead of a fictional `apply-schema`.
+  Expected strings are the TRIMMED Decimals `0.96812` and `1`. The midnight
+  gate no longer uses `toTime()` (anchored to 1970-01-**02**): both this
+  runbook's 4b and 0268's Appendix B precondition 2 now count
+  `timestamp != toStartOfDay(timestamp)`, expecting 0 — the latter edited on
+  this stacked branch, keeping its epoch literal count at one.
+- **IN-01..05.** The "no overlap" prose corrected in the views test, the
+  runbook and here, with a CI test that pins 2026-03-11 as the one shared
+  bucket; the promote re-applies `timestamp < toDateTime(EPOCH)`; refusals
+  name the real path; `DEPEG_DAY_START_S` defined once; a rate finer than
+  `Decimal(38, 14)` is a new refusal, `RateTooPrecise`.
+
 ## Design Decisions
 
 ### From Plan
@@ -348,10 +402,29 @@ primary from the epoch on.
    written. It is now asserted explicitly
    (`only_an_equality_predicate_keeps_the_staged_rows_out_of_the_read_path`) and
    stated in the module docs. Renaming the staging word to something without the
-   shared prefix would remove the hazard entirely — deliberately NOT done here,
-   because the literal is locked by Decision A and a rename during
-   implementation is exactly the silent drift this task's guards exist to
-   prevent.
+   shared prefix (`candidate-external`) would remove the hazard entirely.
+
+   **RATIFIED: the word STAYS (Adam, 2026-09-09.)** Raised explicitly, with the
+   rename costed at one constant — `external_rate::SHADOW_METHOD` is the only
+   real SQL literal, the other nine occurrences being comments, docs and test
+   fixtures — and declined. Decision A's literal stands.
+
+   Two consequences are therefore permanent rather than provisional, and neither
+   should be quietly relaxed:
+   - **`only_an_equality_predicate_keeps_the_staged_rows_out_of_the_read_path`
+     is the STANDING guard**, not temporary scaffolding. It asserts the read
+     predicate is an equality and carries no `LIKE`, `startsWith` or `%`. Do not
+     delete it as redundant — it is the only thing that fails if someone reaches
+     for a prefix match.
+   - **Every future reader of `usd_rate.method` must use `=` or an `IN` list.**
+     `startsWith(method, 'external')` and `LIKE 'external%'` are the idioms that
+     use an index, so they are the ones somebody will reach for, and both select
+     the unverified staged rows. The module docs say so beside the constants.
+
+   ⚠️ If the rename is ever reopened, the window is **before the first shadow
+   load**. `--promote` reads `method = SHADOW_METHOD`, so renaming after a load
+   orphans the staged rows — the promote finds zero and the shadow load has to
+   be re-run. Free now, irritating later.
 9. **`n_obs` and `xcheck_spread_bps` were NOT added**, to either `usd_rate` or
    `Candle`, though this task's Implementation §1 and §3 list them. Decisions B
    and D name exactly one new column and exactly two new wire fields, and they
@@ -359,12 +432,27 @@ primary from the epoch on.
    can be added later without a migration; adding them now would have widened a
    published response schema with fields nobody asked for, and a field removed
    from a published schema is a breaking change for every generated client.
-10. **The wire value is the full fourteen-place decimal.** `usd_rate.usd_rate`
-    is `Decimal(38, 14)` and reaches the wire through `toString`, so 2023-03-11
-    publishes `0.96812000000000`. The `0.9681` this task quotes is a
-    four-significant-figure rounding, and an equality assertion against the short
-    form FAILS. The integration test uses a prefix check plus a numeric check and
-    says why in a comment.
+
+   **RATIFIED: not needed (Adam, 2026-09-09.)** Raised explicitly, with the cost
+   of adding them later stated — two idempotent ALTERs, two appended `Candle`
+   fields, three aggregates and two projections, the alias guard catching a
+   missed site — and with the observation that `quality` already carries most of
+   the cross-check signal: `measured-disputed` means precisely "the two sources
+   disagreed beyond tolerance". `quality` answers *whether*, and
+   `xcheck_spread_bps` would have answered *by how much*, which nobody needs.
+   **Closed, not deferred — no follow-up task is filed and none should be.**
+   Implementation §1 and §3 above are superseded on this point by Decisions B
+   and D.
+10. **The wire value is the stored decimal with its trailing zeros TRIMMED.**
+    `usd_rate.usd_rate` is `Decimal(38, 14)` and reaches the wire through
+    `toString`, which ClickHouse prints without trailing zeros — so 2023-03-11
+    publishes `0.96812`, and the peg publishes `1`, not `1.00000000000000`
+    (`views_it.rs` pins both forms). ⚠️ The first draft of this decision, the
+    runbook and the BRIEF all said `0.96812000000000`; that was wrong, and an
+    operator following the runbook literally would have halted a correct load
+    at the 4c gate (review WR-02). The `0.9681` this task quotes is a
+    four-significant-figure rounding and does not match either. The integration
+    test asserts the exact trimmed string plus a numeric check.
 11. **A refusal returned as a `LoadError` from `main` prints via `Debug`, not
     `Display`** — Rust's `Termination` impl for `Result<_, E: Debug>` — so the
     first smoke run showed the operator
@@ -392,7 +480,56 @@ primary from the epoch on.
     authorship is what separates them — a comment that contradicts the code
     beneath it is worse than no comment.
 
+15. **`/ohlcv` applies the views' bucket-wide oracle preference, not a
+    tie-break at one instant (review WR-05).** The first implementation ranked
+    `oracle` only within an `rts` group and let the ASOF's recency decide across
+    instants — a different rule from `views.sql`'s rank-first tuple, held
+    equal to it only by the loader's day-start stamping. The reviewer offered
+    either rule with the comment corrected; the views' rule was taken, because
+    the one production bucket that holds both (the epoch day) must read the
+    same on both surfaces, and a rule that depends on another tool's invariant
+    is not one either surface can be trusted on. Implemented as two nested
+    method-specific ASOF joins rather than a bucket-level pre-aggregation, so
+    the 0246 oracle window is untouched and no `argMax` has to choose between
+    methods at all.
+16. **An `external` row is valid for its whole UTC day on `/ohlcv`, at every
+    grain (review WR-06).** The import is daily; 0268's external tier prices
+    every candle of the day from it; a one-bucket window on the self-series
+    published `peg`/$1 for 23 of 24 hours of an imported day while the same
+    hour's XLM/USDC candle said 0.96812. The external floor is
+    `toStartOfDay(bkt)`; the oracle floor is unchanged. The window ends at the
+    day's end — the next midnight without a row of its own falls back to `peg`,
+    asserted, because forward-filling past the day would be 0246's defect in a
+    new place. ⚠️ `price_usd_series_1h` was NOT widened the same way — see
+    Issues.
+17. **The promote carries the epoch bound itself (review IN-02).** `partition`
+    runs in a different invocation, possibly of a different binary over a
+    staging set some other file produced; the promote is the one write the read
+    path serves, so it is the last place the code can hold Decision F's
+    boundary. Asserted with the one bound on the shared constant.
+
 ## Issues Encountered
+
+- **`price_usd_series_1h` and `/ohlcv` now disagree on the hours of an
+  imported day, and a decision is owed.** Since review round 1, `/ohlcv` at
+  `granularity=1h` serves an imported daily row for all twenty-four hours
+  (Emerged 16), agreeing with 0268's hourly candles; the hourly VIEW still
+  buckets `usd_rate` by the hour and publishes `1`/`peg` for the twenty-three
+  hours after midnight. Task 0246's cross-surface criterion ("the same value
+  for the same bucket") is therefore met for oracle-priced hours and NOT for
+  imported ones. Options, for Adam: (a) widen the hourly view's rate subquery
+  so an `external` row expands to every hour of its day (an `ARRAY JOIN
+  range(24)` on the external rows, keeping the oracle-first tuple) — a
+  views.sql change with its own grain-agreement test; (b) load the hourly
+  March-2023 CSV for the depeg window, which fills the hours with real
+  measurements but only for that month; (c) accept the divergence and
+  document it, as the runbook's step 8 and the OpenAPI text do today. Not
+  decided here; the runbook says not to "fix" it in the load procedure.
+- **The `1d` bucket of the epoch day is the one place both provenances meet,
+  and its label is `oracle`** — the day's polls outrank the import at 00:00 on
+  every surface. A consumer reading 2026-03-11 sees a measured poll, not the
+  composed series' value for that day. That is the ratified rule (Decision C),
+  recorded so nobody reads it as a seam artefact.
 
 - **`prices-clickhouse`'s `init_sql_parses_into_statements` counts statements**
   and asserted 33. The new ALTER makes 34. Updated with a comment naming which
@@ -419,6 +556,12 @@ primary from the epoch on.
 Full procedure with the queries: `docs/runbooks/load-external-usdc-rate.md`.
 Everything below is deploy-gated; none of it ran on this branch.
 
+- [ ] 0. **Preconditions** (runbook): on the host, as `default`,
+      `prices-clickhouse-init` from THIS branch — re-lands `init.sql` (the
+      `quality` ALTER), seeds `backfill_progress`, `CREATE OR REPLACE`s all six
+      views; then `system.columns` shows `quality` and both view grains carry
+      the widened predicate. Every INSERT names `quality`, so step 4 fails on
+      its first chunk without this
 - [ ] 1. Build: `cargo build -p enrichment-worker --features aws-mtls --bin load-external-rate`
       (the bin does NOT exist in a default build)
 - [ ] 2. Export the four mTLS variables (`CH_DOMAIN`, `MTLS_CERT_PATH`,
@@ -429,16 +572,18 @@ Everything below is deploy-gated; none of it ran on this branch.
       `method = 'external-candidate'`, which nothing reads
 - [ ] 5. Verification query A: 1872 staged rows, 2021-01-25 → 2026-03-11, all
       below the epoch
-- [ ] 6. Verification query B: `SELECT DISTINCT toString(toTime(timestamp))`
-      returns midnight and nothing else (0268 resolves at the bucket END with a
-      strict `rts < bend`, so a day-END stamp is off by a day and fails nowhere)
-- [ ] 7. Verification query C: 2023-03-11 reads `0.96812000000000`, `chainlink`,
-      `measured`
+- [ ] 6. Verification query B: `countIf(timestamp != toStartOfDay(timestamp))`
+      is 0 over 1872 rows (0268 resolves at the bucket END with a strict
+      `rts < bend`, so a day-END stamp is off by a day and fails nowhere; not
+      `toTime()`, which anchors to 1970-01-02)
+- [ ] 7. Verification query C: 2023-03-11 reads `0.96812` (trailing zeros
+      trimmed), `chainlink`, `measured`
 - [ ] 8. Promote. ⚠️ It ADDS a key; the staged rows survive and are inert. Do
       not "clean them up" — leaving them is what makes step 12 free
 - [ ] 9. Confirm 1872 rows under EACH of the two method words
-- [ ] 10. Apply the schema (the idempotent ALTER) and the views, THEN deploy
-      `prices-api` — a new binary against old views cannot find `quality`
+- [ ] 10. Confirm `price_usd_series` publishes `0.96812`/`external` for
+      2023-03-11 (the schema and views landed in step 0), THEN deploy
+      `prices-api` — the new binary reads `usd_rate.quality` directly
 - [ ] 11. Run the runbook's 2023-03-11 curl. **This observation is acceptance
       criterion 1.** Then spot-check a `fallback` and a `measured-disputed` day
 - [ ] 12. (rollback, if needed) Revert the read path's preference to

@@ -19,8 +19,8 @@
 //! artefact an operator will actually pass it.
 
 use enrichment_worker::external_rate::{
-    ACCEPTED_QUALITIES, ACCEPTED_SOURCES, CANONICAL_ASSET_CODE, check_identity, parse_csv,
-    partition,
+    ACCEPTED_QUALITIES, ACCEPTED_SOURCES, CANONICAL_ASSET_CODE, DEPEG_DAY_START_S, check_identity,
+    parse_csv, partition,
 };
 use prices_clickhouse::{USDC_ISSUER, USDC_ORACLE_EPOCH_S};
 
@@ -31,10 +31,8 @@ const COMPOSED_CSV: &str = include_str!(concat!(
     "/../../lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/composed_usdc_usd_1d.csv"
 ));
 
-/// 2023-03-11 00:00:00 UTC — the day USDC actually depegged, and the falsifier
-/// for this whole task. Typed as a unix instant rather than a string so it can
-/// be compared against a parsed row.
-const DEPEG_TS: u32 = 1_678_492_800;
+/// The name the refusals carry; the bin passes the real path.
+const CSV_NAME: &str = "composed_usdc_usd_1d.csv";
 
 /// The figure set the runbook's dry-run gate checks, all in one place.
 ///
@@ -76,7 +74,8 @@ fn the_versioned_composed_csv_is_present_and_non_empty() {
 
 #[test]
 fn the_dry_run_over_the_versioned_csv_reports_the_runbook_figures() {
-    let rows = parse_csv(COMPOSED_CSV).expect("the versioned composed CSV must parse in full");
+    let rows =
+        parse_csv(CSV_NAME, COMPOSED_CSV).expect("the versioned composed CSV must parse in full");
     assert_eq!(rows.len(), PARSED, "data rows parsed");
 
     // Over the WHOLE file, before the epoch partition — the figures the task
@@ -140,11 +139,11 @@ fn the_dry_run_over_the_versioned_csv_reports_the_runbook_figures() {
 
 #[test]
 fn the_2023_03_11_close_is_the_depeg_value_and_it_is_loadable() {
-    let plan = partition(parse_csv(COMPOSED_CSV).unwrap());
+    let plan = partition(parse_csv(CSV_NAME, COMPOSED_CSV).unwrap());
     let depeg = plan
         .loadable
         .iter()
-        .find(|r| r.ts == DEPEG_TS)
+        .find(|r| r.ts == DEPEG_DAY_START_S)
         .expect("2023-03-11 must be in the LOADABLE set — it is this task's falsifier");
 
     // The exact decimal the composer wrote. `0.9681` as quoted in the task text
@@ -161,18 +160,40 @@ fn the_2023_03_11_close_is_the_depeg_value_and_it_is_loadable() {
 
 #[test]
 fn the_last_loadable_day_is_below_the_epoch_and_the_first_skipped_one_is_not() {
-    let plan = partition(parse_csv(COMPOSED_CSV).unwrap());
+    let plan = partition(parse_csv(CSV_NAME, COMPOSED_CSV).unwrap());
     let (first, last) = plan.loadable_span().expect("the loadable set is non-empty");
 
     assert!(
         last < USDC_ORACLE_EPOCH_S,
         "the newest loaded day must sit strictly below the instant our own \
-         oracle takes over, or the two populations overlap and the read path's \
-         preference rule starts doing real work in production"
+         oracle takes over — the two populations must never share a KEY"
     );
     assert!(first < last, "the span must span");
     // 2021-01-25 00:00:00 UTC — the composer's first day.
     assert_eq!(first, 1_611_532_800);
+}
+
+/// Review IN-01: the two populations share no key, but they DO share one daily
+/// bucket. The epoch is 14:00 UTC and the composed series is stamped at 00:00,
+/// so the last loadable row is the START of the epoch day, and the 1d bucket of
+/// that day holds one `external` row and every `oracle` poll from 14:00 on.
+/// That is the ONE bucket in production on which the read path's oracle-first
+/// rank does real work — not a hypothetical, and not "the populations do not
+/// overlap". Pinned here so the prose in the views, the runbook and the task
+/// file cannot drift back to claiming they do not.
+#[test]
+fn the_last_loadable_day_is_the_epoch_day_itself_so_one_daily_bucket_holds_both() {
+    let plan = partition(parse_csv(CSV_NAME, COMPOSED_CSV).unwrap());
+    let (_, last) = plan.loadable_span().unwrap();
+    let epoch_day_start = USDC_ORACLE_EPOCH_S - USDC_ORACLE_EPOCH_S % 86_400;
+    assert_eq!(
+        last, epoch_day_start,
+        "the last loadable row is the 00:00 of the epoch day"
+    );
+    assert!(
+        USDC_ORACLE_EPOCH_S > epoch_day_start,
+        "and the epoch is not itself midnight, so that day holds polls too"
+    );
 }
 
 #[test]

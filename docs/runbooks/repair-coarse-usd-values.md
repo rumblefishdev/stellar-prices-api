@@ -709,16 +709,18 @@ to check.
    nowhere.
 
    ```sql
-   SELECT DISTINCT toString(toTime(timestamp)) AS time_of_day
+   SELECT countIf(timestamp != toStartOfDay(timestamp)) AS not_midnight,
+          count() AS rows
    FROM prices.usd_rate FINAL
    WHERE asset_kind = 'credit' AND asset_code = 'USDC'
      AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
      AND contract_address = '' AND method = 'external'
-   LIMIT 10
    ```
 
-   Expect `1970-01-01 00:00:00` (midnight). Anything else — 23:00, 23:59 — stop
-   and settle the convention with whoever owns 0267 before running.
+   Expect `not_midnight = 0` and `rows` equal to precondition 1's count.
+   Anything else — stop and settle the convention with whoever owns 0267
+   before running. (Not `toTime()`: it anchors the time-of-day to 1970-01-02,
+   so an expectation written against it halts a correct load.)
 
 3. **Confirm `oracle_prices` holds no canonical-USDC reading before the epoch.
    BLOCKING.** Two things rest on "no poll priced USDC before

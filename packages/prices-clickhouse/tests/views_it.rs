@@ -1385,10 +1385,13 @@ async fn peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one() 
 /// Task 0267 — where ONE bucket holds both a polled reading and an imported one,
 /// the ORACLE rate is published and the label reads `oracle`.
 ///
-/// Not an expected case on prod: task 0267 loads only rows strictly below
-/// `USDC_ORACLE_EPOCH_S` and our own polling starts at it, so the two populations
-/// do not overlap today. It is asserted anyway because it is the SAFETY RULE the
-/// whole read-path widening rests on — the moment `method IN ('oracle',
+/// This happens on prod in exactly ONE daily bucket (review IN-01): task 0267
+/// loads only rows strictly below `USDC_ORACLE_EPOCH_S` and our own polling
+/// starts at it, so the two populations share no KEY — but the epoch is 14:00
+/// UTC and the import is stamped at 00:00, so the 1d bucket of the epoch day
+/// (2026-03-11) holds one `external` row and the day's `oracle` polls. The rule
+/// asserted here is what makes that bucket read `oracle`; it is also the SAFETY
+/// RULE the whole read-path widening rests on — the moment `method IN ('oracle',
 /// 'external')` replaced a single-method equality, "which one wins" stopped being
 /// a question the schema answered and became one the query has to.
 ///

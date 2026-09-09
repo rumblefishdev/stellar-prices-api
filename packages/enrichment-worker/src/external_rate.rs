@@ -111,8 +111,17 @@ pub const USD_RATE_COLUMNS: &str = "asset_kind, asset_code, issuer_address, cont
 /// is chunked. Every row survives the chunking exactly once — asserted.
 pub const INSERT_CHUNK_ROWS: usize = 250;
 
-/// The scale of `usd_rate.usd_rate` — `Decimal(38, 14)`.
-const RATE_SCALE: u32 = 14;
+/// The scale of `usd_rate.usd_rate` — `Decimal(38, 14)`. A rate with MORE
+/// fractional places than this is refused (review IN-05): ClickHouse would
+/// otherwise decide what to do with the fifteenth place, and a loader whose
+/// whole point is the exact decimal must not leave rounding to the server.
+pub const RATE_SCALE: u32 = 14;
+
+/// 2023-03-11 00:00:00 UTC — the day USDC actually depegged, and the falsifier
+/// for this whole task. ONE definition (review IN-04), the same discipline as
+/// the oracle epoch: the bin's plan output, the unit tests and the versioned-CSV
+/// test all read this constant rather than restating the number.
+pub const DEPEG_DAY_START_S: u32 = 1_678_492_800;
 
 /// One accepted day of the composed series.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,6 +266,20 @@ pub enum LoadError {
     UnparsableRate { line: usize, value: String },
 
     #[error(
+        "line {line} has close '{value}' with {scale} fractional places; the column is \
+         Decimal(38, {max}) and this loader never rounds. A rate finer than the column would \
+         be rounded by the SERVER, silently, and a rate wrong in the last place looks exactly \
+         like one that is right. The composer writes at most 8 places — this file is not its \
+         output, or the composer changed."
+    )]
+    RateTooPrecise {
+        line: usize,
+        value: String,
+        scale: u32,
+        max: u32,
+    },
+
+    #[error(
         "line {line} has source '{value}'. Accepted: {accepted}. An unrecognised source means \
          either the composer gained a feed (which needs its own review, because `source` reaches \
          the public /ohlcv wire) or the file is not the composed series."
@@ -294,11 +317,15 @@ pub fn check_identity(code: &str, issuer: &str) -> Result<(), LoadError> {
 
 /// Parse the composed CSV. Refuses the whole file on the first violation.
 ///
+/// `path_hint` is how the refusal names the file — the bin passes the real
+/// path (review IN-03), so "`/x/y.csv` has no data rows" tells the operator
+/// which of two files they pointed the tool at.
+///
 /// Hand-rolled on purpose: the file is machine-generated with ten fixed columns
 /// and no quoted fields, so a CSV crate would be a new package in the lockfile
 /// for thirty lines of splitting. [`LoadError::QuotedField`] is the guard for
 /// the day that stops being true — see the threat register entry T-0267-SC.
-pub fn parse_csv(text: &str) -> Result<Vec<ExternalRateRow>, LoadError> {
+pub fn parse_csv(path_hint: &str, text: &str) -> Result<Vec<ExternalRateRow>, LoadError> {
     let mut numbered = text
         .lines()
         .enumerate()
@@ -306,7 +333,7 @@ pub fn parse_csv(text: &str) -> Result<Vec<ExternalRateRow>, LoadError> {
         .filter(|(_, l)| !l.trim().is_empty());
 
     let (_, header) = numbered.next().ok_or_else(|| LoadError::NoDataRows {
-        path_hint: "the file".to_string(),
+        path_hint: path_hint.to_string(),
     })?;
     let got: Vec<&str> = header.split(',').map(str::trim).collect();
     if got != EXPECTED_HEADER {
@@ -351,6 +378,14 @@ pub fn parse_csv(text: &str) -> Result<Vec<ExternalRateRow>, LoadError> {
                 value: f[4].to_string(),
             });
         }
+        if rate.scale() > RATE_SCALE {
+            return Err(LoadError::RateTooPrecise {
+                line,
+                value: f[4].to_string(),
+                scale: rate.scale(),
+                max: RATE_SCALE,
+            });
+        }
 
         let source = f[6];
         if !ACCEPTED_SOURCES.contains(&source) {
@@ -380,7 +415,7 @@ pub fn parse_csv(text: &str) -> Result<Vec<ExternalRateRow>, LoadError> {
 
     if rows.is_empty() {
         return Err(LoadError::NoDataRows {
-            path_hint: "the file".to_string(),
+            path_hint: path_hint.to_string(),
         });
     }
     Ok(rows)
@@ -513,6 +548,13 @@ pub fn insert_statements(
 ///
 /// The full identity tuple is pinned so a promote cannot reach a neighbouring
 /// identity even if one ever carries staged rows (threat T-0267-03).
+///
+/// ⚠️ The promote RE-APPLIES the epoch bound (review IN-02). [`partition`] is
+/// what keeps post-epoch rows out of the staging set today, but the promote is
+/// a separate write from a separate run, possibly of an older binary or over a
+/// staging set some other file produced — and it is the one write whose rows
+/// the read path serves. Decision F puts the boundary in code; this is the last
+/// place the code can hold it.
 pub fn promote_statement(database: &str, version: u64, code: &str, issuer: &str) -> String {
     format!(
         "INSERT INTO {database}.usd_rate ({USD_RATE_COLUMNS}) \
@@ -520,7 +562,9 @@ pub fn promote_statement(database: &str, version: u64, code: &str, issuer: &str)
          '{promoted}', reference_asset, quality, hops, {version} \
          FROM {database}.usd_rate FINAL \
          WHERE asset_kind = '{kind}' AND asset_code = '{code}' AND issuer_address = '{issuer}' \
-         AND contract_address = '' AND method = '{shadow}'",
+         AND contract_address = '' AND method = '{shadow}' \
+         AND timestamp < toDateTime({epoch})",
+        epoch = USDC_ORACLE_EPOCH_S,
         promoted = sql_lit(PROMOTED_METHOD),
         kind = sql_lit(ASSET_KIND),
         code = sql_lit(code),
@@ -570,7 +614,11 @@ mod tests {
 
     #[test]
     fn a_header_mismatch_is_refused_naming_the_expected_column_order() {
-        let err = parse_csv("ts,close\n2023-03-11 00:00:00+00:00,0.96812\n").unwrap_err();
+        let err = parse_csv(
+            "fixture.csv",
+            "ts,close\n2023-03-11 00:00:00+00:00,0.96812\n",
+        )
+        .unwrap_err();
         let msg = err.to_string();
         for col in EXPECTED_HEADER {
             assert!(msg.contains(col), "the refusal must name `{col}`: {msg}");
@@ -579,14 +627,27 @@ mod tests {
 
     #[test]
     fn a_file_with_a_header_and_no_data_rows_is_refused_as_empty() {
-        let err = parse_csv(&csv(&[])).unwrap_err();
+        let err = parse_csv("fixture.csv", &csv(&[])).unwrap_err();
         assert!(err.to_string().contains("no data rows"), "got {err}");
+    }
+
+    /// Review IN-03: the refusal names the FILE it was given, not "the file".
+    /// An operator with two candidate CSVs learns which one was empty.
+    #[test]
+    fn an_empty_file_refusal_names_the_path_it_was_given() {
+        let header_only = csv(&[]);
+        for (path, text) in [("/srv/a/composed.csv", ""), ("b.csv", header_only.as_str())] {
+            let err = parse_csv(path, text).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.starts_with(path), "must open with the path: {msg}");
+            assert!(!msg.contains("the file has"), "{msg}");
+        }
     }
 
     #[test]
     fn a_completely_empty_file_is_refused_as_empty() {
-        assert!(parse_csv("").is_err());
-        assert!(parse_csv("   \n\n").is_err());
+        assert!(parse_csv("fixture.csv", "").is_err());
+        assert!(parse_csv("fixture.csv", "   \n\n").is_err());
     }
 
     #[test]
@@ -613,9 +674,12 @@ mod tests {
 
     #[test]
     fn a_timestamp_that_is_not_midnight_is_refused_naming_the_day_start_rule() {
-        let err = parse_csv(&csv(&[
-            "2023-03-11 23:00:00+00:00,0.995,0.995,0.88,0.96812,243,chainlink,measured,4.1,1",
-        ]))
+        let err = parse_csv(
+            "fixture.csv",
+            &csv(&[
+                "2023-03-11 23:00:00+00:00,0.995,0.995,0.88,0.96812,243,chainlink,measured,4.1,1",
+            ]),
+        )
         .unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -636,9 +700,12 @@ mod tests {
 
     #[test]
     fn a_timestamp_with_a_non_utc_offset_is_refused_by_the_same_rule() {
-        let err = parse_csv(&csv(&[
-            "2023-03-11 00:00:00+01:00,0.995,0.995,0.88,0.96812,243,chainlink,measured,4.1,1",
-        ]))
+        let err = parse_csv(
+            "fixture.csv",
+            &csv(&[
+                "2023-03-11 00:00:00+01:00,0.995,0.995,0.88,0.96812,243,chainlink,measured,4.1,1",
+            ]),
+        )
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("+01:00"), "{msg}");
@@ -647,7 +714,7 @@ mod tests {
 
     #[test]
     fn a_repeated_timestamp_is_refused_naming_the_repeat() {
-        let err = parse_csv(&csv(&[DEPEG, DEPEG])).unwrap_err();
+        let err = parse_csv("fixture.csv", &csv(&[DEPEG, DEPEG])).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("2023-03-11"),
@@ -661,7 +728,7 @@ mod tests {
             let line = format!(
                 "2023-03-11 00:00:00+00:00,0.995,0.995,0.88,{bad},243,chainlink,measured,4.1,1"
             );
-            let err = parse_csv(&csv(&[&line])).unwrap_err();
+            let err = parse_csv("fixture.csv", &csv(&[&line])).unwrap_err();
             let msg = err.to_string();
             assert!(
                 msg.contains(bad),
@@ -670,11 +737,50 @@ mod tests {
         }
     }
 
+    /// Review IN-05: the column is `Decimal(38, 14)`; a fifteenth place would
+    /// be rounded by the server, silently. Fourteen places are exactly the
+    /// column and pass; the composer's own eight pass.
+    #[test]
+    fn a_rate_finer_than_the_column_scale_is_refused_and_one_at_the_scale_is_not() {
+        let line = |rate: &str| {
+            format!("2023-03-11 00:00:00+00:00,0.99,0.99,0.88,{rate},243,chainlink,measured,4.1,1")
+        };
+        let err = parse_csv("fixture.csv", &csv(&[&line("0.968120000000001")])).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(
+                err,
+                LoadError::RateTooPrecise {
+                    scale: 15,
+                    max: 14,
+                    ..
+                }
+            ),
+            "{msg}"
+        );
+        assert!(msg.contains("15 fractional places"), "{msg}");
+        assert!(msg.contains("Decimal(38, 14)"), "{msg}");
+
+        let ok = parse_csv("fixture.csv", &csv(&[&line("0.96812000000001")])).unwrap();
+        assert_eq!(
+            ok[0].rate.scale(),
+            14,
+            "exactly the column's scale is accepted"
+        );
+        assert_eq!(
+            render_rate(&ok[0].rate),
+            "toDecimal128('0.96812000000001', 14)"
+        );
+    }
+
     #[test]
     fn an_unknown_source_is_refused_naming_both_accepted_values() {
-        let err = parse_csv(&csv(&[
-            "2023-03-11 00:00:00+00:00,0.995,0.995,0.88,0.96812,243,coinbase,measured,4.1,1",
-        ]))
+        let err = parse_csv(
+            "fixture.csv",
+            &csv(&[
+                "2023-03-11 00:00:00+00:00,0.995,0.995,0.88,0.96812,243,coinbase,measured,4.1,1",
+            ]),
+        )
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("coinbase"), "{msg}");
@@ -685,9 +791,12 @@ mod tests {
 
     #[test]
     fn an_unknown_quality_is_refused_naming_all_three_accepted_values() {
-        let err = parse_csv(&csv(&[
-            "2023-03-11 00:00:00+00:00,0.995,0.995,0.88,0.96812,243,chainlink,guessed,4.1,1",
-        ]))
+        let err = parse_csv(
+            "fixture.csv",
+            &csv(&[
+                "2023-03-11 00:00:00+00:00,0.995,0.995,0.88,0.96812,243,chainlink,guessed,4.1,1",
+            ]),
+        )
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("guessed"), "{msg}");
@@ -698,7 +807,8 @@ mod tests {
 
     #[test]
     fn a_row_with_the_wrong_field_count_is_refused_with_its_line_number() {
-        let err = parse_csv(&csv(&["2023-03-11 00:00:00+00:00,0.96812"])).unwrap_err();
+        let err =
+            parse_csv("fixture.csv", &csv(&["2023-03-11 00:00:00+00:00,0.96812"])).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("line 2"), "{msg}");
     }
@@ -708,7 +818,7 @@ mod tests {
     /// all 2049 rows); this is the guard for the day that stops being true.
     #[test]
     fn a_quoted_field_is_refused_rather_than_mis_split() {
-        let err = parse_csv(&csv(&[
+        let err = parse_csv("fixture.csv", &csv(&[
             "2023-03-11 00:00:00+00:00,0.995,0.995,0.88,\"0.96812\",243,chainlink,measured,4.1,1",
         ]))
         .unwrap_err();
@@ -724,10 +834,13 @@ mod tests {
         // not be loadable: the composed series runs to 2026-09-04 and our own
         // oracle is primary from the epoch on, so these rows are correct data
         // that this tool has no business writing.
-        let rows = parse_csv(&csv(&[
-            DEPEG,
-            "2026-03-12 00:00:00+00:00,0.9998,0.9998,0.9997,0.9998,2,chainlink,measured,1.1,2",
-        ]))
+        let rows = parse_csv(
+            "fixture.csv",
+            &csv(&[
+                DEPEG,
+                "2026-03-12 00:00:00+00:00,0.9998,0.9998,0.9997,0.9998,2,chainlink,measured,1.1,2",
+            ]),
+        )
         .expect("a post-epoch row is not a malformed file");
         assert_eq!(rows.len(), 2, "both rows must PARSE");
 
@@ -735,7 +848,10 @@ mod tests {
         assert_eq!(plan.parsed, 2);
         assert_eq!(plan.loadable.len(), 1, "only the pre-epoch row is loadable");
         assert_eq!(plan.skipped_at_or_above_epoch, 1);
-        assert_eq!(plan.loadable[0].ts, 1_678_492_800, "2023-03-11 00:00 UTC");
+        assert_eq!(
+            plan.loadable[0].ts, DEPEG_DAY_START_S,
+            "2023-03-11 00:00 UTC"
+        );
     }
 
     #[test]
@@ -752,6 +868,23 @@ mod tests {
         assert_eq!(plan.loadable.len(), 1, "the bound is strictly `<`");
         assert_eq!(plan.loadable[0].ts, USDC_ORACLE_EPOCH_S - 1);
         assert_eq!(plan.skipped_at_or_above_epoch, 2);
+    }
+
+    /// Review IN-04: the falsifier instant is defined ONCE, and it is the
+    /// instant its name claims. Derived through the same parser the loader
+    /// uses on the file, so the constant and the parse rule cannot disagree.
+    #[test]
+    fn the_depeg_day_start_constant_is_2023_03_11_midnight_utc() {
+        let rows = parse_csv("fixture.csv", &csv(&[DEPEG])).unwrap();
+        assert_eq!(rows[0].ts, DEPEG_DAY_START_S);
+        assert_eq!(
+            parse_utc_day_start(1, "2023-03-11 00:00:00+00:00").unwrap(),
+            DEPEG_DAY_START_S
+        );
+        assert!(
+            DEPEG_DAY_START_S < USDC_ORACLE_EPOCH_S,
+            "the depeg is loadable"
+        );
     }
 
     #[test]
@@ -841,7 +974,7 @@ mod tests {
 
     #[test]
     fn the_shadow_insert_names_every_usd_rate_column_and_stamps_the_run() {
-        let rows = parse_csv(&csv(&[DEPEG])).unwrap();
+        let rows = parse_csv("fixture.csv", &csv(&[DEPEG])).unwrap();
         let stmts = insert_statements(
             "prices",
             SHADOW_METHOD,
@@ -912,6 +1045,21 @@ mod tests {
             "writes the promoted word: {s}"
         );
         assert!(s.contains("1757000001"), "with a higher version: {s}");
+
+        // Review IN-02: the promote re-applies the epoch bound itself — it is
+        // the one write the read path serves, and `partition` runs in a
+        // different invocation, possibly of a different binary.
+        assert!(
+            s.contains(&format!(
+                "AND timestamp < toDateTime({USDC_ORACLE_EPOCH_S})"
+            )),
+            "the promote must carry the epoch bound: {s}"
+        );
+        assert_eq!(
+            s.matches("toDateTime(").count(),
+            1,
+            "and exactly one bound, on the shared constant: {s}"
+        );
 
         // The full identity tuple is pinned, so a promote cannot reach a
         // neighbouring identity even if one ever carries staged rows.
