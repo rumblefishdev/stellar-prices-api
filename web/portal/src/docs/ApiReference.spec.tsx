@@ -7,7 +7,11 @@ import {
 } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { OPENAPI_JSON } from '../landing/links';
+import {
+  OPENAPI_JSON,
+  OPENAPI_JSON_DOWNLOAD,
+  OPENAPI_JSON_FILENAME,
+} from '../landing/links';
 import { ApiReference } from './ApiReference';
 import { FIXTURE } from './openapi.fixture';
 
@@ -64,9 +68,11 @@ describe('ApiReference', () => {
     expect(screen.getByText('v9.9.9')).toBeTruthy();
     expect(screen.getByText('https://api.example')).toBeTruthy();
     expect(screen.getByText('x-api-key: YOUR_API_KEY')).toBeTruthy();
+    // The link is the bundled copy, not the fetched URL — asserted in full
+    // in the download case below.
     expect(
       screen.getByRole('link', { name: /openapi json/i }).getAttribute('href'),
-    ).toBe(OPENAPI_JSON);
+    ).toBe(OPENAPI_JSON_DOWNLOAD);
   });
 
   it('lists every operation as a collapsed row with its method and path', async () => {
@@ -245,5 +251,22 @@ describe('ApiReference', () => {
       'textContent',
       `${OPENAPI_JSON} did not return an OpenAPI document`,
     );
+  });
+
+  /**
+   * `download` and a same-origin href are one affordance: either alone leaves
+   * the link rendering the JSON in a tab on the shared host. Asserted on the
+   * anchor, since that is where a browser reads them.
+   */
+  it('offers the document as a download from the bundle, not from the API origin', async () => {
+    stubSpec();
+    render(<ApiReference />);
+
+    const link = await screen.findByRole('link', { name: 'OpenAPI JSON' });
+    expect(link.getAttribute('href')).toBe(OPENAPI_JSON_DOWNLOAD);
+    expect(link.getAttribute('download')).toBe(OPENAPI_JSON_FILENAME);
+    // The bundled copy, never the fetched URL: `download` is inert on a
+    // cross-origin href, and OPENAPI_JSON is cross-origin in production.
+    expect(link.getAttribute('href')).not.toBe(OPENAPI_JSON);
   });
 });
