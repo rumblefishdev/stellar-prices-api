@@ -323,7 +323,7 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          `assumed-par` and `external` are never interchangeable: one is an assumption, the \
          other a measurement that may sit percent off par. A measured rate that happens to \
          read exactly 1.0 is still `external`; the label is decided by whether an imported \
-         rate covers the bucket's UTC day, not by the value.\n\nOn the USDC self-series a \
+         rate covers the bucket, not by the value.\n\nOn the USDC self-series a \
          bucket that holds both a Reflector reading and an imported one reports `oracle`: a \
          measured poll outranks an imported rate outright, whichever was observed first. \
          Observation time only breaks ties between rows of the same kind. The imported \
@@ -332,13 +332,16 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          measured rate — for each of its twenty-four hours; on 2023-03-11 the 07:00 bucket \
          reports the trough rather than the day's close. Where only a daily row exists for \
          a day, that one row prices every bucket of its UTC day at every `granularity`, so \
-         an imported day never mixes `external` and `peg` within itself.\n\nOn a quote leg \
+         an imported day mixes the two only where the oracle epoch falls inside it \
+         (2026-03-11): a bucket that extends past 14:00 UTC that day is not priced from \
+         the imported series, which ends at 13:00.\n\nOn a quote leg \
          the label is reconstructed at read time — the candle rows carry no provenance \
          column — so one case is not separable: a bucket on a covered day for which no rate \
          resolved inside its staleness window falls back to the $1 assumption and is still \
-         reported `external`.\n\n`null` when the price fields \
-         are `null`, and always `null` for `base_currency=XLM`, where nothing is \
-         converted.",
+         reported `external`.\n\n`null` in three cases: when the price fields are `null`; always for \
+         `base_currency=XLM`, where nothing is converted; and for a USDC-quoted bucket \
+         below the oracle epoch that carries a converted rate no imported series covers \
+         — nothing can attribute it, and a label would be a claim.",
     ),
     (
         "Candle",

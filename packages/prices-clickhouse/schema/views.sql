@@ -572,11 +572,14 @@ FROM
     -- the hourly one — in which case `/ohlcv` publishes the imported rate for
     -- all 24 hours of a day and `price_usd_series_1h` publishes it for the 00:00
     -- hour and `1`/'peg' for the other twenty-three. Two, and the reason
-    -- `/ohlcv` now bounds its net by the BUCKET: on the oracle epoch's own day
-    -- the import ends at 13:00 and the epoch is 14:00, so an hour at or after
-    -- 14:00 with no poll inside its window fell into the day-wide net and was
-    -- published as a measurement the imported series does not hold. That bound
-    -- is `bo.bkt < toDateTime(USDC_ORACLE_EPOCH_S)` in `ohlcv_peg_series`. The net exists because task 0268's
+    -- `/ohlcv` now bounds its net by the bucket's END: on the oracle epoch's own
+    -- day the import ends at 13:00 and the epoch is 14:00, so a bucket reaching
+    -- past 14:00 with no poll inside it fell into the day-wide net and was
+    -- published as a measurement the imported series does not hold — at 1h, and
+    -- at 1d/1w/1M for any bucket the oracle rank did not take. That bound is
+    -- `bo.bend <= toDateTime(USDC_ORACLE_EPOCH_S)` (rendered as the literal
+    -- 1773237600) in `peg_series_sql`, which builds `ohlcv_peg_series`.
+    -- The net exists because task 0268's
     -- external enrichment tier prices every candle of an imported day from that
     -- one daily row, and `/ohlcv` must not contradict the candles beside it.
     --
@@ -857,11 +860,14 @@ FROM
     -- the hourly one — in which case `/ohlcv` publishes the imported rate for
     -- all 24 hours of a day and `price_usd_series_1h` publishes it for the 00:00
     -- hour and `1`/'peg' for the other twenty-three. Two, and the reason
-    -- `/ohlcv` now bounds its net by the BUCKET: on the oracle epoch's own day
-    -- the import ends at 13:00 and the epoch is 14:00, so an hour at or after
-    -- 14:00 with no poll inside its window fell into the day-wide net and was
-    -- published as a measurement the imported series does not hold. That bound
-    -- is `bo.bkt < toDateTime(USDC_ORACLE_EPOCH_S)` in `ohlcv_peg_series`. The net exists because task 0268's
+    -- `/ohlcv` now bounds its net by the bucket's END: on the oracle epoch's own
+    -- day the import ends at 13:00 and the epoch is 14:00, so a bucket reaching
+    -- past 14:00 with no poll inside it fell into the day-wide net and was
+    -- published as a measurement the imported series does not hold — at 1h, and
+    -- at 1d/1w/1M for any bucket the oracle rank did not take. That bound is
+    -- `bo.bend <= toDateTime(USDC_ORACLE_EPOCH_S)` (rendered as the literal
+    -- 1773237600) in `peg_series_sql`, which builds `ohlcv_peg_series`.
+    -- The net exists because task 0268's
     -- external enrichment tier prices every candle of an imported day from that
     -- one daily row, and `/ohlcv` must not contradict the candles beside it.
     --

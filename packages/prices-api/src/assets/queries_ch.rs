@@ -960,13 +960,25 @@ fn peg_series_sql(args: &OhlcvArgs, in_xlm: bool, table: &str, conds: &[String])
     // for an hour the imported series does not cover. It is the same post-epoch
     // mis-attribution `ch_enrich::external_sql` bounds itself against.
     //
-    // Bounding `bo.bkt` closes it at every grain and for all time: a bucket
-    // wholly below the epoch keeps the day-wide net, the epoch day's 1d bucket
-    // (whose `bkt` is 00:00) keeps it and still loses to the oracle rank, and no
-    // bucket at or after the epoch can take an import at all.
+    // The bound is on `bo.bend`, the bucket's exclusive END, not on its start.
+    // Bounding the START leaves every bucket that SPANS the epoch — the 1d
+    // bucket of 2026-03-11, the 1w bucket from 2026-03-09, the 1M bucket of
+    // March 2026 — still holding the day-wide net, because their starts are all
+    // below the epoch. Normally the oracle rank takes those buckets and nothing
+    // shows; but with no poll anywhere in the bucket (an enrichment outage, or
+    // a whole month of them) the import wins it, and a `granularity=1M` request
+    // for March 2026 publishes the 13:00 import of the 11th as `external` /
+    // `chainlink` / `measured` over twenty days the series does not hold. That
+    // is the same defect one grain up, and relying on the oracle rank to hide
+    // it is not a bound.
+    //
+    // `bend <= epoch` is the real thing: a bucket wholly below the epoch keeps
+    // the day-wide net (the 13:00-14:00 hour ends exactly AT the epoch and
+    // keeps it), and no bucket that extends past the epoch can take an import
+    // at any grain, whether or not a poll exists.
     let e_ok = format!(
         "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt, 'UTC') \
-          AND bo.bkt < toDateTime({epoch}))",
+          AND bo.bend <= toDateTime({epoch}))",
         epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S
     );
     let rate = format!("multiIf({o_ok}, bo.orate, {e_ok}, re.erate, toDecimal128(1, 14))");
@@ -1955,7 +1967,7 @@ mod tests {
         let o_ok = "(ifNull(bo.om, '') != '' AND bo.orts >= bo.bkt)";
         let e_ok = &format!(
             "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt, 'UTC') \
-          AND bo.bkt < toDateTime({}))",
+          AND bo.bend <= toDateTime({}))",
             prices_clickhouse::USDC_ORACLE_EPOCH_S
         );
         assert!(
@@ -2063,7 +2075,7 @@ mod tests {
         let o_ok = "(ifNull(bo.om, '') != '' AND bo.orts >= bo.bkt)";
         let e_ok = &format!(
             "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt, 'UTC') \
-          AND bo.bkt < toDateTime({}))",
+          AND bo.bend <= toDateTime({}))",
             prices_clickhouse::USDC_ORACLE_EPOCH_S
         );
         for (alias, col) in [("src", "esource"), ("qual", "equality")] {

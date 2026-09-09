@@ -544,8 +544,10 @@ async fn ohlcv_peg_series_stops_importing_across_the_oracle_epoch() {
     let client = setup(db).await;
     let admin = Client::default().with_url(ch_url()).with_database(db);
 
-    // The last imported hour (13:00) and a poll at 15:05 — leaving 14:00 and
-    // 15:00 with no poll inside their own window, which is the gap.
+    // The last imported hour (13:00), and NO oracle row at all — the enrichment
+    // gap this test is about. With a poll present the oracle rank would take
+    // these buckets and the leak would be invisible, which is exactly how it
+    // survived: the bound cannot be tested through a surface that outranks it.
     admin
         .query(&format!(
             "INSERT INTO {db}.usd_rate \
@@ -566,6 +568,7 @@ async fn ohlcv_peg_series_stops_importing_across_the_oracle_epoch() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
              ('2026-03-11 13:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-03-11 14:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
              ('2026-03-11 15:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
         ))
         .execute()
@@ -593,8 +596,17 @@ async fn ohlcv_peg_series_stops_importing_across_the_oracle_epoch() {
     assert_eq!(below["method"], "external", "the imported hour: {below}");
     approx(&below["close"], 0.991234);
 
-    // 15:00 is above the epoch with no poll in its window. The imported series
-    // holds nothing there, so the only honest answer is the labelled $1 peg.
+    // ⚠️ 14:00 is the first bucket the epoch opens. It is excluded by a bound on
+    // either end — the SPANNING bucket below is what separates them.
+    let boundary = at("2026-03-11T14:00:00Z");
+    assert_eq!(
+        boundary["method"], "peg",
+        "the bucket the epoch opens must not take the import: {boundary}"
+    );
+    approx(&boundary["close"], 1.0);
+
+    // 15:00 is wholly above the epoch. The imported series holds nothing there,
+    // so the only honest answer is the labelled $1 peg.
     let above = at("2026-03-11T15:00:00Z");
     assert_eq!(
         above["method"], "peg",
@@ -602,6 +614,41 @@ async fn ohlcv_peg_series_stops_importing_across_the_oracle_epoch() {
          stamped below it — the imported series does not cover it: {above}"
     );
     approx(&above["close"], 1.0);
+
+    // 🔑 THE SPANNING BUCKET, and the reason the bound is on `bend` and not on
+    // `bkt`. The 1d bucket of 2026-03-11 STARTS at 00:00 — below the epoch — and
+    // runs to midnight, ten hours past it. A bound on the bucket's start leaves
+    // it holding the day-wide net, so with no poll anywhere in the day the
+    // 13:00 import wins the whole day and the API publishes it as a measurement
+    // over the ten hours the series does not hold. At 1w and 1M the same shape
+    // spans days and weeks. Normally the oracle rank hides this; an enrichment
+    // gap is exactly when it does not, and relying on another surface to mask a
+    // wrong answer is not a bound.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-03-11 00:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1d&start=2026-03-11T00:00:00Z\
+         &end=2026-03-11T00:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(Client::default().with_url(ch_url()).with_database(db), &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let day = &json["data"].as_array().unwrap()[0];
+    assert_eq!(
+        day["method"], "peg",
+        "a bucket that extends past the epoch must not be priced from an import \
+         stamped below it, at any grain: {day}"
+    );
+    approx(&day["close"], 1.0);
 
     teardown(db).await;
 }
@@ -2230,7 +2277,7 @@ async fn ohlcv_at_1m_carries_a_measurement_across_the_oracle_poll_gap() {
 #[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
 async fn ohlcv_usdc_leg_labels_par_external_and_oracle_by_signature_and_epoch() {
     let db = "it_ohlcv_labels_0268";
-    let client = setup(db).await;
+    let _ = setup(db).await;
     let admin = Client::default().with_url(ch_url()).with_database(db);
 
     // asset_id=3 (FOO) quoted in asset_id=2 (USDC). `close = 10` throughout, so
@@ -2357,7 +2404,6 @@ async fn ohlcv_usdc_leg_labels_par_external_and_oracle_by_signature_and_epoch() 
             );
         }
     }
-    drop(client);
 
     teardown(db).await;
 }
