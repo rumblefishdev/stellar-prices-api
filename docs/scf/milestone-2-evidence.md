@@ -913,7 +913,7 @@ ingestion, ClickHouse and backfill, workers, and enrichment and oracle panels.
 A synth-time assertion runs in CI so the dashboard cannot silently lose a
 widget.
 
-![The acceptance strip — API p95 latency, 5xx rate, cache-hit ratio and ClickHouse write latency — above the alarm status strip covering all 49 prices-production alarms](./screenshots/ac8-dashboard-1-acceptance-strip-and-alarms.png){width=95%}
+![The acceptance strip — API p95 latency, 5xx rate, cache-hit ratio and ClickHouse write latency — above the alarm status strip, captured 2026-09-03 when it covered 49 alarms](./screenshots/ac8-dashboard-1-acceptance-strip-and-alarms.png){width=95%}
 
 ![API row: request count, latency percentiles and error rates per route group on the production stage](./screenshots/ac8-dashboard-2-api.png){width=95%}
 
@@ -923,8 +923,15 @@ widget.
 
 ![Enrichment and oracle row, carrying all six Prices/Enrichment metrics](./screenshots/ac8-dashboard-5-enrichment-oracle.png){width=95%}
 
-**The alarm strip covers 50 alarms**, derived from the construct tree rather than
-hard-coded, so the count maintains itself as alarms are added.
+**The alarm strip covers 50 alarms today**, derived from the construct tree rather
+than hard-coded, so the count maintains itself as alarms are added.
+
+The five images above are **dated illustrations, captured 2026-09-03**, included
+to show that the widgets exist and carry data. They show 49 because the AMM
+push-freshness alarm landed after them — which is the self-maintaining behaviour
+being claimed, visible rather than asserted. No figure in this section is read off
+an image; every one comes from the deployed dashboard or the infrastructure
+code.
 
 **Cost, which the task was asked to record:** roughly 450,000 metric publications
 a month at $0.01 per thousand, about **$4.50, plus about $0.30** for the custom

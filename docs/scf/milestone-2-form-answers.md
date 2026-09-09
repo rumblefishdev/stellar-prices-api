@@ -179,11 +179,10 @@
       cleanly.
 - [ ] `GET /v1/backfill/status` re-read and `earliest_data_available` in §5 AC 5
       confirmed unchanged.
-- [ ] Dashboard screenshots current — `screenshots/ac8-dashboard-*.png` were
-      captured **2026-09-03** (commit `a6d3147`, task 0125) and are byte-identical
-      in the tree today; they have never been re-taken. Their alarm strip shows
-      **49** alarms against §7.2's text, which says **50**. Re-capture before
-      submission, or correct the count.
+- [x] Dashboard screenshots — **decided: keep the 2026-09-03 captures**
+      (commit `a6d3147`, task 0125). They are illustrations of the widgets, not a
+      source of any figure, and §7.2 now dates them and explains why their strip
+      shows 49 where the text says 50. No re-capture owed.
 - [ ] `ch-demo-queries.sql` run against production and any pasted output in the
       evidence document refreshed.
 - [ ] `milestone-2-evidence.md` finalised and exported: `./build-pdf.sh`
