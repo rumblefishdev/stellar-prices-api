@@ -152,7 +152,9 @@ the per-asset endpoint, and decimal strings that survive the JSON round trip.
 #### Reproduce it
 
 ```bash
-# API_KEY and BASE_URL from the environment or .env.local at the repo root
+export API_KEY=b4PRlGnUqf9xS7NIw6s8T6otRZVjctBXaBZ5uKut
+export BASE_URL=https://prices-api.sorobanscan.rumblefish.dev
+
 npm run conformance:0120 && echo "TRANCHE 2 AC 1: PASS"
 ```
 
