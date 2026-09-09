@@ -35,11 +35,30 @@ export function createApp({ config }: CreateAppOptions): void {
   // api-handler Lambda (ADR 0008). Passing the Function in creates the
   // cross-stack dependency (CFN export/import); CDK orders Compute before
   // ApiGateway automatically.
-  new ApiGatewayStack(app, `${prefix}-ApiGateway`, {
+  const apiGateway = new ApiGatewayStack(app, `${prefix}-ApiGateway`, {
     env,
     config,
     apiHandlerFunction: compute.apiHandlerFunction,
+    // The role, so ApiGatewayStack can grant the one control-plane action that
+    // needs the usage-plan id (task 0187). Same direction as the Function
+    // above, so it adds no new dependency and cannot create a cycle.
+    apiHandlerRole: compute.apiHandlerRole,
   });
+
+  // No hosting stack for the portal. `PortalHostingStack` (task 0184) — a
+  // private bucket and a CloudFront distribution fronting both the bundle
+  // and this API — was retired by task 0195 on 2026-09-01: since task 0194
+  // the page is served from the block explorer's distribution at
+  // `https://sorobanscan.rumblefish.dev/api/` (its bucket, synced by
+  // `make -C infra sync-portal-explorer`) and calls this API on
+  // `config.apiDomain` directly, so the distribution had become a second,
+  // ungated front door to the same portal. Constructing `ApiGatewayStack` is
+  // what has the effect; the binding below is now read by nothing, and the
+  // `void` is there to say so deliberately rather than to use it. That is the
+  // fact worth keeping: nothing imports the stack's exports any more, so it
+  // can be destroyed or have its RestApi replaced without tearing anything
+  // down first.
+  void apiGateway;
 
   // EventBridgeStack is independent of ComputeStack in the skeleton
   // (no Lambda targets yet — task 0039 wires the cross-stack

@@ -18,7 +18,12 @@ import {
   lambdaLogGroupName,
   pricesLambdaDefaults,
 } from '../lambda-baseline.js';
-import { mtlsSecretName, secretsManagerLayerArn } from '../mtls.js';
+import {
+  mtlsSecretArnFromParts,
+  mtlsSecretName,
+  portalOauthSecretName,
+  secretsManagerLayerArn,
+} from '../mtls.js';
 
 const DLQ_RETENTION_DAYS = 14;
 
@@ -178,6 +183,28 @@ export class ComputeStack extends cdk.Stack {
    * task 0040; the role is already granted read on exactly this secret.
    */
   public readonly apiHandlerMtlsSecretName: string;
+  /**
+   * `PORTAL_OAUTH_SECRET_NAME` the api-handler reads for portal sign-in
+   * (task 0186) — the Discord client id/secret, the registered redirect URI and
+   * the session signing key, as one JSON bundle. Set on the Function env below;
+   * the role is granted read on exactly this secret and nothing else. The
+   * secret's VALUE never appears in this template, in an env var, or in a log.
+   */
+  public readonly portalOauthSecretName: string;
+  /**
+   * `PORTAL_FREE_PLAN_PARAM` the api-handler reads for self-service key
+   * issuance (task 0187) — the NAME of the SSM parameter holding the
+   * `pricing-api-free` usage-plan id, not the id itself.
+   *
+   * It cannot be the id, and it cannot be a cross-stack reference: the plan is
+   * created by `ApiGatewayStack`, which depends on this stack, so importing it
+   * here would close a Compute -> Gateway -> Compute cycle — the same shape of
+   * problem `apiBaseUrl` has. And it must not be hard-coded, because AWS
+   * generates the id and it changes if the plan is ever replaced. So the
+   * handler reads it at cold start through the Parameters and Secrets extension
+   * already attached below, exactly as it reads secret VALUES by NAME.
+   */
+  public readonly portalFreePlanParameterName: string;
 
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
@@ -195,6 +222,14 @@ export class ComputeStack extends cdk.Stack {
     // the operator (see SecretsStack); CDK only names + grants + sets the env.
     this.ledgerProcessorMtlsSecretName = mtlsSecretName(envName, 'ingestion');
     this.apiHandlerMtlsSecretName = mtlsSecretName(envName, 'api');
+    // Same pattern, third secret: the name is computed by the shared helper, the
+    // grant is on that name's wildcard ARN, and the operator owns the value
+    // (task 0186). Only the api-handler reads it — no worker signs a cookie.
+    this.portalOauthSecretName = portalOauthSecretName(envName);
+    // Must match `ApiGatewayStack`'s `PricingApiFreePlanIdParam` exactly — the
+    // two are the write and the read of one value, in two stacks that cannot
+    // reference each other. Task 0194 audits the pair.
+    this.portalFreePlanParameterName = `/prices/${envName}/pricing-api-free-plan-id`;
 
     // ---------------------------------------------------------------
     // Ledger Processor: baseline role + log group
@@ -410,11 +445,16 @@ export class ComputeStack extends cdk.Stack {
 
     this.ledgerProcessorRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
-        sid: 'PublishLagMetric',
+        sid: 'PublishIngestMetrics',
         actions: ['cloudwatch:PutMetricData'],
         resources: ['*'],
         conditions: {
-          StringEquals: { 'cloudwatch:namespace': 'PricesApi/LedgerProcessor' },
+          // MUST equal `METRIC_NAMESPACE` in
+          // packages/prices-ledger-processor/src/metrics.rs — a mismatch makes
+          // every publish fail with AccessDenied and the dashboard widget stays
+          // empty forever with nothing failing loudly (task 0125). The previous
+          // value, `PricesApi/LedgerProcessor`, was never published to.
+          StringEquals: { 'cloudwatch:namespace': 'Prices/Ingest' },
         },
       }),
     );
@@ -440,11 +480,271 @@ export class ComputeStack extends cdk.Stack {
       removalPolicy: PRICES_LAMBDA_LOG_REMOVAL_POLICY,
     });
 
+    // Read on the portal's Discord OAuth bundle (task 0186). Added here rather
+    // than in `createPricesLambdaRole`'s baseline: every prices Lambda needs its
+    // own mTLS material, but exactly one of them terminates an OAuth flow, and a
+    // client secret readable by the cleanup worker is a client secret with a
+    // wider blast radius than it needs.
+    //
+    // The grant is on the by-name wildcard ARN, so it does not require the
+    // secret to exist at synth time. That WAS harmless because a closed portal
+    // never asked; with `PORTAL_ENABLED` true (task 0194) the read happens at
+    // every cold start, and a missing or misnamed secret closes the portal in
+    // that execution environment with a `portal closed at cold start` error
+    // log — not an init panic, because the Lambda also serves `/v1`. See the
+    // deploy-gate note on `PORTAL_ENABLED` below and
+    // `AppConfig::load_portal_or_close`.
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadPortalOauthSecret',
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          mtlsSecretArnFromParts(
+            awsRegion,
+            accountId,
+            this.portalOauthSecretName,
+          ),
+        ],
+      }),
+    );
+
+    // ---------------------------------------------------------------
+    // Self-service API keys (task 0187) — API Gateway CONTROL plane.
+    // ---------------------------------------------------------------
+    //
+    // Five of the seven calls the portal makes. The other two —
+    // `POST /usageplans/{id}/keys` (task 0187's attach) and
+    // `GET /usageplans/{id}/usage` (task 0188's `GetUsage`) — are granted in
+    // `ApiGatewayStack` instead, because the plan id lives there and importing
+    // it here would close the Compute -> Gateway -> Compute cycle described on
+    // `portalFreePlanParameterName` above. Each grant is declared where its
+    // resource is known; task 0194 audits the set as one policy.
+    //
+    // Control-plane ARNs carry no account id — `arn:aws:apigateway:<region>::`
+    // with a doubled colon — and the resource is the API's own path.
+    //
+    // **Three limits, and only two of them are forced.** Recorded here rather
+    // than in a commit message because they are the boundary of what this
+    // policy can be — and because task 0194's IAM audit reads this comment as
+    // its statement of intent. A sentence here that is wrong is an audit that
+    // passes without asking the question.
+    //
+    // 1. **`POST /apikeys` cannot be narrowed.** There is no ARN for "keys this
+    //    function created", so the grant to create a key is a grant to create
+    //    any key. Mitigated by what the code does with it — one deterministic
+    //    name per Discord id, attached only to the self-service plan — and by
+    //    the `ManagedBy=prices-portal` tag every created key carries, which is
+    //    what makes them answerable after the fact.
+    // 2. **`GET /apikeys` cannot be narrowed either, and it is the biggest of
+    //    the three.** The reconciler needs the collection (see the sid below),
+    //    and a collection has one ARN: there is no per-key form of it, and tag
+    //    conditions do not apply to a list. `GetApiKeys` accepts
+    //    `includeValues=true`, so this grant permits reading the VALUE of every
+    //    API key in the account — the partner keys on `/v1/` included, which are
+    //    not this feature's to see. The handler asks for `includeValues=false`
+    //    on every listing (`Gateway::list_named`, asserted by
+    //    `the_listing_never_requests_key_values`), so the exposure is what an
+    //    attacker with code execution in this Lambda would gain, not what the
+    //    feature does. Worth stating precisely because it is easy to read the
+    //    list of verbs as harmless next to `DELETE`.
+    // 3. **`PATCH` on `/apikeys/*` IS narrowed by tag; `GET` and `DELETE` are
+    //    still not.** The path wildcard is forced on all three — AWS generates
+    //    the key id, so it is unknowable at synth time — but API Gateway
+    //    supports `aws:ResourceTag/${TagKey}` conditions on per-key
+    //    control-plane actions
+    //    (docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-tagging-iam-policy.html),
+    //    and every key this feature creates carries `ManagedBy=prices-portal`
+    //    from the create call.
+    //
+    //    **The new verb is born narrow.** `PATCH` is task 0191's and nothing
+    //    depends on it being account-wide, so it gets the condition in the same
+    //    change that grants it — an unconditioned per-key patch could rename any
+    //    key in the account into a portal name the reconciler would then adopt
+    //    and reveal, or re-enable a key its owner revoked. It lives in its own
+    //    statement for exactly this reason: a condition on a shared statement
+    //    would silently reach the two verbs below.
+    //
+    //    **`GET` and `DELETE` stay as task 0187 left them — deliberately.** The
+    //    condition that would reduce "read or delete any API key in the account,
+    //    including a partner's" to "one this portal made" is still available and
+    //    still unwritten, and it is still **task 0194**'s, which owns the IAM
+    //    audit and can verify it against the deployed stack rather than a synth.
+    //    Writing it here would be a behaviour change to two shipped code paths
+    //    smuggled into a feature slice: an exact-name key created BY HAND in the
+    //    console is untagged, and adoption is decided by NAME
+    //    (`naming::exact_matches` + `current_key`), not by tag — so such a key is
+    //    still listed (the collection grant below carries no condition), still
+    //    ranked winner, still attached, and only then `AccessDenied`s on
+    //    `GetApiKey includeValue=true`. The visitor gets a permanent `502` on a
+    //    key the portal chose for them. Adopting a console-created key is a
+    //    documented requirement of 0187; retiring it is a decision 0194 makes
+    //    with the audit in hand, not a side effect of shipping a revoke.
+    //
+    //    Until then, the guard that actually holds on those two is in the
+    //    handler (`portal/keys/naming.rs`), which never ranks or deletes a key
+    //    whose name is not exactly the caller's — a guard in code, on a grant
+    //    that is account-wide in IAM.
+    //
+    // 4. **Tagging on create is a fourth grant, and it was missing.** Found
+    //    2026-08-31 by task 0194's first real sign-in on the sign-off host:
+    //    `CreateApiKey` with `tags` is authorised as `apigateway:PUT` on
+    //    `/tags/<url-encoded /apikeys/*>`, separately from `POST /apikeys`, and
+    //    without it every issue attempt ended in `AccessDeniedException` —
+    //    the Lambda had never created a key in production; the one key that
+    //    existed came from a local run under operator credentials. An earlier
+    //    revision of this comment listed `PUT /tags/*` under "deliberately
+    //    NOT here (the portal never re-tags a key)": true of re-tagging, false
+    //    of creating, and the reason the audit's IAM check passed a policy
+    //    that could not do its job. Born narrow: `aws:RequestTag/ManagedBy`
+    //    must be `prices-portal` and the tag keys are the two the create
+    //    call sets (`TAG_MANAGED_BY`, `TAG_ISSUED_BY` in `keys/gateway.rs`).
+    //    What the condition does NOT do: IAM cannot tell tag-on-create from
+    //    tag-later on this action, so the grant also lets this role stamp
+    //    `ManagedBy=prices-portal` on an existing key — which is the tag limit
+    //    3's `PATCH` trusts. The handler has no `TagResource` call path, so
+    //    this is again exposure under code execution, not feature behaviour.
+    //
+    // What is deliberately NOT here: `apigateway:*`, `PUT /tags/*` on anything
+    // but API keys, and any grant on `/usageplans` beyond the key attachment
+    // and the usage read — both of those need the plan id, so both live in
+    // `ApiGatewayStack`'s standalone policy (`POST …/keys` for 0187's attach,
+    // `GET …/usage` for 0188's `GetUsage`).
+    //
+    // `DELETE` **is** here, and it is this slice's: the reconciler removes
+    // duplicate keys after a double-submit ("keep the earliest createdDate,
+    // DeleteApiKey the rest").
+    //
+    // `PATCH` on `/apikeys/*` is task 0191's: `UpdateApiKey(enabled=false)`,
+    // the revocation behind "Replace my key". Disable rather than delete,
+    // because the disabled key IS the record of the revocation — its
+    // `lastUpdatedDate` is what refuses a re-issue inside the same quota
+    // period, and there is no registry (task 0190) to hold that fact
+    // otherwise. The handler sends exactly one patch operation,
+    // `replace /enabled false`; it never re-enables, renames or re-tags a
+    // key, and `PATCH` on `/apikeys/*` cannot reach a usage plan or a stage.
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalCreateAndListApiKeys',
+        actions: ['apigateway:POST', 'apigateway:GET'],
+        resources: [`arn:aws:apigateway:${awsRegion}::/apikeys`],
+      }),
+    );
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalTagApiKeysOnCreate',
+        actions: ['apigateway:PUT'],
+        // The tagging resource for "any API key", in the URL-encoded form the
+        // service names in its own AccessDenied message (limit 4 above).
+        resources: [
+          `arn:aws:apigateway:${awsRegion}::/tags/arn%3Aaws%3Aapigateway%3A${awsRegion}%3A%3A%2Fapikeys%2F*`,
+        ],
+        conditions: {
+          StringEquals: { 'aws:RequestTag/ManagedBy': 'prices-portal' },
+          'ForAllValues:StringEquals': {
+            'aws:TagKeys': ['ManagedBy', 'IssuedBy'],
+          },
+        },
+      }),
+    );
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalReadAndDeleteOwnApiKeys',
+        actions: ['apigateway:GET', 'apigateway:DELETE'],
+        resources: [`arn:aws:apigateway:${awsRegion}::/apikeys/*`],
+      }),
+    );
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalDisableOwnApiKeys',
+        actions: ['apigateway:PATCH'],
+        resources: [`arn:aws:apigateway:${awsRegion}::/apikeys/*`],
+        // See limit 3 above: the revoke touches portal-made keys only, and
+        // this condition is on the new verb ALONE — do not fold this statement
+        // back into the one above.
+        //
+        // ⚠️ **What this condition is worth, stated so it is not over-read**
+        // (task 0194's review). It is a guard against THIS code disabling a
+        // key it did not make — a reconciler bug, a mis-parsed id, a future
+        // caller passing the wrong ARN — and it is a good one. It is not a
+        // containment boundary against a compromised handler, because
+        // `PortalTagApiKeysOnCreate` above lets this same role write
+        // `ManagedBy=prices-portal` onto a key of its choosing, and
+        // `aws:ResourceTag` is evaluated after that write. Two calls, and the
+        // guard is satisfied. IAM cannot close that: `apigateway:PUT` on
+        // `/tags/…/apikeys/*` has no condition key distinguishing tagging a
+        // key being created from tagging one that already exists, and the
+        // create itself cannot be scoped to a key that does not exist yet
+        // (limit 1). So the honest reading of the pair is: the portal's role
+        // can reach any API key in the account if it runs code we did not
+        // write. What bounds that is not this line — it is that `POST
+        // /apikeys` is limit 1 with its own mitigation, that the only keys
+        // worth reaching are on a plan this role cannot detach, and that a
+        // `PUT /tags` not preceded by a `CreateApiKey` is visible in
+        // CloudTrail. The detective control is the follow-up; the condition
+        // stays because a guard against our own mistakes is the failure mode
+        // that actually happens.
+        conditions: {
+          StringEquals: { 'aws:ResourceTag/ManagedBy': 'prices-portal' },
+        },
+      }),
+    );
+
+    // The usage-plan id, read at cold start.
+    //
+    // **Currently redundant, and kept deliberately.** The baseline role already
+    // carries `ReadSsmNamespaces`, which grants `ssm:GetParameter` across the
+    // whole `/prices/${envName}/*` namespace — so this statement adds no access
+    // today. It names the one parameter this feature depends on, so that
+    // narrowing that baseline (which task 0194 may well want to) does not
+    // silently break key issuance at the next cold start. Stated rather than
+    // left implicit, because an IAM statement that looks like the reason
+    // something works, while something broader is the actual reason, is worse
+    // than no statement at all.
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalReadFreePlanIdParameter',
+        actions: ['ssm:GetParameter'],
+        resources: [
+          `arn:aws:ssm:${awsRegion}:${accountId}:parameter${this.portalFreePlanParameterName}`,
+        ],
+      }),
+    );
+
+    // The eligibility gate's two knobs (task 0189), read at runtime — per
+    // issuance, not at cold start alone. The same currently-redundant-and-kept
+    // reasoning as `PortalReadFreePlanIdParameter` above: the baseline's
+    // `ReadSsmNamespaces` already covers `/prices/${envName}/*`, and this
+    // statement names the two parameters the gate depends on so a narrowed
+    // baseline cannot silently break issuance.
+    //
+    // **CDK must never CREATE these parameters** — no `ssm.StringParameter`,
+    // and no `valueForStringParameter` (which freezes the value into the
+    // template at deploy time, defeating "tunable without a redeploy"). A
+    // CloudFormation-managed parameter is CDK-owned, so the next `cdk deploy`
+    // silently restores the committed value — which, after task 0179 points
+    // production at the real Stellar guild, would un-flip it back to the test
+    // guild. The operator seeds both values at deploy prep (runbook §2a), the
+    // same ownership split as the OAuth secret. CI pins the rule:
+    // `verify-openapi-routes.mjs` check 7 refuses any `AWS::SSM::Parameter`
+    // with either name in any synthesized template.
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalReadEligibilityParameters',
+        actions: ['ssm:GetParameter'],
+        resources: [
+          `arn:aws:ssm:${awsRegion}:${accountId}:parameter/prices/${envName}/discord-guild-id`,
+          `arn:aws:ssm:${awsRegion}:${accountId}:parameter/prices/${envName}/min-account-age-minutes`,
+        ],
+      }),
+    );
+
     // The single axum api-handler (ADR 0008). Reads as `prices_reader` over
     // mTLS; reuses the same `chDomain` SSM value + secrets extension layer as
     // the ledger processor. No `API_KEYS` env → the in-app key gate stays
-    // DISARMED; per-key 100 req/s is enforced at the API Gateway usage plan
-    // (ADR 0008). `reservedConcurrentExecutions` is the optional SLO escape
+    // DISARMED; the per-key rate and monthly quota are enforced at the API
+    // Gateway usage plan (ADR 0008; limits set by task 0157 —
+    // `pricingApiFreePlanRateLimit` / `pricingApiFreePlanMonthlyQuota`, not the design
+    // doc's 100 req/s). `reservedConcurrentExecutions` is the optional SLO escape
     // hatch (only set when configured). API Gateway grants invoke via the
     // integration's resource policy (no role-cycle, unlike the SQS ESM above).
     const apiHandler = config.apiHandler;
@@ -470,6 +770,96 @@ export class ComputeStack extends cdk.Stack {
         MTLS_SECRET_NAME: this.apiHandlerMtlsSecretName,
         // Build the mTLS CH client eagerly at cold start (primes the pool).
         CH_ENABLED: 'true',
+        // Onboarding portal OPEN (task 0194, 2026-08-28). Task 0183 shipped it
+        // dark and this is the one-word diff that flag was designed to be:
+        // there is one environment and it is production — `envName` is typed
+        // 'production' and `infra/envs/` holds only production.json — so every
+        // portal slice (0184-0195) became publicly reachable the moment this
+        // changed. Reversing it is the same one word plus a deploy; nothing
+        // opening creates has to be unwound to close it again.
+        //
+        // ⚠️ **This value is a deploy gate, not just a flag.** With it true the
+        // handler resolves the portal's configuration AT COLD START, from FOUR
+        // reads, and the portal opens only if every one of them succeeds:
+        //
+        // 1. `load_portal_oauth` (`config.rs`) on the Discord OAuth secret
+        //    named by `PORTAL_OAUTH_SECRET_NAME` — operator-created, runbook §2
+        // 2. `load_portal_keys` (`config.rs`) on the SSM parameter named by
+        //    `PORTAL_FREE_PLAN_PARAM`, i.e.
+        //    `/prices/{env}/pricing-api-free-plan-id`. This one is NOT
+        //    operator-seeded and is easy to miss: it is published by
+        //    `ApiGatewayStack`, which DEPENDS ON this stack and therefore
+        //    deploys AFTER it. On a fresh environment, or any time the usage
+        //    plan is replaced or renamed, this stack can be live with the flag
+        //    true while the parameter does not yet exist. Deploy order matters
+        //    here
+        // 3. + 4. the eligibility probe (`portal/eligibility.rs`) on
+        //    `/prices/{env}/discord-guild-id` and
+        //    `/prices/{env}/min-account-age-minutes` — operator-seeded,
+        //    runbook §2a
+        //
+        // A failed read CLOSES the portal in that execution environment and
+        // logs `portal closed at cold start` on the api-handler; it does NOT
+        // panic init, because this Lambda also serves `/v1` and an init panic
+        // is a `502` to the next data-API caller (task 0194's PR review,
+        // finding 1; the reasoning is on `AppConfig::load_portal_or_close`).
+        // So deploying this ahead of the operator steps ships a portal whose
+        // `/config` says `enabled: false`, not a data-API outage — and nothing
+        // else tells you: the api-handler has no error alarm, so the runbook's
+        // `/config` probe after the deploy is the check. Runbook
+        // `portal-oauth-deploy-prep.md` §2, §2a and §5 are the steps; task
+        // 0194's audit is what verifies they were run.
+        PORTAL_ENABLED: 'true',
+        // The NAME of the portal's Discord OAuth bundle, never its value
+        // (task 0186; ADR 0007's precedent, audited by Tranche 3 AC 6). The
+        // handler reads the value through the Parameters & Secrets extension
+        // layer already attached above — the same mechanism, the same cache, the
+        // same "no secret in an env var" rule as `MTLS_SECRET_NAME`.
+        //
+        // Set unconditionally, which is what kept opening the portal to the
+        // one-word diff above rather than a two-line change made under time
+        // pressure. With the flag now true the read is no longer conditional:
+        // this name resolving to a missing secret is read 1 of the four fatal
+        // cold-start reads listed on `PORTAL_ENABLED`.
+        PORTAL_OAUTH_SECRET_NAME: this.portalOauthSecretName,
+        // The NAME of the SSM parameter holding the `pricing-api-free` usage
+        // plan id (task 0187) — see `portalFreePlanParameterName` for why it is
+        // a name, why it is not a cross-stack reference, and why it is not
+        // hard-coded. Read through the same extension layer, at cold start —
+        // with `PORTAL_ENABLED` now true the control-plane client IS built in
+        // every process, and this read is read 2 of the four listed on
+        // `PORTAL_ENABLED`, the one whose parameter `ApiGatewayStack` publishes
+        // after this stack deploys.
+        //
+        // Set unconditionally alongside `PORTAL_OAUTH_SECRET_NAME`, and for the
+        // same reason: opening the portal stayed a one-word diff.
+        PORTAL_FREE_PLAN_PARAM: this.portalFreePlanParameterName,
+        // The NAMES of the eligibility gate's two SSM parameters (task 0189):
+        // which Discord guild membership is checked against, and the minimum
+        // account age in minutes. Names, never values — the handler resolves
+        // them through the extension **per issuance**, so an operator's
+        // `aws ssm put-parameter` takes effect without a redeploy (bounded
+        // only by the extension's ~5 min cache). The values are
+        // operator-seeded and deliberately NOT CloudFormation resources — see
+        // the `PortalReadEligibilityParameters` statement above for the
+        // un-flip-after-0179 hazard that rule prevents. Set unconditionally,
+        // same one-word-diff reasoning as the two names above.
+        PORTAL_GUILD_ID_PARAM: `/prices/${envName}/discord-guild-id`,
+        PORTAL_MIN_ACCOUNT_AGE_PARAM: `/prices/${envName}/min-account-age-minutes`,
+        // The free plan's per-key rate limit, for the portal dashboard to STATE
+        // (task 0188) — the same `pricingApiFreePlanRateLimit` ApiGatewayStack
+        // hands to `addUsagePlan`, so the figure on the page and the figure the
+        // gateway enforces cannot disagree.
+        //
+        // It travels as an env var rather than being read back from
+        // `GetUsagePlan` because that would cost the portal a control-plane
+        // grant task 0188 deliberately does not take, and rather than being a
+        // literal in the bundle because that is the one number on that panel
+        // that could then go stale: raise the limit here, deploy, and a
+        // dashboard whose stated theme is honesty would keep stating the old
+        // one. Not a secret, and not conditional on `PORTAL_ENABLED` — same
+        // one-word-diff reasoning as the two names above.
+        PORTAL_RATE_LIMIT: String(config.pricingApiFreePlanRateLimit),
         PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED: 'true',
         // Strip the `/{stage}` prefix (`/production`) that API Gateway REST
         // proxy puts in the path, so lambda_http hands axum `/v1/...` (not
@@ -480,6 +870,20 @@ export class ComputeStack extends cdk.Stack {
         // Lambda route, which is why this went unnoticed until the first real
         // deploy (0040's tests are all in-process `tower::oneshot`).
         AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH: 'true',
+        // Stamped into the OpenAPI `servers` block served at /api-docs-json
+        // (task 0124). Config-supplied, not derived from `api.url`: this stack
+        // is a dependency of ApiGatewayStack, so reading the gateway's URL here
+        // would close a Compute → Gateway → Compute cycle. Includes the stage
+        // path — see the `apiBaseUrl` validation in types.ts.
+        API_BASE_URL: config.apiBaseUrl,
+        // The origin the portal's bundle is served from (task 0194). The
+        // backend now has a hostname of its own (`apiDomain`, in
+        // `api-gateway-stack.ts`) and the bundle calls it cross-origin, so the
+        // handler needs to know the one origin to name in
+        // `Access-Control-Allow-Origin` and the host to send the sign-in
+        // round-trip back to — the callback runs here, the page lives there.
+        // Unset would mean a same-origin deployment; production is not one.
+        PORTAL_WEB_ORIGIN: config.portalWebOrigin,
       },
     });
 

@@ -9,6 +9,8 @@ use axum::response::{IntoResponse, Response};
 use crate::assets::dto::PriceResponse;
 use crate::assets::queries_ch;
 use crate::batch::dto::{BatchRequest, BatchResponse, MAX_BATCH};
+use crate::common::errors::ErrorEnvelope;
+use crate::common::extract::ValidatedJson;
 use crate::common::{cache_control, errors};
 use crate::identity::AssetIdentifier;
 use crate::state::AppState;
@@ -22,13 +24,28 @@ use crate::state::AppState;
     post,
     path = "/prices/batch",
     tag = "prices",
+    summary = "`POST /prices/batch` — current prices for many assets in one call.",
+    description = "The same snapshot `GET /assets/{asset_identifier}/price` returns, for up to 100 assets\nin \
+     one request. The whole list is validated first: a malformed identifier, an empty list\nor \
+     more than 100 entries fails the entire request with a 400. Assets without a current\nprice \
+     are listed in `not_found` instead of failing the call. Results follow the order of\nthe \
+     request; a duplicated identifier is answered each time. Not cached.",
     request_body = BatchRequest,
     responses(
         (status = 200, description = "Current prices + not-found list", body = BatchResponse),
-        (status = 400, description = "Empty/oversized batch or invalid identifier"),
+        (status = 400, description = "Malformed or oversized body (`invalid_body`), empty or over-cap list (`invalid_query`), \
+          or an invalid identifier (`invalid_id`)",
+         body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
-pub async fn post_batch(State(state): State<AppState>, Json(req): Json<BatchRequest>) -> Response {
+pub async fn post_batch(
+    State(state): State<AppState>,
+    ValidatedJson(req): ValidatedJson<BatchRequest>,
+) -> Response {
     if req.assets.is_empty() {
         return errors::bad_request(errors::INVALID_QUERY, "assets must not be empty");
     }
@@ -67,9 +84,13 @@ pub async fn post_batch(State(state): State<AppState>, Json(req): Json<BatchRequ
                 id.to_canonical(),
                 queries_ch::CurrentPriceRow {
                     price_usd: row.price_usd.clone(),
+                    price_xlm: row.price_xlm.clone(),
                     vwap_24h: row.vwap_24h.clone(),
                     volume_24h_usd: row.volume_24h_usd.clone(),
+                    change_24h_pct: row.change_24h_pct.clone(),
+                    sources: row.sources.clone(),
                     updated_at: row.updated_at.clone(),
+                    method: row.method.clone(),
                 },
             )),
             None => not_found.push(id.to_canonical()),

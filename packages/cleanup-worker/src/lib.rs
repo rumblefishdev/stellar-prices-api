@@ -18,6 +18,15 @@ use serde::Deserialize;
 
 /// `(table, retention interval SQL)` per §3.6. Only these tables are pruned;
 /// `price_ohlcv_{1h,4h,1d,1w,1M}` are retained forever.
+///
+/// ⚠️ **`prices.usd_rate` is deliberately ABSENT and must stay that way**
+/// (task 0167). This list is opt-in, so an unlisted table is retained forever —
+/// which is the entire point of that table. It exists precisely *because*
+/// `oracle_prices` expires at 13 months and takes the earliest depeg-aware
+/// history with it; `usd_rate` is the forever-retained snapshot that escapes
+/// that. Adding it here would silently re-create the problem it was built to
+/// solve, and the loss would be unrecoverable rather than merely wrong.
+/// See the block comment above `CREATE TABLE prices.usd_rate` in `init.sql`.
 pub const RETENTION: &[(&str, &str)] = &[
     ("price_ohlcv_1m", "INTERVAL 7 DAY"),
     ("price_ohlcv_15m", "INTERVAL 30 DAY"),
@@ -68,4 +77,32 @@ pub async fn run_cleanup(client: &Client) -> Result<CleanupStats, CleanupError> 
     }
 
     Ok(stats)
+}
+
+#[cfg(test)]
+mod usd_rate_retention_tests {
+    use super::RETENTION;
+
+    /// Task 0167. `prices.usd_rate` exists precisely BECAUSE `oracle_prices` is
+    /// pruned at 13 months and takes the earliest depeg-aware history with it —
+    /// unrecoverably, since the readings cannot be re-derived after the fact.
+    ///
+    /// `RETENTION` is an opt-in allowlist, so the protection is an ABSENCE, and
+    /// an absence is exactly the invariant a future reader breaks by adding one
+    /// tidy-looking line. This test is that line's tripwire.
+    #[test]
+    fn usd_rate_is_never_pruned() {
+        let listed: Vec<&str> = RETENTION.iter().map(|(t, _)| *t).collect();
+        assert!(
+            !listed.contains(&"usd_rate"),
+            "usd_rate must never be pruned — it is the forever-retained snapshot \
+             of oracle_prices, which IS pruned. Adding it here re-creates the \
+             exact unrecoverable data loss the table was built to escape. \
+             Listed: {listed:?}"
+        );
+        assert!(
+            listed.contains(&"oracle_prices"),
+            "sanity: oracle_prices must still be pruned, or this test proves nothing"
+        );
+    }
 }

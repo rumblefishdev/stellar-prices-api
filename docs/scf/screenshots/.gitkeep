@@ -5,5 +5,7 @@
 #   - CloudWatch alarms list, prices-production-* filter, all OK
 #   - Slack notification from the task 0056 alarm fire-test
 #
-# Do NOT add a CloudWatch dashboard screenshot — prices-production-overview is
-# a scaffold with no data widgets. See ../README.md "Ground rules".
+# Milestone 2 adds the dashboard screenshots (ac8-dashboard-*.png, task 0125,
+# PR #280, committed 2026-09-03 in a6d3147). The former "do NOT add a
+# CloudWatch dashboard screenshot" rule applied while prices-production-overview
+# was an empty scaffold; it no longer is. The M1 package still does not claim it.

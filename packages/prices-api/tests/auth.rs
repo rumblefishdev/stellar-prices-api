@@ -10,15 +10,38 @@ use tower::ServiceExt;
 const KEY: &str = "test-secret-key";
 
 fn armed_config() -> AppConfig {
+    armed_config_with_portal(false)
+}
+
+fn armed_config_with_portal(portal_enabled: bool) -> AppConfig {
     AppConfig {
         ch_enabled: false,
         base_url: None,
         api_keys: vec![KEY.to_string()],
+        portal_enabled,
+        // Sign-in credentials are loaded asynchronously from Secrets Manager
+        // (task 0186) and are never part of the environment; `None` is the shape
+        // every non-portal test wants.
+        portal_oauth: None,
+        // Discord endpoints are part of the config now, not read from the
+        // process environment per router — see `AppConfig::portal_endpoints`.
+        portal_endpoints: Default::default(),
+        // Task 0187: the control-plane client for self-service keys. `None`
+        // is what every non-portal test wants — with no client in the
+        // config there is no code path here that can reach API Gateway.
+        portal_keys: None,
+        portal_eligibility: None,
+        portal_rate_limit: None,
+        portal_web_origin: None,
     }
 }
 
 async fn send(req: Request<Body>) -> StatusCode {
-    app(&armed_config(), AppState::without_ch())
+    send_with(&armed_config(), req).await
+}
+
+async fn send_with(config: &AppConfig, req: Request<Body>) -> StatusCode {
+    app(config, AppState::without_ch())
         .oneshot(req)
         .await
         .unwrap()
@@ -75,6 +98,50 @@ async fn health_is_exempt_even_when_armed() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+}
+
+/// The portal's exemption is **conditional on the portal being open**, and both
+/// halves are load-bearing.
+///
+/// Open: its routes must answer without a key, because a visitor signing in has
+/// none by definition — gating self-service onboarding behind the credential it
+/// hands out is a closed loop.
+#[tokio::test]
+async fn portal_paths_are_exempt_when_the_portal_is_open() {
+    let status = send_with(
+        &armed_config_with_portal(true),
+        Request::builder()
+            .uri(prices_api::portal::CONFIG_PATH)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// Closed: the exemption is withdrawn, so a portal path answers `401` like any
+/// other unknown path rather than an empty `404`. Exempting it unconditionally
+/// would make the portal prefix the only unauthenticated surface on an armed
+/// service — uniquely fingerprintable, which is the disclosure the portal gate
+/// exists to prevent. Kept in step with `tests/portal.rs`.
+#[tokio::test]
+async fn portal_paths_are_not_exempt_when_the_portal_is_closed() {
+    let portal = send(
+        Request::builder()
+            .uri("/api/key")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let absent = send(
+        Request::builder()
+            .uri("/v1/anything")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(portal, StatusCode::UNAUTHORIZED);
+    assert_eq!(portal, absent);
 }
 
 #[tokio::test]

@@ -9,9 +9,11 @@
 //! at the end, so they never touch `prices` and can run in parallel.
 
 use clickhouse::Client;
-use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichmentPass};
-use enrichment_worker::repair::{CoarseRepairConfig, CoarseRepairDriver};
-use prices_clickhouse::USDC_ISSUER;
+use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPass, UsdResetSpec};
+use enrichment_worker::repair::{
+    CoarseRepairConfig, CoarseRepairDriver, CoarseSweepConfig, run_coarse_sweep,
+};
+use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 
 fn ch_url() -> String {
     std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string())
@@ -116,6 +118,7 @@ fn cfg(db: &str) -> ChEnrichConfig {
         max_batches: 10,
         one_shot: false,
         time_window: None,
+        usd_reset: None,
     }
 }
 
@@ -720,6 +723,8 @@ async fn coarse_repair_driver_bounds_span_and_reports_per_month() {
             end_month: 202_505,
             snapshot: true,
             dry_run: false,
+            one_shot: true,
+            deadline: None,
         },
     );
     let summary = driver.run().await.unwrap();
@@ -796,4 +801,974 @@ async fn coarse_repair_driver_bounds_span_and_reports_per_month() {
         .execute()
         .await
         .unwrap();
+}
+
+/// The recurring coarse sweep folded into the hourly enrichment Lambda (task
+/// 0114). Exercises the three properties the handler relies on:
+///
+///   1. **Trailing window from `now()`** — the sweep computes `[prev-month,
+///      this-month]` (lookback 2) off the CH server clock, so an in-window bucket
+///      is enriched while a 6-months-ago bucket (out of window) is left at zero,
+///      proving partition-bounding (task 0111) without a fixed month argument.
+///   2. **Multi-table** — it sweeps every configured coarse table.
+///   3. **Non-coarse tables are refused** — `price_ohlcv_1m` (the live base) is
+///      recorded under `skipped_tables` (NOT `failed_tables`, which is the alarm
+///      series) and never touched.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn coarse_sweep_bounds_trailing_window_and_refuses_the_1m_base() {
+    let db = "it_coarse_sweep";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    // Peg-enrichable FOO/USDC buckets. For each coarse table: one in the current
+    // month, one in the previous month (both inside a lookback-2 window), and one
+    // six months back (outside it). The 1m base gets one current-month zero row
+    // to prove the sweep refuses it. All timestamps are computed from now() so the
+    // window match is clock-relative, not hard-coded.
+    for tbl in ["price_ohlcv_1h", "price_ohlcv_4h", "price_ohlcv_1m"] {
+        let rows = if tbl == "price_ohlcv_1m" {
+            "(toUnixTimestamp(toStartOfMonth(now())), 10,2,'sdex', 8,8,8,8, 1,40,0,0,8,1,1)"
+                .to_string()
+        } else {
+            "(toUnixTimestamp(toStartOfMonth(now())),                    10,2,'sdex', 8,8,8,8, 1,40,0,0,8,1,1), \
+             (toUnixTimestamp(toStartOfMonth(now() - INTERVAL 1 MONTH)), 10,2,'sdex', 8,8,8,8, 1,40,0,0,8,1,1), \
+             (toUnixTimestamp(now() - INTERVAL 6 MONTH),                 10,2,'sdex', 5,5,5,5, 1,40,0,0,5,1,1)".to_string()
+        };
+        client
+            .query(&format!(
+                "INSERT INTO {db}.{tbl} \
+                 (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+                 VALUES {rows}"
+            ))
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    // Expected trailing window, straight from the same clock the sweep reads.
+    let start_expected: u32 = client
+        .query("SELECT toYYYYMM(now() - INTERVAL 1 MONTH)")
+        .fetch_one::<u32>()
+        .await
+        .unwrap();
+    let end_expected: u32 = client
+        .query("SELECT toYYYYMM(now())")
+        .fetch_one::<u32>()
+        .await
+        .unwrap();
+
+    let sweep_cfg = CoarseSweepConfig {
+        base: cfg(db),
+        // 1m is deliberately included to prove it is refused, not swept.
+        tables: vec![
+            "price_ohlcv_1h".to_string(),
+            "price_ohlcv_4h".to_string(),
+            "price_ohlcv_1m".to_string(),
+        ],
+        lookback_months: 2,
+        max_batches: 10,
+    };
+    // No wall-clock limit for this test — exercise the full window.
+    let sum = run_coarse_sweep(&client, &sweep_cfg, None).await.unwrap();
+
+    // Window resolved from now() …
+    assert_eq!(sum.start_month, start_expected);
+    assert_eq!(sum.end_month, end_expected);
+    // … two coarse tables swept, the 1m base refused.
+    assert_eq!(sum.tables.len(), 2, "1h and 4h swept");
+    // The refusal lands on `skipped_tables` (benign config), NOT `failed_tables`
+    // (the dead-sweep alarm series) — a mis-config must never trip the alarm.
+    assert!(sum.failed_tables.is_empty(), "no runtime failures");
+    assert_eq!(
+        sum.skipped_tables,
+        vec!["price_ohlcv_1m".to_string()],
+        "the live 1m base is refused (skipped), never swept"
+    );
+    // Two in-window rows per table enriched; the out-of-window rows aren't even
+    // enumerated, so nothing is left "remaining" in the swept months.
+    assert_eq!(
+        sum.total_enriched(),
+        4,
+        "2 in-window rows × 2 coarse tables"
+    );
+    assert_eq!(sum.total_remaining(), 0);
+
+    // Partition-bounding held: each coarse table keeps exactly ONE zero — the
+    // six-months-ago bucket the trailing window never reached.
+    for tbl in ["price_ohlcv_1h", "price_ohlcv_4h"] {
+        let zeros: u64 = client
+            .query(&format!(
+                "SELECT count() FROM {db}.{tbl} FINAL WHERE close_usd = 0"
+            ))
+            .fetch_one::<u64>()
+            .await
+            .unwrap();
+        assert_eq!(zeros, 1, "{tbl}: only the out-of-window bucket stays zero");
+    }
+    // And the 1m base is untouched — its current-month zero is still zero.
+    let base_zeros: u64 = client
+        .query(&format!(
+            "SELECT count() FROM {db}.price_ohlcv_1m FINAL WHERE close_usd = 0"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(base_zeros, 1, "the sweep never wrote the 1m base table");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Wall-clock budget (task 0114). A slow catch-up must not run into the Lambda
+/// hard-timeout — which is an invocation error the best-effort handler cannot
+/// catch — so the sweep stops at its deadline and defers the rest. With an
+/// already-elapsed deadline it must enrich NOTHING and record no failures/skips
+/// (deferred ≠ failed), leaving the seeded zero for the next run.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn coarse_sweep_defers_all_work_past_its_deadline() {
+    let db = "it_coarse_sweep_deadline";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    // One in-window, peg-enrichable FOO/USDC bucket that WOULD be repaired with no
+    // deadline.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES (toUnixTimestamp(toStartOfMonth(now())), 10,2,'sdex', 8,8,8,8, 1,40,0,0,8,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let sweep_cfg = CoarseSweepConfig {
+        base: cfg(db),
+        tables: vec!["price_ohlcv_1h".to_string()],
+        lookback_months: 2,
+        max_batches: 10,
+    };
+    // Deadline already in the past → the pre-table check trips immediately.
+    let past = std::time::Instant::now();
+    let sum = run_coarse_sweep(&client, &sweep_cfg, Some(past))
+        .await
+        .unwrap();
+
+    // Nothing swept, and — crucially — the deferred table is NOT a failure/skip.
+    assert!(
+        sum.tables.is_empty(),
+        "deadline stopped the sweep before any table"
+    );
+    assert!(sum.failed_tables.is_empty(), "deferred is not failed");
+    assert!(sum.skipped_tables.is_empty(), "deferred is not skipped");
+    assert_eq!(sum.total_enriched(), 0);
+
+    // The seeded zero is untouched — it will be picked up on a future run.
+    let zeros: u64 = client
+        .query(&format!(
+            "SELECT count() FROM {db}.price_ohlcv_1h FINAL WHERE close_usd = 0"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(zeros, 1, "the in-window zero was deferred, not repaired");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// The `one_shot` knob for the recurring sweep (task 0114).
+///
+/// The manual historical repair drains each month fully (`one_shot: true`, proven
+/// by `coarse_repair_driver_bounds_span_and_reports_per_month`). The recurring
+/// sweep folded into the hourly enrichment Lambda must instead be **bounded**
+/// (`one_shot: false`): each run enriches at most `max_batches × batch_size` rows
+/// of a month and defers the overflow to the next run, so an unexpectedly large
+/// recent backlog can never exceed the function timeout. This proves both halves —
+/// a single bounded run does NOT drain the whole backlog, and successive runs
+/// converge it to the `no_reference` floor.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn coarse_repair_bounded_mode_defers_overflow_across_runs() {
+    let db = "it_coarse_repair_bounded";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    // Seven peg-enrichable FOO/USDC 1h buckets in one month (2025-02), all at
+    // close_usd = 0. The peg tier fills close_usd = close × $1.
+    let feb2025 = 1_739_577_600u32; // 2025-02-15 00:00 UTC
+    let values: Vec<String> = (0..7u32)
+        .map(|i| {
+            let (ts, c) = (feb2025 + i * 3600, i + 2);
+            format!("({ts},10,2,'sdex', {c},{c},{c},{c}, 1,40,0,0,{c},1,1)")
+        })
+        .collect();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES {}",
+            values.join(", ")
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // Bounded config: max_batches = 2, batch_size = 2 → at most 4 rows per run.
+    // (One oracle batch no-ops and drains — no oracle_prices — then the peg tier
+    // runs its own 2-batch budget: 2 batches × 2 rows = 4 enriched, 3 deferred.)
+    let mut enrich = cfg(db);
+    enrich.table = "price_ohlcv_1h".to_string();
+    enrich.max_batches = 2;
+    enrich.batch_size = 2;
+    let repair_cfg = CoarseRepairConfig {
+        enrich,
+        start_month: 202_502,
+        end_month: 202_502,
+        snapshot: false, // the recurring sweep never freezes (recent, not sole-copy)
+        dry_run: false,
+        one_shot: false, // ← the knob under test: BOUNDED, not full-drain
+        deadline: None,  // no wall-clock limit here — testing the batch bound
+    };
+
+    // Run 1 — bounded: 4 of the 7 enriched, the overflow deferred (not drained).
+    let s1 = CoarseRepairDriver::with_client(client.clone(), repair_cfg.clone())
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(s1.months.len(), 1);
+    let feb1 = &s1.months[0];
+    assert_eq!(feb1.month, 202_502);
+    assert_eq!(feb1.zeros_before, 7, "full month backlog before run 1");
+    assert_eq!(
+        feb1.rows_enriched, 4,
+        "bounded run capped at max_batches × batch_size = 4 (overflow deferred)"
+    );
+    assert_eq!(
+        feb1.zeros_after, 3,
+        "3 rows deferred to the next run, not drained"
+    );
+    assert!(
+        feb1.snapshot_name.is_none(),
+        "recurring sweep does not FREEZE"
+    );
+
+    // Run 2 — same bounded config: sees only the deferred overflow and converges.
+    let s2 = CoarseRepairDriver::with_client(client.clone(), repair_cfg.clone())
+        .run()
+        .await
+        .unwrap();
+    let feb2 = &s2.months[0];
+    assert_eq!(feb2.zeros_before, 3, "run 2 sees only the run-1 overflow");
+    assert_eq!(feb2.rows_enriched, 3);
+    assert_eq!(
+        feb2.zeros_after, 0,
+        "backlog converged to the floor after run 2"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0172 regression — a USDT-quoted candle must be priced at the MEASURED
+/// USDT rate, not at $1.
+///
+/// The canonical Stellar USDT (`USDT_ISSUER`) depegged in June 2022 and trades
+/// at ~$0.13. It used to sit in the peg tier alongside USDC, so every
+/// USDT-quoted candle got `close_usd = close × $1` — a ~7.4x overstatement
+/// across 44,657 candles and 495 base assets on prod. It now takes the pivot
+/// tier instead, exactly like XLM: its USD value is read from its own USDC
+/// market rather than assumed.
+///
+/// The fixture makes the two outcomes numerically unmistakable: FOO trades at
+/// 10.0 against USDT, so the correct answer is 10 × 0.13 = **1.3** and the old
+/// buggy answer is **10.0**.
+///
+/// ⚠️ This also guards the failure mode that would look like a fix: simply
+/// deleting USDT from the peg set, with no pivot, leaves these candles at
+/// `close_usd = 0`. That is NOT acceptable — zero is indistinguishable from
+/// "genuinely zero" and "not yet enriched" in this schema, and ~130
+/// `argMax(close_usd, …)` sites read it unguarded. Hence the explicit `> 0`
+/// assertion below.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg() {
+    let db = "it_enrich_0172_usdt_pivot";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (1,'XLM','classic','',''), (2,'USDC','classic','{USDC_ISSUER}',''), \
+             (3,'USDT','classic','{USDT_ISSUER}',''), (10,'FOO','classic','GFOO','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // USDT/USDC at 0.13 is the pivot SOURCE — it is USDC-quoted, so the peg tier
+    // prices it first (0.13 × $1). FOO/USDT at 10.0 is the SUBJECT: the pivot
+    // must then value it at 10 × 0.13 = 1.3, not at the old 10 × $1 = 10.0.
+    let deep = 1_600_000_000u32;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({deep}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 1000,130,0,0,0.13, 1,1), \
+             ({deep},10, 3,'sdex', 10,10,10,10,          5,  50, 0,0,10,    1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let approx = |a: f64, b: f64| (a - b).abs() < 1e-4;
+
+    // The pivot source itself: USDC-quoted, so the peg tier gives it 0.13.
+    let usdt_usd = close_usd(&client, db, 3, 2, deep).await;
+    assert!(
+        approx(usdt_usd, 0.13),
+        "USDT/USDC must price at its market value 0.13, got {usdt_usd}"
+    );
+
+    let foo_via_usdt = close_usd(&client, db, 10, 3, deep).await;
+    assert!(
+        foo_via_usdt > 0.0,
+        "USDT-quoted candle must not be left unpriced at 0 — that trades a wrong \
+         number for a silent one (see the ~130 unguarded argMax(close_usd) sites)"
+    );
+    assert!(
+        approx(foo_via_usdt, 1.3),
+        "USDT-quoted candle must use the MEASURED rate: 10 x 0.13 = 1.3, got \
+         {foo_via_usdt}. A value of 10.0 means USDT is being pegged to $1 again \
+         and every USDT-quoted candle is ~7.4x overstated."
+    );
+
+    // Idempotent, like the other tiers: a second pass must not re-multiply.
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+    let after = close_usd(&client, db, 10, 3, deep).await;
+    assert!(
+        approx(after, 1.3),
+        "second pass must leave the pivot value unchanged, got {after}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Fixture for the task 0182 reset tests: a USDT/USDC pivot reference at two
+/// instants, and a FOO/USDT candle at each **already carrying the wrong `$1`
+/// peg values** — `close_usd = 10.0` where the measured rate says 1.3.
+///
+/// That "already written" part is the whole point. Every tier filters on
+/// `close_usd = 0`, so these rows are inert: the 0172 writer fix does not reach
+/// them and never will.
+async fn setup_0182(db: &str, t_old: u32, t_new: u32) -> Client {
+    let client = setup_scratch(db).await;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (1,'XLM','classic','',''), (2,'USDC','classic','{USDC_ISSUER}',''), \
+             (3,'USDT','classic','{USDT_ISSUER}',''), (10,'FOO','classic','GFOO','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({t_old}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 1000,130, 0, 0, 0.13, 1,1), \
+             ({t_new}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 1000,130, 0, 0, 0.13, 1,1), \
+             ({t_old},10, 3,'sdex', 10,10,10,10,            5, 50,50,10, 10,   1,1), \
+             ({t_new},10, 3,'sdex', 10,10,10,10,            5, 50,50,10, 10,   1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+}
+
+/// Control for the reset tests below, and a standing regression for the trap
+/// that hid task 0182 for a month: an ordinary pass over rows whose `close_usd`
+/// is **wrong but non-zero** does nothing at all, and reports success doing it.
+///
+/// If this test ever starts failing because the values moved, the tiers have
+/// stopped being idempotent — which is a much bigger problem than 0182.
+#[tokio::test]
+#[ignore]
+async fn an_ordinary_pass_cannot_see_a_wrong_but_written_close_usd() {
+    let db = "it_enrich_0182_control";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    let client = setup_0182(db, t_old, t_new).await;
+
+    let stats = ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    assert_eq!(
+        stats.rows_reset, 0,
+        "no reset was configured, so the pass must not discard anything"
+    );
+    for ts in [t_old, t_new] {
+        let v = close_usd(&client, db, 10, 3, ts).await;
+        assert!(
+            (v - 10.0).abs() < 1e-4,
+            "an ordinary pass must leave a written close_usd alone (that is what \
+             makes it idempotent); at {ts} got {v}, expected the untouched 10.0"
+        );
+    }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// The task 0182 repair, end to end: re-open the written values, let the pivot
+/// recompute them from the measured USDT/USDC market, and leave the pre-epoch
+/// window untouched.
+///
+/// Both halves are asserted deliberately. A test that checked only "the new row
+/// got fixed" would also pass for a reset with no epoch bound at all — which
+/// would zero the pre-2021 rows that have no pivot reference and strand them at
+/// `close_usd = 0` permanently.
+#[tokio::test]
+#[ignore]
+async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
+    let db = "it_enrich_0182_reset";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    let client = setup_0182(db, t_old, t_new).await;
+
+    let mut c = cfg(db);
+    // A reset requires a draining pass — see `the_usd_reset_refuses_a_bounded_pass`.
+    // The operator CLI hard-codes this; the IT helper defaults to bounded.
+    c.one_shot = true;
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 3,
+        not_before: t_new,
+    });
+    let stats = ChEnrichmentPass::new(c).run().await.unwrap();
+
+    assert_eq!(
+        stats.rows_reset, 1,
+        "exactly the one post-epoch FOO/USDT row should have been re-opened"
+    );
+
+    let fixed = close_usd(&client, db, 10, 3, t_new).await;
+    assert!(
+        (fixed - 1.3).abs() < 1e-4,
+        "the re-opened candle must be recomputed at the MEASURED rate \
+         (10 x 0.13 = 1.3), got {fixed}. 10.0 means the reset never happened; \
+         0.0 means it was re-opened and then not refilled, which is worse than \
+         the defect."
+    );
+
+    let protected = close_usd(&client, db, 10, 3, t_old).await;
+    assert!(
+        (protected - 10.0).abs() < 1e-4,
+        "the pre-epoch candle must keep its stored value, got {protected}. \
+         Below the epoch the pivot has no reference, so zeroing it here would \
+         strand it at 0 forever."
+    );
+
+    // Both USD columns come from one reference, or the row is incoherent.
+    let vq: f64 = client
+        .query(&format!(
+            "SELECT toFloat64(volume_quote_usd) FROM {db}.price_ohlcv_1m FINAL \
+             WHERE asset_id = 10 AND quote_asset_id = 3 AND timestamp = ?"
+        ))
+        .bind(t_new)
+        .fetch_one::<f64>()
+        .await
+        .unwrap();
+    assert!(
+        (vq - 6.5).abs() < 1e-4,
+        "volume_quote_usd must be recomputed from the same 0.13 rate \
+         (50 x 0.13 = 6.5), got {vq}. 50.0 means it kept the old peg while \
+         close_usd moved, leaving two USD columns that disagree by ~7.4x."
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// A mistyped `--reset-quote-asset-id` must not be able to zero rows nothing can
+/// re-price.
+///
+/// This is the one way the repair ends up strictly worse than the defect: a
+/// wrong-but-visible number becomes the ambiguous zero that ~130 unguarded
+/// `argMax(close_usd, …)` sites read as a real price. And the oracle gate does
+/// not catch it — an unknown asset has no Reflector rows either, which is
+/// exactly what that gate is looking for.
+#[tokio::test]
+#[ignore]
+async fn the_usd_reset_refuses_a_quote_leg_that_no_tier_can_reprice() {
+    let db = "it_enrich_0182_unpriceable";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    let client = setup_0182(db, t_old, t_new).await;
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    // 10 is FOO — a real asset in the fixture, but not a peg or pivot reference.
+    // Stands in for the realistic slip of typing 11 for 111.
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 10,
+        not_before: t_new,
+    });
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+
+    assert!(
+        matches!(err, ChEnrichError::ResetTargetHasNoPricingPath { quote_asset_id, .. }
+                 if quote_asset_id == 10),
+        "expected the reset to refuse an unpriceable quote leg, got {err:?}"
+    );
+
+    let v = close_usd(&client, db, 10, 3, t_new).await;
+    assert!(
+        (v - 10.0).abs() < 1e-4,
+        "a refused reset must not have written anything, got {v}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// A bounded pass can defer the peg-pivot tier (it is gated on the oracle tier
+/// draining), which would leave the reset's zeroes published until some later
+/// run. The combination is refused rather than risked.
+#[tokio::test]
+#[ignore]
+async fn the_usd_reset_refuses_a_bounded_pass() {
+    let db = "it_enrich_0182_bounded";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    let client = setup_0182(db, t_old, t_new).await;
+
+    let mut c = cfg(db);
+    c.one_shot = false;
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 3,
+        not_before: t_new,
+    });
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+
+    assert!(
+        matches!(err, ChEnrichError::ResetRequiresOneShot { quote_asset_id } if quote_asset_id == 3),
+        "expected a bounded pass to refuse the reset, got {err:?}"
+    );
+
+    let v = close_usd(&client, db, 10, 3, t_new).await;
+    assert!(
+        (v - 10.0).abs() < 1e-4,
+        "a refused reset must not have written anything, got {v}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0182's first ordering constraint, enforced rather than documented.
+///
+/// The oracle tier runs before the peg-pivot tier and wins where it applies, so
+/// a reset performed while `oracle_prices` still holds rows for the quote leg
+/// would be undone by the very next statement in the same pass — and the run
+/// would report a healthy repair over unchanged values, now labelled
+/// `method = 'oracle'`. The pass must refuse instead.
+#[tokio::test]
+#[ignore]
+async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_leg() {
+    let db = "it_enrich_0182_oracle_gate";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    let client = setup_0182(db, t_old, t_new).await;
+
+    // A Reflector row for USDT at par — exactly the mis-attribution task 0196
+    // purged from prod.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices \
+             (asset_id, oracle_name, timestamp, price_usd) VALUES \
+             (3, 'reflector', {t_new}, 1.0)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 3,
+        not_before: t_new,
+    });
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+
+    assert!(
+        matches!(err, ChEnrichError::ResetBlockedByOracleRows { quote_asset_id, rows, .. }
+                 if quote_asset_id == 3 && rows == 1),
+        "expected the reset to be refused while oracle rows shadow the quote leg, got {err:?}"
+    );
+
+    // And it refused *before* writing: the stored value is untouched, so the
+    // operator can purge and re-run without a half-applied repair in the way.
+    let v = close_usd(&client, db, 10, 3, t_new).await;
+    assert!(
+        (v - 10.0).abs() < 1e-4,
+        "a refused reset must not have written anything, got {v}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Task 0111 phase 2 — frontier-driven historical sweep
+// ---------------------------------------------------------------------------
+
+/// Read a month's stored frontier state, or `None` if the sweep never recorded
+/// it. `FINAL` collapses the ReplacingMergeTree so a re-recorded month reads as
+/// its latest state, which is exactly how the sweep reads it.
+async fn frontier_state(client: &Client, db: &str, month: u32) -> Option<String> {
+    client
+        .query(&format!(
+            "SELECT CAST(state AS String) FROM {db}.enrichment_frontier FINAL \
+             WHERE tbl = 'price_ohlcv_1m' AND month = ?"
+        ))
+        .bind(month)
+        .fetch_optional::<String>()
+        .await
+        .unwrap()
+}
+
+/// End-to-end frontier walk against a live ClickHouse. This is the half the
+/// pure `months_to_sweep` unit tests cannot reach: the actual SQL — the
+/// `Enum8`-by-name insert, `CAST(state AS String)` on read, the server-side
+/// `toUnixTimestamp64Milli` version, and `toYYYYMM(min|max(timestamp))` as the
+/// partition-span source.
+///
+/// Fixture spans three monthly partitions below the live window:
+///   * 202101 — FOO/XLM with **no** XLM/USDC reference anywhere before it, so
+///     nothing can price it. The permanently-unpriceable floor in miniature.
+///   * 202102 — FOO/USDC, peggable.
+///   * 202103 — FOO/USDC, peggable.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_frontier_advances_exhausts_and_never_revisits() {
+    use enrichment_worker::frontier::{HistoricalSweepConfig, run_historical_sweep};
+
+    let db = "it_enrich_frontier";
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    // 2021-01-15, 2021-02-15, 2021-03-15 — one candle per monthly partition.
+    let (jan, feb, mar) = (1_610_712_000u32, 1_613_390_400u32, 1_615_809_600u32);
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({jan},10, 1,'phoenix', 7,7,7,7, 1,7,0,0,7,1,1), \
+             ({feb},10, 2,'sdex',    4,4,4,4, 1,4,0,0,4,1,1), \
+             ({mar},10, 2,'sdex',    9,9,9,9, 1,9,0,0,9,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let sweep = |max_months: u32| {
+        let mut base = cfg(db);
+        base.url = ch_url();
+        HistoricalSweepConfig {
+            base,
+            // Everything from 2026-07 on belongs to the live pass; the whole
+            // fixture is below it.
+            live_start_month: 202607,
+            max_months,
+            deadline: None,
+            // Drift correction off for the walk assertions below: a re-check
+            // firing mid-walk would re-stamp months and blur what is being
+            // asserted. Its own behaviour is covered by
+            // `a_backfill_into_an_exhausted_month_reopens_it`.
+            recheck_after_secs: u32::MAX,
+            max_rechecks: 0,
+        }
+    };
+    let client_for_sweep = Client::default().with_url(ch_url()).with_database(db);
+
+    // --- run 1: the oldest month, which nothing can price -------------------
+    let r1 = run_historical_sweep(&client_for_sweep, &sweep(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        r1.months.len(),
+        1,
+        "max_months = 1 works exactly one partition"
+    );
+    assert_eq!(r1.months[0].month, 202101, "oldest-first");
+    assert_eq!(
+        r1.frontier_month,
+        Some(202101),
+        "frontier position is the oldest pending month"
+    );
+    assert_eq!(
+        r1.total_enriched(),
+        0,
+        "202101 has no USD reference of any kind"
+    );
+    assert_eq!(
+        frontier_state(&client, db, 202101).await.as_deref(),
+        Some("exhausted"),
+        "a month that makes no progress is terminal — this is the pre-reference \
+         floor dropping out with no hard-coded cutoff date"
+    );
+
+    // --- run 2: must SKIP the exhausted month and advance -------------------
+    let r2 = run_historical_sweep(&client_for_sweep, &sweep(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        r2.months[0].month, 202102,
+        "the exhausted month is never revisited"
+    );
+    assert!(r2.total_enriched() > 0, "202102 is peggable");
+    assert_eq!(
+        frontier_state(&client, db, 202102).await.as_deref(),
+        Some("exhausted"),
+        "a month drained to zero candidates in one pass is terminal immediately — \
+         marking it pending would cost an extra visit per month across ~102 \
+         partitions purely to learn there is nothing left"
+    );
+    assert!(
+        close_usd(&client, db, 10, 2, feb).await > 0.0,
+        "the sweep actually wrote a USD value, not just a frontier row"
+    );
+
+    // --- run 3: the last month below the live window ------------------------
+    let r3 = run_historical_sweep(&client_for_sweep, &sweep(1))
+        .await
+        .unwrap();
+    assert_eq!(r3.months[0].month, 202103);
+    assert!(close_usd(&client, db, 10, 2, mar).await > 0.0);
+
+    // --- run 4: nothing left ------------------------------------------------
+    let r4 = run_historical_sweep(&client_for_sweep, &sweep(5))
+        .await
+        .unwrap();
+    assert!(
+        r4.months.is_empty(),
+        "a fully exhausted history yields no work"
+    );
+    assert_eq!(
+        r4.months_pending, 0,
+        "the drain-progress metric reaches zero"
+    );
+    assert_eq!(r4.frontier_month, None, "no frontier position remains");
+}
+
+/// The sweep must never touch a partition the live pass owns — otherwise the
+/// two contend for the same rows every hour, which is the coupling task 0111
+/// exists to remove.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_sweep_never_enters_the_live_window() {
+    use enrichment_worker::frontier::{HistoricalSweepConfig, run_historical_sweep};
+
+    let db = "it_enrich_frontier_live";
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    // Both candles are inside the declared live window (202102 onward).
+    let (feb, mar) = (1_613_390_400u32, 1_615_809_600u32);
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({feb},10,2,'sdex', 4,4,4,4, 1,4,0,0,4,1,1), \
+             ({mar},10,2,'sdex', 9,9,9,9, 1,9,0,0,9,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let client_for_sweep = Client::default().with_url(ch_url()).with_database(db);
+    let summary = run_historical_sweep(
+        &client_for_sweep,
+        &HistoricalSweepConfig {
+            base: cfg(db),
+            live_start_month: 202102,
+            max_months: 12,
+            deadline: None,
+            recheck_after_secs: u32::MAX,
+            max_rechecks: 0,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        summary.months.is_empty(),
+        "every partition belongs to the live pass"
+    );
+    assert_eq!(
+        close_usd(&client, db, 10, 2, feb).await,
+        0.0,
+        "the sweep must leave live-window rows for the live pass"
+    );
+}
+
+/// 🔴 `exhausted` must be a hint with an expiry, not a verdict.
+///
+/// A month is marked exhausted because nothing there could be priced *at that
+/// moment*. A backfill writing into a historical partition falsifies that later
+/// — which is exactly what tasks 0088 and 0201 do. Without the re-check those
+/// rows would sit unenriched forever while the frontier read clean, which is
+/// the "skipped rows that look healthy" failure class that cost 26 days in 0215.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_backfill_into_an_exhausted_month_reopens_it() {
+    use enrichment_worker::frontier::{HistoricalSweepConfig, run_historical_sweep};
+
+    let db = "it_enrich_frontier_drift";
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    let feb = 1_613_390_400u32; // 2021-02-15
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({feb},10,2,'sdex', 4,4,4,4, 1,4,0,0,4,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let client_for_sweep = Client::default().with_url(ch_url()).with_database(db);
+    let sweep_cfg = |recheck_after_secs: u32, max_rechecks: u32| HistoricalSweepConfig {
+        base: cfg(db),
+        live_start_month: 202607,
+        max_months: 1,
+        deadline: None,
+        recheck_after_secs,
+        max_rechecks,
+    };
+
+    // Drain 202102 to zero candidates → exhausted.
+    run_historical_sweep(&client_for_sweep, &sweep_cfg(u32::MAX, 0))
+        .await
+        .unwrap();
+    assert_eq!(
+        frontier_state(&client, db, 202102).await.as_deref(),
+        Some("exhausted")
+    );
+
+    // A backfill lands a NEW unenriched candle in that finished partition.
+    let feb2 = feb + 60;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({feb2},10,2,'sdex', 6,6,6,6, 1,6,0,0,6,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // With the mark still fresh, the walk skips the month entirely — the
+    // partition is invisible and the new row would never be enriched. This
+    // asserts the hazard exists, so the fix below is testing something real.
+    let blind = run_historical_sweep(&client_for_sweep, &sweep_cfg(u32::MAX, 4))
+        .await
+        .unwrap();
+    assert_eq!(blind.months_rechecked, 0, "nothing is stale yet");
+    assert_eq!(
+        close_usd(&client, db, 10, 2, feb2).await,
+        0.0,
+        "the backfilled row is invisible while the exhausted mark is trusted"
+    );
+
+    // recheck_after_secs = 0 makes every exhausted mark stale immediately.
+    let corrected = run_historical_sweep(&client_for_sweep, &sweep_cfg(0, 4))
+        .await
+        .unwrap();
+    assert_eq!(
+        corrected.months_rechecked, 1,
+        "the stale month was re-counted"
+    );
+    assert_eq!(corrected.months_reopened, 1, "and it had gained work");
+    assert_eq!(
+        frontier_state(&client, db, 202102).await.as_deref(),
+        Some("pending"),
+        "re-opened, so the next walk will work it"
+    );
+
+    // The next ordinary run picks it up and prices the backfilled row.
+    run_historical_sweep(&client_for_sweep, &sweep_cfg(u32::MAX, 0))
+        .await
+        .unwrap();
+    assert!(
+        close_usd(&client, db, 10, 2, feb2).await > 0.0,
+        "drift correction closed the loop — the backfilled row is enriched"
+    );
 }

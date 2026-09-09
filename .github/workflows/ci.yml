@@ -27,6 +27,34 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+              # The OpenAPI lint gate (task 0124) runs in the rust job — the
+              # document is produced by a cargo bin, so only that job can
+              # extract it. Its config lives at the repo root.
+              - 'redocly.yaml'
+              - '.redocly.lint-ignore.yaml'
+              # The `servers` URL the linted document is stamped with.
+              - 'infra/envs/production.json'
+              # `openapi:verify-routes` compares this file's synthesized output
+              # against the extracted document, and it is the only check that
+              # sees the gateway→spec direction. `infra/**` is otherwise absent
+              # here, so an infra-only PR adding a gateway route would skip the
+              # rust job entirely and map a route no document describes. Listed
+              # as the single file rather than `infra/**` so unrelated CDK edits
+              # do not pay for an ARM Rust build.
+              - 'infra/src/lib/stacks/api-gateway-stack.ts'
+              # Same reasoning for the document's `servers` block:
+              # compute-stack.ts is what actually puts API_BASE_URL on the
+              # api-handler, and types.ts is what asserts the value carries the
+              # stage path. `openapi:verify-servers` compares both against the
+              # extracted document — but only if this job runs, and dropping
+              # the env var is a pure-infra edit.
+              - 'infra/src/lib/stacks/compute-stack.ts'
+              - 'infra/src/lib/types.ts'
+              # `redocly` is a devDependency and this is the only job that runs
+              # it. Without these, a PR that drops or bumps it merges green and
+              # the failure lands on the next author to touch packages/**.
+              - 'package.json'
+              - 'package-lock.json'
               # The Lambda asset guards are implemented here. Without this,
               # a PR touching only the guard scripts runs no job at all and
               # the thing both jobs depend on is the one file CI never
@@ -35,6 +63,12 @@ jobs:
             typescript:
               - 'libs/**'
               - 'infra/**'
+              # The portal app (task 0185). Without this line its lint, build,
+              # typecheck and tests never run: no other pattern here matches
+              # `web/`, so a frontend-only PR would run no job at all and merge
+              # green having been checked by nothing. Same shape as the gap the
+              # `rust` filter above closes for `api-gateway-stack.ts`.
+              - 'web/**'
               - 'package.json'
               - 'package-lock.json'
               - 'tsconfig*.json'
@@ -43,7 +77,7 @@ jobs:
               - 'tools/scripts/**'
 
   typescript:
-    name: TypeScript (lint, build, typecheck)
+    name: TypeScript (lint, build, typecheck, test)
     needs: changes
     if: |
       needs.changes.outputs.typescript == 'true' ||
@@ -61,7 +95,13 @@ jobs:
 
       - run: npm ci
       - run: npx nx format:check --all
-      - run: npx nx run-many -t lint build typecheck
+      # `test` is in this list on purpose (task 0185). It was absent while the
+      # only TypeScript project was the CDK app, whose behaviour CI asserts
+      # through `synth-production` in the rust job instead — so nothing was
+      # obviously missing. The portal changed that: its Vitest suite is the only
+      # thing standing between a regression and `/api-tokens/`, and a suite that
+      # runs solely on the author's machine guards nothing after the PR is open.
+      - run: npx nx run-many -t lint build typecheck test
 
       # Cheap counterpart to the rust job's build+verify+synth guard.
       #
@@ -97,18 +137,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # PINNED, and the pin is the whole point — see the cargo-lambda step.
+      #
+      # rustc 1.98.0 (2026-08-18) began passing `-Wl,--fix-cortex-a53-843419`
+      # on aarch64-unknown-linux-gnu. Zig's linker rejects it outright
+      # ("error: unsupported linker arg"), so every aarch64 link fails and the
+      # `Build Lambda bootstraps` step dies on the first crate that links —
+      # `crc-fast`, pulled in by aws-smithy-checksums. Nothing in this repo
+      # changed: PR #227 passed on 1.97.1 and PR #230 failed on 1.98.0 with the
+      # identical cargo-lambda 1.9.1 / zig 0.16.0 pair.
+      #
+      # cargo-zigbuild filters the arg since v0.23.0 (rust-cross/cargo-zigbuild
+      # #451, fixed by #452), but cargo-lambda 1.9.1 still vendors 0.20.1, so
+      # the fix is not reachable by upgrading cargo-lambda today. Unpin BOTH
+      # lines together once a cargo-lambda release carries zigbuild >= 0.23.
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.97.1
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
+      # Pinned alongside the toolchain above: `pip3 install cargo-lambda`
+      # resolves to whatever is newest at run time, which is how the vendored
+      # cargo-zigbuild version — the half of this pair that actually carries
+      # the fix — could change under a green build without a commit.
       - name: Install cargo-lambda
-        run: pip3 install cargo-lambda
+        run: pip3 install cargo-lambda==1.9.1
 
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace
-      - run: cargo clippy -p extractors-core -p phoenix-extractor -p soroswap-extractor -p aquarius-extractor -p ledger-processor -- -D warnings
+      - run: cargo clippy -p extractors-core -p phoenix-extractor -p soroswap-extractor -p aquarius-extractor -p ledger-processor -p prices-api -- -D warnings
+      # `--no-deps` because prices-ingest-core (a path dependency) carries
+      # pre-existing clippy findings; this lints only the crate that owns the
+      # ClickHouseWriteLatencyMs publish path (task 0125).
+      - run: cargo clippy -p prices-ledger-processor --features lambda --no-deps -- -D warnings
       - run: cargo test --workspace
 
       # The set of Lambda assets is DERIVED from the CDK source rather than
@@ -193,6 +256,19 @@ jobs:
       # reference resolved at DEPLOY time. There are no `fromLookup` /
       # `valueFromLookup` context lookups, which are the calls that would
       # need real AWS credentials at synth time.
+      #
+      # Node on the Rust runner is DELIBERATE — do not "clean this up".
+      # Synth needs the nine bootstraps and only this job builds them, so
+      # moving it out means shipping ~110 MB across a job boundary. Task 0110
+      # measured the trade: this tail costs 29s of a 5m08s job (of which only
+      # ~20s is removable — synth's own 9s relocates), while a separate synth
+      # job costs ~50-70s serialized after this one. The split makes PR
+      # wall-clock worse, saves nothing on billing (GitHub bills each job
+      # rounded up to the whole minute at per-runner-class rates: 6 ARM
+      # minutes today vs 5 ARM plus 1-2 on the synth runner), and does not
+      # remove the duplicate TS build either. Closed won't-do; numbers in
+      # lore/3-wiki/project/ci-pipeline.md. The real cost here is
+      # `Build Lambda bootstraps` above, at 3m24s = 67% of the job.
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
@@ -200,5 +276,50 @@ jobs:
 
       - run: npm ci
 
+      # The OpenAPI document is a public promise about the deployed API (task
+      # 0124): it is served at `GET /api-docs-json` and is what partner clients
+      # are generated from. Lint the extracted document — the same bytes the
+      # handler serves — so a malformed or under-described spec fails here
+      # rather than in a consumer's generator.
+      #
+      # Lives in this job because extraction runs a cargo bin; the node setup
+      # below is already here for the synth step, so this costs one npx call.
+      - name: Lint OpenAPI document
+        run: npm run openapi:lint
+
       - name: Synth production app
         run: make -C infra synth-production
+
+      # The overview dashboard has no loud failure mode: a renamed metric, a
+      # dropped widget or `periodOverride` flipping back to `auto` all synth
+      # and deploy clean and show up as an empty panel (task 0125). Assert on
+      # the synthesized template instead of on a human noticing.
+      - name: Verify overview dashboard
+        run: npm run infra:verify-dashboard
+
+      # Both sides of the route contract now exist as artifacts: the
+      # synthesized template above (what CDK will deploy) and target/openapi.json
+      # from the lint step (what the handler will serve). Compare them rather
+      # than trusting a hand-maintained mirror — `/api-docs-json` sat in the
+      # axum router for months while the gateway never mapped it, and nothing
+      # failed. Same reasoning as tools/scripts/lambda-assets.sh (task 0077).
+      - name: Verify OpenAPI routes match API Gateway
+        run: npm run openapi:verify-routes
+
+      # Routes are one half of the contract; the base URL is the other. The
+      # extraction stamps `servers` from infra/envs/production.json, which never
+      # observes ComputeStack actually putting API_BASE_URL on the Lambda — so
+      # dropping or renaming that variable would leave the linted document with
+      # a `servers` block the deployed one does not have. Compare the two.
+      - name: Verify OpenAPI servers match the deployed handler
+        run: npm run openapi:verify-servers
+
+      # The portal bundle carries its own copy of this document
+      # (web/portal/public/openapi.json): the "OpenAPI JSON" link on
+      # /api/docs needs a SAME-ORIGIN href for `download` to be honoured, and
+      # on the shared host the API is on another hostname (task 0270). A
+      # second copy is a copy that can go stale, and nothing else would
+      # notice — the rendered reference still fetches the live document, so
+      # the page looks right while the file behind the link is old.
+      - name: Verify the bundled OpenAPI document has not drifted
+        run: npm run openapi:verify-bundled

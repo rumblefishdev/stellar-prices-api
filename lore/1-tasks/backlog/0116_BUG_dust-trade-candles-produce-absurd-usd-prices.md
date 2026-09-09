@@ -1,0 +1,159 @@
+---
+id: "0116"
+title: "Dust-trade candles produce absurd close_usd values (up to $29.6M) in every OHLCV granularity"
+type: BUG
+status: backlog
+related_adr: []
+related_tasks: ["0114", "0115", "0026", "0144", "0147", "0117"]
+tags: [clickhouse, data-quality, sdex, enrichment, priority-medium, effort-small, milestone-M2]
+milestone: 2
+links:
+  - "../../../packages/enrichment-worker/src/ch_enrich.rs"
+history:
+  - date: 2026-07-23
+    status: backlog
+    who: okarcz
+    note: >
+      Spawned from [[0114]]'s pilot verification. The coarse-USD repair surfaced
+      40 rows > $1M in 202502 alone; investigation showed the references are
+      correct and the *input candles* are junk. Confirmed pre-existing — the
+      live-enriched path shows the same tail — so this is not a repair defect.
+  - date: 2026-08-10
+    status: backlog
+    who: okarcz
+    note: >
+      Tagged milestone-M2 (+ milestone: 2), closing the last open AC of [[0117]].
+      0117 deferred this tagging because 0116 existed only on the unmerged
+      fix/0114_repair-preflight-and-runbook-gaps branch; 0114 is now completed
+      and 0116 is on develop, so the precondition is met. No shape change - this
+      is scope tagging only. It matters because untagged, 0116 is invisible to
+      any "what is left for M2?" query, and it feeds Tranche 2 AC 4 (VWAP
+      reconciliation against raw price_ohlcv rows) and AC 6 (the USDC 1d
+      spot-check) - absurd close_usd values would surface in exactly those two
+      checks.
+---
+
+# Dust-trade candles produce absurd `close_usd` values
+
+## ⚠️ The mirror image — precision COLLAPSE at the small end (found 2026-08-10)
+
+This task is about absurdly **large** `close_usd`. Verifying [[0167]] on prod
+surfaced the opposite failure at the same root: assets whose unit price sits at
+the bottom of `Decimal(38,14)`.
+
+Measured over 103,016 USDC-quoted daily candles, 145 (0.14%) carry a `close_usd`
+that no rate can reproduce. Their `close` is a single-digit multiple of `1e-14`
+and **every one loses exactly one ulp**:
+
+| asset | close | close_usd | mantissas |
+|---|---|---|---|
+| KINGSTON | `0.00000000000008` | `0.00000000000007` | 8 → 7 |
+| MetaVerse | `0.0000000000001` | `0.00000000000009` | 10 → 9 |
+| MetaVerse | `0.00000000000011` | `0.0000000000001` | 11 → 10 |
+| MetaVerse | `0.00000000000015` | `0.00000000000014` | 15 → 14 |
+
+Consistently **one unit down**, which rules out round-to-nearest (`10 × 1.0001`
+would stay `10`). It is a float round-trip: `1e-13` has no exact binary form,
+becomes `0.99999…e-13`, and truncates. Relative error reaches **14.25%**;
+absolute error is `1e-14` per unit — nil, even at the millions of `volume_base`
+these candles carry.
+
+**Same family as this task** — an asset priced outside the range
+`Decimal(38,14)` handles usefully — opposite end. Recorded here rather than
+filed separately because a fix for one should consider the other: dust trades
+produce garbage at the top, precision collapse produces it at the bottom, and
+both are "the price is outside our representable working range".
+
+⚠️ **Not a pricing-tier defect.** The same error appears against any rate,
+including the one enrichment itself used, so it must not be mistaken for an
+oracle or peg problem. It also means a *relative*-error check over these assets
+will always look alarming while the absolute error is negligible — any
+tolerance test needs an absolute floor as well as a percentage.
+
+## Summary
+
+Single-trade SDEX candles with negligible volume carry nonsense unit prices,
+which enrichment then faithfully converts to USD. The result is a long tail of
+absurd `close_usd` values across every granularity — measured up to **$29.6M**
+for a token whose entire bucket was ~$3 of volume.
+
+This is **not** an enrichment or repair defect. The USD reference applied to
+these rows is correct; the OHLC input was already junk.
+
+## Evidence (prod, measured 2026-07-23)
+
+Top offenders in `price_ohlcv_1h` for 202502, after the [[0114]] repair:
+
+| base | quote | close_quote | close_usd | implied_ref_usd | vol_quote | trade_count |
+|---|---|---|---|---|---|---|
+| COVA | XLM | 94,810,046 | 29,606,748 | 0.312 | 9.48 XLM | **1** |
+| PCOY | XLM | 58,588,965 | 20,798,438 | 0.355 | 5.86 XLM | **1** |
+| YIELD | USDC | 12,312,121 | 12,312,121 | **1.0** | 3.69 USDC | **1** |
+
+`implied_ref_usd` (= `close_usd / close`) is 0.312–0.408 for XLM-quoted rows —
+the correct XLM/USD price for February 2025 — and exactly 1.0 for USDC-quoted
+rows (the stablecoin-direct cast). **The conversion is right; the candle is
+wrong.** Someone traded a dust amount (~1e-7 of a token) for a few XLM, and the
+resulting unit price is meaningless.
+
+## It predates the repair — confirmed by control
+
+The same tail exists in data written by the **live** enrichment path, which
+nobody disputes:
+
+| scope | rows | p50 | p99 | max_usd | > $1M | pct |
+|---|---|---|---|---|---|---|
+| `1h` 202502 (repaired) | 1,000,641 | 0.001104 | 10,197 | 29.6M | 40 | 0.0040% |
+| `1h` 202607 (live path) | 136,754 | 0.000582 | 2,039 | **24.0M** | 2 | 0.0015% |
+| `1m` 202607 (live path) | 3,437,815 | 0.002149 | 5,104 | **55.6M** | 8 | 0.0002% |
+
+Live's `max_usd` is *higher* than the repaired month's. The ~2.7× rate
+difference between the two `1h` rows is era/composition plus small-sample noise
+(2 events), not a systematic difference — the `1m` figure differs mostly by
+granularity, since a month holds ~25× more 1m rows than 1h buckets.
+
+## Scope of the harm
+
+- **`volume_quote_usd` is unaffected.** These rows carry ~$3 of volume, so
+  volume aggregates are not distorted. BE's LP analytics do not see this.
+- **`close_usd` is affected** — a price-display column. Any consumer that
+  charts, ranks, or takes a max over `close_usd` will show a spike.
+- The wider tail matters more than the extreme: **3.4% of repaired rows are
+  > $1k** and 9.3% are > $100. Not all of those are junk (some tokens are
+  genuinely expensive per unit), so a naive threshold will misclassify.
+
+## Possible approaches (not yet chosen)
+
+1. **Filter at read time** in the API — cheapest, non-destructive, but every
+   consumer must opt in and the bad data stays.
+2. **Flag at ingest** — add a `is_dust` / quality column set when
+   `trade_count = 1` and `volume_quote` is below a per-quote threshold. Keeps
+   the row, lets consumers choose. Touches live ingestion, which has a freeze
+   history ([[0064]] / [[0094]]) — needs care.
+3. **Exclude from the candle entirely** — most invasive; changes what a candle
+   means and is not reversible.
+
+Option 2 looks right, but the threshold needs deriving from the distribution
+rather than guessing — see the 3.4%/9.3% caveat above.
+
+## Acceptance Criteria
+
+- [ ] A dust threshold is derived from measured distribution, not assumed, and
+      validated against a sample of genuinely-expensive tokens so they are not
+      swept up.
+- [ ] Absurd `close_usd` rows are identifiable by consumers (flag column or
+      documented read-time filter).
+- [ ] `volume_quote_usd` behaviour is explicitly unchanged (it is already
+      correct).
+- [ ] Verified against both a repaired historical month (202502) and a
+      live-written month (202607) — the defect exists in both.
+
+## Notes
+
+- Do **not** treat this as a [[0114]] regression. The repair's own AC was
+  corrected on 2026-07-23 to test *reference correctness* rather than a value
+  ceiling, precisely because a ceiling can never pass on data the repair is not
+  responsible for.
+- Distinct from [[0115]] (exotic quotes with no USD path at all). That is about
+  rows we *cannot* price; this is about rows we price correctly from a
+  meaningless input.

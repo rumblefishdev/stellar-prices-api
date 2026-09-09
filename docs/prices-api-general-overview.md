@@ -15,6 +15,7 @@ the API surface, or the cost / budget framing.
 
 | Date       | Sections touched                                                                                                                                                          | Driver                                                                                                                                                                                                                                                                                    | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-09-02 | §5.7 (new)                                                                                                                                                                | [Task 0248](../lore/1-tasks/active/0248_DOCS_blend-is-named-in-the-rfp-but-is-not-a-price-source.md)                                                                                                                                                                                      | **Venue coverage recorded against the RFP's named markets.** The RFP's Price Aggregation bullet names four markets (Soroswap, Aquarius, SDEX, Blend); we ingest three of them plus Phoenix, which it does not name. New §5.7 states the count plainly and records why **Blend cannot be a price source**: it is a lending protocol with no swap, and a price is a property of a trade. The decisive point is that Blend pool creators choose an _oracle_ to price collateral, which places Blend downstream of a service like this one — a consumer of price data, not a producer. Its 80/20 BLND:USDC backstop AMM is the only part that trades and its volume is **unmeasured**, stated rather than implied. No extractor, no `Venue` arm, no registry seeding: pricing BLND from the backstop pool would be a feature of its own. Deliberately **not** generalised into a rule about lending protocols.                                                                                                                                                                                                                                                                                                                 |
 | 2026-05-20 | §0, §1.1, §1.2, §2.1, §2.3, §3, §4.5, §5.2–§5.4, §5.6, §6, §7, §8, §9, §10, §11 (all-table refresh)                                                                       | [ADR 0007](../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0045](../lore/1-tasks/archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/README.md) · [Task 0049](../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md) | **Live data sink flipped from Prices-owned RDS PostgreSQL to BE's shared Hetzner ClickHouse cluster** (separate `prices` database). All live OHLCV / current-prices / oracle / asset registry / backfill-progress data now lives in ClickHouse, written over HTTPS-mTLS to Caddy:443 by Lambdas running outside any VPC. The S3 → Lambda path gains an SNS topic between the bucket and both tenants' processors (one-time BE CDK change). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`); rollups become a CH materialised-view chain, **eliminating the OHLCV Rollup Lambda**. Prices-api VPC, NAT Gateway, and RDS line items removed; mTLS cert lifecycle added (per-env certs, 1-year manual rotation, CA-rotation revocation). Cost lines: $12/mo RDS removed; ~$1-2/env/mo Hetzner CH cost-share added (basis: [task 0046](../lore/1-tasks/archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md) empirical ~0.45 GB/yr, 14.8× compression). Local backfill sections (Stream 1 ADR 0001, Stream 2 ADR 0005) preserved — only their cloud-push targets shift RDS → CH. |
 | 2026-05-15 | §2.3, §5.3, §5.6 Stream 1 (two-stream design table, architecture diagram, processing-rate sub-table, schema-coupling note), §9 (Tranche 1 work), §10, §11.1, §11.2, §11.4 | [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) · [Task 0029](../lore/1-tasks/active/0029_DOCS_update-design-doc-stream-1-adr-0001.md)                                                                                                                         | Stream 1 (Soroban AMM) backfill reconciled with ADR 0001: source moved from BE's PG `soroban_events` to a **local ClickHouse** instance populated upfront by BE's `backfill-runner --target=clickhouse`; deployment shape moved from ECS Fargate to a local Rust CLI (`soroban-amm-backfill`) on the operator's workstation, ScVal decoding via `stellar-xdr` crate, one-shot completion push to cloud RDS. Stream 1 Fargate cost line removed; backfill total now ~$30. BE coupling reframed as a transient prep-step tool invocation (not runtime DB read); §11.1 `soroban_events` row removed and its development-savings counterpart added to §11.2. Closes out the design-doc sweep started in [Task 0013](../lore/1-tasks/archive/0013_DOCS_update-design-doc-to-match-be-reality.md).                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | 2026-05-14 | §2.3, §3.5, §4.5, §5.3, §5.6 Stream 2, §6, §8, §9, §10, §11.1, §11.4                                                                                                      | [ADR 0005](../lore/2-adrs/0005_stream2-sdex-local-workstation-backfill.md) (supersedes ADR 0002) · [Task 0013](../lore/1-tasks/archive/0013_DOCS_update-design-doc-to-match-be-reality.md)                                                                                                | Stream 2 (SDEX) backfill moved from continuous ECS Fargate to a local Rust CLI on the operator's workstation with a separate `sdex-cloud-push` step to cloud RDS. `backfill_progress` schema swapped from heartbeat fields to `last_push_at`. `GET /backfill/status` response and tranche acceptance criteria reframed around push cadence. Backfill compute cost dropped ~95%. Stream 1 (Soroban AMM) reconciliation per [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) is tracked separately under [Task 0029](../lore/1-tasks/active/0029_DOCS_update-design-doc-stream-1-adr-0001.md).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -161,11 +162,11 @@ to their own infrastructure at any time if needed.
 | **Lambda — Asset Discovery**         | Asset registry              | EventBridge rate(1 hour). Detects new SEP-41 contract deployments and classic asset issuances; UPSERTs into `prices.assets`                                                                                                                                                                       |
 | **Lambda — Cleanup Worker**          | Data retention              | EventBridge cron(02:00 UTC daily). `ALTER TABLE … DROP PARTITION` on old monthly partitions of each per-granularity OHLCV table                                                                                                                                                                   |
 | **Lambda — API handlers**            | Public API                  | Individual functions per route group. Rust / axum via `lambda_runtime`, 256–512 MB, 15s timeout. No VPC; outbound HTTPS-mTLS to Caddy:443                                                                                                                                                         |
-| **API Gateway**                      | Public API entry point      | REST API, usage plans, API key auth, rate limiting (100 req/s per key), request validation. Built-in response cache (0.5 GB) with per-endpoint TTLs                                                                                                                                               |
+| **API Gateway**                      | Public API entry point      | REST API, usage plans, API key auth, rate limiting (1 req/s sustained, burst 5, 100 000 req/month per self-service key — task 0157), request validation. Built-in response cache (0.5 GB) with per-endpoint TTLs                                                                                  |
 | **EventBridge Scheduler**            | Scheduled triggers          | Cron/rate rules for all periodic Lambda workers                                                                                                                                                                                                                                                   |
 | **Secrets Manager**                  | Credentials & mTLS material | Per-env client `{cert,key,ca}` for Caddy:443 mTLS (single JSON bundle secret per identity, named by `MTLS_SECRET_NAME`); Soroswap/Aquarius API keys; oracle contract address                                                                                                                      |
 | **CloudWatch + X-Ray**               | Observability               | API latency, error rates, ingestion lag, Lambda duration/concurrency, backfill progress; mTLS cert NotAfter alarm                                                                                                                                                                                 |
-| **S3** (API docs)                    | Documentation hosting       | OpenAPI spec + self-service onboarding portal, served via CloudFront                                                                                                                                                                                                                              |
+| **S3** (API docs)                    | Documentation hosting       | self-service onboarding portal + API reference, served from the block explorer's bucket and CloudFront distribution at `sorobanscan.rumblefish.dev/api/`; the OpenAPI document is served by the API itself                                                                                        |
 
 **Components no longer in the Prices API budget** (eliminated by ADR 0007):
 
@@ -378,6 +379,8 @@ CREATE TABLE prices.current_prices (
                                           -- preserve Decimal(38,14) precision; sources
                                           -- excluded by min_volume_usd or outlier
                                           -- detection are absent from the object
+                                          -- (the min_volume_usd system default is
+                                          -- applied CONDITIONALLY — see §5.5)
     updated_at       DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(updated_at)
@@ -416,7 +419,8 @@ One row per backfill stream (`sdex_archive`, `soroban_amm`). Both rows are
 seeded at provisioning time. Per ADRs 0001 and 0005, both canonical streams
 are populated by workstation-local processes, so the cloud row is updated by
 a push step — not by a continuously-running cloud-side task. For
-`sdex_archive` the writer is `sdex-cloud-push` (runs in tip-backward chunks);
+`sdex_archive` the writer is the `sdex-backfill` CLI itself, writing directly to
+Hetzner over mTLS (ADR 0009; runs in tip-backward chunks);
 for `soroban_amm` the writer is the one-shot AMM CLI when it completes its
 push to cloud. The `GET /backfill/status` endpoint reads both rows and
 returns them as the nested `sdex` and `soroban_amm` objects (see Section 4.5).
@@ -642,6 +646,25 @@ date, the response includes a `backfill_note` field indicating how far back data
 
 Current real-time price (latest snapshot from `current_prices`).
 
+`price_usd` is the **latest priced close**: a candle whose USD value has not
+been computed yet (enrichment is a separate, lagging pass) is skipped rather
+than reported as `0`. It is **not age-bounded** — for an asset that has
+stopped trading it is simply its last priced close, up to the 24 h window
+old — and `updated_at` is the snapshot time, **not** the price's age. No
+field carries that age today. `"0"` means no priced close exists in the
+window at all. `price_usd` is also **not** outlier-filtered: it reports the
+newest priced close regardless of venue, while `vwap_24h` is the de-noised
+figure.
+
+`sources` and `vwap_24h` are bounded where `price_usd` is not, and the
+asymmetry is deliberate: a per-venue entry asserts "this venue is quoting X",
+so a venue whose last priced close is more than **2 h** old is dropped rather
+than carried. A source is therefore absent when it has no recent priced
+close **or** the §5.5 outlier filter excluded it. One consequence worth
+planning for: an asset can legitimately return a `price_usd` alongside an
+empty `sources` and a `vwap_24h` of `0` — we hold a price, but no venue is
+currently quoting. (Task 0135.)
+
 **Response:**
 
 ```json
@@ -730,7 +753,7 @@ Section 5.6). The response reflects both.
     "current_ledger": 34891234,
     "start_ledger": 1,
     "target_ledger": 57234198,
-    "progress_pct": 39.2,
+    "progress_pct": 39.04,
     "ledgers_remaining": 34891233,
     "last_push_at": "2026-06-15T11:30:00Z",
     "earliest_data_available": "2019-08-22T00:00:00Z"
@@ -744,17 +767,17 @@ Section 5.6). The response reflects both.
 }
 ```
 
-| Field                                 | Description                                                                                                                                                                                                                        |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sdex.status`                         | `running`, `paused`, `completed`, or `error` — SDEX archive backfill                                                                                                                                                               |
-| `sdex.current_ledger`                 | Oldest ledger reflected in the cloud DB after the most recent `sdex-cloud-push`. Advances at push cadence, not CLI cadence.                                                                                                        |
-| `sdex.progress_pct`                   | `(target_ledger - current_ledger) / (target_ledger - start_ledger) * 100`, computed at read time                                                                                                                                   |
-| `sdex.ledgers_remaining`              | `current_ledger - start_ledger`, computed at read time                                                                                                                                                                             |
-| `sdex.last_push_at`                   | Timestamp of the most recent successful `sdex-cloud-push`. The CloudWatch freshness alarm fires when this is older than the configured push-cadence threshold for the active tranche. `null` until the first push.                 |
-| `sdex.earliest_data_available`        | Stored timestamp of the oldest SDEX OHLCV row known for this stream — recorded by the push step when it first lands a candle for a given timestamp, **not** computed live via `MIN(timestamp)`. Returned as-is, so reads are O(1). |
-| `soroban_amm.status`                  | Typically `completed` from Tranche 1 onwards                                                                                                                                                                                       |
-| `soroban_amm.last_push_at`            | Timestamp of the one-shot AMM CLI's completion push (ADR 0001). `null` until the push happens.                                                                                                                                     |
-| `soroban_amm.earliest_data_available` | Same semantics as `sdex.earliest_data_available` — stored, not computed. Lands at the Soroban activation date (~Nov 2023) once the one-time backfill completes.                                                                    |
+| Field                                 | Description                                                                                                                                                                                                                                                                                                |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sdex.status`                         | `running`, `paused`, `completed`, or `error` — SDEX archive backfill                                                                                                                                                                                                                                       |
+| `sdex.current_ledger`                 | Oldest ledger reflected on Hetzner after the most recent backfill write (ADR 0009 — direct write, no separate push step). ⚠️ It is the lowest completed run **start**, so it asserts a floor, not proven contiguous coverage up to `target_ledger` (task 0263).                                            |
+| `sdex.progress_pct`                   | `(target_ledger - current_ledger) / (target_ledger - start_ledger) * 100`, computed at read time                                                                                                                                                                                                           |
+| `sdex.ledgers_remaining`              | `current_ledger - start_ledger`, computed at read time                                                                                                                                                                                                                                                     |
+| `sdex.last_push_at`                   | Timestamp of the most recent successful **direct write** to Hetzner by the backfill CLI (ADR 0009; the column name predates that ADR and is retained). The CloudWatch freshness alarm fires when this is older than the configured cadence threshold for the active tranche. `null` until the first write. |
+| `sdex.earliest_data_available`        | Stored timestamp of the oldest SDEX OHLCV row known for this stream — recorded by the push step when it first lands a candle for a given timestamp, **not** computed live via `MIN(timestamp)`. Returned as-is, so reads are O(1).                                                                         |
+| `soroban_amm.status`                  | Typically `completed` from Tranche 1 onwards                                                                                                                                                                                                                                                               |
+| `soroban_amm.last_push_at`            | Timestamp of the one-shot AMM CLI's completion push (ADR 0001). `null` until the push happens.                                                                                                                                                                                                             |
+| `soroban_amm.earliest_data_available` | Same semantics as `sdex.earliest_data_available` — stored, not computed. Lands at the Soroban activation date (~Nov 2023) once the one-time backfill completes.                                                                                                                                            |
 
 ---
 
@@ -818,6 +841,20 @@ INSERT opens a fresh connection.
 
 ### 5.3 Ingestion Workers
 
+> **⚠️ Backfill sink model superseded by ADR 0009 (direct-write).** The two SDEX
+> rows below (`sdex-backfill` writing to a **local ClickHouse** on the
+> workstation, then a separate **`sdex-cloud-push`** step streaming those rows to
+> Hetzner) and the AMM row's "completion cloud push" describe the **original
+> ADR 0005 / ADR 0001** local-stage-then-push design. **[ADR 0009](../lore/2-adrs/0009_backfill-direct-write-to-hetzner-clickhouse.md)
+> retired it:** both backfill CLIs now write **directly to Hetzner `prices.*`
+> over the 0052 mTLS client as they decode** — there is **no local ClickHouse
+> mirror and no separate `sdex-cloud-push` step**. §9 (Tranche-1 Work) already
+> reflects the delivered direct-write path. Throughout §5.3–§5.6 and the §5.5
+> data-flow diagram, read every `sdex-cloud-push` / "cloud-push cadence" /
+> "local ClickHouse sink" reference as the backfill CLI's **direct write** to
+> Hetzner; `backfill_progress.last_push_at` (a real, retained column) is the
+> timestamp of the most recent such write.
+
 | Worker                                                          | Trigger                                                                                  | Source                                                                                                                                          | Data                                                                                                                                                                                                                               |
 | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Prices Ledger Processor**                                     | SNS message (per S3 PutObject; ~every 5–6 s)                                             | `LedgerCloseMeta` from BE's S3                                                                                                                  | SDEX trades + all Soroban AMM swap events → per-source 1-min OHLCV rows in `prices.price_ohlcv_1m`                                                                                                                                 |
@@ -862,6 +899,18 @@ Only include sources where volume_24h > configurable_min_threshold_usd (e.g. $10
 
 Volume threshold is configurable per-request via `?min_volume_usd=` query param or defaults to
 the system setting.
+
+> **As implemented (task 0118).** The system default is **$100**, and it is applied
+> **conditionally**: a below-threshold source is dropped only when the asset still has a source
+> _above_ the threshold. The rule exists to stop a dust venue skewing a real market, and on an
+> asset whose every venue is dust there is no real market to defend — dropping them all would
+> blank `vwap_24h`/`sources` while the row still carries a usable `price_usd`. This is a
+> deliberate deviation from the literal reading above, taken after a pre-merge production
+> measurement: the unconditional form would have blanked **2,960 of 3,068 priced assets (96.5%)**,
+> the same failure shape as the 2026-08-21 liveness-guard rollback. An **explicit**
+> `?min_volume_usd=` is different: it always filters strictly at exactly the value sent, and can
+> empty `sources` — the caller asked for that cut. The threshold is a **weighting rule only**;
+> `price_usd` and `volume_24h_usd` are never filtered by it.
 
 **Outlier detection:** before a source's price is included in the VWAP, it is compared against the
 inter-source median. Sources deviating by more than a configurable percentage are excluded from
@@ -1072,19 +1121,84 @@ CLI progress via direct SQL on the local workstation ClickHouse.
 
 ---
 
+### 5.7 Venue coverage — the markets we ingest, and why Blend is not one
+
+The SCF RFP's Core Requirements name four markets:
+
+> _"Price Aggregation: Weighted average across major markets (Soroswap,
+> Aquarius, SDEX, **Blend**)"_
+
+**We ingest three of the four named markets, plus one the RFP does not name.**
+Stated plainly so the count is not something a reader has to reconstruct:
+
+| Venue        | Ingested | Named in the RFP | Path                                           |
+| ------------ | -------- | ---------------- | ---------------------------------------------- |
+| **SDEX**     | Yes      | Yes              | Ledger-close trades (§5.2), plus §5.6 backfill |
+| **Soroswap** | Yes      | Yes              | Soroban AMM swap events (§5.2)                 |
+| **Aquarius** | Yes      | Yes              | Soroban AMM swap events (§5.2)                 |
+| **Phoenix**  | Yes      | **No**           | Soroban AMM swap events (§5.2)                 |
+| **Blend**    | **No**   | Yes              | — see below                                    |
+
+_Table 5.7 — Venue coverage against the RFP's named markets._
+
+#### Why Blend is not a price source
+
+**Blend is a lending protocol, not an exchange.** Users deposit assets to earn
+interest or borrow against collateral; there is no swap. **A price is a property
+of a trade**, so a lending pool has none to give — this is a mechanical fact
+about the protocol, not a scoping preference. From the protocol's own
+description ([Meru Wallet case study](https://stellar.org/case-studies/meru-wallet-uses-blend-defi-protocol-for-yield),
+read 2026-09-01):
+
+- **Isolated lending pools.** A pool creator sets supported assets, collateral
+  requirements, interest rates and utilisation caps. None of these is a traded
+  price.
+- **Pool creators specify which _oracle_ prices the collateral.** This is the
+  decisive fact: **Blend is a consumer of price data, positioned downstream of a
+  service like this one** — not a producer of it. Feeding Blend's own numbers
+  back into an aggregate would be circular.
+- **The backstop module is an 80/20 BLND:USDC AMM.** This is the only part of
+  Blend that trades. Its volume is **unmeasured** — we have not assessed whether
+  it clears enough to contribute a meaningful price, and no claim is made either
+  way.
+
+So the RFP bullet groups a lending protocol with three DEXes under "major
+markets". Aggregating it is not something we chose not to do; there is no trade
+stream to aggregate.
+
+⚠️ **This is not a rule about lending protocols as a category.** The reasoning
+is "no trades, therefore no prices", which happens to cover lending today. It
+does not generalise to a claim about protocol types.
+
+#### What would change the answer
+
+Only one technically coherent version of "add Blend" exists: **price the BLND
+token from the backstop pool's 80/20 AMM**, treating it as another Soroban AMM
+venue. That starts with measuring the backstop pool's volume, and is a feature
+in its own right — a `Venue` arm, an extractor, pool-registry seeding and a
+historical backfill. It is not in scope here, and this section is not a deferral
+of it.
+
+Recorded under [task 0248](../lore/1-tasks/active/0248_DOCS_blend-is-named-in-the-rfp-but-is-not-a-price-source.md).
+Whether the headline `price_usd` should even be the weighted cross-venue
+aggregate this same RFP bullet describes is a separate question, tracked as
+[task 0217](../lore/1-tasks/backlog/0217_FEATURE_decide-whether-price-usd-is-outlier-protected.md).
+
+---
+
 ## 6. Performance & Scaling Strategy
 
 ### Target: <100ms p95 API response time
 
-| Layer                                    | Strategy                                                                                                                                                                                                                                                                                                                                                                                                        |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **API Gateway caching**                  | Built-in response cache (0.5 GB). Per-endpoint TTLs: `/assets` list 60s, `/ohlcv` 60s, `/price` 15s, `/backfill/status` 30s. Cache key includes query params. POST `/prices/batch` uncached                                                                                                                                                                                                                     |
-| **API Gateway throttling**               | Request throttling (100/s per API key, 1000/s global burst)                                                                                                                                                                                                                                                                                                                                                     |
-| **Lambda**                               | Rust binary with `lambda_runtime`. Sub-millisecond cold starts. Stateless, auto-scales to concurrency limit. No VPC, so no ENI provisioning latency on cold start                                                                                                                                                                                                                                               |
-| **Database client (`clickhouse` crate)** | Warm connection pool reused across Lambda invocations to amortise mTLS handshake (~80-130 ms cross-cloud RTT to Caddy). Per-request payloads batched per-ledger so a typical invocation issues 1–2 INSERTs, not one per trade                                                                                                                                                                                   |
-| **Sort key & partitioning**              | Per-granularity tables sorted by `(asset_id, quote_asset_id, source, timestamp)`; monthly partitions on `timestamp`. Partition pruning + sort-key skip eliminate irrelevant months and assets on hot reads                                                                                                                                                                                                      |
-| **Query optimization**                   | `prices.current_prices` avoids real-time aggregation. OHLCV reads target the granularity table that already holds the requested resolution. Read handlers issue `SELECT … FINAL` or `argMax/argMin + GROUP BY` to handle `ReplacingMergeTree` eventual consistency                                                                                                                                              |
-| **Cross-cloud latency mitigation**       | Public-internet hop AWS → Hetzner is ~80-130 ms RTT. Mitigated by (a) warm-container connection reuse, (b) per-ledger write batching, (c) API Gateway response caching for read-heavy endpoints, (d) the API handlers' query patterns favouring single-round-trip CH calls. Single-digit-ms p50 SELECTs over the public hop are routine once the connection is warm; the >100 ms p95 budget remains comfortable |
+| Layer                                    | Strategy                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **API Gateway caching**                  | Built-in response cache (0.5 GB). Per-endpoint TTLs, as deployed and verified 2026-09-03 (task 0122): `/assets` list 60s, `/assets/{id}` 60s, `/ohlcv` 60s, `/price` **10s**, `/oracles/{id}` 60s, `/backfill/status` **60s**, `/api-docs-json` 3600s. `/health` and POST `/prices/batch` uncached. **The cache key is per-route, not "the query string"**: API Gateway keys only on parameters declared as `cacheKeyParameters`, so `/assets` keys on 7 query params, `/price` on the path plus `min_volume_usd`, `/ohlcv` on the path plus 5, and `/assets/{id}`, `/oracles/{id}` and `/backfill/status` on the path alone. `x-api-key` is in no key, so the cache is shared across callers. Source of truth is `CACHE_TTL` in `infra/src/lib/stacks/api-gateway-stack.ts`, which mirrors the handler tiers in `packages/prices-api/src/common/cache_control.rs` |
+| **API Gateway throttling**               | Request throttling (1 req/s sustained, burst 5, 100 000 req/month per self-service key — task 0157; 200 req/s per method stage-wide)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| **Lambda**                               | Rust binary with `lambda_runtime`. Sub-millisecond cold starts. Stateless, auto-scales to concurrency limit. No VPC, so no ENI provisioning latency on cold start                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| **Database client (`clickhouse` crate)** | Warm connection pool reused across Lambda invocations to amortise mTLS handshake (~80-130 ms cross-cloud RTT to Caddy). Per-request payloads batched per-ledger so a typical invocation issues 1–2 INSERTs, not one per trade                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| **Sort key & partitioning**              | Per-granularity tables sorted by `(asset_id, quote_asset_id, source, timestamp)`; monthly partitions on `timestamp`. Partition pruning + sort-key skip eliminate irrelevant months and assets on hot reads                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **Query optimization**                   | `prices.current_prices` avoids real-time aggregation. OHLCV reads target the granularity table that already holds the requested resolution. Read handlers issue `SELECT … FINAL` or `argMax/argMin + GROUP BY` to handle `ReplacingMergeTree` eventual consistency                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| **Cross-cloud latency mitigation**       | Public-internet hop AWS → Hetzner is ~80-130 ms RTT. Mitigated by (a) warm-container connection reuse, (b) per-ledger write batching, (c) API Gateway response caching for read-heavy endpoints, (d) the API handlers' query patterns favouring single-round-trip CH calls. Single-digit-ms p50 SELECTs over the public hop are routine once the connection is warm; the >100 ms p95 budget remains comfortable                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 ### ClickHouse Sizing (shared Hetzner cluster, BE-owned)
 
@@ -1160,7 +1274,7 @@ on ClickHouse, that machinery is not part of the prices-api budget at any traffi
 | Infrastructure    | AWS CDK (TypeScript) — shared CDK app with Block Explorer stacks; prices-api stacks deploy no VPC/RDS/NAT                                                                                                                                        |
 | CI/CD             | GitHub Actions → `cdk deploy` — shared pipeline with Block Explorer                                                                                                                                                                              |
 | Monitoring        | CloudWatch Logs + Metrics + Alarms + X-Ray tracing; mTLS cert NotAfter alarm; ingestion-lag alarm                                                                                                                                                |
-| API Docs          | OpenAPI 3.0 spec, auto-generated from axum routes; Swagger UI hosted on S3 + CloudFront                                                                                                                                                          |
+| API Docs          | OpenAPI 3.0 spec, auto-generated from axum routes; the API reference (Swagger UI's shape, the portal's design system) is a route of the onboarding portal (`/api/docs`) on the block explorer's CloudFront                                       |
 
 **Shared with Block Explorer codebase (same Rust workspace):**
 
@@ -1221,8 +1335,11 @@ on ClickHouse, that machinery is not part of the prices-api budget at any traffi
    successive pushes (tip-backward direction). `soroban_amm.status` is `"running"` early in
    Tranche 1 and transitions to `"completed"` once the AMM stream finishes (see Section 4.5
    for the canonical response shape)
-5. CloudWatch alarm test: skip a scheduled `sdex-cloud-push` cycle → freshness alarm fires
-   once `sdex.last_push_at` exceeds the configured Tranche 1 threshold
+5. CloudWatch alarm test: let a scheduled backfill write cycle lapse → freshness alarm fires
+   once `sdex.last_push_at` exceeds the configured Tranche 1 threshold. (Tool name
+   corrected per ADR 0009 — there is no `sdex-cloud-push` step; `last_push_at` is
+   the timestamp of the CLI's most recent **direct write** to Hetzner. The test
+   itself is unchanged: it exercises the freshness alarm, not the tool.)
 6. `sdex.earliest_data_available` in `GET /backfill/status` shows a date approximately 6 months ago
 
 **Budget: $XX,XXX (Tranche 1)**
@@ -1248,10 +1365,11 @@ on ClickHouse, that machinery is not part of the prices-api budget at any traffi
 - Input validation: asset identifier format enforced, param ranges validated, 400 on invalid input
 
 **Backfill milestone for Tranche 2:**
-By the end of Week 9, the operator has run additional tip-backward `sdex-backfill` chunks
-and `sdex-cloud-push` cycles covering approximately **January 2022 to present** (4+ years of
+By the end of Week 9, the operator has run additional tip-backward `sdex-backfill` chunks —
+writing **directly to Hetzner `prices.*` over mTLS** (ADR 0009; there is no separate
+`sdex-cloud-push` step) — covering approximately **January 2022 to present** (4+ years of
 SDEX history, including all of the Soroban era plus 2 years of pre-Soroban SDEX data). The
-pushed range and freshness are visible via `GET /backfill/status` (`sdex.earliest_data_available`,
+covered range and freshness are visible via `GET /backfill/status` (`sdex.earliest_data_available`,
 `sdex.last_push_at`). Local CLI per-ledger rate (~311 ledgers/s per task 0022) is well above
 what is required for this coverage given the workstation uptime through Tranche 2; see §5.6
 for the full local-CLI metrics.
@@ -1261,7 +1379,22 @@ for the full local-CLI metrics.
 1. All 7 endpoint groups return correct, schema-valid responses for at least 20 major assets
 2. Load test (k6 or Locust, script provided): 100 req/s sustained for 5 minutes on
    `GET /assets/{id}/price` → p95 latency <200ms, error rate <0.1%
+   — the target is unchanged, but since task 0157 no key in the account can sustain
+   it: the default plan is 1 req/s (§6). The run needs a usage plan created for it,
+   per `docs/runbooks/manual-api-key-tier.md`; the report must state which plan the
+   key was on (task 0121)
 3. Cache confirmed: consecutive identical requests within TTL window return `X-Cache: Hit` header
+   — **amended, and graded against the reworded criterion below.** This API emits no
+   `X-Cache` header on any route and cannot be made to emit a truthful one: API Gateway
+   has no such feature, a handler-written header would report `Miss` on every genuine
+   hit, and CloudFront writes `Hit from cloudfront`, so the literal string is unmet even
+   after an edge rebuild. Graded instead as: _"consecutive identical requests within the
+   TTL window are served from the API Gateway stage cache, and a request after the window
+   is not. Demonstrated by response latency, which separates cleanly, and by the deployed
+   per-method cache configuration."_ The amendment weakens the claim from the cache
+   asserting itself to behaviour consistent with a cache, which is stated rather than
+   blurred. Evidence in `docs/prices-api-cache-verification.md`, decision in ADR 0012,
+   declared to the reviewer in `docs/scf/milestone-2-rfp-deviations.md` §2 (tasks 0122, 0262)
 4. VWAP calculation verifiable against raw `price_ohlcv` rows for at least 3 assets
 5. `GET /backfill/status` shows `earliest_data_available` ≤ 2022-01-01
 6. OHLCV data for `?timeframe=all` on USDC returns data points from at least January 2022,
@@ -1287,9 +1420,9 @@ for the full local-CLI metrics.
 - GitHub repository made public with README, architecture docs, deploy instructions
 
 **Backfill milestone for Tranche 3:**
-By the end of Week 13, the operator has run additional tip-backward `sdex-backfill` chunks
-and `sdex-cloud-push` cycles covering approximately **January 2018 to present** (8+ years of
-SDEX history). Per ADR 0005 §9, full historical completion (ledger 1 to current tip) is
+By the end of Week 13, the operator has run additional tip-backward `sdex-backfill` chunks —
+direct-write per ADR 0009, as above — covering approximately **January 2018 to present**
+(8+ years of SDEX history). Per ADR 0005 §9, full historical completion (ledger 1 to current tip) is
 **not** a Tranche 3 deliverable — the operator continues pushing older ranges in the
 background post-delivery.
 
@@ -1298,6 +1431,9 @@ The reviewer should confirm (against the response shape in Section 4.5):
 
 - `GET /backfill/status` returns `sdex.status: "running"` and `sdex.last_push_at` is fresh
   (within the Tranche 3 push-cadence window)
+  > ⚠️ **Amended 2026-09-08** — superseded for the same reason as acceptance
+  > criterion 1 below: the archive completed on 2026-07-27 and reports
+  > `completed`. See the note there.
 - `sdex.earliest_data_available` ≤ 2018-01-01
 - `sdex.current_ledger` is strictly decreasing across successive `GET /backfill/status`
   observations (visible as more pushes complete during the review window)
@@ -1315,10 +1451,20 @@ post-delivery monitoring.
 
 1. `GET /backfill/status` shows `sdex.status: "running"`, `sdex.last_push_at` within the
    Tranche 3 push-cadence window, and `sdex.earliest_data_available` ≤ 2018-01-01
+   > ⚠️ **Amended 2026-09-08 — two of these three clauses became unsatisfiable
+   > because the archive finished early.** The SDEX stream reached `completed` on
+   > 2026-07-27, during Tranche 2, so it no longer reports `running` and nothing
+   > pushes to keep `last_push_at` fresh. The depth clause stands and is met by
+   > six years (2015-11-18). The liveness half should be graded on the signals
+   > that are live post-backfill — the rollup-freshness and ledger-processor lag
+   > alarms, and `realtime_tip_ledger` tracking the chain. Declared in
+   > [`docs/scf/milestone-2-rfp-deviations.md`](scf/milestone-2-rfp-deviations.md)
+   > §4 and carried in the Milestone 2 evidence package §8.
 2. OpenAPI spec passes `openapi-validator` lint with no errors; Swagger UI deployed
 3. Onboarding portal accessible; self-service API key request flow functional
 4. Integration test suite: all tests pass on CI (GitHub Actions link provided)
-5. Load test report: p95 <100ms at 100 req/s confirmed
+5. Load test report: p95 <100ms at 100 req/s confirmed — same caveat as Tranche 2
+   AC 2: a purpose-built usage plan is required, and the report names it
 6. Security checklist signed off: no wildcard IAM, ClickHouse endpoint reachable only via
    mTLS through Caddy:443, mTLS cert + key in Secrets Manager (not env vars), all inputs
    validated
@@ -1351,8 +1497,10 @@ post-delivery monitoring.
 
 Per ADRs 0001 and 0005, **both** historical backfill streams run as local Rust CLIs on the
 operator's workstation, not as continuous ECS Fargate tasks. The Hetzner CH cluster sees
-only bursty push steps: the Stream 2 `sdex-cloud-push` (tip-backward chunks) and the
-Stream 1 `soroban-amm-backfill` one-shot completion push. AWS-billed line items are
+only bursty write traffic: the Stream 2 `sdex-backfill` CLI's tip-backward chunks and the
+Stream 1 `soroban-amm-backfill` one-shot run, both writing **directly** over mTLS
+(ADR 0009 — the `sdex-cloud-push` step this paragraph described no longer exists; the
+burst profile is unchanged, only its source). AWS-billed line items are
 essentially unchanged from steady-state since the writes happen against Hetzner, not
 AWS-side storage. Workstation electricity, ISP bandwidth, and local ClickHouse disk for
 the Stream 1 prep step are operator-paid and outside this table.
@@ -1483,6 +1631,6 @@ with strict per-database isolation via ClickHouse's native multi-tenant primitiv
 runtime or data coupling with the Block Explorer at the backfill layer. The only BE
 artefact consumed is the `xdr-parser` crate, pinned as a git Cargo library dependency
 and compiled read-only into the `sdex-backfill` binary on the operator's workstation. The
-final `sdex-cloud-push` step lands rows into the shared Hetzner CH — that single hop
-introduces the same shared-host coupling as the live path, governed by the same Cluster
-A/B/C/D agreements.
+CLI writes rows directly into the shared Hetzner CH as it decodes (ADR 0009, replacing the
+`sdex-cloud-push` step this paragraph described) — that hop introduces the same shared-host
+coupling as the live path, governed by the same Cluster A/B/C/D agreements.

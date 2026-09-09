@@ -18,6 +18,21 @@ history:
       sweep. Named there as "the fix that actually prevents recurrence" but never
       made a task, which is the same failure mode it is meant to fix — a
       precondition living only in prose.
+  - date: 2026-07-23
+    status: backlog
+    who: okarcz
+    note: >
+      Mechanism correction from the 0114 Phase C session, and it changes the
+      design. Cleanup does NOT drop partitions - it deletes by ALTER DELETE
+      mutation. system.part_log covers 2026-06-22 to now with 16.4M events and
+      ZERO DropPart entries, while system.mutations holds the 2026-07-15
+      destructive event verbatim (DELETE WHERE intDiv(toUInt64(version),1000) <
+      50457424 on price_ohlcv_1m - every pre-Soroban row, i.e. the backfill's
+      output). Fits the access model: prices_writer has ALTER DELETE but cannot
+      drop partitions. So a DropPart-based guard would never fire. Added a
+      second mechanism-level check on system.mutations for pending DELETEs, with
+      the caveat that a starved mutation (six Phoenix deletes pending 07-17 to
+      07-23+, empty latest_fail_reason) is armed, not safe.
 ---
 
 # Preflight guard — refuse to backfill while the cleanup rule is ENABLED
@@ -33,10 +48,34 @@ destruction.
 ## Context
 
 Running both at once deletes the backfill's output **as fast as it is written**:
-cleanup drops whole historical partitions immediately rather than honouring the
-7-day retention intent, so a multi-day run produces nothing durable and
-re-creates the exact history gap the run existed to close. Recovery is only
-possible by re-downloading the span.
+cleanup removes historical rows immediately rather than honouring the 7-day
+retention intent, so a multi-day run produces nothing durable and re-creates the
+exact history gap the run existed to close. Recovery is only possible by
+re-downloading the span.
+
+> **🔴 Mechanism correction (2026-07-23, from the [[0114]] Phase C session) — this
+> changes what the guard must watch.** This task previously said cleanup "drops
+> whole historical partitions". It does **not**. Cleanup deletes by
+> **`ALTER … DELETE` mutation**. Evidence from prod CH:
+>
+> - `system.part_log` covers 2026-06-22 → now (16.4M events) and contains **zero
+>   `DropPart` events** — the event-type set is `RemovePart`, `MergeParts`,
+>   `MutatePart`, `NewPart` and the `*Start` variants. (`RemovePart` is merge
+>   housekeeping, *not* deletion — it fires when source parts are retired after a
+>   merge. Do not treat it as a deletion signal.)
+> - The destructive 2026-07-15 event is recorded in `system.mutations` verbatim:
+>   ```sql
+>   -- price_ohlcv_1m, mutation_2496036, 2026-07-15 10:24:36, is_done 1
+>   DELETE WHERE intDiv(toUInt64(version), 1000) < 50457424
+>   ```
+>   `version` encodes ledger sequence, so this removed every pre-Soroban row —
+>   exactly the running backfill's output.
+> - It fits the access model: `prices_writer` holds `SELECT, INSERT, ALTER
+>   DELETE, OPTIMIZE` and **cannot** drop partitions (the same grant wall that
+>   blocked `FREEZE` in 0114). Deleting by mutation is the *only* path available
+>   to it.
+>
+> **A guard built around partition-drop detection would never fire.**
 
 This cost **~5 days of run time on 2026-07-20**: the pre-Soroban SDEX tail's
 output for ledgers `1 → ~21.4M` was wiped, forcing a second ~5-day pass over
@@ -60,6 +99,21 @@ Memory: `[[cleanup-rule-shreds-backfill-output]]`.
   ```
 - Prefer the AWS SDK over shelling out, so the check works the same in CI and on
   an operator box. It needs only `events:DescribeRule`.
+- **Add a second, mechanism-level check against CH itself** — the rule state is
+  necessary but not sufficient (a mutation already submitted keeps deleting no
+  matter what the rule says, and a manual `ALTER … DELETE` bypasses the rule
+  entirely). Query `system.mutations` for pending destructive work:
+  ```sql
+  SELECT table, mutation_id, command, create_time, is_done, parts_to_do
+  FROM system.mutations
+  WHERE database = 'prices' AND is_done = 0 AND command LIKE '%DELETE%'
+  ```
+  Treat any row as **armed and pending**, not safe. Note mutations can sit
+  starved for days when the merge pool is saturated — six Phoenix deletes were
+  pending from 2026-07-17 through at least 07-23 with empty `latest_fail_reason`
+  — so "not progressing" must not be read as "not going to happen".
+- **Never key the guard on `DropPart`** (see the mechanism correction above); it
+  does not occur.
 - **Fail closed, but not un-runnable**: exit non-zero with a message naming the
   rule, the risk, and the exact `aws events disable-rule` remediation. Gate the
   bypass behind an explicit `--allow-cleanup-enabled` flag so overriding is a

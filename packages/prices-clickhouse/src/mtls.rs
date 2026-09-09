@@ -83,6 +83,16 @@ struct BundleJson {
 /// rev's the path, this is the one constant to update.
 const EXTENSION_URL: &str = "http://localhost:2773/secretsmanager/get";
 
+/// HTTP path the same extension serves **SSM Parameter Store** reads on.
+///
+/// A different path on the same localhost listener, with the same auth token
+/// and the same in-process cache. Used by `prices-api`'s self-service key
+/// issuance (task 0187) to read the usage-plan id published by
+/// `ApiGatewayStack` — a value that cannot travel as a cross-stack reference
+/// (`ComputeStack` is a dependency of `ApiGatewayStack`, so importing it would
+/// close a cycle) and must not be hard-coded.
+const EXTENSION_PARAMETER_URL: &str = "http://localhost:2773/systemsmanager/parameters/get";
+
 /// Header the extension requires for authn — the in-process token is the same
 /// `AWS_SESSION_TOKEN` Lambda already injects into the runtime.
 const EXTENSION_TOKEN_HEADER: &str = "X-Aws-Parameters-Secrets-Token";
@@ -107,6 +117,34 @@ const EXTENSION_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// Lambda always sets that variable; a missing value points at a non-Lambda
 /// runtime and is surfaced as [`MtlsError::MissingEnv`].
 pub async fn fetch_bundle_from_extension(secret_name: &str) -> Result<MtlsBundle, MtlsError> {
+    let secret_string = fetch_secret_string(secret_name).await?;
+    let parsed: BundleJson =
+        serde_json::from_str(&secret_string).map_err(|e| MtlsError::BundleDecode(e.to_string()))?;
+    Ok(MtlsBundle {
+        cert_pem: parsed.cert,
+        key_pem: parsed.key,
+        ca_pem: parsed.ca,
+    })
+}
+
+/// Fetch **any** secret's `SecretString` through the Parameters and Secrets
+/// Lambda Extension, with no assumption about what is inside it.
+///
+/// Extracted from [`fetch_bundle_from_extension`], which is now one caller of
+/// it. The second is `prices-api`'s portal sign-in (task 0186), whose Discord
+/// client secret lives in Secrets Manager for the same ADR 0007 reason the mTLS
+/// material does and must reach the Lambda by the same route: the extension's
+/// in-process cache, so a warm container never calls Secrets Manager on the hot
+/// path, and no secret VALUE is ever an environment variable.
+///
+/// Kept here rather than re-implemented there deliberately. The endpoint URL,
+/// the token header, the two timeouts and the "extension unreachable" diagnosis
+/// are one mechanism with one set of operational lessons; a second copy in
+/// another crate is a second thing to fix when AWS moves the path.
+///
+/// The returned `String` is secret material — do not log it, and prefer parsing
+/// it into a type with a redacting `Debug` (as both callers do).
+pub async fn fetch_secret_string(secret_name: &str) -> Result<String, MtlsError> {
     let token = require_env("AWS_SESSION_TOKEN")?;
     let client = reqwest::Client::builder()
         .connect_timeout(EXTENSION_CONNECT_TIMEOUT)
@@ -135,17 +173,64 @@ pub async fn fetch_bundle_from_extension(secret_name: &str) -> Result<MtlsBundle
         .json()
         .await
         .map_err(|e| MtlsError::Fetch(format!("response body parse failed: {e}")))?;
-    let secret_string = body
-        .get("SecretString")
+    body.get("SecretString")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| MtlsError::Fetch("response missing `SecretString` field".into()))?;
-    let parsed: BundleJson =
-        serde_json::from_str(secret_string).map_err(|e| MtlsError::BundleDecode(e.to_string()))?;
-    Ok(MtlsBundle {
-        cert_pem: parsed.cert,
-        key_pem: parsed.key,
-        ca_pem: parsed.ca,
-    })
+        .map(str::to_string)
+        .ok_or_else(|| MtlsError::Fetch("response missing `SecretString` field".into()))
+}
+
+/// Fetch an **SSM Parameter Store** value through the same Parameters and
+/// Secrets Lambda Extension.
+///
+/// Sibling of [`fetch_secret_string`], sharing its client construction,
+/// timeouts and diagnosis. Kept here for the same reason that one was extracted
+/// rather than copied: the endpoint host, the token header and the two timeouts
+/// are one mechanism, and a second copy in another crate is a second thing to
+/// fix when AWS moves the path.
+///
+/// The value is **not** secret — its one caller reads the `pricing-api-free`
+/// usage-plan id (task 0187) — so unlike its sibling this one may be logged.
+/// The extension is used anyway, rather than the SSM SDK, for the cache: a warm
+/// container answers from memory instead of calling Systems Manager on a path
+/// that runs on every key issue.
+///
+/// Requires `ssm:GetParameter` on the parameter, granted in `compute-stack.ts`.
+pub async fn fetch_parameter_string(name: &str) -> Result<String, MtlsError> {
+    let token = require_env("AWS_SESSION_TOKEN")?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(EXTENSION_CONNECT_TIMEOUT)
+        .timeout(EXTENSION_REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| MtlsError::Fetch(format!("reqwest client build failed: {e}")))?;
+    let resp = client
+        .get(EXTENSION_PARAMETER_URL)
+        .query(&[("name", name)])
+        .header(EXTENSION_TOKEN_HEADER, token)
+        .send()
+        .await
+        .map_err(|e| {
+            MtlsError::Fetch(format!(
+                "extension at {EXTENSION_PARAMETER_URL} unreachable (verify Parameters and \
+                 Secrets layer ARN is attached and layer is initialised): {e}"
+            ))
+        })?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(MtlsError::Fetch(format!(
+            "extension returned HTTP {status} (parameter={name})"
+        )));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| MtlsError::Fetch(format!("response body parse failed: {e}")))?;
+    // `{"Parameter": {"Name": ..., "Value": ..., ...}}` — the GetParameter
+    // response shape, unwrapped one level by the extension.
+    body.get("Parameter")
+        .and_then(|p| p.get("Value"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| MtlsError::Fetch("response missing `Parameter.Value` field".into()))
 }
 
 /// Assemble a [`clickhouse::Client`] that talks HTTPS + mTLS to

@@ -1,10 +1,9 @@
 //! Axum handlers for the `/v1/assets` resource.
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
-use serde_json::json;
 
 use crate::assets::dto::{
     AssetDetail, AssetListItem, AssetListResponse, OhlcvResponse, PriceResponse,
@@ -12,6 +11,8 @@ use crate::assets::dto::{
 use crate::assets::queries_ch::{
     self, BaseCurrency, Granularity, ListArgs, OhlcvArgs, Order, SortCol, Timeframe, TypeFilter,
 };
+use crate::common::errors::ErrorEnvelope;
+use crate::common::extract::{ValidatedPath, ValidatedQuery};
 use crate::common::{cache_control, cursor, errors};
 use crate::identity::AssetIdentifier;
 use crate::state::AppState;
@@ -23,34 +24,101 @@ const OHLCV_MAX_POINTS: u64 = 5000;
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 200;
 
+/// Query parameters for `GET /assets/{id}/price` (task 0118).
+#[derive(Debug, Deserialize)]
+pub struct PriceParams {
+    pub min_volume_usd: Option<f64>,
+}
+
+/// Validate `?min_volume_usd=` (task 0118, coordinated with 0119's "every
+/// invalid input is a 400 in the standard envelope"). serde already rejects
+/// non-numeric text, but `f64::from_str` accepts `NaN`/`inf`, so finiteness is
+/// checked here, along with the sign and a sanity ceiling. Returns the 400 to
+/// send when the value is invalid, `None` when it is fine.
+fn min_volume_error(v: Option<f64>) -> Option<Response> {
+    match v {
+        Some(x)
+            if !(x.is_finite() && (0.0..=crate::assets::dto::MAX_MIN_VOLUME_USD).contains(&x)) =>
+        {
+            Some(errors::bad_request(
+                errors::INVALID_QUERY,
+                "min_volume_usd must be a finite number in 0..=1e15",
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// `GET /assets/{asset_identifier}/price` — current price for one asset.
 ///
 /// Parsing/validation runs before any DB call, so a malformed identifier 400s
-/// without touching ClickHouse. `price_xlm`, `change_24h_pct`, and `sources` are
-/// v1 stubs (task 0072 fills them producer-side).
+/// without touching ClickHouse. `price_xlm`, `change_24h_pct` and `sources` are
+/// materialized producer-side by `mv_current_prices` (task 0072) and pass
+/// straight through, so this stays a point lookup.
+///
+/// `?min_volume_usd=` (task 0118) re-weights `vwap_24h` from the row's own
+/// `sources` JSON in the handler — no extra ClickHouse round-trip, so the p95
+/// SLO that motivated the producer-side design is untouched. An explicit value
+/// always filters strictly at exactly that value: the MV's $100 default is
+/// applied *conditionally*, so on an all-dust asset a below-$100 venue is
+/// still in the JSON and a caller asking for 100 must not be handed it back.
+/// Omit the param on the common path — it is part of the API Gateway cache
+/// key (§6), and the cached entry is shared only when the param is absent.
 #[utoipa::path(
     get,
     path = "/assets/{asset_identifier}/price",
     tag = "prices",
+    summary = "`GET /assets/{asset_identifier}/price` — current price for one asset.",
+    description = "The current price snapshot for one asset: the latest USD close, the same price in XLM, \
+     the\n24-hour volume-weighted average, volume, change and a per-venue breakdown, all \
+     computed\nover the trailing 24-hour window. `updated_at` is the time of the snapshot. \
+     Identifier\nvalidation runs before any database access, so a malformed identifier is a 400 \
+     and\nnever reaches storage.\n\n`min_volume_usd` re-weights `vwap_24h` from the response's \
+     own `sources` and drops the\nvenues at or below the threshold; it never changes `price_usd` \
+     or `volume_24h_usd`. The\nparameter is part of the cache key, so requests that omit it share \
+     one cached response.",
     params(
         ("asset_identifier" = String, Path,
-         description = "native, CODE:ISSUER, or a C… contract address")
+         description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
+          the `C…` address of a Soroban contract"),
+        ("min_volume_usd" = Option<f64>, Query, minimum = 0,
+         description = "Drop every venue whose trailing 24-hour USD volume is at or below this value, then \
+          recompute `vwap_24h` over the venues that remain. Applied exactly as given: it can \
+          leave `sources` empty and `vwap_24h` at `\"0\"`. The default threshold (100 USD) is \
+          conditional — it keeps a low-volume venue when no venue on the asset clears it — so an \
+          explicit `100` can still remove venues the default kept. `price_usd` and \
+          `volume_24h_usd` are unaffected. Between 0 and 1e15. Omit it unless needed: the \
+          parameter is part of the cache key."),
     ),
     responses(
         (status = 200, description = "Current price", body = PriceResponse),
-        (status = 400, description = "Invalid asset identifier"),
-        (status = 404, description = "No current price for the asset"),
+        (status = 400, description = "Invalid asset identifier or query parameter (`invalid_id`, `invalid_query`)", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
+        (status = 404, description = "No current price for the asset: unknown, or not priced yet (`not_found`)", body = ErrorEnvelope),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
-pub async fn get_price(State(state): State<AppState>, Path(raw): Path<String>) -> Response {
+pub async fn get_price(
+    State(state): State<AppState>,
+    ValidatedPath(raw): ValidatedPath<String>,
+    ValidatedQuery(q): ValidatedQuery<PriceParams>,
+) -> Response {
     let id = match AssetIdentifier::parse(&raw) {
         Ok(id) => id,
         Err(e) => return errors::bad_request(errors::INVALID_ID, e.to_string()),
     };
+    if let Some(resp) = min_volume_error(q.min_volume_usd) {
+        return resp;
+    }
 
     match queries_ch::current_price(state.ch(), &id).await {
         Ok(Some(row)) => {
-            let body = PriceResponse::from_row(id.to_canonical(), row);
+            let mut body = PriceResponse::from_row(id.to_canonical(), row);
+            if let Some(t) = q.min_volume_usd {
+                crate::assets::dto::apply_min_volume(&mut body.sources, &mut body.vwap_24h, t);
+            }
             let mut resp = Json(body).into_response();
             cache_control::attach(&mut resp, cache_control::SHORT);
             resp
@@ -65,17 +133,29 @@ pub async fn get_price(State(state): State<AppState>, Path(raw): Path<String>) -
     get,
     path = "/assets/{asset_identifier}",
     tag = "assets",
+    summary = "`GET /assets/{asset_identifier}` — single-asset metadata.",
+    description = "Metadata for one asset, looked up by its natural identifier. Fields that do not apply \
+     to\nthe asset's kind are empty strings: `code` and `issuer` for a Soroban contract, \
+     `contract`\nfor a classic asset.",
     params(
         ("asset_identifier" = String, Path,
-         description = "native, CODE:ISSUER, or a C… contract address")
+         description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
+          the `C…` address of a Soroban contract")
     ),
     responses(
         (status = 200, description = "Asset detail", body = AssetDetail),
-        (status = 400, description = "Invalid asset identifier"),
-        (status = 404, description = "Unknown asset"),
+        (status = 400, description = "Invalid asset identifier (`invalid_id`)", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
+        (status = 404, description = "Unknown asset (`not_found`)", body = ErrorEnvelope),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
-pub async fn get_asset(State(state): State<AppState>, Path(raw): Path<String>) -> Response {
+pub async fn get_asset(
+    State(state): State<AppState>,
+    ValidatedPath(raw): ValidatedPath<String>,
+) -> Response {
     let id = match AssetIdentifier::parse(&raw) {
         Ok(id) => id,
         Err(e) => return errors::bad_request(errors::INVALID_ID, e.to_string()),
@@ -108,16 +188,24 @@ pub async fn get_asset(State(state): State<AppState>, Path(raw): Path<String>) -
     }
 }
 
-/// Query parameters for `GET /assets`.
+/// Cap on the `?search` prefix — the shared "compared against `asset_code`"
+/// rule (see its definition for why length-only).
+const MAX_SEARCH_LEN: usize = cursor::MAX_STRING_PAYLOAD_LEN;
+
+/// Query parameters for `GET /assets`. Enum params deserialize straight into
+/// their typed forms — an unknown token fails serde and surfaces as a 400
+/// through `ValidatedQuery`; unknown query *keys* are deliberately ignored
+/// (forward-compatible, matches API Gateway cache-key behavior).
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
     #[serde(rename = "type")]
-    pub asset_type: Option<String>,
+    pub asset_type: Option<TypeFilter>,
     pub search: Option<String>,
-    pub sort: Option<String>,
-    pub order: Option<String>,
+    pub sort: Option<SortCol>,
+    pub order: Option<Order>,
     pub cursor: Option<String>,
     pub limit: Option<u32>,
+    pub min_volume_usd: Option<f64>,
 }
 
 /// `GET /assets` — paginated, sortable, filterable list of tracked assets.
@@ -125,42 +213,77 @@ pub struct ListParams {
     get,
     path = "/assets",
     tag = "assets",
+    summary = "`GET /assets` — paginated, sortable, filterable list of tracked assets.",
+    description = "The tracked assets with their current-price snapshot, one page at a time. Sorted by\n`sort` \
+     and `order`, filtered by `type` and `search`, and paginated with an opaque keyset\ncursor: \
+     pass the previous page's `cursor` while `has_more` is `true`, with the same\n`sort` and \
+     `order`. Unknown query parameters are ignored.",
     params(
-        ("type" = Option<String>, Query, description = "classic | soroban | all (default all)"),
-        ("search" = Option<String>, Query, description = "asset code prefix match"),
-        ("sort" = Option<String>, Query,
-         description = "price | volume_24h | change_24h | code (default volume_24h)"),
-        ("order" = Option<String>, Query, description = "asc | desc (default desc)"),
-        ("cursor" = Option<String>, Query, description = "opaque pagination cursor"),
-        ("limit" = Option<u32>, Query, description = "1..=200 (default 50)"),
+        ("type" = Option<TypeFilter>, Query, description = "Which assets to list: `classic` (classic assets, including the native asset), `soroban` \
+          (Soroban contracts) or `all` (default)"),
+        ("search" = Option<String>, Query,
+         description = "Case-sensitive prefix match on the asset code, 1 to 64 bytes; an empty value is treated \
+          as absent. Soroban assets whose code is not yet resolved are not matched",
+         min_length = 1, max_length = 64),
+        ("sort" = Option<SortCol>, Query,
+         description = "Sort column (default `volume_24h`): `price`, `volume_24h`, `change_24h` or `code`"),
+        ("order" = Option<Order>, Query, description = "Sort direction (default `desc`)"),
+        ("cursor" = Option<String>, Query, description = "Opaque cursor from the previous page's `cursor` field; use it with the same `sort` and \
+          `order`"),
+        ("limit" = Option<u32>, Query, description = "Page size, 1 to 200 (default 50)",
+         minimum = 1, maximum = 200),
+        ("min_volume_usd" = Option<f64>, Query, minimum = 0,
+         description = "Same as on `GET /assets/{asset_identifier}/price`: drop the venues at or below this \
+          trailing 24-hour USD volume and recompute each row's `vwap_24h` and `sources`. Applied \
+          exactly as given; between 0 and 1e15. Does not affect `price_usd`, `volume_24h_usd` or \
+          the sort order, which are computed before the filter."),
     ),
     responses(
         (status = 200, description = "Asset list page", body = AssetListResponse),
-        (status = 400, description = "Invalid query parameter"),
+        (status = 400, description = "Invalid query parameter or cursor (`invalid_query`)", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
-pub async fn get_assets(State(state): State<AppState>, Query(p): Query<ListParams>) -> Response {
-    let Some(sort) = SortCol::parse(p.sort.as_deref()) else {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid sort");
-    };
-    let Some(order) = Order::parse(p.order.as_deref()) else {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid order");
-    };
-    let Some(type_filter) = TypeFilter::parse(p.asset_type.as_deref()) else {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid type");
-    };
+pub async fn get_assets(
+    State(state): State<AppState>,
+    ValidatedQuery(p): ValidatedQuery<ListParams>,
+) -> Response {
+    let sort = p.sort.unwrap_or(SortCol::Volume24h);
+    let order = p.order.unwrap_or(Order::Desc);
+    let type_filter = p.asset_type.unwrap_or(TypeFilter::All);
     let limit = p.limit.unwrap_or(DEFAULT_LIMIT);
     if limit == 0 || limit > MAX_LIMIT {
         return errors::bad_request(errors::INVALID_QUERY, "limit must be 1..=200");
     }
+    // `valid_for` type-checks the payload against the active sort — a numeric
+    // sort binds `v` into `toFloat64(?)`, where a corrupt value would make
+    // ClickHouse throw (500) instead of this 400.
     let cursor = match p.cursor.as_deref() {
         Some(tok) => match cursor::decode(tok) {
-            Some(c) => Some(c),
-            None => return errors::bad_request(errors::INVALID_QUERY, "invalid cursor"),
+            Some(c) if c.valid_for(sort.is_numeric()) => Some(c),
+            _ => return errors::bad_request(errors::INVALID_QUERY, "invalid cursor"),
         },
         None => None,
     };
+    // Empty search is treated as absent. Length-only cap, no charset: stored
+    // codes include lossy-decoded on-chain bytes, so a charset rule would make
+    // listed assets unsearchable (PR #217 review; same rule as the cursor).
     let search = p.search.filter(|s| !s.is_empty());
+    if let Some(s) = &search
+        && s.len() > MAX_SEARCH_LEN
+    {
+        return errors::bad_request(
+            errors::INVALID_QUERY,
+            format!("search must be at most {MAX_SEARCH_LEN} bytes"),
+        );
+    }
+    if let Some(resp) = min_volume_error(p.min_volume_usd) {
+        return resp;
+    }
+    let min_volume = p.min_volume_usd;
 
     let args = ListArgs {
         sort,
@@ -187,23 +310,33 @@ pub async fn get_assets(State(state): State<AppState>, Query(p): Query<ListParam
 
     let data = rows
         .into_iter()
-        .map(|r| AssetListItem {
-            asset_type: if r.contract_address.is_empty() {
-                "classic".to_string()
-            } else {
-                "soroban".to_string()
-            },
-            asset_code: r.asset_code,
-            issuer_address: r.issuer_address,
-            contract_address: r.contract_address,
-            home_domain: r.home_domain,
-            price_usd: r.price_usd,
-            change_24h_pct: r.change_24h_pct,
-            change_7d_pct: r.change_7d_pct,
-            volume_24h_usd: r.volume_24h_usd,
-            vwap_24h: r.vwap_24h,
-            sources: json!({}),
-            updated_at: r.updated_at,
+        .map(|r| {
+            let mut sources = crate::assets::dto::parse_sources(&r.sources);
+            let mut vwap_24h = r.vwap_24h;
+            if let Some(t) = min_volume {
+                // 0118 override — reweights vwap_24h/sources only; the sort
+                // ran in ClickHouse on columns the threshold never touches.
+                crate::assets::dto::apply_min_volume(&mut sources, &mut vwap_24h, t);
+            }
+            AssetListItem {
+                asset_type: if r.contract_address.is_empty() {
+                    "classic".to_string()
+                } else {
+                    "soroban".to_string()
+                },
+                asset_code: r.asset_code,
+                issuer_address: r.issuer_address,
+                contract_address: r.contract_address,
+                home_domain: r.home_domain,
+                price_usd: r.price_usd,
+                change_24h_pct: r.change_24h_pct,
+                change_7d_pct: r.change_7d_pct,
+                volume_24h_usd: r.volume_24h_usd,
+                vwap_24h,
+                sources,
+                updated_at: r.updated_at,
+                method: r.method,
+            }
         })
         .collect();
 
@@ -217,75 +350,174 @@ pub async fn get_assets(State(state): State<AppState>, Query(p): Query<ListParam
     resp
 }
 
-/// Query parameters for `GET /assets/{id}/ohlcv`.
+/// Query parameters for `GET /assets/{id}/ohlcv`. Enum params deserialize
+/// straight into their typed forms (see [`ListParams`] for the policy).
 #[derive(Debug, Deserialize)]
 pub struct OhlcvParams {
-    pub timeframe: Option<String>,
-    pub granularity: Option<String>,
+    pub timeframe: Option<Timeframe>,
+    pub granularity: Option<Granularity>,
     pub start: Option<String>,
     pub end: Option<String>,
-    pub base_currency: Option<String>,
+    pub base_currency: Option<BaseCurrency>,
 }
 
 /// `GET /assets/{asset_identifier}/ohlcv` — candlestick history.
 ///
-/// O/H/L/C are denominated in `base_currency` (USD→USDC quote, XLM→native quote)
-/// and returned as stored — no conversion. Candles merge across sources per
+/// `base_currency` **denominates** the series; it does not select a quote leg
+/// (ADR 0011). `USD` expresses every candle in USD whatever it traded against,
+/// so an asset with no USDC market still returns its history — `close` is exact
+/// and O/H/L/`vwap` are derived by scaling, flagged per candle. `XLM` still
+/// filters to the native quote and returns candles as stored.
+///
+/// Price fields are **absent, not dropped**, on a bucket with no USD value.
+/// Candles merge across sources — and, in USD mode, across quote legs — per
 /// bucket. `backfill_note` appears only for `timeframe=all` while the backfill
 /// is still running.
 #[utoipa::path(
     get,
     path = "/assets/{asset_identifier}/ohlcv",
     tag = "prices",
+    summary = "`GET /assets/{asset_identifier}/ohlcv` — candlestick history.",
+    description = "Candlestick history for one asset. `base_currency` sets the currency the candles \
+     are\nexpressed in, not which market they come from. With `USD` (the default) every candle \
+     is\nconverted to USD whatever it traded against, so an asset with no USD market still has \
+     a\nhistory: `close` is exact, while `open`, `high`, `low` and `vwap` are scaled from \
+     the\nquote-asset values with one rate per bucket and flagged with `derived`. With `XLM` \
+     only\ntrades against the native asset are returned, as stored.\n\nA bucket that traded but \
+     has no USD value yet is returned with its price fields `null`\nrather than omitted, so a \
+     chart keeps its time axis. Trades from every venue — and, in\nUSD mode, against every quote \
+     asset — are merged per bucket, in ascending time order.\n\nThe window is `timeframe`, ending \
+     now, or `start`/`end`. A window that would exceed 5000\ncandles at the chosen granularity is \
+     rejected with a 400. `backfill_note` is present only\nfor `timeframe=all` while the \
+     historical backfill is still running.",
     params(
-        ("asset_identifier" = String, Path, description = "native, CODE:ISSUER, or a C… contract"),
-        ("timeframe" = Option<String>, Query, description = "1h | 24h | 7d | 30d | 1y | all (default 24h)"),
-        ("granularity" = Option<String>, Query,
-         description = "1m | 15m | 1h | 4h | 1d | 1w | 1M (auto from timeframe if omitted)"),
-        ("start" = Option<String>, Query, description = "ISO-8601 range start (overrides timeframe)"),
-        ("end" = Option<String>, Query, description = "ISO-8601 range end"),
-        ("base_currency" = Option<String>, Query, description = "USD (default) | XLM"),
+        ("asset_identifier" = String, Path, description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
+          the `C…` address of a Soroban contract"),
+        ("timeframe" = Option<Timeframe>, Query,
+         description = "Window ending now: `1h`, `24h` (default), `7d`, `30d`, `1y` or `all` (from Stellar \
+          genesis). `start` overrides its start"),
+        ("granularity" = Option<Granularity>, Query,
+         description = "Bucket size: `1m`, `15m`, `1h`, `4h`, `1d`, `1w` or `1M` (case-sensitive: `1m` is one \
+          minute, `1M` one month). Default: the timeframe's own — `1h`→`1m`, `24h`→`15m`, \
+          `7d`→`1h`, `30d`→`4h`, `1y`→`1d`; for `start`/`end` windows and `timeframe=all`, the \
+          finest size that keeps the window within 5000 candles"),
+        ("start" = Option<String>, Query,
+         description = "Window start, inclusive: `YYYY-MM-DD`, an ISO 8601 date-time (a time without an offset \
+          is UTC), or a Unix epoch in seconds (milliseconds when 13 or more digits). Overrides \
+          the start of `timeframe`"),
+        ("end" = Option<String>, Query,
+         description = "Window end, inclusive, in the same forms (default: now). With `end` alone, the \
+          `timeframe` window ends there"),
+        ("base_currency" = Option<BaseCurrency>, Query,
+         description = "`USD` (default) or `XLM`; all-lowercase `usd`/`xlm` are accepted as aliases"),
     ),
     responses(
         (status = 200, description = "Candlestick series", body = OhlcvResponse),
-        (status = 400, description = "Invalid parameter"),
-        (status = 404, description = "Unknown asset"),
+        (status = 400, description = "Invalid identifier or parameter, or a window over 5000 candles (`invalid_id`, \
+          `invalid_query`)", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
+        (status = 404, description = "Unknown asset (`not_found`)", body = ErrorEnvelope),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
+        (status = 503, description = "A reference asset the conversion needs is not tracked — USDC for `USD`, the native \
+          asset for `XLM` (`quote_unavailable`)", body = ErrorEnvelope),
     )
 )]
 pub async fn get_ohlcv(
     State(state): State<AppState>,
-    Path(raw): Path<String>,
-    Query(p): Query<OhlcvParams>,
+    ValidatedPath(raw): ValidatedPath<String>,
+    ValidatedQuery(p): ValidatedQuery<OhlcvParams>,
 ) -> Response {
     let id = match AssetIdentifier::parse(&raw) {
         Ok(id) => id,
         Err(e) => return errors::bad_request(errors::INVALID_ID, e.to_string()),
     };
-    let Some(timeframe) = Timeframe::parse(p.timeframe.as_deref()) else {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid timeframe");
-    };
-    let Some(base_currency) = BaseCurrency::parse(p.base_currency.as_deref()) else {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid base_currency");
-    };
-    let granularity = match p.granularity.as_deref() {
-        None => timeframe.default_granularity(),
-        Some(s) => match Granularity::parse(s) {
-            Some(g) => g,
-            None => return errors::bad_request(errors::INVALID_QUERY, "invalid granularity"),
+    let timeframe = p.timeframe.unwrap_or(Timeframe::H24);
+    let base_currency = p.base_currency.unwrap_or(BaseCurrency::Usd);
+
+    // Window rule (task 0119): parse ?start/?end to epochs, then bound-check the
+    // whole window BEFORE the DB is touched. Explicit rejection replaces the old
+    // silent truncation at OHLCV_MAX_POINTS, which looked like missing data.
+    // Granularity is resolved AFTER the window (see below): when omitted, it
+    // derives from what the caller actually asked for.
+    let start = match p.start.as_deref() {
+        Some(s) => match parse_time(s) {
+            Some(t) => Some(t),
+            None => {
+                return errors::bad_request(
+                    errors::INVALID_QUERY,
+                    "invalid start (expected ISO-8601 or epoch)",
+                );
+            }
         },
+        None => None,
     };
-    // Validate ?start / ?end up front — otherwise a malformed value is bound into
-    // ClickHouse `parseDateTimeBestEffort(?)`, which throws → a 500 for what is a
-    // client input error (should be 400).
-    if let Some(s) = p.start.as_deref()
-        && !valid_iso8601(s)
-    {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid start (expected ISO-8601)");
+    let end = match p.end.as_deref() {
+        Some(e) => match parse_time(e) {
+            Some(t) => Some(t),
+            None => {
+                return errors::bad_request(
+                    errors::INVALID_QUERY,
+                    "invalid end (expected ISO-8601 or epoch)",
+                );
+            }
+        },
+        None => None,
+    };
+    let now = chrono::Utc::now().timestamp();
+    let eff_end = end.unwrap_or(now);
+    // The timeframe window anchors to eff_end (not now), so `?end=…&timeframe=7d`
+    // means "the 7d window ending there". `all` starts at Stellar genesis. The
+    // derived branch is clamped to epoch 0: it is the one bound `parse_time`'s
+    // range check never saw, and a negative value would reach `toDateTime(?)`
+    // (ClickHouse DateTime is unsigned — throw or wraparound, both wrong).
+    let eff_start = start.unwrap_or_else(|| {
+        match timeframe.seconds() {
+            Some(tf) => eff_end - tf as i64,
+            None => queries_ch::STELLAR_GENESIS_EPOCH,
+        }
+        .max(0)
+    });
+    // Strictly greater: `start == end` is a legitimate one-bucket window, since
+    // the SQL bounds are inclusive on both ends.
+    if eff_start > eff_end {
+        // A future-only `start` trips this with an `end` the client never sent —
+        // name the actual problem instead (review finding, PR #217).
+        let message = if end.is_none() && start.is_some_and(|s| s > now) {
+            "start is in the future"
+        } else {
+            "start must be before end"
+        };
+        return errors::bad_request(errors::INVALID_QUERY, message);
     }
-    if let Some(e) = p.end.as_deref()
-        && !valid_iso8601(e)
-    {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid end (expected ISO-8601)");
+    let span = (eff_end - eff_start) as u64;
+    // Granularity, when omitted, follows what the caller asked for: a plain
+    // timeframe keeps its documented default; an explicit window (and
+    // `timeframe=all`, whose span grows with time) gets the finest granularity
+    // that fits the point cap — so `?start=2020-01-01` alone is answerable
+    // instead of 400ing at a granularity the caller never chose, and bare
+    // `timeframe=all` self-coarsens instead of hitting a cliff around 2029.
+    let explicit_window = start.is_some() || end.is_some();
+    let granularity = match p.granularity {
+        Some(g) => g,
+        None if !explicit_window && !timeframe.is_all() => timeframe.default_granularity(),
+        None => Granularity::finest_for_span(span, OHLCV_MAX_POINTS),
+    };
+    // `+ 1`: the SQL bounds are inclusive on both ends, so an aligned window
+    // spanning exactly N buckets contains N + 1 bucket-start timestamps —
+    // counting span/granularity alone would let a 5001-bucket request through
+    // to be silently truncated by the LIMIT.
+    let points = span.div_ceil(granularity.seconds()) + 1;
+    if points > OHLCV_MAX_POINTS {
+        return errors::bad_request(
+            errors::INVALID_QUERY,
+            format!(
+                "window yields ~{points} candles at granularity {g} (max {OHLCV_MAX_POINTS}); \
+                 use a coarser granularity or a narrower start/end",
+                g = granularity.as_str()
+            ),
+        );
     }
 
     // Resolve the base asset.
@@ -295,50 +527,155 @@ pub async fn get_ohlcv(
         Err(e) => return errors::db_error(&e, "asset lookup"),
     };
 
-    // Resolve the quote leg from base_currency.
-    let quote_ident = match base_currency {
-        BaseCurrency::Usd => AssetIdentifier::Classic {
-            code: "USDC".to_string(),
-            issuer: prices_clickhouse::USDC_ISSUER.to_string(),
-        },
-        BaseCurrency::Xlm => AssetIdentifier::Native,
+    // Resolve the denomination (ADR 0011 §1). In USD mode `base_currency` no
+    // longer selects a quote leg — the reference ids are needed only to classify
+    // each row's provenance, not to filter it. In XLM mode it is still the
+    // pre-ADR pair filter; see Denomination::QuoteLeg.
+    //
+    // The three references are resolved by natural identity, mirroring the
+    // enrichment worker's own resolve_reference_ids so read and write cannot
+    // disagree about which USDC is canonical. All three must be tracked: their
+    // absence is a server-side data gap, not "no candles", so it stays a 503
+    // rather than being masked as an empty 200 (which looks like a healthy asset
+    // with no history).
+    let denomination =
+        match base_currency {
+            BaseCurrency::Usd => {
+                // Resolved once per AppState and shared thereafter — see
+                // AppState::usd_refs. The three identities are constants and their
+                // surrogate ids never move, so re-reading `assets FINAL` on every
+                // request is pure waste on a p95-bounded path.
+                let refs = state
+                .usd_refs()
+                .get_or_try_init(|| async {
+                    // Concurrent: they do not depend on each other.
+                    let (usdc_id, xlm_id, usdt_id) =
+                        (usdc_identifier(), AssetIdentifier::Native, usdt_identifier());
+                    let (usdc, xlm, usdt) = tokio::join!(
+                        queries_ch::resolve_asset_id(state.ch(), &usdc_id),
+                        queries_ch::resolve_asset_id(state.ch(), &xlm_id),
+                        queries_ch::resolve_asset_id(state.ch(), &usdt_id),
+                    );
+                    // The pivots are best-effort: an untracked reference cannot
+                    // be any candle's quote leg, so it only costs the `traded`
+                    // label. A lookup ERROR still fails — that is the database
+                    // misbehaving, not an absent asset.
+                    let mut pivots = Vec::new();
+                    for found in [xlm, usdt] {
+                        match found {
+                            Ok(Some(id)) => pivots.push(id),
+                            Ok(None) => tracing::debug!(
+                                "ohlcv pivot reference not tracked; rows on this leg go unlabelled"
+                            ),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    // USDC must resolve: see UsdRefs::usdc.
+                    match usdc {
+                        Ok(Some(usdc)) => Ok(queries_ch::UsdRefs { usdc, pivots }),
+                        Ok(None) => Err(clickhouse::error::Error::Custom(
+                            "canonical USDC is not tracked".to_string(),
+                        )),
+                        Err(e) => Err(e),
+                    }
+                })
+                .await;
+                match refs {
+                    Ok(r) => queries_ch::Denomination::Usd(r.clone()),
+                    Err(e) => {
+                        tracing::error!(error = %e, "ohlcv reference resolution failed");
+                        return errors::service_unavailable(
+                            errors::QUOTE_UNAVAILABLE,
+                            "pricing in the requested base_currency is unavailable",
+                        );
+                    }
+                }
+            }
+            BaseCurrency::Xlm => {
+                match resolve_reference(state.ch(), AssetIdentifier::Native, base_currency).await {
+                    Ok(id) => queries_ch::Denomination::QuoteLeg(id),
+                    Err(resp) => return resp,
+                }
+            }
+        };
+
+    // The validated window is exactly what binds into SQL — the same eff_start
+    // the point-count check measured, so there is one interpretation of the
+    // window, not a parallel now() - INTERVAL path that could drift from it
+    // (INTERVAL 1 YEAR is calendar-aware; seconds() isn't). The upper bound
+    // binds only when the client supplied one: a derived `end = now` from this
+    // process's clock could, under skew, cut a bucket ClickHouse already has —
+    // an open top costs nothing (future buckets don't exist).
+    let args = OhlcvArgs {
+        asset_id,
+        denomination,
+        granularity,
+        start: Some(eff_start),
+        end,
+        limit: OHLCV_MAX_POINTS,
     };
-    let quote_asset_id = match queries_ch::resolve_asset_id(state.ch(), &quote_ident).await {
-        Ok(Some(q)) => q,
-        // The quote leg (USDC for USD, native for XLM) must be tracked — its
-        // absence is a server-side data gap, not "no candles". Surface it as a
-        // 503 instead of masking it as an empty 200 (which looks like a healthy
-        // asset with no history).
-        Ok(None) => {
-            tracing::error!(
-                base_currency = base_currency.as_str(),
-                "ohlcv quote asset not tracked"
-            );
+    // ADR 0011 §6: canonical USDC is only ever a quote leg, so a normal query
+    // for it matches zero rows and no amount of filter-dropping helps — its
+    // series is synthesized instead. Keyed on the requested identity, not on a
+    // resolved asset_id, because 0139 has ids serving more than one identity.
+    // ADR 0011 §6: canonical USDC is only ever a quote leg, so a normal query
+    // for it matches zero rows in EITHER denomination and no amount of
+    // filter-dropping helps — its series is synthesized instead.
+    //
+    // Matched on the natural identity (case-insensitively: `AssetIdentifier`
+    // preserves the code's case verbatim) OR on the resolved id. The id arm is
+    // what catches USDC addressed by its SAC contract address, which is a
+    // different identity for the same asset.
+    // ⚠️ [[0139]] means an `asset_id` can serve more than one identity, so the
+    // id arm could in principle route a colliding asset here. Accepted: the
+    // alternative is that a legitimate USDC identity silently falls back to the
+    // known-empty path, which is the defect this task exists to remove.
+    let (peg_usdc, peg_xlm) = match &args.denomination {
+        queries_ch::Denomination::Usd(refs) => (Some(refs.usdc), refs.pivots.first().copied()),
+        queries_ch::Denomination::QuoteLeg(x) => {
+            match queries_ch::resolve_asset_id(state.ch(), &usdc_identifier()).await {
+                Ok(Some(u)) => (Some(u), Some(*x)),
+                Ok(None) => (None, Some(*x)),
+                Err(e) => return errors::db_error(&e, "quote lookup"),
+            }
+        }
+    };
+    let is_peg_asset = peg_usdc.is_some_and(|u| {
+        u == asset_id
+            || id
+                .to_canonical()
+                .eq_ignore_ascii_case(&usdc_identifier().to_canonical())
+    });
+
+    let data = if is_peg_asset {
+        // Both references anchor the series: USDC is the rate's identity, XLM is
+        // the market the buckets come from (and, in XLM mode, the denominator).
+        let (Some(usdc), Some(xlm)) = (peg_usdc, peg_xlm) else {
+            tracing::error!("ohlcv peg series needs both USDC and native XLM tracked");
             return errors::service_unavailable(
                 errors::QUOTE_UNAVAILABLE,
                 "pricing in the requested base_currency is unavailable",
             );
+        };
+        let in_xlm = matches!(base_currency, BaseCurrency::Xlm);
+        match queries_ch::ohlcv_peg_series(
+            state.ch(),
+            &args,
+            usdc,
+            xlm,
+            prices_clickhouse::USDC_ISSUER,
+            in_xlm,
+        )
+        .await
+        {
+            Ok(d) => d,
+            Err(e) => return errors::db_error(&e, "ohlcv peg series"),
         }
-        Err(e) => return errors::db_error(&e, "quote lookup"),
-    };
-
-    let since_interval = if p.start.is_some() {
-        None
     } else {
-        timeframe.interval()
-    };
-    let args = OhlcvArgs {
-        asset_id,
-        quote_asset_id,
-        granularity,
-        start: p.start.clone(),
-        end: p.end.clone(),
-        since_interval,
-        limit: OHLCV_MAX_POINTS,
-    };
-    let data = match queries_ch::ohlcv(state.ch(), args).await {
-        Ok(d) => d,
-        Err(e) => return errors::db_error(&e, "ohlcv lookup"),
+        match queries_ch::ohlcv(state.ch(), args).await {
+            Ok(d) => d,
+            Err(e) => return errors::db_error(&e, "ohlcv lookup"),
+        }
     };
 
     // backfill_note: only for timeframe=all, with data, while SDEX still running.
@@ -362,6 +699,55 @@ pub async fn get_ohlcv(
     };
 
     ohlcv_response(&id, granularity, base_currency, note, data)
+}
+
+/// Canonical USDC's natural identity — the same `(code, issuer)` pair the
+/// enrichment peg tier and `views.sql` key on, so the three cannot drift.
+fn usdc_identifier() -> AssetIdentifier {
+    AssetIdentifier::Classic {
+        code: "USDC".to_string(),
+        issuer: prices_clickhouse::USDC_ISSUER.to_string(),
+    }
+}
+
+/// Canonical Stellar USDT's natural identity.
+///
+/// ⚠️ This is a *reference* leg, not a peg. It depegged in June 2022 and trades
+/// at ~$0.13 (task 0172); candles quoted in it are priced by measurement through
+/// the pivot, exactly like XLM. Naming it here is only how those rows get
+/// classified `traded`.
+fn usdt_identifier() -> AssetIdentifier {
+    AssetIdentifier::Classic {
+        code: "USDT".to_string(),
+        issuer: prices_clickhouse::USDT_ISSUER.to_string(),
+    }
+}
+
+/// Resolve one reference leg, mapping "not tracked" to a 503.
+///
+/// A missing reference is a server-side data gap. Returning an empty 200 would
+/// render it as "this asset has no history", which is the exact confusion this
+/// endpoint's whole fix is about.
+async fn resolve_reference(
+    ch: &clickhouse::Client,
+    ident: AssetIdentifier,
+    base_currency: BaseCurrency,
+) -> Result<u32, Response> {
+    match queries_ch::resolve_asset_id(ch, &ident).await {
+        Ok(Some(id)) => Ok(id),
+        Ok(None) => {
+            tracing::error!(
+                base_currency = base_currency.as_str(),
+                asset = %ident.to_canonical(),
+                "ohlcv reference asset not tracked"
+            );
+            Err(errors::service_unavailable(
+                errors::QUOTE_UNAVAILABLE,
+                "pricing in the requested base_currency is unavailable",
+            ))
+        }
+        Err(e) => Err(errors::db_error(&e, "quote lookup")),
+    }
 }
 
 /// Build the OHLCV 200 response with a MEDIUM cache header.
@@ -398,78 +784,141 @@ async fn sdex_backfill_running(ch: &clickhouse::Client) -> bool {
     }
 }
 
-/// Lightweight ISO-8601 / epoch validation for `?start` / `?end`. Accepts what
-/// our clients send (and what ClickHouse `parseDateTimeBestEffort` consumes)
-/// without pulling in a datetime crate: a bare epoch (all digits), or a
-/// `YYYY-MM-DD` date optionally followed by `T`/space and an `HH:MM[:SS][.fff]`
-/// time with an optional `Z` / `±HH:MM` offset. Anything else (e.g. `notadate`)
-/// is rejected so the handler returns 400 instead of letting CH error → 500.
-fn valid_iso8601(s: &str) -> bool {
+/// Latest epoch we accept for `?start` / `?end`: 2100-01-01. Bounds what gets
+/// bound into ClickHouse `toDateTime` (DateTime tops out in 2106) and rejects
+/// nonsense like a 12-digit "epoch" that is really a typo.
+const MAX_EPOCH: i64 = 4_102_444_800;
+
+/// Parse a `?start` / `?end` value to epoch seconds (UTC). Accepts a bare
+/// epoch (seconds; milliseconds when 13+ digits), `YYYY-MM-DD` (midnight
+/// UTC), and `YYYY-MM-DD[T ]HH:MM[:SS[.fff]]` with an optional `Z` / `±HH:MM`
+/// / `±HHMM` offset (naive times are UTC). Unlike its shape-only predecessor,
+/// this rejects semantically impossible dates (`2026-02-30`, `T99:99:99`) —
+/// and the parsed epoch (not the raw string) is what reaches SQL, so there is
+/// exactly one interpretation of the window.
+fn parse_time(s: &str) -> Option<i64> {
+    use std::borrow::Cow;
+
     let s = s.trim();
     if s.is_empty() {
-        return false;
+        return None;
     }
-    // Bare unix epoch (seconds / millis).
-    if s.bytes().all(|b| b.is_ascii_digit()) {
-        return true;
+    let epoch = if s.bytes().all(|b| b.is_ascii_digit()) {
+        // Digit count, not magnitude, decides seconds vs milliseconds — the
+        // documented rule. (10-digit millis, i.e. instants in 1970, are
+        // indistinguishable from valid seconds and read as seconds.)
+        let millis = s.len() >= 13;
+        let n: i64 = s.parse().ok()?;
+        if millis { n / 1000 } else { n }
+    } else if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        d.and_hms_opt(0, 0, 0)?.and_utc().timestamp()
+    } else {
+        // Datetime forms. Two query-string realities to undo before parsing
+        // (PR #217 review): the documented space separator sits exactly at
+        // byte 10 (fix it positionally — replacing the FIRST space would
+        // corrupt the next case), and a literal `+` percent-decodes to a
+        // space, so a trailing " HH:MM" / " HHMM" after the time is a
+        // `+HH:MM` offset that lost its sign in transit.
+        let mut norm: Cow<str> = if s.len() > 10 && s.as_bytes()[10] == b' ' {
+            Cow::Owned(format!("{}T{}", &s[..10], &s[11..]))
+        } else {
+            Cow::Borrowed(s)
+        };
+        if let Some(i) = norm.rfind(' ')
+            && looks_like_utc_offset(&norm[i + 1..])
+        {
+            let mut owned = norm.into_owned();
+            owned.replace_range(i..=i, "+");
+            norm = Cow::Owned(owned);
+        }
+        // Offset-carrying forms: RFC 3339 (`T`, seconds, `Z`/`±HH:MM`), then
+        // the shapes it rejects — minute precision with an offset, and `±HHMM`
+        // without the colon (`%#z` takes both colon styles).
+        let with_offset = chrono::DateTime::parse_from_rfc3339(&norm)
+            .ok()
+            .or_else(|| {
+                ["%Y-%m-%dT%H:%M:%S%.f%#z", "%Y-%m-%dT%H:%M%#z"]
+                    .iter()
+                    .find_map(|fmt| chrono::DateTime::parse_from_str(&norm, fmt).ok())
+            });
+        match with_offset {
+            Some(dt) => dt.timestamp(),
+            None => {
+                // Naive forms (UTC), seconds optional; a trailing `Z` marks
+                // the same UTC instant, so accept it on minute precision too.
+                let naive = norm.strip_suffix('Z').unwrap_or(&norm);
+                ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M"]
+                    .iter()
+                    .find_map(|fmt| chrono::NaiveDateTime::parse_from_str(naive, fmt).ok())?
+                    .and_utc()
+                    .timestamp()
+            }
+        }
+    };
+    (0..=MAX_EPOCH).contains(&epoch).then_some(epoch)
+}
+
+/// `HH:MM` or `HHMM` — the tail of a `+HH:MM` offset whose `+` was
+/// percent-decoded to a space in the query string.
+fn looks_like_utc_offset(t: &str) -> bool {
+    match t.len() {
+        4 => t.bytes().all(|b| b.is_ascii_digit()),
+        5 => {
+            t.as_bytes()[2] == b':'
+                && t.bytes()
+                    .enumerate()
+                    .all(|(i, b)| i == 2 || b.is_ascii_digit())
+        }
+        _ => false,
     }
-    let bytes = s.as_bytes();
-    // Date prefix: exactly `YYYY-MM-DD`.
-    if bytes.len() < 10 {
-        return false;
-    }
-    let digit = |i: usize| bytes[i].is_ascii_digit();
-    if !(digit(0)
-        && digit(1)
-        && digit(2)
-        && digit(3)
-        && bytes[4] == b'-'
-        && digit(5)
-        && digit(6)
-        && bytes[7] == b'-'
-        && digit(8)
-        && digit(9))
-    {
-        return false;
-    }
-    let month = (bytes[5] - b'0') * 10 + (bytes[6] - b'0');
-    let day = (bytes[8] - b'0') * 10 + (bytes[9] - b'0');
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return false;
-    }
-    if s.len() == 10 {
-        return true;
-    }
-    // Optional time component: separator (`T` or space) then time-ish chars only.
-    if bytes[10] != b'T' && bytes[10] != b' ' {
-        return false;
-    }
-    let time = &s[11..];
-    time.len() >= 5 // at least HH:MM
-        && time
-            .bytes()
-            .all(|b| b.is_ascii_digit() || matches!(b, b':' | b'.' | b'Z' | b'+' | b'-'))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::valid_iso8601;
+    use super::parse_time;
 
     #[test]
-    fn iso8601_accepts_common_forms() {
+    fn parse_time_accepts_common_forms() {
         for s in [
             "2026-06-15",
             "2026-06-15T11:30:00Z",
             "2026-06-15 11:30:00",
+            "2026-06-15T11:30",
             "2026-06-15T11:30:00.123+02:00",
             "1718450000",
+            // Offset shapes RFC 3339 alone rejects — accepted by the old
+            // parseDateTimeBestEffort pipeline, so still part of the contract.
+            "2026-06-15T11:30Z",
+            "2026-06-15T11:30+02:00",
+            "2026-06-15T11:30:00+0200",
+            // What the handler actually receives when a client sends `+HH:MM`
+            // raw in a query string: `+` percent-decodes to a space
+            // (PR #217 review).
+            "2026-06-15T11:30:00 02:00",
+            "2026-06-15T11:30 0200",
+            "2026-06-15 11:30:00 02:00",
         ] {
-            assert!(valid_iso8601(s), "{s} should be valid");
+            assert!(parse_time(s).is_some(), "{s} should be valid");
         }
     }
 
     #[test]
-    fn iso8601_rejects_garbage() {
+    fn parse_time_agrees_on_equivalent_forms() {
+        // The same instant in four spellings — all must produce one epoch,
+        // since the parsed value (not the raw string) is what reaches SQL.
+        let epoch = parse_time("2026-06-15T11:13:20Z").unwrap();
+        assert_eq!(parse_time("2026-06-15 11:13:20"), Some(epoch));
+        assert_eq!(parse_time(&epoch.to_string()), Some(epoch));
+        assert_eq!(parse_time(&format!("{}000", epoch)), Some(epoch)); // millis
+        // Offsets shift correctly — including with the `+` lost in transit.
+        assert_eq!(parse_time("2026-06-15T13:13:20+02:00"), Some(epoch));
+        assert_eq!(parse_time("2026-06-15T13:13:20 02:00"), Some(epoch));
+        // Date-only is midnight UTC.
+        assert_eq!(parse_time("1970-01-02"), Some(86_400));
+    }
+
+    #[test]
+    fn parse_time_rejects_garbage_and_impossible_dates() {
         for s in [
             "notadate",
             "",
@@ -478,8 +927,12 @@ mod tests {
             "2026-06-32",
             "06-15-2026",
             "T12:00:00",
+            "2026-02-30",          // impossible calendar date
+            "2026-06-15T99:99:99", // impossible time
+            "99999999999999999",   // over MAX_EPOCH even as millis
+            "999999999999",        // 12 digits = seconds by the rule → > 2100
         ] {
-            assert!(!valid_iso8601(s), "{s} should be invalid");
+            assert!(parse_time(s).is_none(), "{s} should be invalid");
         }
     }
 }

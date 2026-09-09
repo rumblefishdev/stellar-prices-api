@@ -12,10 +12,13 @@ use serde::Serialize;
 
 use crate::common::cache_control;
 
-/// The wire shape for every error response.
-#[derive(Debug, Serialize)]
+/// The wire shape for every error response. Published in the OpenAPI document
+/// as the `body` of every 4xx/5xx response (task 0124), so a client can code
+/// against `code` rather than parsing `message`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ErrorEnvelope {
     /// Stable machine-readable code (see the `*` constants below).
+    #[schema(example = "invalid_id")]
     pub code: &'static str,
     /// Human-readable explanation.
     pub message: String,
@@ -36,6 +39,9 @@ impl ErrorEnvelope {
 pub const INVALID_ID: &str = "invalid_id";
 /// Query parameters failed validation.
 pub const INVALID_QUERY: &str = "invalid_query";
+/// The request body failed extraction: malformed JSON, wrong shape, missing
+/// `Content-Type`, or over the body-size limit.
+pub const INVALID_BODY: &str = "invalid_body";
 /// The requested resource does not exist.
 pub const NOT_FOUND: &str = "not_found";
 /// Missing or invalid `X-API-Key`.
@@ -46,14 +52,20 @@ pub const DB_ERROR: &str = "db_error";
 /// requested `base_currency` cannot be served.
 pub const QUOTE_UNAVAILABLE: &str = "quote_unavailable";
 
-/// 400 Bad Request with a machine-readable `code`.
+/// 400 Bad Request with a machine-readable `code`. Carries
+/// `Cache-Control: no-store` so a client/CDN never caches a rejection (`limit`
+/// is a gateway cache-key param; the gateway's own cache is config-side and
+/// verified under task 0122).
 pub fn bad_request(code: &'static str, message: impl Into<String>) -> Response {
-    ErrorEnvelope {
+    let mut resp = ErrorEnvelope {
         code,
         message: message.into(),
         details: None,
     }
-    .into_response_with(StatusCode::BAD_REQUEST)
+    .into_response_with(StatusCode::BAD_REQUEST);
+    resp.headers_mut()
+        .insert(CACHE_CONTROL, cache_control::NO_STORE);
+    resp
 }
 
 /// 404 Not Found.
@@ -96,6 +108,25 @@ pub fn service_unavailable(code: &'static str, message: impl Into<String>) -> Re
         details: None,
     }
     .into_response_with(StatusCode::SERVICE_UNAVAILABLE)
+}
+
+/// 401 Unauthorized with a caller-chosen `code`.
+///
+/// The portal's key routes (task 0187) refuse an unauthenticated caller with
+/// `not_signed_in` rather than the partner API's `unauthorized`: the two mean
+/// different things to the two audiences — one says "present an API key", the
+/// other says "sign in with Discord", and the portal's bundle branches on the
+/// code to decide which control to show.
+pub fn unauthorized_with(code: &'static str, message: impl Into<String>) -> Response {
+    let mut resp = ErrorEnvelope {
+        code,
+        message: message.into(),
+        details: None,
+    }
+    .into_response_with(StatusCode::UNAUTHORIZED);
+    resp.headers_mut()
+        .insert(CACHE_CONTROL, cache_control::NO_STORE);
+    resp
 }
 
 /// 401 Unauthorized. Carries `Cache-Control: no-store` so a rejection is never

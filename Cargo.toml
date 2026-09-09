@@ -16,8 +16,10 @@ members = [
     "packages/supply-worker",
     "packages/oracle-worker",
     "packages/enrichment-worker",
+    "packages/coarse-sweep-worker",
     "packages/prices-api",
     "packages/backfill-freshness-probe",
+    "packages/rollup-freshness-probe",
     "packages/mtls-notafter-probe",
     "packages/pool-registry-seed",
 ]
@@ -46,12 +48,19 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 thiserror = "2"
+# Already in the build graph transitively (xdr-parser → domain), so this direct
+# dep compiles nothing new. Used by prices-api to parse ?start/?end (task 0119).
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
 # AWS / Lambda — used only by the live Prices Ledger Processor (task 0038),
 # behind its `lambda` / `aws-mtls` cargo features so default builds stay lean.
 lambda_runtime = "0.13"
 aws-config = "1"
 aws-sdk-s3 = "1"
+# API Gateway CONTROL plane (task 0187 — self-service key issuance). Not the
+# data plane: this is `CreateApiKey`/`GetApiKeys`/`CreateUsagePlanKey`, the same
+# API the console drives. Used by prices-api's portal only.
+aws-sdk-apigateway = "1"
 aws-sdk-cloudwatch = "1"
 aws_lambda_events = { version = "0.16", default-features = false, features = ["sqs"] }
 tempfile = "3"

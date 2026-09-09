@@ -1,0 +1,4 @@
+# Runtime state, not results. The .tsv log IS the result and is committed.
+state.env
+state.env.torn-down-*
+poller.out

@@ -3,10 +3,17 @@
   "awsRegion": "eu-central-1",
   "apiGatewayThrottleRate": 200,
   "apiGatewayThrottleBurst": 400,
-  "apiGatewayPartnerDailyQuota": 10000,
-  "apiKeyRateLimit": 100,
-  "apiKeyBurstLimit": 200,
+  "pricingApiFreePlanRateLimit": 1,
+  "pricingApiFreePlanBurstLimit": 5,
+  "pricingApiFreePlanMonthlyQuota": 100000,
   "apiGatewayCacheEnabled": true,
+  "apiBaseUrl": "https://prices-api.sorobanscan.rumblefish.dev",
+  "apiDomain": {
+    "domainName": "prices-api.sorobanscan.rumblefish.dev",
+    "hostedZoneId": "Z10396861CRMUIWWA8TL9",
+    "hostedZoneName": "sorobanscan.rumblefish.dev"
+  },
+  "portalWebOrigin": "https://sorobanscan.rumblefish.dev",
   "apiHandler": {
     "memoryMb": 512,
     "timeoutSeconds": 15
@@ -17,13 +24,28 @@
     "assetDiscovery": "rate(1 hour)",
     "cleanup": "cron(0 3 * * ? *)",
     "enrichment": "rate(1 hour)",
+    "coarseSweep": "cron(30 * * * ? *)",
     "backfillFreshnessProbe": "rate(15 minutes)",
+    "rollupFreshnessProbe": "rate(15 minutes)",
     "mtlsNotafterProbe": "rate(1 day)"
   },
   "opsAlarms": {
     "sdexPushFreshnessSeconds": 604800,
+    "ammPushFreshnessSeconds": 604800,
     "mtlsNotAfterDaysThreshold": 30,
+    "rollupLagSeconds": {
+      "price_ohlcv_1m": 900,
+      "price_ohlcv_15m": 3600,
+      "price_ohlcv_1h": 10800,
+      "price_ohlcv_4h": 43200,
+      "price_ohlcv_1d": 172800,
+      "price_ohlcv_1w": 864000,
+      "price_ohlcv_1M": 3888000
+    },
     "ledgerProcessorLagSeconds": 120,
+    "chDiskFreePercent": 20,
+    "dlqEscalationDepths": [10, 50],
+    "usdSanityEscalationCounts": [1, 100, 10000],
     "slack": {
       "workspaceIdSsmParam": "/prices/production/slack-workspace-id",
       "channelIdSsmParam": "/prices/production/slack-channel-id"

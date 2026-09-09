@@ -35,24 +35,113 @@ export interface EnvironmentConfig {
 
   // API Gateway (consumed by ApiGatewayStack)
 
-  /** Stage-wide sustained requests per second before API Gateway returns 429. */
-  readonly apiGatewayThrottleRate: number;
-  /** Stage-wide maximum concurrent requests in a short burst above the rate. */
-  readonly apiGatewayThrottleBurst: number;
-  /** Daily request quota for API-key holders (UsagePlan quota.limit). */
-  readonly apiGatewayPartnerDailyQuota: number;
   /**
-   * Per-API-key sustained requests/second (UsagePlan throttle). The §2.1 / §7
-   * contract is 100 req/s per key; this is the value enforced per key holder.
+   * Default per-method sustained requests/second on the stage before API Gateway
+   * returns 429.
+   *
+   * NOT an aggregate across the stage: a per-API per-stage limit is applied per
+   * method, so this value is granted to each method separately. Ten methods at
+   * 200 is ten independent buckets of 200, not 200 shared ten ways.
    */
-  readonly apiKeyRateLimit: number;
-  /** Per-API-key burst limit (UsagePlan throttle). */
-  readonly apiKeyBurstLimit: number;
+  readonly apiGatewayThrottleRate: number;
+  /** Default per-method token-bucket capacity above the rate (same scope). */
+  readonly apiGatewayThrottleBurst: number;
+  /**
+   * Per-key sustained requests/second on the `pricing-api-free` usage plan.
+   *
+   * The design doc's §2.1 / §7 figure was 100 req/s, sized for a key we hand
+   * out deliberately. Task 0157 overrides it: a key anybody can mint by signing
+   * in must not be able to consume the sustained load the whole system is
+   * load-tested against.
+   */
+  readonly pricingApiFreePlanRateLimit: number;
+  /**
+   * Token-bucket capacity for the `pricing-api-free` plan. Refill keeps the sustained
+   * rate at `pricingApiFreePlanRateLimit`; burst only lets the allowance be spent
+   * unevenly — enough that the quickstart's parallel example queries don't 429.
+   */
+  readonly pricingApiFreePlanBurstLimit: number;
+  /**
+   * Monthly request quota for the `pricing-api-free` plan (UsagePlan quota.limit).
+   *
+   * The operative limit a caller actually meets: at the per-second rate a key
+   * could produce ~2.6M requests/month, so the quota binds ~26x harder than the
+   * throttle. The period is in the name because a usage plan carries exactly one
+   * quota — encoding it makes the unit impossible to misread.
+   */
+  readonly pricingApiFreePlanMonthlyQuota: number;
   /**
    * Whether the API Gateway stage response cache (0.5 GB) is enabled. Per-route
    * TTLs are fixed in `ApiGatewayStack` per §2.1.
    */
   readonly apiGatewayCacheEnabled: boolean;
+
+  /**
+   * Public base URL of the deployed API, passed to the api-handler as
+   * `API_BASE_URL` and stamped into the OpenAPI `servers` block (task 0124).
+   *
+   * Since 2026-08-31 this is the API's own hostname (`apiDomain`, task 0194),
+   * whose base path mapping is the root — so NO stage path. The execute-api
+   * form is still accepted, and then it MUST include the stage path: API
+   * Gateway serves the REST API at
+   * `https://{id}.execute-api.{region}.amazonaws.com/{stage}`, so a value
+   * without `/production` advertises a base that 403s on every route — the same
+   * stage-prefix trap that made `AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH=true`
+   * necessary for `/v1` (task 0089). `validateConfig` checks whichever form
+   * is used. The portal's snippets carry the same value as
+   * `PUBLIC_API_BASE_URL` (`web/portal/src/landing/links.ts`), asserted by
+   * `links.spec.ts`.
+   *
+   * Configured rather than derived because ComputeStack (which owns the
+   * function's environment) is a *dependency* of ApiGatewayStack (which owns
+   * the URL) — reading `api.url` here would close the cycle Compute → Gateway →
+   * Compute and fail synth. Names `apiDomain.domainName` since task 0194
+   * (2026-08-31).
+   */
+  readonly apiBaseUrl: string;
+
+  /**
+   * The API's own hostname (task 0194, the "custom domain" piece of 0195):
+   * `prices-api.sorobanscan.rumblefish.dev`.
+   *
+   * A REGIONAL custom domain on the REST API with a DNS-validated certificate
+   * (created by `ApiGatewayStack` — not the block explorer's unused wildcard,
+   * which nothing renews) and alias records in `hostedZoneId`. The base path
+   * mapping is the root, so `https://{domainName}/api/config` is what
+   * execute-api serves at `/{envName}/api/config`; there is no stage in the
+   * path and no `/prices` prefix, because the mapping target is the stage,
+   * not a resource under it.
+   *
+   * Why the portal needs it at all: the bundle is served from another
+   * application's distribution (`portalWebOrigin`), whose `/api/*` behaviour
+   * is a static SPA — every extensionless path under it, `/api/config`
+   * included, is rewritten to `/api/index.html` at the edge and answered
+   * `200 text/html`. There is nothing on that host for a same-origin call to
+   * reach, so the bundle calls this hostname directly, cross-origin and
+   * same-site — the pattern the explorer's own SPA uses for its API.
+   *
+   * `hostedZoneName` must be a suffix of `domainName`, and the zone must live
+   * in this account: the certificate's validation record and the alias records
+   * are both written into it at deploy time.
+   */
+  readonly apiDomain: {
+    readonly domainName: string;
+    readonly hostedZoneId: string;
+    readonly hostedZoneName: string;
+  };
+
+  /**
+   * The origin the portal's bundle is served from —
+   * `https://sorobanscan.rumblefish.dev`, scheme and host, no path.
+   *
+   * Two things hang off it and only these two: it is the one origin the
+   * portal routes' CORS answer names (`allowOrigins` on the gateway's
+   * preflight, `Access-Control-Allow-Origin` from the handler), and it is the
+   * host the sign-in round-trip lands on after the callback — which runs on
+   * `apiDomain`, where the session cookie is set. Passed to the api-handler
+   * as `PORTAL_WEB_ORIGIN`.
+   */
+  readonly portalWebOrigin: string;
 
   // API handler Lambda (consumed by ComputeStack + ApiGatewayStack — task 0040)
 
@@ -100,12 +189,28 @@ export interface EnvironmentConfig {
      */
     readonly enrichment: string;
     /**
+     * Standalone coarse-table USD sweep (task 0218). Split out of the
+     * enrichment worker, where it ran after that pass's `?` and so was skipped
+     * whenever the pass errored and starved when it ran long — it never
+     * executed in production. Its own schedule is what makes a missing run
+     * detectable by a zero-invocations alarm.
+     */
+    readonly coarseSweep: string;
+    /**
      * Backfill push-freshness probe (task 0056). Reads
      * `prices.backfill_progress.last_push_at` over mTLS and republishes each
      * stream's push age as the `Prices/Backfill` `PushAgeSeconds` metric the
      * SDEX freshness alarm watches. §5.6 cadence: every 15 minutes.
      */
     readonly backfillFreshnessProbe: string;
+    /**
+     * Rollup freshness probe (task 0137). Reads `now() - max(timestamp)` for
+     * every OHLCV granularity and republishes it as the `Prices/Rollup`
+     * `RollupLagSeconds` metric the per-tier rollup alarms watch. Every 15
+     * minutes: the finest bound is 15 min, and a cadence coarser than the
+     * tightest bound would let that tier breach and recover unobserved.
+     */
+    readonly rollupFreshnessProbe: string;
     /**
      * mTLS client-cert NotAfter probe (task 0056). Reads the per-role cert
      * bundles from Secrets Manager and publishes days-to-expiry as the
@@ -135,8 +240,41 @@ export interface EnvironmentConfig {
      * (604800) — the first-chunk push covers ~6 months of history (§5.6).
      */
     readonly sdexPushFreshnessSeconds: number;
+    /**
+     * Freshness threshold (seconds) for `soroban_amm` push age. Default 7 days
+     * (604800), matching the SDEX threshold and `STALE_PUSH_SECONDS` in the
+     * API's backfill handler — the endpoint and the alarm must agree on what
+     * "stalled" means.
+     *
+     * Kept separate from `sdexPushFreshnessSeconds` because the two streams
+     * have different cadences: SDEX pushes per chunk on a schedule, the AMM
+     * import is one-shot. Tuning one must not silently retune the other.
+     */
+    readonly ammPushFreshnessSeconds: number;
     /** Days-to-NotAfter below which the mTLS cert-expiry alarm fires (30). */
     readonly mtlsNotAfterDaysThreshold: number;
+    /**
+     * Per-tier rollup staleness thresholds in seconds, keyed by OHLCV table
+     * name (task 0137). The rollup-freshness-probe publishes each tier's
+     * `now() - max(timestamp)` as `Prices/Rollup` `RollupLagSeconds`; one alarm
+     * per key fires when that tier's lag exceeds its threshold.
+     *
+     * ⚠️ **Every threshold must exceed its own bucket width.** `timestamp` is
+     * the bucket *start*, so a healthy tier's lag sawtooths from 0 up to one
+     * full bucket width before the next bucket opens — a `1w` tier reports a
+     * six-day lag the day before rollover while perfectly healthy. Any
+     * threshold at or below the bucket width false-fires once per bucket
+     * forever, and a permanently-firing alarm gets muted, which is the exact
+     * state task 0137 was filed to end.
+     *
+     * These values are duplicated from `ROLLUP_TIERS` in
+     * `packages/rollup-freshness-probe/src/lib.rs`, which documents the full
+     * rationale and unit-tests the bucket-width invariant. **This config is
+     * authoritative for what the alarm actually does** — the Rust copy is
+     * documentation and a test fixture, and a drift between them mis-tunes the
+     * alarm without any test failing. Change both, or neither.
+     */
+    readonly rollupLagSeconds: Readonly<Record<string, number>>;
     /**
      * Ingestion-lag threshold (seconds) for the live ledger-processor alarm
      * (task 0056 finding B). Watches the `prices-ingest-{env}` SQS queue's
@@ -150,6 +288,93 @@ export interface EnvironmentConfig {
      * past it).
      */
     readonly ledgerProcessorLagSeconds: number;
+    /**
+     * Free-space floor (percent) on the ClickHouse host's filesystem, below
+     * which `prices-{env}-ch-disk-free` fires (task 0204, gap 1).
+     *
+     * The 2026-08-13 disk-full stall ran **11.5 h** and was discovered by
+     * reading Lambda panic logs — nothing watched the condition. ⚠️ The volume
+     * is **shared with the block-explorer team and we are 3.3% of it**, so we
+     * can neither prevent it filling nor free a meaningful amount ourselves:
+     * the only thing this alarm buys is **warning time**, and the threshold has
+     * to be generous enough to deliver some.
+     *
+     * 20% of the 1.72 TiB volume is ~352 GiB. The incident consumed ~150 GiB,
+     * so this fires with roughly twice that still free — hours of warning at the
+     * rate that event moved — while sitting below the 2026-08-17 measurement of
+     * 430.6 GiB free (25.0%), so it does not fire on the current steady state.
+     * ⚠️ A bound at 25 would have been in ALARM the day it shipped.
+     *
+     * ⚠️ **15 was proposed and reversed on 2026-08-20.** Reaching 15% takes 166
+     * GiB consumed; the 2026-08-13 event consumed ~150 GiB and would have landed
+     * at 15.93% free, missing the alarm entirely. This value fires at 78 GiB.
+     * Five percentage points is the whole margin between catching that incident
+     * and missing it — re-measure before changing this, do not eyeball it.
+     *
+     * Mirrored as `DISK_FREE_PERCENT_BOUND` in
+     * `packages/rollup-freshness-probe/src/disk.rs`, which documents the
+     * reasoning and unit-tests it against both the measured steady state and a
+     * replay of the incident. **This config is authoritative for what the alarm
+     * does**; the Rust copy is documentation and a test fixture, and drift
+     * between them mis-tunes the alarm without any test failing. Change both,
+     * or neither.
+     */
+    readonly chDiskFreePercent: number;
+    /**
+     * Extra depths at which the ingest-DLQ alarm escalates (task 0204, gap 2).
+     *
+     * On 2026-08-13 Slack showed one message: `ApproximateNumberOfMessagesVisible
+     * >= 1`. By morning the DLQ held **91**, and nobody reading the channel could
+     * tell 1 from 91. That is not a tuning miss — a CloudWatch alarm notifies on
+     * a **state transition**, so an alarm already latched in ALARM says nothing
+     * further no matter how far the queue climbs.
+     *
+     * Each depth here becomes an additional alarm on the same metric, so a
+     * growing DLQ crosses a new threshold and produces a new Slack message.
+     * The `>= 1` rung is the pre-existing `prices-{env}-ledger-processor-dlq`
+     * alarm and is NOT listed here — these are the rungs above it.
+     *
+     * Defaults to `[10, 50]`: 1 means a ledger was dropped and always warrants a
+     * look; 10 means it is not a lone poison pill but something systemic; 50
+     * means an outage is in progress (the 2026-08-13 event reached 91, so it
+     * would have lit every rung).
+     *
+     * Must be strictly increasing integers above 1 — equal or descending rungs
+     * would fire out of order and make the ladder unreadable.
+     */
+    readonly dlqEscalationDepths: readonly number[];
+    /**
+     * Counts at which the USD-correctness alarms escalate (task 0204, gap 4).
+     *
+     * The `rollup-freshness-probe` publishes two counts of USDT-quoted candles
+     * over a rolling 7-day window: `UsdtPegAppliedCandles` (valued as if USDT
+     * were still pegged at $1) and `UsdtStrandedCandles` (left at
+     * `close_usd = 0` past a 48 h grace despite a representable `close`). Each
+     * threshold here becomes one alarm on each metric.
+     *
+     * ⚠️ **Why a ladder and not a single `>= 1`.** A wrong `close_usd` is a
+     * **standing condition** — it stays wrong until a person repairs it — so it
+     * hits the same CloudWatch wall gap 2 hit: an alarm notifies on a state
+     * transition, latches, and then says nothing while the population grows.
+     * Unlike materialized-view drift (gap 3), which is binary and has no way out
+     * of this, a *count of wrong candles* has **depth**: a regressed writer adds
+     * to it on every run. So gap 2's ladder transfers here directly.
+     *
+     * Defaults to `[1, 100, 10000]`. 1 because a single candle valued at the peg
+     * is already a defect and there is no benign floor; 100 because past that it
+     * is a writer regression rather than an edge case; 10000 because task 0182's
+     * historical population was 567,760 across five tiers, so a rung at that
+     * order of magnitude distinguishes "a bug shipped" from "a bug has been
+     * shipped for a while".
+     *
+     * ⚠️ A frozen historical population would latch even with the ladder — the
+     * rungs re-notify on *growth*. That is accepted: this is a re-introduction
+     * guard, and a re-introduction grows. Every rung keeps its OK action for the
+     * same reason gap 2's do.
+     *
+     * Must be strictly increasing positive integers.
+     */
+    readonly usdSanityEscalationCounts: readonly number[];
     /**
      * Optional AWS Chatbot → Slack routing for the ops-alarms topic (task 0056).
      * When set, `ObservabilityStack` subscribes `prices-{env}-ops-alarms` to a
@@ -221,6 +446,39 @@ export interface EnvironmentConfig {
 }
 
 /**
+ * Worst-case lag a **healthy** tier reaches, per OHLCV granularity (task 0137).
+ *
+ * This is **not** a set of thresholds — it is the floor every
+ * `opsAlarms.rollupLagSeconds` threshold must clear, and the list of tiers the
+ * rollup alarms are expected to cover. Mirrors `ROLLUP_TIERS` in
+ * `packages/rollup-freshness-probe/src/lib.rs`.
+ *
+ * A tier's healthy peak is its **bucket width plus the refresh interval of the
+ * materialized view that feeds it** — the bucket cannot appear until that MV
+ * next runs, so bucket width alone understates the peak and would let a
+ * false-firing threshold pass validation. (`price_ohlcv_1w` at 8 d, for
+ * instance, clears the 7 d bucket but not the real 8 d peak.)
+ *
+ * ⚠️ `price_ohlcv_1M` is the tightest tier and this floor still understates it:
+ * buckets are weeks-attributed-by-start, so besides spanning ~31 days, a month's
+ * first bucket does not appear until a week actually *starts* inside that month
+ * — up to 6 further days. Its real worst case is nearer ~38 d against a 45 d
+ * bound. Treat any proposal to lower it with suspicion.
+ */
+export const ROLLUP_HEALTHY_PEAK_SECONDS: Readonly<Record<string, number>> = {
+  // bucket + refresh interval of the MV that feeds the tier (schema/rollups.sql)
+  price_ohlcv_1m: 60, // 1 min, written by ingestion (no MV)
+  price_ohlcv_15m: 15 * 60 + 60, // + mv_ohlcv_1m_to_15m  EVERY 1 MINUTE
+  price_ohlcv_1h: 60 * 60 + 15 * 60, // + mv_ohlcv_15m_to_1h EVERY 15 MINUTE
+  price_ohlcv_4h: 4 * 60 * 60 + 60 * 60, // + mv_ohlcv_1h_to_4h  EVERY 1 HOUR
+  price_ohlcv_1d: 86_400 + 4 * 60 * 60, // + mv_ohlcv_4h_to_1d  EVERY 4 HOUR
+  price_ohlcv_1w: 7 * 86_400 + 86_400, // + mv_ohlcv_1d_to_1w  EVERY 1 DAY
+  // + mv_ohlcv_1w_to_1M EVERY 1 DAY, + 6 d alignment slack: a month's bucket
+  // does not exist until a week actually STARTS inside that month.
+  price_ohlcv_1M: 31 * 86_400 + 86_400 + 6 * 86_400,
+};
+
+/**
  * Validates an EnvironmentConfig at synth time. Throws on missing
  * or malformed values rather than letting `cdk synth`/`cdk deploy`
  * fail deep inside CloudFormation with cryptic errors.
@@ -246,8 +504,12 @@ export function validateConfig(config: EnvironmentConfig): void {
       `apiGatewayThrottleRate must be a positive integer, got: ${config.apiGatewayThrottleRate}`,
     );
   }
+  // `< 1` for the same reason as the self-service burst check below: errors are
+  // accumulated, so without it an invalid rate of -5 lets a burst of -3 through
+  // unreported (-3 >= -5).
   if (
     !Number.isInteger(config.apiGatewayThrottleBurst) ||
+    config.apiGatewayThrottleBurst < 1 ||
     config.apiGatewayThrottleBurst < config.apiGatewayThrottleRate
   ) {
     errors.push(
@@ -255,24 +517,31 @@ export function validateConfig(config: EnvironmentConfig): void {
     );
   }
   if (
-    !Number.isInteger(config.apiGatewayPartnerDailyQuota) ||
-    config.apiGatewayPartnerDailyQuota < 1
+    !Number.isInteger(config.pricingApiFreePlanRateLimit) ||
+    config.pricingApiFreePlanRateLimit < 1
   ) {
     errors.push(
-      `apiGatewayPartnerDailyQuota must be a positive integer, got: ${config.apiGatewayPartnerDailyQuota}`,
+      `pricingApiFreePlanRateLimit must be a positive integer, got: ${config.pricingApiFreePlanRateLimit}`,
     );
   }
-  if (!Number.isInteger(config.apiKeyRateLimit) || config.apiKeyRateLimit < 1) {
+  // The `< 1` test is not redundant with the rate check below it. Errors are
+  // accumulated, not short-circuited, so with an invalid rate of -10 a burst of
+  // -5 would pass `burst < rate` and go unreported until the rate was fixed.
+  if (
+    !Number.isInteger(config.pricingApiFreePlanBurstLimit) ||
+    config.pricingApiFreePlanBurstLimit < 1 ||
+    config.pricingApiFreePlanBurstLimit < config.pricingApiFreePlanRateLimit
+  ) {
     errors.push(
-      `apiKeyRateLimit must be a positive integer, got: ${config.apiKeyRateLimit}`,
+      `pricingApiFreePlanBurstLimit must be a positive integer >= pricingApiFreePlanRateLimit (${config.pricingApiFreePlanRateLimit}), got: ${config.pricingApiFreePlanBurstLimit}`,
     );
   }
   if (
-    !Number.isInteger(config.apiKeyBurstLimit) ||
-    config.apiKeyBurstLimit < config.apiKeyRateLimit
+    !Number.isInteger(config.pricingApiFreePlanMonthlyQuota) ||
+    config.pricingApiFreePlanMonthlyQuota < 1
   ) {
     errors.push(
-      `apiKeyBurstLimit must be a positive integer >= apiKeyRateLimit (${config.apiKeyRateLimit}), got: ${config.apiKeyBurstLimit}`,
+      `pricingApiFreePlanMonthlyQuota must be a positive integer, got: ${config.pricingApiFreePlanMonthlyQuota}`,
     );
   }
   if (typeof config.apiGatewayCacheEnabled !== 'boolean') {
@@ -280,17 +549,155 @@ export function validateConfig(config: EnvironmentConfig): void {
       `apiGatewayCacheEnabled must be a boolean, got: ${config.apiGatewayCacheEnabled}`,
     );
   }
-  // The stage-wide throttle is a hard ceiling across ALL keys, so it must be at
-  // least the advertised per-key rate — otherwise a single key can never reach
-  // its SLA and compliant traffic gets spurious 429s.
-  if (
-    Number.isInteger(config.apiGatewayThrottleRate) &&
-    Number.isInteger(config.apiKeyRateLimit) &&
-    config.apiGatewayThrottleRate < config.apiKeyRateLimit
-  ) {
+  // `servers` in the published OpenAPI document is a promise that the URL
+  // serves the API. Assert the shape here rather than discovering at runtime
+  // that the advertised base is missing its stage path and 403s (task 0124).
+  if (typeof config.apiBaseUrl !== 'string' || !config.apiBaseUrl) {
     errors.push(
-      `apiGatewayThrottleRate (${config.apiGatewayThrottleRate}) must be >= apiKeyRateLimit (${config.apiKeyRateLimit}) so a single key can reach its per-key SLA`,
+      `apiBaseUrl must be a non-empty string, got: ${config.apiBaseUrl}`,
     );
+  } else {
+    if (!config.apiBaseUrl.startsWith('https://')) {
+      errors.push(
+        `apiBaseUrl must start with "https://", got: "${config.apiBaseUrl}"`,
+      );
+    }
+    if (config.apiBaseUrl.endsWith('/')) {
+      errors.push(
+        `apiBaseUrl must not end with "/" (routes are appended as "/v1/..."), got: "${config.apiBaseUrl}"`,
+      );
+    }
+    // An execute-api host serves the API only under /{stage}; a bare host is
+    // the stage-prefix trap. A custom domain (task 0126) has no such
+    // requirement, so only enforce this for execute-api URLs.
+    if (
+      config.apiBaseUrl.includes('.execute-api.') &&
+      !config.apiBaseUrl.endsWith(`/${config.envName}`)
+    ) {
+      errors.push(
+        `apiBaseUrl is an execute-api URL and must end with the stage path "/${config.envName}", got: "${config.apiBaseUrl}"`,
+      );
+    }
+  }
+
+  // The API hostname and the bundle's origin (task 0194). Both are literals in
+  // `production.json` and both are wrong silently: a hostname outside the zone
+  // fails at deploy time with an ACM validation that never completes, and an
+  // origin with a path or a trailing slash is a CORS header the browser
+  // compares byte-for-byte and never matches.
+  {
+    const hostname =
+      /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+    const { domainName, hostedZoneId, hostedZoneName } = config.apiDomain ?? {};
+    if (!domainName || !hostname.test(domainName)) {
+      errors.push(
+        `apiDomain.domainName must be a lowercase hostname, got: "${domainName}"`,
+      );
+    }
+    if (!hostedZoneName || !hostname.test(hostedZoneName)) {
+      errors.push(
+        `apiDomain.hostedZoneName must be a lowercase hostname, got: "${hostedZoneName}"`,
+      );
+    } else if (
+      !domainName?.endsWith(`.${hostedZoneName}`) ||
+      domainName === hostedZoneName
+    ) {
+      errors.push(
+        `apiDomain.domainName must be a subdomain of apiDomain.hostedZoneName ("${hostedZoneName}"), got: "${domainName}"`,
+      );
+    }
+    if (!hostedZoneId || !/^Z[0-9A-Z]{8,}$/.test(hostedZoneId)) {
+      errors.push(
+        `apiDomain.hostedZoneId must be a Route 53 hosted zone id, got: "${hostedZoneId}"`,
+      );
+    }
+    if (
+      typeof config.portalWebOrigin !== 'string' ||
+      !/^https:\/\/[a-z0-9.-]+(:\d+)?$/.test(config.portalWebOrigin)
+    ) {
+      errors.push(
+        `portalWebOrigin must be an https origin with no path or trailing slash, got: "${config.portalWebOrigin}"`,
+      );
+    }
+  }
+
+  // A self-issued key must not be sized anywhere near what the stage hands a
+  // single method — that is the entire reason task 0157 exists. Cap the plan at
+  // one tenth of the stage default, for both rate and burst.
+  //
+  // Read the ratio for what it is: a proportionality guard, NOT a capacity
+  // calculation. A per-method default is not a shared pool that ten keys "fit
+  // under" — every method gets its own bucket, so the plan limit and the method
+  // default never compete for the same tokens. The number 10 is a judgement
+  // call, and its real job is to stop the design doc's 100 req/s being
+  // reinstated by typo: at a default of 200, a rate of 1 passes and 100 does
+  // not. A bare `<=` against the default would not catch it (200 >= 100).
+  //
+  // The only genuinely shared ceiling above the usage plan is the account limit
+  // (10 000 RPS / 5 000 burst in eu-central-1), which nothing here approaches.
+  const MAX_PLAN_SHARE_OF_STAGE_DEFAULT = 10;
+
+  // The floor the ratio implies, stated as its own rule rather than left to be
+  // discovered through an instruction that cannot be followed. A plan limit must
+  // be >= 1, so a stage default below MAX_PLAN_SHARE_OF_STAGE_DEFAULT admits no
+  // legal plan limit at all: the ratio check would report "the maximum is 0"
+  // while the checks above reject anything under 1. Fail here instead, naming
+  // the field that is actually wrong. At 200 this is nowhere near binding, but
+  // an operator clamping the stage throttle to shed load has to stay at or
+  // above 10 — and lower the plan limits with it, not instead of it.
+  const stageFloors: ReadonlyArray<readonly [string, number]> = [
+    ['apiGatewayThrottleRate', config.apiGatewayThrottleRate],
+    ['apiGatewayThrottleBurst', config.apiGatewayThrottleBurst],
+  ];
+  for (const [stageField, stageValue] of stageFloors) {
+    if (
+      Number.isInteger(stageValue) &&
+      stageValue >= 1 &&
+      stageValue < MAX_PLAN_SHARE_OF_STAGE_DEFAULT
+    ) {
+      errors.push(
+        `${stageField} (${stageValue}) must be at least ${MAX_PLAN_SHARE_OF_STAGE_DEFAULT}: ` +
+          `a usage-plan limit may be at most one ${MAX_PLAN_SHARE_OF_STAGE_DEFAULT}th of it and must itself be >= 1, ` +
+          `so a lower stage default leaves no satisfiable plan limit`,
+      );
+    }
+  }
+
+  const planVsStage: ReadonlyArray<readonly [string, number, string, number]> =
+    [
+      [
+        'pricingApiFreePlanRateLimit',
+        config.pricingApiFreePlanRateLimit,
+        'apiGatewayThrottleRate',
+        config.apiGatewayThrottleRate,
+      ],
+      [
+        'pricingApiFreePlanBurstLimit',
+        config.pricingApiFreePlanBurstLimit,
+        'apiGatewayThrottleBurst',
+        config.apiGatewayThrottleBurst,
+      ],
+    ];
+  // Both guards keep this from piling a derived error on top of a primary one:
+  // with a stage rate of -200 the checks above already report it, and "the
+  // maximum is -20" would add noise, not information. The stage-side guard is
+  // the floor check rather than `>= 1` for the same reason — below 10 the floor
+  // check above has already named the problem, and reporting "the maximum is 0"
+  // alongside it would only tell the operator to do something impossible.
+  for (const [planField, planValue, stageField, stageValue] of planVsStage) {
+    if (
+      Number.isInteger(stageValue) &&
+      stageValue >= MAX_PLAN_SHARE_OF_STAGE_DEFAULT &&
+      Number.isInteger(planValue) &&
+      planValue >= 1 &&
+      planValue * MAX_PLAN_SHARE_OF_STAGE_DEFAULT > stageValue
+    ) {
+      errors.push(
+        `${planField} (${planValue}) exceeds one ${MAX_PLAN_SHARE_OF_STAGE_DEFAULT}th of ${stageField} (${stageValue}): ` +
+          `a self-service key must not be sized within an order of magnitude of the stage's default per-method limit, ` +
+          `so the maximum is ${Math.floor(stageValue / MAX_PLAN_SHARE_OF_STAGE_DEFAULT)}`,
+      );
+    }
   }
 
   const api = config.apiHandler;
@@ -328,7 +735,9 @@ export function validateConfig(config: EnvironmentConfig): void {
       'assetDiscovery',
       'cleanup',
       'enrichment',
+      'coarseSweep',
       'backfillFreshnessProbe',
+      'rollupFreshnessProbe',
       'mtlsNotafterProbe',
     ] as const;
     for (const key of expectedKeys) {
@@ -356,12 +765,104 @@ export function validateConfig(config: EnvironmentConfig): void {
       );
     }
     if (
+      !Number.isInteger(ops.ammPushFreshnessSeconds) ||
+      ops.ammPushFreshnessSeconds < 1
+    ) {
+      errors.push(
+        `opsAlarms.ammPushFreshnessSeconds must be a positive integer (seconds), got: ${ops.ammPushFreshnessSeconds}`,
+      );
+    }
+    if (
       !Number.isInteger(ops.mtlsNotAfterDaysThreshold) ||
       ops.mtlsNotAfterDaysThreshold < 1
     ) {
       errors.push(
         `opsAlarms.mtlsNotAfterDaysThreshold must be a positive integer (days), got: ${ops.mtlsNotAfterDaysThreshold}`,
       );
+    }
+    // Percent, so bounded 0–100 exclusive at both ends: 0 can never fire and
+    // 100 is always firing. Non-integers are allowed (a 12.5% floor is a
+    // reasonable thing to want); NaN is not.
+    if (
+      typeof ops.chDiskFreePercent !== 'number' ||
+      !Number.isFinite(ops.chDiskFreePercent) ||
+      ops.chDiskFreePercent <= 0 ||
+      ops.chDiskFreePercent >= 100
+    ) {
+      errors.push(
+        `opsAlarms.chDiskFreePercent must be a number in (0, 100) exclusive, got: ${ops.chDiskFreePercent}`,
+      );
+    }
+    if (!Array.isArray(ops.dlqEscalationDepths)) {
+      errors.push('opsAlarms.dlqEscalationDepths missing or not an array');
+    } else {
+      // Rung 1 is the pre-existing `>= 1` alarm, so every configured rung must
+      // sit above it, and they must ascend — a ladder that repeats or descends
+      // fires out of order and tells the reader nothing about severity.
+      let previous = 1;
+      for (const depth of ops.dlqEscalationDepths) {
+        if (!Number.isInteger(depth) || depth <= previous) {
+          errors.push(
+            `opsAlarms.dlqEscalationDepths must be strictly increasing integers above 1, got: [${ops.dlqEscalationDepths.join(', ')}]`,
+          );
+          break;
+        }
+        previous = depth;
+      }
+    }
+    if (!Array.isArray(ops.usdSanityEscalationCounts)) {
+      errors.push(
+        'opsAlarms.usdSanityEscalationCounts missing or not an array',
+      );
+    } else if (ops.usdSanityEscalationCounts.length === 0) {
+      // An empty ladder silently disables the gap-4 alarms while the probe
+      // keeps publishing the metrics — the check would look wired up and watch
+      // nothing, which is the exact shape of failure task 0204 exists to end.
+      errors.push(
+        'opsAlarms.usdSanityEscalationCounts must not be empty — an empty ladder publishes the metrics but alarms on nothing',
+      );
+    } else {
+      let previousCount = 0;
+      for (const count of ops.usdSanityEscalationCounts) {
+        if (!Number.isInteger(count) || count <= previousCount) {
+          errors.push(
+            `opsAlarms.usdSanityEscalationCounts must be strictly increasing positive integers, got: [${ops.usdSanityEscalationCounts.join(', ')}]`,
+          );
+          break;
+        }
+        previousCount = count;
+      }
+    }
+    if (!ops.rollupLagSeconds || typeof ops.rollupLagSeconds !== 'object') {
+      errors.push('opsAlarms.rollupLagSeconds missing or not an object');
+    } else {
+      const configured = Object.keys(ops.rollupLagSeconds).sort();
+      const expected = Object.keys(ROLLUP_HEALTHY_PEAK_SECONDS).sort();
+      if (configured.join(',') !== expected.join(',')) {
+        errors.push(
+          `opsAlarms.rollupLagSeconds must cover exactly [${expected.join(', ')}], got: [${configured.join(', ')}]`,
+        );
+      }
+      for (const [table, peak] of Object.entries(ROLLUP_HEALTHY_PEAK_SECONDS)) {
+        const threshold = ops.rollupLagSeconds[table];
+        if (threshold === undefined) continue;
+        if (!Number.isInteger(threshold) || threshold < 1) {
+          errors.push(
+            `opsAlarms.rollupLagSeconds.${table} must be a positive integer (seconds), got: ${threshold}`,
+          );
+        } else if (threshold <= peak) {
+          // The sawtooth trap. `timestamp` is the bucket START, so a healthy
+          // tier's lag climbs to a full bucket width — plus the refresh interval
+          // of the MV feeding it — before the next bucket opens. A threshold at
+          // or below that fires every bucket, forever, and an alarm that always
+          // fires gets muted, which is precisely the blind spot task 0137 exists
+          // to close. Reject at synth rather than ship an alarm guaranteed to
+          // cry wolf.
+          errors.push(
+            `opsAlarms.rollupLagSeconds.${table} (${threshold}s) must exceed the tier's healthy peak of ${peak}s (bucket width + feeding MV refresh interval), or the alarm false-fires once per bucket forever`,
+          );
+        }
+      }
     }
     if (
       !Number.isInteger(ops.ledgerProcessorLagSeconds) ||

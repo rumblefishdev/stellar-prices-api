@@ -105,6 +105,60 @@ export function workerFunctionName(
 }
 
 /**
+ * Name of the invocation-errors alarm {@link createWorkerLambda} creates for a
+ * scheduled worker.
+ *
+ * Same single-source-of-truth reasoning as {@link workerFunctionName}, one step
+ * further out: these alarms are owned by EventBridgeStack and never re-exported,
+ * so ObservabilityStack's dashboard imports them **by ARN** built from this
+ * helper (task 0125). A drift between the two would not error — the alarm strip
+ * would just silently cover nine fewer alarms than it claims.
+ */
+export function workerErrorAlarmName(
+  envName: string,
+  lambdaName: string,
+): string {
+  return `prices-${envName}-${lambdaName}-errors`;
+}
+
+/**
+ * Every scheduled worker EventBridgeStack creates through
+ * {@link createWorkerLambda}, by name — the ONE list the dashboard's alarm
+ * strip and its workers row are derived from (task 0125 review WR-02/03).
+ * `createWorkerLambda` refuses a name that is not here, so adding a tenth
+ * worker fails the synth until this list is updated, and then those consumers
+ * follow automatically.
+ *
+ * The per-worker duration / no-invocations health alarms are NOT derived from
+ * it: they carry hand-written timeout, cadence and impact text per worker in
+ * `observability-stack.ts` (`workerHealth`), and three workers deliberately
+ * have none. That stack asserts every name here is either in `workerHealth`
+ * or in its explicit exemption list, so a new worker cannot fall through.
+ */
+export const SCHEDULED_WORKERS = [
+  'asset-discovery',
+  'cleanup',
+  'supply',
+  'oracle',
+  'enrichment',
+  'coarse-sweep',
+  'backfill-freshness-probe',
+  'rollup-freshness-probe',
+  'mtls-notafter-probe',
+] as const;
+
+export type ScheduledWorker = (typeof SCHEDULED_WORKERS)[number];
+
+/**
+ * Workers whose EventBridge rule is disabled on purpose. They still exist,
+ * still carry an `-errors` alarm, but publish no `AWS/Lambda` metrics, so a
+ * dashboard series on them is permanently empty.
+ */
+export const SCHEDULE_DISABLED_WORKERS: readonly ScheduledWorker[] = [
+  'cleanup',
+];
+
+/**
  * Creates an IAM role for a prices-api Lambda with the baseline
  * permissions applied (CloudWatch Logs + mTLS secrets + SSM read).
  *
@@ -261,6 +315,13 @@ export function createWorkerLambda(
   } = props;
   const env = config.envName;
 
+  if (!(SCHEDULED_WORKERS as readonly string[]).includes(name)) {
+    throw new Error(
+      `createWorkerLambda: "${name}" is not in SCHEDULED_WORKERS (lambda-baseline.ts). ` +
+        'Add it there first — the dashboard alarm strip and workers row are derived from that list.',
+    );
+  }
+
   const role = createPricesLambdaRole(scope, `${idPrefix}Role`, {
     config,
     accountId,
@@ -307,7 +368,7 @@ export function createWorkerLambda(
   );
 
   const errorAlarm = new cloudwatch.Alarm(scope, `${idPrefix}ErrorAlarm`, {
-    alarmName: `prices-${env}-${name}-errors`,
+    alarmName: workerErrorAlarmName(env, name),
     alarmDescription,
     metric: fn.metricErrors({ period: alarmPeriod, statistic: 'Sum' }),
     threshold: 1,

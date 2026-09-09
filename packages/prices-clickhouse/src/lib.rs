@@ -15,6 +15,12 @@ pub mod env;
 /// Shared observability setup for the worker Lambdas (`init_tracing`).
 pub mod observability;
 
+/// Read-only drift detection between `schema/rollups.sql` and the live
+/// refreshable-MV definitions on a target (task 0142). The rollup MVs are
+/// `IF NOT EXISTS`, so an edit to one silently no-ops against a provisioned
+/// cluster; this makes that divergence visible without touching any object.
+pub mod drift;
+
 /// mTLS transport for the remote Hetzner CH endpoint (Caddy:443). Gated behind
 /// the `aws-mtls` feature so the plaintext local-dev / init-CLI path does not
 /// pull the rustls / hyper-util / reqwest stack. Ported from BE (task 0052).
@@ -32,6 +38,28 @@ pub const ROLLUPS_SQL: &str = include_str!("../schema/rollups.sql");
 /// sizing measurement (re-aggregates `_1m FINAL` into `_15m … _1M`).
 pub const PREROLL_SQL: &str = include_str!("../schema/preroll.sql");
 
+/// Incremental, non-truncating pre-roll bounded to the pre-Soroban SDEX tail
+/// `[genesis, activation)` (task 0088).
+pub const PREROLL_INCREMENTAL_SQL: &str = include_str!("../schema/preroll-incremental.sql");
+
+/// Incremental pre-roll for the live-era coarse gap, all sources (task 0090 —
+/// the six rollup MVs are dropped on production, so nothing else rolls up).
+pub const PREROLL_LIVE_GAP_SQL: &str = include_str!("../schema/preroll-live-gap.sql");
+
+/// Incremental pre-roll scoped to the Soroban-era AMM sources corrected by the
+/// events-sourced reprice (task 0097).
+pub const PREROLL_AMM_REPRICE_SQL: &str = include_str!("../schema/preroll-amm-reprice.sql");
+
+/// Every pre-roll script, for guards that must hold across all of them.
+/// Operator-run scripts are embedded here only so the test suite can see them —
+/// `apply_sql` is never pointed at the incremental three.
+pub const ALL_PREROLL_SQL: [(&str, &str); 4] = [
+    ("preroll.sql", PREROLL_SQL),
+    ("preroll-incremental.sql", PREROLL_INCREMENTAL_SQL),
+    ("preroll-live-gap.sql", PREROLL_LIVE_GAP_SQL),
+    ("preroll-amm-reprice.sql", PREROLL_AMM_REPRICE_SQL),
+];
+
 /// Refreshable MV maintaining `prices.current_prices` (task 0039 — replaces the
 /// price-updater Lambda). Applied separately like [`ROLLUPS_SQL`] (needs
 /// ClickHouse ≥ 23.12); not part of the default init flow.
@@ -40,6 +68,17 @@ pub const CURRENT_SQL: &str = include_str!("../schema/current.sql");
 /// Read-surface views (task 0061 Step 5): `prices.price_usd_series` (USD close
 /// per natural-identity asset/bucket) + `prices.usd_reference` (per-bucket USD
 /// reference availability). Plain views — applied after the init tables.
+///
+/// Every statement here is `CREATE OR REPLACE VIEW`, NOT `CREATE … IF NOT
+/// EXISTS` (task 0134): the latter does not redefine a view that already exists,
+/// so an edit to a body would silently no-op against a provisioned target.
+/// Re-applying therefore always re-lands the definitions.
+///
+/// ⚠️ Consequence: this file needs a privileged applier. `CREATE OR REPLACE
+/// VIEW` requires a `DROP VIEW` grant unconditionally, which the scoped
+/// production users do not have (and cannot be granted by us — they are
+/// XML-managed by BE). Applying it is an operator action; see the header of
+/// `schema/views.sql`.
 pub const VIEWS_SQL: &str = include_str!("../schema/views.sql");
 
 /// Canonical `backfill_progress` seed (task 0051 / §3.5): the `sdex_archive` and
@@ -114,6 +153,13 @@ pub fn client(cfg: &Config) -> Client {
 pub enum SchemaError {
     #[error("clickhouse query failed: {0}")]
     Query(#[from] clickhouse::error::Error),
+
+    /// A `CREATE MATERIALIZED VIEW` rendering could not be fingerprinted (task
+    /// 0142). Raised rather than skipped: a statement the drift check cannot
+    /// parse must not drop silently out of the report, because a shorter report
+    /// reads exactly like a clean one.
+    #[error("could not parse a materialized-view definition: {rendering}")]
+    UnparsableDdl { rendering: String },
 }
 
 /// Apply [`INIT_SQL`] to the given client. Idempotent — every statement is a
@@ -143,7 +189,7 @@ pub async fn apply_sql(client: &Client, sql: &str) -> Result<(), SchemaError> {
 /// Split a multi-statement SQL string into individual statements. Strips `-- …`
 /// line comments and empty statements. Does not handle quoted `;` or block
 /// comments — keep the schema files free of both.
-fn split_statements(sql: &str) -> Vec<String> {
+pub(crate) fn split_statements(sql: &str) -> Vec<String> {
     let stripped: String = sql
         .lines()
         .map(|line| match line.find("--") {
@@ -179,18 +225,21 @@ mod tests {
 
     #[test]
     fn init_sql_parses_into_statements() {
-        // 1 CREATE DATABASE + 18 CREATE TABLE (assets, asset_metadata, _1m,
+        // 1 CREATE DATABASE + 21 CREATE TABLE (assets, asset_metadata, _1m,
         // _15m, _1h, _4h, _1d, _1w, _1M, current_prices, asset_supply,
-        // oracle_prices, backfill_sdex_ledgers, backfill_progress,
-        // discovery_state, unresolved_pools, pool_registry, ingest_cursor) + 7
-        // close_usd ALTERs (one per OHLCV grain) + 1 assets.sac_address ALTER
-        // (task 0061) + 2 backfill_progress ALTERs (earliest_data_available
-        // [0073 half → 0053] + newest_data_available [0053]) = 29 statements.
+        // asset_symbol, oracle_prices, usd_rate, backfill_sdex_ledgers,
+        // backfill_progress, discovery_state, unresolved_pools, pool_registry,
+        // ingest_cursor, enrichment_frontier) + 7 close_usd ALTERs (one per
+        // OHLCV grain) + 1 assets.sac_address ALTER (task 0061) + 2
+        // backfill_progress ALTERs (earliest_data_available [0073 half → 0053]
+        // + newest_data_available [0053]) + 1 current_prices.method ALTER
+        // (task 0178) = 33 statements.
         // (+discovery_state task 0054, +asset_supply task 0039, +unresolved_pools
         // + pool_registry task 0053, +asset_metadata task 0067, +ingest_cursor
-        // task 0064.)
+        // task 0064, +usd_rate task 0167, +enrichment_frontier task 0111,
+        // +asset_symbol task 0210.)
         let stmts = split_statements(INIT_SQL);
-        assert_eq!(stmts.len(), 29, "got {}", stmts.len());
+        assert_eq!(stmts.len(), 33, "got {}", stmts.len());
     }
 
     #[test]
@@ -200,10 +249,48 @@ mod tests {
     }
 
     #[test]
-    fn current_sql_is_one_materialized_view() {
+    fn current_sql_is_a_drop_then_create_of_one_materialized_view() {
+        // Was `stmts.len() == 1` (CREATE only) until task 0072. A refreshable
+        // MV's definition is FIXED AT CREATE TIME, so changing the SELECT needs
+        // DROP + re-CREATE — an ALTER does not take. The DROP is therefore part
+        // of the deploy contract, not a stray statement, and the ORDER is
+        // load-bearing: a CREATE-then-DROP file would leave no view at all.
         let stmts = split_statements(CURRENT_SQL);
-        assert_eq!(stmts.len(), 1, "got {}", stmts.len());
-        assert!(stmts[0].contains("prices.mv_current_prices"));
+        assert_eq!(stmts.len(), 2, "got {}", stmts.len());
+        assert!(
+            stmts[0].contains("DROP VIEW") && stmts[0].contains("prices.mv_current_prices"),
+            "first statement must drop the MV, got: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[1].contains("CREATE MATERIALIZED VIEW")
+                && stmts[1].contains("prices.mv_current_prices"),
+            "second statement must re-create the MV"
+        );
+    }
+
+    /// The `TO prices.current_prices (...)` column list must name every column
+    /// the SELECT projects: a materialised view inserts POSITIONALLY, so an
+    /// omitted column silently shifts every value one slot left (0039 review).
+    #[test]
+    fn current_sql_to_clause_names_all_ten_written_columns() {
+        for col in [
+            "asset_id",
+            "price_usd",
+            "price_xlm",
+            "change_24h_pct",
+            "change_7d_pct",
+            "volume_24h_usd",
+            "market_cap_usd",
+            "vwap_24h",
+            "sources",
+            "updated_at",
+        ] {
+            assert!(
+                CURRENT_SQL.contains(col),
+                "current.sql must write column `{col}`"
+            );
+        }
     }
 
     #[test]
@@ -222,5 +309,265 @@ mod tests {
         ] {
             assert!(stmts.iter().any(|s| s.contains(v)), "missing {v}");
         }
+    }
+
+    /// Task 0134 — no view in `views.sql` may be declared `IF NOT EXISTS`.
+    ///
+    /// `CREATE VIEW IF NOT EXISTS` does not redefine a view that already exists,
+    /// so on a provisioned target (ch-prod-01) an edit to a view body silently
+    /// no-ops: the apply reports success and the definition never changes. Task
+    /// 0072 hit exactly that on `current_price_usd`. This test exists so a view
+    /// added later in the wrong form fails the build instead of shipping the
+    /// footgun to prod, where it is invisible.
+    ///
+    /// Views only. `init.sql` stays `IF NOT EXISTS` — tables must NOT be
+    /// recreated — and the refreshable MVs (`current.sql`, `rollups.sql`) cannot
+    /// use OR REPLACE at all; they require DROP + re-CREATE.
+    #[test]
+    fn views_sql_uses_create_or_replace_for_every_view() {
+        let stmts = split_statements(VIEWS_SQL);
+        assert_eq!(stmts.len(), 6, "guard is vacuous if the file is empty");
+
+        for stmt in &stmts {
+            let head: String = stmt.chars().take(80).collect();
+            assert!(
+                stmt.contains("CREATE OR REPLACE VIEW"),
+                "every view must use CREATE OR REPLACE VIEW (task 0134); got: {head}"
+            );
+            assert!(
+                !stmt.contains("IF NOT EXISTS"),
+                "CREATE VIEW IF NOT EXISTS silently fails to redefine an existing \
+                 view — the edit would never land on ch-prod-01; got: {head}"
+            );
+        }
+    }
+
+    /// Task 0142 — the rollup MVs must stay `IF NOT EXISTS`, and the file must
+    /// keep pointing at the procedure for changing one.
+    ///
+    /// This asserts the OPPOSITE of the 0134 guard above, and deliberately so. A
+    /// refreshable `TO`-table MV has no `CREATE OR REPLACE` form, so the escape
+    /// 0134 used on the plain views is unavailable; the only route is `DROP` +
+    /// re-`CREATE`, and that is not free. While an MV is dropped its tier stops
+    /// rolling up (task 0136 is the precedent — nine days unnoticed), and a
+    /// re-`CREATE` that loses `APPEND`, `sum(version)` or the aligned window
+    /// silently reintroduces the task 0090/0095 production data loss. So the
+    /// `DROP` stays an operator action under a runbook rather than something an
+    /// apply does implicitly, and this file must never acquire one.
+    ///
+    /// The consequence — that editing a body here does NOT land on a target that
+    /// already holds the MV — is what `drift::check_rollup_drift` exists to make
+    /// visible.
+    #[test]
+    fn rollups_sql_keeps_if_not_exists_and_references_the_reapply_runbook() {
+        let stmts = split_statements(ROLLUPS_SQL);
+        assert_eq!(stmts.len(), 6, "guard is vacuous if the file is empty");
+
+        for stmt in &stmts {
+            let head: String = stmt.chars().take(80).collect();
+            assert!(
+                stmt.contains("CREATE MATERIALIZED VIEW IF NOT EXISTS"),
+                "every rollup MV must stay IF NOT EXISTS (task 0142); got: {head}"
+            );
+            assert!(
+                !stmt.contains("OR REPLACE"),
+                "a refreshable TO-table MV has no OR REPLACE form — ClickHouse \
+                 rejects it; changing one is DROP + re-CREATE under the runbook; \
+                 got: {head}"
+            );
+            assert!(
+                !stmt.contains("DROP"),
+                "the DROP belongs in the re-apply runbook, not in the apply path: \
+                 applying this file must never take a rollup tier offline; got: {head}"
+            );
+        }
+
+        // Asserted on the raw text, not on `split_statements`, because the
+        // pointer lives in the header comment block — which is exactly where an
+        // operator about to edit a body will be looking.
+        assert!(
+            ROLLUPS_SQL.contains("docs/runbooks/0142-rollup-mv-reapply.md"),
+            "rollups.sql must point at the re-apply procedure: an edit to a body \
+             here does not land on a provisioned target, and the file is the only \
+             place that warning is guaranteed to be read"
+        );
+    }
+
+    /// `close_usd` is baked by a separate, lagging enrichment pass onto a
+    /// non-nullable `Decimal(38,14) DEFAULT 0` column, so an unguarded
+    /// `argMax(close_usd, t.timestamp)` hands a coarse bucket a fabricated zero
+    /// whenever its newest sub-bucket is not yet enriched — throwing away every
+    /// priced sub-bucket underneath it (task 0145, from BE's 0199 report via
+    /// 0144). The pre-rolls are where this is most damaging: they run over
+    /// historical spans where enrichment is incomplete *by definition*, at
+    /// backfill scale, and the rows they zero then age out of the MV
+    /// re-aggregation windows where only the 0114 sweep can still reach them.
+    ///
+    /// Asserted over `split_statements`, which strips comments — so the header
+    /// disclosure block in each file cannot make this guard pass or fail.
+    #[test]
+    fn no_preroll_script_uses_an_unguarded_argmax_on_close_usd() {
+        for (name, sql) in ALL_PREROLL_SQL {
+            let stmts = split_statements(sql);
+            assert!(
+                !stmts.is_empty(),
+                "{name}: guard is vacuous if the file yields no statements"
+            );
+
+            let mut guarded = 0usize;
+            for stmt in &stmts {
+                if let Some(offset) = stmt.find("argMax(close_usd") {
+                    let head: String = stmt[offset..].chars().take(90).collect();
+                    panic!(
+                        "{name}: unguarded argMax on close_usd — use \
+                         argMaxIf(close_usd, t.timestamp, close_usd > 0) so the bucket \
+                         carries its latest *priced* close instead of inheriting the \
+                         un-enriched sentinel 0 (task 0145); got: {head}"
+                    );
+                }
+                guarded += stmt
+                    .matches("argMaxIf(close_usd, t.timestamp, close_usd > 0)")
+                    .count();
+            }
+
+            // Non-vacuity: the file must still be projecting close_usd at all.
+            // Without this, deleting every close_usd projection would "pass".
+            assert!(
+                guarded > 0,
+                "{name}: no guarded close_usd projection found — either the file \
+                 stopped projecting close_usd, or the guard expression was reworded \
+                 and this test has gone blind"
+            );
+        }
+    }
+
+    /// Task 0135 extends the 0145 guard to the current-prices MV: every
+    /// close_usd aggregate in current.sql must be the If-guarded form. The
+    /// pre-roll matcher above is alias-specific (`t.timestamp`), so this one
+    /// matches the unaliased spelling current.sql uses. A revert of the 0135
+    /// contract (argMaxIf → argMax) is otherwise invisible to CI — the
+    /// behavioural tests in current_mv_it.rs need a local ClickHouse and are
+    /// `#[ignore]`d.
+    #[test]
+    fn current_sql_uses_no_unguarded_argmax_on_close_usd() {
+        let stmts = split_statements(CURRENT_SQL);
+        assert!(!stmts.is_empty(), "current.sql yields no statements");
+
+        let mut guarded = 0usize;
+        for stmt in &stmts {
+            if let Some(offset) = stmt.find("argMax(close_usd") {
+                let head: String = stmt[offset..].chars().take(90).collect();
+                panic!(
+                    "current.sql: unguarded argMax on close_usd — use \
+                     argMaxIf(close_usd, timestamp, close_usd > 0) so the tip \
+                     carries its latest *priced* close instead of the \
+                     un-enriched sentinel 0 (task 0135); got: {head}"
+                );
+            }
+            // Prefix match, not the full expression: per_source's guard also
+            // carries the carry-bound predicate, so pinning the exact text
+            // would silently stop counting it (and the count below would
+            // "pass" one short).
+            guarded += stmt.matches("argMaxIf(close_usd, timestamp,").count();
+            guarded += stmt.matches("argMinIf(close_usd, timestamp,").count();
+        }
+
+        // Non-vacuity: 3 argMaxIf (xlm_usd scalar, per_source's src_price,
+        // unfiltered) + 2 argMinIf (ref_7d, open_24h). A drop means a
+        // projection lost its guard or the expression was reworded and this
+        // test has gone blind.
+        //
+        // Was 6 until the PR #241 review: per_source's src_price_fresh was a
+        // second argMaxIf carrying the bound in its predicate. Liveness is now
+        // `max(timestamp) >= now() - INTERVAL 2 HOUR`, which is not a
+        // close_usd aggregate at all — it must NOT be, since counting
+        // close_usd there is exactly the finding-1 defect.
+        assert_eq!(
+            guarded, 5,
+            "current.sql guarded close_usd aggregate count changed — verify \
+             every site still skips un-enriched rows, then update this count"
+        );
+
+        // Task 0135, review finding #5: the carry bound must exist at EXACTLY
+        // one site. It was briefly duplicated across per_source and unfiltered,
+        // and a bound tuned in one place but not the other reproduces the very
+        // contradiction the review caught — a zero headline price beside a
+        // populated `sources`. The guard above cannot see that; this can.
+        let bounds = CURRENT_SQL.matches("INTERVAL 2 HOUR").count();
+        assert_eq!(
+            bounds, 1,
+            "the carry bound must appear exactly once (per_source). Found \
+             {bounds}: a second site means the two can drift apart"
+        );
+    }
+
+    /// The 121 sites are the whole point: 6 + 14 + 6 + 95, matching scope
+    /// correction C1 in task 0144. A count regression here means a pre-roll
+    /// projection was added without the guard, or one was silently dropped.
+    #[test]
+    fn preroll_guarded_close_usd_site_counts_match_the_0144_audit() {
+        let expected = [
+            ("preroll.sql", 6usize),
+            ("preroll-incremental.sql", 14),
+            ("preroll-live-gap.sql", 6),
+            ("preroll-amm-reprice.sql", 95),
+        ];
+
+        let mut total = 0usize;
+        for ((name, sql), (expected_name, want)) in ALL_PREROLL_SQL.iter().zip(expected) {
+            assert_eq!(*name, expected_name, "ALL_PREROLL_SQL order changed");
+            // Count over statements, not raw text: each file's header disclosure
+            // block quotes the guard expression verbatim, which would otherwise
+            // inflate every count by one.
+            let got: usize = split_statements(sql)
+                .iter()
+                .map(|s| {
+                    s.matches("argMaxIf(close_usd, t.timestamp, close_usd > 0)")
+                        .count()
+                })
+                .sum();
+            assert_eq!(got, want, "{name}: guarded close_usd site count");
+            total += got;
+        }
+        assert_eq!(total, 121, "total guarded pre-roll sites (task 0144 C1)");
+    }
+
+    /// The live-spot view must forward every column `mv_current_prices` writes
+    /// (task 0072). BE consumes this view IN-CLUSTER — named views, no HTTP —
+    /// so a column the view omits is unreachable to that consumer no matter how
+    /// well the MV populates it.
+    #[test]
+    fn views_sql_current_price_usd_forwards_every_current_prices_column() {
+        let stmt = split_statements(VIEWS_SQL)
+            .into_iter()
+            .find(|s| s.contains("prices.current_price_usd"))
+            .expect("current_price_usd view statement");
+
+        for col in [
+            "price_usd",
+            "price_xlm",
+            "change_24h_pct",
+            "change_7d_pct",
+            "volume_24h_usd",
+            "market_cap_usd",
+            "vwap_24h",
+            "sources",
+            "updated_at",
+        ] {
+            assert!(
+                stmt.contains(&format!("c.{col}")),
+                "current_price_usd must forward `{col}` from current_prices"
+            );
+        }
+
+        // `CREATE VIEW IF NOT EXISTS` does NOT redefine a view that already
+        // exists — the apply silently no-ops and the new columns never land on
+        // a target that already has the old definition. A plain view supports
+        // atomic OR REPLACE (the refreshable MV in current.sql cannot, hence
+        // its DROP + re-CREATE).
+        assert!(
+            stmt.contains("CREATE OR REPLACE VIEW"),
+            "current_price_usd must REPLACE rather than IF NOT EXISTS"
+        );
     }
 }

@@ -4,6 +4,15 @@ Schema + connection layer for the `prices` ClickHouse database. Mirrors BE's
 `crates/db-clickhouse` layout: a single embedded `schema/init.sql` is the source
 of truth, applied idempotently by the `prices-clickhouse-init` binary.
 
+> **The applier needs DDL privileges** (task 0134). `init.sql` is uniformly
+> `CREATE … IF NOT EXISTS` (tables must never be recreated), but `views.sql` is
+> uniformly `CREATE OR REPLACE VIEW` — `IF NOT EXISTS` does not redefine an
+> existing view, so an edit would silently no-op on a provisioned target. `CREATE
+> OR REPLACE VIEW` requires a `DROP VIEW` grant unconditionally, which the scoped
+> production users do not have and cannot be granted by us. On ch-prod-01 the
+> schema is applied by the operator as the container's `default` user over the
+> loopback native port; see the header of `schema/views.sql`.
+
 This crate stands up the schema and hands out a configured `clickhouse::Client`.
 It deliberately owns **no** row structs or writers — the backfill / extractor
 crates (`sdex-backfill`, the venue extractors) own their own write path.

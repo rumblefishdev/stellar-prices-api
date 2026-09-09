@@ -112,6 +112,21 @@ fn config() -> AppConfig {
         ch_enabled: false,
         base_url: None,
         api_keys: vec![],
+        portal_enabled: false,
+        // Sign-in credentials are loaded asynchronously from Secrets Manager
+        // (task 0186) and are never part of the environment; `None` is the shape
+        // every non-portal test wants.
+        portal_oauth: None,
+        // Discord endpoints are part of the config now, not read from the
+        // process environment per router — see `AppConfig::portal_endpoints`.
+        portal_endpoints: Default::default(),
+        // Task 0187: the control-plane client for self-service keys. `None`
+        // is what every non-portal test wants — with no client in the
+        // config there is no code path here that can reach API Gateway.
+        portal_keys: None,
+        portal_eligibility: None,
+        portal_rate_limit: None,
+        portal_web_origin: None,
     }
 }
 
@@ -182,6 +197,72 @@ async fn asset_detail_returns_home_domain_from_metadata() {
         json["home_domain"], "centre.io",
         "home_domain must be joined in from asset_metadata"
     );
+    teardown(db).await;
+}
+
+/// A valid Soroban C-strkey. The detail route parses the identifier through
+/// `stellar_strkey::Contract`, so a placeholder like list_it's `CCONTRACTTOKEN`
+/// would 400 before reaching the query.
+fn contract() -> String {
+    stellar_strkey::Contract([9u8; 32]).to_string()
+}
+
+/// Seed a Soroban asset plus, optionally, its resolved symbol.
+async fn seed_soroban(db: &str, symbol: Option<&str>) {
+    let admin = Client::default().with_url(ch_url());
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (3, '', 'contract', '', '{c}')",
+            c = contract()
+        ))
+        .execute()
+        .await
+        .unwrap();
+    if let Some(symbol) = symbol {
+        admin
+            .query(&format!(
+                "INSERT INTO {db}.asset_symbol (contract_address, symbol) VALUES ('{c}', '{symbol}')",
+                c = contract()
+            ))
+            .execute()
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a local ClickHouse"]
+async fn asset_detail_returns_soroban_symbol_as_code() {
+    // Task 0210. The symbol is served from the asset_symbol LEFT JOIN, not the
+    // assets identity row — the same single-writer shape 0067 gave home_domain,
+    // but keyed on `contract_address` because 10 of the 52 soroban rows share an
+    // `asset_id` with another row (0139).
+    let db = "it_ep_detail_symbol_0210";
+    let client = setup(db).await;
+    seed_soroban(db, Some("SolvBTC")).await;
+
+    let (status, json) = get(client, &format!("/v1/assets/{}", contract())).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["code"], "SolvBTC");
+    assert_eq!(json["contract"], contract());
+    assert_eq!(json["issuer"], "");
+    teardown(db).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a local ClickHouse"]
+async fn asset_detail_unresolved_soroban_code_is_empty() {
+    // No asset_symbol row: the join misses and `code` stays `""`, which is the
+    // pre-0210 behaviour. Consumers must not see a partially-composed value.
+    let db = "it_ep_detail_symbol_miss_0210";
+    let client = setup(db).await;
+    seed_soroban(db, None).await;
+
+    let (status, json) = get(client, &format!("/v1/assets/{}", contract())).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["code"], "");
     teardown(db).await;
 }
 
@@ -259,18 +340,24 @@ async fn backfill_status_maps_both_streams() {
     assert_eq!(json["realtime_tip_ledger"], 57234198u64);
     assert_eq!(json["sdex"]["status"], "running");
     assert_eq!(json["sdex"]["current_ledger"], 34891234u64);
-    // remaining = target - current = 57234198 - 34891234
-    assert_eq!(json["sdex"]["ledgers_remaining"], 22342964u64);
+    // The archive walks BACKWARD (tip -> genesis), so `current_ledger` is the
+    // oldest ledger reflected and what remains is the stretch still BELOW it:
+    // remaining = current - start = 34891234 - 1
+    assert_eq!(json["sdex"]["ledgers_remaining"], 34891233u64);
     assert_eq!(json["sdex"]["last_push_at"], "2026-06-15T11:30:00Z");
-    // earliest_data_available = archive floor available to backfill (AC 6)
+    // earliest_data_available = oldest OHLCV row this stream has landed (AC 6)
     assert_eq!(
         json["sdex"]["earliest_data_available"],
         "2015-11-18T03:47:00Z"
     );
-    // done = (current - start) / (target - start) * 100
-    //      = (34891234 - 1) / (57234198 - 1) * 100 ≈ 60.96
+    // covered = (target - current) / (target - start) * 100
+    //         = (57234198 - 34891234) / (57234198 - 1) * 100 ≈ 39.04
+    //
+    // Changed from 60.96 with the backward-direction fix (task 0127): the old
+    // forward form reported the COMPLEMENT of the covered span, which read a
+    // finished archive (current == start == 1) as 0.0% on production.
     let pct = json["sdex"]["progress_pct"].as_f64().unwrap();
-    assert!((pct - 60.96).abs() < 0.1, "pct={pct}");
+    assert!((pct - 39.04).abs() < 0.1, "pct={pct}");
 
     assert_eq!(json["soroban_amm"]["status"], "completed");
     assert_eq!(json["soroban_amm"]["completed_at"], "2026-04-14T08:23:11Z");

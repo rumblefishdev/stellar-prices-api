@@ -1,0 +1,276 @@
+# Runbook — changing a rollup MV body on a provisioned target (task 0142)
+
+How to land an edit to `packages/prices-clickhouse/schema/rollups.sql` on a
+cluster that already holds the six refreshable rollup MVs, without
+reintroducing the task 0090/0095 data loss.
+
+**Applies to:** `mv_ohlcv_1m_to_15m`, `_15m_to_1h`, `_1h_to_4h`, `_4h_to_1d`,
+`_1d_to_1w`, `_1w_to_1M` on ch-prod-01.
+
+## Why you cannot just re-apply the file
+
+Every statement in `rollups.sql` is `CREATE MATERIALIZED VIEW IF NOT EXISTS`,
+and `IF NOT EXISTS` does not redefine an object that already exists. On a target
+that holds the MV, **re-applying an edited file changes nothing and reports
+success.** Verified on 26.3.10.60 and pinned by
+`tests/rollup_drift_it.rs::an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops`.
+
+Task 0134 removed this footgun from `views.sql` by converting those to `CREATE
+OR REPLACE VIEW`. That escape does not exist here: a refreshable `TO`-table MV
+has no `OR REPLACE` form. The only route is `DROP` + re-`CREATE`, which is why
+this is an operator procedure rather than something the apply path does.
+
+> ⚠️ **Requires a privileged user.** `DROP VIEW` / `CREATE MATERIALIZED VIEW`
+> need DDL grants the scoped production users (`prices_writer`,
+> `prices_reader`) do not have and cannot be granted by us — they are
+> XML-managed. On ch-prod-01 this runs as the container's `default` user over
+> the loopback native port, the same path `views.sql` uses.
+>
+> The drift check in step 1 is the exception: it is read-only and runs as any
+> account that can read `system.tables`.
+
+## Where these commands run
+
+⚠️ **Read this before step 1.** `Config::from_env()` defaults `CLICKHOUSE_URL` to
+`http://localhost:8123`, so a bare `cargo run` on a local machine checks the
+**local dev ClickHouse** and exits 0 — a clean result that says nothing whatever
+about ch-prod-01. Every command below is written for the Hetzner host.
+
+Prod's HTTP endpoint (`ch.sorobanscan.rumblefish.dev`) is mTLS-only behind Caddy
+and `prices_clickhouse::client()` builds a plaintext client, so there is no path
+from a local machine to prod for this binary. Run it **on the host, against the
+loopback port** — the same pattern as
+[`events-sourced-amm-reprice.md`](events-sourced-amm-reprice.md):
+
+```bash
+# On the Hetzner host (connection details: the prod SSH access note).
+# Build locally for the host target and copy the binary up, or build on the host.
+read -rs CH_PW
+CLICKHOUSE_URL=http://localhost:8123 \
+CLICKHOUSE_USER=default \
+CLICKHOUSE_PASSWORD="$CH_PW" \
+CLICKHOUSE_DATABASE=prices \
+  ./prices-clickhouse-drift
+```
+
+The password goes in the environment, never in `argv` — `/proc/<pid>/cmdline` is
+world-readable, so a flag would expose it to any `ps` on the box.
+
+The tool logs `url`, `user` and `database` at startup. **Read that line before
+you read the result**; it is the only thing standing between a local all-clear
+and a statement about production.
+
+Any account that can read `system.tables` will do — but note that view is
+grant-filtered, so an account without rights on the MV objects reports all six
+as `MISSING` rather than erroring. The tool flags that shape explicitly when
+every declared MV comes back missing.
+
+## Step 1 — see what the target actually holds
+
+```bash
+prices-clickhouse-drift
+prices-clickhouse-drift --verbose
+```
+
+Read-only: it issues `SELECT`s against `system.tables` and
+`formatQuerySingleLine`, and creates, alters and drops nothing. Exit 0 means all
+six are present, match the file and are in `APPEND` mode; exit 1 means at least
+one needs attention.
+
+Run this **before** you edit anything. A target that has already drifted is a
+different job from landing a new edit, and doing both in one pass makes the
+verification in step 5 unreadable.
+
+Five findings it reports, in descending severity:
+
+| Report                          | Meaning                                                                                                                                                                                             |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CRITICAL … NOT in APPEND mode` | Replace mode. Every refresh is atomically replacing the whole target table with just its bounded window — the task 0090 data loss, **happening now**. Fix this first and independently of any edit. |
+| `MISSING`                       | Declared in the file, absent on the target. That tier is not rolling up (the task 0136 shape). A plain re-apply fixes it — `IF NOT EXISTS` creates what is not there.                               |
+| `DRIFT`                         | Live definition and file disagree. Re-applying will NOT fix it; that is what the rest of this runbook is for.                                                                                       |
+| `EXTRA`                         | An MV not in the file writes into a table the declared MVs own — two writers into one `ReplacingMergeTree`. Find out what created it before changing anything else.                                 |
+| `UNKNOWN`                       | The object exists but its definition is not a shape the check can read — most likely re-created without `REFRESH`, which makes it an insert-trigger MV with entirely different semantics.           |
+
+## Step 2 — pre-flight the new definition
+
+Check the edited statement against all four invariants **before** dropping
+anything. A re-`CREATE` is the moment these get silently re-decided, and three
+of the four have already caused production incidents.
+
+- [ ] **`REFRESH … APPEND`** — the keyword is present. Without it the MV
+      atomically replaces its entire target table on every refresh; paired with
+      the bounded `WHERE` below, that deletes all pre-rolled history. This is
+      task 0090's data loss and task 0095's fix. Non-negotiable.
+- [ ] **`sum(version)`, not `max(version)`** — the target is a
+      `ReplacingMergeTree(version)`, so the projected version decides which
+      re-inserted row wins. `max` ties when an early row in a bucket is
+      corrected, and RMT's tie-break is not contractual (task 0059 #5).
+- [ ] **Window lower bound aligned to the coarse bucket** —
+      `toStartOfInterval(now() - <window>, INTERVAL <coarse-grain>)`, never a
+      raw `now() - <window>`. A raw bound falls mid-bucket, so the oldest bucket
+      in the window is rebuilt from only its in-window slice and a **partial**
+      bucket gets appended over complete pre-rolled history (task 0095).
+- [ ] **`t.`-qualified source columns** — the bucket key must be aliased `AS
+timestamp` for the `TO`-table insert routing to work, and that alias
+      shadows the source column inside the SELECT. A bare `timestamp` in
+      `argMin`/`argMax`/`WHERE` resolves to the constant bucket start, not the
+      per-row time (task 0071). Renaming the bucket is not an option — see the
+      header of `rollups.sql`.
+
+Then prove the edit locally against the prod-pinned server before it goes near
+the cluster:
+
+```bash
+docker compose up -d clickhouse           # 26.3.10.60, the prod pin
+cargo test -p prices-clickhouse --lib
+cargo test -p prices-clickhouse --test rollup_drift_it   -- --ignored
+cargo test -p prices-clickhouse --test rollup_append_it  -- --ignored
+cargo test -p prices-clickhouse --test rollup_chain_it   -- --ignored
+```
+
+`rollup_append_it` is the one that matters most here: it places data **outside**
+the refresh window and proves a refresh preserves it. An edit that reintroduces
+replace mode passes `rollup_chain_it` and fails this.
+
+## Step 3 — the exposure while an MV is dropped
+
+**One MV at a time, and never leave one dropped.** While an MV is gone its tier
+receives nothing, which looks exactly like a quiet market — task 0136 is the
+precedent, where starved rollups went nine days unnoticed.
+
+The gap is **self-healing if you are quick, because each MV re-aggregates a
+bounded window rather than only the newest bucket.** Once re-created, the first
+refresh rebuilds everything in its window, back-filling what was missed. So the
+requirement is simply that the outage stays well inside the window:
+
+| MV                   | refresh cadence | window   | practical budget                          |
+| -------------------- | --------------- | -------- | ----------------------------------------- |
+| `mv_ohlcv_1m_to_15m` | 1 min           | 2 h      | tightest — but a DROP + CREATE is seconds |
+| `mv_ohlcv_15m_to_1h` | 15 min          | 8 h      | ample                                     |
+| `mv_ohlcv_1h_to_4h`  | 1 h             | 1 day    | ample                                     |
+| `mv_ohlcv_4h_to_1d`  | 4 h             | 7 days   | ample                                     |
+| `mv_ohlcv_1d_to_1w`  | 1 day           | 60 days  | ample                                     |
+| `mv_ohlcv_1w_to_1M`  | 1 day           | 400 days | ample                                     |
+
+**Measured 2026-08-14 on the 26.3.10.60 pin:** a freshly created refreshable MV
+runs its initial refresh **immediately at creation**, not at the next scheduled
+boundary — `last_success_time` equals the `CREATE` time — and `next_refresh_time`
+then realigns to the normal clock boundary. So the catch-up is automatic; no
+manual `SYSTEM REFRESH VIEW` is required, though it is available if you want to
+force one.
+
+The real risk here is therefore **not** the length of the gap. It is a botched
+re-`CREATE` — which is what step 2 exists for, and why the statement you are
+about to run should be in your clipboard before you drop anything.
+
+⚠️ **Pair this with the task 0137 rollup freshness alarm.** If the alarm is
+routed to Slack, expect it to fire for the dropped tier if the outage outlasts
+its bound (bucket width + feeding-MV refresh). Do not silence it; let it prove
+it works, and confirm it returns to OK in step 5.
+
+## Step 4 — drop and re-create, one MV at a time
+
+For each MV, **fine-to-coarse** — `_1m_to_15m` first, `_1w_to_1M` last — so that
+each MV is re-created only once its own source has already been corrected.
+
+⚠️ **The order is load-bearing, and the intuitive one is backwards.** Every MV
+reads the tier below it, and (per step 3) a freshly created MV refreshes
+_immediately_. Re-create `_1w_to_1M` first and its one and only refresh for the
+next 24 hours re-aggregates `price_ohlcv_1w` rows that the old `_1d_to_1w` wrote
+— so a correction propagates upward not at all. Going fine-to-coarse, each
+re-created MV reads a source its predecessor has already fixed.
+
+```sql
+-- 1. drop
+DROP VIEW prices.mv_ohlcv_1m_to_15m;
+
+-- 2. re-create — paste the edited statement from schema/rollups.sql verbatim,
+--    including `IF NOT EXISTS` (harmless: you just dropped it, and keeping the
+--    file and the executed statement identical is what makes step 5 clean).
+CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_ohlcv_1m_to_15m
+REFRESH EVERY 1 MINUTE APPEND
+TO prices.price_ohlcv_15m AS
+SELECT …;
+```
+
+Then confirm this one before touching the next:
+
+```sql
+SELECT view, status, last_success_time, next_refresh_time, exception
+FROM system.view_refreshes
+WHERE database = 'prices' AND view = 'mv_ohlcv_1m_to_15m';
+```
+
+`status = Scheduled`, a `last_success_time` at or after your `CREATE`, and an
+empty `exception`. A non-empty `exception` means the MV exists but is failing on
+every tick — visible here and nowhere else.
+
+> **Re-creating by re-applying the file — know what else that touches.** Once an
+> MV is dropped, `IF NOT EXISTS` will create it, so applying `rollups.sql`
+> re-creates every _missing_ MV and leaves every existing one untouched. It is
+> **not** a way to land an edit on an MV that still exists.
+>
+> ⚠️ But `prices-clickhouse-init --rollups` does **not** apply only that file.
+> Before it reaches `ROLLUPS_SQL` it unconditionally applies `init.sql`, seeds
+> `backfill_progress`, and applies all six `CREATE OR REPLACE VIEW` statements in
+> `views.sql` — **from your working tree**, over whatever ch-prod-01 currently
+> holds. That is a much larger blast radius than "re-create one missing MV", and
+> it needs the `DROP VIEW` grant those replaces require.
+>
+> For a single missing tier, prefer the explicit `CREATE` above. Reach for the
+> binary only when you intend to re-land the whole schema, and only from a
+> checkout you have verified against the cluster.
+
+## Step 5 — verify
+
+On the host, same environment as step 1 (see "Where these commands run" — a
+local run here verifies your dev machine, not the cluster you just changed):
+
+```bash
+prices-clickhouse-drift
+```
+
+Exit 0, and every line `ok`. That is the only check that confirms the edit
+actually landed — the `CREATE` reporting success does not, which is the whole
+premise of task 0142.
+
+Then verify on the **data**, not on the DDL:
+
+```sql
+-- the tier is advancing again
+SELECT max(timestamp) FROM prices.price_ohlcv_1M;
+
+-- and history was not truncated by a replace-mode mistake
+SELECT min(timestamp), count() FROM prices.price_ohlcv_1M;
+```
+
+⚠️ **Compare `min(timestamp)` and `count()` against what you recorded before
+step 4.** A replace-mode re-`CREATE` shows up here as history collapsing to the
+window, and it will already have happened by the first refresh. Take the
+readings before you drop.
+
+Finally, confirm the task 0137 freshness alarm has returned to OK — and note the
+lesson task 0204 records: an alarm returning to OK is not by itself proof of
+recovery. The `min`/`count` readings above are.
+
+## Rollback
+
+There is no snapshot to restore — an MV is a definition, not data. Rollback is
+`DROP VIEW` + re-`CREATE` from the **previous** statement, which is why you
+should have it to hand (`git show HEAD:packages/prices-clickhouse/schema/rollups.sql`)
+before starting.
+
+The data is a different question. If a botched re-`CREATE` ran in replace mode
+even once, the target table has lost everything outside its window, and recovery
+is a pre-roll — see `docs/runbooks/0136-coarse-rollup-merge-recovery.md` and the
+`preroll-live-gap.sql` path, not this runbook.
+
+## Related
+
+- `docs/runbooks/0136-coarse-rollup-merge-recovery.md` — per-table surgery on
+  these same objects, and the precedent for how long a starved rollup goes
+  unnoticed.
+- `packages/prices-clickhouse/schema/rollups.sql` — the invariants in step 2 are
+  documented at length in its header.
+- `packages/prices-clickhouse/src/drift.rs` — why the check compares a
+  fingerprint rather than the DDL text.

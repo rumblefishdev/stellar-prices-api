@@ -36,9 +36,14 @@ pub trait CandleSink {
         samples: &[OracleSample],
     ) -> impl Future<Output = Result<(), SinkError>> + Send;
 
-    fn write_assets(
+    /// Persist assets interned on/after the `since` watermark — only the ones
+    /// this run newly discovered, not the whole registry (task 0132). `since` is
+    /// [`AssetRegistry::watermark`] captured before the run. A no-op write when
+    /// no new assets were seen.
+    fn write_new_assets(
         &self,
         registry: &AssetRegistry,
+        since: u32,
     ) -> impl Future<Output = Result<(), SinkError>> + Send;
 }
 
@@ -130,11 +135,20 @@ impl CandleSink for ClickHouseSink {
         .map(|_| ())
     }
 
-    async fn write_assets(&self, registry: &AssetRegistry) -> Result<(), SinkError> {
+    async fn write_new_assets(
+        &self,
+        registry: &AssetRegistry,
+        since: u32,
+    ) -> Result<(), SinkError> {
         retry_with_backoff(
             &DEFAULT_BACKOFF_MS,
             |_| true,
-            || async { self.writer.write_assets(registry).await.map_err(redact) },
+            || async {
+                self.writer
+                    .write_new_assets(registry, since)
+                    .await
+                    .map_err(redact)
+            },
         )
         .await
         .map(|_| ())
@@ -154,6 +168,7 @@ fn redact(e: prices_ingest_core::IngestError) -> SinkError {
 pub struct CountingSink {
     pub candles: std::sync::atomic::AtomicU64,
     pub oracle: std::sync::atomic::AtomicU64,
+    pub assets: std::sync::atomic::AtomicU64,
 }
 
 impl CandleSink for CountingSink {
@@ -169,7 +184,14 @@ impl CandleSink for CountingSink {
         Ok(())
     }
 
-    async fn write_assets(&self, _registry: &AssetRegistry) -> Result<(), SinkError> {
+    async fn write_new_assets(
+        &self,
+        registry: &AssetRegistry,
+        since: u32,
+    ) -> Result<(), SinkError> {
+        let n = registry.assets_since(since).count() as u64;
+        self.assets
+            .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 }

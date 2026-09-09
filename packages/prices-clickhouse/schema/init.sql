@@ -162,11 +162,36 @@ CREATE TABLE IF NOT EXISTS prices.current_prices (
     market_cap_usd   Decimal(38, 14),
     vwap_24h         Decimal(38, 14),
     sources          String,
-    updated_at       DateTime      DEFAULT now()
+    updated_at       DateTime      DEFAULT now(),
+    method           LowCardinality(String) DEFAULT ''
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (asset_id)
 SETTINGS index_granularity = 8192;
+
+-- Price provenance (task 0178). Extends [[0165]]'s price_usd_series vocabulary
+-- to the tip surface, so a consumer can tell a MEASURED 1.0000 from a filled
+-- one — without it, `price_usd` repeats the `close_usd = 0` mistake of one
+-- value meaning several things.
+--
+--   'traded' — a real aggregate of candles some pricing tier already priced.
+--   'oracle' — a measured depeg-aware rate from prices.usd_rate. USDC ONLY;
+--              see the allowlist warning in current.sql before widening it.
+--   ''       — the "unavailable" SENTINEL, not a vocabulary word: the asset has
+--              no priced candle in the window, so `price_usd` is the 0 sentinel
+--              and no method applies. This column is non-nullable like every
+--              other column on this table, so absence must be a value.
+--   'peg'    — reserved by 0165 and deliberately NOT emitted here. This surface
+--              reads the real rate, so "no measured rate was available" is
+--              never true of it.
+--
+-- ⚠️ Do NOT conflate with prices.usd_rate.method, which is a RATE-provenance
+-- enum ('oracle'/'peg'/'pivot'/'pivot2') answering a different question. 0165
+-- made them distinct deliberately (views.sql:171-174).
+--
+-- Idempotent ALTER for databases created before 0178, mirroring the close_usd
+-- pattern above.
+ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS method LowCardinality(String) DEFAULT '' AFTER updated_at;
 
 ----------------------------------------------------------------------
 -- Per-asset circulating supply (task 0039 supply worker). Its OWN
@@ -182,6 +207,53 @@ CREATE TABLE IF NOT EXISTS prices.asset_supply (
 )
 ENGINE = ReplacingMergeTree(fetched_at)
 ORDER BY (asset_id)
+SETTINGS index_granularity = 8192;
+
+----------------------------------------------------------------------
+-- Per-contract Soroban token symbol (task 0210). Soroban tokens carry no
+-- asset_code -- the symbol lives on the token contract and is read over RPC.
+--
+-- Its OWN single-writer table, for two reasons:
+--   1. It cannot live in `assets.asset_code`: that column is part of that
+--      table's sort key, so amending it writes a SECOND row rather than
+--      replacing (one asset_id on two natural identities -- task 0139's live
+--      fan-out, deliberately widened).
+--   2. It cannot be a column on `asset_metadata`: `write_asset_metadata`
+--      replaces the WHOLE row, so a symbol writer and the home_domain writer
+--      would clobber each other -- the task-0067 hazard `asset_supply` exists
+--      to avoid.
+--
+-- Keyed on `contract_address`, not `asset_id`: the symbol belongs to the
+-- contract, and 10 of the 52 soroban rows share an asset_id with another row
+-- (0139), which would make an asset_id-keyed symbol unattributable.
+--
+-- An empty `symbol` is a NEGATIVE ANSWER, not missing data: it records "asked,
+-- and this contract gave nothing usable". `attempts` is what turns a run of
+-- those into a permanent sentinel, at MAX_SYMBOL_ATTEMPTS.
+--
+-- The counter exists because the simulation's `error` field mixes causes that
+-- look identical from here: a contract that was never deployed or has no
+-- `symbol()` (deterministic, should stop being polled) and a ledger-entry read
+-- failure or a node behind the network (transient, must not be recorded as
+-- fact). Telling them apart would mean matching on the host's error text, which
+-- is a protocol-version detail. Counting observes the difference instead: a
+-- deterministic failure repeats and exhausts the counter, a transient one
+-- resolves and `attempts` returns to 0.
+--
+-- The asymmetry is why this is worth a column. A wrong retry costs one RPC call
+-- per run; a wrong sentinel publishes an empty symbol that nothing re-polls, and
+-- undoing it means hand-editing a ReplacingMergeTree on the shared box.
+--
+-- Sole writer = the asset-discovery worker's symbol stage.
+----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS prices.asset_symbol (
+    contract_address  String,
+    symbol            String    DEFAULT '',
+    attempts          UInt8     DEFAULT 0,
+    fetched_at        DateTime  DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(fetched_at)
+ORDER BY (contract_address)
 SETTINGS index_granularity = 8192;
 
 ----------------------------------------------------------------------
@@ -207,6 +279,103 @@ CREATE TABLE IF NOT EXISTS prices.oracle_prices (
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMM(timestamp)
 ORDER BY (asset_id, oracle_name, timestamp)
+SETTINGS index_granularity = 8192;
+
+----------------------------------------------------------------------
+-- prices.usd_rate — the USD rate of an asset, as a first-class value.
+-- Task 0167; shape specified by 0154, scoped by the 0151 decision.
+--
+-- ## Why this table exists
+-- close_usd is not a stored fact, it is a CACHED PRODUCT. All three enrichment
+-- tiers compute the same shape (ch_enrich.rs):
+--     close_usd = close * <USD rate of the candle's QUOTE asset at that time>
+-- The rate is a function of (quote asset, timestamp) ONLY — never of the candle
+-- being priced. So today we look the rate up, multiply it into hundreds of
+-- millions of rows, and DISCARD it. This table writes it down instead: a handful
+-- of assets per bucket rather than one product per candle.
+--
+-- ⏳ The urgent reason is retention. oracle_prices is pruned at INTERVAL 13
+-- MONTH (cleanup-worker/src/lib.rs), so the earliest depeg-aware history ages
+-- out permanently. A view CANNOT solve this by joining oracle_prices directly:
+-- the published series would MUTATE as rows age out (a bucket reading 0.9993
+-- silently reverting to 1.0000), which is why views.sql forbids that join. The
+-- rate must be snapshotted into a forever-retained table.
+--
+-- ## ⚠️ Key is NATURAL IDENTITY, never asset_id
+-- Task 0139 is confirmed as genuine asset_id collisions between unrelated
+-- assets — measured 2026-08-10 at 3,281 asset_ids serving 6,568 identities
+-- (asset_id 4194 is both STW and ARBRIDGE). A rate keyed on asset_id would be
+-- ambiguous for exactly those ids and would bake a non-unique key into new
+-- infrastructure. Natural identity sidesteps 0139 whichever way its fix lands.
+--
+-- ## ⚠️ Deliberately ABSENT from cleanup-worker's RETENTION list
+-- That list is OPT-IN: a table not named there is retained forever, which is
+-- exactly what this table needs. Do NOT "helpfully" add it — adding it would
+-- re-create the very expiry problem the table exists to escape.
+--
+-- ## Resolution rule — ASOF at-or-before, bounded by staleness. NEVER averaged.
+-- Rows are OBSERVATIONS at the source's own cadence, not bucket aggregates. A
+-- consumer needing the rate at time T takes the newest row with timestamp <= T,
+-- and refuses it past a staleness window (unbounded forward-fill would present a
+-- three-day-old reading as current). For a bucket-grained consumer such as
+-- price_usd_series, T is the BUCKET'S END — i.e. the bucket's closing rate.
+--
+-- Three reasons this is not an average or a vwap:
+--   1. It is the rule the codebase already uses — the oracle tier is an
+--      ASOF LEFT JOIN ... ON o.timestamp <= p.timestamp with a staleness floor
+--      (ch_enrich.rs), and the XLM pivot forward-fills the same way.
+--   2. It COMPOSES ACROSS ALL SIX GRANULARITIES FOR FREE. A daily close is the
+--      ASOF at day-end, which IS the last hourly close. Averages do not compose
+--      (the mean of hourly means is not the daily mean unless counts match), so
+--      an averaging rule would need six definitions plus a consistency proof.
+--   3. price_usd_series means "one USD CLOSE per bucket" — a bucket average
+--      would be a different statistic wearing the same column name.
+-- vwap is impossible regardless: oracle observations carry no volume.
+--
+-- Accepted cost: a close is more exposed to a single outlier reading at a bucket
+-- boundary than an average is. Negligible for peg assets (~0.1% band), and task
+-- 0154 ASOFs at the CANDLE's timestamp so the boundary case does not arise there.
+--
+-- ## Columns
+--   method  'oracle' — a measured reading (hops = 0)
+--           'peg'    — the $1 assumption (hops = 0)
+--           'pivot'  — via XLM (hops = 1)          } owned by 0154,
+--           'pivot2' — via another rated asset (2) } not written here
+--   ⚠️ ABSENCE IS THE SIGNAL for pre-oracle history. Deep history (before the
+--   oracle window, ~2025-09) gets NO ROW, and the consumer's own peg fallback
+--   applies. Do NOT write synthetic method='peg' rows at $1 to "fill" it — that
+--   makes a fallback indistinguishable from a measurement, which is precisely
+--   the close_usd = 0 mistake (one value meaning several things) in a new place.
+--
+--   ⚠️ `method` IS PART OF THE SORTING KEY, deliberately. RMT dedups on the
+--   sorting key, so without it a 'pivot' row written by 0154 at the same
+--   (identity, timestamp) as a measured 'oracle' reading would silently REPLACE
+--   it — and the winner would be whichever was written later, not whichever is
+--   better evidence. With `method` in the key the two coexist and the consumer
+--   chooses. Fixed while the table was still empty; changing a sorting key
+--   afterwards means a rebuild.
+--
+--   version — the write time. A re-run writes nothing (the copy skips
+--   observations already stored with the same value), and a genuine upstream
+--   CORRECTION at an already-stored timestamp differs in value, so it is
+--   re-copied and its higher version wins.
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS prices.usd_rate (
+    asset_kind        LowCardinality(String),
+    asset_code        String,
+    issuer_address    String,
+    contract_address  String,
+    timestamp         DateTime      CODEC(DoubleDelta),
+    usd_rate          Decimal(38, 14),
+    method            LowCardinality(String),
+    reference_asset   String        DEFAULT '',
+    hops              UInt8         DEFAULT 0,
+    version           UInt64
+)
+ENGINE = ReplacingMergeTree(version)
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (asset_kind, asset_code, issuer_address, contract_address, timestamp, method)
 SETTINGS index_granularity = 8192;
 
 ----------------------------------------------------------------------
@@ -351,4 +520,57 @@ CREATE TABLE IF NOT EXISTS prices.ingest_cursor (
 )
 ENGINE = ReplacingMergeTree(ledger)
 ORDER BY (id)
+SETTINGS index_granularity = 8192;
+
+-- ---------------------------------------------------------------------
+-- Enrichment sweep frontier (task 0111). One row per (table, monthly
+-- partition) recording whether the historical USD-enrichment sweep still has
+-- work to do there. The scheduled pass is bounded to the newest few partitions
+-- (`ENRICH_LIVE_PARTITIONS`); the historical drain walks the rest one partition
+-- at a time, and this is how it remembers where it got to across invocations.
+--
+-- Fourth instance of the pattern `ingest_cursor` / `backfill_progress` /
+-- `discovery_state` already establish here: a tiny ReplacingMergeTree state
+-- table in `prices`, written by our own workers. ~102 partitions × 6 tiers is
+-- under 700 rows and well under 100 KB permanently — on a disk we are 3.3% of.
+-- Not a materialized view, not in the rollup chain, and NOT in the cleanup
+-- worker's retention list.
+--
+-- 🔴 ADVISORY, NEVER AUTHORITATIVE. The sweep re-confirms a month with a
+-- partition-bounded `count_candidates` (~0.2 s) before working it, so a wrong
+-- or stale row costs one cheap query and never skipped rows. Skipped rows that
+-- read as healthy are precisely the failure class that cost 26 days in task
+-- 0215; a performance hint cannot cause it, an authoritative cursor can. A
+-- slow-cadence full re-enumeration corrects drift for the same reason.
+--
+-- `state`:
+--   * `pending`   — believed to still hold enrichable zeros.
+--   * `exhausted` — a bounded pass made no progress here, so what remains has
+--                   no USD reference of any kind. That is the normal terminal
+--                   state, not an error: 5.34M rows predate the XLM/USDC
+--                   reference market (first candle 2021-02) and are permanently
+--                   unpriceable by this design. Marking them exhausted on first
+--                   visit is what stops the sweep revisiting them forever,
+--                   WITHOUT a hard-coded cutoff constant.
+--
+-- `version` is monotonic-forward, deliberately mirroring `ingest_cursor`:
+-- three invocation attempts run per hour (one EventBridge trigger plus two
+-- Lambda async retries), so writes race. RMT(version) keeps the highest, and
+-- because the frontier is advisory a race costs duplicated work rather than
+-- lost work. An operator rewind therefore needs an explicit DELETE, not a lower
+-- INSERT — the same intentional asymmetry as the ingest cursor.
+--
+-- `zeros_seen` is informational (the count at the last sweep), for drain-progress
+-- metrics; never read as a decision input.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS prices.enrichment_frontier (
+    tbl         LowCardinality(String),
+    month       UInt32,
+    state       Enum8('pending' = 1, 'exhausted' = 2),
+    zeros_seen  UInt64,
+    swept_at    DateTime DEFAULT now(),
+    version     UInt64
+)
+ENGINE = ReplacingMergeTree(version)
+ORDER BY (tbl, month)
 SETTINGS index_granularity = 8192;

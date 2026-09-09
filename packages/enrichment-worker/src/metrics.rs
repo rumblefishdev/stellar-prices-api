@@ -20,6 +20,8 @@
 //! transient CloudWatch error never blocks enrichment.
 
 use crate::ch_enrich::ChPassStats;
+use crate::frontier::SweepSummary;
+use crate::repair::CoarseSweepSummary;
 
 /// CloudWatch namespace for all enrichment metrics. Matches the
 /// `cloudwatch:namespace` condition on the Lambda role's `PutMetricData` grant
@@ -27,11 +29,15 @@ use crate::ch_enrich::ChPassStats;
 pub const METRIC_NAMESPACE: &str = "Prices/Enrichment";
 
 /// CloudWatch unit for a [`Metric`]. Kept minimal — the enrichment metrics are
-/// either counts or a duration.
+/// counts, a duration, or a bare identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unit {
     Count,
     Milliseconds,
+    /// Dimensionless. For values that are identifiers rather than quantities —
+    /// `EnrichmentFrontierMonth` is a `YYYYMM`, and publishing it as a `Count`
+    /// would invite a dashboard to sum or average it into nonsense.
+    None,
 }
 
 /// One CloudWatch datum: a spec §5 metric name, its value, and unit.
@@ -96,6 +102,181 @@ pub fn pass_metrics(stats: &ChPassStats) -> Vec<Metric> {
     metrics
 }
 
+/// Metrics for the recurring coarse-table sweep (task 0114). Published under the
+/// **same** [`METRIC_NAMESPACE`] as the 1m pass, so the existing `PutMetricData`
+/// grant (scoped to that namespace) covers them without an IAM change.
+///
+///   * `CoarseSweepRowsEnriched` — coarse rows corrected this run, across all
+///     swept tables. Steady-state ≈ 0 once the tables sit at the floor; a
+///     sustained non-zero is the actionable signal — the rollup path is
+///     re-freezing zeros (enrichment lag exceeded the MV windows — task 0111
+///     territory) and the guard is earning its keep.
+///   * `CoarseSweepTableFailures` — tables whose pass **errored** this run. The
+///     dead-sweep signal to alarm on. Deliberately excludes config-skipped
+///     tables (below), so a benign mis-config cannot false-fire the alarm.
+///   * `CoarseSweepTablesSkipped` — non-coarse names left in the config
+///     (`price_ohlcv_1m` / typos). Visible for hygiene, but a static condition,
+///     not a runtime failure — kept off the alarm series.
+///
+/// A `RowsRemaining` metric is intentionally NOT published: `zeros_after` is
+/// dominated by the permanent multi-million exotic `no_reference` floor, so it
+/// sits near-constant whether or not the sweep is keeping up and cannot observe
+/// the lag it would exist to catch. `RowsEnriched` is the usable signal; the
+/// floor size is available on demand via the per-quote-class composition query.
+/// Metrics for the frontier-driven historical drain (task 0111 phase 4). Same
+/// [`METRIC_NAMESPACE`], so the existing `PutMetricData` grant covers them.
+///
+/// The point of these is that **drain progress becomes a number instead of an
+/// archaeology dig**. Before this, answering "is the backlog moving?" meant
+/// hand-querying `query_log` and `system.parts` on prod.
+///
+///   * `EnrichmentFrontierMonthsPending` — monthly partitions below the live
+///     window still believed to hold work. Monotonically falling in a healthy
+///     drain; flat for days is the actionable signal.
+///   * `EnrichmentFrontierMonth` — the frontier position itself as `YYYYMM`.
+///     A gauge you can eyeball against the known span. Published as `None` →
+///     omitted rather than 0, so a finished drain does not read as "January
+///     year zero".
+///   * `EnrichmentHistoricalRowsEnriched` — rows the drain corrected this run.
+///     This is the per-leg progress signal the pass itself cannot give: the XLM
+///     pivot writes exactly `batch_size` every batch and so masks every other
+///     leg's stall in the aggregate count (task 0219).
+///   * `EnrichmentFrontierMonthsReopened` — exhausted months that turned out to
+///     have gained work and were re-opened. Published only when non-zero.
+///   * `EnrichmentHistoricalDeadlineHit` — 1 when the run stopped on its
+///     wall-clock budget rather than on `max_months`. Distinguishes "nothing
+///     left to do" from "ran out of time", which otherwise look identical from
+///     a rows-enriched of zero.
+pub fn historical_sweep_metrics(summary: &SweepSummary) -> Vec<Metric> {
+    let mut m = vec![
+        Metric {
+            name: "EnrichmentFrontierMonthsPending",
+            value: summary.months_pending as f64,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "EnrichmentHistoricalRowsEnriched",
+            value: summary.total_enriched() as f64,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "EnrichmentHistoricalDeadlineHit",
+            value: if summary.deadline_hit { 1.0 } else { 0.0 },
+            unit: Unit::Count,
+        },
+    ];
+    if summary.months_reopened > 0 {
+        // Only published when non-zero: a month re-opening means something wrote
+        // into a partition the sweep had finished. Worth seeing, but a constant
+        // 0 series on a dashboard trains people to ignore it.
+        m.push(Metric {
+            name: "EnrichmentFrontierMonthsReopened",
+            value: summary.months_reopened as f64,
+            unit: Unit::Count,
+        });
+    }
+    if let Some(month) = summary.frontier_month {
+        m.push(Metric {
+            name: "EnrichmentFrontierMonth",
+            value: month as f64,
+            unit: Unit::None,
+        });
+    }
+    m
+}
+
+pub fn sweep_metrics(summary: &CoarseSweepSummary, duration_ms: u64) -> Vec<Metric> {
+    vec![
+        // Published on EVERY completed run, including one that swept nothing.
+        // This is what separates "ran and found nothing" from "never reached"
+        // (task 0218 AC 2): the latter emits no datapoint at all, and the
+        // `-no-invocations` alarm treats missing data as breaching.
+        Metric {
+            name: "CoarseSweepRuns",
+            value: 1.0,
+            unit: Unit::Count,
+        },
+        // Zero here and 1 in `sweep_failure_metrics` — so a run that failed
+        // before producing a summary is a datapoint, not silence.
+        Metric {
+            name: "CoarseSweepFailedRuns",
+            value: 0.0,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepTablesSwept",
+            value: summary.tables.len() as f64,
+            unit: Unit::Count,
+        },
+        // A starved run and a short run both report fewer swept tables; only
+        // this tells them apart (task 0218 AC 4). Published even when the run
+        // hit its deadline, which is precisely when it matters.
+        Metric {
+            name: "CoarseSweepDeadlineHit",
+            value: if summary.was_starved() { 1.0 } else { 0.0 },
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepDurationMs",
+            value: duration_ms as f64,
+            unit: Unit::Milliseconds,
+        },
+        Metric {
+            name: "CoarseSweepRowsEnriched",
+            value: summary.total_enriched() as f64,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepTableFailures",
+            value: summary.failed_tables.len() as f64,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepTablesSkipped",
+            value: summary.skipped_tables.len() as f64,
+            unit: Unit::Count,
+        },
+    ]
+}
+
+/// Metrics for a sweep invocation that failed **before** producing a summary —
+/// i.e. `run_coarse_sweep` returned `Err`, so there is nothing to report per
+/// table.
+///
+/// Exists because the `Ok`-only publishing this replaced made a failed run
+/// indistinguishable from a run that never happened: both emitted nothing. The
+/// three states task 0218 AC 2 requires to be distinguishable are now:
+///
+/// | state | signal |
+/// |---|---|
+/// | never reached | **no datapoint at all** — caught by `-no-invocations` |
+/// | ran, found nothing | `CoarseSweepRuns=1`, `FailedRuns=0`, `RowsEnriched=0` |
+/// | ran, failed | `CoarseSweepRuns=1`, `FailedRuns=1` |
+pub fn sweep_failure_metrics(duration_ms: u64) -> Vec<Metric> {
+    vec![
+        Metric {
+            name: "CoarseSweepRuns",
+            value: 1.0,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepFailedRuns",
+            value: 1.0,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepRowsEnriched",
+            value: 0.0,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepDurationMs",
+            value: duration_ms as f64,
+            unit: Unit::Milliseconds,
+        },
+    ]
+}
+
 /// Publish `metrics` to CloudWatch under [`METRIC_NAMESPACE`], tagged with an
 /// `Environment` dimension. One `PutMetricData` call for the whole batch.
 #[cfg(feature = "lambda")]
@@ -120,6 +301,7 @@ pub async fn publish(
                 .unit(match m.unit {
                     Unit::Count => StandardUnit::Count,
                     Unit::Milliseconds => StandardUnit::Milliseconds,
+                    Unit::None => StandardUnit::None,
                 })
                 .dimensions(dimension.clone())
                 .build()
@@ -146,6 +328,7 @@ mod tests {
             candidates_before: 100,
             candidates_after: 7,
             rows_enriched: 93,
+            rows_reset: 0,
             oracle_misses: 12,
             rows_remaining_at_volume_zero: 4,
             rows_remaining_recent: 1,
@@ -171,6 +354,123 @@ mod tests {
         assert_eq!(avg.value, 1500.0);
         assert_eq!(avg.unit, Unit::Milliseconds);
         assert_eq!(m.len(), 6);
+    }
+
+    #[test]
+    fn sweep_metrics_sum_enriched_and_split_failed_from_skipped() {
+        use crate::repair::{CoarseSweepSummary, MonthRepair, RepairSummary, TableSweep};
+
+        let table = |name: &str, enriched: u64, remaining: u64| TableSweep {
+            table: name.to_string(),
+            summary: RepairSummary {
+                months: vec![MonthRepair {
+                    month: 202_606,
+                    zeros_before: enriched + remaining,
+                    zeros_after: remaining,
+                    rows_enriched: enriched,
+                    rows_reset: 0,
+                    snapshot_name: None,
+                }],
+                deadline_hit: false,
+            },
+        };
+        let summary = CoarseSweepSummary {
+            start_month: 202_605,
+            end_month: 202_606,
+            tables: vec![table("price_ohlcv_1h", 8, 2), table("price_ohlcv_4h", 4, 1)],
+            // A genuine runtime pass error vs a benign config skip — distinct series.
+            failed_tables: vec!["price_ohlcv_1d".to_string()],
+            skipped_tables: vec!["price_ohlcv_1m".to_string()],
+            deadline_hit: false,
+            deferred_tables: vec![],
+        };
+
+        let m = sweep_metrics(&summary, 21_500);
+        let by = |name: &str| m.iter().find(|x| x.name == name).expect("metric present");
+        // Enriched is summed across every swept table (8+4).
+        assert_eq!(by("CoarseSweepRowsEnriched").value, 12.0);
+        // The alarm series counts ONLY the errored table, not the config skip …
+        assert_eq!(by("CoarseSweepTableFailures").value, 1.0);
+        // … which is surfaced on its own, non-alarming series instead.
+        assert_eq!(by("CoarseSweepTablesSkipped").value, 1.0);
+        // RowsRemaining is deliberately not published (floor-dominated).
+        assert!(!m.iter().any(|x| x.name == "CoarseSweepRowsRemaining"));
+        // A completed run always reports itself, so "found nothing" is a
+        // datapoint rather than silence (task 0218 AC 2).
+        assert_eq!(by("CoarseSweepRuns").value, 1.0);
+        assert_eq!(by("CoarseSweepFailedRuns").value, 0.0);
+        assert_eq!(by("CoarseSweepTablesSwept").value, 2.0);
+        assert_eq!(by("CoarseSweepDeadlineHit").value, 0.0);
+        assert_eq!(by("CoarseSweepDurationMs").value, 21_500.0);
+        assert_eq!(m.len(), 8);
+    }
+
+    /// A run that stopped on its wall-clock budget must be distinguishable from
+    /// one that simply had fewer tables — otherwise a starved sweep looks
+    /// healthy, which is task 0218 AC 4.
+    #[test]
+    fn a_starved_run_publishes_deadline_hit() {
+        let summary = CoarseSweepSummary {
+            start_month: 202_605,
+            end_month: 202_606,
+            tables: vec![],
+            failed_tables: vec![],
+            skipped_tables: vec![],
+            deadline_hit: true,
+            deferred_tables: vec!["price_ohlcv_1d".to_string()],
+        };
+        let m = sweep_metrics(&summary, 120_000);
+        let by = |name: &str| m.iter().find(|x| x.name == name).expect("metric present");
+        assert_eq!(by("CoarseSweepDeadlineHit").value, 1.0);
+        // It still reports itself as a completed run — the point is that the
+        // run happened and was cut short, not that it never ran.
+        assert_eq!(by("CoarseSweepRuns").value, 1.0);
+        assert_eq!(by("CoarseSweepFailedRuns").value, 0.0);
+        assert_eq!(by("CoarseSweepTablesSwept").value, 0.0);
+    }
+
+    /// A table truncated mid-walk must ALSO mark the run starved. Before this
+    /// the flag lived only on the sweep, so a budget that expired *inside* a
+    /// table — or during the final one — reported `DeadlineHit = 0` and a
+    /// starved run looked healthy. Found in review of PR #244.
+    #[test]
+    fn a_table_truncated_mid_walk_marks_the_run_starved() {
+        use crate::repair::{RepairSummary, TableSweep};
+        let truncated = RepairSummary {
+            deadline_hit: true,
+            ..Default::default()
+        };
+        let summary = CoarseSweepSummary {
+            start_month: 202_605,
+            end_month: 202_606,
+            tables: vec![TableSweep {
+                table: "price_ohlcv_1h".to_string(),
+                summary: truncated,
+            }],
+            failed_tables: vec![],
+            skipped_tables: vec![],
+            // The sweep-level flag is FALSE: the loop never reached a later
+            // table, it ran out inside this one.
+            deadline_hit: false,
+            deferred_tables: vec![],
+        };
+        assert!(summary.was_starved(), "mid-table truncation must count");
+        let m = sweep_metrics(&summary, 120_000);
+        let by = |name: &str| m.iter().find(|x| x.name == name).expect("metric present");
+        assert_eq!(by("CoarseSweepDeadlineHit").value, 1.0);
+    }
+
+    /// The three states task 0218 AC 2 requires to be distinguishable. "Never
+    /// reached" is the absence of any datapoint, so it is asserted by the other
+    /// two both emitting `CoarseSweepRuns = 1`.
+    #[test]
+    fn a_failed_run_is_a_datapoint_not_silence() {
+        let m = sweep_failure_metrics(4_200);
+        let by = |name: &str| m.iter().find(|x| x.name == name).expect("metric present");
+        assert_eq!(by("CoarseSweepRuns").value, 1.0);
+        assert_eq!(by("CoarseSweepFailedRuns").value, 1.0);
+        assert_eq!(by("CoarseSweepRowsEnriched").value, 0.0);
+        assert_eq!(by("CoarseSweepDurationMs").value, 4_200.0);
     }
 
     /// A pass that ran zero batches (empty backlog) has no per-batch figure, so

@@ -10,6 +10,12 @@
         "source": "github",
         "repo": "nrwl/nx-ai-agents-config"
       }
+    },
+    "rf-claude-marketplace": {
+      "source": {
+        "source": "github",
+        "repo": "rumblefishdev/rf-claude-marketplace"
+      }
     }
   }
 }

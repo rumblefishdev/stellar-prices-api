@@ -4,6 +4,25 @@
 -- stays version-agnostic). Refreshable MVs require ClickHouse ≥ 23.12 and the
 -- allow_experimental_refreshable_materialized_view setting on older builds.
 --
+-- ⚠️ EDITING A BODY BELOW DOES NOT LAND ON A PROVISIONED TARGET (task 0142).
+--   Every statement here is `CREATE MATERIALIZED VIEW IF NOT EXISTS`, and
+--   `IF NOT EXISTS` does not redefine an object that already exists. On
+--   ch-prod-01 — which holds all six — re-applying this file after an edit
+--   changes NOTHING and reports success. Unlike the plain views in views.sql
+--   (task 0134) there is no `CREATE OR REPLACE` escape: a refreshable TO-table
+--   MV must be DROPped and re-CREATEd, which takes that tier offline while it
+--   is gone and re-opens every invariant below. That is an operator procedure,
+--   not an apply:
+--
+--       docs/runbooks/0142-rollup-mv-reapply.md
+--
+--   To see whether a target's live definitions still match this file:
+--
+--       cargo run -p prices-clickhouse --bin prices-clickhouse-drift
+--
+--   It is read-only (SELECTs against system.tables only) and exits non-zero on
+--   drift. Run it after any edit here, and after any re-CREATE.
+--
 -- These MVs serve the LIVE path only: each re-aggregates a bounded recent
 -- window from the previous granularity's FINAL (post-dedup, post-enrichment)
 -- and APPENDs the result. Historical/backfilled partitions fall outside the

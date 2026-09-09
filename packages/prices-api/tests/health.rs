@@ -13,6 +13,21 @@ fn test_config() -> AppConfig {
         ch_enabled: false,
         base_url: None,
         api_keys: vec![],
+        portal_enabled: false,
+        // Sign-in credentials are loaded asynchronously from Secrets Manager
+        // (task 0186) and are never part of the environment; `None` is the shape
+        // every non-portal test wants.
+        portal_oauth: None,
+        // Discord endpoints are part of the config now, not read from the
+        // process environment per router — see `AppConfig::portal_endpoints`.
+        portal_endpoints: Default::default(),
+        // Task 0187: the control-plane client for self-service keys. `None`
+        // is what every non-portal test wants — with no client in the
+        // config there is no code path here that can reach API Gateway.
+        portal_keys: None,
+        portal_eligibility: None,
+        portal_rate_limit: None,
+        portal_web_origin: None,
     }
 }
 

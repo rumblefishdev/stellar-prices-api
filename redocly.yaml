@@ -1,0 +1,35 @@
+# Redocly lint config for the published OpenAPI document (task 0124).
+#
+# Run via `npm run openapi:lint`, which extracts the document with
+# `cargo run -p prices-api --bin extract_openapi` and lints THAT — the same
+# bytes the deployed API serves at `GET /api-docs-json`, not a hand-maintained
+# copy. CI runs it in the `rust` job (the only one with both cargo and node).
+#
+# The document is OpenAPI 3.1.0: utoipa 5 has no 3.0 emit mode. 3.1 is a valid
+# OpenAPI major release and what modern tooling (including Swagger UI 4+, which
+# task 0128's Tranche-3 UI will use) reads natively.
+#
+# `recommended-strict`, not `recommended`: the plain ruleset reports most of its
+# checks as WARNINGS, and `redocly lint` exits 0 with warnings. A gate that only
+# fails on errors would have accepted the exact regression it exists to catch —
+# `operation-4xx-response`, the rule that found seven key-gated operations
+# documenting no 401/403, is a warning under `recommended`. Strict promotes them
+# to errors so CI actually blocks.
+extends:
+  - recommended-strict
+
+rules:
+  # OFF, deliberately. utoipa fills `info.license` from CARGO_PKG_LICENSE, which
+  # is unset for these crates, so it emits `{"name": ""}` — and the repo has no
+  # LICENSE file or Cargo `license` field to copy from. Declaring a license in a
+  # public API document is a business decision, not a lint fix; until it is
+  # made, the empty object stays and this rule stays off. See task 0155.
+  info-license-strict: off
+
+  # Kept ON, at error severity (redundant under recommended-strict, but stated
+  # so a future switch back to `recommended` cannot silently demote it). Every
+  # key-gated operation documents 401/403 + the ErrorEnvelope body. The two
+  # anonymous routes (/health, /api-docs-json) have no 4xx at all and are
+  # excepted in .redocly.lint-ignore.yaml rather than by weakening the rule for
+  # the routes where it earns its keep.
+  operation-4xx-response: error

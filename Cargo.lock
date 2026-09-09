@@ -158,11 +158,13 @@ dependencies = [
 name = "asset-discovery"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clickhouse",
  "lambda_runtime 0.13.0",
  "prices-clickhouse",
  "prices-ingest-core",
  "prices-ledger-processor",
+ "reqwest",
  "serde",
  "serde_json",
  "stellar-strkey",
@@ -298,6 +300,31 @@ dependencies = [
  "pin-project-lite",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "aws-sdk-apigateway"
+version = "1.108.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58515df9c41073f915ffcbabc3aa822400bdfa1bb9f1f36442800359d9698c3d"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
 ]
 
 [[package]]
@@ -1142,6 +1169,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
+name = "coarse-sweep-worker"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-cloudwatch",
+ "enrichment-worker",
+ "lambda_runtime 0.13.0",
+ "prices-clickhouse",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1463,6 +1505,7 @@ version = "0.1.0"
 dependencies = [
  "aws-config",
  "aws-sdk-cloudwatch",
+ "chrono",
  "clap",
  "clickhouse",
  "lambda_runtime 0.13.0",
@@ -2579,6 +2622,8 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 name = "oracle-worker"
 version = "0.1.0"
 dependencies = [
+ "aws-config",
+ "aws-sdk-cloudwatch",
  "base64",
  "clickhouse",
  "lambda_runtime 0.13.0",
@@ -2757,13 +2802,22 @@ dependencies = [
 name = "prices-api"
 version = "0.1.0"
 dependencies = [
+ "aws-config",
+ "aws-sdk-apigateway",
  "axum",
  "base64",
+ "chrono",
  "clickhouse",
+ "form_urlencoded",
+ "getrandom 0.3.4",
+ "hmac 0.12.1",
  "lambda_http",
  "prices-clickhouse",
+ "reqwest",
+ "rust_decimal",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "stellar-strkey",
  "thiserror 2.0.18",
  "tokio",
@@ -2824,6 +2878,7 @@ name = "prices-ledger-processor"
 version = "0.1.0"
 dependencies = [
  "aws-config",
+ "aws-sdk-cloudwatch",
  "aws-sdk-s3",
  "aws_lambda_events 0.16.1",
  "clap",
@@ -3226,6 +3281,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "rollup-freshness-probe"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-cloudwatch",
+ "clickhouse",
+ "lambda_runtime 0.13.0",
+ "prices-clickhouse",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

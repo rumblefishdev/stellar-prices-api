@@ -96,13 +96,18 @@
 > **Live & anonymous (verify directly in a browser):**
 >
 > - API health probe:
->   `https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/health`
+>   `https://prices-api.sorobanscan.rumblefish.dev/health`
 >
 > **Key-gated (API key available to reviewers on request):**
 >
 > - Milestone 1 acceptance-criteria endpoint:
->   `GET https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/v1/backfill/status`
+>   `GET https://prices-api.sorobanscan.rumblefish.dev/v1/backfill/status`
 >   with header `x-api-key`.
+>
+> ⚠️ **Amended 2026-09-02.** The two URLs above were originally given on the
+> API Gateway `execute-api` hostname. That endpoint was switched off on
+> 2026-09-02 in favour of the API's own custom domain, and the links were
+> updated so both remain runnable exactly as written.
 >
 > **Source code (public):**
 >
@@ -160,7 +165,7 @@
       (replace both `<DRIVE_*>` placeholders).
 - [x] Video uploaded with public sharing; URL pasted into Field 2.
 - [x] All `<ANGLE_BRACKET>` placeholders in this file replaced.
-- [x] `curl -sS https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/health`
+- [x] `curl -sS https://prices-api.sorobanscan.rumblefish.dev/health`
       returns 200.
 - [x] No API key, certificate, or other secret material visible in the PDF, the
       screenshots, or any video frame.

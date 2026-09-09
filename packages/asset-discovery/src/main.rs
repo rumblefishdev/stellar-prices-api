@@ -1,8 +1,10 @@
 //! Asset Discovery Lambda entrypoint (task 0054).
 //!
 //! EventBridge `rate(1 hour)` → this binary. Each invocation:
-//!   1. ensures the seed assets exist (`ensure_seed`), then
-//!   2. scans a window of recent ledgers from S3 and registers any new assets
+//!   1. resolves `symbol()` for Soroban contracts that have no
+//!      `prices.asset_symbol` row yet (`symbols::run_symbols`, task 0210),
+//!   2. ensures the seed assets exist (`ensure_seed`), then
+//!   3. scans a window of recent ledgers from S3 and registers any new assets
 //!      seen in trades (`discover_window`), advancing `prices.discovery_state`.
 //!
 //! Build the deployable with:
@@ -40,6 +42,12 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         .map_err(|_| lambda_runtime::Error::from("BUCKET_NAME env var is required"))?;
     let fetcher = Arc::new(S3Fetcher::from_env(bucket).await);
 
+    // Task 0210 symbol stage. `reqwest::Client` is internally an Arc, so the
+    // per-invocation clone is cheap and the connection pool is shared.
+    let http = asset_discovery::symbols::http_client();
+    let rpc_url = std::env::var("SOROBAN_RPC_URL")
+        .unwrap_or_else(|_| asset_discovery::symbols::DEFAULT_SOROBAN_RPC.to_string());
+
     let seed = Arc::new(asset_discovery::seed_identities()?);
     let max_ledgers = prices_clickhouse::env::env_parse_or("MAX_LEDGERS", DEFAULT_MAX_LEDGERS);
     // Where to begin if `discovery_state` is empty (no prior run). Operator-set,
@@ -51,6 +59,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     tracing::info!(
         seed = seed.len(),
         max_ledgers,
+        rpc_url,
         "asset-discovery cold start ready"
     );
 
@@ -58,11 +67,34 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         let writer = writer.clone();
         let fetcher = fetcher.clone();
         let seed = seed.clone();
+        let http = http.clone();
+        let rpc_url = rpc_url.clone();
         async move {
-            // 1. Seed (idempotent).
+            // 1. Resolve Soroban token symbols (task 0210).
+            //
+            // First, and NOT behind the ledger scan's `?`. The scan is the
+            // unbounded stage (a catch-up run fetches and decodes many S3
+            // objects); this one is bounded at
+            // `MAX_CONTRACTS_PER_RUN × RPC_TIMEOUT_SECS`. Task 0218's lesson is
+            // that a stage sitting behind another stage's `?` is skippable and
+            // starvable and cannot be watched, so both stages run and both
+            // report — a symbol failure is logged and surfaced in the response
+            // rather than aborting discovery.
+            let symbols = asset_discovery::symbols::run_symbols(
+                writer.client(),
+                &http,
+                &rpc_url,
+                asset_discovery::symbols::MAX_CONTRACTS_PER_RUN,
+            )
+            .await;
+            if let Err(err) = &symbols {
+                tracing::error!(error = %err, "symbol stage failed");
+            }
+
+            // 2. Seed (idempotent).
             let seeded = asset_discovery::ensure_seed(&writer, &seed).await?;
 
-            // 2. Discover from `cursor + 1` (or the operator seed on first run).
+            // 3. Discover from `cursor + 1` (or the operator seed on first run).
             let start = match asset_discovery::load_cursor(&writer).await? {
                 Some(cursor) => Some(cursor + 1),
                 None => initial_ledger,
@@ -82,6 +114,10 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             };
 
             tracing::info!(
+                symbols_considered = symbols.as_ref().map(|s| s.considered).unwrap_or(0),
+                symbols_resolved = symbols.as_ref().map(|s| s.resolved).unwrap_or(0),
+                symbols_absent = symbols.as_ref().map(|s| s.absent).unwrap_or(0),
+                symbols_skipped = symbols.as_ref().map(|s| s.skipped).unwrap_or(0),
                 seeded,
                 scanned = stats.map(|s| s.ledgers_scanned).unwrap_or(0),
                 to_ledger = stats.map(|s| s.to_ledger).unwrap_or(0),
@@ -90,6 +126,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 "asset-discovery run complete"
             );
             Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({
+                // `null` when the symbol stage failed — its error is logged
+                // above and does not abort the run (task 0218).
+                "symbols": symbols.ok(),
                 "seeded": seeded,
                 "scanned": stats.map(|s| s.ledgers_scanned).unwrap_or(0),
                 "to_ledger": stats.map(|s| s.to_ledger).unwrap_or(0),
