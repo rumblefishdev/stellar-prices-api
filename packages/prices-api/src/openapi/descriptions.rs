@@ -333,6 +333,33 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     ),
     (
         "Candle",
+        "quality",
+        "How confident the imported series is in that day's observation. Present only \
+         alongside `source`, i.e. only on the synthesized USDC self-series \
+         (`GET /assets/USDC:<issuer>/ohlcv`) for buckets whose `method` is `external`; \
+         `null` on every other asset, on the `peg` fallback, and whenever the price fields \
+         are `null`.\n\n* `measured` — a real observation from the primary feed.\n* \
+         `measured-disputed` — observed, but a cross-check against a second independent \
+         source disagreed by more than the composer's spread tolerance. The number is real; \
+         treat it as less certain than a plain `measured` day and prefer not to alert on it \
+         alone.\n* `fallback` — the primary feed had nothing for that day, so the secondary \
+         source supplied it. Still an observation, and far better than assuming $1, but a \
+         different instrument on a different venue.\n\nA day with no quality is not a day of \
+         unknown quality — the field simply does not apply outside the imported series.",
+    ),
+    (
+        "Candle",
+        "source",
+        "Which outside USD series the imported rate came from: `chainlink` or `bitstamp`.\n\n\
+         Present only on the synthesized USDC self-series \
+         (`GET /assets/USDC:<issuer>/ohlcv`), and there only for buckets whose `method` is \
+         `external`. It is `null` on every other asset — not because those candles lack \
+         provenance, but because the stored candles carry no column to report it from — and \
+         `null` on the `peg` fallback, where no series was consulted at all, and whenever the \
+         price fields are `null`.",
+    ),
+    (
+        "Candle",
         "timestamp",
         "Bucket start, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`).",
     ),

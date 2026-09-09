@@ -806,6 +806,187 @@ const PRECISION_FLOOR: &str = "toDecimal128('0.000000000001', 14)";
 ///
 /// ⚠️ The denominator is guarded by the same [`PRECISION_FLOOR`]: an unpriced or
 /// dust-valued XLM bucket yields no price rather than a division blow-up.
+/// The `Denomination::Usd` aggregate list, extracted so a ClickHouse-free test
+/// can read it — see [`OUTER_ALIASES`] for why the column tail is not something
+/// to maintain by hand in three places.
+fn usd_aggregates() -> String {
+    format!(
+        "if(countIf(valid) = 0, NULL, toString(argMaxIf(o_x, (volume_base, quote_asset_id), valid))) AS o, \
+                 if(countIf(valid) = 0, NULL, toString({HIGH_PUBLISHED})) AS h, \
+                 if(countIf(valid) = 0, NULL, toString({LOW_PUBLISHED})) AS l, \
+                 if(countIf(valid) = 0, NULL, toString({CLOSE_EXACT})) AS c, \
+                 toString(sum(volume_base)) AS vb, \
+                 toString(sum(volume_quote_usd)) AS vqu, \
+                 if(countIf(valid) = 0 OR isNull({VWAP_RAW}), NULL, \
+                    toString(least(greatest({VWAP_RAW}, {LOW_PUBLISHED}), {HIGH_PUBLISHED}))) AS vw, \
+                 toUInt64(sum(trade_count)) AS tc, \
+                 nullIf(if(countIf(valid) = 0, NULL, argMaxIf(meth, (volume_base, quote_asset_id), valid)), '') AS meth, \
+                 if(countIf(valid) = 0, NULL, toUInt8(1)) AS drv, \
+                 {PROVENANCE_NULL_TAIL}"
+    )
+}
+
+/// The `Denomination::QuoteLeg` aggregate list. Same extraction, same reason.
+fn quote_leg_aggregates() -> String {
+    format!(
+        "toNullable(toString(argMax(open, volume_base))) AS o, \
+             toNullable(toString(max(high))) AS h, \
+             toNullable(toString(min(low))) AS l, \
+             toNullable(toString(argMax(close, volume_base))) AS c, \
+             toString(sum(volume_base)) AS vb, \
+             toString(sum(volume_quote_usd)) AS vqu, \
+             toNullable(toString(if(isNull(toDecimal128OrNull(toString( \
+                 sum(toFloat64(vwap) * toFloat64(volume_base)) \
+                 / nullIf(sum(toFloat64(volume_base)), 0)), 14)), toDecimal128(0, 14), \
+                 least(greatest(toDecimal128OrNull(toString( \
+                     sum(toFloat64(vwap) * toFloat64(volume_base)) \
+                     / nullIf(sum(toFloat64(volume_base)), 0)), 14), min(low)), max(high))))) AS vw, \
+             toUInt64(sum(trade_count)) AS tc, \
+             CAST(NULL AS Nullable(String)) AS meth, \
+             CAST(NULL AS Nullable(UInt8)) AS drv, \
+             {PROVENANCE_NULL_TAIL}"
+    )
+}
+
+/// The peg-series SQL, as a pure string — extracted for the same reason
+/// [`usd_method_expr`] is: the invariants below are unobservable from the
+/// outside and a ClickHouse-free unit test needs a string it can read.
+///
+/// Pinned by `peg_series_sql_*` in this module's tests.
+fn peg_series_sql(args: &OhlcvArgs, in_xlm: bool, table: &str, conds: &[String]) -> String {
+    // The staleness window: `[floor, bucket end)`.
+    //
+    // For every grain at least ORACLE_POLL_FLOOR_S wide the floor is the
+    // bucket's own start, so the window IS the bucket and this is exactly
+    // `price_usd_series`'s rule — `toStartOfInterval(t, g) = bkt` and
+    // `bkt <= t < bkt + g` are the same predicate, which is what keeps the two
+    // surfaces in agreement (task 0246 AC 1).
+    //
+    // `1m` is the one grain narrower than the oracle's 5-minute cadence, so its
+    // floor widens to ORACLE_POLL_FLOOR_S — see that constant for why a strict
+    // one-bucket window would be a regression there rather than a fix.
+    let floor = if args.granularity.seconds() >= ORACLE_POLL_FLOOR_S {
+        "b.bkt".to_string()
+    } else {
+        format!("b.bend - INTERVAL {ORACLE_POLL_FLOOR_S} SECOND")
+    };
+    // The no-match sentinel, in one place because three expressions below must
+    // agree on what "no usable observation for this bucket" means. Two ways to
+    // fail: nothing matched at all, or what matched is older than the window.
+    //
+    // ⚠️ The second test is not redundant under `join_use_nulls = 0`, it is the
+    // belt: an unmatched ASOF yields the DEFAULT, and for a DateTime that is
+    // `1970-01-01` — which fails the floor too. Under `join_use_nulls = 1` the
+    // first test carries it, since `NULL < x` is NULL rather than true.
+    let no_rate = format!("(ifNull(r.meth, '') = '' OR r.rts < {floor})");
+
+    let val = if in_xlm {
+        format!(
+            "toNullable(toString(toDecimal128OrNull(toString( \
+             toFloat64(if({no_rate}, toDecimal128(1, 14), r.rate)) \
+             / nullIf(toFloat64(b.den), 0)), 14)))"
+        )
+    } else {
+        format!("toNullable(toString(if({no_rate}, toDecimal128(1, 14), r.rate)))")
+    };
+    // ⚠️ Task 0267 — the inner `argMax` STOPPED BEING DEGENERATE, and nothing
+    // about the shape shows it.
+    //
+    // It was `argMax(rate, rts)` GROUPED BY `rts`: maximising over the very key
+    // it groups on. With a single admitted method that could only ever collapse
+    // duplicates at one instant, of which `usd_rate`'s sorting key permits at
+    // most one — so it decided nothing and any tie-break would have done.
+    //
+    // Widening the filter to `IN ('oracle', 'external')` makes it load-bearing:
+    // `method` is PART OF the sorting key, so a polled row and an imported row
+    // CAN coexist at the same instant, and the collapse now has a real choice to
+    // make. It keys on `pref` (oracle = 1, import = 0) instead, which puts the
+    // preference INSIDE the `rts` group — the only place it can go. Applying it
+    // at the ASOF instead would be wrong twice over: the ASOF picks the newest
+    // row before the bucket end, so a preference there would have to beat
+    // recency, and preferring an older oracle reading over a newer one of ANY
+    // provenance is not the rule. Oracle wins a TIE, not the series.
+    //
+    // Same rule and same reason as views.sql's rank-first argMax tuple; the two
+    // surfaces must agree, and `ohlcv_agrees_with_price_usd_series_on_the_same_bucket`
+    // is what says so out loud.
+
+    // Task 0267. The rate's provenance now reaches the wire, so the two columns
+    // that carry it get the SAME `if(o IS NULL, …)` shape as `meth`: NULL when
+    // the bucket has no price at all, and NULL when it fell back to the $1 peg,
+    // because a fallback has no outside series and no observation quality to
+    // report. Naming a source for a value nobody measured is the exact mistake
+    // the `peg`/`oracle` split exists to prevent.
+    let src = format!("if(o IS NULL OR {no_rate}, NULL, toNullable(r.ref_asset))");
+    let qual = format!("if(o IS NULL OR {no_rate}, NULL, toNullable(r.qual))");
+    format!(
+        "SELECT {OUTER_ALIASES} FROM ( \
+           SELECT \
+             formatDateTime(b.bkt, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
+             {val} AS o, \
+             o AS h, o AS l, o AS c, o AS vw, \
+             '0' AS vb, \
+             '0' AS vqu, \
+             toUInt64(0) AS tc, \
+             if(o IS NULL, NULL, \
+                toNullable(if({no_rate}, 'peg', r.meth))) AS meth, \
+             if(o IS NULL, NULL, toNullable(toUInt8(1))) AS drv, \
+             {src} AS src, \
+             {qual} AS qual, \
+             b.bkt AS bkt \
+           FROM ( SELECT timestamp AS bkt, timestamp + INTERVAL {interval} AS bend, \
+                         1 AS k, {denom} AS den \
+                  FROM {table} FINAL WHERE {conds} \
+                  GROUP BY timestamp \
+                  ORDER BY bkt DESC LIMIT {limit} ) AS b \
+           ASOF LEFT JOIN ( \
+                  SELECT 1 AS k, rts, argMax(rate, pref) AS rate, \
+                         CAST(argMax(m, pref) AS String) AS meth, \
+                         argMax(ref_asset, pref) AS ref_asset, \
+                         CAST(argMax(qual, pref) AS String) AS qual \
+                  FROM ( SELECT timestamp AS rts, usd_rate AS rate, method AS m, \
+                                reference_asset AS ref_asset, quality AS qual, \
+                                if(method = 'oracle', 1, 0) AS pref \
+                         FROM usd_rate FINAL \
+                         WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+                           AND issuer_address = ? AND contract_address = '' \
+                           AND method IN ('oracle', 'external') ) \
+                  GROUP BY rts ) AS r \
+             ON b.k = r.k AND r.rts < b.bend \
+         ) ORDER BY bkt ASC",
+        conds = conds.join(" AND "),
+        limit = args.limit,
+        interval = args.granularity.interval_sql(),
+        denom = if in_xlm {
+            // XLM's USD price for the bucket, from the highest-volume source.
+            format!("argMaxIf(close_usd, volume_base, close_usd >= {PRECISION_FLOOR})")
+        } else {
+            "toDecimal128(1, 14)".to_string()
+        },
+    )
+}
+
+/// The outer projection's alias list, shared by BOTH `/ohlcv` query shapes.
+///
+/// ⚠️ ONE source of truth on purpose. `Candle` derives `clickhouse::Row` and
+/// RowBinary is POSITIONAL and carries no types, so a projection that gains or
+/// loses a column relative to the struct either errors with `InvalidTagEncoding`
+/// or — for lengths 0 and 1 — SILENTLY MIS-FRAMES the rest of the row. Two
+/// hand-maintained copies of this list is exactly the drift that produces a
+/// plausible wrong row on a public endpoint with nothing failing anywhere.
+/// The alias count must equal `Candle`'s field count, and the ORDER must match
+/// the struct's field order.
+const OUTER_ALIASES: &str = "ts, o, h, l, c, vb, vqu, vw, tc, meth, drv, src, qual";
+
+/// Task 0267's two provenance columns as the candle path emits them: NULL.
+///
+/// Neither `ohlcv` arm can populate them — the candle TABLES carry no
+/// provenance column (task 0268's Issue 9), so `source`/`quality` are non-null
+/// only on USDC's own synthesized series. They are still emitted, because
+/// positional RowBinary counts columns, not names.
+const PROVENANCE_NULL_TAIL: &str =
+    "CAST(NULL AS Nullable(String)) AS src, CAST(NULL AS Nullable(String)) AS qual";
+
 pub async fn ohlcv_peg_series(
     ch: &Client,
     args: &OhlcvArgs,
@@ -856,15 +1037,25 @@ pub async fn ohlcv_peg_series(
     // falls in the bucket or the bucket falls back to the labelled peg. There is
     // no window over which a stale reading can be presented as a measurement.
     //
-    // ⚠️ **Only `method = 'oracle'` is accepted now.** The old form ranked
+    // ⚠️ **Only MEASURED rows are accepted.** The old form ranked
     // `oracle > pivot > pivot2 > …` with `argMin(rate, pref)` and rendered a
     // pivot row as `'traded'`. `price_usd_series` and `current.sql`'s tip
     // surface both take measurements or nothing, so this surface was the only
     // one that would have answered from a task 0154 pivot — a second way for the
-    // same two surfaces to disagree, on a bucket that HAS observations. Today it
-    // is a no-op: nothing writes a non-`oracle` row for canonical USDC. If 0154
+    // same two surfaces to disagree, on a bucket that HAS observations. If 0154
     // ever wants pivots on a read surface, it must add them to ALL of them in
     // one change, not inherit one silently here.
+    //
+    // ⚠️ Task 0267 widened "measured" from `= 'oracle'` to
+    // `IN ('oracle', 'external')`, and that is not a relaxation of the rule
+    // above: an `external` row is a reading an OUTSIDE series observed, which is
+    // evidence of the same standing as a poll and merely of different
+    // provenance. A `pivot` is COMPUTED from another asset's price and is still
+    // refused, as is the pre-promotion `external-candidate` staging word, which
+    // no read predicate anywhere names. Provenance is what separates them, not
+    // authorship. `views.sql`'s two grains took the identical widening in the
+    // same commit — the two surfaces must move together or they disagree about
+    // the same rate.
     //
     // ⚠️ An unmatched joined row does NOT yield NULL. By default
     // (`join_use_nulls = 0`, which is what production runs) it yields the
@@ -897,80 +1088,13 @@ pub async fn ohlcv_peg_series(
     // consumer chooses measured-or-nothing in the WHERE clause, so the tie
     // cannot be broken by part read order — which it could when the raw table
     // was joined directly.
-    // The staleness window: `[floor, bucket end)`.
     //
-    // For every grain at least ORACLE_POLL_FLOOR_S wide the floor is the
-    // bucket's own start, so the window IS the bucket and this is exactly
-    // `price_usd_series`'s rule — `toStartOfInterval(t, g) = bkt` and
-    // `bkt <= t < bkt + g` are the same predicate, which is what keeps the two
-    // surfaces in agreement (task 0246 AC 1).
-    //
-    // `1m` is the one grain narrower than the oracle's 5-minute cadence, so its
-    // floor widens to ORACLE_POLL_FLOOR_S — see that constant for why a strict
-    // one-bucket window would be a regression there rather than a fix.
-    let floor = if args.granularity.seconds() >= ORACLE_POLL_FLOOR_S {
-        "b.bkt".to_string()
-    } else {
-        format!("b.bend - INTERVAL {ORACLE_POLL_FLOOR_S} SECOND")
-    };
-    // The no-match sentinel, in one place because three expressions below must
-    // agree on what "no usable observation for this bucket" means. Two ways to
-    // fail: nothing matched at all, or what matched is older than the window.
-    //
-    // ⚠️ The second test is not redundant under `join_use_nulls = 0`, it is the
-    // belt: an unmatched ASOF yields the DEFAULT, and for a DateTime that is
-    // `1970-01-01` — which fails the floor too. Under `join_use_nulls = 1` the
-    // first test carries it, since `NULL < x` is NULL rather than true.
-    let no_rate = format!("(ifNull(r.meth, '') = '' OR r.rts < {floor})");
-
-    let val = if in_xlm {
-        format!(
-            "toNullable(toString(toDecimal128OrNull(toString( \
-             toFloat64(if({no_rate}, toDecimal128(1, 14), r.rate)) \
-             / nullIf(toFloat64(b.den), 0)), 14)))"
-        )
-    } else {
-        format!("toNullable(toString(if({no_rate}, toDecimal128(1, 14), r.rate)))")
-    };
-    let sql = format!(
-        "SELECT ts, o, h, l, c, vb, vqu, vw, tc, meth, drv FROM ( \
-           SELECT \
-             formatDateTime(b.bkt, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
-             {val} AS o, \
-             o AS h, o AS l, o AS c, o AS vw, \
-             '0' AS vb, \
-             '0' AS vqu, \
-             toUInt64(0) AS tc, \
-             if(o IS NULL, NULL, \
-                toNullable(if({no_rate}, 'peg', 'oracle'))) AS meth, \
-             if(o IS NULL, NULL, toNullable(toUInt8(1))) AS drv, \
-             b.bkt AS bkt \
-           FROM ( SELECT timestamp AS bkt, timestamp + INTERVAL {interval} AS bend, \
-                         1 AS k, {denom} AS den \
-                  FROM {table} FINAL WHERE {conds} \
-                  GROUP BY timestamp \
-                  ORDER BY bkt DESC LIMIT {limit} ) AS b \
-           ASOF LEFT JOIN ( \
-                  SELECT 1 AS k, rts, argMax(rate, rts) AS rate, \
-                         CAST(argMax(m, rts) AS String) AS meth \
-                  FROM ( SELECT timestamp AS rts, usd_rate AS rate, method AS m \
-                         FROM usd_rate FINAL \
-                         WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
-                           AND issuer_address = ? AND contract_address = '' \
-                           AND method = 'oracle' ) \
-                  GROUP BY rts ) AS r \
-             ON b.k = r.k AND r.rts < b.bend \
-         ) ORDER BY bkt ASC",
-        conds = conds.join(" AND "),
-        limit = args.limit,
-        interval = args.granularity.interval_sql(),
-        denom = if in_xlm {
-            // XLM's USD price for the bucket, from the highest-volume source.
-            format!("argMaxIf(close_usd, volume_base, close_usd >= {PRECISION_FLOOR})")
-        } else {
-            "toDecimal128(1, 14)".to_string()
-        },
-    );
+    // ⚠️ Since task 0267 the WHERE clause admits TWO measured methods, so it no
+    // longer settles the tie on its own: an `oracle` row and an `external` row
+    // CAN now reach this collapse at the same instant. The `pref` key in the
+    // inner `argMax` is what settles it, and the note beside that expression is
+    // where the reasoning lives.
+    let sql = peg_series_sql(args, in_xlm, &table, &conds);
 
     let mut q = ch.query(&sql).bind(xlm_id).bind(usdc_id);
     if let Some(st) = args.start {
@@ -1172,19 +1296,7 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
                 // through `toFloat64`, so the two are on different scales and can
                 // cross — task 0229. `least`/`greatest` pull the derived extremes
                 // back over the exact close; see the CLOSE_EXACT note above.
-                format!(
-                    "if(countIf(valid) = 0, NULL, toString(argMaxIf(o_x, (volume_base, quote_asset_id), valid))) AS o, \
-                 if(countIf(valid) = 0, NULL, toString({HIGH_PUBLISHED})) AS h, \
-                 if(countIf(valid) = 0, NULL, toString({LOW_PUBLISHED})) AS l, \
-                 if(countIf(valid) = 0, NULL, toString({CLOSE_EXACT})) AS c, \
-                 toString(sum(volume_base)) AS vb, \
-                 toString(sum(volume_quote_usd)) AS vqu, \
-                 if(countIf(valid) = 0 OR isNull({VWAP_RAW}), NULL, \
-                    toString(least(greatest({VWAP_RAW}, {LOW_PUBLISHED}), {HIGH_PUBLISHED}))) AS vw, \
-                 toUInt64(sum(trade_count)) AS tc, \
-                 nullIf(if(countIf(valid) = 0, NULL, argMaxIf(meth, (volume_base, quote_asset_id), valid)), '') AS meth, \
-                 if(countIf(valid) = 0, NULL, toUInt8(1)) AS drv"
-                ),
+                usd_aggregates(),
             )
         }
         // As stored: no conversion, so nothing is derived and there is no USD
@@ -1220,27 +1332,26 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
             // `ohlcv_xlm_denomination_decodes_rows` — the pre-existing XLM test
             // asserts an EMPTY series, so no row is ever decoded and it cannot
             // catch this.
-            "toNullable(toString(argMax(open, volume_base))) AS o, \
-             toNullable(toString(max(high))) AS h, \
-             toNullable(toString(min(low))) AS l, \
-             toNullable(toString(argMax(close, volume_base))) AS c, \
-             toString(sum(volume_base)) AS vb, \
-             toString(sum(volume_quote_usd)) AS vqu, \
-             toNullable(toString(if(isNull(toDecimal128OrNull(toString( \
-                 sum(toFloat64(vwap) * toFloat64(volume_base)) \
-                 / nullIf(sum(toFloat64(volume_base)), 0)), 14)), toDecimal128(0, 14), \
-                 least(greatest(toDecimal128OrNull(toString( \
-                     sum(toFloat64(vwap) * toFloat64(volume_base)) \
-                     / nullIf(sum(toFloat64(volume_base)), 0)), 14), min(low)), max(high))))) AS vw, \
-             toUInt64(sum(trade_count)) AS tc, \
-             CAST(NULL AS Nullable(String)) AS meth, \
-             CAST(NULL AS Nullable(UInt8)) AS drv"
-                .to_string(),
+            quote_leg_aggregates(),
         ),
     };
 
+    // ⚠️ Task 0267's two provenance columns are emitted by BOTH arms even though
+    // NEITHER can populate them: the candle tables carry no provenance column
+    // (task 0268's Issue 9), so `src`/`qual` are non-null only on USDC's own
+    // synthesized series in `ohlcv_peg_series`.
+    //
+    // They cannot simply be omitted here. `Candle` derives `clickhouse::Row` and
+    // RowBinary is POSITIONAL and carries no types — see the QuoteLeg arm's note
+    // above: the deserializer reads one byte as the Option tag, and a column
+    // count that disagrees with the struct either errors with
+    // `InvalidTagEncoding` or, for lengths 0 and 1, SILENTLY MIS-FRAMES the rest
+    // of the row. Three aggregate strings and two outer projections have to move
+    // together; miss one and the failure is a plausible wrong row on a public
+    // endpoint, not a compile error.
+    // `ohlcv_and_peg_series_project_the_same_alias_tail` is the guard.
     let sql = format!(
-        "SELECT ts, o, h, l, c, vb, vqu, vw, tc, meth, drv FROM ( \
+        "SELECT {OUTER_ALIASES} FROM ( \
            SELECT \
              formatDateTime(timestamp, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
              {aggregates} \
@@ -1479,5 +1590,212 @@ mod tests {
         assert!(SortCol::Volume24h.is_numeric());
         assert!(SortCol::Change24h.is_numeric());
         assert!(!SortCol::Code.is_numeric());
+    }
+    // ------------------------------------------------------------------
+    // Task 0267 — the read-path widening and the two new wire columns.
+    //
+    // CI has no ClickHouse, so the behavioural proof is `#[ignore]` in
+    // tests/ohlcv_it.rs. These pin the SHAPE that test depends on, and one of
+    // them guards a failure mode no behavioural test would ever surface as a
+    // failure: a mis-framed RowBinary row is a plausible WRONG row, not an
+    // error.
+    // ------------------------------------------------------------------
+
+    /// The output aliases of an aggregate list, in order.
+    ///
+    /// A plain identifier after ` AS ` is an output alias; a parenthesised one
+    /// (`CAST(NULL AS Nullable(String))`) is a type and is skipped. Crude on
+    /// purpose — a real SQL parser here would be a dependency and a second thing
+    /// to trust.
+    fn aliases_of(sql: &str) -> Vec<&str> {
+        sql.split(" AS ")
+            .skip(1)
+            .filter_map(|tail| {
+                let word = tail.split([',', ' ']).next()?;
+                (!word.is_empty()
+                    && word
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+                .then_some(word)
+            })
+            .collect()
+    }
+
+    fn peg_args() -> OhlcvArgs {
+        OhlcvArgs {
+            asset_id: 2,
+            denomination: Denomination::QuoteLeg(2),
+            granularity: Granularity::D1,
+            start: None,
+            end: None,
+            limit: 100,
+        }
+    }
+
+    fn peg_sql() -> String {
+        peg_series_sql(
+            &peg_args(),
+            false,
+            "price_ohlcv_1d",
+            &["asset_id = ?".to_string()],
+        )
+    }
+
+    /// The USDC self-series must read an IMPORTED measurement, not only a
+    /// polled one — otherwise task 0267's loaded history is written and never
+    /// served, and every pre-2026 bucket keeps publishing a literal 1.0.
+    #[test]
+    fn peg_series_sql_admits_both_measured_methods() {
+        let sql = peg_sql();
+        assert!(
+            sql.contains("method IN ('oracle', 'external')"),
+            "the usd_rate subquery must admit both measured methods: {sql}"
+        );
+        assert!(
+            !sql.contains("AND method = 'oracle'"),
+            "the single-method equality is what hid the imported rows: {sql}"
+        );
+        // The pre-promotion staging word must stay unreadable. Staged rows are
+        // unverified by definition, and this is the surface that would publish
+        // them.
+        assert!(!sql.contains("external-candidate"), "{sql}");
+    }
+
+    /// ⚠️ The preference must be applied INSIDE the `rts` group, never at the
+    /// ASOF. The inner `argMax` used to be degenerate — grouped by `rts` and
+    /// maximising over `rts` — and the widening is what gives it a real choice
+    /// to make, because `method` is part of `usd_rate`'s sorting key and an
+    /// oracle row and an imported one can therefore share an instant.
+    #[test]
+    fn peg_series_sql_ranks_oracle_first_inside_the_rts_group() {
+        let sql = peg_sql();
+        assert!(
+            sql.contains("if(method = 'oracle', 1, 0) AS pref"),
+            "the preference column must exist: {sql}"
+        );
+        for col in ["rate", "m", "ref_asset", "qual"] {
+            assert!(
+                sql.contains(&format!("argMax({col}, pref)")),
+                "the `{col}` aggregate must key on the preference: {sql}"
+            );
+        }
+        assert!(
+            !sql.contains("argMax(rate, rts)"),
+            "keying on the timestamp lets a later import outrank a measured \
+             oracle reading: {sql}"
+        );
+        // The ASOF still picks the NEWEST row before the bucket end. Oracle wins
+        // a tie, not the series — a preference at the ASOF would have to beat
+        // recency, which is a different and wrong rule.
+        assert!(sql.contains("ON b.k = r.k AND r.rts < b.bend"), "{sql}");
+    }
+
+    /// The label comes from the row that WON, not from a hard-coded word. Once
+    /// the rows say `external`, the API says `external` with no further change.
+    #[test]
+    fn peg_series_sql_reports_the_method_the_row_carries() {
+        let sql = peg_sql();
+        assert!(
+            sql.contains("'peg', r.meth)"),
+            "the non-peg branch must forward the row's own method: {sql}"
+        );
+        assert!(
+            !sql.contains("'peg', 'oracle'"),
+            "a hard-coded oracle branch reports every imported rate as a poll: {sql}"
+        );
+        // The peg fallback and its sentinel are untouched by this task.
+        assert!(sql.contains("ifNull(r.meth, '') = ''"), "{sql}");
+    }
+
+    /// `source` and `quality` are NULL on the peg fallback as well as on a
+    /// price-less bucket. A fallback consulted no series and observed nothing,
+    /// so naming a source for it would make an assumption indistinguishable
+    /// from a measurement — the exact conflation this whole subsystem exists to
+    /// prevent.
+    #[test]
+    fn peg_series_sql_nulls_the_provenance_on_the_peg_fallback() {
+        let sql = peg_sql();
+        for alias in ["src", "qual"] {
+            assert!(
+                sql.contains(&format!("AS {alias},")),
+                "the peg series must emit `{alias}`: {sql}"
+            );
+        }
+        assert_eq!(
+            sql.matches("if(o IS NULL OR (ifNull(r.meth, '') = ''")
+                .count(),
+            2,
+            "both provenance columns must carry the no-price AND no-rate guard: {sql}"
+        );
+        assert!(sql.contains("reference_asset AS ref_asset"), "{sql}");
+        assert!(sql.contains("quality AS qual"), "{sql}");
+    }
+
+    /// 🔴 The mis-framing guard, and the reason it exists rather than a
+    /// behavioural test: `Candle` derives `clickhouse::Row`, RowBinary is
+    /// POSITIONAL and carries no types, and a projection that disagrees with the
+    /// struct either errors with `InvalidTagEncoding` or — for lengths 0 and 1 —
+    /// SILENTLY MIS-FRAMES the rest of the row. The failure is a plausible wrong
+    /// row on a public endpoint. Two outer projections and three aggregate
+    /// strings have to move together; this is what says so.
+    ///
+    /// The expected tail is built ONCE and every site is compared against it.
+    #[test]
+    fn every_projection_and_aggregate_ends_with_the_same_provenance_tail() {
+        // The outer projection is a single shared constant, so the two query
+        // shapes cannot disagree by construction. Pin its content anyway — the
+        // constant is only a single source of truth if it is the RIGHT list.
+        let aliases: Vec<&str> = OUTER_ALIASES.split(", ").collect();
+        assert_eq!(
+            aliases.len(),
+            13,
+            "one alias per `Candle` field, in the struct's order: {OUTER_ALIASES}"
+        );
+        assert_eq!(&aliases[11..], &["src", "qual"], "{OUTER_ALIASES}");
+
+        assert_eq!(
+            PROVENANCE_NULL_TAIL,
+            "CAST(NULL AS Nullable(String)) AS src, CAST(NULL AS Nullable(String)) AS qual",
+            "both new columns must be explicitly typed Nullable — the \
+             deserializer reads one byte as the Option tag"
+        );
+
+        // Both `ohlcv` arms end with that exact tail and nothing after it, so a
+        // thirteenth column appended to one arm alone fails here.
+        //
+        // The alias sequence is compared against `OUTER_ALIASES` itself, minus
+        // `ts` (which the outer projection adds), so the aggregates and the
+        // projection cannot drift apart in COUNT or in ORDER — and order is what
+        // matters, because positional RowBinary reads by position, not by name.
+        let want: Vec<&str> = OUTER_ALIASES.split(", ").skip(1).collect();
+        for (name, agg) in [
+            ("Denomination::Usd", usd_aggregates()),
+            ("Denomination::QuoteLeg", quote_leg_aggregates()),
+        ] {
+            assert!(
+                agg.ends_with(PROVENANCE_NULL_TAIL),
+                "{name}'s aggregate list must END with the provenance tail: {agg}"
+            );
+            assert_eq!(
+                aliases_of(&agg),
+                want,
+                "{name} must project exactly `Candle`'s fields, in order: {agg}"
+            );
+        }
+
+        // The peg series populates them for real, so it cannot share the tail —
+        // but it must still project the same two aliases last, in the same
+        // order, and wrap them in the same outer list.
+        let sql = peg_sql();
+        assert!(
+            sql.starts_with(&format!("SELECT {OUTER_ALIASES} FROM (")),
+            "{sql}"
+        );
+        let src_at = sql.find(" AS src,").expect("peg series projects src");
+        let qual_at = sql.find(" AS qual,").expect("peg series projects qual");
+        assert!(
+            src_at < qual_at,
+            "`source` precedes `quality` in `Candle`, so it must precede it here"
+        );
     }
 }
