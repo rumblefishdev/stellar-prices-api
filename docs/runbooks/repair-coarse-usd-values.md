@@ -701,7 +701,7 @@ to check.
    nowhere.
 
    ```sql
-   SELECT DISTINCT toString(toTime(timestamp)) AS time_of_day
+   SELECT DISTINCT formatDateTime(timestamp, '%H:%i:%S', 'UTC') AS time_of_day
    FROM prices.usd_rate FINAL
    WHERE asset_kind = 'credit' AND asset_code = 'USDC'
      AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
@@ -709,8 +709,16 @@ to check.
    LIMIT 10
    ```
 
-   Expect `1970-01-01 00:00:00` (midnight). Anything else — 23:00, 23:59 — stop
+   Expect `00:00:00` (midnight). Anything else — `23:00:00`, `23:59:00` — stop
    and settle the convention with whoever owns 0267 before running.
+
+   > `toTime` was the wrong instrument here twice over: it pins the date to
+   > **1970-01-02**, not 1970-01-01, so a series stamped at UTC midnight — the
+   > outcome this step checks FOR — printed `1970-01-02 00:00:00` and failed the
+   > documented expectation, sending the operator to STOP on a correct series.
+   > It also reads the SERVER timezone, which this repair's own rule (WR-07)
+   > forbids depending on. `formatDateTime` with an explicit `'UTC'` states both.
+   > Note `%i` is minutes; ClickHouse's `%M` is the month name.
 
 3. **Confirm `oracle_prices` holds no canonical-USDC reading before the epoch.
    BLOCKING.** Two things rest on "no poll priced USDC before
