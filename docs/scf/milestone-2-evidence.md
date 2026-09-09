@@ -179,9 +179,10 @@ not claimed"_ list.
 
 ### AC 1 — All 7 endpoint groups return correct, schema-valid responses for ≥ 20 major assets
 
-**Verdict: met. 1021 checks pass, 0 fail, 0 skip**, against the deployed
-production API on **2026-09-07 at 10:40 UTC**, and again at **11:09 UTC** with an
-identical verdict.
+**Verdict: met. 1014 checks pass, 0 fail, 0 skip**, against the deployed
+production API on **2026-09-09 at 08:12 UTC** — the fourth consecutive
+zero-failure run. The 2026-09-07 pair was run twice, 29 minutes apart, and
+diffed check by check to an identical verdict.
 
 The evidence is a scripted, re-runnable conformance suite
 (`tools/scripts/conformance-0120.mjs`, task 0120). It exercises all seven route
@@ -222,17 +223,18 @@ individual check.
 | 2026-09-02             | 870      | 16    | 0     |
 | 2026-09-07, 10:40      | 1032     | 0     | 0     |
 | 2026-09-07, 11:09      | 1032     | 0     | 0     |
-| **2026-09-08, 14:42**  | **1021** | **0** | **0** |
+| 2026-09-08, 14:42      | 1021     | 0     | 0     |
+| **2026-09-09, 08:12**  | **1014** | **0** | **0** |
 
 🔑 **Two things must be read alongside that table, and we would rather state them
 than have them noticed.**
 
-**The check count rose, 886 to 1032, then settled at 1021.** Nothing was relaxed
+**The check count rose, 886 to 1032, and has since drifted down to 1021 and 1014.** Nothing was relaxed
 to reach zero. Every change on 2026-09-07 _added_ assertions, and each one
 replaced an assumption with a measurement. The later dip is not a removal: checks
 are generated per asset **per condition**, so an asset that has not traded inside
 the liquidity window yields fewer assertions rather than a skip. **Zero failures
-across all three zero-fail runs is the claim; the total is a function of the
+across all four zero-fail runs is the claim; the total is a function of the
 market on the day.**
 
 **No production code changed on 2026-09-07.** Every failure that disappeared that
@@ -268,12 +270,13 @@ assertion those four flip from pass to fail.**
 
 - **The reports are gitignored as regenerable.** The citable artefact is the
   figures above plus the one-command reproduction, not a committed file.
-- **The pagination walk moves between runs, and by more than a little** — **27
-  pages and 5,353 distinct assets** on 2026-09-08, against 19 / 3,725, 18 / 3,567
-  and 20 / 3,880 on earlier runs. Exhaustive and duplicate-free each time; the
-  traded population itself is what moves, and it grew by roughly 44% in a day.
-  A reviewer reproducing this should expect their own figure, not ours. Owned by
-  task 0261.
+- **The pagination walk moves between runs, and by more than a little** — **20
+  pages and 3,900 distinct assets** on 2026-09-09, against 27 / 5,353 the day
+  before, and 19 / 3,725, 18 / 3,567 and 20 / 3,880 earlier. Exhaustive and
+  duplicate-free each time; the traded population itself is what moves, and it
+  moves in both directions: roughly 44% up in a day, and most of the way back
+  down the next. A reviewer reproducing this should expect their own figure, not
+  ours. Owned by task 0261.
 - **One assertion is deliberately weaker than the rest.** A candle's timestamp is
   its bucket _start_, so "did this asset trade in the last 24 hours" cannot be
   answered exactly from candles alone. The liquidity test is three-valued:

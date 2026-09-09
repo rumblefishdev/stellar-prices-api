@@ -26,7 +26,8 @@
 >    conformance suite exercises every group across twenty major assets covering
 >    all three identifier forms, and validates every response — errors included —
 >    against the API's own live OpenAPI document. Latest run on production:
->    **1032 checks pass, 0 fail, 0 skip**, repeated 29 minutes later with an
+>    **1014 checks pass, 0 fail, 0 skip** — the fourth consecutive zero-failure
+>    run, one of which was repeated 29 minutes later with a check-for-check
 >    identical verdict.
 > 2. **Load tested at the approved target.** 100 requests per second sustained
 >    for five minutes on the current-price route: **p95 of 47.09 ms** against a
