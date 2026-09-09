@@ -14,7 +14,15 @@ margin:
 > execute. **Everything here is reproducible against the public deployment.** The
 > API base is `https://prices-api.sorobanscan.rumblefish.dev`, a REGIONAL custom
 > domain mapped at the root, so no URL carries a stage path. Key-gated routes need
-> an `x-api-key` header, available on request via the submission form.
+> an `x-api-key` header, and **a reviewer key is published with this document:**
+>
+> ```
+> x-api-key: b4PRlGnUqf9xS7NIw6s8T6otRZVjctBXaBZ5uKut
+> ```
+>
+> It is on the public free tier — 1 request per second, burst 5, 100,000 requests
+> a month — and every route it opens is read-only. Every command in this document
+> runs as printed with `API_KEY` set to that value.
 >
 > **Two criteria are graded against amended wording**, each set out in full in
 > [`milestone-2-rfp-deviations.md`](milestone-2-rfp-deviations.md), part of this
@@ -587,9 +595,10 @@ _Table — live verification endpoints and the access model for reviewers._
 off on 2026-09-02. Those documents were amended in place with dated notes, so
 every command in both packages remains runnable as written.
 
-Reviewers wanting hands-on access to the key-gated or private resources — an API
-key, a short-lived mTLS client certificate, or the read-only dashboard viewer —
-can request them via the address on the submission form.
+The reviewer API key above opens every `/v1` route. The two resources it does not
+cover — a short-lived mTLS client certificate for production ClickHouse, and the
+read-only CloudWatch dashboard viewer — are issued per person and can be requested
+from the project team.
 
 ## 9. Repository navigation
 
