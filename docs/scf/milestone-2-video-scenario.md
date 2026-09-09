@@ -164,12 +164,14 @@ before recording.
 > "This is the acceptance evidence for the first criterion. It exercises all seven
 > route groups across twenty major assets, covering all three ways an asset can be
 > identified, and validates every response — errors included — against the live
-> specification. Today it is 1032 checks passing, none failing, none skipped."
+> specification. Today it is 1014 checks passing, none failing, none skipped."
 
 > "Two things worth saying about that number. The check count went **up** when we
 > fixed this suite, from 886 to 1032, because we added assertions rather than
-> relaxing them. And no production code changed that day — every failure that
-> disappeared was a defect in the test, not a fix to the API."
+> relaxing them — it has drifted down to 1014 since, because checks are generated
+> per asset per condition and the traded population moves. And no production code
+> changed that day — every failure that disappeared was a defect in the test, not
+> a fix to the API."
 
 > "It also has to give the same answer twice. Enrichment runs in the background, so
 > an earlier version of this suite could pass and fail half an hour apart on
