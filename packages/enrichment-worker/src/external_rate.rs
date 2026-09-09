@@ -349,6 +349,15 @@ pub enum LoadError {
     NonPositiveRate { line: usize, value: String },
 
     #[error(
+        "the ClickHouse server reports timezone '{got}', not 'UTC'. Every day and hour \
+         boundary this loader, the views and the enrichment tiers compute is a server-local \
+         boundary (the candle tables are stamped by unzoned toStartOfInterval), so on a \
+         non-UTC server the imported rows would land on the wrong day. Nothing was written. \
+         Set the server timezone to UTC (or run against a UTC replica) and retry."
+    )]
+    ServerNotUtc { got: String },
+
+    #[error(
         "line {line} has close '{value}', outside the accepted band [{min}, {max}]. The scale \
          check bounds how FINE a rate may be; this bounds how BIG it may be, which nothing did \
          before (review round 2, IN-06). Decimal(38, 14) leaves twenty-four integer digits, so a \
@@ -706,6 +715,24 @@ pub fn insert_statements(
 /// staging set some other file produced — and it is the one write whose rows
 /// the read path serves. Decision F puts the boundary in code; this is the last
 /// place the code can hold it.
+/// The query the loader runs BEFORE any write; its single-row answer goes
+/// through [`check_server_timezone`].
+pub const SERVER_TIMEZONE_SQL: &str = "SELECT timezone()";
+
+/// Review round 3, CR-04: every day/hour boundary in this repo is computed in
+/// the SERVER's timezone (the candle tables are stamped by unzoned
+/// `toStartOfInterval`), so pinning `'UTC'` on one operand of a comparison
+/// only displaces the defect. The one gate that retires the whole class is
+/// refusing to write unless the server itself is UTC. Pure so CI can test it.
+pub fn check_server_timezone(reported: &str) -> Result<(), LoadError> {
+    match reported.trim() {
+        "UTC" | "Etc/UTC" => Ok(()),
+        other => Err(LoadError::ServerNotUtc {
+            got: other.to_string(),
+        }),
+    }
+}
+
 pub fn promote_statement(database: &str, version: u64, code: &str, issuer: &str) -> String {
     format!(
         "INSERT INTO {database}.usd_rate ({USD_RATE_COLUMNS}) \
@@ -1586,5 +1613,17 @@ mod tests {
             RUNBOOK.contains("ADDS a key"),
             "the additive-promote warning"
         );
+    }
+
+    #[test]
+    fn the_server_timezone_gate_accepts_only_utc() {
+        assert!(check_server_timezone("UTC").is_ok());
+        assert!(check_server_timezone("Etc/UTC\n").is_ok());
+        for tz in ["Europe/Warsaw", "CET", "", "utc"] {
+            let err = check_server_timezone(tz).unwrap_err();
+            assert!(matches!(err, LoadError::ServerNotUtc { .. }), "{tz}: {err}");
+            assert!(err.to_string().contains("Nothing was written"), "{err}");
+        }
+        assert_eq!(SERVER_TIMEZONE_SQL, "SELECT timezone()");
     }
 }

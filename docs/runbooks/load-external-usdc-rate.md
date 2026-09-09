@@ -102,11 +102,19 @@ differ, stop.
 
 ## Preconditions
 
-Three things, and the first is the one a first-time operator hits: **every
+Four things, and the second is the one a first-time operator hits: **every
 INSERT the tool renders names the `quality` column**, so on a cluster that has
 not yet had this task's `init.sql` applied, step 3 fails on its first chunk
 with `No such column quality` — loudly, with nothing half-written, but with no
 hint of why. Check before you build.
+
+0. **The server is in UTC.** Run `SELECT timezone()` and stop unless it says
+   `UTC`. Every day and hour boundary in this repo — the candle tables' unzoned
+   `toStartOfInterval`, the views' day buckets, the loader's and the tiers'
+   ASOF floors — is computed in the SERVER's timezone, so on a non-UTC server
+   imported rows land on the wrong day and every gate below misreads. The
+   loader refuses to write on its own if this is not `UTC`
+   (`ServerNotUtc`), but check first: the refusal comes after the dry run.
 
 1. **The schema and the views from this branch are applied to the cluster.**
    The real tool is `prices-clickhouse-init` — there is no `apply-schema`

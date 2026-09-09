@@ -705,7 +705,36 @@ primary from the epoch on.
     saying so is more useful than accepting it. The check runs after the scale
     and sign checks so those keep reporting the more specific refusal.
 
+**Review round 3** (`gsd-code-reviewer` on `58faa5b`, 2026-09-09: 2 blockers,
+6 warnings, 4 info). Both blockers fixed by Adam's call, without a fourth
+review round: **CR-03** `--promote` no longer parses a CSV (the path is
+optional with `--promote`; a promote rewrites staged rows and needs no file),
+so `--promote` on the hourly file no longer aborts on its 01:00 row at the
+default daily grain. **CR-04** the timezone class is retired at its root
+instead of per expression: the loader runs `SELECT timezone()` before any
+write and refuses with `ServerNotUtc` unless the answer is `UTC`
+(`check_server_timezone`, pure, unit-tested), and both runbooks gain a
+precondition 0 with the same check. The six warnings and four info items are
+recorded below as Issues for the operator run rather than fixed here.
+
 ## Issues Encountered
+
+- **Review round 3, open by decision (Adam, 2026-09-09) — to close at the run,
+  not in code.** WR-11: five runbook gates parse a datetime from a string
+  (server-local) — moot once precondition 0 (server is UTC) holds. WR-12: the
+  UTC-pinning test does not cover the expression that produces the wire
+  timestamp — same. WR-13: "the two surfaces agree everywhere" is false on the
+  epoch day itself (hours 00–13 external, 14+ oracle in one daily bucket);
+  wording to soften in the runbook at the run. WR-14: nothing enforces that the
+  hourly run's `version` exceeds the daily run's; run them at least a second
+  apart and verify `max(version)` per grain before promote (the runbook's step
+  4b′ shows the query). WR-15: the daily pass contributes no row that the
+  hourly pass does not also write, so it is a verification step, not a
+  load-bearing one; keep it because its dry run is the cheaper sanity check.
+  WR-16: 0267 before 0268 is irreversible for sub-daily candles — stated here,
+  and 0268's Appendix B precondition 1 already refuses the other order.
+  IN-09..12: wording and test-scope nits, unchanged.
+
 
 - **RESOLVED (2026-09-09, Adam) — `price_usd_series_1h` and `/ohlcv` disagreed
   on the hours of an imported day; the fix was the DATA, not a fourth query

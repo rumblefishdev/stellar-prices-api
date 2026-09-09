@@ -658,7 +658,7 @@ for why that matters more than it sounds.
 
 ### Preconditions
 
-All five, in order. None is optional.
+All six, in order. None is optional.
 
 **Set the epoch ONCE, first.** Every query below that mentions the oracle epoch
 reads it as the client parameter `{epoch:UInt32}`, so the value is typed one
@@ -676,6 +676,14 @@ runbook, and a unit test
 it to the constant — two hand-typed epochs are how a precondition ends up
 measuring the wrong window and reporting 0 over the exact assumption it exists
 to check.
+
+0. **The server is in UTC.** Run `SELECT timezone()` and stop unless it says
+   `UTC`. Every day and hour boundary in this repo — the candle tables' unzoned
+   `toStartOfInterval`, the views' day buckets, the loader's and the tiers'
+   ASOF floors — is computed in the SERVER's timezone, so on a non-UTC server
+   imported rows land on the wrong day and every gate below misreads. Task
+   0267's loader refuses to write on a non-UTC server; this campaign has no
+   such guard in code, so this line IS the guard.
 
 1. **Task 0267's `external` rows are loaded.** A count of **0 is a hard
    refusal**, not a no-op — the tool exits with

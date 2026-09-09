@@ -41,8 +41,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 use enrichment_worker::external_rate::{
-    DEPEG_DAY_START_S, DEPEG_HOUR_S, Grain, LoadPlan, PROMOTED_METHOD, SHADOW_METHOD,
-    check_identity, insert_statements, parse_csv, partition, promote_statement,
+    DEPEG_DAY_START_S, DEPEG_HOUR_S, Grain, LoadPlan, PROMOTED_METHOD, SERVER_TIMEZONE_SQL,
+    SHADOW_METHOD, check_identity, check_server_timezone, insert_statements, parse_csv, partition,
+    promote_statement,
 };
 use prices_clickhouse::{USDC_ISSUER, USDC_ORACLE_EPOCH_S};
 use tracing::info;
@@ -80,8 +81,11 @@ enum Transport {
     about = "Load a composed external USD/asset series into prices.usd_rate (task 0267)"
 )]
 struct Args {
-    /// The composed CSV to load (task 0265's artefact, read 1:1).
-    csv: PathBuf,
+    /// The composed CSV to load (task 0265's artefact, read 1:1). Not needed
+    /// with `--promote`, which rewrites the staged rows already in the table
+    /// and parses nothing (review round 3, CR-03).
+    #[arg(required_unless_present = "promote")]
+    csv: Option<PathBuf>,
 
     /// Which composed file this is. `daily` accepts ONLY 00:00:00 UTC stamps;
     /// `hourly` accepts any full hour (mm:ss = 00:00). Everything else — the
@@ -250,15 +254,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The task 0173 ticker→issuer gate, in code.
     check_identity(&args.asset_code, &args.issuer).map_err(|e| e.to_string())?;
 
-    let text = std::fs::read_to_string(&args.csv)
-        .map_err(|e| format!("could not read {}: {e}", args.csv.display()))?;
     let grain: Grain = args.grain.into();
-    let plan = partition(
-        parse_csv(&args.csv.display().to_string(), &text, grain).map_err(|e| e.to_string())?,
-    );
-    print_plan(&plan, grain, args.dry_run);
+    // A promote parses nothing: it rewrites the staged rows already in the
+    // table, whichever grain wrote them. Parsing the CSV here at the default
+    // daily grain made `--promote <csv_1h>` abort on the file's 01:00 row
+    // before the promote branch was reached (review round 3, CR-03).
+    let plan = match (&args.csv, args.promote) {
+        (Some(csv), false) => {
+            let text = std::fs::read_to_string(csv)
+                .map_err(|e| format!("could not read {}: {e}", csv.display()))?;
+            let plan = partition(
+                parse_csv(&csv.display().to_string(), &text, grain).map_err(|e| e.to_string())?,
+            );
+            print_plan(&plan, grain, args.dry_run);
+            Some(plan)
+        }
+        (_, true) => None,
+        (None, false) => return Err("a CSV path is required unless --promote is given".into()),
+    };
 
     if args.dry_run {
+        let plan = plan.as_ref().expect("dry run always parses");
         info!(
             parsed = plan.parsed,
             loadable = plan.loadable.len(),
@@ -283,7 +299,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         grain = grain.label(),
         database = %args.database,
         transport = ?args.transport,
-        rows = plan.loadable.len(),
+        rows = plan.as_ref().map_or(0, |p| p.loadable.len()),
         "load-external-rate starting"
     );
 
@@ -301,7 +317,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             version,
             &args.asset_code,
             &args.issuer,
-            &plan.loadable,
+            &plan.as_ref().expect("shadow always parses").loadable,
         )
     };
     if statements.is_empty() {
@@ -344,6 +360,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // The one gate that retires the whole timezone class (review round 3,
+    // CR-04): every boundary this repo computes is server-local, so nothing
+    // is written unless the server itself is UTC.
+    let tz: String = client.query(SERVER_TIMEZONE_SQL).fetch_one().await?;
+    check_server_timezone(&tz).map_err(|e| e.to_string())?;
+    info!(timezone = %tz, "server timezone verified");
+
     let total = statements.len();
     for (i, stmt) in statements.iter().enumerate() {
         client.query(stmt).execute().await?;
@@ -363,7 +386,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "\nstaged {} row(s) as method = '{SHADOW_METHOD}' at version {version}.\n\
              NOTHING READS THAT WORD YET. Run the three verification queries in \
              docs/runbooks/load-external-usdc-rate.md before --promote.",
-            plan.loadable.len()
+            plan.as_ref().map_or(0, |p| p.loadable.len())
         );
     }
 
