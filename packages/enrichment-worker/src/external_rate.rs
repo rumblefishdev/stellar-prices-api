@@ -106,9 +106,11 @@ pub const ACCEPTED_QUALITIES: &[&str] = &["measured", "measured-disputed", "fall
 pub const USD_RATE_COLUMNS: &str = "asset_kind, asset_code, issuer_address, contract_address, \
      timestamp, usd_rate, method, reference_asset, quality, hops, version";
 
-/// Rows per INSERT statement. 1872 rows in one request against a SHARED
-/// production cluster is inconsiderate at best; the load is not urgent, so it
-/// is chunked. Every row survives the chunking exactly once — asserted.
+/// Rows per INSERT statement. 1872 rows at daily grain — and 44 918 at hourly,
+/// which is the grain this actually runs at since the 2026-09-09 decision — in
+/// one request against a SHARED production cluster is inconsiderate at best; the
+/// load is not urgent, so it is chunked into ~180 requests. Every row survives
+/// the chunking exactly once — asserted.
 pub const INSERT_CHUNK_ROWS: usize = 250;
 
 /// The scale of `usd_rate.usd_rate` — `Decimal(38, 14)`. A rate with MORE
@@ -347,6 +349,24 @@ pub enum LoadError {
          output; do not clamp it here."
     )]
     NonPositiveRate { line: usize, value: String },
+
+    /// A DAILY shadow load onto a staging set that already holds hourly rows
+    /// for the same identity (task 0267 review). See [`staged_non_midnight_sql`].
+    #[error(
+        "refusing a DAILY load: `{method}` already holds {rows} row(s) away from \
+         UTC midnight for this identity, which only the HOURLY pass writes.\n\
+         The two grains share all 1872 midnight keys — same identity, same \
+         timestamp, same method — so they are ONE ReplacingMergeTree key and the \
+         later `version` wins. Loading daily now would stamp the DAY close over \
+         the 00:00 HOUR of every covered day, and `price_usd_series_1h` would \
+         publish that day-close for the 00:00 hour of all 1872 days. Nothing \
+         errors: the rows are valid, the counts match, and only the values are \
+         wrong.\n\
+         Load DAILY FIRST and HOURLY SECOND. If you are deliberately re-seeding \
+         the daily file, pass --allow-daily-after-hourly and RE-RUN THE HOURLY \
+         PASS afterwards, or the midnights stay wrong."
+    )]
+    DailyAfterHourly { method: String, rows: u64 },
 
     #[error(
         "the ClickHouse server reports timezone '{got}', not 'UTC'. Every day and hour \
@@ -697,24 +717,6 @@ pub fn insert_statements(
         .collect()
 }
 
-/// Render the promote: an `INSERT … SELECT` that re-writes the staged rows
-/// under [`PROMOTED_METHOD`] at a higher version.
-///
-/// ⚠️ ADDITIVE. `method` is part of `usd_rate`'s sorting key, so this creates a
-/// SECOND ReplacingMergeTree key and the staged rows survive untouched. It
-/// contains no `DELETE`, `DROP`, `ALTER` or `TRUNCATE`, and there is nothing to
-/// roll back at the row level — the rollback for this whole task is reverting
-/// the read path's preference, which deletes nothing.
-///
-/// The full identity tuple is pinned so a promote cannot reach a neighbouring
-/// identity even if one ever carries staged rows (threat T-0267-03).
-///
-/// ⚠️ The promote RE-APPLIES the epoch bound (review IN-02). [`partition`] is
-/// what keeps post-epoch rows out of the staging set today, but the promote is
-/// a separate write from a separate run, possibly of an older binary or over a
-/// staging set some other file produced — and it is the one write whose rows
-/// the read path serves. Decision F puts the boundary in code; this is the last
-/// place the code can hold it.
 /// The query the loader runs BEFORE any write; its single-row answer goes
 /// through [`check_server_timezone`].
 pub const SERVER_TIMEZONE_SQL: &str = "SELECT timezone()";
@@ -733,6 +735,24 @@ pub fn check_server_timezone(reported: &str) -> Result<(), LoadError> {
     }
 }
 
+/// Render the promote: an `INSERT … SELECT` that re-writes the staged rows
+/// under [`PROMOTED_METHOD`] at a higher version.
+///
+/// ⚠️ ADDITIVE. `method` is part of `usd_rate`'s sorting key, so this creates a
+/// SECOND ReplacingMergeTree key and the staged rows survive untouched. It
+/// contains no `DELETE`, `DROP`, `ALTER` or `TRUNCATE`, and there is nothing to
+/// roll back at the row level — the rollback for this whole task is reverting
+/// the read path's preference, which deletes nothing.
+///
+/// The full identity tuple is pinned so a promote cannot reach a neighbouring
+/// identity even if one ever carries staged rows (threat T-0267-03).
+///
+/// ⚠️ The promote RE-APPLIES the epoch bound (review IN-02). [`partition`] is
+/// what keeps post-epoch rows out of the staging set today, but the promote is
+/// a separate write from a separate run, possibly of an older binary or over a
+/// staging set some other file produced — and it is the one write whose rows
+/// the read path serves. Decision F puts the boundary in code; this is the last
+/// place the code can hold it.
 pub fn promote_statement(database: &str, version: u64, code: &str, issuer: &str) -> String {
     format!(
         "INSERT INTO {database}.usd_rate ({USD_RATE_COLUMNS}) \
@@ -763,8 +783,101 @@ pub fn promoted_read_predicate() -> String {
     format!("method = '{PROMOTED_METHOD}'")
 }
 
+/// Count staged rows that are NOT at UTC midnight, for one identity.
+///
+/// The hourly pass is the only writer that can produce such a row, so a
+/// non-zero answer means "the hourly file is already staged". Used to refuse a
+/// daily load that would otherwise overwrite the shared midnight keys — see
+/// [`LoadError::DailyAfterHourly`].
+///
+/// ⚠️ `'UTC'` is named. `usd_rate.timestamp` is a bare `DateTime`; an unzoned
+/// `toStartOfDay` resolves in the server timezone, and on a non-UTC server every
+/// row would look non-midnight and this gate would refuse a correct load. The
+/// loader also refuses a non-UTC server outright ([`check_server_timezone`]),
+/// so this is the second line of the same defence.
+pub fn staged_non_midnight_sql(database: &str, code: &str, issuer: &str) -> String {
+    format!(
+        "SELECT count() FROM {database}.usd_rate FINAL \
+         WHERE asset_kind = 'credit' AND asset_code = '{code}' \
+           AND issuer_address = '{issuer}' AND contract_address = '' \
+           AND method = '{SHADOW_METHOD}' \
+           AND timestamp != toStartOfDay(timestamp, 'UTC')"
+    )
+}
+
+/// Whether a load may proceed, given the grain, the override and what is staged.
+///
+/// Pure, so the ordering rule is testable without a ClickHouse. Only the DAILY
+/// grain is gated: hourly-onto-daily is the SUPPORTED order and must stay free.
+pub fn check_grain_order(
+    grain: Grain,
+    staged_non_midnight: u64,
+    allow_override: bool,
+) -> Result<(), LoadError> {
+    match grain {
+        Grain::Daily if staged_non_midnight > 0 && !allow_override => {
+            Err(LoadError::DailyAfterHourly {
+                method: SHADOW_METHOD.to_string(),
+                rows: staged_non_midnight,
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// The supported order is DAILY FIRST, HOURLY SECOND. The reverse is what
+    /// the gate exists to refuse: the two grains share all 1872 midnight keys —
+    /// same identity, same timestamp, same method — so they are ONE
+    /// ReplacingMergeTree key, the later `version` wins, and a daily load after
+    /// an hourly one stamps the day close over the 00:00 hour of every covered
+    /// day. Valid rows, matching counts, wrong values, no error anywhere.
+    #[test]
+    fn a_daily_load_is_refused_once_hourly_rows_are_staged() {
+        let err = check_grain_order(Grain::Daily, 43_046, false).unwrap_err();
+        assert!(
+            matches!(err, LoadError::DailyAfterHourly { rows, .. } if rows == 43_046),
+            "got {err:?}"
+        );
+        // The message has to tell the operator the order, not just say no.
+        let text = err.to_string();
+        assert!(text.contains("DAILY FIRST and HOURLY SECOND"), "{text}");
+        assert!(text.contains("--allow-daily-after-hourly"), "{text}");
+    }
+
+    /// Hourly onto daily is the SUPPORTED order and must stay free — gating it
+    /// would refuse the runbook's own procedure at its second step.
+    #[test]
+    fn the_hourly_pass_is_never_gated_by_staged_daily_rows() {
+        check_grain_order(Grain::Hourly, 0, false).unwrap();
+        check_grain_order(Grain::Hourly, 1_872, false).unwrap();
+    }
+
+    /// A first daily load has nothing staged, and the override is an escape
+    /// hatch rather than a second mode.
+    #[test]
+    fn a_first_daily_load_passes_and_the_override_reopens_a_reseed() {
+        check_grain_order(Grain::Daily, 0, false).unwrap();
+        check_grain_order(Grain::Daily, 43_046, true).unwrap();
+    }
+
+    /// ⚠️ The gate's own query must name `'UTC'`: `usd_rate.timestamp` is a bare
+    /// `DateTime`, so an unzoned `toStartOfDay` resolves in the SERVER timezone
+    /// and on a non-UTC server every row reads as non-midnight — the gate would
+    /// then refuse a correct daily load.
+    #[test]
+    fn the_staged_probe_names_its_timezone_and_the_staging_method() {
+        let sql = staged_non_midnight_sql("prices", "USDC", "GABC");
+        assert!(sql.contains("toStartOfDay(timestamp, 'UTC')"), "{sql}");
+        assert!(
+            sql.contains(&format!("method = '{SHADOW_METHOD}'")),
+            "only the STAGED set may gate a load: {sql}"
+        );
+        assert!(sql.contains("asset_code = 'USDC'"), "{sql}");
+        assert!(sql.contains("issuer_address = 'GABC'"), "{sql}");
+    }
     use super::*;
     use prices_clickhouse::{USDC_ISSUER, USDC_ORACLE_EPOCH_S};
     use std::str::FromStr;

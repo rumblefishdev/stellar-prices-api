@@ -42,8 +42,8 @@ use std::path::PathBuf;
 use clap::{Parser, ValueEnum};
 use enrichment_worker::external_rate::{
     DEPEG_DAY_START_S, DEPEG_HOUR_S, Grain, LoadPlan, PROMOTED_METHOD, SERVER_TIMEZONE_SQL,
-    SHADOW_METHOD, check_identity, check_server_timezone, insert_statements, parse_csv, partition,
-    promote_statement,
+    SHADOW_METHOD, check_grain_order, check_identity, check_server_timezone, insert_statements,
+    parse_csv, partition, promote_statement, staged_non_midnight_sql,
 };
 use prices_clickhouse::{USDC_ISSUER, USDC_ORACLE_EPOCH_S};
 use tracing::info;
@@ -147,10 +147,13 @@ struct Args {
     dry_run: bool,
 
     /// Write the rows under the PRE-PROMOTION staging method
-    /// (`external-candidate`). ON by default, and the only mode that writes
-    /// rows from the CSV. No read predicate anywhere names that word, so staged
-    /// rows are inert until `--promote` runs — that is what makes the runbook's
-    /// three verification queries a real gate rather than a formality.
+    /// (`external-candidate`). It is the DEFAULT and cannot be turned off: every
+    /// branch keys on `--promote` alone, and this field exists to make
+    /// `--shadow --promote` a hard error (`conflicts_with`), not to select a
+    /// mode. Without `--promote` the loader always writes under the staging
+    /// method. No read predicate anywhere names that word, so staged rows are
+    /// inert until `--promote` runs — that is what makes the runbook's three
+    /// verification queries a real gate rather than a formality.
     #[arg(long, default_value_t = true)]
     shadow: bool,
 
@@ -164,11 +167,28 @@ struct Args {
     /// promote is idempotent only because RMT dedups the identical promoted key
     /// on the higher version.
     ///
-    /// Reads no rows from the CSV — the CSV is still required, and still
-    /// validated, because a promote against a file that no longer parses is an
-    /// operator running the wrong command.
+    /// ⚠️ Reads NOTHING from the CSV. A CSV path is accepted and IGNORED — the
+    /// runbook's promote step still carries `$CSV_1H` — because the promote
+    /// rewrites rows already staged in the table, whichever grain wrote them.
+    /// Review round 3, CR-03: parsing the hourly file under the default daily
+    /// grain aborted the promote, so `--promote` stopped parsing altogether.
+    /// Do not read this flag as "the file is re-validated"; it is never opened.
     #[arg(long, conflicts_with = "shadow")]
     promote: bool,
+
+    /// Allow a DAILY load onto a staging set that already holds HOURLY rows.
+    ///
+    /// ⚠️ The two grains share all 1872 midnight keys and the later `version`
+    /// wins, so a daily load after an hourly one stamps the DAY close over the
+    /// 00:00 HOUR of every covered day — valid rows, matching counts, wrong
+    /// values, and nothing anywhere errors. The supported order is DAILY FIRST,
+    /// HOURLY SECOND.
+    ///
+    /// Pass this only to deliberately re-seed the daily file, and RE-RUN THE
+    /// HOURLY PASS afterwards or the midnights stay wrong. The check reads the
+    /// table, so `--dry-run` — which contacts no server — cannot report it.
+    #[arg(long)]
+    allow_daily_after_hourly: bool,
 }
 
 fn print_plan(plan: &LoadPlan, grain: Grain, dry_run: bool) {
@@ -366,6 +386,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tz: String = client.query(SERVER_TIMEZONE_SQL).fetch_one().await?;
     check_server_timezone(&tz).map_err(|e| e.to_string())?;
     info!(timezone = %tz, "server timezone verified");
+
+    // The grain-order gate. Until now "daily first, hourly second" was enforced
+    // by prose in the runbook and a checklist item in the task; the two grains
+    // share all 1872 midnight keys, so the wrong order silently republishes the
+    // day close as the 00:00 hour of every covered day. A promote writes no
+    // timestamps of its own and is not gated.
+    if !args.promote {
+        let staged: u64 = client
+            .query(&staged_non_midnight_sql(
+                &args.database,
+                &args.asset_code,
+                &args.issuer,
+            ))
+            .fetch_one()
+            .await?;
+        check_grain_order(grain, staged, args.allow_daily_after_hourly)
+            .map_err(|e| e.to_string())?;
+        if staged > 0 {
+            info!(
+                staged_non_midnight = staged,
+                grain = grain.label(),
+                "hourly rows are already staged for this identity"
+            );
+        }
+    }
 
     let total = statements.len();
     for (i, stmt) in statements.iter().enumerate() {
