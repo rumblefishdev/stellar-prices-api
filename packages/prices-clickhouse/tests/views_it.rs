@@ -1165,7 +1165,15 @@ async fn usdt_quote_only_gets_no_peg_fallback_but_usdc_still_does() {
 ///      oracle's last reading across years of buckets.
 ///   4. **`method = 'pivot'` rows are ignored.** `usd_rate` keys on
 ///      (identity, timestamp, method) exactly so a task 0154 pivot row cannot
-///      replace a measurement; this consumer chooses measured or nothing. The
+///      replace a measurement; this consumer chooses, and it chooses a
+///      MEASUREMENT or nothing. ⚠️ Since task 0267 "a measurement" is two words,
+///      not one: an IMPORTED reading (`method = 'external'`, an outside USD
+///      series that actually observed the rate) is accepted here, while a
+///      DERIVED `pivot`/`pivot2` rate — computed from another asset's price
+///      rather than observed — still is not. Provenance is what separates them,
+///      not authorship. The rule that oracle outranks an import in a bucket
+///      holding both is
+///      [`an_oracle_row_outranks_an_imported_row_in_the_same_bucket`]. The
 ///      fixture plants a wildly wrong pivot value at the end of the day — if it
 ///      leaked it would win case 2's "last observation" test.
 ///   5. **The grains compose where the oracle observed.** The daily close equals
@@ -1366,6 +1374,197 @@ async fn peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one() 
         .await
         .unwrap();
     assert_eq!(garbage, 0, "no row may publish a non-positive close_usd");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0267 — where ONE bucket holds both a polled reading and an imported one,
+/// the ORACLE rate is published and the label reads `oracle`.
+///
+/// Not an expected case on prod: task 0267 loads only rows strictly below
+/// `USDC_ORACLE_EPOCH_S` and our own polling starts at it, so the two populations
+/// do not overlap today. It is asserted anyway because it is the SAFETY RULE the
+/// whole read-path widening rests on — the moment `method IN ('oracle',
+/// 'external')` replaced a single-method equality, "which one wins" stopped being
+/// a question the schema answered and became one the query has to.
+///
+/// ⚠️ The fixture plants the import at a LATER timestamp than the oracle reading
+/// and at a deliberately wrong value, exactly as case 4 does for `pivot`. Both
+/// details are load-bearing:
+///
+///   * **Later** — because the shape this replaced was `argMax(usd_rate,
+///     timestamp)`. Under that key the import wins, so a regression to it fails
+///     here. Had the import been seeded earlier, the old key would have produced
+///     the right answer for the wrong reason and this test would have passed
+///     against the very bug it exists to catch.
+///   * **A wrong value, not just a different method** — so a preference
+///     regression changes the published NUMBER and not merely the label. A test
+///     that only checked `method` would let a mislabelled-but-correct rate pass,
+///     which is the less dangerous half of the failure.
+///
+/// Both grains are checked: the daily and hourly rate subqueries are separate SQL
+/// and a fix applied to one only is this file's recurring defect.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn an_oracle_row_outranks_an_imported_row_in_the_same_bucket() {
+    let db = "it_views_0267_oracle_outranks_external";
+    let client = setup_scratch(db).await;
+
+    /// The polled reading — what both grains must publish.
+    const ORACLE: &str = "1.00066784838102";
+    /// The import, planted LATER in the same bucket at a value no measured USDC
+    /// rate could hold, so a rank regression is visible in the number itself.
+    const IMPORT: &str = "0.50000000000000";
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // One FOO/USDC candle, so USDC is a quote-only peg leg and arm B emits its
+    // placeholder for the bucket. The 23:00 hour carries the hourly case.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (toDateTime('2026-08-10 23:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // The two rows COEXIST rather than one replacing the other: `method` is part
+    // of the ReplacingMergeTree sorting key (init.sql), which is exactly the
+    // property that makes "the consumer chooses" possible — and necessary.
+    // The imported row carries task 0267's provenance columns; the oracle row
+    // leaves `quality` at its '' default, because "how confident was the outside
+    // series" is not a question a poll answers.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit','USDC','{USDC_ISSUER}','',toDateTime('2026-08-10 23:30:00'),{ORACLE},'oracle','','',0,1), \
+             ('credit','USDC','{USDC_ISSUER}','',toDateTime('2026-08-10 23:45:00'),{IMPORT},'external','chainlink','measured',0,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let usdc_at = |view: &'static str, bucket: &'static str| {
+        let client = client.clone();
+        let db = db.to_string();
+        async move {
+            client
+                .query(&format!(
+                    "SELECT toString(close_usd), method FROM {db}.{view} \
+                     WHERE asset_code = ? AND issuer_address = ? AND bucket = toDateTime(?)"
+                ))
+                .bind("USDC")
+                .bind(USDC_ISSUER)
+                .bind(bucket)
+                .fetch_one::<(String, String)>()
+                .await
+                .unwrap()
+        }
+    };
+
+    for (view, bucket) in [
+        ("price_usd_series", "2026-08-10 00:00:00"),
+        ("price_usd_series_1h", "2026-08-10 23:00:00"),
+    ] {
+        let (close, method) = usdc_at(view, bucket).await;
+        assert_eq!(
+            close, ORACLE,
+            "{view} @ {bucket}: the POLLED rate must win a bucket that holds \
+             both. `{IMPORT}` means the preference is keyed on the timestamp \
+             again and the later import outranked the measurement."
+        );
+        assert_eq!(
+            method, "oracle",
+            "{view} @ {bucket}: a bucket whose published rate came from the \
+             oracle must say so — the label follows the row that WON, not the \
+             row that arrived last"
+        );
+    }
+
+    // The import is not lost, it is outranked: on its own it is published and
+    // labelled 'external'. Without this half, a view that simply ignored every
+    // imported row would pass the assertions above — and task 0267's entire
+    // purpose is to serve those rows where no oracle reading exists.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit','USDC','{USDC_ISSUER}','',toDateTime('2023-03-11 00:00:00'),0.96812000000000,'external','chainlink','measured',0,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let (depeg, depeg_method) = usdc_at("price_usd_series", "2023-03-11 00:00:00").await;
+    assert_eq!(
+        depeg, "0.96812",
+        "the depeg day must publish the IMPORTED rate. `1` means the widened \
+         predicate is not reaching method = 'external' rows at all."
+    );
+    assert_eq!(
+        depeg_method, "external",
+        "an imported measurement must be labelled 'external' — a consumer has \
+         to be able to tell it from a polled reading AND from the $1 fallback"
+    );
+
+    // The pre-promotion staging word is INERT. Nothing reads it, which is what
+    // makes a shadow load safe to leave in place while an operator verifies it.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit','USDC','{USDC_ISSUER}','',toDateTime('2023-03-11 23:00:00'),0.11100000000000,'external-candidate','chainlink','measured',0,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    let (still, still_method) = usdc_at("price_usd_series", "2023-03-11 00:00:00").await;
+    assert_eq!(
+        still, "0.96812",
+        "an 'external-candidate' row must not reach this surface — staged rows \
+         are unverified by definition"
+    );
+    assert_eq!(still_method, "external");
 
     client
         .query(&format!("DROP DATABASE {db}"))

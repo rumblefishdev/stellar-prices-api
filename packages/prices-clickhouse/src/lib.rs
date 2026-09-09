@@ -292,8 +292,11 @@ mod tests {
         // + pool_registry task 0053, +asset_metadata task 0067, +ingest_cursor
         // task 0064, +usd_rate task 0167, +enrichment_frontier task 0111,
         // +asset_symbol task 0210.)
+        // (+1 = 34: task 0267's idempotent `ALTER TABLE prices.usd_rate ADD
+        // COLUMN IF NOT EXISTS quality`, the same shape as the current_prices
+        // ALTERs already counted above.)
         let stmts = split_statements(INIT_SQL);
-        assert_eq!(stmts.len(), 33, "got {}", stmts.len());
+        assert_eq!(stmts.len(), 34, "got {}", stmts.len());
     }
 
     #[test]
@@ -623,5 +626,182 @@ mod tests {
             stmt.contains("CREATE OR REPLACE VIEW"),
             "current_price_usd must REPLACE rather than IF NOT EXISTS"
         );
+    }
+    // ------------------------------------------------------------------
+    // Task 0267 — the read-path widening, asserted on the SQL TEXT.
+    //
+    // CI has no ClickHouse, so the behavioural proof (an oracle row and an
+    // imported row in one bucket, oracle wins) is `#[ignore]` in
+    // tests/views_it.rs. These tests are the half that runs on every push:
+    // they pin the SHAPE the behavioural test depends on, so a regression is
+    // caught by CI rather than by whoever next remembers to start docker.
+    // ------------------------------------------------------------------
+
+    /// Collapse whitespace runs so an assertion pins the SQL rather than its
+    /// indentation. `split_statements` strips comments but preserves layout.
+    fn squash(sql: &str) -> String {
+        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The two `price_usd_series` grain statements, squashed, as
+    /// `(name, sql)` — every task 0267 assertion runs over BOTH.
+    ///
+    /// ⚠️ Keeping the two grains in step is the point. The pre-0165 hourly
+    /// variant carried a defect the daily one did not, and a fix applied to one
+    /// grain only is the exact shape of that bug.
+    fn series_grains() -> Vec<(&'static str, String)> {
+        let stmts = split_statements(VIEWS_SQL);
+        let find = |needle: &str| -> String {
+            squash(
+                stmts
+                    .iter()
+                    .find(|s| s.contains(needle))
+                    .unwrap_or_else(|| panic!("no view statement containing `{needle}`")),
+            )
+        };
+        vec![
+            ("price_usd_series", find("prices.price_usd_series AS")),
+            ("price_usd_series_1h", find("prices.price_usd_series_1h AS")),
+        ]
+    }
+
+    /// Task 0267 decision C. An IMPORTED measurement (`method = 'external'`)
+    /// is evidence of the same standing as a polled one and must be readable
+    /// by both grains — otherwise the loaded USDC history is written and never
+    /// served, and `/ohlcv` keeps publishing a literal 1.0 labelled `peg`.
+    #[test]
+    fn views_sql_rate_subquery_admits_oracle_and_external_at_both_grains() {
+        for (name, stmt) in series_grains() {
+            assert!(
+                stmt.contains("WHERE method IN ('oracle', 'external')"),
+                "{name}: the usd_rate subquery must admit both measured methods"
+            );
+            assert!(
+                !stmt.contains("WHERE method = 'oracle'"),
+                "{name}: the single-method equality predicate must be gone — it \
+                 is what hid task 0267's imported rows from this surface"
+            );
+            // The staging word must NOT be readable. Rows land under it before
+            // an operator has verified them, and the whole safety of the
+            // shadow/promote split is that no read predicate names it.
+            assert!(
+                !stmt.contains("external-candidate"),
+                "{name}: the pre-promotion staging method must never be read"
+            );
+        }
+    }
+
+    /// The preference rule, and the reason it is a TUPLE. `argMax` over
+    /// `(rank, timestamp)` compares element by element, so an oracle row beats
+    /// every imported row in the bucket regardless of when each was observed.
+    /// A bare `timestamp` key — the shape this had before the widening — would
+    /// let a backfilled import outrank a measured reading purely by landing
+    /// later in the day. This test fails if anyone reverts to that key.
+    #[test]
+    fn views_sql_rate_preference_is_a_rank_first_tuple_at_both_grains() {
+        for (name, stmt) in series_grains() {
+            for col in ["usd_rate", "method"] {
+                assert!(
+                    stmt.contains(&format!(
+                        "argMax({col}, (if(method = 'oracle', 1, 0), timestamp))"
+                    )),
+                    "{name}: argMax over `{col}` must key on the rank-first tuple"
+                );
+            }
+            assert!(
+                !stmt.contains("argMax(usd_rate, timestamp)"),
+                "{name}: a bare timestamp key lets a later import outrank an \
+                 oracle reading — the rank must come first"
+            );
+            assert!(
+                stmt.contains("AS rate_method"),
+                "{name}: the winning row's method must be carried up, or the \
+                 label arm has nothing to rank on"
+            );
+        }
+    }
+
+    /// The label is three-way since task 0267, and the ORDER of its arms is
+    /// load-bearing: `max(peg_rate) <= 0` stays the first discriminator because
+    /// it is the only test that reads identically under both `join_use_nulls`
+    /// settings (arm B's own comment explains why). Ordering the rank test
+    /// first would work by accident rather than by rule.
+    #[test]
+    fn views_sql_method_label_is_three_way_with_the_peg_test_first() {
+        for (name, stmt) in series_grains() {
+            assert!(
+                stmt.contains(
+                    "multiIf(max(peg_rate) <= 0, 'peg', max(rate_rank) = 2, 'oracle', 'external')"
+                ),
+                "{name}: the label must be a three-way multiIf with the peg \
+                 discriminator first"
+            );
+            assert!(
+                !stmt.contains("if(max(peg_rate) > 0, 'oracle', 'peg')"),
+                "{name}: the two-way label cannot survive — it reports every \
+                 imported rate as an oracle reading"
+            );
+            assert!(
+                stmt.contains("'traded'"),
+                "{name}: the traded arm is unchanged by task 0267"
+            );
+        }
+    }
+
+    /// `UNION ALL` matches its arms POSITIONALLY and requires an identical
+    /// column count, so `rate_rank` has to appear in BOTH arms even though arm
+    /// A can never carry a rate. Two arm sites plus one outer aggregate.
+    #[test]
+    fn views_sql_rate_rank_reaches_both_union_arms_and_the_outer_aggregate() {
+        for (name, stmt) in series_grains() {
+            assert_eq!(
+                stmt.matches("AS rate_rank").count(),
+                2,
+                "{name}: rate_rank must be produced by BOTH union arms"
+            );
+            assert!(
+                stmt.contains("toUInt8(0) AS rate_rank"),
+                "{name}: arm A must emit the structural placeholder"
+            );
+            assert!(
+                stmt.contains("multiIf(ifNull(r.rate_method, '') = 'oracle', 2, ifNull(r.rate_method, '') = 'external', 1, 0) AS rate_rank"),
+                "{name}: arm B's rank must be NUMERIC — a max() over the method \
+                 string would rank by the lexicographic accident that 'oracle' \
+                 sorts above 'external'"
+            );
+            assert_eq!(
+                stmt.matches("max(rate_rank)").count(),
+                1,
+                "{name}: the outer aggregate must consume the rank exactly once"
+            );
+        }
+    }
+
+    /// The single-grain-edit guard. Every token task 0267 introduced must occur
+    /// the SAME number of times in both grain statements — so a fix applied to
+    /// the daily view and forgotten on the hourly one fails here rather than
+    /// silently shipping two surfaces that disagree about the same rate.
+    #[test]
+    fn views_sql_both_series_grains_agree_on_every_task_0267_token() {
+        let grains = series_grains();
+        let (daily_name, daily) = &grains[0];
+        let (hourly_name, hourly) = &grains[1];
+        for token in [
+            "WHERE method IN ('oracle', 'external')",
+            "argMax(usd_rate, (if(method = 'oracle', 1, 0), timestamp))",
+            "argMax(method, (if(method = 'oracle', 1, 0), timestamp))",
+            "AS rate_method",
+            "AS rate_rank",
+            "toUInt8(0) AS rate_rank",
+            "max(rate_rank) = 2",
+            "multiIf(max(peg_rate) <= 0, 'peg', max(rate_rank) = 2, 'oracle', 'external')",
+        ] {
+            assert_eq!(
+                daily.matches(token).count(),
+                hourly.matches(token).count(),
+                "`{token}` occurs a different number of times in {daily_name} \
+                 than in {hourly_name} — the grains have drifted apart"
+            );
+        }
     }
 }

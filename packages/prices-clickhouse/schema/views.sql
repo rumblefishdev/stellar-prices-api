@@ -376,7 +376,18 @@ SELECT
        if(max(peg_rate) > 0, max(peg_rate), CAST(1 AS Decimal(38, 14))),
        CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))) AS close_usd,
     CAST(if(max(is_peg) = 1 AND sum(w) = 0,
-            if(max(peg_rate) > 0, 'oracle', 'peg'),
+            -- Three-way since task 0267, because a measured rate can now arrive
+            -- from two provenances. ⚠️ The PEG DISCRIMINATOR STAYS FIRST and
+            -- stays `max(peg_rate) <= 0`: arm B's join_use_nulls note explains
+            -- that an unmatched LEFT JOIN yields the column DEFAULT rather than
+            -- NULL on prod, so "this bucket has no rate at all" reads as 0 in
+            -- peg_rate AND as 0 in rate_rank, and only the peg_rate test reads
+            -- identically under both join_use_nulls settings. Ordering the rank
+            -- test first would work by accident, not by rule.
+            -- Only once a rate EXISTS does the rank say which provenance it came
+            -- from: 2 = 'oracle', 1 = 'external'. See arm B for why the rank is
+            -- numeric rather than a max() over the method string.
+            multiIf(max(peg_rate) <= 0, 'peg', max(rate_rank) = 2, 'oracle', 'external'),
             'traded') AS LowCardinality(String)) AS method
 FROM
 (
@@ -393,7 +404,10 @@ FROM
         toFloat64(p.close_usd) * toFloat64(p.volume_base) AS v,
         toFloat64(p.volume_base)                          AS w,
         toUInt8(0)                                        AS is_peg,
-        CAST(0 AS Decimal(38, 14))                        AS peg_rate
+        CAST(0 AS Decimal(38, 14))                        AS peg_rate,
+        -- UNION ALL matches arms POSITIONALLY and requires an identical column
+        -- count, so this placeholder is structural, not decoration (task 0267).
+        toUInt8(0)                                        AS rate_rank
     FROM prices.price_ohlcv_1d AS p FINAL
     INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
     WHERE p.close_usd > 0
@@ -427,7 +441,17 @@ FROM
         -- would be DEAD CODE on prod. ifNull() only covers a session that sets
         -- join_use_nulls = 1; the `> 0` test in the outer SELECT is the real
         -- discriminator, and it reads the same under both settings.
-        ifNull(r.usd_rate, CAST(0 AS Decimal(38, 14))) AS peg_rate
+        ifNull(r.usd_rate, CAST(0 AS Decimal(38, 14))) AS peg_rate,
+        -- Task 0267. NUMERIC rank, never a max() over the method STRING: that
+        -- would only work by the lexicographic accident that 'oracle' sorts
+        -- above 'external', which is a property of the English words and not of
+        -- the precedence rule. 2 beats 1 by arithmetic.
+        -- Same join_use_nulls rule as peg_rate above: an unmatched LEFT JOIN
+        -- yields the column DEFAULT, so the rank arrives as 0 (not NULL) and the
+        -- ifNull() covers only a session that sets join_use_nulls = 1.
+        multiIf(ifNull(r.rate_method, '') = 'oracle', 2,
+                ifNull(r.rate_method, '') = 'external', 1,
+                0) AS rate_rank
     FROM
     (
         SELECT
@@ -483,10 +507,18 @@ FROM
     -- refuses. Pinned as expected behaviour by views_it.rs::
     -- a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains.
     --
-    -- method = 'oracle' selects a MEASURED reading. usd_rate keys on
+    -- The method predicate selects a MEASURED reading. usd_rate keys on
     -- (identity, timestamp, method) precisely so a task 0154 'pivot' row cannot
     -- silently replace a measurement; the consumer chooses, and this consumer
     -- chooses measured or nothing. Same choice as current.sql's tip surface.
+    --
+    -- Task 0267 widened "measured" from one word to two: 'external' is a reading
+    -- IMPORTED from an outside USD series (init.sql's method vocabulary), which
+    -- is evidence of the same standing as a poll and is admitted here. A DERIVED
+    -- 'pivot'/'pivot2' rate still is not, and neither is the pre-promotion
+    -- 'external-candidate' staging word, which no read predicate names.
+    -- Where one bucket holds BOTH an oracle row and an imported one, oracle wins
+    -- by the explicit rank in the argMax tuple below, never by timestamp.
     --
     -- Flooring uses toStartOfInterval, the SAME function the rollup MVs use to
     -- build these buckets (rollups.sql) — so the two agree under any server
@@ -533,9 +565,20 @@ FROM
             issuer_address,
             contract_address,
             toStartOfInterval(timestamp, INTERVAL 1 DAY) AS bucket,
-            argMax(usd_rate, timestamp)                  AS usd_rate
+            -- ⚠️ THE RANK COMES FIRST IN THE TUPLE, and that ordering is the
+            -- whole preference rule (task 0267). argMax over a TUPLE compares
+            -- element by element, so `(rank, timestamp)` means: any 'oracle' row
+            -- in the bucket beats EVERY imported row regardless of when each was
+            -- observed, and the timestamp only breaks ties WITHIN one method.
+            -- Keying on the timestamp alone -- the shape this was before the
+            -- widening -- would let a backfilled import land later in the day
+            -- than the last poll and silently outrank a measured reading.
+            -- argMax over a tuple is an idiom this codebase already ships; see
+            -- the two-key argMaxIf in prices-api queries_ch.rs.
+            argMax(usd_rate, (if(method = 'oracle', 1, 0), timestamp)) AS usd_rate,
+            argMax(method,   (if(method = 'oracle', 1, 0), timestamp)) AS rate_method
         FROM prices.usd_rate FINAL
-        WHERE method = 'oracle'
+        WHERE method IN ('oracle', 'external')
         GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket
     ) AS r
         ON  r.asset_kind       = b.asset_kind
@@ -584,7 +627,18 @@ SELECT
        if(max(peg_rate) > 0, max(peg_rate), CAST(1 AS Decimal(38, 14))),
        CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))) AS close_usd,
     CAST(if(max(is_peg) = 1 AND sum(w) = 0,
-            if(max(peg_rate) > 0, 'oracle', 'peg'),
+            -- Three-way since task 0267, because a measured rate can now arrive
+            -- from two provenances. ⚠️ The PEG DISCRIMINATOR STAYS FIRST and
+            -- stays `max(peg_rate) <= 0`: arm B's join_use_nulls note explains
+            -- that an unmatched LEFT JOIN yields the column DEFAULT rather than
+            -- NULL on prod, so "this bucket has no rate at all" reads as 0 in
+            -- peg_rate AND as 0 in rate_rank, and only the peg_rate test reads
+            -- identically under both join_use_nulls settings. Ordering the rank
+            -- test first would work by accident, not by rule.
+            -- Only once a rate EXISTS does the rank say which provenance it came
+            -- from: 2 = 'oracle', 1 = 'external'. See arm B for why the rank is
+            -- numeric rather than a max() over the method string.
+            multiIf(max(peg_rate) <= 0, 'peg', max(rate_rank) = 2, 'oracle', 'external'),
             'traded') AS LowCardinality(String)) AS method
 FROM
 (
@@ -600,7 +654,10 @@ FROM
         toFloat64(p.close_usd) * toFloat64(p.volume_base) AS v,
         toFloat64(p.volume_base)                          AS w,
         toUInt8(0)                                        AS is_peg,
-        CAST(0 AS Decimal(38, 14))                        AS peg_rate
+        CAST(0 AS Decimal(38, 14))                        AS peg_rate,
+        -- UNION ALL matches arms POSITIONALLY and requires an identical column
+        -- count, so this placeholder is structural, not decoration (task 0267).
+        toUInt8(0)                                        AS rate_rank
     FROM prices.price_ohlcv_1h AS p FINAL
     INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
     WHERE p.close_usd > 0
@@ -634,7 +691,17 @@ FROM
         -- would be DEAD CODE on prod. ifNull() only covers a session that sets
         -- join_use_nulls = 1; the `> 0` test in the outer SELECT is the real
         -- discriminator, and it reads the same under both settings.
-        ifNull(r.usd_rate, CAST(0 AS Decimal(38, 14))) AS peg_rate
+        ifNull(r.usd_rate, CAST(0 AS Decimal(38, 14))) AS peg_rate,
+        -- Task 0267. NUMERIC rank, never a max() over the method STRING: that
+        -- would only work by the lexicographic accident that 'oracle' sorts
+        -- above 'external', which is a property of the English words and not of
+        -- the precedence rule. 2 beats 1 by arithmetic.
+        -- Same join_use_nulls rule as peg_rate above: an unmatched LEFT JOIN
+        -- yields the column DEFAULT, so the rank arrives as 0 (not NULL) and the
+        -- ifNull() covers only a session that sets join_use_nulls = 1.
+        multiIf(ifNull(r.rate_method, '') = 'oracle', 2,
+                ifNull(r.rate_method, '') = 'external', 1,
+                0) AS rate_rank
     FROM
     (
         SELECT
@@ -690,10 +757,18 @@ FROM
     -- refuses. Pinned as expected behaviour by views_it.rs::
     -- a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains.
     --
-    -- method = 'oracle' selects a MEASURED reading. usd_rate keys on
+    -- The method predicate selects a MEASURED reading. usd_rate keys on
     -- (identity, timestamp, method) precisely so a task 0154 'pivot' row cannot
     -- silently replace a measurement; the consumer chooses, and this consumer
     -- chooses measured or nothing. Same choice as current.sql's tip surface.
+    --
+    -- Task 0267 widened "measured" from one word to two: 'external' is a reading
+    -- IMPORTED from an outside USD series (init.sql's method vocabulary), which
+    -- is evidence of the same standing as a poll and is admitted here. A DERIVED
+    -- 'pivot'/'pivot2' rate still is not, and neither is the pre-promotion
+    -- 'external-candidate' staging word, which no read predicate names.
+    -- Where one bucket holds BOTH an oracle row and an imported one, oracle wins
+    -- by the explicit rank in the argMax tuple below, never by timestamp.
     --
     -- Flooring uses toStartOfInterval, the SAME function the rollup MVs use to
     -- build these buckets (rollups.sql) — so the two agree under any server
@@ -740,9 +815,20 @@ FROM
             issuer_address,
             contract_address,
             toStartOfInterval(timestamp, INTERVAL 1 HOUR) AS bucket,
-            argMax(usd_rate, timestamp)                  AS usd_rate
+            -- ⚠️ THE RANK COMES FIRST IN THE TUPLE, and that ordering is the
+            -- whole preference rule (task 0267). argMax over a TUPLE compares
+            -- element by element, so `(rank, timestamp)` means: any 'oracle' row
+            -- in the bucket beats EVERY imported row regardless of when each was
+            -- observed, and the timestamp only breaks ties WITHIN one method.
+            -- Keying on the timestamp alone -- the shape this was before the
+            -- widening -- would let a backfilled import land later in the hour
+            -- than the last poll and silently outrank a measured reading.
+            -- argMax over a tuple is an idiom this codebase already ships; see
+            -- the two-key argMaxIf in prices-api queries_ch.rs.
+            argMax(usd_rate, (if(method = 'oracle', 1, 0), timestamp)) AS usd_rate,
+            argMax(method,   (if(method = 'oracle', 1, 0), timestamp)) AS rate_method
         FROM prices.usd_rate FINAL
-        WHERE method = 'oracle'
+        WHERE method IN ('oracle', 'external')
         GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket
     ) AS r
         ON  r.asset_kind       = b.asset_kind
