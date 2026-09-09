@@ -156,9 +156,18 @@ the per-asset endpoint, and decimal strings that survive the JSON round trip.
 npm run conformance:0120 && echo "TRANCHE 2 AC 1: PASS"
 ```
 
+**What the command does.** It fetches the live OpenAPI document from
+`/api-docs-json`, then walks all seven route groups for each of the twenty
+fixture assets in turn, validating every response against that document and
+against the correctness assertions above, and prints a running per-asset trace
+followed by a `pass / fail / skip` tally. **It exits `1` if any check failed and
+`0` only on a clean sweep**, which is why the `&&` above prints the verdict at all
+— a reviewer does not have to read the trace to know the result.
+
 The suite paces itself at 1.1 s per request, matching the free plan's 1 req/s
-sustained rate, and drives no load. It writes a timestamped JSON report of every
-individual check.
+sustained rate, and drives no load. It also writes a timestamped JSON report of
+every individual check, so a disputed line can be traced to the exact request and
+response behind it.
 
 **A reviewer should expect their own total, not ours.** Checks are generated per
 asset **per condition**, so an asset that has not traded inside the liquidity
