@@ -904,13 +904,21 @@ impl ChEnrichmentPass {
             Some(na) => format!(" AND timestamp < toDateTime({na})"),
             None => String::new(),
         };
+        // ⚠️ The lower bound is widened by one forward-fill window, and that is
+        // not cosmetic. The oracle tier ASOFs `o.timestamp <= p.timestamp` with
+        // `(p.timestamp - o.timestamp) <= window_s`, so a reading stamped just
+        // BELOW `not_before` still re-prices candles up to `not_before +
+        // window_s - 1` — inside the reset's own range. A guard that starts
+        // looking at `not_before` cannot see the row that will shadow it, which
+        // is the re-apply-and-relabel failure this refusal exists to prevent.
+        // Only the UPPER bound needed to become window-scoped for task 0268.
+        let nb = spec.not_before.saturating_sub(self.cfg.window_s);
         let sql = format!(
             "SELECT count() FROM {db}.oracle_prices \
              WHERE asset_id = {q} AND oracle_name = ? \
                AND timestamp >= toDateTime({nb}){upper}",
             db = self.cfg.database,
             q = spec.quote_asset_id,
-            nb = spec.not_before,
         );
         let rows = self
             .client
