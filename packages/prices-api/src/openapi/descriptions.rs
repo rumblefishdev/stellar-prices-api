@@ -321,7 +321,13 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          bucket, so the $1 fallback was rendered. Never appears on a quote leg — there the \
          same situation is `assumed-par`.\n\nEach value names the INPUT the rate came from, so \
          `assumed-par` and `external` are never interchangeable: one is an assumption, the \
-         other a measurement that may sit percent off par.\n\n`null` when the price fields \
+         other a measurement that may sit percent off par. A measured rate that happens to \
+         read exactly 1.0 is still `external`; the label is decided by whether an imported \
+         rate covers the bucket's UTC day, not by the value.\n\nOn a quote leg this is \
+         reconstructed at read time — the candle rows carry no provenance column — so one \
+         case is not separable: a bucket on a covered day for which no rate resolved inside \
+         its staleness window falls back to the $1 assumption and is still reported \
+         `external`.\n\n`null` when the price fields \
          are `null`, and always `null` for `base_currency=XLM`, where nothing is \
          converted.",
     ),
@@ -625,17 +631,18 @@ mod tests {
             .iter()
             .find(|(schema, field, _)| *schema == "Candle" && *field == "method")
             .expect("Candle.method is described");
+        // ⚠️ Read the published vocabulary, NOT every quoted literal in the
+        // statement: the `external` arm consults `usd_rate`, so the rendered SQL
+        // also carries `'UTC'`, `'credit'`, `'USDC'` and the issuer address,
+        // none of which are `method` values.
         let rendered = crate::assets::queries_ch::usd_method_expr(2, &[7]);
-        let emitted: Vec<&str> = rendered
-            .split('\'')
-            .skip(1)
-            .step_by(2)
-            .filter(|lit| !lit.is_empty())
-            .collect();
-        assert!(
-            emitted.len() >= 4,
-            "the emitter renders its labels as quoted literals: {rendered}"
-        );
+        let emitted = crate::assets::queries_ch::CANDLE_METHOD_LABELS;
+        for value in emitted {
+            assert!(
+                rendered.contains(&format!("'{value}'")),
+                "the emitter no longer renders `{value}`: {rendered}"
+            );
+        }
         for value in emitted.iter().copied().chain(["peg"]) {
             assert!(
                 text.contains(&format!("`{value}`")),

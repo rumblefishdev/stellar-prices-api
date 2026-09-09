@@ -1616,7 +1616,29 @@ async fn ohlcv_usdc_leg_labels_par_external_and_oracle_by_signature_and_epoch() 
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
              ('2023-03-11 12:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 50, 10,    10, 1, 1), \
              ('2026-03-11 13:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 48, 9.681, 10, 1, 1), \
-             ('2026-03-11 15:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 48, 9.681, 10, 1, 1)"
+             ('2026-03-11 15:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 48, 9.681, 10, 1, 1), \
+             ('2024-06-01 12:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 48, 9.900, 10, 1, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // ⚠️ The imported series is what makes case 2 `external`, and seeding it is
+    // the point of this fixture. The label is decided by whether an imported
+    // rate covers the bucket's UTC DAY — not by `close_usd`'s bytes, which a
+    // measured rate of exactly 1.0 makes indistinguishable from the assumption
+    // (174 of the 2049 imported days close at exactly 1.00000000).
+    //
+    // 2026-03-11 is covered. 2023-03-11 and 2024-06-01 are deliberately NOT,
+    // which is what separates cases 1 and 4 below.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2026-03-11 13:00:00', 0.96810000000000, \
+              'external', 'chainlink', 0, 1)",
+            i = iss()
         ))
         .execute()
         .await
@@ -1632,15 +1654,25 @@ async fn ohlcv_usdc_leg_labels_par_external_and_oracle_by_signature_and_epoch() 
         (
             "2026-03-11T13:00:00Z",
             "external",
-            "scaled below the epoch: only the imported USDC/USD series can have \
-             priced this, so calling it 'oracle' would claim a poll that never \
-             happened",
+            "scaled below the epoch on a day the imported series covers: task \
+             0267's rate priced this, and calling it 'oracle' would claim a poll \
+             that never happened",
         ),
         (
             "2026-03-11T15:00:00Z",
             "oracle",
             "same signature as the row above, two hours later: at or after the \
              epoch a scaled USDC leg was priced by a measured Reflector reading",
+        ),
+        (
+            // 🔑 Scaled, below the epoch, on a day NO imported rate covers. The
+            // arm list used to answer `external` here on the timestamp alone —
+            // asserting a measurement from a series that holds nothing for this
+            // day. No tier can produce this state, so the honest answer is null.
+            "2024-06-01T12:00:00Z",
+            "null",
+            "scaled below the epoch but no imported rate covers the day: nothing \
+             can attribute this bucket, and a label would be a claim",
         ),
     ] {
         let uri = format!(
@@ -1652,26 +1684,49 @@ async fn ohlcv_usdc_leg_labels_par_external_and_oracle_by_signature_and_epoch() 
         assert_eq!(status, StatusCode::OK, "body={json}");
         let data = json["data"].as_array().unwrap();
         assert_eq!(data.len(), 1, "{ts}: one bucket expected: {json}");
-        assert_eq!(data[0]["method"], expected, "{ts}: {why}");
+        if expected == "null" {
+            assert!(data[0]["method"].is_null(), "{ts}: {why}: {json}");
+        } else {
+            assert_eq!(data[0]["method"], expected, "{ts}: {why}");
+        }
     }
 
     // The retired word must not reach the wire on a quote leg at all — a
     // regression that reinstated it would otherwise only show as an unexpected
     // string in one of the three assertions above.
-    let uri = format!(
-        "/v1/assets/FOO:{}/ohlcv?granularity=1h&start=2023-03-11T00:00:00Z\
-         &end=2026-03-12T00:00:00Z&base_currency=USD",
-        iss()
-    );
-    let (status, json) = get(client, &uri).await;
-    assert_eq!(status, StatusCode::OK, "body={json}");
-    for c in json["data"].as_array().unwrap() {
-        assert_ne!(
-            c["method"], "peg",
-            "0268 retired this label from the candle path; it survives only on \
-             USDC's own series: {c}"
+    //
+    // ⚠️ Swept as day-wide windows, one per seeded bucket, NOT as one span from
+    // 2023 to 2026: that span is ~26329 buckets at `1h` and the handler refuses
+    // anything over `OHLCV_MAX_POINTS` (5000) with a 400, so the sweep asserted
+    // `OK` against `invalid_query` and this test could never reach its own
+    // assertion. Each window still carries a seeded row, which is what the
+    // sweep needs.
+    for (start, end) in [
+        ("2023-03-11T00:00:00Z", "2023-03-12T00:00:00Z"),
+        ("2024-06-01T00:00:00Z", "2024-06-02T00:00:00Z"),
+        ("2026-03-11T00:00:00Z", "2026-03-12T00:00:00Z"),
+    ] {
+        let uri = format!(
+            "/v1/assets/FOO:{}/ohlcv?granularity=1h&start={start}&end={end}&base_currency=USD",
+            iss()
         );
+        let (status, json) =
+            get(Client::default().with_url(ch_url()).with_database(db), &uri).await;
+        assert_eq!(status, StatusCode::OK, "body={json}");
+        let rows = json["data"].as_array().unwrap();
+        assert!(
+            !rows.is_empty(),
+            "{start}: the sweep must see its seeded row"
+        );
+        for c in rows {
+            assert_ne!(
+                c["method"], "peg",
+                "0268 retired this label from the candle path; it survives only \
+                 on USDC's own series: {c}"
+            );
+        }
     }
+    drop(client);
 
     teardown(db).await;
 }
