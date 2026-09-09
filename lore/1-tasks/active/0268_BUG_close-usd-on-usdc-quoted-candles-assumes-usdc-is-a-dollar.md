@@ -620,3 +620,136 @@ Nothing below can be done from the branch. Work Appendix B of
     This closes **AC 6**.
 11. **AC 4 stays open** until [[0267]] step 2 widens the three
     `method = 'oracle'` filters — Issue 1.
+
+---
+
+## Review round 4 (2026-09-09) — verified against a live ClickHouse
+
+Every finding below was checked against ClickHouse **26.3.10.60**, the pinned
+production version. The `#[ignore]`d suites this branch relies on had never been
+run: three were red, for one root cause.
+
+### 🔴 The campaign was a no-op
+
+`reset_sql` appended the bare predicate `close_usd = close` into a SELECT whose
+own projection declares `CAST(0 AS Decimal(38, 14)) AS close_usd`. ClickHouse
+resolves identifiers against SELECT aliases **before** table columns
+(`prefer_column_name_to_alias` defaults to 0), so the term evaluated as
+`0 = close` and matched nothing.
+
+The failure is silent by construction: `count_reset_pending` renders the same
+fragment into an alias-free statement, resolves the real column, and reports the
+full 654 291-row population; the reset then writes 0 rows, logs "USD reset made
+no progress", and the run exits 0. An operator following the runbook would have
+seen a clean pass over unchanged values.
+
+Verified directly:
+
+```sql
+SELECT CAST(0 AS Decimal(38,14)) AS close_usd, p.close AS close
+FROM (SELECT toDecimal128(5,14) AS close_usd, toDecimal128(5,14) AS close) AS p
+WHERE close_usd = close      -- 0 rows: evaluated 0 = 5
+WHERE p.close_usd = p.close  -- 1 row
+```
+
+Fixed by qualifying in `reset_sql` only; `reset_pending_pred` and the month
+enumeration keep the bare form (no `p` in scope — the prefix would be a syntax
+error). Three integration tests went red→green:
+`the_external_reset_never_zeroes_a_bucket_it_cannot_refill` (0 != 1),
+`the_bounded_usd_reset_is_not_refused_by_oracle_rows_above_its_window`,
+`the_external_reset_touches_only_the_bounded_month`.
+
+⚠️ The string invariant could not catch this: it asserted the two fragments are
+**equal**, which is exactly what must not hold. Replaced with a test that pins
+the qualified form in one site and the bare form in the other.
+
+### 🔴 `assumed-par` was a value signature, not provenance
+
+`usd_method_expr`'s first arm read `close_usd = close`. That tests the OUTCOME
+and reports it as the INPUT. **174 of the 2049 days in 0267's imported series
+close at exactly 1.00000000**, so ~8.5% of the re-enriched population would
+carry a MEASURED rate under an assumption label — while `dto.rs` and the
+published OpenAPI text promise the opposite in as many words. Documentation
+right, SQL wrong. This is Issue 9's read half, and it was in scope all along.
+
+The `external` arm now asks whether an imported rate covers the bucket's UTC day
+— the same day-set `external_rate_day_pred` resets on — and is tested before the
+par signature. Measured on the seeded rows, old vs new label:
+
+| bucket | old | new |
+|---|---|---|
+| 2023-03-11 (measured 0.96812) | `external` | `external` |
+| 2024-06-01 (no imported rate) | `assumed-par` | `assumed-par` |
+| **2025-01-15 (measured exactly 1.0)** | **`assumed-par`** | **`external`** |
+| 2026-03-11 16:00 (post-epoch) | `oracle` | `oracle` |
+
+A bare `quote_asset_id = usdc -> 'oracle'` arm also went: pre-epoch it reported
+a poll that provably did not exist. That state now reports null.
+
+**One residual, documented on the wire rather than hidden:** day coverage is not
+bucket coverage, so a bucket on a covered day whose own staleness window found
+no rate falls back to $1 and still reports `external`. No read-side expression
+can separate those two cases — the candle rows carry no provenance column. See
+Future Work.
+
+### 🟠 Also fixed
+
+- `assert_reset_not_shadowed_by_oracle` gained a lower bound at `not_before`,
+  but the oracle tier forward-fills a reading up to `window_s` old, so a row
+  just below the floor still re-prices candles just above it — the
+  re-apply-and-relabel this guard exists to refuse. Floor widened by `window_s`;
+  only the upper bound needed to be window-scoped. New test, falsified.
+- `--reset-quote-asset-id <USDT> --reset-require-external-rate` was accepted.
+  Every site on the external path is USDC-only, so it would zero USDT rows on
+  USDC's rate days and leave the peg tier to write $1 back over all of them —
+  0182 under a different quote asset. Refused in the library.
+- `external_rate_day_pred` admitted a day on any `external` row while
+  `external_sql` filters `r.usd > 0` after the ASOF; the day-set now requires a
+  positive rate. (0267's loader already rejects a non-positive rate, so this is
+  belt-and-braces, not a live defect.)
+- Runbook precondition 2 expected `1970-01-01` from `toTime`, which pins to
+  **1970-01-02** — it would have sent the operator to STOP on a correct series.
+  Now `formatDateTime(timestamp, '%H:%i:%S', 'UTC')`, expecting `00:00:00`.
+  (`%M` is the month name in ClickHouse: `'%H:%M:%S'` prints `00:March:00`.)
+
+### Open
+
+- **654 291 is a measured constant, not a query.** It comes from 0247/0168 and
+  is repeated in the title, this file, the runbook and two code comments, but
+  nothing re-derives it and the runbook carries no re-measuring query. If the
+  population has moved since, the abort signals compare against a stale figure.
+- Implementation §1 promises the enrichment "records which one it used"; nothing
+  is recorded. §2 promises re-enriching `vwap` where derived; `external_sql`
+  carries `p.vwap` through unchanged. §5 describes a shadow-column rollout; the
+  branch does a versioned in-place re-insert with FREEZE/`ATTACH PARTITION` as
+  rollback. The plan changed and the text did not.
+- **ADR 0011 §4 says "no fourth word is coined for the same concept on a third
+  endpoint" and that `method` stays `traded`/`peg`/`oracle`, additive.** This
+  branch coins `assumed-par` and `external` and retires `peg` from the candle
+  path. The branches are right for money semantics — `peg` conflated an
+  assumption with a measurement — but the ADR must be superseded in the same
+  merge, or the repo's own settled contract says the wire is wrong. **No ADR file
+  is touched by either branch.** This needs a human decision and an ADR on
+  `develop`; it is not something to slip into a feature branch.
+
+### Future Work → to spawn on `develop`
+
+- **Store the pricing tier on the candle row** (Issue 9, complete form). The
+  read path reconstructs `method` from the quote asset, the bucket timestamp and
+  the imported rate's day coverage. That is now truthful in the common cases and
+  still cannot attribute a source (`Candle.source`/`quality` are NULL on every
+  quote leg) or separate a covered-day peg fallback from a measurement. A
+  `LowCardinality` provenance column on `price_ohlcv_*`, written by every tier,
+  is the only complete fix. Needs its own rollout plan over 654k+ rows and a
+  wire-contract change — not a rider on this task.
+
+### Design decisions — Emerged
+
+- **Day-set lookup over a stored column, for now.** The complete fix is the
+  column above; it is a schema change plus a re-enrichment of every candle, on a
+  branch already carrying a 654k-row campaign. The day-set removes the
+  systematic 8.5% error today, at one uncorrelated subquery per query, and the
+  residual is stated in the OpenAPI text.
+- **Null over `oracle` for the unexplained pre-epoch state.** A null says "no
+  USD provenance to report", which `dto.rs` already defines; `oracle` would have
+  been a claim.
