@@ -2,7 +2,7 @@
 id: "0267"
 title: "Serve USDC's measured USD history from the Chainlink anchor — load external rates, stop synthesising 1.0, say on the wire what each point is"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0011"]
 related_tasks: ["0265", "0247", "0168", "0173", "0111", "0125", "0127", "0266", "0268"]
 tags: [layer-backend, layer-api, priority-high, effort-medium, milestone-M3, pricing, enrichment, data-correctness, stablecoin]
@@ -883,3 +883,77 @@ Everything below is deploy-gated; none of it ran on this branch.
 - [ ] 14. Then, and only then, [[0268]]'s campaign —
       `docs/runbooks/repair-coarse-usd-values.md` Appendix B, whose precondition
       1 counts exactly the rows step 8 produces
+
+---
+
+## Review round 4 (2026-09-09) — verified against a live ClickHouse
+
+Round 4 differs from rounds 1–3 in one respect that matters: every finding was
+checked against ClickHouse **26.3.10.60**, the pinned production version, rather
+than read. The `#[ignore]`d suites had never been run — three of them were red.
+
+### Fixed on this branch
+
+1. **`/ohlcv`'s imported-rate net outlived the oracle epoch.** `e_ok` floored an
+   imported row at `toStartOfDay(bkt,'UTC')` with no bound on the BUCKET, so an
+   hour at or after 14:00 on 2026-03-11 with no poll in its own window reached
+   back to the 13:00 import and published it as `external`/`chainlink`/`measured`
+   while `price_usd_series_1h` published `1`/`peg` for the same hour. Bounded by
+   `bo.bkt < toDateTime(USDC_ORACLE_EPOCH_S)`.
+
+   ⚠️ The review proposed bounding the imported ROW (`re.erts < epoch`). That is
+   a **no-op against real data** — the offending row is at 13:00, already below
+   the epoch, and both the loader and `promote_statement` refuse to write a row
+   at or above it. The bucket is what leaks. Test:
+   `ohlcv_peg_series_stops_importing_across_the_oracle_epoch`, falsified against
+   the unbounded expression (returns 0.991234/`external`; must return 1.0/`peg`).
+
+2. **The grain order is now enforced in code.** "Daily first, hourly second" was
+   prose in the runbook and a checklist item here. The two grains share all 1872
+   midnight keys and the later `version` wins, so the wrong order stamps the day
+   close over the 00:00 hour of every covered day — valid rows, matching counts,
+   wrong values, no error. Verified on the real `usd_rate` DDL: staging
+   2023-03-11 00:00 at the true hourly `0.99503491` and then at the day close
+   `0.96812` leaves ONE row, `0.96812`. `--grain daily` now refuses while hourly
+   rows are staged; `--allow-daily-after-hourly` reopens a deliberate re-seed.
+
+3. **Three comments and two help texts that contradicted the code**: the
+   misattached `promote_statement` doc block (rustdoc hung 20 lines of ⚠️ on a
+   `&str` const, leaving the function undocumented), `--promote`'s "still
+   validated" (it parses nothing), `--shadow`'s implied mode switch (it cannot be
+   false), `INSERT_CHUNK_ROWS`' 1872-row rationale (the hourly pass is 44 918),
+   and the `views.sql`/`queries_ch.rs` claim that the two read surfaces agree
+   everywhere once hourly rows are loaded (false on the epoch day).
+
+4. **The published precedence rule was backwards.** `descriptions.rs` said a
+   bucket holding both a Reflector reading and an imported one reports `oracle`
+   "whichever was observed later" — recency. The implementation is rank-first
+   (`argMax(usd_rate, (if(method='oracle',1,0), timestamp))`), so a poll wins
+   outright and observation time only breaks ties within a method. Public API
+   text, corrected during the merge.
+
+### Open
+
+- **The scheduled read of new Chainlink rounds (Implementation §7) is not
+  implemented and is not marked out of scope.** No scheduler, binary or backlog
+  item exists. It needs either an "Out of scope" line here or a spawned task.
+- `ohlcv_peg_series_answers_for_a_readonly_user` could not be run: the sandbox
+  ClickHouse has no writeable access storage, so `CREATE USER` fails. Unrelated
+  to this branch's changes, and the new `usd_rate` read on the quote-leg path
+  needs no extra grant (the test grants `SELECT ON <db>.*`) and adds no
+  `SETTINGS` clause, which was the 2026-08-27 failure mode.
+- The hourly grain, `check_server_timezone` and the `toStartOfDay` day-wide net
+  are implemented and live in the runbook but were never added to the
+  Implementation section here.
+
+### Design decisions — Emerged
+
+21. **Bound the bucket, not the row** (finding 1). The row bound reads as the
+    obvious fix and does nothing; stated here because the next reader will
+    propose it again.
+22. **The grain gate lives in the library, gated on the DAILY grain only.**
+    Hourly-onto-daily is the supported order and must stay free, or the gate
+    would refuse the runbook's own second step.
+23. **`--dry-run` still contacts no server**, so it cannot report the grain
+    gate. Keeping dry-run offline was judged worth more than early warning; the
+    gate fires before the first INSERT and the help says so.
