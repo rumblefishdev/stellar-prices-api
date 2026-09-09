@@ -753,3 +753,35 @@ Future Work.
 - **Null over `oracle` for the unexplained pre-epoch state.** A null says "no
   USD provenance to report", which `dto.rs` already defines; `oracle` would have
   been a claim.
+
+### Round 4, second pass — three defects in the round-4 fixes
+
+Re-reviewed adversarially against the live ClickHouse. The first pass introduced
+two defects and left one hole:
+
+- **The day-set asked about the bucket's first day** while the external tier
+  resolves at the bucket END within `max(bucket_width, 1 day)`. Every WEEKLY and
+  MONTHLY USDC candle priced from a mid-period rate — which
+  `external_rate_day_pred` documents as normal — reported `method: null`.
+  Under-reaching is the safe direction for a write and a wrong answer for a
+  read. The arm now tests the whole window, rounded out to days.
+- **The par arm was not epoch-bounded**, so a post-epoch poll reading exactly
+  1.0 reported `assumed-par` — the same defect this round removed, on the other
+  side of the epoch. `peg_sql` has no epoch bound either, so post-epoch par is
+  genuinely produced by both tiers. Bounded.
+- **`external_sql`'s ASOF source still admitted a non-positive rate.** The
+  day-set gained `usd_rate > 0`; the subquery the ASOF picks from did not, and
+  `r.usd > 0` runs only after the pick. A zero rate mid-day would claim the day,
+  let the reset zero every later bucket, be dropped by the post-filter, and
+  leave the peg tier to write $1 back — 0182 re-created by the commit meant to
+  prevent it.
+- **CI was red**: `cargo clippy -- -D warnings` failed on a constant read only
+  by tests. Now `#[cfg(test)]`, gate passes.
+- The oracle-shadow refusal reported `[not_before, …)` while scanning one window
+  lower — an operator checking it would get zero rows for a real refusal.
+
+Lesson worth keeping: both defects of this round were **read-side labels that
+looked right in the common case**. The tests that "covered" them asserted string
+equality of SQL fragments or used fixtures that could not reach the boundary.
+Every fix in both passes was falsified against a live ClickHouse before being
+believed.
