@@ -541,19 +541,19 @@ widget.
 
 ![The acceptance strip — API p95 latency, 5xx rate, cache-hit ratio and ClickHouse write latency — above the alarm status strip](./screenshots/ac8-dashboard-1-acceptance-strip-and-alarms.png){width=95%}
 
-The other four panel captures are in `docs/scf/screenshots/`. **The alarm strip
-covers 50 alarms**, derived from the construct tree rather than hard-coded, so the
-count maintains itself as alarms are added; the image above is a dated
-illustration captured 2026-09-03 and shows 49 for that reason. No figure in this
-section is read off an image. **Cost:** about **$4.80 a month** in metric
-publications.
+![API row: request count, latency percentiles and error rates per route group on the production stage](./screenshots/ac8-dashboard-2-api.png){width=95%}
 
-🔑 **Two named substitutions.** Milestone 1 mentions "DB CPU"; that is served here
-by ClickHouse host and write-path metrics, free disk percentage and write latency,
-because ADR 0007 replaced RDS with the shared Hetzner cluster. And the criterion
-says read-only IAM _role_ where an IAM _user_ with a narrow inline read policy is
-delivered, because the reviewing identity has not been named and the account is
-shared with another project.
+![Ingestion row, including the ClickHouseWriteLatencyMs metric added by this task](./screenshots/ac8-dashboard-3-ingestion-write-latency.png){width=95%}
+
+![ClickHouse and backfill row over a 14-day window, beside the per-worker panel over 7 days](./screenshots/ac8-dashboard-4-clickhouse-backfill-workers.png){width=95%}
+
+![Enrichment and oracle row, carrying all six Prices/Enrichment metrics](./screenshots/ac8-dashboard-5-enrichment-oracle.png){width=95%}
+
+**The alarm strip covers 50 alarms**, derived from the construct tree rather than
+hard-coded, so the count maintains itself as alarms are added; the captures above
+are dated illustrations taken 2026-09-03 and show 49 for that reason. No figure in
+this section is read off an image. **Cost:** about **$4.80 a month** in metric
+publications.
 
 ### 7.3 The API edge: CORS, custom domain, and the WAF decision
 
