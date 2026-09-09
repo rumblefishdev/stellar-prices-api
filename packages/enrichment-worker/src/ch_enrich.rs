@@ -201,6 +201,23 @@ pub enum ChEnrichError {
     )]
     ResetRequiresExternalRates { quote_asset_id: u32 },
 
+    /// `require_external_rate` asked for on a quote leg that is not canonical
+    /// USDC (task 0268 review). The external tier can only refill USDC.
+    #[error(
+        "USD reset refused: --reset-require-external-rate was passed for quote \
+         asset_id {quote_asset_id}, which is not canonical USDC (asset_id \
+         {usdc_id}).\n\
+         Every part of the external path is pinned to canonical USDC: the day-set \
+         predicate, the loaded-rates check and the external tier's own statement. \
+         A reset on another quote leg would therefore zero rows on USDC's rate \
+         days and leave the external tier unable to refill a single one — the \
+         peg tier would write $1 back over every one of them, which is task \
+         0182's incident with a different quote asset.\n\
+         Reset this leg without --reset-require-external-rate, or target \
+         canonical USDC."
+    )]
+    ResetExternalRateLegIsNotUsdc { quote_asset_id: u32, usdc_id: u32 },
+
     /// A [`UsdResetSpec`] whose `[not_before, not_after)` window is empty (task
     /// 0268 review, WR-05). See [`UsdResetSpec::validate`] for why this is an
     /// error and not a no-op.
@@ -432,7 +449,7 @@ fn external_rate_day_pred(db: &str) -> String {
         "toDate(timestamp, 'UTC') IN (SELECT toDate(timestamp, 'UTC') FROM {db}.usd_rate FINAL \
          WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
            AND issuer_address = '{USDC_ISSUER}' AND contract_address = '' \
-           AND method = 'external')"
+           AND method = 'external' AND usd_rate > 0)"
     )
 }
 
@@ -940,6 +957,36 @@ impl ChEnrichmentPass {
         Ok(())
     }
 
+    /// Refuse a `require_external_rate` reset whose quote leg is not canonical
+    /// USDC (task 0268 review).
+    ///
+    /// Everything on the external path names canonical USDC and nothing else:
+    /// [`external_rate_day_pred`]'s day-set, `assert_external_rates_are_loaded`,
+    /// and `external_sql`'s own `quote_asset_id` bound, which is filled from
+    /// `refs.usdc`. `assert_reset_target_is_priceable` accepts USDT — it is a
+    /// stable reference and the PEG tier can price it — so
+    /// `--reset-quote-asset-id <USDT> --reset-require-external-rate` was a legal
+    /// combination that zeroed USDT-quoted rows on USDC's rate days and left the
+    /// external tier, which only ever runs for USDC, unable to refill one of
+    /// them. The peg tier then writes $1 back over the lot: task 0182's incident
+    /// under a different quote asset.
+    ///
+    /// Refused here in the library rather than with a CLI `conflicts_with`,
+    /// because the CLI is not the only driver.
+    async fn assert_external_rate_leg_is_usdc(
+        &self,
+        spec: &UsdResetSpec,
+    ) -> Result<(), ChEnrichError> {
+        let refs = self.resolve_reference_ids().await?;
+        match refs.usdc {
+            Some(usdc_id) if usdc_id == spec.quote_asset_id => Ok(()),
+            usdc => Err(ChEnrichError::ResetExternalRateLegIsNotUsdc {
+                quote_asset_id: spec.quote_asset_id,
+                usdc_id: usdc.unwrap_or(0),
+            }),
+        }
+    }
+
     /// Refuse a `require_external_rate` reset when `prices.usd_rate` holds no
     /// `method = 'external'` row for canonical USDC at all (task 0268).
     ///
@@ -1031,6 +1078,9 @@ impl ChEnrichmentPass {
         // only applies to the 0268 mode. Same property as the other three:
         // nothing is zeroed unless a tier in THIS pass can put a value back.
         if spec.require_external_rate {
+            // Before anything counts rows: the external path is USDC-only, so a
+            // different quote leg cannot be refilled by it at all.
+            self.assert_external_rate_leg_is_usdc(spec).await?;
             self.assert_external_rates_are_loaded(spec).await?;
             // Fifth (review WR-09): the external tier's own premise, measured on
             // the table the oracle tier reads. Independent of `not_before`.

@@ -1499,6 +1499,47 @@ async fn the_usd_reset_is_refused_by_an_oracle_row_that_forward_fills_into_it() 
         .unwrap();
 }
 
+/// The external path is canonical-USDC-only at every site, but the priceability
+/// gate accepts USDT (the peg tier can price it), so
+/// `--reset-quote-asset-id <USDT> --reset-require-external-rate` used to be a
+/// legal combination: it zeroed USDT-quoted rows on USDC's rate days, the
+/// external tier — which only ever runs for USDC — refilled none of them, and
+/// the peg tier wrote $1 back over the lot. Task 0182's incident, different
+/// quote asset. Refused in the library, so no driver can assemble it.
+#[tokio::test]
+#[ignore]
+async fn an_external_reset_refuses_a_quote_leg_that_is_not_canonical_usdc() {
+    let db = "it_enrich_0268_usdt_external";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    // The 0182 fixture is the one that tracks USDT (asset_id 3) as a stable
+    // reference, so `assert_reset_target_is_priceable` passes it and this test
+    // reaches the guard it is about.
+    let client = setup_0182(db, t_old, t_new).await;
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(UsdResetSpec {
+        // asset_id 3 is USDT in this fixture: a stable reference, so the
+        // priceability gate passes it, and the external tier cannot touch it.
+        quote_asset_id: 3,
+        not_before: 0,
+        not_after: Some(prices_clickhouse::USDC_ORACLE_EPOCH_S),
+        require_external_rate: true,
+    });
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+    assert!(
+        matches!(err, ChEnrichError::ResetExternalRateLegIsNotUsdc { quote_asset_id, .. }
+                 if quote_asset_id == 3),
+        "an external reset on a non-USDC leg must be refused, got {err:?}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 #[ignore]
 async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_leg() {
