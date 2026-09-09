@@ -118,3 +118,13 @@ packages/prices-api/loadtest/pool-wide.json
 .planning/
 # GSD dispatch sentinel (run-scoped, per developer)
 .gsd/
+
+# 0265 research: raw data and reproduction scripts stay local (see analysis/run.sh); notes, figures and sources.csv are versioned
+# data/: only task 0267's input (the composed USDC/USD series) and the source table are versioned;
+# everything else is a venue dump or an analysis output that analysis/run.sh regenerates
+lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/*
+!lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/sources.csv
+!lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/composed_usdc_usd_1d.csv
+!lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/composed_usdc_usd_1h_2023-03.csv
+lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/analysis/*
+!lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/analysis/guardrails.py
