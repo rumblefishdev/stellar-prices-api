@@ -82,22 +82,26 @@
 > **Full evidence — acceptance-criteria mapping with runnable commands, the
 > complete deviation rationale, the limits of each result stated where the
 > evidence sits, and an explicit list of what is _not_ claimed:**
-> `<DRIVE_FOLDER_LINK>`
+> https://drive.google.com/file/d/16wTFhOmJkjLe1ixDXDQbbIDckh0lHlv2/view?usp=sharing
 
 ---
 
 ## Field 2 — Deliverable Verification - Video
 
-> `<VIDEO_LINK>`
+> https://drive.google.com/file/d/1WkC4BG-8vcZrEGqJ1CjPE9iiTasotfOb/view?usp=sharing
 
 ---
 
 ## Field 3 — Additional Deliverable Verification
 
-> **Evidence package (Google Drive):** `<DRIVE_FOLDER_LINK>` — contains
-> `milestone-2-evidence.pdf` (acceptance-criteria walkthrough with reproducible
-> commands, dashboard screenshots, the deviation rationale, and the
-> not-claimed list) and the demo video.
+> **Evidence package (Google Drive):** https://drive.google.com/drive/folders/1Y0xKwCstQnb0Sn5XNWvuxXkgNpPFx7HC?usp=sharing
+>
+> The folder holds `milestone-2-evidence.pdf` — the acceptance-criteria
+> walkthrough with reproducible commands, dashboard screenshots, the deviation
+> rationale and the not-claimed list — and the demo video. Direct links:
+>
+> - Evidence PDF: https://drive.google.com/file/d/16wTFhOmJkjLe1ixDXDQbbIDckh0lHlv2/view?usp=sharing
+> - Demo video: https://drive.google.com/file/d/1WkC4BG-8vcZrEGqJ1CjPE9iiTasotfOb/view?usp=sharing
 >
 > **Live & anonymous (verify directly in a browser):**
 >
@@ -197,12 +201,16 @@
       (already parameterised — it defaults to milestone 2, and `./build-pdf.sh 1`
       still rebuilds the Milestone 1 PDF from its own source). Last build
       2026-09-09: 20 pages, 1.1 MB, all five screenshots embedded.
-- [ ] PDF uploaded to a Google Drive folder with link-sharing set to "anyone with
-      the link can view".
-- [ ] Drive folder link copied into the Field 1 closer **and** the Field 3
-      opener (replace both `<DRIVE_FOLDER_LINK>` placeholders).
-- [ ] Video uploaded with public sharing; URL pasted into Field 2.
-- [ ] All `<ANGLE_BRACKET>` placeholders in this file replaced.
+- [x] PDF uploaded to Google Drive with link-sharing public — **verified
+      anonymously 2026-09-09**: the file downloads with no session and is
+      byte-identical to the local build (`md5 9c3bb905…`, 1,112,228 bytes,
+      20 pages).
+- [x] Links placed: the evidence PDF closes Field 1, the folder opens Field 3
+      with both direct links beneath it. All three return HTTP 200 anonymously.
+- [x] Video uploaded with public sharing; URL in Field 2
+      (`stellar-prices-api-milestone-2.mp4`, reachable anonymously).
+- [x] All `<ANGLE_BRACKET>` placeholders replaced — none remain outside the
+      convention note at the top of this file.
 - [x] `curl -sS https://prices-api.sorobanscan.rumblefish.dev/api-docs-json`
       returns **HTTP 200** and the OpenAPI 3.1 document anonymously — verified
       2026-09-09.
