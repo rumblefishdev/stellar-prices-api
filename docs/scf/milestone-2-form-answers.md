@@ -168,24 +168,32 @@
 
 ## Pre-submission checklist
 
-- [ ] `develop` merged up to date and every Field 3 link resolves in an
-      incognito window (the anonymous ones without a key).
-- [ ] **All cited figures re-run within days of submission.** Numbers drift: the
-      backfill advances, coverage percentages move, and the traded population
-      changes between pagination walks.
-- [ ] Conformance suite re-run on production and the pass/fail/skip counts in
-      `milestone-2-evidence.md` §5 AC 1 updated: `npm run conformance:0120`.
-- [ ] Cache recipe in §5 AC 3 re-run; the six-row latency table still separates
-      cleanly.
-- [ ] `GET /v1/backfill/status` re-read and `earliest_data_available` in §5 AC 5
-      confirmed unchanged.
+- [~] Every Field 3 link **verified present on `develop` 2026-09-09** — both
+  ADRs, the deviations document, the general overview, the conformance script
+  and the load-test script. ⏳ The submission branch itself is 23 commits
+  ahead of `develop` and not yet merged; per project convention the PR stays
+  open until the work is confirmed in production.
+- [x] **All cited figures re-run 2026-09-09.** Numbers drift: the backfill
+      advances, coverage percentages move, and the traded population changes
+      between pagination walks — it fell from 5,353 to 3,900 assets in one day.
+- [x] Conformance suite re-run on production 2026-09-09 08:12 UTC and §5 AC 1
+      updated: **1014 pass, 0 fail, 0 skip**.
+- [x] Cache recipe in §5 AC 3 re-run 2026-09-09. The **five-row** table still
+      separates cleanly: hits 37-54 ms, misses 282-948 ms. The first ask was a
+      cold Lambda start and is reported as such.
+- [x] `GET /v1/backfill/status` re-read 2026-09-09 and `earliest_data_available`
+      confirmed unchanged at `2015-11-18T03:47:00Z`. All four AC 5 views re-run,
+      including the three ClickHouse ones; none moved.
 - [x] Dashboard screenshots — **decided: keep the 2026-09-03 captures**
       (commit `a6d3147`, task 0125). They are illustrations of the widgets, not a
       source of any figure, and §7.2 now dates them and explains why their strip
       shows 49 where the text says 50. No re-capture owed.
-- [ ] `ch-demo-queries.sql` run against production and any pasted output in the
-      evidence document refreshed.
-- [ ] `milestone-2-evidence.md` finalised and exported: `./build-pdf.sh`
+- [~] `ch-demo-queries.sql` — the queries behind figures the document actually
+  pastes were run against production 2026-09-09 (method distribution, the
+  per-source 24 h volumes, and AC 5's three database views), and §6.3's
+  sources payload was refreshed from them. The remaining queries are
+  reproduction aids whose output is not quoted; they were not all re-run.
+- [x] `milestone-2-evidence.md` exported: `./build-pdf.sh`
       (already parameterised — it defaults to milestone 2, and `./build-pdf.sh 1`
       still rebuilds the Milestone 1 PDF from its own source). Last build
       2026-09-09: 20 pages, 1.1 MB, all five screenshots embedded.
@@ -195,11 +203,15 @@
       opener (replace both `<DRIVE_FOLDER_LINK>` placeholders).
 - [ ] Video uploaded with public sharing; URL pasted into Field 2.
 - [ ] All `<ANGLE_BRACKET>` placeholders in this file replaced.
-- [ ] `curl -sS https://prices-api.sorobanscan.rumblefish.dev/api-docs-json | head`
-      returns the specification anonymously.
-- [ ] No API key, certificate, or other secret material visible in the PDF, the
-      screenshots, or any video frame — including the browser address bar and
-      any terminal scrollback.
+- [x] `curl -sS https://prices-api.sorobanscan.rumblefish.dev/api-docs-json`
+      returns **HTTP 200** and the OpenAPI 3.1 document anonymously — verified
+      2026-09-09.
+- [~] No API key, certificate, or other secret material. The **PDF text and all
+  four Markdown deliverables were scanned clean** 2026-09-09 — no AWS access
+  keys, no Stellar secret seeds, no private-key blocks, no literal
+  `x-api-key` values, and no personal usernames. ⏳ **The video frames and
+  the screenshots still need a human pass** — address bar, tab titles,
+  terminal scrollback, autocomplete dropdowns.
 - [ ] Field 4 — decide between `—` and a specific support request.
-- [ ] English-only across all four blocks; no internal slang, no task numbers
-      without context, no personal usernames.
+- [x] English-only across all four blocks; no personal usernames (scanned
+      2026-09-09). Task numbers appear only with their context.
