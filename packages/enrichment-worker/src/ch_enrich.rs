@@ -206,7 +206,7 @@ pub enum ChEnrichError {
     #[error(
         "USD reset refused: --reset-require-external-rate was passed for quote \
          asset_id {quote_asset_id}, which is not canonical USDC (asset_id \
-         {usdc_id}).\n\
+         {usdc_id}; 0 means canonical USDC is not a tracked asset here at all).\n\
          Every part of the external path is pinned to canonical USDC: the day-set \
          predicate, the loaded-rates check and the external tier's own statement. \
          A reset on another quote leg would therefore zero rows on USDC's rate \
@@ -905,7 +905,10 @@ impl ChEnrichmentPass {
     /// keeps the guard's meaning and drops only the false positives.
     ///
     /// A spec with `not_after = None` still counts to the end of time, so the
-    /// 0182 path keeps its all-time refusal byte for byte.
+    /// 0182 path keeps its all-time refusal ABOVE the floor. The floor itself is
+    /// no longer `not_before`: it is one `window_s` below it, because the oracle
+    /// tier forward-fills a reading across that window and a row just under the
+    /// floor still re-prices candles just over it.
     ///
     /// A warning would not do. The failure is silent and it *looks like success*:
     /// the reset zeroes the rows, the oracle tier (which runs first, and wins
@@ -948,9 +951,20 @@ impl ChEnrichmentPass {
                 quote_asset_id: spec.quote_asset_id,
                 oracle_name: self.cfg.oracle_name.clone(),
                 rows,
+                // ⚠️ The SCANNED band, not the reset's own window: the floor is
+                // widened by `window_s` because a reading below it still
+                // forward-fills into the reset. Reporting `[not_before, …)`
+                // would send the operator to a query returning 0 rows for a
+                // refusal that is real.
                 window: match spec.not_after {
-                    Some(na) => format!("[{}, {})", spec.not_before, na),
-                    None => format!("[{}, all time)", spec.not_before),
+                    Some(na) => format!(
+                        "[{nb}, {na}) (scanned from {nb}, one forward-fill window below --reset-not-before {})",
+                        spec.not_before
+                    ),
+                    None => format!(
+                        "[{nb}, all time) (scanned from {nb}, one forward-fill window below --reset-not-before {})",
+                        spec.not_before
+                    ),
                 },
             });
         }
@@ -980,6 +994,9 @@ impl ChEnrichmentPass {
         let refs = self.resolve_reference_ids().await?;
         match refs.usdc {
             Some(usdc_id) if usdc_id == spec.quote_asset_id => Ok(()),
+            // `None` means canonical USDC is not a tracked asset at all, which
+            // is a different operator error than "wrong leg" — reported as 0,
+            // never a real asset_id, and spelled out in the message.
             usdc => Err(ChEnrichError::ResetExternalRateLegIsNotUsdc {
                 quote_asset_id: spec.quote_asset_id,
                 usdc_id: usdc.unwrap_or(0),
@@ -1002,7 +1019,7 @@ impl ChEnrichmentPass {
             "SELECT count() FROM {db}.usd_rate FINAL \
              WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
                AND issuer_address = '{USDC_ISSUER}' AND contract_address = '' \
-               AND method = 'external'",
+               AND method = 'external' AND usd_rate > 0",
             db = self.cfg.database,
         );
         let rows = self.client.query(&sql).fetch_one::<u64>().await?;
@@ -1857,7 +1874,7 @@ fn external_sql(db: &str, tbl: &str, usdc_id: u32, window: &str) -> String {
              FROM {db}.usd_rate FINAL \
              WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
                AND issuer_address = '{USDC_ISSUER}' AND contract_address = '' \
-               AND method = 'external' \
+               AND method = 'external' AND usd_rate > 0 \
          ) AS r \
              ON r.k = p.k AND r.rts < p.bend \
          WHERE r.usd > 0 \

@@ -635,7 +635,11 @@ mod tests {
         // statement: the `external` arm consults `usd_rate`, so the rendered SQL
         // also carries `'UTC'`, `'credit'`, `'USDC'` and the issuer address,
         // none of which are `method` values.
-        let rendered = crate::assets::queries_ch::usd_method_expr(2, &[7]);
+        let rendered = crate::assets::queries_ch::usd_method_expr(
+            2,
+            &[7],
+            crate::assets::queries_ch::Granularity::H1,
+        );
         let emitted = crate::assets::queries_ch::CANDLE_METHOD_LABELS;
         for value in emitted {
             assert!(
