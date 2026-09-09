@@ -82,7 +82,7 @@
 > **Full evidence — acceptance-criteria mapping with runnable commands, the
 > complete deviation rationale, the limits of each result stated where the
 > evidence sits, and an explicit list of what is _not_ claimed:**
-> https://drive.google.com/file/d/16wTFhOmJkjLe1ixDXDQbbIDckh0lHlv2/view?usp=sharing
+> https://drive.google.com/file/d/1J1CwqcWjs4aiTQDnEA1xM4fz9AfyZhnI/view?usp=sharing
 
 ---
 
@@ -100,7 +100,7 @@
 > walkthrough with reproducible commands, dashboard screenshots, the deviation
 > rationale and the not-claimed list — and the demo video. Direct links:
 >
-> - Evidence PDF: https://drive.google.com/file/d/16wTFhOmJkjLe1ixDXDQbbIDckh0lHlv2/view?usp=sharing
+> - Evidence PDF: https://drive.google.com/file/d/1J1CwqcWjs4aiTQDnEA1xM4fz9AfyZhnI/view?usp=sharing
 > - Demo video: https://drive.google.com/file/d/1WkC4BG-8vcZrEGqJ1CjPE9iiTasotfOb/view?usp=sharing
 >
 > **Live & anonymous (verify directly in a browser):**
@@ -200,11 +200,13 @@
 - [x] `milestone-2-evidence.md` exported: `./build-pdf.sh`
       (already parameterised — it defaults to milestone 2, and `./build-pdf.sh 1`
       still rebuilds the Milestone 1 PDF from its own source). Last build
-      2026-09-09: 20 pages, 1.1 MB, all five screenshots embedded.
+      2026-09-09: 12 pages, 944 KB, all five dashboard screenshots embedded.
 - [x] PDF uploaded to Google Drive with link-sharing public — **verified
       anonymously 2026-09-09**: the file downloads with no session and is
-      byte-identical to the local build (`md5 9c3bb905…`, 1,112,228 bytes,
-      20 pages).
+      byte-identical to the local build (`md5 941b60a7…`, 963,565 bytes,
+      12 pages). ⚠️ This is a **new Drive file**; the earlier upload
+      (`16wTFhOm…`) is superseded and should be removed from the folder so a
+      reviewer cannot open the 20-page draft.
 - [x] Links placed: the evidence PDF closes Field 1, the folder opens Field 3
       with both direct links beneath it. All three return HTTP 200 anonymously.
 - [x] Video uploaded with public sharing; URL in Field 2
