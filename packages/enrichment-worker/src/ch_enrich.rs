@@ -201,6 +201,23 @@ pub enum ChEnrichError {
     )]
     ResetRequiresExternalRates { quote_asset_id: u32 },
 
+    /// `require_external_rate` asked for on a quote leg that is not canonical
+    /// USDC (task 0268 review). The external tier can only refill USDC.
+    #[error(
+        "USD reset refused: --reset-require-external-rate was passed for quote \
+         asset_id {quote_asset_id}, which is not canonical USDC (asset_id \
+         {usdc_id}).\n\
+         Every part of the external path is pinned to canonical USDC: the day-set \
+         predicate, the loaded-rates check and the external tier's own statement. \
+         A reset on another quote leg would therefore zero rows on USDC's rate \
+         days and leave the external tier unable to refill a single one — the \
+         peg tier would write $1 back over every one of them, which is task \
+         0182's incident with a different quote asset.\n\
+         Reset this leg without --reset-require-external-rate, or target \
+         canonical USDC."
+    )]
+    ResetExternalRateLegIsNotUsdc { quote_asset_id: u32, usdc_id: u32 },
+
     /// A [`UsdResetSpec`] whose `[not_before, not_after)` window is empty (task
     /// 0268 review, WR-05). See [`UsdResetSpec::validate`] for why this is an
     /// error and not a no-op.
@@ -432,7 +449,7 @@ fn external_rate_day_pred(db: &str) -> String {
         "toDate(timestamp, 'UTC') IN (SELECT toDate(timestamp, 'UTC') FROM {db}.usd_rate FINAL \
          WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
            AND issuer_address = '{USDC_ISSUER}' AND contract_address = '' \
-           AND method = 'external')"
+           AND method = 'external' AND usd_rate > 0)"
     )
 }
 
@@ -904,13 +921,21 @@ impl ChEnrichmentPass {
             Some(na) => format!(" AND timestamp < toDateTime({na})"),
             None => String::new(),
         };
+        // ⚠️ The lower bound is widened by one forward-fill window, and that is
+        // not cosmetic. The oracle tier ASOFs `o.timestamp <= p.timestamp` with
+        // `(p.timestamp - o.timestamp) <= window_s`, so a reading stamped just
+        // BELOW `not_before` still re-prices candles up to `not_before +
+        // window_s - 1` — inside the reset's own range. A guard that starts
+        // looking at `not_before` cannot see the row that will shadow it, which
+        // is the re-apply-and-relabel failure this refusal exists to prevent.
+        // Only the UPPER bound needed to become window-scoped for task 0268.
+        let nb = spec.not_before.saturating_sub(self.cfg.window_s);
         let sql = format!(
             "SELECT count() FROM {db}.oracle_prices \
              WHERE asset_id = {q} AND oracle_name = ? \
                AND timestamp >= toDateTime({nb}){upper}",
             db = self.cfg.database,
             q = spec.quote_asset_id,
-            nb = spec.not_before,
         );
         let rows = self
             .client
@@ -930,6 +955,36 @@ impl ChEnrichmentPass {
             });
         }
         Ok(())
+    }
+
+    /// Refuse a `require_external_rate` reset whose quote leg is not canonical
+    /// USDC (task 0268 review).
+    ///
+    /// Everything on the external path names canonical USDC and nothing else:
+    /// [`external_rate_day_pred`]'s day-set, `assert_external_rates_are_loaded`,
+    /// and `external_sql`'s own `quote_asset_id` bound, which is filled from
+    /// `refs.usdc`. `assert_reset_target_is_priceable` accepts USDT — it is a
+    /// stable reference and the PEG tier can price it — so
+    /// `--reset-quote-asset-id <USDT> --reset-require-external-rate` was a legal
+    /// combination that zeroed USDT-quoted rows on USDC's rate days and left the
+    /// external tier, which only ever runs for USDC, unable to refill one of
+    /// them. The peg tier then writes $1 back over the lot: task 0182's incident
+    /// under a different quote asset.
+    ///
+    /// Refused here in the library rather than with a CLI `conflicts_with`,
+    /// because the CLI is not the only driver.
+    async fn assert_external_rate_leg_is_usdc(
+        &self,
+        spec: &UsdResetSpec,
+    ) -> Result<(), ChEnrichError> {
+        let refs = self.resolve_reference_ids().await?;
+        match refs.usdc {
+            Some(usdc_id) if usdc_id == spec.quote_asset_id => Ok(()),
+            usdc => Err(ChEnrichError::ResetExternalRateLegIsNotUsdc {
+                quote_asset_id: spec.quote_asset_id,
+                usdc_id: usdc.unwrap_or(0),
+            }),
+        }
     }
 
     /// Refuse a `require_external_rate` reset when `prices.usd_rate` holds no
@@ -1023,6 +1078,9 @@ impl ChEnrichmentPass {
         // only applies to the 0268 mode. Same property as the other three:
         // nothing is zeroed unless a tier in THIS pass can put a value back.
         if spec.require_external_rate {
+            // Before anything counts rows: the external path is USDC-only, so a
+            // different quote leg cannot be refilled by it at all.
+            self.assert_external_rate_leg_is_usdc(spec).await?;
             self.assert_external_rates_are_loaded(spec).await?;
             // Fifth (review WR-09): the external tier's own premise, measured on
             // the table the oracle tier reads. Independent of `not_before`.
@@ -1855,18 +1913,33 @@ fn pre_epoch_oracle_rows_sql(db: &str, usdc_id: u32) -> String {
 /// Bound parameters, in SQL order: the snapshot watermark, then the `LIMIT`.
 fn reset_sql(db: &str, tbl: &str, spec: &UsdResetSpec, window: &str) -> String {
     // Task 0268's two extensions, appended so a spec that asks for neither leaves
-    // the 0182 statement byte-identical. The fragments carry BARE column names,
-    // not `p.`-qualified ones, on purpose: that makes the external predicate the
-    // same string here as in `reset_pending_pred` and the month enumeration, and
-    // "the same string" is the only form of agreement a test can prove. There is
-    // one table in scope, so the resolution is unambiguous.
+    // the 0182 statement byte-identical.
+    //
+    // ⚠️ The par signature MUST be `p.`-qualified here, and only here. This
+    // statement's own projection declares `CAST(0 AS Decimal(38, 14)) AS
+    // close_usd`, and ClickHouse resolves an identifier against SELECT aliases
+    // BEFORE table columns (`prefer_column_name_to_alias` defaults to 0 — that
+    // setting exists for exactly this collision). A bare `close_usd = close`
+    // therefore evaluates as `0 = close`, matches nothing, and the campaign
+    // exits 0 having reset no rows: `count_reset_pending` reports the full
+    // population, the reset writes nothing, and the run logs only "made no
+    // progress". Verified on ClickHouse 26.3.10.60:
+    //     SELECT CAST(0 AS Decimal(38,14)) AS close_usd, p.close AS close
+    //     FROM (SELECT toDecimal128(5,14) AS close_usd,
+    //                  toDecimal128(5,14) AS close) AS p
+    //     WHERE close_usd = close        -- EMPTY: evaluated 0 = 5
+    //     WHERE p.close_usd = p.close    -- 1 row
+    // `reset_pending_pred` and the month enumeration keep the BARE form: they
+    // render into alias-free statements with no `p` in scope, where a `p.`
+    // prefix would be a syntax error. The day-set fragment is shared verbatim by
+    // all three, which is what the invariant test can still prove.
     let mut bounds = String::new();
     if let Some(na) = spec.not_after {
         bounds.push_str(&format!(" AND p.timestamp < toDateTime({na})"));
     }
     if spec.require_external_rate {
         bounds.push_str(&format!(
-            " AND close_usd = close AND {}",
+            " AND p.close_usd = p.close AND {}",
             external_rate_day_pred(db)
         ));
     }
@@ -2021,6 +2094,39 @@ mod tests {
             "a correlated reference is illegal in months_with_zeros: {frag}"
         );
         assert!(!frag.contains("EXISTS"), "{frag}");
+    }
+
+    /// ⚠️ The par signature must be `p.`-qualified in [`reset_sql`] and BARE in
+    /// [`reset_pending_pred`], because only `reset_sql` declares a `close_usd`
+    /// alias in its own projection — and ClickHouse resolves aliases before
+    /// columns, so the bare form there silently becomes `0 = close` and the
+    /// campaign resets nothing while reporting a full population. This is the
+    /// regression that shipped through three review rounds and was caught only
+    /// by a live ClickHouse; the string test that guarded this file compared the
+    /// two fragments for EQUALITY, which is precisely what must not hold.
+    #[test]
+    fn the_reset_statement_qualifies_the_par_signature_against_its_own_alias() {
+        let spec = usdc_external_reset();
+        let sql = reset_sql("prices", "price_ohlcv_1h", &spec, "");
+        assert!(
+            sql.contains("CAST(0 AS Decimal(38, 14)) AS close_usd"),
+            "the projection still declares the colliding alias: {sql}"
+        );
+        assert!(
+            sql.contains("AND p.close_usd = p.close AND"),
+            "the reset must compare COLUMNS, not its own zero alias: {sql}"
+        );
+        assert!(
+            !sql.contains(" AND close_usd = close AND"),
+            "an unqualified par signature here resolves to the alias: {sql}"
+        );
+        // The alias-free sites keep the bare form: `p` is not in scope there.
+        let pred = reset_pending_pred("prices", &spec);
+        assert!(
+            pred.contains(" AND close_usd = close AND"),
+            "the pending predicate has no table alias to qualify: {pred}"
+        );
+        assert!(!pred.contains("p.close_usd"), "{pred}");
     }
 
     /// D-04: the reset's candidate set carries the peg tier's EXACT signature, so

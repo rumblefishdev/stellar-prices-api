@@ -1437,6 +1437,109 @@ async fn the_usd_reset_refuses_a_bounded_pass() {
 /// this test builds — it still counts to the end of time, so 0182's all-time
 /// refusal is unchanged. The bounded half is
 /// `the_bounded_usd_reset_is_not_refused_by_oracle_rows_above_its_window`.
+/// 🔑 **The forward-fill band below `not_before`.** The oracle tier ASOFs
+/// `o.timestamp <= p.timestamp` and accepts a reading up to `window_s` old, so a
+/// row stamped just BELOW the reset's floor still re-prices candles just ABOVE
+/// it — inside the very range the reset is about to zero. A guard that starts
+/// counting at `not_before` cannot see that row: it reports a clean premise, the
+/// reset zeroes the band, and the oracle tier refills it from the same reading
+/// the reset existed to remove, relabelled `method = 'oracle'`.
+///
+/// Task 0268 scoped this guard's UPPER bound to the reset window and gave it a
+/// lower bound at the same time; only the upper one needed to move. The floor is
+/// therefore widened by one `window_s`, and this is the test that it is.
+#[tokio::test]
+#[ignore]
+async fn the_usd_reset_is_refused_by_an_oracle_row_that_forward_fills_into_it() {
+    let db = "it_enrich_0182_shadow_band";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    let client = setup_0182(db, t_old, t_new).await;
+
+    // 100 s below the floor — outside [not_before, ..), inside the 300 s window
+    // the oracle tier will forward-fill across.
+    let shadow = t_new - 100;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices \
+             (asset_id, oracle_name, timestamp, price_usd) VALUES \
+             (3, 'reflector', {shadow}, 1.0)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 3,
+        not_before: t_new,
+        not_after: None,
+        require_external_rate: false,
+    });
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+
+    assert!(
+        matches!(err, ChEnrichError::ResetBlockedByOracleRows { quote_asset_id, rows, .. }
+                 if quote_asset_id == 3 && rows == 1),
+        "a reading {}s below the floor still forward-fills into the reset window \
+         and must refuse it, got {err:?}",
+        t_new - shadow
+    );
+
+    let v = close_usd(&client, db, 10, 3, t_new).await;
+    assert!(
+        (v - 10.0).abs() < 1e-4,
+        "a refused reset must not have written anything, got {v}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// The external path is canonical-USDC-only at every site, but the priceability
+/// gate accepts USDT (the peg tier can price it), so
+/// `--reset-quote-asset-id <USDT> --reset-require-external-rate` used to be a
+/// legal combination: it zeroed USDT-quoted rows on USDC's rate days, the
+/// external tier — which only ever runs for USDC — refilled none of them, and
+/// the peg tier wrote $1 back over the lot. Task 0182's incident, different
+/// quote asset. Refused in the library, so no driver can assemble it.
+#[tokio::test]
+#[ignore]
+async fn an_external_reset_refuses_a_quote_leg_that_is_not_canonical_usdc() {
+    let db = "it_enrich_0268_usdt_external";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    // The 0182 fixture is the one that tracks USDT (asset_id 3) as a stable
+    // reference, so `assert_reset_target_is_priceable` passes it and this test
+    // reaches the guard it is about.
+    let client = setup_0182(db, t_old, t_new).await;
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(UsdResetSpec {
+        // asset_id 3 is USDT in this fixture: a stable reference, so the
+        // priceability gate passes it, and the external tier cannot touch it.
+        quote_asset_id: 3,
+        not_before: 0,
+        not_after: Some(prices_clickhouse::USDC_ORACLE_EPOCH_S),
+        require_external_rate: true,
+    });
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+    assert!(
+        matches!(err, ChEnrichError::ResetExternalRateLegIsNotUsdc { quote_asset_id, .. }
+                 if quote_asset_id == 3),
+        "an external reset on a non-USDC leg must be refused, got {err:?}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 #[ignore]
 async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_leg() {

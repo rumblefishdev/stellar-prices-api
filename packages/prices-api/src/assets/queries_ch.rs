@@ -1183,36 +1183,80 @@ pub async fn ohlcv_peg_series(
 ///
 /// ## The arms, in order, and why each sits where it does
 ///
-/// 1. `quote_asset_id = usdc AND close_usd = close` -> **`assumed-par`**. The
-///    peg tier multiplied by exactly $1, so the equality is exact integer
-///    arithmetic on the stored decimals — no division and no float error. The
-///    word names the INPUT (the literal 1.0 was the value) rather than the
-///    outcome, matching how `external`, `oracle` and `traded` are defined.
-///    Task 0268 retired the older spelling here; `ohlcv_peg_series` keeps it,
-///    because on USDC's OWN series it means 0165's "no measured rate was
-///    available" and that is still true.
-/// 2. `quote_asset_id = usdc AND timestamp < USDC_ORACLE_EPOCH_S` ->
-///    **`external`**. Reached only when arm 1 missed, i.e. the candle carries a
-///    SCALED `close_usd` on a USDC leg. Before the epoch the only thing that can
-///    have scaled it is task 0267's imported USDC/USD series, applied by the
-///    enrichment worker's external tier (task 0268).
+/// ⚠️ **A value signature is not provenance.** Until task 0268 this arm list
+/// opened with `close_usd = close -> assumed-par`, which reads the OUTCOME and
+/// calls it the input. USDC sits at exactly par most days: 174 of the 2049 days
+/// in task 0267's imported series close at exactly `1.00000000`, so ~8.5% of
+/// the re-enriched population carries a MEASURED rate whose product is
+/// bit-identical to an assumed one. Those candles were labelled `assumed-par`
+/// while `dto.rs` and the published OpenAPI text promise the opposite in as many
+/// words: *"a bucket reading exactly 1.0 under `external` or `oracle` is a
+/// measurement that happened to be at par, which is precisely what `assumed-par`
+/// is not."* The doc was right and the SQL was wrong.
 ///
-///    ⚠️ **This arm is sound only because `prices.usd_rate` holds no `oracle`
-///    row for canonical USDC before that instant.** That claim is in-repo prose
-///    (this file's oracle-window notes, `views.sql`'s 0165 block), NOT a live
-///    measurement — which makes it falsifiable, and it is falsified the moment a
-///    single pre-epoch `oracle` row exists: such a candle would be labelled
-///    `external` while a poll priced it. The 0268 runbook's Appendix B
-///    precondition 3 is the query that confirms it on prod before the pass runs,
-///    and it is recorded as an open assumption in the task file.
-/// 3. `quote_asset_id = usdc` -> **`oracle`**. Everything arms 1 and 2 left: a
-///    scaled USDC-quoted candle at or after the epoch, which the oracle tier
-///    priced from a measured Reflector reading.
-/// 4. `quote_asset_id IN (pivots)` -> **`traded`** (ADR 0011 §4; see [`ohlcv`]).
+/// The fix is to consult the rate table instead of the stored bytes: a
+/// pre-epoch USDC-quoted candle is `external` when an imported rate actually
+/// covers its UTC day, whatever the arithmetic came out to. That is the same
+/// uncorrelated day-set the enrichment worker resets on
+/// (`ch_enrich::external_rate_day_pred`), so the read label names the tier that
+/// actually wrote the value.
+///
+/// 1. `quote_asset_id = usdc AND timestamp < USDC_ORACLE_EPOCH_S AND <the
+///    bucket's UTC day carries an imported rate>` -> **`external`**. Task 0267's
+///    series priced it, via task 0268's external tier.
+///
+///    ⚠️ **One residual ambiguity, stated rather than hidden.** Day membership
+///    is not bucket membership: the external tier resolves a rate at the BUCKET
+///    END within a staleness window, so a bucket on a covered day whose own
+///    window found nothing falls to the peg tier and is still reported
+///    `external` here. The candle tables carry no provenance column, so no
+///    read-side expression can separate those two cases — that is task 0268's
+///    Issue 9, and closing it properly means storing the tier on the row.
+///    Between the two available errors this is the rarer one: the day-set is
+///    exactly what the reset zeroed, and a covered day with an unrefillable
+///    bucket also trips the campaign's own `rows_reset ~ rows_enriched` abort.
+///
+///    ⚠️ **Still sound only because `prices.usd_rate` holds no `oracle` row for
+///    canonical USDC before the epoch.** That claim is in-repo prose, NOT a live
+///    measurement. The 0268 runbook's Appendix B precondition 3 confirms it on
+///    prod before the pass runs, and `assert_no_pre_epoch_oracle_rows` refuses
+///    the pass if it is false.
+/// 2. `quote_asset_id = usdc AND close_usd = close` -> **`assumed-par`**. No
+///    imported rate covers the day, so the peg tier multiplied by a literal
+///    $1.00 and the equality is exact integer arithmetic on the stored decimals.
+///    The word names the INPUT. Task 0268 retired the older spelling here;
+///    `ohlcv_peg_series` keeps it, because on USDC's OWN series it means 0165's
+///    "no measured rate was available" and that is still true.
+/// 3. `quote_asset_id = usdc AND timestamp >= USDC_ORACLE_EPOCH_S` ->
+///    **`oracle`**: at or after the epoch a scaled USDC-quoted candle was priced
+///    from a measured Reflector reading.
+/// 4. `quote_asset_id = usdc` -> **`''`**. Pre-epoch, not at par, and no
+///    imported rate covers the day — a state no tier can produce. It is spelled
+///    out rather than folded into `oracle`, because the old bare-USDC arm
+///    reported a poll that provably did not exist, and a null is the honest
+///    answer to "which input priced this". It also keeps USDC off arm 5 if it is
+///    ever tracked as a pivot.
+/// 5. `quote_asset_id IN (pivots)` -> **`traded`** (ADR 0011 §4; see [`ohlcv`]).
 ///    Omitted ENTIRELY when no pivot reference is tracked — an empty `IN ()` is
 ///    a ClickHouse syntax error, and the label is optional.
-/// 5. `''` -> the fallback, which [`ohlcv`]'s `nullIf` turns into a JSON `null`.
+/// 6. `''` -> the fallback, which [`ohlcv`]'s `nullIf` turns into a JSON `null`.
 ///    A `multiIf` with no else is an error, so this arm always closes the list.
+///
+/// ⚠️ The bare column names below (`close_usd`, `close`, `timestamp`) resolve to
+/// TABLE columns only because the projection this is spliced into aliases none
+/// of them (`valid`, `rate`, `o_x`, `c_x`, ...). ClickHouse resolves aliases
+/// BEFORE columns, so an alias added there with one of these names would
+/// silently change what this expression tests — the defect task 0268 shipped in
+/// `ch_enrich::reset_sql`.
+/// The `Candle.method` labels the candle path can emit, in arm order.
+///
+/// Extracted because the rendered SQL now carries incidental literals of its own
+/// (`'UTC'`, `'credit'`, `'USDC'`, the issuer) once the `external` arm consults
+/// `usd_rate`, and a test that scrapes every quoted literal out of the statement
+/// would demand the OpenAPI text describe those too. The vocabulary is the
+/// contract; the SQL is one emitter of it.
+pub(crate) const CANDLE_METHOD_LABELS: [&str; 4] = ["external", "assumed-par", "oracle", "traded"];
+
 pub(crate) fn usd_method_expr(usdc: u32, pivots: &[u32]) -> String {
     let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
     let traded_arm = if pivots.is_empty() {
@@ -1221,10 +1265,16 @@ pub(crate) fn usd_method_expr(usdc: u32, pivots: &[u32]) -> String {
         let ids: Vec<String> = pivots.iter().map(|i| i.to_string()).collect();
         format!("quote_asset_id IN ({}), 'traded', ", ids.join(", "))
     };
+    let issuer = prices_clickhouse::USDC_ISSUER;
     format!(
-        "multiIf(quote_asset_id = {usdc} AND close_usd = close, 'assumed-par', \
-         quote_asset_id = {usdc} AND timestamp < toDateTime({epoch}), 'external', \
-         quote_asset_id = {usdc}, 'oracle', \
+        "multiIf(quote_asset_id = {usdc} AND timestamp < toDateTime({epoch}) \
+           AND toDate(timestamp, 'UTC') IN (SELECT toDate(timestamp, 'UTC') FROM usd_rate FINAL \
+             WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+               AND issuer_address = '{issuer}' AND contract_address = '' \
+               AND method = 'external' AND usd_rate > 0), 'external', \
+         quote_asset_id = {usdc} AND close_usd = close, 'assumed-par', \
+         quote_asset_id = {usdc} AND timestamp >= toDateTime({epoch}), 'oracle', \
+         quote_asset_id = {usdc}, '', \
          {traded_arm}\
          '') AS meth"
     )
@@ -1497,13 +1547,71 @@ mod tests {
     /// stays valid and the wire quietly lies. Byte offsets are the only cheap
     /// way to pin it.
     #[test]
-    fn usd_method_expr_arm_order_is_par_then_external_then_oracle() {
+    fn usd_method_expr_arm_order_is_external_then_par_then_oracle() {
         let sql = usd_method_expr(2, &[]);
-        let par = sql.find("'assumed-par'").expect("par arm present");
         let ext = sql.find("'external'").expect("external arm present");
+        let par = sql.find("'assumed-par'").expect("par arm present");
         let orc = sql.find("'oracle'").expect("oracle arm present");
-        assert!(par < ext, "par must be tested before external: {sql}");
-        assert!(ext < orc, "external must be tested before oracle: {sql}");
+        assert!(
+            ext < par,
+            "the measured day-set must be tested BEFORE the par signature, or a \
+             rate that measured exactly 1.0 is reported as an assumption: {sql}"
+        );
+        assert!(par < orc, "par must be tested before oracle: {sql}");
+    }
+
+    /// The `external` arm must consult the rate table, not the stored bytes.
+    /// A candle whose measured rate came out at exactly 1.0 is bit-identical to
+    /// a pegged one, so any test of `close_usd` alone cannot tell them apart —
+    /// 174 of task 0267's 2049 imported days close at exactly 1.00000000.
+    #[test]
+    fn usd_method_expr_external_arm_reads_provenance_not_the_value() {
+        let sql = usd_method_expr(2, &[]);
+        assert!(
+            sql.contains("FROM usd_rate FINAL"),
+            "the external arm must consult the rate table: {sql}"
+        );
+        assert!(
+            sql.contains("AND method = 'external' AND usd_rate > 0"),
+            "only a positive imported rate may claim a day: {sql}"
+        );
+        assert!(
+            sql.contains(&format!(
+                "issuer_address = '{}'",
+                prices_clickhouse::USDC_ISSUER
+            )),
+            "the day-set is pinned to canonical USDC: {sql}"
+        );
+        assert!(
+            sql.contains("toDate(timestamp, 'UTC')"),
+            "the day-set must name its timezone, not inherit the server's: {sql}"
+        );
+        // The external arm's condition must not be reachable by value alone.
+        let ext = sql.find("'external'").unwrap();
+        let par_sig = sql.find("close_usd = close").unwrap();
+        assert!(
+            ext < par_sig,
+            "the value signature must not gate the measured label: {sql}"
+        );
+    }
+
+    /// Pre-epoch, not at par, and no imported rate for the day is a state no
+    /// tier produces. It reports null rather than `oracle`: the old bare-USDC
+    /// arm claimed a poll that provably did not exist before the epoch.
+    #[test]
+    fn usd_method_expr_reports_null_rather_than_claim_a_pre_epoch_poll() {
+        let sql = usd_method_expr(2, &[]);
+        let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
+        assert!(
+            sql.contains(&format!(
+                "quote_asset_id = 2 AND timestamp >= toDateTime({epoch}), 'oracle'"
+            )),
+            "the oracle arm is bounded BELOW by the epoch: {sql}"
+        );
+        assert!(
+            sql.contains("quote_asset_id = 2, '', "),
+            "the unexplained USDC state reports null: {sql}"
+        );
     }
 
     /// An empty `IN ()` is a ClickHouse syntax error, so the traded arm is
@@ -1513,8 +1621,12 @@ mod tests {
     fn usd_method_expr_omits_the_traded_arm_when_no_pivot_is_tracked() {
         let sql = usd_method_expr(2, &[]);
         assert!(
-            !sql.contains("IN ("),
+            !sql.contains("IN ()"),
             "no empty IN list may be emitted: {sql}"
+        );
+        assert!(
+            !sql.contains("quote_asset_id IN ("),
+            "the pivot arm is omitted whole when no pivot is tracked: {sql}"
         );
         assert!(!sql.contains("'traded'"), "{sql}");
         assert!(

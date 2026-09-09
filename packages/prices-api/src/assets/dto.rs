@@ -325,11 +325,24 @@ pub struct Candle {
     /// Every value names the INPUT the rate came from, never the outcome: a
     /// bucket reading exactly 1.0 under `external` or `oracle` is a measurement
     /// that happened to be at par, which is precisely what `assumed-par` is not.
+    /// USDC is at exactly par on most days — 174 of the 2049 days in the
+    /// imported series close at exactly 1.00000000 — so this distinction decides
+    /// the label on a large share of the history, and `external` is chosen by
+    /// asking whether an imported rate covers the bucket's UTC day, not by
+    /// inspecting the stored number.
     ///
-    /// Derived from the candle's quote leg and rate signature, not stored: the
-    /// candle tables carry `close_usd` with no companion provenance column. See
-    /// `queries_ch::ohlcv` for the classification and the prod measurement
-    /// behind it.
+    /// **Not stored on the candle.** The candle tables carry `close_usd` with no
+    /// companion provenance column, so a quote leg's `method` is reconstructed
+    /// at read time from the quote asset, the bucket timestamp and the imported
+    /// rate's day coverage. One case is therefore not separable and is stated
+    /// rather than hidden: a bucket on a covered day whose own staleness window
+    /// found no rate falls back to the $1 assumption and is still reported
+    /// `external`. Buckets on days with no imported rate at all report
+    /// `assumed-par` correctly. Carrying the tier on the row is the only
+    /// complete fix and is tracked separately.
+    ///
+    /// See `queries_ch::usd_method_expr` for the classification and the prod
+    /// measurement behind it.
     ///
     /// `None` when the price fields are absent, **and also for every
     /// `base_currency=XLM` response** — that mode returns candles as stored, so

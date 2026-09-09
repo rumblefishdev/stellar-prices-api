@@ -321,14 +321,22 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          bucket, so the $1 fallback was rendered. Never appears on a quote leg — there the \
          same situation is `assumed-par`.\n\nEach value names the INPUT the rate came from, so \
          `assumed-par` and `external` are never interchangeable: one is an assumption, the \
-         other a measurement that may sit percent off par.\n\nOn the USDC self-series a \
-         bucket that holds both a Reflector reading and an imported one reports `oracle`, \
-         whichever was observed later. The imported series is loaded at HOURLY grain, so an \
+         other a measurement that may sit percent off par. A measured rate that happens to \
+         read exactly 1.0 is still `external`; the label is decided by whether an imported \
+         rate covers the bucket's UTC day, not by the value.\n\nOn the USDC self-series a \
+         bucket that holds both a Reflector reading and an imported one reports `oracle`: a \
+         measured poll outranks an imported rate outright, whichever was observed first. \
+         Observation time only breaks ties between rows of the same kind. The imported \
+         series is loaded at HOURLY grain, so an \
          hourly request over an imported day reports `external` — and that hour's own \
          measured rate — for each of its twenty-four hours; on 2023-03-11 the 07:00 bucket \
          reports the trough rather than the day's close. Where only a daily row exists for \
          a day, that one row prices every bucket of its UTC day at every `granularity`, so \
-         an imported day never mixes `external` and `peg` within itself.\n\n`null` when the price fields \
+         an imported day never mixes `external` and `peg` within itself.\n\nOn a quote leg \
+         the label is reconstructed at read time — the candle rows carry no provenance \
+         column — so one case is not separable: a bucket on a covered day for which no rate \
+         resolved inside its staleness window falls back to the $1 assumption and is still \
+         reported `external`.\n\n`null` when the price fields \
          are `null`, and always `null` for `base_currency=XLM`, where nothing is \
          converted.",
     ),
@@ -661,17 +669,18 @@ mod tests {
             .iter()
             .find(|(schema, field, _)| *schema == "Candle" && *field == "method")
             .expect("Candle.method is described");
+        // ⚠️ Read the published vocabulary, NOT every quoted literal in the
+        // statement: the `external` arm consults `usd_rate`, so the rendered SQL
+        // also carries `'UTC'`, `'credit'`, `'USDC'` and the issuer address,
+        // none of which are `method` values.
         let rendered = crate::assets::queries_ch::usd_method_expr(2, &[7]);
-        let emitted: Vec<&str> = rendered
-            .split('\'')
-            .skip(1)
-            .step_by(2)
-            .filter(|lit| !lit.is_empty())
-            .collect();
-        assert!(
-            emitted.len() >= 4,
-            "the emitter renders its labels as quoted literals: {rendered}"
-        );
+        let emitted = crate::assets::queries_ch::CANDLE_METHOD_LABELS;
+        for value in emitted {
+            assert!(
+                rendered.contains(&format!("'{value}'")),
+                "the emitter no longer renders `{value}`: {rendered}"
+            );
+        }
         for value in emitted.iter().copied().chain(["peg"]) {
             assert!(
                 text.contains(&format!("`{value}`")),
