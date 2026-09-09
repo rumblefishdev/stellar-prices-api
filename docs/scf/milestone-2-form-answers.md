@@ -186,7 +186,9 @@
 - [ ] `ch-demo-queries.sql` run against production and any pasted output in the
       evidence document refreshed.
 - [ ] `milestone-2-evidence.md` finalised and exported: `./build-pdf.sh`
-      (retarget it from the Milestone 1 source first).
+      (already parameterised — it defaults to milestone 2, and `./build-pdf.sh 1`
+      still rebuilds the Milestone 1 PDF from its own source). Last build
+      2026-09-09: 20 pages, 1.1 MB, all five screenshots embedded.
 - [ ] PDF uploaded to a Google Drive folder with link-sharing set to "anyone with
       the link can view".
 - [ ] Drive folder link copied into the Field 1 closer **and** the Field 3
