@@ -67,6 +67,18 @@ the order is not cosmetic:
   the whole day and lands on the 23:00 row, whose close **is** the daily close
   for all 2049 days (pinned by `enrichment-worker/tests/composed_usdc_csv.rs`).
 
+> **The loader now enforces this order.** Before any write, a shadow load at
+> `--grain daily` counts staged rows away from UTC midnight — rows only the
+> hourly pass can produce — and refuses if it finds any
+> (`LoadError::DailyAfterHourly`). Until this gate existed, the wrong order was
+> refused by nothing: the rows are valid, the counts match, only the values are
+> wrong, and `price_usd_series_1h` would publish the day close for the 00:00
+> hour of all 1 872 covered days. To deliberately re-seed the daily file after
+> an hourly load, pass `--allow-daily-after-hourly` **and re-run the hourly
+> pass afterwards**, or the midnights stay wrong. The gate reads the table, so
+> `--dry-run` (which contacts no server) cannot report it — it fires at the
+> start of the real load, before the first INSERT.
+
 Loading the daily file alone is a valid, smaller deliverable — `/ohlcv` treats a
 lone daily row as valid for its whole UTC day — but it leaves
 `price_usd_series_1h` publishing the import at 00:00 and `1`/`peg` for the other
