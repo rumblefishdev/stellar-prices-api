@@ -204,9 +204,9 @@
 - [x] PDF uploaded to Google Drive with link-sharing public — **verified
       anonymously 2026-09-09**: the file downloads with no session and is
       byte-identical to the local build (`md5 941b60a7…`, 963,565 bytes,
-      12 pages). ⚠️ This is a **new Drive file**; the earlier upload
-      (`16wTFhOm…`) is superseded and should be removed from the folder so a
-      reviewer cannot open the 20-page draft.
+      12 pages). The superseded 20-page upload was deleted and its id
+      (`16wTFhOm…`) now answers 404, so the folder holds one evidence document
+      and no stale link resolves.
 - [x] Links placed: the evidence PDF closes Field 1, the folder opens Field 3
       with both direct links beneath it. All three return HTTP 200 anonymously.
 - [x] Video uploaded with public sharing; URL in Field 2
