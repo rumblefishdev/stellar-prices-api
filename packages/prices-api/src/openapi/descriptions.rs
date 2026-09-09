@@ -323,10 +323,12 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          `assumed-par` and `external` are never interchangeable: one is an assumption, the \
          other a measurement that may sit percent off par.\n\nOn the USDC self-series a \
          bucket that holds both a Reflector reading and an imported one reports `oracle`, \
-         whichever was observed later. The imported series is DAILY: an `external` row \
-         prices every bucket of its UTC day at every `granularity`, so an hourly request \
-         over an imported day reports `external` for all twenty-four hours, not for the \
-         midnight bucket alone.\n\n`null` when the price fields \
+         whichever was observed later. The imported series is loaded at HOURLY grain, so an \
+         hourly request over an imported day reports `external` — and that hour's own \
+         measured rate — for each of its twenty-four hours; on 2023-03-11 the 07:00 bucket \
+         reports the trough rather than the day's close. Where only a daily row exists for \
+         a day, that one row prices every bucket of its UTC day at every `granularity`, so \
+         an imported day never mixes `external` and `peg` within itself.\n\n`null` when the price fields \
          are `null`, and always `null` for `base_currency=XLM`, where nothing is \
          converted.",
     ),

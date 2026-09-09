@@ -701,15 +701,20 @@ to check.
    repair. Rows above that floor are simply not re-opened; rows below it never
    were.
 
-2. **Confirm 0267 stamps its daily rows at the START of the UTC day.** The tier
+2. **Confirm 0267 stamps its rows at the START of their UTC bucket.** The tier
    resolves the rate at the bucket's END with an ASOF `rts < bend`, so a
-   day-start stamp gives every bucket in a day that day's rate. A day-END
-   convention resolves every bucket to the **previous day's** rate — an
-   off-by-one-day error that produces entirely plausible numbers and fails
+   bucket-start stamp gives every candle in a bucket that bucket's rate. A
+   bucket-END convention resolves every one to the **previous** bucket's rate —
+   an off-by-one error that produces entirely plausible numbers and fails
    nowhere.
 
+   ⚠️ 0267 loads at **two grains** (`--grain daily|hourly`), so the rows are at
+   full hours, of which the midnights are a subset. Check the hour, and check
+   that the midnights are all still present:
+
    ```sql
-   SELECT countIf(timestamp != toStartOfDay(timestamp)) AS not_midnight,
+   SELECT countIf(timestamp != toStartOfHour(timestamp, 'UTC')) AS not_full_hour,
+          countIf(timestamp  = toStartOfDay(timestamp, 'UTC'))  AS midnights,
           count() AS rows
    FROM prices.usd_rate FINAL
    WHERE asset_kind = 'credit' AND asset_code = 'USDC'
@@ -717,10 +722,19 @@ to check.
      AND contract_address = '' AND method = 'external'
    ```
 
-   Expect `not_midnight = 0` and `rows` equal to precondition 1's count.
-   Anything else — stop and settle the convention with whoever owns 0267
-   before running. (Not `toTime()`: it anchors the time-of-day to 1970-01-02,
-   so an expectation written against it halts a correct load.)
+   Expect `not_full_hour = 0`, `rows` equal to precondition 1's count, and
+   `midnights` equal to the number of covered days (1 872 on the versioned
+   files, one per day of the daily series). Anything else — stop and settle the
+   convention with whoever owns 0267 before running.
+
+   Two traps in that one expression, both of which this runbook has stepped in.
+   **Not `toTime()`**: it anchors the time-of-day to 1970-01-02, so an
+   expectation written against it halts a correct load. And **name the zone**:
+   `timestamp` is a bare `DateTime` and nothing pins the server's timezone
+   (`docker-compose.yml` sets no `TZ`; `ch-prod-01`'s is undocumented), so an
+   unzoned `toStartOfDay`/`toStartOfHour` resolves locally — on a UTC+2 server
+   the unzoned day form reports every single row as not-midnight and this gate
+   blocks a correct load.
 
 3. **Confirm `oracle_prices` holds no canonical-USDC reading before the epoch.
    BLOCKING.** Two things rest on "no poll priced USDC before

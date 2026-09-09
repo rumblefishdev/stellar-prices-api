@@ -36,17 +36,42 @@ the first instant our own Reflector polling produced one. Everything earlier
 therefore fell back to the $1 peg — including **2023-03-11, the day USDC
 depegged**, which the API published as a literal `1.0` labelled `peg`.
 
-Task 0265 composed a daily USDC/USD series from two independent outside feeds
-and versioned it in this repo:
+Task 0265 composed a USDC/USD series from two independent outside feeds and
+versioned it in this repo at **two grains**:
 
 ```
 lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/composed_usdc_usd_1d.csv
+lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/composed_usdc_usd_1h.csv
 ```
 
-2049 daily rows, 2021-01-25 → 2026-09-04. Columns
+2049 daily rows and 49 176 hourly ones, both 2021-01-25 → 2026-09-04, both with
+the same ten columns
 `ts,open,high,low,close,n_obs,source,quality,xcheck_spread_bps,xcheck_sources`;
-`ts` is the UTC day **start**; `source ∈ {chainlink, bitstamp}`;
-`quality ∈ {measured, measured-disputed, fallback}`.
+`ts` is the UTC bucket **start** (day start / full hour);
+`source ∈ {chainlink, bitstamp}`;
+`quality ∈ {measured, measured-disputed, fallback}` (`measured-disputed` is a
+daily cross-check verdict and does not occur at hourly grain).
+
+**Both files are loaded, DAILY FIRST and HOURLY SECOND** (Adam, 2026-09-09), and
+the order is not cosmetic:
+
+- They collide at **every midnight**: `prices.usd_rate` keys on
+  (identity, `timestamp`, `method`) and both grains write the same `method`, so
+  a day's 00:00 row is ONE ReplacingMergeTree key. The values differ — the daily
+  row carries the **day's** close, the hourly row the **00:00 hour's** — at
+  1 980 of the 2 049 shared midnights. The higher `version` wins, i.e. whichever
+  grain was loaded last.
+- Hourly must win, because `price_usd_series_1h` and `/ohlcv` at `1h` resolve at
+  the hour and the 00:00 bucket must carry the 00:00 hour's number.
+- The daily surface does not move when it does: `price_usd_series` argMaxes over
+  the whole day and lands on the 23:00 row, whose close **is** the daily close
+  for all 2049 days (pinned by `enrichment-worker/tests/composed_usdc_csv.rs`).
+
+Loading the daily file alone is a valid, smaller deliverable — `/ohlcv` treats a
+lone daily row as valid for its whole UTC day — but it leaves
+`price_usd_series_1h` publishing the import at 00:00 and `1`/`peg` for the other
+twenty-three hours of every covered day, and it cannot show the depeg **trough**
+(2023-03-11 07:00, `0.8833`) at `granularity=1h` at all.
 
 This procedure loads it as `method = 'external'` rows — measured evidence of the
 same standing as a poll, kept a distinct word because task 0247 forbids
@@ -120,17 +145,51 @@ REPLACE`s all six views in `views.sql` from your working tree** — which
    WHERE database = 'prices' AND table = 'usd_rate' AND name = 'quality'
    ```
 
-   Expect `1`. And confirm both view grains carry the widened predicate — a
-   DDL-text check, not a read of `usd_rate`:
+   Expect `1`. And confirm both view grains carry the widened predicate.
+
+   ⚠️ **Do not substring-match the formatted predicate.** ClickHouse does not
+   store the text you submitted: `create_table_query` is re-serialised from the
+   AST, and `packages/prices-clickhouse/src/drift.rs` exists precisely because
+   of it — _"`INTERVAL 15 MINUTE` becomes `toIntervalMinute(15)`, whitespace
+   collapses, identifiers may gain backticks … a naive text compare would
+   report drift permanently, which is worse than no check at all."_ Whether the
+   printer reproduces `method IN ('oracle', 'external')` byte-for-byte on
+   26.3.10.60 is unverified, and `create_table_query` is **empty** for a
+   session user lacking `SHOW COLUMNS` on the object (`drift.rs`), which reads
+   as "the views did not land" on a cluster that is fine. An earlier draft of
+   this runbook made exactly that mistake.
+
+   Two checks instead. The first lists the views and flags a **bare token** the
+   AST printer cannot reshape, and it returns a row per view whether or not the
+   flag is set, so an empty `create_table_query` shows up as `has_external = 0`
+   next to a `ddl_len` of 0 rather than as a missing view:
 
    ```sql
-   SELECT name FROM system.tables
+   SELECT name,
+          position(create_table_query, '''external''') > 0 AS has_external,
+          length(create_table_query)                     AS ddl_len
+   FROM system.tables
    WHERE database = 'prices'
      AND name IN ('price_usd_series', 'price_usd_series_1h')
-     AND position(create_table_query, 'method IN (\'oracle\', \'external\')') > 0
+   ORDER BY name
    ```
 
-   Expect **both** names. Then `prices-clickhouse-drift` exits 0.
+   Expect **two rows**, `has_external = 1` on both. `ddl_len = 0` means the
+   session user cannot read the DDL — re-run as the container's `default`
+   user; it does **not** mean the views are wrong.
+
+   The second cannot lie at all, because it EXECUTES the predicate rather than
+   reading its text. It costs nothing and returns 0 until step 5's promote,
+   which is the correct answer before then:
+
+   ```sql
+   SELECT count() FROM prices.price_usd_series WHERE method = 'external'
+   ```
+
+   A view without the widening **fails to parse this** — `method` is projected
+   by the widened definition only — so an error here is the unambiguous
+   "the old view is still installed". Expect `0` now, and a non-zero count when
+   you run it again at step 6. Then `prices-clickhouse-drift` exits 0.
 
 2. **The four mTLS variables and `CH_DATABASE`** are exported (section 1
    below lists them). The tool refuses `--transport hetzner` without
@@ -165,26 +224,37 @@ export CH_DATABASE=prices
 
 ---
 
-## 2. Dry run — and these figures are a GATE
+## 2. Dry run (DAILY) — and these figures are a GATE
+
+Sections 2–4 are the **daily** pass. Section 4½ repeats them for the hourly
+file; section 5 promotes both at once.
 
 ```bash
-CSV=lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/composed_usdc_usd_1d.csv
+DATA=lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data
+CSV=$DATA/composed_usdc_usd_1d.csv
+CSV_1H=$DATA/composed_usdc_usd_1h.csv
 
 cargo run -p enrichment-worker --features aws-mtls --bin load-external-rate -- \
-  --transport hetzner --dry-run "$CSV"
+  --transport hetzner --dry-run --grain daily "$CSV"
 ```
+
+⚠️ `--grain` defaults to `daily` and the default is **not** symmetric: every
+midnight is also a full hour, so the daily file parses at `--grain hourly` too
+and would be loaded as 2049 isolated hours. Name the flag beside the file, every
+time, as the commands here do.
 
 It must print exactly:
 
 | Figure                      | Value                             |
 | --------------------------- | --------------------------------- |
+| grain                       | **daily**                         |
 | rows parsed                 | **2049**                          |
 | loadable (below epoch)      | **1872**                          |
 | skipped (at/above epoch)    | **177**                           |
 | quality `fallback`          | **24**                            |
 | quality `measured-disputed` | **4**                             |
 | quality `measured`          | **1844**                          |
-| 2023-03-11 close            | **0.96812** (chainlink, measured) |
+| 2023-03-11 00:00 close      | **0.96812** (chainlink, measured) |
 
 > ⚠️ **A figure that does not match is a STOP, not a note.** These numbers are
 > measured against the versioned file and pinned by a CI test
@@ -197,11 +267,11 @@ A dry run writes nothing and opens no write path. It is safe to repeat.
 
 ---
 
-## 3. Shadow load
+## 3. Shadow load (DAILY)
 
 ```bash
 cargo run -p enrichment-worker --features aws-mtls --bin load-external-rate -- \
-  --transport hetzner "$CSV"
+  --transport hetzner --grain daily "$CSV"
 ```
 
 `--shadow` is ON by default. The rows land under `method = 'external-candidate'`
@@ -214,7 +284,7 @@ run with it, so a later run is distinguishable from this one.
 
 ---
 
-## 4. The three verification queries
+## 4. The three verification queries (DAILY)
 
 Run all three. Each fails differently, and none is implied by the others.
 
@@ -243,7 +313,7 @@ an off-by-one-day error that produces entirely plausible numbers and fails
 nowhere.
 
 ```sql
-SELECT countIf(timestamp != toStartOfDay(timestamp)) AS not_midnight,
+SELECT countIf(timestamp != toStartOfDay(timestamp, 'UTC')) AS not_midnight,
        count() AS rows
 FROM prices.usd_rate FINAL
 WHERE asset_kind = 'credit' AND asset_code = 'USDC'
@@ -252,9 +322,22 @@ WHERE asset_kind = 'credit' AND asset_code = 'USDC'
 ```
 
 Expect `not_midnight = 0`, `rows = 1872`. Anything else — stop and do not
-promote. (Not `toTime()`: that function anchors the time-of-day to
-**1970-01-02**, not 01-01, so an expectation written against it halts a
-correct load; comparing against `toStartOfDay` has no anchor to get wrong.)
+promote.
+
+> Two things this expression has to get right, and an earlier draft got one of
+> each wrong. **Not `toTime()`**: that function anchors the time-of-day to
+> **1970-01-02**, not 01-01, so an expectation written against it halts a
+> correct load. And **`toStartOfDay` must name its zone**: `timestamp` is a bare
+> `DateTime` and nothing in this repo pins the server's timezone
+> (`docker-compose.yml` sets no `TZ`; `ch-prod-01`'s zone is undocumented), so
+> an unzoned `toStartOfDay` resolves locally and on a UTC+2 server this gate
+> reads `not_midnight = 1872` on a perfectly correct load. `'UTC'` is not
+> optional here.
+
+⚠️ **After the hourly pass (section 4½) this query no longer applies as
+written** — `external-candidate` then holds 44 918 rows at every full hour, of
+which 1 872 are midnights. Run 4b before the hourly load, or use the hourly
+form given in 4½.
 
 **4c. The depeg day reads back correctly.** The falsifier for the whole task.
 
@@ -275,18 +358,115 @@ task text is a rounding, not the stored value, and does not match either.
 
 ---
 
-## 5. Promote
+## 4½. The hourly grain — repeat 2–4 for the second file
+
+Same tool, same refusals, same epoch partition, same staging word. Only
+`--grain` and the file change. **Do this after the daily pass has passed 4a–4c,
+never before it** — the two grains share every midnight key and the last write
+wins (section 0).
+
+**Dry run.** These figures are a GATE in exactly the same sense as section 2's,
+and are pinned by the same CI test:
 
 ```bash
 cargo run -p enrichment-worker --features aws-mtls --bin load-external-rate -- \
-  --transport hetzner --promote "$CSV"
+  --transport hetzner --dry-run --grain hourly "$CSV_1H"
+```
+
+| Figure                   | Value                                |
+| ------------------------ | ------------------------------------ |
+| grain                    | **hourly**                           |
+| rows parsed              | **49176**                            |
+| loadable (below epoch)   | **44918**                            |
+| skipped (at/above epoch) | **4258**                             |
+| quality `fallback`       | **597**                              |
+| quality `measured`       | **44321**                            |
+| source `bitstamp`        | **597**                              |
+| source `chainlink`       | **44321**                            |
+| loadable span (unix)     | **1611532800 .. 1773234000**         |
+| 2023-03-11 00:00 close   | **0.99503491** (chainlink, measured) |
+| 2023-03-11 07:00 close   | **0.8833** (chainlink, measured)     |
+| 2023-03-11 23:00 close   | **0.96812** (chainlink, measured)    |
+
+Two of those deserve a sentence:
+
+- **No `measured-disputed` line.** That verdict is the composer's DAILY
+  cross-check between feeds; it has no hourly analogue, so the four disputed
+  days appear here as plain `measured`. Its absence is expected, not a
+  truncated file.
+- **`2023-03-11 00:00` is 0.99503491, not 0.96812.** That is the shared-midnight
+  collision, visible: the daily file's 00:00 row carries the day's close, this
+  one carries the 00:00 hour's. The hourly value is the right one for an hourly
+  bucket, and loading hourly second is what makes it win.
+
+**Shadow load.** 44 918 rows in chunks of 250 — about 180 requests against a
+shared cluster, a few minutes:
+
+```bash
+cargo run -p enrichment-worker --features aws-mtls --bin load-external-rate -- \
+  --transport hetzner --grain hourly "$CSV_1H"
+```
+
+**Verify.** The hourly forms of 4a–4c. Note `not_full_hour`, not
+`not_midnight` — and `'UTC'` for the same reason as before:
+
+```sql
+-- 4a′ span and count
+SELECT count() AS rows, min(timestamp) AS first, max(timestamp) AS last,
+       max(timestamp) < toDateTime({epoch:UInt32}) AS below_epoch
+FROM prices.usd_rate FINAL
+WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+  AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+  AND contract_address = '' AND method = 'external-candidate';
+
+-- 4b′ every stamp is a full hour UTC, and the midnights are still all there
+SELECT countIf(timestamp != toStartOfHour(timestamp, 'UTC'))  AS not_full_hour,
+       countIf(timestamp  = toStartOfDay(timestamp, 'UTC'))   AS midnights,
+       count()                                                AS rows
+FROM prices.usd_rate FINAL
+WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+  AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+  AND contract_address = '' AND method = 'external-candidate';
+
+-- 4c′ the trough hour, which a daily-only load cannot show
+SELECT toString(timestamp) AS hour, toString(usd_rate) AS rate,
+       reference_asset AS source, quality
+FROM prices.usd_rate FINAL
+WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+  AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+  AND contract_address = '' AND method = 'external-candidate'
+  AND timestamp IN (toDateTime(1678518000), toDateTime(1678575600))
+ORDER BY timestamp
+```
+
+Expect: `rows = 44918`, `first = 2021-01-25 00:00:00`, `last = 2026-03-11
+13:00:00`, `below_epoch = 1`; `not_full_hour = 0`, `midnights = 1872`; and two
+rows reading `0.8833` (07:00) and `0.96812` (23:00), both
+`chainlink`/`measured`.
+
+⚠️ `rows = 44918`, **not** 46 790 — the staged set is a UNION, not a sum: the
+hourly file's 1 872 midnight rows replaced the daily file's at the shared key.
+A count of 46 790 would mean the two grains are writing different `method`
+values and the collision is not happening, which breaks everything section 0
+says.
+
+---
+
+## 5. Promote
+
+One promote covers both grains: it selects every staged row of this identity
+below the epoch, whatever grain wrote it. Run it once, after **both** passes.
+
+```bash
+cargo run -p enrichment-worker --features aws-mtls --bin load-external-rate -- \
+  --transport hetzner --promote "$CSV_1H"
 ```
 
 > ⚠️ **The promote ADDS a key; it does not move one.** `method` is part of
 > `usd_rate`'s `ORDER BY`, so the `external-candidate` rows and the `external`
 > rows are **different** ReplacingMergeTree keys and **both survive**. Nothing is
 > deleted. The staged rows stay behind, still inert because no read predicate
-> names them, and their storage cost is negligible (1872 narrow rows). Do not
+> names them, and their storage cost is negligible (44 918 narrow rows). Do not
 > "clean them up" — leaving them is what makes the rollback in step 9 free.
 
 Re-running the promote is idempotent only because RMT dedups the identical
@@ -303,8 +483,9 @@ WHERE asset_kind = 'credit' AND asset_code = 'USDC'
 GROUP BY method
 ```
 
-Expect **1872 of each**. Fewer `external` than `external-candidate` means the
-promote did not finish.
+Expect **44 918 of each** after both passes (1 872 of each if you loaded the
+daily file only). Fewer `external` than `external-candidate` means the promote
+did not finish.
 
 ---
 
@@ -323,6 +504,26 @@ WHERE asset_code = 'USDC'
 ```
 
 Expect `0.96812`, `external`. `1`, `peg` means the promote has not run (step 5) or the views on the cluster predate this branch (Preconditions).
+
+And the hourly grain, which is what section 4½ bought — three different numbers
+inside one day, where a daily-only load publishes one:
+
+```sql
+SELECT toString(bucket) AS hour, toString(close_usd) AS close, method
+FROM prices.price_usd_series_1h
+WHERE asset_code = 'USDC'
+  AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+  AND bucket IN (toDateTime('2023-03-11 00:00:00'),
+                 toDateTime('2023-03-11 07:00:00'),
+                 toDateTime('2023-03-11 23:00:00'))
+ORDER BY bucket
+```
+
+Expect `0.99503491`, `0.8833`, `0.96812`, all `external`. A single value
+repeated three times means only the daily file was loaded; `1`/`peg` on the
+07:00 and 23:00 hours means the same. (Buckets appear only where a candle
+exists for that hour, so an empty result is a gap in `price_ohlcv_1h`, not a
+missing rate.)
 
 Both `price_usd_series` grains and `queries_ch::ohlcv_peg_series` read
 `oracle` and `external` rows, and where one bucket holds both, `oracle` wins
@@ -368,14 +569,25 @@ means the read path is not seeing the rows: re-check step 5's counts (a shadow
 load that was never promoted looks exactly like this) and then the
 Preconditions.
 
-**Grains.** The import is daily, and `/ohlcv` serves an imported row for
-**every bucket of its UTC day at every grain** — `granularity=1h` on
-2023-03-11 returns `0.96812`/`external` for all twenty-four hours, the same
-rate task 0268's external tier writes into that day's hourly candles. ⚠️
-`price_usd_series_1h` does **not**: it buckets the rate by the hour and
-publishes `1`/`peg` for the twenty-three hours after midnight. That
-disagreement is recorded as an open issue in the task file; do not "fix" it in
-this procedure.
+**The hourly falsifier**, which the daily grain cannot produce:
+
+```bash
+curl -s "https://<api-host>/v1/assets/USDC:GA5Z…/ohlcv?granularity=1h&start=2023-03-11T00:00:00Z&end=2023-03-11T23:00:00Z&base_currency=USD" \
+  | jq '.data[] | select(.timestamp | test("T(00|07|23):")) | {timestamp, close, method}'
+```
+
+Expect `0.99503491` at 00:00, **`0.8833` at 07:00** and `0.96812` at 23:00, all
+`external`. The trough is the hour the peg actually broke, and a daily-only
+load answers `0.96812` for all three.
+
+**Grains.** `/ohlcv` floors an imported row at the start of its UTC day, so a
+LONE daily row serves every bucket of that day at every grain — matching task
+0268's external tier, which prices every candle of an imported day from the same
+row. `price_usd_series_1h` has no such net: it buckets an imported row exactly
+like a poll. With **both** files loaded the two surfaces resolve the same row per
+bucket and agree everywhere, which is the state this procedure leaves the
+cluster in. From a daily-only load they disagree on 23 of every 24 hours — that
+is the reason section 4½ is part of the procedure and not an optional extra.
 
 **Provenance.** `source` and `quality` are `null` — not `""` — on every bucket
 whose rate came from a poll or from the peg. An empty string there is a

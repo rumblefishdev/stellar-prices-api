@@ -19,12 +19,16 @@
 //!
 //!   # 1. dry run (writes nothing, prints the figures the runbook gates on):
 //!   cargo run -p enrichment-worker --features aws-mtls --bin load-external-rate -- \
-//!     --transport hetzner --dry-run \
+//!     --transport hetzner --dry-run --grain daily \
 //!     lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/composed_usdc_usd_1d.csv
 //!
 //!   # 2. shadow load (method = 'external-candidate'; nothing reads it yet):
 //!   cargo run -p enrichment-worker --features aws-mtls --bin load-external-rate -- \
-//!     --transport hetzner <csv>
+//!     --transport hetzner --grain daily <csv>
+//!
+//!   # 2b. then the HOURLY file, SECOND — it must win the shared midnight key:
+//!   cargo run -p enrichment-worker --features aws-mtls --bin load-external-rate -- \
+//!     --transport hetzner --grain hourly <csv_1h>
 //!
 //!   # 3. promote, AFTER the runbook's verification queries pass:
 //!   cargo run -p enrichment-worker --features aws-mtls --bin load-external-rate -- \
@@ -37,11 +41,30 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 use enrichment_worker::external_rate::{
-    DEPEG_DAY_START_S, LoadPlan, PROMOTED_METHOD, SHADOW_METHOD, check_identity, insert_statements,
-    parse_csv, partition, promote_statement,
+    DEPEG_DAY_START_S, DEPEG_HOUR_S, Grain, LoadPlan, PROMOTED_METHOD, SHADOW_METHOD,
+    check_identity, insert_statements, parse_csv, partition, promote_statement,
 };
 use prices_clickhouse::{USDC_ISSUER, USDC_ORACLE_EPOCH_S};
 use tracing::info;
+
+/// clap's view of [`Grain`]. A separate enum so the lib module stays free of a
+/// clap dependency — the same split as the rest of this binary.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum GrainArg {
+    /// `composed_usdc_usd_1d.csv` — one row per UTC day, stamped 00:00:00.
+    Daily,
+    /// `composed_usdc_usd_1h.csv` — one row per UTC hour, stamped mm:ss = 00:00.
+    Hourly,
+}
+
+impl From<GrainArg> for Grain {
+    fn from(g: GrainArg) -> Self {
+        match g {
+            GrainArg::Daily => Grain::Daily,
+            GrainArg::Hourly => Grain::Hourly,
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum Transport {
@@ -59,6 +82,26 @@ enum Transport {
 struct Args {
     /// The composed CSV to load (task 0265's artefact, read 1:1).
     csv: PathBuf,
+
+    /// Which composed file this is. `daily` accepts ONLY 00:00:00 UTC stamps;
+    /// `hourly` accepts any full hour (mm:ss = 00:00). Everything else — the
+    /// six refusals, the epoch partition, the shadow/promote split, the `method`
+    /// values — is identical.
+    ///
+    /// ⚠️ Defaults to `daily`, and the default is not symmetric: every midnight
+    /// is also a full hour, so the DAILY file parses at `--grain hourly` too.
+    /// Only the hourly file is refused at the wrong grain (at its 01:00 row).
+    /// Name the flag beside the file, as the runbook does.
+    ///
+    /// ⚠️ THE TWO GRAINS SHARE EVERY MIDNIGHT KEY AND CARRY DIFFERENT VALUES
+    /// THERE — the daily row is the DAY's close, the hourly row the 00:00
+    /// HOUR's. `usd_rate` is a ReplacingMergeTree keyed on
+    /// (identity, timestamp, method), so the later `version` wins. Load DAILY
+    /// FIRST and HOURLY SECOND: `price_usd_series` argMaxes to the 23:00 row,
+    /// whose close is the daily close, so the daily surface is unaffected —
+    /// while the hourly surfaces need the hour's own number at 00:00.
+    #[arg(long, value_enum, default_value_t = GrainArg::Daily)]
+    grain: GrainArg,
 
     /// `local` (plain HTTP) or `hetzner` (mTLS direct-write).
     #[arg(long, value_enum, default_value_t = Transport::Local)]
@@ -124,8 +167,9 @@ struct Args {
     promote: bool,
 }
 
-fn print_plan(plan: &LoadPlan, dry_run: bool) {
+fn print_plan(plan: &LoadPlan, grain: Grain, dry_run: bool) {
     println!("\n=== load-external-rate plan ===");
+    println!("{:>28}  {}", "grain", grain.label());
     println!("{:>28}  {}", "rows parsed", plan.parsed);
     println!("{:>28}  {}", "loadable (below epoch)", plan.loadable.len());
     println!(
@@ -142,17 +186,25 @@ fn print_plan(plan: &LoadPlan, dry_run: bool) {
         println!("{:>28}  {} .. {}", "loadable span (unix)", first, last);
     }
 
-    // 2023-03-11 00:00:00 UTC. Printed by name because it is the falsifier for
-    // this whole task: if this row is absent or reads 1.0, do not load.
-    match plan.loadable.iter().find(|r| r.ts == DEPEG_DAY_START_S) {
-        Some(r) => println!(
-            "{:>28}  {} ({}, {})",
-            "2023-03-11 close", r.rate, r.source, r.quality
-        ),
+    // The falsifier, per grain. Printed by name because it is what the runbook
+    // gates on: if this row is absent or reads 1.0, do not load.
+    //
+    // At daily grain that is 2023-03-11 itself (0.96812, the day's close). At
+    // hourly grain the DAY's close is a poor falsifier — the peg had largely
+    // recovered by 23:00 — so the trough hour 07:00 (0.8833) is printed too. It
+    // is the number a daily-only load cannot show at `granularity=1h`, and
+    // therefore the whole argument for this grain.
+    let show = |label: &str, ts: u32| match plan.loadable.iter().find(|r| r.ts == ts) {
+        Some(r) => println!("{:>28}  {} ({}, {})", label, r.rate, r.source, r.quality),
         None => println!(
-            "{:>28}  ABSENT — this is the day the whole task exists for. STOP.",
-            "2023-03-11 close"
+            "{:>28}  ABSENT — this is what the whole task exists for. STOP.",
+            label
         ),
+    };
+    show("2023-03-11 00:00 close", DEPEG_DAY_START_S);
+    if grain == Grain::Hourly {
+        show("2023-03-11 07:00 close", DEPEG_HOUR_S);
+        show("2023-03-11 23:00 close", DEPEG_DAY_START_S + 23 * 3600);
     }
     if dry_run {
         println!("[DRY RUN — nothing written]");
@@ -200,15 +252,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let text = std::fs::read_to_string(&args.csv)
         .map_err(|e| format!("could not read {}: {e}", args.csv.display()))?;
-    let plan =
-        partition(parse_csv(&args.csv.display().to_string(), &text).map_err(|e| e.to_string())?);
-    print_plan(&plan, args.dry_run);
+    let grain: Grain = args.grain.into();
+    let plan = partition(
+        parse_csv(&args.csv.display().to_string(), &text, grain).map_err(|e| e.to_string())?,
+    );
+    print_plan(&plan, grain, args.dry_run);
 
     if args.dry_run {
         info!(
             parsed = plan.parsed,
             loadable = plan.loadable.len(),
             skipped = plan.skipped_at_or_above_epoch,
+            grain = grain.label(),
             "dry run complete — nothing written"
         );
         return Ok(());
@@ -225,6 +280,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(
         version,
         mode,
+        grain = grain.label(),
         database = %args.database,
         transport = ?args.transport,
         rows = plan.loadable.len(),

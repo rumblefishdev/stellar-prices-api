@@ -126,5 +126,6 @@ lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/*
 !lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/sources.csv
 !lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/composed_usdc_usd_1d.csv
 !lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/composed_usdc_usd_1h_2023-03.csv
+!lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/data/composed_usdc_usd_1h.csv
 lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/analysis/*
 !lore/1-tasks/archive/0265_FEATURE_price-usdc-from-measurement-not-the-peg/analysis/guardrails.py

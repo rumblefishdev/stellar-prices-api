@@ -546,17 +546,47 @@ FROM
     -- under which a daily close can equal the last hourly close of that day at
     -- all (subject to the gap caveat above).
     --
-    -- ⚠️ ONE DELIBERATE DIFFERENCE, and it is not drift. `/ohlcv` serves grains
-    -- this view does not, down to `1m`, and a 1-minute bucket is NARROWER than
-    -- the oracle's 5-minute poll cadence — so scoping strictly to the bucket
-    -- there would leave ~4 buckets in 5 on the $1 fallback and turn the series
-    -- into a square wave. Its window is therefore max(bucket, 300 s), 300 s
-    -- being enrichment's own FORWARD_FILL_WINDOW_S. At `1h` and `1d` — the only
-    -- grains this view has — max(bucket, 300 s) IS the bucket, so the two agree
-    -- exactly wherever they are comparable. Pinned by
-    -- ohlcv_agrees_with_price_usd_series_on_the_same_bucket (ohlcv_it.rs), which
-    -- compares the two surfaces against each other rather than against
-    -- literals.
+    -- ⚠️ TWO DELIBERATE DIFFERENCES from `/ohlcv`, and neither is drift.
+    --
+    -- (1) THE ORACLE WINDOW. `/ohlcv` serves grains this view does not, down to
+    -- `1m`, and a 1-minute bucket is NARROWER than the oracle's 5-minute poll
+    -- cadence — so scoping strictly to the bucket there would leave ~4 buckets
+    -- in 5 on the $1 fallback and turn the series into a square wave. Its
+    -- window is therefore max(bucket, 300 s), 300 s being enrichment's own
+    -- FORWARD_FILL_WINDOW_S. At `1h` and `1d` — the only grains these views
+    -- have — max(bucket, 300 s) IS the bucket, so the two agree exactly
+    -- wherever they are comparable.
+    --
+    -- (2) THE IMPORTED ROW'S WINDOW (task 0267). `/ohlcv` additionally floors
+    -- an `external` row at `toStartOfDay(bkt, 'UTC')`, so ONE imported row is
+    -- valid for the whole UTC day it is stamped on. These views do not: they
+    -- bucket an imported row exactly like a poll, at the bucket it falls in.
+    --
+    -- ⚠️ That is a SAFETY NET on `/ohlcv`, not a difference in what production
+    -- serves. Since the 2026-09-09 hourly decision the loader runs at BOTH
+    -- grains (`load-external-rate --grain daily|hourly`), so `usd_rate` holds
+    -- an `external` row for EVERY HOUR of every covered day and both surfaces
+    -- resolve the same row for the same bucket. The two therefore agree, which
+    -- is what task 0246's cross-surface criterion asserts. The net is
+    -- observable ONLY if someone loads the daily file alone and not the hourly
+    -- one — in which case `/ohlcv` publishes the imported rate for all 24 hours
+    -- of a day and `price_usd_series_1h` publishes it for the 00:00 hour and
+    -- `1`/'peg' for the other twenty-three. The net exists because task 0268's
+    -- external enrichment tier prices every candle of an imported day from that
+    -- one daily row, and `/ohlcv` must not contradict the candles beside it.
+    --
+    -- Widening this view with a UNION ALL / ARRAY JOIN over the 24 hours of an
+    -- imported day was considered and REJECTED (task 0267, review round 2
+    -- WR-09): hourly rows make it unnecessary, and it would have added a second
+    -- rate shape to a view whose whole job is to be the boring one.
+    --
+    -- Pinned by ohlcv_agrees_with_price_usd_series_on_the_same_bucket
+    -- (ohlcv_it.rs), which compares the two surfaces against each other rather
+    -- than against literals, over a fixture that now holds imported hours as
+    -- well as polls, and — without a ClickHouse — by
+    -- the_views_and_the_peg_series_admit_the_same_external_rows
+    -- (prices-api queries_ch.rs), which pins that the two spell the predicate
+    -- the same way.
     LEFT JOIN
     (
         SELECT
@@ -796,17 +826,47 @@ FROM
     -- under which a daily close can equal the last hourly close of that day at
     -- all (subject to the gap caveat above).
     --
-    -- ⚠️ ONE DELIBERATE DIFFERENCE, and it is not drift. `/ohlcv` serves grains
-    -- this view does not, down to `1m`, and a 1-minute bucket is NARROWER than
-    -- the oracle's 5-minute poll cadence — so scoping strictly to the bucket
-    -- there would leave ~4 buckets in 5 on the $1 fallback and turn the series
-    -- into a square wave. Its window is therefore max(bucket, 300 s), 300 s
-    -- being enrichment's own FORWARD_FILL_WINDOW_S. At `1h` and `1d` — the only
-    -- grains this view has — max(bucket, 300 s) IS the bucket, so the two agree
-    -- exactly wherever they are comparable. Pinned by
-    -- ohlcv_agrees_with_price_usd_series_on_the_same_bucket (ohlcv_it.rs), which
-    -- compares the two surfaces against each other rather than against
-    -- literals.
+    -- ⚠️ TWO DELIBERATE DIFFERENCES from `/ohlcv`, and neither is drift.
+    --
+    -- (1) THE ORACLE WINDOW. `/ohlcv` serves grains this view does not, down to
+    -- `1m`, and a 1-minute bucket is NARROWER than the oracle's 5-minute poll
+    -- cadence — so scoping strictly to the bucket there would leave ~4 buckets
+    -- in 5 on the $1 fallback and turn the series into a square wave. Its
+    -- window is therefore max(bucket, 300 s), 300 s being enrichment's own
+    -- FORWARD_FILL_WINDOW_S. At `1h` and `1d` — the only grains these views
+    -- have — max(bucket, 300 s) IS the bucket, so the two agree exactly
+    -- wherever they are comparable.
+    --
+    -- (2) THE IMPORTED ROW'S WINDOW (task 0267). `/ohlcv` additionally floors
+    -- an `external` row at `toStartOfDay(bkt, 'UTC')`, so ONE imported row is
+    -- valid for the whole UTC day it is stamped on. These views do not: they
+    -- bucket an imported row exactly like a poll, at the bucket it falls in.
+    --
+    -- ⚠️ That is a SAFETY NET on `/ohlcv`, not a difference in what production
+    -- serves. Since the 2026-09-09 hourly decision the loader runs at BOTH
+    -- grains (`load-external-rate --grain daily|hourly`), so `usd_rate` holds
+    -- an `external` row for EVERY HOUR of every covered day and both surfaces
+    -- resolve the same row for the same bucket. The two therefore agree, which
+    -- is what task 0246's cross-surface criterion asserts. The net is
+    -- observable ONLY if someone loads the daily file alone and not the hourly
+    -- one — in which case `/ohlcv` publishes the imported rate for all 24 hours
+    -- of a day and `price_usd_series_1h` publishes it for the 00:00 hour and
+    -- `1`/'peg' for the other twenty-three. The net exists because task 0268's
+    -- external enrichment tier prices every candle of an imported day from that
+    -- one daily row, and `/ohlcv` must not contradict the candles beside it.
+    --
+    -- Widening this view with a UNION ALL / ARRAY JOIN over the 24 hours of an
+    -- imported day was considered and REJECTED (task 0267, review round 2
+    -- WR-09): hourly rows make it unnecessary, and it would have added a second
+    -- rate shape to a view whose whole job is to be the boring one.
+    --
+    -- Pinned by ohlcv_agrees_with_price_usd_series_on_the_same_bucket
+    -- (ohlcv_it.rs), which compares the two surfaces against each other rather
+    -- than against literals, over a fixture that now holds imported hours as
+    -- well as polls, and — without a ClickHouse — by
+    -- the_views_and_the_peg_series_admit_the_same_external_rows
+    -- (prices-api queries_ch.rs), which pins that the two spell the predicate
+    -- the same way.
     LEFT JOIN
     (
         SELECT

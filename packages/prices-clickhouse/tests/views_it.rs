@@ -1576,6 +1576,153 @@ async fn an_oracle_row_outranks_an_imported_row_in_the_same_bucket() {
         .unwrap();
 }
 
+/// 🔑 Task 0267, review round 2 WR-09 — `price_usd_series_1h` publishes the
+/// IMPORTED rate of each HOUR, from the hourly grain of task 0265's composed
+/// series (Adam, 2026-09-09).
+///
+/// This is the view half of
+/// `ohlcv_usdc_serves_the_depeg_day_hour_by_hour_from_the_hourly_import`
+/// (prices-api `ohlcv_it.rs`), seeded identically and asserted against the same
+/// three numbers, because the two surfaces must agree and the cheapest way to
+/// keep them agreeing is to make the same fixture answer both.
+///
+/// ⚠️ THE DIVERGENCE THIS CLOSES. `/ohlcv` floors an `external` row at
+/// `toStartOfDay(bkt, 'UTC')` — one DAILY imported row serves all 24 hours of
+/// its day, matching task 0268's external enrichment tier. This view has no such
+/// net: it buckets an imported row exactly like a poll. From a daily-only load
+/// the two therefore disagree on 23 of every 24 hours, which is what WR-09
+/// found. Loading the HOURLY file removes the disagreement at its source: there
+/// is a row per hour, so both surfaces resolve the same row and the net is never
+/// exercised. That is the reasoning behind NOT widening this view with a
+/// UNION ALL / ARRAY JOIN over the day's hours — see the comment above the rate
+/// join in `views.sql`.
+///
+/// The 2023-03-12 00:00 bucket is the control: a candle, no rate. It must read
+/// `1`/'peg'. Without it a regression that forward-filled the previous day's
+/// import across the UTC day boundary would pass.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn price_usd_series_1h_publishes_the_imported_rate_of_each_hour() {
+    let db = "it_views_0267_hourly_import";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // FOO/USDC candles, so USDC is a quote-only peg leg and the view's peg arm
+    // emits its placeholder for each bucket — the same shape every other peg
+    // test in this file uses.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
+             (toDateTime('2023-03-11 07:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
+             (toDateTime('2023-03-11 23:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
+             (toDateTime('2023-03-12 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // The real hours from composed_usdc_usd_1h.csv: the day opens near par,
+    // troughs at 07:00 and closes at 0.96812 — the value the DAILY file carries
+    // for the whole day. Three distinct numbers, so a surface resolving the
+    // wrong hour's row cannot still match.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit','USDC','{USDC_ISSUER}','',toDateTime('2023-03-11 00:00:00'),0.99503491000000,'external','chainlink','measured',0,1), \
+             ('credit','USDC','{USDC_ISSUER}','',toDateTime('2023-03-11 07:00:00'),0.88330000000000,'external','chainlink','measured',0,1), \
+             ('credit','USDC','{USDC_ISSUER}','',toDateTime('2023-03-11 23:00:00'),0.96812000000000,'external','chainlink','measured',0,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    for (bucket, want, method) in [
+        ("2023-03-11 00:00:00", "0.99503491", "external"),
+        ("2023-03-11 07:00:00", "0.8833", "external"),
+        ("2023-03-11 23:00:00", "0.96812", "external"),
+        ("2023-03-12 00:00:00", "1", "peg"),
+    ] {
+        let (close, rate_method) = client
+            .query(&format!(
+                "SELECT toString(close_usd), method FROM {db}.price_usd_series_1h \
+                 WHERE asset_code = ? AND issuer_address = ? AND bucket = toDateTime(?)"
+            ))
+            .bind("USDC")
+            .bind(USDC_ISSUER)
+            .bind(bucket)
+            .fetch_one::<(String, String)>()
+            .await
+            .unwrap_or_else(|e| panic!("no row for {bucket}: {e}"));
+        assert_eq!(
+            close, want,
+            "{bucket}: the hourly view must publish that HOUR's imported rate. \
+             `0.96812` on the 00:00 or 07:00 bucket means a daily row is being \
+             spread across the day; `1` means the widened predicate is not \
+             reaching method = 'external' at all."
+        );
+        assert_eq!(
+            rate_method, method,
+            "{bucket}: an imported hour must be labelled 'external', and the day \
+             AFTER the import must fall back to a labelled peg rather than \
+             forward-filling across the UTC day boundary"
+        );
+    }
+
+    // The daily surface is INDIFFERENT to the hourly rows: it argMaxes over the
+    // whole day and lands on 23:00, whose close IS the daily close (asserted for
+    // all 2049 days in enrichment-worker's composed_usdc_csv.rs). This is the
+    // property that makes "load daily first, hourly second" safe — the hourly
+    // rows win the shared midnight key and the daily number does not move.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    let (daily, daily_method) = client
+        .query(&format!(
+            "SELECT toString(close_usd), method FROM {db}.price_usd_series \
+             WHERE asset_code = ? AND issuer_address = ? AND bucket = toDateTime(?)"
+        ))
+        .bind("USDC")
+        .bind(USDC_ISSUER)
+        .bind("2023-03-11 00:00:00")
+        .fetch_one::<(String, String)>()
+        .await
+        .unwrap();
+    assert_eq!(
+        daily, "0.96812",
+        "the daily bucket must still publish the DAY's close, taken from the \
+         23:00 hourly row"
+    );
+    assert_eq!(daily_method, "external");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
 /// Task 0168 — the two grains DIVERGE across an oracle gap, and that is expected.
 ///
 /// The sibling test

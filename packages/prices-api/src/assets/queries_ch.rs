@@ -890,16 +890,33 @@ fn peg_series_sql(args: &OhlcvArgs, in_xlm: bool, table: &str, conds: &[String])
     //   * `ro` — the newest `oracle` reading before the bucket end, valid only
     //     inside the bucket's own window `[floor, bend)`. Unchanged from 0246.
     //   * `re` — the newest `external` row before the bucket end, valid for
-    //     the WHOLE UTC DAY it is stamped on: `[toStartOfDay(bkt), bend)`.
-    //     The imported series is DAILY and stamped at the day start (the loader
-    //     refuses anything else), and task 0268's external tier prices every
-    //     candle of that day — at every grain — from that one row. A one-bucket
-    //     window here would publish `0.96812`/`external` for the 00:00 hour of
-    //     2023-03-11 and `1`/`peg` for the other twenty-three, while the same
-    //     day's hourly XLM/USDC candles carried the measured rate throughout.
-    //     ⚠️ `price_usd_series_1h` still buckets the rate by the HOUR and so
-    //     still says `peg` for those hours — recorded as an open issue in the
-    //     0267 task file, not silently accepted.
+    //     the WHOLE UTC DAY it is stamped on: `[toStartOfDay(bkt, 'UTC'), bend)`.
+    //
+    //     ⚠️ This day-wide window is a SAFETY NET, not the loading plan. Since
+    //     the 2026-09-09 hourly decision the loader runs at BOTH grains
+    //     (`--grain daily|hourly`) and production carries an external row for
+    //     every hour of every covered day, so the window is only ever exercised
+    //     by a bucket whose own hour has a row anyway. It exists for the case
+    //     where someone loads the DAILY file alone: task 0268's external tier
+    //     prices every candle of that day — at every grain — from that one row,
+    //     and a one-bucket window here would publish `0.96812`/`external` for
+    //     the 00:00 hour of 2023-03-11 and `1`/`peg` for the other twenty-three,
+    //     while the same day's hourly XLM/USDC candles carried the measured rate
+    //     throughout.
+    //
+    //     ⚠️ `price_usd_series_1h` buckets the rate strictly by the HOUR and has
+    //     NO such net (views.sql). With hourly rows loaded the two surfaces
+    //     agree everywhere, which is what task 0246's cross-surface criterion
+    //     asserts; the difference is observable ONLY on a daily-only load, and
+    //     it is stated in the views' own comment rather than left implicit.
+    //
+    //     ⚠️ `'UTC'` is NAMED (review round 2, CR-02). `usd_rate.timestamp` and
+    //     `price_ohlcv_*.timestamp` are bare `DateTime`, so an unzoned
+    //     `toStartOfDay` resolves in the SERVER timezone and the window slides
+    //     with its UTC offset — at UTC+2 the last two hours of every imported
+    //     day would drop back to `peg`. `ch_enrich.rs` enforces the same rule
+    //     for the external enrichment tier with a unit test; this is the other
+    //     half of the same semantic.
     //
     // A valid oracle reading wins the bucket OUTRIGHT, regardless of which row
     // is newer — the same rule as `views.sql`'s rank-first `argMax` tuple, so
@@ -924,7 +941,7 @@ fn peg_series_sql(args: &OhlcvArgs, in_xlm: bool, table: &str, conds: &[String])
     // holds under both `join_use_nulls` settings (see the sentinel note in
     // `ohlcv_peg_series`), and the timestamp test is the window.
     let o_ok = format!("(ifNull(bo.om, '') != '' AND bo.orts >= {floor})");
-    let e_ok = "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt))".to_string();
+    let e_ok = "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt, 'UTC'))".to_string();
     let rate = format!("multiIf({o_ok}, bo.orate, {e_ok}, re.erate, toDecimal128(1, 14))");
 
     let val = if in_xlm {
@@ -1731,7 +1748,7 @@ mod tests {
     fn peg_series_sql_ranks_a_valid_oracle_reading_over_the_whole_bucket() {
         let sql = peg_sql();
         let o_ok = "(ifNull(bo.om, '') != '' AND bo.orts >= bo.bkt)";
-        let e_ok = "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt))";
+        let e_ok = "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt, 'UTC'))";
         assert!(
             sql.contains(&format!(
                 "multiIf({o_ok}, bo.orate, {e_ok}, re.erate, toDecimal128(1, 14))"
@@ -1779,7 +1796,7 @@ mod tests {
                 &["asset_id = ?".to_string()],
             );
             assert!(
-                sql.contains("re.erts >= toStartOfDay(bo.bkt)"),
+                sql.contains("re.erts >= toStartOfDay(bo.bkt, 'UTC')"),
                 "{grain:?}: the external floor is the DAY start: {sql}"
             );
             assert!(
@@ -1835,7 +1852,7 @@ mod tests {
     fn peg_series_sql_nulls_the_provenance_outside_an_imported_rate() {
         let sql = peg_sql();
         let o_ok = "(ifNull(bo.om, '') != '' AND bo.orts >= bo.bkt)";
-        let e_ok = "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt))";
+        let e_ok = "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt, 'UTC'))";
         for (alias, col) in [("src", "esource"), ("qual", "equality")] {
             let want = format!(
                 "if(o IS NULL OR {o_ok} OR NOT {e_ok}, NULL, nullIf(re.{col}, '')) AS {alias},"
@@ -1871,6 +1888,119 @@ mod tests {
         );
         // The bucket conds come first, so their binds precede both issuers.
         assert!(sql.find("asset_id = ?").unwrap() < oracle_at, "{sql}");
+    }
+
+    /// 🔴 Review round 2, CR-02 — every timezone-sensitive expression in the
+    /// peg series NAMES its zone.
+    ///
+    /// `usd_rate.timestamp` and `price_ohlcv_*.timestamp` are bare `DateTime`
+    /// (`grep 'DateTime(' init.sql` finds no `'UTC'` anywhere in the schema), so
+    /// an unzoned `toStartOfDay` resolves in the SERVER timezone. Nothing in
+    /// this repo pins that: `docker-compose.yml` sets no `TZ`, so local and CI
+    /// runs are UTC and every other test passes — while `ch-prod-01` is a
+    /// Hetzner box whose zone is undocumented. At UTC+2 the external floor for
+    /// the 22:00 and 23:00 buckets of every imported day lands ON THE NEXT
+    /// day's start, so a row stamped 00:00 UTC fails it and those hours drop
+    /// back to `1`/`peg` while task 0268's (zone-pinned) external tier has
+    /// already written the measured rate into the very same hours' candles.
+    ///
+    /// The shape mirrors `ch_enrich::every_timezone_sensitive_expression_pins_utc`
+    /// deliberately: this is the read half of the semantic that file enforces on
+    /// the write half, and one rule should be spelled one way.
+    #[test]
+    fn the_peg_series_pins_utc_on_every_timezone_sensitive_expression() {
+        for grain in [Granularity::M1, Granularity::H1, Granularity::D1] {
+            let sql = peg_series_sql(
+                &OhlcvArgs {
+                    granularity: grain,
+                    ..peg_args()
+                },
+                false,
+                "price_ohlcv_x",
+                &["asset_id = ?".to_string()],
+            );
+            let mut seen = 0usize;
+            for f in ["toStartOfDay(", "toDate(", "toStartOfInterval("] {
+                for (i, _) in sql.match_indices(f) {
+                    let tail = &sql[i..];
+                    let close = tail.find(')').unwrap();
+                    assert!(
+                        tail[..close].ends_with("'UTC'"),
+                        "{grain:?}: `{f}` without an explicit zone — the window \
+                         slides with the server's UTC offset: {}",
+                        &tail[..close + 1]
+                    );
+                    seen += 1;
+                }
+            }
+            // Not vacuous: the external floor is the only such expression, and
+            // it is spelled FOUR times — the rate, the label and the two
+            // provenance columns all read it. A rewrite that dropped it would
+            // otherwise pass here silently.
+            assert_eq!(
+                seen, 4,
+                "{grain:?}: expected the external day floor, four readers: {sql}"
+            );
+            assert!(!sql.contains("toStartOfDay(bo.bkt)"), "{grain:?}: {sql}");
+        }
+    }
+
+    /// 🔴 Review round 2, WR-09 — the two surfaces that serve an imported rate
+    /// must SPELL the external predicate the same way, checked without a
+    /// ClickHouse.
+    ///
+    /// They drifted once already: `/ohlcv` gained the day-wide safety net and
+    /// `price_usd_series_1h` did not, and nothing failed — the cross-surface
+    /// integration test could not see it because its fixture seeded oracle rows
+    /// only, and it is `#[ignore]` regardless. This is the cheap half of the
+    /// fix: the words themselves, in CI, on every push.
+    #[test]
+    fn the_views_and_the_peg_series_admit_the_same_external_rows() {
+        let views = prices_clickhouse::VIEWS_SQL;
+        let sql = peg_sql();
+
+        // Both rate surfaces of views.sql admit exactly the two measured words,
+        // spelled identically, and the peg series names the same two.
+        assert_eq!(
+            views.matches("method IN ('oracle', 'external')").count(),
+            2,
+            "price_usd_series and price_usd_series_1h must both admit the \
+             import, spelled the same way"
+        );
+        assert!(sql.contains("AND method = 'external' )"), "{sql}");
+        assert!(sql.contains("AND method = 'oracle' )"), "{sql}");
+
+        // Neither surface may REACH the pre-promotion staging word, by any
+        // idiom — `external-candidate` has `external` as a prefix, so a
+        // `LIKE`/`startsWith` form would select unverified rows.
+        //
+        // ⚠️ Checked as "no prefix idiom", not as "the word is absent": the
+        // views' comment block names the staging word in prose, deliberately,
+        // to say that nothing reads it. `external_rate.rs`'s
+        // `no_shipped_view_reads_the_staging_method` is the test that strips
+        // comments and proves the executable text is clean; this one must not
+        // duplicate it badly.
+        assert!(!sql.contains("external-candidate"), "{sql}");
+        for s in [views, sql.as_str()] {
+            for idiom in ["LIKE", "startsWith", "external%"] {
+                assert!(!s.contains(idiom), "`{idiom}` selects staged rows: {s}");
+            }
+        }
+
+        // Both surfaces rank oracle FIRST and by rank rather than by recency.
+        assert_eq!(
+            views
+                .matches("(if(method = 'oracle', 1, 0), timestamp)")
+                .count(),
+            4,
+            "two argMax tuples per view, rank-first"
+        );
+        let o_ok = sql.find("bo.orts >=").unwrap();
+        let e_ok = sql.find("re.erts >=").unwrap();
+        assert!(
+            o_ok < e_ok,
+            "the oracle test precedes the external one: {sql}"
+        );
     }
     /// 🔴 The mis-framing guard, and the reason it exists rather than a
     /// behavioural test: `Candle` derives `clickhouse::Row`, RowBinary is

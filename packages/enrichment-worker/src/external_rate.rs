@@ -56,7 +56,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use chrono::{DateTime, FixedOffset, NaiveTime};
+use chrono::{DateTime, FixedOffset, NaiveTime, Timelike};
 use prices_clickhouse::{USDC_ISSUER, USDC_ORACLE_EPOCH_S};
 use rust_decimal::Decimal;
 
@@ -117,11 +117,97 @@ pub const INSERT_CHUNK_ROWS: usize = 250;
 /// whole point is the exact decimal must not leave rounding to the server.
 pub const RATE_SCALE: u32 = 14;
 
+/// The lower magnitude bound on an accepted rate (review round 2, IN-06).
+///
+/// [`RATE_SCALE`] bounds the number from below — how FINE it may be — and
+/// `rate <= 0` bounds it at the origin, but nothing bounded the integer part:
+/// `Decimal(38, 14)` leaves twenty-four integer digits, and a value with more
+/// would be rendered into `toDecimal128('…', 14)` and left for the SERVER to
+/// decide about. That is the same "let ClickHouse decide" that `RateTooPrecise`
+/// exists to prevent, at the other end of the number.
+///
+/// The band is deliberately TIGHT rather than merely representable: this tool
+/// loads one thing, a USD/USDC series. USDC's worst measured hour in five years
+/// is 0.8833 (2023-03-11 07:00) and its highest 1.0102, so a value outside
+/// [0.5, 1.5] does not mean "an unusual day" — it means the file is not the
+/// composed USDC series. A rate of 2 000 would otherwise load silently and
+/// publish a two-thousand-dollar stablecoin.
+pub const RATE_MIN: &str = "0.5";
+
+/// The upper magnitude bound. See [`RATE_MIN`].
+pub const RATE_MAX: &str = "1.5";
+
+/// The grain of a composed CSV, and the only thing that differs between the two
+/// files task 0265 produced (Adam, 2026-09-09).
+///
+/// Both files carry the SAME ten columns and land under the SAME
+/// [`PROMOTED_METHOD`]; the only difference the loader cares about is which
+/// instants it will accept — a day start, or any full hour.
+///
+/// ⚠️ THE TWO GRAINS SHARE THE MIDNIGHT KEY, AND THEIR VALUES DIFFER. A daily
+/// row stamped `2023-03-11 00:00` carries the whole DAY's close (0.96812); the
+/// hourly row at that same instant carries the 00:00 HOUR's close
+/// (0.99503491). `prices.usd_rate` is a ReplacingMergeTree keyed on
+/// (identity, timestamp, method), so the two are ONE key and the higher
+/// `version` wins — i.e. whichever grain was loaded LAST. On the versioned
+/// files that is 1 980 of 2 049 shared midnights.
+///
+/// That is why the runbook loads DAILY FIRST and HOURLY SECOND, and it is not
+/// a compromise: with hourly rows present, `price_usd_series` (daily) argMaxes
+/// over all twenty-four hours of the day and lands on the 23:00 row, whose
+/// close IS the daily close for all 2 049 days (asserted in
+/// `composed_usdc_csv.rs`). Loading hourly last therefore leaves the daily
+/// surface unchanged and makes the hourly surface right, which the reverse
+/// order does not.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum Grain {
+    /// One row per UTC day, stamped at 00:00:00 — `composed_usdc_usd_1d.csv`.
+    #[default]
+    Daily,
+    /// One row per UTC hour, stamped at mm:ss = 00:00 — `composed_usdc_usd_1h.csv`.
+    Hourly,
+}
+
+impl Grain {
+    /// The word the refusals and the plan report use.
+    pub fn label(self) -> &'static str {
+        match self {
+            Grain::Daily => "daily",
+            Grain::Hourly => "hourly",
+        }
+    }
+
+    /// The bucket a row of this grain is stamped at the start of.
+    pub fn bucket(self) -> &'static str {
+        match self {
+            Grain::Daily => "day",
+            Grain::Hourly => "hour",
+        }
+    }
+
+    /// How a refusal names the only instant this grain accepts.
+    pub fn required_instant(self) -> &'static str {
+        match self {
+            Grain::Daily => "00:00:00 UTC",
+            Grain::Hourly => "a full hour UTC (mm:ss = 00:00)",
+        }
+    }
+}
+
 /// 2023-03-11 00:00:00 UTC — the day USDC actually depegged, and the falsifier
 /// for this whole task. ONE definition (review IN-04), the same discipline as
 /// the oracle epoch: the bin's plan output, the unit tests and the versioned-CSV
 /// test all read this constant rather than restating the number.
 pub const DEPEG_DAY_START_S: u32 = 1_678_492_800;
+
+/// 2023-03-11 **07:00:00** UTC — the hour of the trough, and the hourly file's
+/// falsifier. The daily row for that day closes at 0.96812 because the peg had
+/// largely recovered by 23:00; the 07:00 hour closes at **0.8833**, and a
+/// consumer asking for `granularity=1h` on the depeg day must be able to SEE
+/// that. It is the single strongest argument for loading the hourly grain at
+/// all, so it gets a constant rather than a literal, the same discipline as the
+/// day above and the oracle epoch.
+pub const DEPEG_HOUR_S: u32 = DEPEG_DAY_START_S + 7 * 3600;
 
 /// One accepted day of the composed series.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,15 +312,19 @@ pub enum LoadError {
     QuotedField { line: usize },
 
     #[error(
-        "line {line} has timestamp '{value}', which is not a UTC day START ({why}). Every row \
-         MUST be stamped 00:00:00 UTC. Task 0268 resolves a candle's rate at the BUCKET END with \
-         a strict `rts < bend`, so a row stamped anywhere later in the day resolves every bucket \
-         to the PREVIOUS day — and it fails nowhere: the numbers are simply off by a day, for \
-         ever. Fix the export; do not shift the timestamps by hand."
+        "line {line} has timestamp '{value}', which is not a UTC {bucket} START ({why}). Every \
+         row of a {grain} series MUST be stamped {required}. Task 0268 resolves a candle's rate \
+         at the BUCKET END with a strict `rts < bend`, so a row stamped anywhere later in the \
+         {bucket} resolves every bucket to the PREVIOUS {bucket} — and it fails nowhere: the \
+         numbers are simply off by one {bucket}, for ever. Fix the export; do not shift the \
+         timestamps by hand."
     )]
-    TimestampNotUtcDayStart {
+    TimestampNotBucketStart {
         line: usize,
         value: String,
+        grain: &'static str,
+        bucket: &'static str,
+        required: &'static str,
         why: &'static str,
     },
 
@@ -257,6 +347,23 @@ pub enum LoadError {
          output; do not clamp it here."
     )]
     NonPositiveRate { line: usize, value: String },
+
+    #[error(
+        "line {line} has close '{value}', outside the accepted band [{min}, {max}]. The scale \
+         check bounds how FINE a rate may be; this bounds how BIG it may be, which nothing did \
+         before (review round 2, IN-06). Decimal(38, 14) leaves twenty-four integer digits, so a \
+         wildly wrong number would render into toDecimal128 and let the SERVER decide what to do \
+         with it. This tool loads ONE thing — a USD/USDC series whose worst measured hour in five \
+         years is 0.8833 and whose highest is 1.0102 — so a value outside this band does not mean \
+         an unusual day, it means the file is not the composed USDC series. Check the file before \
+         you widen the band."
+    )]
+    RateOutOfBand {
+        line: usize,
+        value: String,
+        min: String,
+        max: String,
+    },
 
     #[error(
         "line {line} has close '{value}', which is not a decimal number. The column is \
@@ -321,11 +428,23 @@ pub fn check_identity(code: &str, issuer: &str) -> Result<(), LoadError> {
 /// path (review IN-03), so "`/x/y.csv` has no data rows" tells the operator
 /// which of two files they pointed the tool at.
 ///
+/// `grain` decides which instants are accepted and NOTHING else: both composed
+/// files carry the same ten columns, the same vocabulary and the same
+/// refusals, and both land under the same [`PROMOTED_METHOD`]. Passing
+/// [`Grain::Daily`] against the hourly file refuses at its second data row
+/// (01:00 is not a day start), which is the desired direction — a grain
+/// mismatch is an operator running the wrong command, not something to guess
+/// about.
+///
 /// Hand-rolled on purpose: the file is machine-generated with ten fixed columns
 /// and no quoted fields, so a CSV crate would be a new package in the lockfile
 /// for thirty lines of splitting. [`LoadError::QuotedField`] is the guard for
 /// the day that stops being true — see the threat register entry T-0267-SC.
-pub fn parse_csv(path_hint: &str, text: &str) -> Result<Vec<ExternalRateRow>, LoadError> {
+pub fn parse_csv(
+    path_hint: &str,
+    text: &str,
+    grain: Grain,
+) -> Result<Vec<ExternalRateRow>, LoadError> {
     let mut numbered = text
         .lines()
         .enumerate()
@@ -359,7 +478,7 @@ pub fn parse_csv(path_hint: &str, text: &str) -> Result<Vec<ExternalRateRow>, Lo
             });
         }
 
-        let ts = parse_utc_day_start(line, f[0])?;
+        let ts = parse_bucket_start(line, f[0], grain)?;
         if let Some(first_line) = seen.insert(ts, line) {
             return Err(LoadError::DuplicateTimestamp {
                 line,
@@ -384,6 +503,18 @@ pub fn parse_csv(path_hint: &str, text: &str) -> Result<Vec<ExternalRateRow>, Lo
                 value: f[4].to_string(),
                 scale: rate.scale(),
                 max: RATE_SCALE,
+            });
+        }
+        // Review round 2, IN-06 — the magnitude bound. Deliberately AFTER the
+        // scale check so a too-precise rate still reports the more specific
+        // refusal, and before anything is pushed, so nothing partial is built.
+        let (min, max) = rate_band();
+        if rate < min || rate > max {
+            return Err(LoadError::RateOutOfBand {
+                line,
+                value: f[4].to_string(),
+                min: min.to_string(),
+                max: max.to_string(),
             });
         }
 
@@ -421,38 +552,58 @@ pub fn parse_csv(path_hint: &str, text: &str) -> Result<Vec<ExternalRateRow>, Lo
     Ok(rows)
 }
 
-/// `YYYY-MM-DD HH:MM:SS±HH:MM` → unix seconds, refusing anything that is not a
-/// UTC day start. Both refusals are the SAME error with a different `why`,
-/// because they are one rule: the instant must be midnight UTC.
-fn parse_utc_day_start(line: usize, raw: &str) -> Result<u32, LoadError> {
-    let dt: DateTime<FixedOffset> =
-        DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%:z").map_err(|_| {
-            LoadError::TimestampNotUtcDayStart {
-                line,
-                value: raw.to_string(),
-                why: "it is not `YYYY-MM-DD HH:MM:SS+00:00`",
-            }
-        })?;
-    if dt.offset().local_minus_utc() != 0 {
-        return Err(LoadError::TimestampNotUtcDayStart {
-            line,
-            value: raw.to_string(),
-            why: "its UTC offset is not zero, so 'midnight' here is not midnight UTC",
-        });
-    }
-    if dt.naive_utc().time() != NaiveTime::MIN {
-        return Err(LoadError::TimestampNotUtcDayStart {
-            line,
-            value: raw.to_string(),
-            why: "its time-of-day is not 00:00:00",
-        });
-    }
-    let secs = dt.timestamp();
-    u32::try_from(secs).map_err(|_| LoadError::TimestampNotUtcDayStart {
+/// The accepted rate band as decimals, parsed from the two string constants so
+/// the constants stay greppable and the parse cannot silently disagree with
+/// them.
+fn rate_band() -> (Decimal, Decimal) {
+    (
+        Decimal::from_str_exact(RATE_MIN).expect("RATE_MIN is a decimal literal"),
+        Decimal::from_str_exact(RATE_MAX).expect("RATE_MAX is a decimal literal"),
+    )
+}
+
+/// `YYYY-MM-DD HH:MM:SS±HH:MM` → unix seconds, refusing anything that is not
+/// the START of a bucket of `grain`. Every refusal is the SAME error with a
+/// different `why`, because they are one rule: the instant must be the start of
+/// its own UTC bucket.
+///
+/// ⚠️ The UTC-offset check is not redundant with the time-of-day check at
+/// either grain. `2023-03-11 00:00:00+02:00` has a time-of-day of 00:00:00 and
+/// is not midnight UTC; `2023-03-11 07:00:00+05:30` is a full hour locally and
+/// is 01:30 UTC, which is not a full hour at all. Refusing the offset first
+/// means the remaining checks can reason in UTC alone.
+fn parse_bucket_start(line: usize, raw: &str, grain: Grain) -> Result<u32, LoadError> {
+    let refuse = |why: &'static str| LoadError::TimestampNotBucketStart {
         line,
         value: raw.to_string(),
-        why: "it is outside the range `DateTime` can store",
-    })
+        grain: grain.label(),
+        bucket: grain.bucket(),
+        required: grain.required_instant(),
+        why,
+    };
+
+    let dt: DateTime<FixedOffset> = DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%:z")
+        .map_err(|_| refuse("it is not `YYYY-MM-DD HH:MM:SS+00:00`"))?;
+    if dt.offset().local_minus_utc() != 0 {
+        return Err(refuse(
+            "its UTC offset is not zero, so the wall-clock time here is not the UTC one",
+        ));
+    }
+    let t = dt.naive_utc().time();
+    match grain {
+        Grain::Daily => {
+            if t != NaiveTime::MIN {
+                return Err(refuse("its time-of-day is not 00:00:00"));
+            }
+        }
+        Grain::Hourly => {
+            if t.minute() != 0 || t.second() != 0 {
+                return Err(refuse("its minutes and seconds are not both zero"));
+            }
+        }
+    }
+    let secs = dt.timestamp();
+    u32::try_from(secs).map_err(|_| refuse("it is outside the range `DateTime` can store"))
 }
 
 /// Decision F. Split the parsed rows at [`USDC_ORACLE_EPOCH_S`]: below is
@@ -598,6 +749,18 @@ mod tests {
 
     fn csv(rows: &[&str]) -> String {
         format!("{}\n{}\n", EXPECTED_HEADER.join(","), rows.join("\n"))
+    }
+
+    /// Every test below that does not say otherwise is about the DAILY file, so
+    /// the grain is defaulted here rather than repeated forty times. The local
+    /// item shadows the glob-imported `super::parse_csv`; `parse_at` reaches the
+    /// real one when a test cares which grain it is exercising.
+    fn parse_csv(path: &str, text: &str) -> Result<Vec<ExternalRateRow>, LoadError> {
+        super::parse_csv(path, text, Grain::Daily)
+    }
+
+    fn parse_at(grain: Grain, text: &str) -> Result<Vec<ExternalRateRow>, LoadError> {
+        super::parse_csv("fixture.csv", text, grain)
     }
 
     fn row(ts: u32, rate: &str) -> ExternalRateRow {
@@ -773,6 +936,210 @@ mod tests {
         );
     }
 
+    /// 🔴 Review round 2, IN-06 — the magnitude bound. `RATE_SCALE` says how
+    /// FINE a rate may be and `rate <= 0` pins the origin; nothing said how BIG
+    /// it may be, and `Decimal(38, 14)` leaves twenty-four integer digits for a
+    /// wrong file to fill. The band is tight on purpose: this tool loads a
+    /// USD/USDC series, whose extremes over five years are 0.8833 and 1.0102.
+    #[test]
+    fn a_rate_outside_the_stablecoin_band_is_refused_at_both_ends() {
+        let line = |rate: &str| {
+            format!("2023-03-11 00:00:00+00:00,0.99,0.99,0.88,{rate},243,chainlink,measured,4.1,1")
+        };
+        for bad in ["0.49999", "1.50001", "2", "1000000", "0.000001"] {
+            let err = parse_csv("fixture.csv", &csv(&[&line(bad)])).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                matches!(err, LoadError::RateOutOfBand { .. }),
+                "`{bad}` must be refused on MAGNITUDE, not on scale or sign: {msg}"
+            );
+            assert!(msg.contains(bad), "must name the offending rate: {msg}");
+            assert!(msg.contains(RATE_MIN) && msg.contains(RATE_MAX), "{msg}");
+        }
+
+        // The bounds themselves are INCLUSIVE, and the real extremes of the
+        // composed series sit comfortably inside them — a band that refused the
+        // depeg trough would be worse than no band at all.
+        for ok in [RATE_MIN, RATE_MAX, "0.8833", "1.0101707", "0.96812"] {
+            let rows = parse_csv("fixture.csv", &csv(&[&line(ok)]))
+                .unwrap_or_else(|e| panic!("`{ok}` must be accepted: {e}"));
+            assert_eq!(rows.len(), 1);
+        }
+
+        // Ordering: a too-precise rate reports the more specific refusal even
+        // though it is also inside the band, and a non-positive one still
+        // reports the sign rather than the band.
+        assert!(matches!(
+            parse_csv("fixture.csv", &csv(&[&line("0.968120000000001")])).unwrap_err(),
+            LoadError::RateTooPrecise { .. }
+        ));
+        assert!(matches!(
+            parse_csv("fixture.csv", &csv(&[&line("0")])).unwrap_err(),
+            LoadError::NonPositiveRate { .. }
+        ));
+    }
+
+    // ---- the hourly grain (Adam, 2026-09-09) --------------------------------
+
+    /// At `Grain::Hourly` every FULL hour is accepted and nothing else is. The
+    /// rule is minutes and seconds both zero, in UTC — not "a round-looking
+    /// wall clock", which is why the offset is checked first.
+    #[test]
+    fn the_hourly_grain_accepts_every_full_hour_and_refuses_the_rest() {
+        let line = |ts: &str| format!("{ts},0.99,0.99,0.88,0.96812,243,chainlink,measured,4.1,1");
+        for good in [
+            "2023-03-11 00:00:00+00:00",
+            "2023-03-11 07:00:00+00:00",
+            "2023-03-11 23:00:00+00:00",
+        ] {
+            let rows = parse_at(Grain::Hourly, &csv(&[&line(good)]))
+                .unwrap_or_else(|e| panic!("`{good}` is a full hour UTC: {e}"));
+            assert_eq!(rows.len(), 1);
+        }
+        for bad in [
+            "2023-03-11 07:30:00+00:00",
+            "2023-03-11 07:00:30+00:00",
+            "2023-03-11 07:00:01+00:00",
+        ] {
+            let err = parse_at(Grain::Hourly, &csv(&[&line(bad)])).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                matches!(err, LoadError::TimestampNotBucketStart { .. }),
+                "{msg}"
+            );
+            assert!(msg.contains("hourly"), "the refusal names the grain: {msg}");
+            assert!(msg.contains("mm:ss = 00:00"), "{msg}");
+            assert!(
+                msg.contains("PREVIOUS hour"),
+                "the refusal must give task 0182's REASON in the reader's own                  units: {msg}"
+            );
+        }
+    }
+
+    /// ⚠️ A non-zero UTC offset is refused at hourly grain too, and it is not
+    /// redundant with the minute check: `07:00:00+05:30` is a full hour on the
+    /// wall clock and 01:30 UTC, which is not a full hour at all.
+    #[test]
+    fn an_offset_timestamp_is_refused_at_hourly_grain_even_when_it_looks_round() {
+        for bad in ["2023-03-11 07:00:00+05:30", "2023-03-11 07:00:00+02:00"] {
+            let err = parse_at(
+                Grain::Hourly,
+                &csv(&[&format!(
+                    "{bad},0.99,0.99,0.88,0.96812,243,chainlink,measured,4.1,1"
+                )]),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("UTC offset is not zero"), "{err}");
+        }
+    }
+
+    /// The grain changes WHICH INSTANTS are accepted and nothing else: the six
+    /// other refusals, the epoch partition and the rendered statements are the
+    /// same code on both paths. Asserted rather than assumed, because "same
+    /// otherwise" is exactly the kind of claim that quietly stops being true.
+    #[test]
+    fn the_hourly_grain_shares_every_other_refusal_and_the_epoch_partition() {
+        let at = |ts: &str, tail: &str| format!("{ts},0.99,0.99,0.88,{tail}");
+        let hour = "2023-03-11 07:00:00+00:00";
+
+        for (row, want) in [
+            (
+                at(hour, "0.96812,243,binance,measured,4.1,1"),
+                "UnknownSource",
+            ),
+            (
+                at(hour, "0.96812,243,chainlink,guessed,4.1,1"),
+                "UnknownQuality",
+            ),
+            (
+                at(hour, "-1,243,chainlink,measured,4.1,1"),
+                "NonPositiveRate",
+            ),
+            (at(hour, "9,243,chainlink,measured,4.1,1"), "RateOutOfBand"),
+        ] {
+            let err = parse_at(Grain::Hourly, &csv(&[&row])).unwrap_err();
+            assert_eq!(
+                format!("{err:?}").split(' ').next().unwrap(),
+                want,
+                "hourly must refuse exactly as daily does: {err}"
+            );
+        }
+
+        // Duplicates are refused at the HOUR, not merely at the day — two rows
+        // for the same hour would collapse non-deterministically in the RMT.
+        let dup = at(hour, "0.96812,243,chainlink,measured,4.1,1");
+        assert!(matches!(
+            parse_at(Grain::Hourly, &csv(&[&dup, &dup])).unwrap_err(),
+            LoadError::DuplicateTimestamp { .. }
+        ));
+
+        // Decision F, unchanged: the boundary is the shared constant and it is
+        // STRICT, so the epoch hour itself is skipped and the hour before is
+        // loaded.
+        let stamp = |ts: u32| {
+            let d = DateTime::from_timestamp(i64::from(ts), 0).unwrap();
+            at(
+                &d.format("%Y-%m-%d %H:%M:%S+00:00").to_string(),
+                "0.96812,243,chainlink,measured,4.1,1",
+            )
+        };
+        let plan = partition(
+            parse_at(
+                Grain::Hourly,
+                &csv(&[
+                    &stamp(USDC_ORACLE_EPOCH_S - 3600),
+                    &stamp(USDC_ORACLE_EPOCH_S),
+                    &stamp(USDC_ORACLE_EPOCH_S + 3600),
+                ]),
+            )
+            .unwrap(),
+        );
+        assert_eq!(plan.parsed, 3);
+        assert_eq!(plan.loadable.len(), 1);
+        assert_eq!(plan.loadable[0].ts, USDC_ORACLE_EPOCH_S - 3600);
+        assert_eq!(plan.skipped_at_or_above_epoch, 2);
+    }
+
+    /// The hourly falsifier's constant, derived through the same parser the
+    /// loader uses — the same discipline as the day constant above.
+    #[test]
+    fn the_depeg_hour_constant_is_2023_03_11_0700_utc() {
+        assert_eq!(
+            parse_bucket_start(1, "2023-03-11 07:00:00+00:00", Grain::Hourly).unwrap(),
+            DEPEG_HOUR_S
+        );
+        assert_eq!(DEPEG_HOUR_S, DEPEG_DAY_START_S + 7 * 3600);
+        const { assert!(DEPEG_HOUR_S < USDC_ORACLE_EPOCH_S) };
+    }
+
+    /// Both grains write the SAME words. The shadow/promote split, the method
+    /// vocabulary and the rendered column list are grain-independent, which is
+    /// what lets one `--promote` cover a load of both files.
+    #[test]
+    fn both_grains_render_the_same_statement_shape() {
+        let daily = parse_at(Grain::Daily, &csv(&[DEPEG])).unwrap();
+        let hourly = parse_at(
+            Grain::Hourly,
+            &csv(&["2023-03-11 07:00:00+00:00,0.90,0.90,0.88,0.8833,26,chainlink,measured,,0.0"]),
+        )
+        .unwrap();
+        let render = |rows: &[ExternalRateRow]| {
+            insert_statements("prices", SHADOW_METHOD, 7, "USDC", USDC_ISSUER, rows).join("\n")
+        };
+        let (d, h) = (render(&daily), render(&hourly));
+        for stmt in [&d, &h] {
+            assert!(stmt.contains(USD_RATE_COLUMNS), "{stmt}");
+            assert!(stmt.contains(&format!("'{SHADOW_METHOD}'")), "{stmt}");
+            assert!(!stmt.contains(&format!("'{PROMOTED_METHOD}',")), "{stmt}");
+        }
+        assert!(
+            d.contains(&format!("toDateTime({DEPEG_DAY_START_S})")),
+            "{d}"
+        );
+        assert!(h.contains(&format!("toDateTime({DEPEG_HOUR_S})")), "{h}");
+        assert!(h.contains("toDecimal128('0.8833', 14)"), "{h}");
+    }
+
     #[test]
     fn an_unknown_source_is_refused_naming_both_accepted_values() {
         let err = parse_csv(
@@ -878,13 +1245,10 @@ mod tests {
         let rows = parse_csv("fixture.csv", &csv(&[DEPEG])).unwrap();
         assert_eq!(rows[0].ts, DEPEG_DAY_START_S);
         assert_eq!(
-            parse_utc_day_start(1, "2023-03-11 00:00:00+00:00").unwrap(),
+            parse_bucket_start(1, "2023-03-11 00:00:00+00:00", Grain::Daily).unwrap(),
             DEPEG_DAY_START_S
         );
-        assert!(
-            DEPEG_DAY_START_S < USDC_ORACLE_EPOCH_S,
-            "the depeg is loadable"
-        );
+        const { assert!(DEPEG_DAY_START_S < USDC_ORACLE_EPOCH_S) };
     }
 
     #[test]
@@ -1161,22 +1525,61 @@ mod tests {
              than a second copy of the number"
         );
 
-        // No other 2026-era ten-digit epoch may sneak in beside it.
-        let stray = RUNBOOK
+        // No other 2026-era ten-digit epoch may sneak in beside it — with ONE
+        // allowance, spelled out rather than hand-waved: the hourly dry-run
+        // table quotes the loadable SPAN, whose upper end is the last full hour
+        // strictly below the epoch. That is a different number answering a
+        // different question, it is what the tool prints, and it is DERIVED
+        // here so it cannot drift away from the constant either.
+        let last_loadable_hour = (USDC_ORACLE_EPOCH_S - 3600).to_string();
+        let stray: Vec<&str> = RUNBOOK
             .split(|c: char| !c.is_ascii_digit())
-            .filter(|w| w.len() == 10 && w.starts_with("177") && *w != epoch)
-            .count();
-        assert_eq!(stray, 0, "a second hand-typed 2026 epoch in the runbook");
+            .filter(|w| {
+                w.len() == 10 && w.starts_with("177") && *w != epoch && *w != last_loadable_hour
+            })
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "a second hand-typed 2026 epoch in the runbook: {stray:?}"
+        );
+        assert!(
+            RUNBOOK.contains(&last_loadable_hour),
+            "the hourly dry-run table must quote the loadable span's upper end, \
+             and it is the epoch minus one hour"
+        );
 
         // The figures the runbook gates the operator on must be the ones the
         // tool actually produces. A table that drifted from the code would stop
         // an operator on a correct run, or — worse — wave through a wrong one.
-        for figure in ["2049", "1872", "177", "0.96812"] {
+        for figure in [
+            // the daily pass
+            "2049",
+            "1872",
+            "177",
+            "0.96812",
+            // the hourly pass (Adam, 2026-09-09)
+            "49176",
+            "44918",
+            "4258",
+            "597",
+            "44321",
+            "0.8833",
+            "0.99503491",
+        ] {
             assert!(
                 RUNBOOK.contains(figure),
                 "the dry-run gate must state `{figure}`"
             );
         }
+        // Both grains, both flags, and the order that resolves the shared
+        // midnight key — the one thing an operator can get wrong here that no
+        // query afterwards will tell them about.
+        assert!(RUNBOOK.contains("--grain daily"), "the daily flag");
+        assert!(RUNBOOK.contains("--grain hourly"), "the hourly flag");
+        assert!(
+            RUNBOOK.contains("DAILY FIRST and HOURLY SECOND"),
+            "the load order, stated as an order"
+        );
         // And the words the operator has to distinguish.
         assert!(RUNBOOK.contains(SHADOW_METHOD), "the staging word");
         assert!(

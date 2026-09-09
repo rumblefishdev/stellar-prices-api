@@ -1753,6 +1753,54 @@ async fn seed_0246(db: &str, admin: &Client) {
         .execute()
         .await
         .unwrap();
+
+    // 🔴 Review round 2, WR-09 — a SECOND day, on which the rate is IMPORTED
+    // rather than polled.
+    //
+    // The fixture used to seed `oracle` rows only, so the cross-surface test
+    // below could not reach the population on which the two surfaces actually
+    // diverged: `/ohlcv` floors an imported row at the UTC day start (one daily
+    // row is valid for all 24 hours) and `price_usd_series_1h` buckets it by the
+    // hour. That gap is what let the divergence ship. It is closed by loading at
+    // HOURLY grain — `usd_rate` carries an imported row for every hour — and
+    // this seed is that shape: three imported HOURS on 2026-02-11, each with a
+    // candle of its own, so both surfaces resolve the same row per bucket.
+    //
+    // 2026-02-12 00:00 has a candle and NO rate of any method, and it is the
+    // control: it must read `1`/'peg' on both surfaces. Without it, a regression
+    // that forward-filled the previous day's import across the day boundary
+    // would pass — and `/ohlcv`'s day floor is exactly the expression that would
+    // do it.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-02-11 00:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-11 07:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-11 23:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-12 00:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // The three values are the real 2023-03-11 shape, transplanted: the day
+    // opens near par, troughs at 07:00 and closes at the daily close. Distinct
+    // per hour on purpose — a surface that resolved the wrong hour's row would
+    // otherwise still match.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2026-02-11 00:00:00', 0.99503491000000, 'external', 'chainlink', 'measured', 0, 1), \
+             ('credit', 'USDC', '{i}', '', '2026-02-11 07:00:00', 0.88330000000000, 'external', 'chainlink', 'measured', 0, 1), \
+             ('credit', 'USDC', '{i}', '', '2026-02-11 23:00:00', 0.96812000000000, 'external', 'chainlink', 'measured', 0, 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
 }
 
 /// 🔑 Task 0246 — `/ohlcv` and `price_usd_series_1h` must publish the SAME
@@ -1784,13 +1832,17 @@ async fn ohlcv_agrees_with_price_usd_series_on_the_same_bucket() {
 
     let uri = format!(
         "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2026-02-10T10:00:00Z\
-         &end=2026-02-10T12:00:00Z&base_currency=USD",
+         &end=2026-02-12T00:00:00Z&base_currency=USD",
         iss()
     );
     let (status, json) = get(client, &uri).await;
     assert_eq!(status, StatusCode::OK, "body={json}");
     let data = json["data"].as_array().unwrap();
-    assert_eq!(data.len(), 3, "three buckets expected: {json}");
+    assert_eq!(
+        data.len(),
+        7,
+        "three polled buckets, three IMPORTED ones and the un-priced control: {json}"
+    );
 
     for row in data {
         let bucket = row["timestamp"].as_str().unwrap().replace('T', " ");
@@ -1829,6 +1881,104 @@ async fn ohlcv_agrees_with_price_usd_series_on_the_same_bucket() {
     // both surfaces agree on the WRONG row would still fail here.
     approx(&data[0]["close"], 1.0007);
     assert_eq!(data[0]["method"], "oracle");
+
+    // 🔴 Review round 2, WR-09 — the imported day, hour by hour. The loop above
+    // proves the two surfaces AGREE; these four assertions prove they agree on
+    // the right number, which "both wrong" would otherwise satisfy.
+    for (i, (want, method)) in [
+        (0.99503491, "external"),
+        (0.8833, "external"),
+        (0.96812, "external"),
+        (1.0, "peg"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let row = &data[3 + i];
+        let ts = row["timestamp"].as_str().unwrap().to_string();
+        assert_eq!(
+            row["method"], method,
+            "{ts}: an imported hour must read `external`, and the day AFTER the              import must NOT — `/ohlcv`'s day floor must not forward-fill across              a UTC day boundary: {json}"
+        );
+        approx(&row["close"], want);
+    }
+
+    teardown(db).await;
+}
+
+/// 🔑 Review round 2, WR-09 / the hourly load (Adam, 2026-09-09) — the depeg
+/// day at `granularity=1h`, which is the whole argument for loading the hourly
+/// grain.
+///
+/// From a DAILY-only load, every hour of 2023-03-11 reads 0.96812: one row,
+/// valid for its whole UTC day by `/ohlcv`'s safety net. That is right for the
+/// day and wrong for the hour — the peg troughed at **0.8833** at 07:00 UTC and
+/// had largely recovered by 23:00. With the hourly file loaded, `/ohlcv` at
+/// `1h` shows the trough where it happened.
+///
+/// The instants here are the REAL ones from `composed_usdc_usd_1h.csv`, not a
+/// transplant: `DEPEG_HOUR_S` and its value are asserted against the versioned
+/// file by `composed_usdc_csv.rs`, so this test and the loader cannot disagree
+/// about what the answer should be.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_usdc_serves_the_depeg_day_hour_by_hour_from_the_hourly_import() {
+    let db = "it_ohlcv_0267_hourly_depeg";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2023-03-11 00:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2023-03-11 07:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2023-03-11 23:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, quality, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2023-03-11 00:00:00', 0.99503491000000, 'external', 'chainlink', 'measured', 0, 1), \
+             ('credit', 'USDC', '{i}', '', '2023-03-11 07:00:00', 0.88330000000000, 'external', 'chainlink', 'measured', 0, 1), \
+             ('credit', 'USDC', '{i}', '', '2023-03-11 23:00:00', 0.96812000000000, 'external', 'chainlink', 'measured', 0, 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2023-03-11T00:00:00Z\
+         &end=2023-03-11T23:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 3, "one bucket per seeded hour: {json}");
+
+    for (row, want) in data.iter().zip([0.99503491, 0.8833, 0.96812]) {
+        let ts = row["timestamp"].as_str().unwrap().to_string();
+        approx(&row["close"], want);
+        assert_eq!(row["method"], "external", "{ts}: {json}");
+        assert_eq!(row["source"], "chainlink", "{ts}: {json}");
+        assert_eq!(row["quality"], "measured", "{ts}: {json}");
+    }
+
+    // The point, stated as its own assertion: the trough hour and the day's
+    // close are DIFFERENT numbers. A daily-only load makes them equal, and this
+    // is the check that says so out loud.
+    assert_ne!(
+        data[1]["close"], data[2]["close"],
+        "07:00 must not publish the day's close — that is the daily-only \
+         behaviour this grain exists to replace: {json}"
+    );
 
     teardown(db).await;
 }

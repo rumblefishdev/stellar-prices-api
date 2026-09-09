@@ -111,7 +111,8 @@ Ticked = closed by the code on this branch. Unticked = needs the production
 load and the deploy (Operator Checklist below), or was descoped — each says
 which.
 
-- [ ] `GET /v1/assets/USDC:GA5Z…/ohlcv` returns `close = 0.9681`,
+- [ ] `GET /v1/assets/USDC:GA5Z…/ohlcv` returns `close = 0.96812` (quoted as
+      `0.9681` in the original criterion), `method = external`,
       `source = chainlink`, `quality = measured` for 2023-03-11
       *(DEPLOY-GATED. The query, the read path and the wire fields all ship
       here, and an `#[ignore]` integration test
@@ -195,18 +196,23 @@ which.
 ## Implementation Notes
 
 What shipped, on `feat/0267_usdc-measured-history-from-chainlink-anchor`
-(stacked on `fix/0268_close-usd-assumes-usdc-is-a-dollar`), in four commits.
+(stacked on `fix/0268_close-usd-assumes-usdc-is-a-dollar`), in five commits.
 
 **The source, its granularity and its fetch date**, because an imported series
 with no provenance is not evidence ([[0247]]'s fifth criterion). Primary
 **Chainlink** USDC/USD on-chain rounds, fallback **Bitstamp**, cross-checked
-against Kraken; composed by [[0265]]'s `compose_usdc.py` into a **daily** series
-and versioned in this repo at
-`lore/1-tasks/archive/0265_.../data/composed_usdc_usd_1d.csv`. **2049 rows,
-2021-01-25 → 2026-09-04**, fetched and composed 2026-09-07. It is read 1:1 and
-NOT copied into a fixtures directory: a second copy is a second thing to keep in
-step, and the CI test's whole point is that the tool agrees with the artefact an
-operator will actually pass it.
+against Kraken; composed by [[0265]]'s `compose_usdc.py` and versioned in this repo at **two
+grains**:
+
+- `lore/1-tasks/archive/0265_.../data/composed_usdc_usd_1d.csv` — **2049 daily
+  rows**, `ts` at the UTC day start;
+- `…/composed_usdc_usd_1h.csv` — **49 176 hourly rows**, `ts` at full hours UTC
+  (added 2026-09-09 with the hourly decision).
+
+Both run 2021-01-25 → 2026-09-04 with the same ten columns; fetched and composed
+2026-09-07. Both are read 1:1 and NOT copied into a fixtures directory: a second
+copy is a second thing to keep in step, and the CI test's whole point is that
+the tool agrees with the artefact an operator will actually pass it.
 
 **The ticker→issuer gate is code.** `external_rate::check_identity` refuses
 every code and issuer but `USDC` /
@@ -344,6 +350,126 @@ the wire and the operator path did not. What changed:
   name the real path; `DEPEG_DAY_START_S` defined once; a rate finer than
   `Decimal(38, 14)` is a new refusal, `RateTooPrecise`.
 
+**Review round 2 (2026-09-09, `gsd-code-reviewer` at `deep`: 1 critical, 4
+warnings, 3 info) and the hourly decision, together in one commit.** The round-1
+fixes held; what round 2 found was a timezone assumption in the read path and
+two operator gates that inherited it, plus a comment block that had been left
+asserting the opposite of what shipped.
+
+- **🔴 CR-02, the blocker.** `queries_ch.rs`'s external floor was
+  `toStartOfDay(bo.bkt)` with **no timezone**. `usd_rate.timestamp` and
+  `price_ohlcv_*.timestamp` are bare `DateTime` and nothing in this repo pins
+  the server's zone — `docker-compose.yml` sets no `TZ`, so local and CI runs
+  are UTC and every test passed, while `ch-prod-01`'s zone is undocumented. At
+  UTC+2 the floor for the 22:00 and 23:00 buckets of every imported day lands on
+  the NEXT day's start, so those hours drop back to `1`/`peg` while 0268's
+  (zone-pinned) external tier has already written the measured rate into the
+  same hours' candles; at UTC−5, 19 hours of 24 do. Now
+  `toStartOfDay(bo.bkt, 'UTC')`, the three expected strings updated, and a new
+  guard `the_peg_series_pins_utc_on_every_timezone_sensitive_expression` in the
+  shape 0268 already ships for the write half — it scans `toStartOfDay(`,
+  `toDate(` and `toStartOfInterval(` at every grain and requires the zone, and
+  pins the count at four so a rewrite that DROPPED the floor cannot pass
+  vacuously.
+- **WR-07, the same class in two operator gates.** Both runbooks' bucket-start
+  gate counted `timestamp != toStartOfDay(timestamp)` — round 1's own suggested
+  replacement for `toTime()`, adopted verbatim in two files. On a UTC+2 server
+  it reports every correct row as not-midnight and the runbook's stance is
+  "stop and do not promote", so a correct load halts and the operator goes
+  hunting in a loader that is behaving as designed. Both now name `'UTC'` and
+  say why; 0268's Appendix B additionally became the HOURLY form
+  (`toStartOfHour(…, 'UTC')` plus a midnight count), and its epoch-literal count
+  is still exactly one — a 0268 test pins that.
+- **WR-08, a precondition that could lie.** The view check substring-matched
+  `create_table_query` for `method IN ('oracle', 'external')`. ClickHouse does
+  not store submitted text — `drift.rs` exists because of the re-serialisation,
+  and enumerates it — and `create_table_query` is EMPTY for a session user
+  without `SHOW COLUMNS`, either of which reads as "the views did not land" on
+  a correct cluster. **Chosen replacement: both halves of the reviewer's
+  suggestion.** A `system.tables` listing that returns a row per view with a
+  bare-token flag (`position(create_table_query, '''external''')`) plus
+  `length(create_table_query)`, so an unreadable DDL shows as `ddl_len = 0`
+  beside the view rather than as a missing row; and a probe that EXECUTES the
+  predicate — `SELECT count() FROM prices.price_usd_series WHERE method =
+  'external'` — which the un-widened view cannot even parse, because `method` is
+  projected by the widened definition only. It answers `0` before the promote
+  and non-zero after, and it cannot be fooled by a printer or a grant.
+- **WR-09** — see Issues Encountered; resolved by loading the hourly grain
+  rather than by widening the view.
+- **WR-10, unclosable here.** The rewritten `/ohlcv` query has never executed
+  against any ClickHouse: `ci.yml` runs `cargo test --workspace` with no
+  `--ignored` and no `services:` block, and every test that would run the SQL is
+  `#[ignore]`. 642 passing tests prove the STRING. The shape is new to this
+  codebase (an ASOF LEFT JOIN whose left side is itself an ASOF LEFT JOIN,
+  nested as a subquery) and the precedent for trusting an unexercised analyzer
+  claim is bad — the `SETTINGS join_use_nulls = 1` clause that every local test
+  passed with and that answered 500 for canonical USDC on the deployed API. The
+  exact commands are now a HARD PRECONDITION at step 0 of the Operator
+  Checklist.
+- **IN-06, the rate is bounded on magnitude too.** `RATE_SCALE` bounded how fine
+  a rate may be and `rate <= 0` pinned the origin, but `Decimal(38, 14)` leaves
+  twenty-four integer digits for a wrong file to fill and the SERVER would have
+  decided what to do with them. New refusal `RateOutOfBand` at
+  `0.5 ≤ rate ≤ 1.5` — tight on purpose, since USDC's extremes over five years
+  are 0.8833 and 1.0102, so a value outside the band means the file is not the
+  composed series rather than an unusual day. Ordered after the scale and sign
+  checks so those keep reporting the more specific refusal.
+- **IN-07** the first acceptance criterion now headlines `0.96812`;
+  **IN-08** the task file is still under `lore/1-tasks/backlog/` — noted, and
+  deliberately not moved here: this branch is stacked on 0268's and `develop`
+  already carries the file under `active/`, so a move on this branch would be a
+  rename conflict at merge for no gain. It is a `/lore-framework-tasks` action
+  on `develop`, not a code change.
+
+**The hourly grain (Adam, 2026-09-09, ratified).** [[0265]]'s composer wrote the
+full hourly history as well as the daily one, and it is versioned on this branch
+as `composed_usdc_usd_1h.csv` (49 176 rows, 2021-01-25 → 2026-09-04, the same
+ten columns, `ts` at full hours UTC).
+
+- `load-external-rate` gained `--grain daily|hourly`, defaulting to `daily`.
+  The grain decides WHICH INSTANTS are accepted and nothing else: the same six
+  refusals, the same epoch partition, the same shadow/promote split, the same
+  `method` words, the same rendered statements. `Grain::Hourly` requires
+  minutes and seconds both zero in UTC; the offset check runs first, because
+  `07:00:00+05:30` is a round wall clock and 01:30 UTC.
+- The default is deliberately NOT symmetric and the runbook says so: every
+  midnight is also a full hour, so the DAILY file parses at `--grain hourly`
+  too and would load as 2 049 isolated hours. Only the hourly file is refused
+  at the wrong grain (at its 01:00 row). Name the flag beside the file.
+- **The two grains collide at every midnight, and their values differ.**
+  `usd_rate` keys on (identity, `timestamp`, `method`) and both grains write the
+  same `method`, so a day's 00:00 row is ONE ReplacingMergeTree key; the daily
+  row carries the DAY's close and the hourly row the 00:00 HOUR's, and they
+  disagree at **1 980 of the 2 049** shared midnights. Nothing reconciles them —
+  they answer different questions — so the ORDER decides, and it is **daily
+  first, hourly second**. That is safe because `price_usd_series` argMaxes over
+  the whole day and lands on the 23:00 row, whose close IS the daily close for
+  all 2 049 days; the daily surface does not move, and the hourly surfaces get
+  the hour's own number. Loading the other way round breaks the hourly surfaces
+  and fixes nothing. Pinned by
+  `the_two_grains_share_every_midnight_key_and_the_hourly_row_must_win_it`.
+- **Verified hourly dry-run figures** (the runbook's new section 4½ gate, and a
+  CI test): 49 176 parsed, **44 918 loadable**, 4 258 skipped at or above the
+  epoch, 44 321 `measured` / 597 `fallback` / **no** `measured-disputed`
+  (a daily cross-check verdict with no hourly analogue), 44 321 `chainlink` /
+  597 `bitstamp`, span 1 611 532 800 .. 1 773 234 000 (2026-03-11 13:00 — the
+  last full hour below a 14:00 epoch), and on the depeg day
+  **00:00 = 0.99503491, 07:00 = 0.8833, 23:00 = 0.96812**. The 07:00 trough is
+  the number a daily-only load cannot show at `granularity=1h` at all, and it
+  now has its own constant, `DEPEG_HOUR_S`.
+- Tests: hourly validation unit tests in the lib; a CI dry-run over the
+  versioned hourly CSV beside the daily one; `#[ignore]`
+  `ohlcv_usdc_serves_the_depeg_day_hour_by_hour_from_the_hourly_import`
+  (`/ohlcv` at `1h` → 0.8833 at 07:00, the day's close at 23:00) and its view
+  half `price_usd_series_1h_publishes_the_imported_rate_of_each_hour`, seeded
+  identically so the two surfaces are asserted against the same three numbers.
+  `seed_0246` gained imported HOURS plus an un-priced control day, so the
+  existing cross-surface test now covers the population the two surfaces
+  diverged on; and
+  `the_views_and_the_peg_series_admit_the_same_external_rows` is the
+  ClickHouse-free guard that they spell the predicate the same way — the check
+  that would have caught WR-09 on the push that introduced it.
+
 ## Design Decisions
 
 ### From Plan
@@ -355,6 +481,19 @@ Ratified by Adam on 2026-09-09, before implementation.
    `--features aws-mtls` transport surface. Shadow / promote / dry-run modes and
    six hard refusals, each with its own CI unit test. Rejected: a Python one-off
    — no gate, no tests, and nothing a reviewer can re-run.
+
+   ⚠️ **AMENDED 2026-09-09 (Adam), one word.** Decision A as ratified refused
+   "timestamps not at 00:00:00 UTC". With the hourly grain that refusal is
+   **grain-aligned**, not midnight: `--grain daily` still refuses anything but
+   00:00:00 UTC, `--grain hourly` refuses anything but a full hour UTC. The
+   RULE is unchanged and is the one task 0182 taught — a row must be stamped at
+   the START of the bucket it describes, because 0268 resolves at the bucket END
+   with a strict `rts < bend` and a late stamp resolves every bucket to the
+   previous one, plausibly and silently. Only the bucket width is now a
+   parameter. Nothing else in A moved: the identity gate, the duplicate and
+   rate refusals, the shadow/promote split and the epoch partition are the same
+   code on both paths, asserted by
+   `the_hourly_grain_shares_every_other_refusal_and_the_epoch_partition`.
 2. **Decision B — `quality` becomes a column on `prices.usd_rate`**, a
    `LowCardinality(String) DEFAULT ''` added by an idempotent ALTER. Rejected:
    packing it into `reference_asset` (which already means the source), and
@@ -500,31 +639,102 @@ primary from the epoch on.
     `toStartOfDay(bkt)`; the oracle floor is unchanged. The window ends at the
     day's end — the next midnight without a row of its own falls back to `peg`,
     asserted, because forward-filling past the day would be 0246's defect in a
-    new place. ⚠️ `price_usd_series_1h` was NOT widened the same way — see
-    Issues.
+    new place. ⚠️ **Demoted by decision 20 below**: with hourly rows loaded this
+    window is a SAFETY NET for a daily-only load rather than the operating rule,
+    and `price_usd_series_1h` was deliberately NOT widened to match it.
 17. **The promote carries the epoch bound itself (review IN-02).** `partition`
     runs in a different invocation, possibly of a different binary over a
     staging set some other file produced; the promote is the one write the read
     path serves, so it is the last place the code can hold Decision F's
     boundary. Asserted with the one bound on the shared constant.
 
+---
+
+*Review round 2 and the hourly decision, 2026-09-09.*
+
+18. **🔴 Every timezone-sensitive expression in the read path names `'UTC'`
+    (review CR-02), and the rule is now a test rather than a habit.** The
+    external floor was `toStartOfDay(bo.bkt)`. `usd_rate.timestamp` and
+    `price_ohlcv_*.timestamp` are bare `DateTime`, no schema object anywhere in
+    this repo says `DateTime('UTC')`, and nothing pins the server's zone, so the
+    day window slid with the deployment's UTC offset: at UTC+2 the last two
+    hours of every imported day, at UTC−5 nineteen of twenty-four, fell back to
+    `1`/`peg` — the exact 23-of-24 defect Emerged 16 was written to remove,
+    reintroduced conditionally on a variable nobody had checked. `docker-compose`
+    sets no `TZ`, which is why 629 green tests said nothing. The fix is one
+    argument; the durable part is the guard, deliberately mirroring 0268's
+    `every_timezone_sensitive_expression_pins_utc` so the read half and the
+    write half of "which UTC day is this import valid for" are spelled the same
+    way. (`+ INTERVAL 1 MONTH` in `bend` is timezone-sensitive for the calendar
+    grains too, but that is task 0246's and out of scope — a follow-up, not a
+    gate.)
+19. **Both grains of the composed series are loaded, DAILY FIRST and HOURLY
+    SECOND, and the order is a correctness requirement.** They share every
+    midnight key under one `method`, and their values disagree at 1 980 of
+    2 049 shared midnights because a daily row carries the day's close and an
+    hourly row the hour's. ReplacingMergeTree keeps the higher `version`, so
+    load order is the whole resolution. Hourly must win — `price_usd_series_1h`
+    and `/ohlcv` at `1h` resolve at the hour — and it costs the daily surface
+    nothing, because that view argMaxes over the day and lands on 23:00, whose
+    close is the daily close for all 2 049 days. Considered and rejected:
+    stamping the two grains under different `method` words (it would double the
+    read-path vocabulary and re-open "which one wins" for every consumer), and
+    loading hourly only (the daily file is the artefact 0247's criterion names,
+    and it is the file the composition rule was reviewed against).
+20. **The hourly view was NOT widened; the DATA was fixed instead (review
+    WR-09).** The reviewer's recommendation was a `UNION ALL` + `ARRAY JOIN
+    range(24)` in `price_usd_series_1h` so one daily external row expands across
+    its day. With hourly rows loaded there is nothing to expand: `usd_rate`
+    carries a row per hour and both surfaces resolve the same one. Widening
+    would have added a second, method-specific rate shape to the view whose job
+    is to be the boring surface everything else is compared against, and it
+    would have had to be kept in step with `/ohlcv`'s floor for ever.
+    `/ohlcv`'s day-wide window stays as a safety net for a daily-only load, both
+    `views.sql` comment blocks now state that rule instead of claiming
+    unconditional agreement, `database-schema-overview.md` carries the caveat,
+    `seed_0246` reaches the imported population, and a ClickHouse-free guard
+    pins that the two surfaces spell the external predicate identically. The
+    reviewer's own reason for (1) — "restore 0246's criterion rather than carve
+    an exception into it" — is satisfied by the data route, which is why it was
+    taken over the SQL route.
+21. **The rate is bounded on magnitude as well as scale (review IN-06), and the
+    band is tight rather than merely representable.** `0.5 ≤ rate ≤ 1.5`. A
+    band chosen from what `Decimal(38, 14)` can hold would admit a 2 000-dollar
+    stablecoin silently; this tool loads one series whose five-year extremes are
+    0.8833 and 1.0102, so anything outside the band means the file is wrong, and
+    saying so is more useful than accepting it. The check runs after the scale
+    and sign checks so those keep reporting the more specific refusal.
+
 ## Issues Encountered
 
-- **`price_usd_series_1h` and `/ohlcv` now disagree on the hours of an
-  imported day, and a decision is owed.** Since review round 1, `/ohlcv` at
-  `granularity=1h` serves an imported daily row for all twenty-four hours
-  (Emerged 16), agreeing with 0268's hourly candles; the hourly VIEW still
-  buckets `usd_rate` by the hour and publishes `1`/`peg` for the twenty-three
-  hours after midnight. Task 0246's cross-surface criterion ("the same value
-  for the same bucket") is therefore met for oracle-priced hours and NOT for
-  imported ones. Options, for Adam: (a) widen the hourly view's rate subquery
-  so an `external` row expands to every hour of its day (an `ARRAY JOIN
-  range(24)` on the external rows, keeping the oracle-first tuple) — a
-  views.sql change with its own grain-agreement test; (b) load the hourly
-  March-2023 CSV for the depeg window, which fills the hours with real
-  measurements but only for that month; (c) accept the divergence and
-  document it, as the runbook's step 8 and the OpenAPI text do today. Not
-  decided here; the runbook says not to "fix" it in the load procedure.
+- **RESOLVED (2026-09-09, Adam) — `price_usd_series_1h` and `/ohlcv` disagreed
+  on the hours of an imported day; the fix was the DATA, not a fourth query
+  shape.** Review round 1 gave `/ohlcv` a day-wide window on an `external` row
+  (Emerged 16) and left the hourly view bucketing by the hour, so task 0246's
+  cross-surface criterion held for oracle-priced hours and failed for imported
+  ones — 23 hours in every 24. Round 2 (WR-09) found the comment block in
+  `views.sql` still asserting the opposite, and the guard test unable to see it
+  because `seed_0246` seeded oracle rows only.
+
+  Three options were on the table: (a) widen the hourly view with a
+  `UNION ALL` + `ARRAY JOIN range(24)` so a daily external row expands across
+  its day; (b) load the March-2023 hourly CSV, filling one month; (c) accept and
+  document. **None was taken.** [[0265]]'s composer had in the meantime written
+  the FULL hourly history (49 176 rows, 2021-01-25 → 2026-09-04), so the loader
+  gained `--grain hourly` instead: `usd_rate` now carries an external row for
+  every hour of every covered day, both surfaces resolve the same row for the
+  same bucket, and they agree without either query changing.
+
+  **The UNION ALL / ARRAY JOIN widening is therefore NOT implemented, on
+  purpose.** Hourly rows make it unnecessary, and it would have added a second
+  rate shape — a different subquery per method — to a view whose whole value is
+  being the boring one that `price_usd_series` and the rollups can be compared
+  against. `/ohlcv`'s day-wide window SURVIVES, demoted from "the rule" to a
+  safety net for a daily-only load, and both `views.sql` comment blocks now say
+  exactly that instead of claiming the two surfaces agree unconditionally. The
+  divergence remains observable, but only if someone loads the daily file and
+  not the hourly one — which the runbook's section 4½ makes a step rather than
+  an option.
 - **The `1d` bucket of the epoch day is the one place both provenances meet,
   and its label is `oracle`** — the day's polls outrank the import at 00:00 on
   every surface. A consumer reading 2026-03-11 sees a measured poll, not the
@@ -556,36 +766,87 @@ primary from the epoch on.
 Full procedure with the queries: `docs/runbooks/load-external-usdc-rate.md`.
 Everything below is deploy-gated; none of it ran on this branch.
 
-- [ ] 0. **Preconditions** (runbook): on the host, as `default`,
+- [ ] 0a. 🔴 **HARD PRECONDITION — run the `#[ignore]` ClickHouse tests once,
+      locally, BEFORE the deploy (review WR-10).** The rewritten
+      `ohlcv_peg_series` has never executed against any ClickHouse: `ci.yml`
+      runs `cargo test --workspace` with no `--ignored` and no `services:`
+      block, so the 642 green tests prove the STRING, not the QUERY. The shape
+      is new to this codebase — an ASOF LEFT JOIN whose left side is itself an
+      ASOF LEFT JOIN, nested as a subquery — and `ohlcv_peg_series` is the only
+      path serving `GET /v1/assets/USDC:GA5Z…/ohlcv`, so a parse or analyzer
+      rejection is a **500 on that endpoint for every request**, not a wrong
+      number. The precedent is in the same file: a `SETTINGS join_use_nulls = 1`
+      clause every local test passed with, which answered 500 for canonical
+      USDC on the deployed API. Exactly these commands:
+
+      ```bash
+      docker compose up -d clickhouse
+      cargo test -p prices-api        --test ohlcv_it -- --ignored ohlcv_usdc
+      cargo test -p prices-api        --test ohlcv_it -- --ignored ohlcv_agrees_with_price_usd_series
+      cargo test -p prices-clickhouse --test views_it -- --ignored an_oracle_row_outranks
+      cargo test -p prices-clickhouse --test views_it -- --ignored price_usd_series_1h_publishes
+      ```
+
+      All must pass. If this run is skipped, step 10's deploy is the FIRST
+      execution of the rewritten query — record that fact here if so, rather
+      than leaving it unsaid.
+- [ ] 0b. **Preconditions** (runbook): on the host, as `default`,
       `prices-clickhouse-init` from THIS branch — re-lands `init.sql` (the
       `quality` ALTER), seeds `backfill_progress`, `CREATE OR REPLACE`s all six
-      views; then `system.columns` shows `quality` and both view grains carry
-      the widened predicate. Every INSERT names `quality`, so step 4 fails on
+      views; then `system.columns` shows `quality`, both view grains appear in
+      `system.tables` with `has_external = 1` and a non-zero `ddl_len`, and the
+      executable probe `SELECT count() FROM prices.price_usd_series WHERE
+      method = 'external'` PARSES (returning 0 before the promote). ⚠️ Do not
+      substring-match `create_table_query` for the formatted predicate — it is
+      re-serialised from the AST and is empty for a user without `SHOW
+      COLUMNS`, either of which reads as "the views did not land" on a correct
+      cluster (review WR-08). Every INSERT names `quality`, so step 4 fails on
       its first chunk without this
 - [ ] 1. Build: `cargo build -p enrichment-worker --features aws-mtls --bin load-external-rate`
       (the bin does NOT exist in a default build)
 - [ ] 2. Export the four mTLS variables (`CH_DOMAIN`, `MTLS_CERT_PATH`,
       `MTLS_KEY_PATH`, `MTLS_CA_PATH`) and `CH_DATABASE`
-- [ ] 3. Dry run against the versioned CSV. ⚠️ **A figure that does not match
-      2049 / 1872 / 177 / 24 / 4 / `0.96812` is a STOP, not a note**
+- [ ] 3. Dry run against the versioned DAILY CSV, `--grain daily`. ⚠️ **A
+      figure that does not match 2049 / 1872 / 177 / 24 / 4 / `0.96812` is a
+      STOP, not a note.** ⚠️ Name `--grain` beside the file every time: the
+      daily file also parses at `--grain hourly` and would load as 2049
+      isolated hours
 - [ ] 4. Shadow load (`--shadow` is the default) — writes
       `method = 'external-candidate'`, which nothing reads
 - [ ] 5. Verification query A: 1872 staged rows, 2021-01-25 → 2026-03-11, all
       below the epoch
-- [ ] 6. Verification query B: `countIf(timestamp != toStartOfDay(timestamp))`
-      is 0 over 1872 rows (0268 resolves at the bucket END with a strict
-      `rts < bend`, so a day-END stamp is off by a day and fails nowhere; not
-      `toTime()`, which anchors to 1970-01-02)
+- [ ] 6. Verification query B: `countIf(timestamp != toStartOfDay(timestamp,
+      'UTC'))` is 0 over 1872 rows (0268 resolves at the bucket END with a
+      strict `rts < bend`, so a day-END stamp is off by a day and fails
+      nowhere; not `toTime()`, which anchors to 1970-01-02; and **name the
+      zone** — unzoned, this gate reads 1872 on a non-UTC server and halts a
+      correct load, review WR-07)
 - [ ] 7. Verification query C: 2023-03-11 reads `0.96812` (trailing zeros
       trimmed), `chainlink`, `measured`
-- [ ] 8. Promote. ⚠️ It ADDS a key; the staged rows survive and are inert. Do
-      not "clean them up" — leaving them is what makes step 12 free
-- [ ] 9. Confirm 1872 rows under EACH of the two method words
+- [ ] 7a. **The HOURLY pass — runbook section 4½, after 5–7 have passed and
+      never before.** Dry run `--grain hourly`: 49176 / 44918 / 4258 / 597
+      `fallback` / 44321 `measured` / span ending 1773234000, and
+      00:00 = `0.99503491`, 07:00 = **`0.8833`**, 23:00 = `0.96812`. Then the
+      shadow load (~180 chunked requests), then 4a′/4b′/4c′: 44918 rows,
+      `not_full_hour = 0`, `midnights = 1872`, and the two depeg hours reading
+      back. ⚠️ 44918, **not** 46790 — the hourly midnights REPLACED the daily
+      ones at the shared key, which is the intended outcome (Emerged 19)
+- [ ] 8. Promote. One promote covers both grains. ⚠️ It ADDS a key; the staged
+      rows survive and are inert. Do not "clean them up" — leaving them is what
+      makes step 12 free
+- [ ] 9. Confirm 44918 rows under EACH of the two method words
 - [ ] 10. Confirm `price_usd_series` publishes `0.96812`/`external` for
       2023-03-11 (the schema and views landed in step 0), THEN deploy
       `prices-api` — the new binary reads `usd_rate.quality` directly
-- [ ] 11. Run the runbook's 2023-03-11 curl. **This observation is acceptance
-      criterion 1.** Then spot-check a `fallback` and a `measured-disputed` day
+- [ ] 10a. Confirm the HOURLY read path: `price_usd_series_1h` for
+      2023-03-11 at 00:00 / 07:00 / 23:00 reads `0.99503491` / `0.8833` /
+      `0.96812`, all `external`. One value repeated three times means only the
+      daily file was loaded
+- [ ] 11. Run the runbook's 2023-03-11 curl at `1d`. **This observation is
+      acceptance criterion 1.** Then the `granularity=1h` curl, which must show
+      `0.8833` at 07:00 — the hour the peg actually broke, and the number a
+      daily-only load cannot produce. Then spot-check a `fallback` and a
+      `measured-disputed` day
 - [ ] 12. (rollback, if needed) Revert the read path's preference to
       oracle-only and re-apply the views. No row is deleted
 - [ ] 13. Close [[0247]] (its first criterion is the load) and re-include USDC
