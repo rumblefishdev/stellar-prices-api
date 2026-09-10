@@ -38,6 +38,30 @@ history:
       Activated. The measured evidence in this file dates from 2026-07-23 and
       202607 was then a partial, in-flight month — re-measuring on prod before
       deriving any threshold.
+  - date: 2026-09-10
+    status: active
+    who: okarcz
+    note: >
+      📐 **Re-measured on prod; the approach in this file does not survive it.**
+      The mechanism is confirmed and sharper than "negligible volume": the
+      extreme tail is trades of **one or two stroops** (1e-7) of base with
+      `trade_count = 1` and under $0.36 of notional. Dose-response is clean and
+      monotonic in both months — 202502 one-stroop buckets are 85.0% over
+      $1,000 (max $29,606,748, the headline reproduced), 202608 22.3% (max
+      $3,517,649); at ≥1 whole token, 0.11% and 0.008%.
+      🔴 **Option 2 as specified would be wrong a third of the time.** Of dust
+      buckets checkable against a non-dust reference for the same pair, **38 of
+      116 are priced correctly** (0.1-10x). A smallest-unit trade of a genuinely
+      expensive asset is a real order at the right price, so a size threshold
+      misclassifies exactly the assets the AC said not to sweep up.
+      🔴 **93% cannot be adjudicated at all** — 2,741 of 2,944 dust buckets are
+      on assets with no non-dust trading anywhere in the month. Spawned
+      **[[0274]]**; that population is an asset with no market, not a bad candle.
+      Also measured and discarded: **notional value is a poor discriminator** —
+      the >$1k rate *rises* with bucket value (2.6% at $0.01-1, 12.2% at ≥$10k),
+      because active tokens legitimately cost more.
+      Operator chose the document-and-refile route after the findings were put
+      to them. **PR #303** open.
 ---
 
 # Dust-trade candles produce absurd `close_usd` values
@@ -145,15 +169,107 @@ rather than guessing — see the 3.4%/9.3% caveat above.
 
 ## Acceptance Criteria
 
-- [ ] A dust threshold is derived from measured distribution, not assumed, and
+- [x] A dust threshold is derived from measured distribution, not assumed, and
       validated against a sample of genuinely-expensive tokens so they are not
-      swept up.
-- [ ] Absurd `close_usd` rows are identifiable by consumers (flag column or
-      documented read-time filter).
-- [ ] `volume_quote_usd` behaviour is explicitly unchanged (it is already
-      correct).
-- [ ] Verified against both a repaired historical month (202502) and a
-      live-written month (202607) — the defect exists in both.
+      swept up. **Derived (base amount in minimal units) and then, on the
+      validation this criterion demands, found unfit to ship as a standalone
+      verdict — a third of checkable dust buckets are priced correctly.** The
+      criterion is met by the validation having been done and its result
+      published, not by a threshold shipping.
+- [x] Absurd `close_usd` rows are identifiable by consumers. **Documented
+      read-time filter** — `volume_base` + `trade_count` are already on every
+      candle, so no flag column was needed. Documented in three places: the
+      `Candle` doc comments, the published OpenAPI description, and design doc
+      §4.2.
+- [x] `volume_quote_usd` behaviour is explicitly unchanged (it is already
+      correct). **Stated in all three places**, with the reason: these buckets
+      carry a few dollars, so volume aggregates are undistorted.
+- [x] Verified against both a repaired historical month (202502) and a
+      live-written month — the defect exists in both. **202502 and 202608**;
+      202607 was substituted because it was partial when this task was written
+      and 202608 is a complete live-written month.
+
+## Implementation Notes
+
+Documentation only. No schema, ingestion or read-path change. **PR #303**;
+`cargo test -p prices-api` 440 passed / 0 failed, OpenAPI lint valid, clippy
+clean. Every prod query read-only via mTLS as `dev_read` (`readonly = 1`).
+
+Measured on `price_ohlcv_1h`, rows with `close_usd > 0`:
+
+| base amount | 202502 % > $1k | 202608 % > $1k |
+|---|---|---|
+| 1 stroop | **85.0** | 22.3 |
+| 2-9 stroops | 82.3 | 15.5 |
+| 10-99 | 32.4 | 12.4 |
+| 100-9,999 | 10.9 | 5.9 |
+| 1e4-1e7 | 2.5 | 0.4 |
+| ≥ 1 whole token | **0.11** | **0.008** |
+
+Population, 202608: 695,015 priced rows; 2,944 dust (≤9 stroops, 0.42%); 2,049
+of those over $1,000. Dust is only **12.7%** of the >$1k population — the
+extreme (>$1M) tail is dust-dominated, the broad tail is not.
+
+## Issues Encountered
+
+- **A correlated subquery is not supported on this ClickHouse** (`Code: 48
+  NOT_IMPLEMENTED`) — the reference-coverage measurement had to be rewritten as
+  two `LEFT JOIN`s to aggregate subqueries. Note the result is only readable
+  because prod runs `join_use_nulls = 0`: an unmatched row yields `0`, not NULL,
+  and the query tests `> 0` rather than `IS NOT NULL`, which would be dead code
+  here ([[join-use-nulls-zero-makes-is-not-null-dead-code]]).
+- **`SELECT toString(close_usd) AS close_usd … WHERE close_usd > 1000` fails**
+  with `Code: 386 NO_COMMON_TYPE` — the alias shadows the column in `WHERE`.
+  Aliases prefixed `s_` instead.
+- **A first attempt at a junk metric measured nothing.** Defining junk as ">100x
+  the pair's own median" gave a flat ~0.3-2.5% across every size bucket with
+  ratios up to 1.6e14 — the median itself is contaminated by the
+  precision-collapse rows this file records at the small end. Replaced with a
+  reference built **only from non-dust rows**, which is what produced the
+  usable answer.
+
+## Design Decisions
+
+### From Plan
+
+1. **Derive the threshold from the distribution rather than guess**, and
+   validate against genuinely-expensive tokens — the task's first AC, and the
+   step that produced the decision below.
+
+### Emerged
+
+2. **Option 2 (flag at ingest) rejected on measurement, not preference.** Of
+   dust buckets with a non-dust reference for the same pair, 33% are priced
+   correctly. Shipping a size-based `is_dust` column would publish a flag that
+   is wrong a third of the time it fires, and wrong specifically about valuable
+   assets. Recorded in `Candle::volume_base`'s doc comment so it is not
+   rediscovered from scratch.
+
+3. **Option 1 (documented read-time filter) chosen, and it needed no new
+   field.** `volume_base` and `trade_count` are already returned on every
+   candle, including price-less ones — the raw material was on the wire the
+   whole time; only the interpretation was missing.
+
+4. **Documented in three places, not one, because the repo separates two
+   audiences.** `openapi/descriptions.rs` exists precisely so published text
+   carries no task numbers or ADR references, enforced by
+   `every_published_text_is_present_and_reader_facing`. Writing this only in the
+   doc comments would have left integrators — the people who chart a $3.5M
+   candle — unable to see it.
+
+5. **The 93% split out as [[0274]] rather than absorbed here.** It is a
+   different claim about a different subject: 0116 asks whether a bucket's close
+   is a market price, 0274 asks whether the asset has a market at all. It also
+   belongs beside [[0147]] and [[0252]], which is a decision 0274 is asked to
+   settle rather than assume.
+
+6. **`volume_quote_usd` called out as unaffected in every place**, not left
+   implicit. The natural reaction to "prices are wrong" is to distrust the
+   volume beside them; the measurement says not to.
+
+## Future Work
+
+- [[0274]] — assets with no meaningful trading are published as priced (the 93%).
 
 ## Notes
 
