@@ -2,7 +2,7 @@
 id: "0116"
 title: "Dust-trade candles produce absurd close_usd values (up to $29.6M) in every OHLCV granularity"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0114", "0115", "0026", "0144", "0147", "0117"]
 tags: [clickhouse, data-quality, sdex, enrichment, priority-medium, effort-small, milestone-M2]
@@ -62,6 +62,24 @@ history:
       because active tokens legitimately cost more.
       Operator chose the document-and-refile route after the findings were put
       to them. **PR #303** open.
+  - date: 2026-09-10
+    status: completed
+    who: okarcz
+    note: >
+      ✅ **Merged in PR #303** (merge commit `55bfe2c`), verified on `develop`:
+      all four surfaces carry the text — `dto.rs`, `openapi/descriptions.rs`,
+      the published `web/portal/public/openapi.json`, and design doc §4.2.
+      CI green on all three checks; 440 tests pass, OpenAPI lint valid, clippy
+      clean. All 4 acceptance criteria met.
+      🔑 **The task closes without the fix it was written to ask for, and that
+      is the result rather than a shortfall.** The first AC required validating
+      a derived threshold against genuinely-expensive tokens; doing so showed
+      the threshold misfires on a third of the buckets it catches, so shipping
+      it would have published a flag that is wrong specifically about the most
+      valuable assets. What consumers needed was already on the wire
+      (`volume_base` + `trade_count`) — only the interpretation was missing.
+      Spawned [[0274]] for the 93% majority case. Nothing was written to prod;
+      every measurement was a read as `dev_read` (`readonly = 1`).
 ---
 
 # Dust-trade candles produce absurd `close_usd` values
