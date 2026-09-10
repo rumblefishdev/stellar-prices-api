@@ -16,7 +16,9 @@
   "paths": {
     "/api-docs-json": {
       "get": {
-        "tags": ["ops"],
+        "tags": [
+          "ops"
+        ],
         "summary": "`GET /api-docs-json` — this OpenAPI document.",
         "description": "The machine-readable description of this API, served anonymously. The document changes only with a new release; revalidate every 5 minutes to pick the next one up.",
         "operationId": "api_docs_json",
@@ -34,12 +36,16 @@
             "description": "The API description could not be served"
           }
         },
-        "security": [{}]
+        "security": [
+          {}
+        ]
       }
     },
     "/health": {
       "get": {
-        "tags": ["ops"],
+        "tags": [
+          "ops"
+        ],
         "summary": "`GET /health` — liveness probe.",
         "description": "Returns 200 with a small JSON body carrying `\"status\": \"ok\"` and a non-cacheable `Cache-Control`. Answered at the edge without reaching the service, so it reports that the API is up — not that its data is fresh, and not that the database is reachable.",
         "operationId": "health",
@@ -51,12 +57,16 @@
             "description": "Rate limit exceeded"
           }
         },
-        "security": [{}]
+        "security": [
+          {}
+        ]
       }
     },
     "/v1/assets": {
       "get": {
-        "tags": ["assets"],
+        "tags": [
+          "assets"
+        ],
         "summary": "`GET /assets` — paginated, sortable, filterable list of tracked assets.",
         "description": "The tracked assets with their current-price snapshot, one page at a time. Sorted by\n`sort` and `order`, filtered by `type` and `search`, and paginated with an opaque keyset\ncursor: pass the previous page's `cursor` while `has_more` is `true`, with the same\n`sort` and `order`. Unknown query parameters are ignored.",
         "operationId": "get_assets",
@@ -184,7 +194,9 @@
     },
     "/v1/assets/{asset_identifier}": {
       "get": {
-        "tags": ["assets"],
+        "tags": [
+          "assets"
+        ],
         "summary": "`GET /assets/{asset_identifier}` — single-asset metadata.",
         "description": "Metadata for one asset, looked up by its natural identifier. Fields that do not apply to\nthe asset's kind are empty strings: `code` and `issuer` for a Soroban contract, `contract`\nfor a classic asset.",
         "operationId": "get_asset",
@@ -261,7 +273,9 @@
     },
     "/v1/assets/{asset_identifier}/ohlcv": {
       "get": {
-        "tags": ["prices"],
+        "tags": [
+          "prices"
+        ],
         "summary": "`GET /assets/{asset_identifier}/ohlcv` — candlestick history.",
         "description": "Candlestick history for one asset. `base_currency` sets the currency the candles are\nexpressed in, not which market they come from. With `USD` (the default) every candle is\nconverted to USD whatever it traded against, so an asset with no USD market still has a\nhistory: `close` is exact, while `open`, `high`, `low` and `vwap` are scaled from the\nquote-asset values with one rate per bucket and flagged with `derived`. With `XLM` only\ntrades against the native asset are returned, as stored.\n\nA bucket that traded but has no USD value yet is returned with its price fields `null`\nrather than omitted, so a chart keeps its time axis. Trades from every venue — and, in\nUSD mode, against every quote asset — are merged per bucket, in ascending time order.\n\nThe window is `timeframe`, ending now, or `start`/`end`. A window that would exceed 5000\ncandles at the chosen granularity is rejected with a 400. `backfill_note` is present only\nfor `timeframe=all` while the historical backfill is still running.",
         "operationId": "get_ohlcv",
@@ -393,7 +407,9 @@
     },
     "/v1/assets/{asset_identifier}/price": {
       "get": {
-        "tags": ["prices"],
+        "tags": [
+          "prices"
+        ],
         "summary": "`GET /assets/{asset_identifier}/price` — current price for one asset.",
         "description": "The current price snapshot for one asset: the latest USD close, the same price in XLM, the\n24-hour volume-weighted average, volume, change and a per-venue breakdown, all computed\nover the trailing 24-hour window. `updated_at` is the time of the snapshot. Identifier\nvalidation runs before any database access, so a malformed identifier is a 400 and\nnever reaches storage.\n\n`min_volume_usd` re-weights `vwap_24h` from the response's own `sources` and drops the\nvenues at or below the threshold; it never changes `price_usd` or `volume_24h_usd`. The\nparameter is part of the cache key, so requests that omit it share one cached response.",
         "operationId": "get_price",
@@ -481,7 +497,9 @@
     },
     "/v1/backfill/status": {
       "get": {
-        "tags": ["backfill"],
+        "tags": [
+          "backfill"
+        ],
         "summary": "`GET /backfill/status` — progress of the historical backfill streams.",
         "description": "Progress of the two streams that load history: the SDEX archive, which walks backward\nfrom the chain tip toward genesis, and the one-shot Soroban AMM import, which walks forward.\nA stream that has never reported is absent from the response.\n\nA stream recorded as `running` whose last push is more than 7 days old is reported as `stalled`: nothing writes a terminal state when a run dies, so `running` alone cannot be trusted to mean the stream is making progress.",
         "operationId": "get_status",
@@ -527,7 +545,9 @@
     },
     "/v1/oracles/{asset_identifier}": {
       "get": {
-        "tags": ["oracles"],
+        "tags": [
+          "oracles"
+        ],
         "summary": "`GET /oracles/{asset_identifier}` — latest per-oracle readings for an asset.",
         "description": "The most recent reading from each oracle that publishes a USD price for the asset, one\nentry per oracle. An unknown asset is a 404; a known asset with no oracle readings\nreturns 200 with an empty `oracles` array.",
         "operationId": "get_oracles",
@@ -604,7 +624,9 @@
     },
     "/v1/prices/batch": {
       "post": {
-        "tags": ["prices"],
+        "tags": [
+          "prices"
+        ],
         "summary": "`POST /prices/batch` — current prices for many assets in one call.",
         "description": "The same snapshot `GET /assets/{asset_identifier}/price` returns, for up to 100 assets\nin one request. The whole list is validated first: a malformed identifier, an empty list\nor more than 100 entries fails the entire request with a 400. Assets without a current\nprice are listed in `not_found` instead of failing the call. Results follow the order of\nthe request; a duplicated identifier is answered each time. Not cached.",
         "operationId": "post_batch",
@@ -674,18 +696,29 @@
       "AmmStream": {
         "type": "object",
         "description": "Progress of the one-shot Soroban AMM import.",
-        "required": ["status"],
+        "required": [
+          "status"
+        ],
         "properties": {
           "completed_at": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Time the import finished, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `null` while it is still running."
           },
           "earliest_data_available": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Timestamp of the oldest candle this stream has written so far, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `null` until the first."
           },
           "last_push_at": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Time of the most recent successful write, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `null` before the first."
           },
           "status": {
@@ -813,10 +846,16 @@
       "AssetListResponse": {
         "type": "object",
         "description": "One page of the asset listing.",
-        "required": ["data", "has_more"],
+        "required": [
+          "data",
+          "has_more"
+        ],
         "properties": {
           "cursor": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Opaque cursor for the next page; `null` on the last page. Pass it as `cursor` with the same `sort` and `order`."
           },
           "data": {
@@ -835,7 +874,9 @@
       "BackfillStatus": {
         "type": "object",
         "description": "Progress of the historical backfill streams.",
-        "required": ["realtime_tip_ledger"],
+        "required": [
+          "realtime_tip_ledger"
+        ],
         "properties": {
           "realtime_tip_ledger": {
             "type": "integer",
@@ -873,12 +914,17 @@
       "BaseCurrency": {
         "type": "string",
         "description": "The currency candles are expressed in (`base_currency`). The tokens are uppercase; all-lowercase `usd`/`xlm` are accepted as aliases and any other casing is rejected.",
-        "enum": ["USD", "XLM"]
+        "enum": [
+          "USD",
+          "XLM"
+        ]
       },
       "BatchRequest": {
         "type": "object",
         "description": "Request body of `POST /prices/batch`.",
-        "required": ["assets"],
+        "required": [
+          "assets"
+        ],
         "properties": {
           "assets": {
             "type": "array",
@@ -894,7 +940,10 @@
       "BatchResponse": {
         "type": "object",
         "description": "Response of `POST /prices/batch`.",
-        "required": ["prices", "not_found"],
+        "required": [
+          "prices",
+          "not_found"
+        ],
         "properties": {
           "not_found": {
             "type": "array",
@@ -923,27 +972,45 @@
         ],
         "properties": {
           "close": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Closing price of the bucket, in `base_currency`; `null` when the bucket has no price. Exact in USD mode — the other price fields are scaled, see `derived`."
           },
           "derived": {
-            "type": ["boolean", "null"],
+            "type": [
+              "boolean",
+              "null"
+            ],
             "description": "Whether `open`, `high`, `low` and `vwap` were derived by scaling rather than measured. Normally `close` is exact and the other price fields are scaled from the quote-asset values with one rate per bucket, so the true USD high may have occurred at a different moment than the quote-asset high. For USDC, which has no trades of its own, every price field comes from the rate and `derived` is `true`.\n\n`null` when the price fields are `null`, and always `null` for `base_currency=XLM`."
           },
           "high": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Highest price in the bucket, in `base_currency`; `null` when the bucket has no price."
           },
           "low": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Lowest price in the bucket, in `base_currency`; `null` when the bucket has no price."
           },
           "method": {
-            "type": ["string", "null"],
-            "description": "Where the USD rate behind this bucket came from:\n\n* `peg` — no measured rate was available; USDC was taken at 1 USD.\n* `oracle` — a measured oracle reading.\n* `traded` — priced through a reference asset's own trades.\n\n`null` when the price fields are `null`, and always `null` for `base_currency=XLM`, where nothing is converted."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the USD rate behind this bucket came from:\n\n* `assumed-par` — nothing was measured; the literal 1.0 supplied the value, i.e. USDC was taken at 1 USD.\n* `external` — an imported, measured USDC/USD series supplied the rate.\n* `oracle` — a measured Reflector reading supplied the rate.\n* `traded` — priced through a reference asset's own trades.\n* `peg` — only on the synthesized USDC self-series (`GET /assets/USDC:<issuer>/ohlcv`): no measured USDC/USD observation covered the bucket, so the $1 fallback was rendered. Never appears on a quote leg — there the same situation is `assumed-par`.\n\nEach value names the INPUT the rate came from, so `assumed-par` and `external` are never interchangeable: one is an assumption, the other a measurement that may sit percent off par. On a quote leg the label is reconstructed at read time — the candle rows carry no provenance column — so one case is deliberately not separated: a bucket reading exactly 1.0 reports `assumed-par` whether the dollar was assumed or a measured rate happened to land on it. The two leave an identical row and carry the same number, so the label is the conservative one; `external` is reported only for a bucket whose value was actually scaled by an imported rate.\n\n`null` when the price fields are `null`, and always `null` for `base_currency=XLM`, where nothing is converted."
           },
           "open": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Opening price of the bucket, in `base_currency`; `null` when the bucket has no price."
           },
           "timestamp": {
@@ -966,7 +1033,10 @@
             "description": "USD volume of the bucket, summed over the trades that have a USD value. A trade not yet priced counts in `volume_base` and `trade_count` but not here, so this is the USD volume that can be accounted for, not the bucket's total restated in USD."
           },
           "vwap": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Volume-weighted average price of the bucket, in `base_currency`; `null` when the bucket has no price."
           }
         }
@@ -974,7 +1044,10 @@
       "ErrorEnvelope": {
         "type": "object",
         "description": "The body of every error response. `code` is stable and meant for programs; `message` is for people and its wording may change.",
-        "required": ["code", "message"],
+        "required": [
+          "code",
+          "message"
+        ],
         "properties": {
           "code": {
             "type": "string",
@@ -993,19 +1066,35 @@
       "Granularity": {
         "type": "string",
         "description": "Candle bucket size. Case-sensitive: `1m` is one minute, `1M` one month.",
-        "enum": ["1m", "15m", "1h", "4h", "1d", "1w", "1M"]
+        "enum": [
+          "1m",
+          "15m",
+          "1h",
+          "4h",
+          "1d",
+          "1w",
+          "1M"
+        ]
       },
       "OhlcvResponse": {
         "type": "object",
         "description": "Candlestick series for one asset.",
-        "required": ["asset", "granularity", "base_currency", "data"],
+        "required": [
+          "asset",
+          "granularity",
+          "base_currency",
+          "data"
+        ],
         "properties": {
           "asset": {
             "type": "string",
             "description": "The asset as requested, in canonical form: `native`, `CODE:ISSUER` or a contract address."
           },
           "backfill_note": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Present only for `timeframe=all` while the historical backfill is still running: names the earliest date available so far and points to `GET /backfill/status`."
           },
           "base_currency": {
@@ -1028,7 +1117,11 @@
       "OracleEntry": {
         "type": "object",
         "description": "The most recent reading from one oracle.",
-        "required": ["name", "price_usd", "updated_at"],
+        "required": [
+          "name",
+          "price_usd",
+          "updated_at"
+        ],
         "properties": {
           "name": {
             "type": "string",
@@ -1047,7 +1140,10 @@
       "OraclesResponse": {
         "type": "object",
         "description": "Latest oracle readings for one asset.",
-        "required": ["asset", "oracles"],
+        "required": [
+          "asset",
+          "oracles"
+        ],
         "properties": {
           "asset": {
             "type": "string",
@@ -1065,7 +1161,10 @@
       "Order": {
         "type": "string",
         "description": "Sort direction (`order`).",
-        "enum": ["asc", "desc"]
+        "enum": [
+          "asc",
+          "desc"
+        ]
       },
       "PriceResponse": {
         "type": "object",
@@ -1140,11 +1239,17 @@
             "minimum": 0
           },
           "earliest_data_available": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Timestamp of the oldest candle this stream has written so far, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `null` until the first. Moves backwards as older history is ingested."
           },
           "last_push_at": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Time of the most recent successful write, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `null` before the first."
           },
           "ledgers_remaining": {
@@ -1182,17 +1287,33 @@
       "SortCol": {
         "type": "string",
         "description": "Sort column of the asset listing (`sort`). Case-sensitive.",
-        "enum": ["price", "volume_24h", "change_24h", "code"]
+        "enum": [
+          "price",
+          "volume_24h",
+          "change_24h",
+          "code"
+        ]
       },
       "Timeframe": {
         "type": "string",
         "description": "Window ending now, for the candlestick history. `all` starts at Stellar genesis (2015-09-30).",
-        "enum": ["1h", "24h", "7d", "30d", "1y", "all"]
+        "enum": [
+          "1h",
+          "24h",
+          "7d",
+          "30d",
+          "1y",
+          "all"
+        ]
       },
       "TypeFilter": {
         "type": "string",
         "description": "Asset kind filter of the listing (`type`): `classic` (classic assets, including the native asset), `soroban` (Soroban contracts) or `all`.",
-        "enum": ["classic", "soroban", "all"]
+        "enum": [
+          "classic",
+          "soroban",
+          "all"
+        ]
       }
     },
     "securitySchemes": {
