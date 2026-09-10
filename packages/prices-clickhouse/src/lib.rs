@@ -170,6 +170,46 @@ pub fn client(cfg: &Config) -> Client {
         .with_database(&cfg.database)
 }
 
+/// Bound how long a **single statement** may run on `client`, in seconds
+/// (ClickHouse's `max_execution_time`), returning the bounded client.
+///
+/// Task 0215 half 2. The value is in the FAILURE MODE, not in the ceiling.
+/// ClickHouse enforces this itself and — `timeout_overflow_mode` being `throw`
+/// on production — raises a real `TIMEOUT_EXCEEDED` exception carrying an error
+/// code, which the caller logs. Without it a statement that outruns its caller
+/// produces something indistinguishable from a network blip: during the 0215
+/// outage the client saw an empty body, ClickHouse completed the statement
+/// anyway, the rows landed, and every signal read healthy for 26 days.
+///
+/// **It must live on the client, not in a settings profile.** The scheduled
+/// Lambdas and the operator CLIs share the single `prices_writer` user, whose
+/// `prices_write_ddl` profile carries no execution bound and does not inherit
+/// `default`. There is no server-side place to give those callers different
+/// ceilings, and they need different ones — a CLI legitimately runs statements
+/// far longer than a Lambda ever should.
+///
+/// `secs == 0` is ClickHouse's spelling of *unlimited*, so it sets no option at
+/// all and [`execution_bound`] reports it as `None`; a caller that offers this
+/// as a knob should say so in its logs rather than let the unbounded state
+/// return quietly.
+pub fn with_execution_bound(client: Client, secs: u64) -> Client {
+    match execution_bound(secs) {
+        Some(secs) => client.with_option("max_execution_time", secs.to_string()),
+        None => client,
+    }
+}
+
+/// The effective per-statement bound for a configured value: `None` when there
+/// is none.
+///
+/// Split out from [`with_execution_bound`] because `0` is the trap. It reads
+/// like "no delay" and means "no limit" — a mistyped or deliberately-zeroed
+/// knob restores exactly the unbounded state this guard exists to end, and does
+/// it silently. Callers branch on this to log which of the two they got.
+pub fn execution_bound(secs: u64) -> Option<u64> {
+    (secs > 0).then_some(secs)
+}
+
 /// Errors raised while applying schema SQL.
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaError {
@@ -232,6 +272,28 @@ pub(crate) fn split_statements(sql: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task 0215: `max_execution_time = 0` is ClickHouse's spelling of
+    /// UNLIMITED, not "no delay". A knob zeroed by a typo, or by an operator
+    /// who read it as a disable, silently restores the unbounded state the
+    /// bound exists to end — and the 0215 outage is the record of how long an
+    /// unbounded statement can fail while every signal reads healthy.
+    ///
+    /// Asserted on [`execution_bound`] rather than the client, because
+    /// `clickhouse::Client` exposes no way to read an option back: a test
+    /// against the client could only re-state what the call passed in.
+    #[test]
+    fn a_zero_execution_bound_is_unlimited_not_instant() {
+        assert_eq!(execution_bound(0), None, "0 means unlimited to ClickHouse");
+        assert_eq!(execution_bound(1), Some(1));
+        assert_eq!(execution_bound(120), Some(120));
+
+        // And the client builder agrees — a zero sets no option, so it cannot
+        // send `max_execution_time=0` and pin the server to unlimited either.
+        let base = Client::default();
+        let _bounded = with_execution_bound(base.clone(), 120);
+        let _unbounded = with_execution_bound(base, 0);
+    }
 
     /// Days from 1970-01-01 to a civil (y, m, d), Howard Hinnant's `days_from_civil`.
     ///
