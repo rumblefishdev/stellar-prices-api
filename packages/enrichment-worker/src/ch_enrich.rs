@@ -855,6 +855,32 @@ impl ChEnrichmentPass {
                 refs.usdt = Some(r.asset_id);
             }
         }
+
+        // ⚠️ Task 0215: a reference that does not resolve narrows this pass
+        // SILENTLY. `stable_ids()`/`pivot_ids()` flatten the `None` away, so the
+        // step issues one statement where it should issue two and still reports
+        // success — the exact shape of the defect that took 26 days to find,
+        // and which was readable only by pulling emitted SQL out of production's
+        // `system.query_log`. Partial sets stay legal (bootstrap orders assets
+        // arbitrarily), so this warns rather than fails; what it must never do
+        // is happen quietly.
+        let missing: Vec<&str> = [
+            ("XLM", refs.xlm.is_none()),
+            ("USDC", refs.usdc.is_none()),
+            ("USDT", refs.usdt.is_none()),
+        ]
+        .into_iter()
+        .filter_map(|(code, absent)| absent.then_some(code))
+        .collect();
+        if !missing.is_empty() {
+            warn!(
+                missing = %missing.join(","),
+                stable_ids = ?refs.stable_ids(),
+                pivot_ids = ?refs.pivot_ids(),
+                "reference asset did not resolve — peg/pivot set is NARROWED for this pass"
+            );
+        }
+
         Ok(refs)
     }
 
@@ -875,40 +901,26 @@ impl ChEnrichmentPass {
         watermark: u32,
     ) -> Result<(), ChEnrichError> {
         let window = self.window_pred("p.timestamp");
-        if let Some(sql) = peg_sql(
-            &self.cfg.database,
-            &self.cfg.table,
-            &refs.stable_ids(),
-            &window,
-        ) {
-            self.client
-                .query(&sql)
-                .bind(watermark)
-                .bind(self.cfg.batch_size)
-                .execute()
-                .await?;
-        }
-        // One pivot pass per measured reference asset (XLM, then USDT — task
-        // 0172). Order matters only for cost, not correctness: each pass fills
-        // rows the previous ones left at `close_usd = 0`, and the two reference
-        // assets match disjoint sets of candles (`r.ref_asset_id = p.quote_asset_id`).
-        if let Some(usdc_id) = refs.usdc {
-            for ref_id in refs.pivot_ids() {
-                let sql = pivot_sql(
-                    &self.cfg.database,
-                    &self.cfg.table,
-                    ref_id,
-                    usdc_id,
-                    &window,
-                );
-                self.client
-                    .query(&sql)
-                    .bind(watermark)
-                    .bind(self.cfg.pivot_window_s)
-                    .bind(watermark)
-                    .bind(self.cfg.batch_size)
-                    .execute()
-                    .await?;
+        for stmt in plan_peg_pivot_step(&self.cfg.database, &self.cfg.table, refs, &window) {
+            match stmt {
+                StepStatement::Peg { sql } => {
+                    self.client
+                        .query(&sql)
+                        .bind(watermark)
+                        .bind(self.cfg.batch_size)
+                        .execute()
+                        .await?;
+                }
+                StepStatement::Pivot { sql, .. } => {
+                    self.client
+                        .query(&sql)
+                        .bind(watermark)
+                        .bind(self.cfg.pivot_window_s)
+                        .bind(watermark)
+                        .bind(self.cfg.batch_size)
+                        .execute()
+                        .await?;
+                }
             }
         }
         Ok(())
@@ -1141,6 +1153,57 @@ const INSERT_COLUMNS: &str = "timestamp, asset_id, quote_asset_id, source, \
 /// shared with the rest of the pass — see [`ChEnrichmentPass::watermark`]) and the
 /// `LIMIT` (batch size). `volume_quote_usd` is only filled when still zero, so an
 /// oracle-set (depeg-aware) value survives.
+/// One statement of a peg-pivot step, with the shape that decides how it is
+/// bound. The two variants take **different bind sequences**, which is why this
+/// is an enum and not a bare `Vec<String>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StepStatement {
+    /// The peg pass: USDC-quoted candles valued at ×$1.
+    Peg { sql: String },
+    /// One pivot pass, valuing `ref_id`-quoted candles at that asset's own
+    /// measured USDC close. `ref_id` is carried so a test can assert *which*
+    /// references were planned, not merely how many.
+    Pivot { sql: String, ref_id: u32 },
+}
+
+/// Decide which statements one peg-pivot step issues, without sending any.
+///
+/// Split out of [`ChEnrichmentPass::enrich_peg_pivot_step`] for task 0215: the
+/// defect that task chased was a pivot set that had silently narrowed from two
+/// statements to one, and the only way anyone could tell was by reading emitted
+/// SQL back out of `system.query_log` on production. Planning is pure, so
+/// `plan_issues_one_peg_and_two_pivots` can assert the shape in CI instead.
+///
+/// ⚠️ The integration tests that cover this end-to-end
+/// (`usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg` and
+/// `enrich_fills_close_usd_across_oracle_peg_and_pivot_tiers`) are `#[ignore]`
+/// and need a live ClickHouse, so **they do not run in CI** — see task 0275.
+/// Until they do, this unit test is the only automatic guard on the pivot set.
+fn plan_peg_pivot_step(
+    db: &str,
+    tbl: &str,
+    refs: &ReferenceIds,
+    window: &str,
+) -> Vec<StepStatement> {
+    let mut plan = Vec::new();
+    if let Some(sql) = peg_sql(db, tbl, &refs.stable_ids(), window) {
+        plan.push(StepStatement::Peg { sql });
+    }
+    // One pivot pass per measured reference asset (XLM, then USDT — task 0172).
+    // Order matters only for cost, not correctness: each pass fills rows the
+    // previous ones left at `close_usd = 0`, and the two reference assets match
+    // disjoint sets of candles (`r.ref_asset_id = p.quote_asset_id`).
+    if let Some(usdc_id) = refs.usdc {
+        for ref_id in refs.pivot_ids() {
+            plan.push(StepStatement::Pivot {
+                sql: pivot_sql(db, tbl, ref_id, usdc_id, window),
+                ref_id,
+            });
+        }
+    }
+    plan
+}
+
 fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32], window: &str) -> Option<String> {
     if stable_ids.is_empty() {
         return None;
@@ -1474,6 +1537,79 @@ mod tests {
         );
         // Inlining adds no bind params: still watermark, window, watermark, limit.
         assert_eq!(sql.matches('?').count(), 4, "window adds no bind params");
+    }
+
+    /// Task 0215 regression: a peg-pivot step must issue **one peg and TWO
+    /// pivots** — XLM and USDT — so a pivot set that silently narrows to one
+    /// fails here rather than on production's quote legs.
+    ///
+    /// The defect this guards was diagnosed only by reading emitted SQL out of
+    /// `system.query_log` after 26 days, because nothing in the suite asserted
+    /// how many statements a step sends. The end-to-end integration tests do
+    /// cover it, but they are `#[ignore]` and need a live ClickHouse, so they
+    /// never run in CI (task 0275) — this is the guard that actually runs.
+    #[test]
+    fn plan_issues_one_peg_and_two_pivots() {
+        let db = "prices";
+        let tbl = "price_ohlcv_1m";
+        let window = "";
+        let refs = ReferenceIds {
+            xlm: Some(5),
+            usdc: Some(3),
+            usdt: Some(7),
+        };
+
+        let plan = plan_peg_pivot_step(db, tbl, &refs, window);
+
+        let pivot_refs: Vec<u32> = plan
+            .iter()
+            .filter_map(|s| match s {
+                StepStatement::Pivot { ref_id, .. } => Some(*ref_id),
+                StepStatement::Peg { .. } => None,
+            })
+            .collect();
+        let pegs = plan
+            .iter()
+            .filter(|s| matches!(s, StepStatement::Peg { .. }))
+            .count();
+
+        assert_eq!(pegs, 1, "exactly one peg statement per step");
+        assert_eq!(
+            pivot_refs,
+            vec![5, 7],
+            "both references must pivot, XLM then USDT — a narrowed set is the 0215 defect"
+        );
+        assert_eq!(plan.len(), 3, "one peg + two pivots");
+
+        // The reference id is baked into each pivot's SQL as a literal, which is
+        // what made the defect readable in `system.query_log` at all. Assert on
+        // the emitted text so a plan that reports the right ids while building
+        // the wrong statement cannot pass.
+        for (stmt, expected) in plan
+            .iter()
+            .filter(|s| matches!(s, StepStatement::Pivot { .. }))
+            .zip([5u32, 7])
+        {
+            let StepStatement::Pivot { sql, .. } = stmt else {
+                unreachable!("filtered to pivots")
+            };
+            assert!(
+                sql.contains(&format!("CAST({expected} AS UInt32) AS ref_asset_id")),
+                "pivot SQL must carry ref {expected} as a literal"
+            );
+        }
+
+        // Without a USDC market there is nothing to measure a pivot against, so
+        // the step degrades to the peg alone — never to a silent single pivot.
+        let no_usdc = ReferenceIds {
+            xlm: Some(5),
+            usdc: None,
+            usdt: Some(7),
+        };
+        assert!(
+            plan_peg_pivot_step(db, tbl, &no_usdc, window).is_empty(),
+            "no USDC market → no peg and no pivot"
+        );
     }
 
     #[test]
