@@ -760,6 +760,48 @@ days now arrives with an error code attached.
 Same command as step 2 with `"120"`. Then confirm one clean `QueryFinish` pivot
 pair on the next run before closing the AC.
 
+## ✅ The `max_execution_time` MECHANISM is already proven — 2026-09-10
+
+Measured before deploying anything, and it shrinks what the induction still has
+to show. Re-read today from `system.settings_profile_elements`:
+
+| profile | `max_execution_time` |
+|---|---|
+| `read_only` (`api_reader`, `dev_read`, `prices_reader`) | **30** |
+| `prices_write_ddl` (**`prices_writer`** — the worker) | **absent → unbounded** |
+
+`timeout_overflow_mode` is `throw` (unchanged from the default). So half 2's
+premise still holds 20 days on.
+
+**And ClickHouse demonstrably throws on this cluster.** `system.query_log`,
+`exception_code = 159`, 30 days — 23 events across 9 days, every one a
+`dev_read` query that outran the profile's 30 s:
+
+```
+Code: 159. DB::Exception: Timeout exceeded:
+elapsed 30000.860859 ms, maximum: 30000 ms. (TIMEOUT_EXCEEDED)
+```
+
+That is exactly what half 2 buys, already happening: an error code, the elapsed
+time and the bound that was crossed — against `BadResponse("")`, which carried
+none of it and was indistinguishable from a network blip for 26 days.
+
+⚠️ **The bound OVERSHOOTS.** It is checked between blocks, not preemptively:
+one of these ran **43.9 s** against a 30 s limit before the check fired. So a
+configured 120 s can kill at ~120-135 s, and the value must sit far enough under
+the Lambda's 300 s to leave room for that. 120 s does.
+
+### What this leaves for the induction
+
+Not the mechanism — only the plumbing:
+
+1. the worker's client actually **sends** the option, and
+2. the worker **logs** the resulting exception rather than swallowing it.
+
+⛔ Neither can be rehearsed as `dev_read`: `readonly = 1` refuses a settings
+change outright (code 164), so the URL-parameter path only exists for
+`prices_writer`. It needs the deploy.
+
 ## Acceptance Criteria
 
 - [x] The source is shown correct — `pivot_ids() == [xlm, usdt]` and the peg
@@ -786,7 +828,8 @@ pair on the next run before closing the AC.
       **Code in PR #305** (2026-09-10): 120 s on the scheduled worker's client via
       `ENRICH_MAX_EXECUTION_TIME_SECS`; the operator CLIs stay unbounded on
       purpose, which is what "per-caller" means here. ⏳ **The induction is
-      outstanding** and is the operator's to run against prod.
+      outstanding** and is the operator's to run against prod — though the
+      section above narrows it to the plumbing; the mechanism is measured.
       ⚠️ **Scope decided 2026-09-10 — the worker only, not the CLIs.** After
       [[0111]] the worst statement on this path is ~3.3 s against the old 45.6 s,
       so 120 s is ~37x headroom and the number is NOT load-bearing. What earns it
