@@ -201,6 +201,25 @@ pub enum ChEnrichError {
     )]
     ResetRequiresExternalRates { quote_asset_id: u32 },
 
+    /// A `require_external_rate` reset on a SUB-DAILY table while the imported
+    /// series holds only daily rows (task 0268). See
+    /// [`ChEnrichmentPass::assert_hourly_rates_are_loaded`].
+    #[error(
+        "USD reset refused on {table}: --reset-require-external-rate was passed, \
+         but prices.usd_rate holds no HOURLY `external` row for canonical USDC \
+         (every imported row sits at UTC midnight — only the daily file is loaded).\n\
+         A sub-daily candle priced now takes the DAY close, and the repair cannot \
+         be redone later: the reset re-opens only rows still carrying the $1 \
+         signature (close_usd = close), and a row priced at the day close no \
+         longer does. Loading the hourly file afterwards would change nothing for \
+         these candles — on 2023-03-11 the 12:00 hour would stay at 0.96812 \
+         instead of 0.90687, about 7% off.\n\
+         Load and promote the hourly file first — docs/runbooks/load-external-usdc-rate.md, \
+         section 4½ — then re-run. Daily-grain tables (price_ohlcv_1d/1w/1M) are \
+         not affected and do not need it."
+    )]
+    ResetRequiresHourlyRates { table: String },
+
     /// `require_external_rate` asked for on a quote leg that is not canonical
     /// USDC (task 0268 review). The external tier can only refill USDC.
     #[error(
@@ -1031,6 +1050,49 @@ impl ChEnrichmentPass {
         Ok(())
     }
 
+    /// Refuse a `require_external_rate` reset on a sub-daily table unless the
+    /// imported series holds HOURLY rows (task 0268).
+    ///
+    /// The reset is one-shot per row, and that is what makes the ordering matter.
+    /// It re-opens only rows still carrying the $1 signature (`close_usd =
+    /// close`). With only the daily file loaded, the external tier prices every
+    /// hour of a day from that day's single row — the day CLOSE — and the row
+    /// leaves the signature for good. Loading the hourly file later cannot reach
+    /// it: a second pass finds nothing to re-open. Measured on 2023-03-11: the
+    /// 12:00 candle repaired on a daily-only load stayed at 0.96812 through a
+    /// later hourly load and a second pass, while Chainlink's 12:00 close was
+    /// 0.90687439.
+    ///
+    /// "Only the daily file" is detected as "no imported row away from UTC
+    /// midnight": the hourly pass is the only writer of such rows (the loader's
+    /// daily grain refuses a non-midnight timestamp). `'UTC'` is named so a
+    /// non-UTC server cannot make every row look non-midnight.
+    ///
+    /// Daily and coarser tables resolve at the bucket END, where the daily row
+    /// and the 23:00 hourly row carry the same close on every covered day, so
+    /// they are not gated.
+    async fn assert_hourly_rates_are_loaded(&self) -> Result<(), ChEnrichError> {
+        let width = bucket_width_s(&self.cfg.table);
+        if width == 0 || width >= 86_400 {
+            return Ok(());
+        }
+        let sql = format!(
+            "SELECT count() FROM {db}.usd_rate FINAL \
+             WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+               AND issuer_address = '{USDC_ISSUER}' AND contract_address = '' \
+               AND method = 'external' AND usd_rate > 0 \
+               AND timestamp != toStartOfDay(timestamp, 'UTC')",
+            db = self.cfg.database,
+        );
+        let rows = self.client.query(&sql).fetch_one::<u64>().await?;
+        if rows == 0 {
+            return Err(ChEnrichError::ResetRequiresHourlyRates {
+                table: self.cfg.table.clone(),
+            });
+        }
+        Ok(())
+    }
+
     /// Refuse a `require_external_rate` reset while `prices.oracle_prices` holds
     /// a canonical USDC reading below `USDC_ORACLE_EPOCH_S` (task 0268 review,
     /// WR-09).
@@ -1099,6 +1161,9 @@ impl ChEnrichmentPass {
             // different quote leg cannot be refilled by it at all.
             self.assert_external_rate_leg_is_usdc(spec).await?;
             self.assert_external_rates_are_loaded(spec).await?;
+            // A sub-daily table needs the HOURLY series, or it is priced at the
+            // day close once and can never be re-opened.
+            self.assert_hourly_rates_are_loaded().await?;
             // Fifth (review WR-09): the external tier's own premise, measured on
             // the table the oracle tier reads. Independent of `not_before`.
             self.assert_no_pre_epoch_oracle_rows(spec).await?;

@@ -79,11 +79,20 @@ the order is not cosmetic:
 > `--dry-run` (which contacts no server) cannot report it — it fires at the
 > start of the real load, before the first INSERT.
 
-Loading the daily file alone is a valid, smaller deliverable — `/ohlcv` treats a
-lone daily row as valid for its whole UTC day — but it leaves
-`price_usd_series_1h` publishing the import at 00:00 and `1`/`peg` for the other
-twenty-three hours of every covered day, and it cannot show the depeg **trough**
-(2023-03-11 07:00, `0.8833`) at `granularity=1h` at all.
+Loading the daily file alone is a valid, smaller deliverable **for the rate
+table and the daily surfaces only** — `/ohlcv` treats a lone daily row as valid
+for its whole UTC day — but it leaves `price_usd_series_1h` publishing the import
+at 00:00 and `1`/`peg` for the other twenty-three hours of every covered day, and
+it cannot show the depeg **trough** (2023-03-11 07:00, `0.8833`) at
+`granularity=1h` at all.
+
+> ⚠️ **It is NOT a valid stopping point before task 0268's campaign.** The
+> campaign's reset is one-shot per row: a `price_ohlcv_1h` candle repaired on a
+> daily-only load takes the day CLOSE and can never be re-opened, so a later
+> hourly load cannot correct it (2023-03-11 12:00 would stay at 0.96812 instead
+> of 0.90687, about 7% off). `coarse-repair` therefore refuses `price_ohlcv_1h`
+> until hourly rows exist (`ResetRequiresHourlyRates`). Load and promote BOTH
+> files before the campaign.
 
 This procedure loads it as `method = 'external'` rows — measured evidence of the
 same standing as a poll, kept a distinct word because task 0247 forbids

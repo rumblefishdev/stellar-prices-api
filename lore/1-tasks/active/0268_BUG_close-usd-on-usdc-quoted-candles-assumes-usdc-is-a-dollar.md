@@ -785,3 +785,53 @@ looked right in the common case**. The tests that "covered" them asserted string
 equality of SQL fragments or used fixtures that could not reach the boundary.
 Every fix in both passes was falsified against a live ClickHouse before being
 believed.
+
+### 2026-09-10 — `/code-review` round, hourly gate, CI, decisions
+
+**The round-4 labelling fix was wrong, and has been reversed.** A `/code-review`
+pass found that testing the imported-rate day-set BEFORE the par signature made
+two large populations claim a measurement they do not have — both reproduced on
+ClickHouse 26.3.10.60 before changing anything:
+
+- every un-repaired pre-epoch candle on a covered day reported `external` while
+  still holding `close x $1.00` (522,321 per the prod measurement in
+  `queries_ch.rs`) — day coverage says nothing about whether the campaign has
+  reached the row;
+- every post-epoch peg fallback reported `oracle` (134,193) — a poll that never
+  happened.
+
+The par signature now wins at any timestamp and `external` also requires
+`close_usd != close`. That reinstates "a measured rate of exactly 1.0 reports
+`assumed-par`" — the conservative direction, since the VALUE is identical. The
+round-4 note above described the remaining residual as a rare edge case; it was
+systematic, and the user's 2026-09-09 acceptance of the residual rested on that
+wrong description. The residual that stands now is the conservative one.
+Also from that review: the coverage window used `+ INTERVAL`, which ClickHouse
+resolves in the SERVER timezone; now UTC-pinned per grain.
+
+**Hourly gate (`ResetRequiresHourlyRates`).** Found while verifying the hourly
+path end to end: the reset is one-shot per row — it re-opens only rows still at
+`close_usd = close`. On a daily-only load every hour of a covered day is priced
+at the day CLOSE and leaves the signature for good, so a later hourly load
+cannot correct it. Measured: 2023-03-11 12:00 repaired on a daily-only load
+stayed at 0.96812 through an hourly load and a second pass; Chainlink's 12:00
+close is 0.90687439. Fresh candles after the hourly load matched Chainlink
+exactly at 00:00 / 07:00 / 13:00 / 20:00. A sub-daily table is now refused until
+imported rows exist away from UTC midnight (43,046 on the versioned files);
+daily and coarser tables are not gated. Runbook Appendix B precondition 1 says so.
+
+**CI** now compiles and lints `coarse-repair` and `load-external-rate`
+(`clippy -p enrichment-worker --features aws-mtls --all-targets -D warnings`).
+Before, their `required-features = ["aws-mtls"]` kept them out of every CI job.
+
+**Decisions (user, 2026-09-10):**
+1. ADR 0011 stays unchanged. The new `method` words are therefore a DELIBERATE,
+   accepted deviation from §4 — do not "fix" the code back to the ADR.
+2. The labelling residual is accepted (now the conservative one above).
+5. The small autonomous choices (the `--allow-daily-after-hourly` escape, local
+   merges of 0268 into 0267) are fine.
+
+**Still open:** deploy ordering (run the campaign BEFORE deploying the new API
+binary, so no still-$1 value is labelled measured — not yet in the runbook), and
+re-measuring the 654,291 population before the run. The `peg` -> `assumed-par`
+rename on the candle path is a breaking wire change and needs a release note.

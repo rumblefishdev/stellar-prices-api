@@ -1925,6 +1925,18 @@ async fn seed_external_rate(client: &Client, db: &str, ts: u32, rate: f64) {
         .unwrap();
 }
 
+/// Mark the imported series as HOURLY-loaded, the way production loads it
+/// (daily file first, hourly second). The external reset refuses a sub-daily
+/// table while every imported row sits at UTC midnight, because a candle priced
+/// from the day close then leaves the $1 signature and can never be re-opened.
+///
+/// The marker is one row at 2000-01-01 01:00 UTC: away from midnight, so it
+/// satisfies the gate, and on a day no fixture candle occupies, so neither the
+/// day-set nor any ASOF window can price anything from it.
+async fn seed_hourly_marker(client: &Client, db: &str) {
+    seed_external_rate(client, db, 946_688_400, 1.0).await;
+}
+
 async fn seed_assets_and_candles(client: &Client, db: &str) {
     client
         .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
@@ -2387,6 +2399,69 @@ fn external_reset() -> UsdResetSpec {
 /// is the test that it does: two candles with identical signatures, one on a day
 /// the imported series covers and one not. The covered candle is re-priced at the
 /// measured rate; the uncovered one comes out EXACTLY as it went in.
+/// 🔑 **A daily-only load must not reach a sub-daily table.** With only the
+/// daily file loaded every hour of a covered day is priced from that day's one
+/// row — the day CLOSE — and the reset is one-shot per row: it re-opens only rows
+/// still carrying the $1 signature, which a row priced at the day close no longer
+/// does. So loading the hourly file afterwards cannot correct those candles.
+/// Measured before this gate existed: a 2023-03-11 12:00 candle repaired on a
+/// daily-only load stayed at 0.96812 through an hourly load and a second pass;
+/// Chainlink's 12:00 close was 0.90687439.
+///
+/// Daily and coarser tables resolve at the bucket END, where the daily row and
+/// the 23:00 hourly row carry the same close, so they must NOT be refused.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_external_reset_refuses_a_sub_daily_table_on_a_daily_only_load() {
+    let db = "it_enrich_0268_daily_only";
+    let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
+    let client = setup_0268(db, covered, uncovered).await;
+    // Midnight only: exactly what the daily file writes.
+    seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(external_reset());
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+    assert!(
+        matches!(&err, ChEnrichError::ResetRequiresHourlyRates { table } if table == "price_ohlcv_1m"),
+        "a sub-daily table on a daily-only load must be refused, got {err:?}"
+    );
+    // Refused BEFORE writing: the candle still carries its original value.
+    let v = close_usd(&client, db, 10, 2, covered).await;
+    assert!(
+        (v - 4.0).abs() < 1e-9,
+        "a refused reset must not have touched the candle, got {v}"
+    );
+
+    // The same load on a daily table is fine: nothing sub-daily is at stake.
+    let mut d = cfg(db);
+    d.one_shot = true;
+    d.table = "price_ohlcv_1d".to_string();
+    d.usd_reset = Some(external_reset());
+    ChEnrichmentPass::new(d)
+        .run()
+        .await
+        .expect("a daily table must not be gated on the hourly series");
+
+    // And once the hourly file is in, the sub-daily table proceeds.
+    seed_hourly_marker(&client, db).await;
+    let mut h = cfg(db);
+    h.one_shot = true;
+    h.usd_reset = Some(external_reset());
+    let stats = ChEnrichmentPass::new(h).run().await.unwrap();
+    assert_eq!(
+        stats.rows_reset, 1,
+        "with hourly rates loaded the reset proceeds"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
 async fn the_external_reset_never_zeroes_a_bucket_it_cannot_refill() {
@@ -2395,6 +2470,7 @@ async fn the_external_reset_never_zeroes_a_bucket_it_cannot_refill() {
     let client = setup_0268(db, covered, uncovered).await;
     // Day start of `covered` (2020-09-13) only. `uncovered` (2020-09-18) has no row.
     seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
+    seed_hourly_marker(&client, db).await;
 
     let mut c = cfg(db);
     c.one_shot = true;
@@ -2486,6 +2562,7 @@ async fn the_external_reset_refuses_a_pre_epoch_oracle_reading_below_its_own_win
     let client = setup_scratch(db).await;
     seed_assets_and_candles(&client, db).await;
     seed_external_rate(&client, db, DEEP_DAY_START, DEPEG_RATE).await;
+    seed_hourly_marker(&client, db).await;
     // A Reflector reading for USDC a year BEFORE the reset's lower bound and
     // far below the epoch: invisible to the windowed shadow guard.
     let reading = DEEP_DAY_START - 365 * 86_400;
@@ -2539,6 +2616,7 @@ async fn the_bounded_usd_reset_is_not_refused_by_oracle_rows_above_its_window() 
     let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
     let client = setup_0268(db, covered, uncovered).await;
     seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
+    seed_hourly_marker(&client, db).await;
 
     // A live USDC oracle row ABOVE the reset's upper bound — prod's actual shape.
     let above = prices_clickhouse::USDC_ORACLE_EPOCH_S + 3_600;
@@ -2601,6 +2679,7 @@ async fn the_external_reset_touches_only_the_bounded_month() {
     let client = setup_0268(db, sep, oct).await;
     seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
     seed_external_rate(&client, db, 1_601_596_800, DEPEG_RATE).await;
+    seed_hourly_marker(&client, db).await;
 
     let mut c = cfg(db);
     c.one_shot = true;

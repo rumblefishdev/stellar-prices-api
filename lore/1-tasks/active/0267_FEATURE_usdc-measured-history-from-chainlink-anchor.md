@@ -979,3 +979,39 @@ ClickHouse, falsified one of them:
   — both exclude it — so the spanning 1d bucket now carries the proof.
 - `Candle.method`'s published text documented two causes of `null`; the code
   emits a third, which this branch's own integration case asserts. Documented.
+
+### 2026-09-10 — hourly path verified end to end, decisions, scope
+
+**Hourly path, measured.** With both files loaded (44,918 `external` rows, the
+union of the two grains; 43,046 away from UTC midnight), fresh 1h candles on
+2023-03-11 repaired by 0268's campaign match Chainlink's hour exactly: 00:00
+0.99503491, 07:00 0.8833 (the trough), 13:00 0.913, 20:00 0.97982655. So the
+API no longer publishes one price for a whole day at `granularity=1h`.
+
+The same run exposed an ordering trap: candles repaired while ONLY the daily
+file was loaded kept the day close (12:00 stayed 0.96812 vs Chainlink 0.90687)
+and a second pass could not reach them — the reset is one-shot per row.
+0268 now refuses `price_ohlcv_1h` until hourly rows exist
+(`ResetRequiresHourlyRates`), and this runbook no longer calls a daily-only load
+a valid stopping point before the campaign.
+
+**Implementation §7 is not needed — out of scope by design (user, 2026-09-10).**
+Before `USDC_ORACLE_EPOCH_S` prices come from the imported Chainlink series;
+from the epoch on they come from the Reflector oracle, as they always did. The
+imported series ends at 13:00 on 2026-03-11 and must not price anything after
+the epoch, so a scheduled read of new Chainlink rounds would have nothing to do.
+
+**Decisions (user, 2026-09-10):** ADR 0011 stays unchanged (the new `method`
+words are a deliberate, accepted deviation); the labelling residual is
+accepted; the 0265 analysis scripts (`compose_usdc.py`, `fetch_*.py`,
+`run.sh`) stay local and unversioned — only the composed CSVs, `sources.csv`
+and `guardrails.py` are in the repo, so reproducing the series needs the
+author's checkout.
+
+**Housekeeping:** commit 1d6bf93 had swept a locally regenerated
+`fig6_composed_vs_ours.png` (different from develop's) into this branch; it is
+untracked again (281c720) so merging cannot overwrite the archived figure. CI
+now compiles and lints this task's `load-external-rate` binary.
+
+**Still open:** deploy ordering (campaign BEFORE the API deploy) and the
+654,291 re-measurement — see 0268.

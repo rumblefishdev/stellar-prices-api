@@ -709,6 +709,28 @@ to check.
    repair. Rows above that floor are simply not re-opened; rows below it never
    were.
 
+   **For `price_ohlcv_1h`, the HOURLY file must be loaded and promoted too — not
+   only the daily one.** The tool refuses a sub-daily table otherwise
+   (`ResetRequiresHourlyRates`), and the refusal is not a formality: the reset is
+   **one-shot per row**. It re-opens only rows still carrying the $1 signature
+   (`close_usd = close`). On a daily-only load every hour of a covered day is
+   priced from that day's single row — the day CLOSE — and the row leaves the
+   signature for good, so loading the hourly file later cannot reach it. On
+   2023-03-11 the 12:00 candle would stay at 0.96812 instead of Chainlink's
+   0.90687 (about 7% off). Daily and coarser tables are not gated: at the bucket
+   end the daily row and the 23:00 hourly row carry the same close.
+
+   ```sql
+   SELECT countIf(timestamp != toStartOfDay(timestamp, 'UTC')) AS hourly_rows
+   FROM prices.usd_rate FINAL
+   WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+     AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+     AND contract_address = '' AND method = 'external'
+   ```
+
+   Expect `hourly_rows > 0` (43 046 on the versioned files) before touching
+   `price_ohlcv_1h`.
+
 2. **Confirm 0267 stamps its rows at the START of their UTC bucket.** The tier
    resolves the rate at the bucket's END with an ASOF `rts < bend`, so a
    bucket-start stamp gives every candle in a bucket that bucket's rate. A
