@@ -19,6 +19,18 @@ history:
       statements" criterion: the end-to-end coverage already existed and would
       have caught the defect — but it has never run. 0215 shipped a unit-level
       guard instead, which is a workaround for this task, not a replacement.
+  - date: 2026-09-10
+    status: backlog
+    who: okarcz
+    note: >
+      📐 **Measured before estimating — the suite is CLEAN and FAST.** Ran all
+      19 locally against `docker compose` ClickHouse: **19 passed, 0 failed, in
+      0.57 s**. So this task carries **no triage burden** — the original
+      "expect failures, budget for them" framing was a guess and it was wrong.
+      Also settled: `docker-compose.yml` already pins **26.3.10.60**, byte-equal
+      to prod's `version()` read the same day, so the version-parity question
+      is answered before the work starts. What remains is genuinely small — a
+      service container plus `-- --ignored`.
 ---
 
 # The ClickHouse integration tests have never run in CI
@@ -66,13 +78,16 @@ plan assertion to get an actually-armed check.
 
 - Add a ClickHouse service to the Rust CI job, pinned to the **exact production
   version** (26.3.10.60 as of 2026-09-10 — read it, do not copy this number
-  forward), and run the ignored tests with `CLICKHOUSE_URL` pointed at it.
-- Expect failures on the first run and budget for them. Nothing has enforced
-  these tests for months; some will have rotted against schema and behaviour
-  changes. **Triage each one — a test that no longer matches intended behaviour
-  must be fixed or deleted with a reason, never `#[ignore]`d back to sleep.**
-- Decide whether they gate every PR or run on a schedule. Gating is stronger;
-  the runtime cost and the shared-runner impact are the trade-off.
+  forward; `docker-compose.yml` already pins exactly this and is the model), and
+  run the ignored tests with `CLICKHOUSE_URL` pointed at it.
+- ✅ **No triage expected.** All 19 pass today (measured 2026-09-10, 0.57 s).
+  Should one fail on first arming anyway, the rule still stands: fix it or
+  delete it with a reason, never `#[ignore]` it back to sleep.
+- **Gate every PR.** The runtime objection does not survive the measurement —
+  0.57 s of tests behind a ~20-30 s container start. A nightly schedule would
+  buy nothing and would report failures away from the change that caused them.
+  Consider landing `continue-on-error` for one or two runs purely to confirm the
+  container wiring, then removing it; do not leave it non-blocking.
 - Once armed, review whether `plan_issues_one_peg_and_two_pivots` ([[0215]])
   stays. It covers the emission where the ITs cover the outcome, so it probably
   earns its place either way — but that should be a decision, not an accident.
@@ -85,10 +100,25 @@ plan assertion to get an actually-armed check.
       silently skips them again fails this criterion.
 - [ ] Every test that fails on first arming is triaged: fixed, or deleted with
       the reason recorded. None are re-ignored to make the build green.
+      (Expected to be vacuous — all 19 pass as of 2026-09-10.)
 - [ ] A deliberately broken pivot set (or equivalent induced defect) turns the
       CI job red — verified by inducing, on a branch, not inferred.
 - [ ] Any other crate's `#[ignore]`d integration tests are inventoried, so this
       is answered for the workspace and not just `enrichment-worker`.
+
+## ⏱️ Timing against Adam's open PRs
+
+**#293 (task 0268) takes `ch_enrich_it` from 19 to 34 fixtures, and #300 (0267)
+adds 8 more** across `prices-api` and `prices-clickhouse` — the dormant suite
+roughly doubles when they land. Both PRs instruct the operator to run those
+fixtures manually before the production repricing campaign, so today that
+instruction is the only thing standing between the campaign and a defect:
+everything CI checks on them is SQL-string assertions, not behaviour against a
+real database. #293 carries a **bounded reset**, which is the operation that
+destroyed 157 candles in [[0182]].
+
+Arming CI does not conflict with those PRs — the existing 19 are green, so a red
+build on his branches would mean his code, not inherited rot.
 
 ## Notes
 
