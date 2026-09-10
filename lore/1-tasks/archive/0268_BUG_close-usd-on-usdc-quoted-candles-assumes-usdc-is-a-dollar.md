@@ -2,7 +2,7 @@
 id: "0268"
 title: "close_usd on every USDC-quoted candle before 2026-03-11 assumes USDC = $1 — re-enrich 654,291 candles from the external rate, and stop stamping method: peg on assets that are not stablecoins"
 type: BUG
-status: active
+status: completed
 related_adr: ["0011"]
 related_tasks: ["0265", "0267", "0168", "0182", "0111", "0266", "0247"]
 tags: [layer-backend, priority-medium, effort-large, milestone-M3, clickhouse, enrichment, data-correctness, stablecoin, history]
@@ -13,7 +13,7 @@ links:
   - "../../../packages/enrichment-worker/src/ch_enrich.rs"
   - "../../../packages/prices-clickhouse/schema/init.sql"
 history:
-  - date: 2026-09-07
+  - date: "2026-09-07"
     status: backlog
     who: akot
     note: >
@@ -22,13 +22,13 @@ history:
       USDC's own series (defect A) and leaves this one, because it is a
       re-enrichment of stored candles, not an INSERT. Sized from the sweep in
       0265 phase 0 (135 of 232 assets carry method: peg).
-  - date: 2026-09-07
+  - date: "2026-09-07"
     status: active
     who: akot
     note: "Activated; taken by akot after closing 0265."
-  - date: 2026-09-07
+  - date: "2026-09-07"
     status: active
-    who: claude
+    who: akot
     note: >
       Code half shipped on fix/0268_close-usd-assumes-usdc-is-a-dollar in three
       commits: the method vocabulary split with a read-time 'external' label
@@ -40,6 +40,14 @@ history:
       added. AC 3 closes; 1, 2, 5 close on the prod run (waits on 0267's rows);
       4 belongs to 0267 step 2; 6 is a post-run operator step. STATUS STAYS
       ACTIVE — six of seven run-day steps are the operator's.
+  - date: "2026-09-10"
+    status: completed
+    who: akot
+    note: >
+      Code merged to develop (PR #293). Archived with the production half
+      outstanding: the Appendix B campaign, post_run_0268_it, the per-table
+      runtime/rows figures and the [[0266]] re-measurement are carried by
+      [[0276]].
 ---
 
 # Stored USD prices assume USDC is a dollar
@@ -112,12 +120,13 @@ Two symptoms, one fix:
 Five of the six close **on prod, after the operator run** — the branch delivers
 the code, the tests, the runbook and a dry-runnable tool, and the run itself
 waits on [[0267]]'s rows. Which half is done is stated per criterion.
+**Archived 2026-09-10: the run-gated criteria are deferred to [[0276]].**
 
-- [ ] No USDC-quoted candle before 2026-03-11 carries `close_usd == close`
+- [ ] (deferred to [[0276]]) No USDC-quoted candle before 2026-03-11 carries `close_usd == close`
       exactly where an `external` rate exists for its bucket *(code half DONE:
       the external tier, its four SQL-string invariants and its three
       behavioural tests. Closes on the run — Appendix B.)*
-- [ ] `native` on 2023-03-11 publishes a USD close that reflects the USDC
+- [ ] (deferred to [[0276]]) `native` on 2023-03-11 publishes a USD close that reflects the USDC
       rate that day (≈ 3 % below the USDC-denominated close), on every
       granularity *(the falsifier is now runnable code —
       `packages/enrichment-worker/tests/post_run_0268_it.rs`, both tests
@@ -131,17 +140,17 @@ waits on [[0267]]'s rows. Which half is done is stated per criterion.
       `dto.rs` and `docs/database-schema/database-schema-overview.md`, all in
       one commit with the wire change. `peg` survives only on USDC's own
       series, where 0165's meaning still holds.
-- [ ] The view and stored `close_usd` agree in deep history; the
+- [ ] (deferred to [[0276]]) The view and stored `close_usd` agree in deep history; the
       `backfill_note` caveat from [[0267]] is removed *(**not this branch** —
       needs `views.sql:521,728` and `queries_ch.rs:960` widened from
       `method = 'oracle'` to include `'external'`, which is [[0267]] step 2.
       See Issues 1.)*
-- [ ] The pass is bounded and resumable; runtime and rows touched recorded
+- [ ] (deferred to [[0276]]) The pass is bounded and resumable; runtime and rows touched recorded
       here, as [[0182]] did *(code half DONE: every new statement carries the
       0111 partition bound on its candidate side, asserted by an occurrence
       count; the reset obeys `time_window`. The figures go here after the
       run.)*
-- [ ] [[0266]]'s dislocation table re-measured after the pass, with the
+- [ ] (deferred to [[0276]]) [[0266]]'s dislocation table re-measured after the pass, with the
       result recorded there *(deferred, ratified: post-run operator step.)*
 
 ## Out of scope

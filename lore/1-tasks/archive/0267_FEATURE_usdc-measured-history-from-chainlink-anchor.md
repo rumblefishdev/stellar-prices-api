@@ -2,7 +2,7 @@
 id: "0267"
 title: "Serve USDC's measured USD history from the Chainlink anchor — load external rates, stop synthesising 1.0, say on the wire what each point is"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0011"]
 related_tasks: ["0265", "0247", "0168", "0173", "0111", "0125", "0127", "0266", "0268"]
 tags: [layer-backend, layer-api, priority-high, effort-medium, milestone-M3, pricing, enrichment, data-correctness, stablecoin]
@@ -15,7 +15,7 @@ links:
   - "../../../packages/prices-api/src/assets/queries_ch.rs"
   - "../../../packages/prices-clickhouse/schema/views.sql"
 history:
-  - date: 2026-09-07
+  - date: "2026-09-07"
     status: backlog
     who: akot
     note: >
@@ -23,9 +23,9 @@ history:
       where, how to compose); this is the implementation. [[0247]] designed
       the usd_rate loading path and becomes step 1 here rather than a
       separate ticket — its acceptance criteria are folded in below.
-  - date: 2026-09-09
+  - date: "2026-09-09"
     status: backlog
-    who: claude
+    who: akot
     note: >
       CODE HALF COMPLETE on feat/0267_usdc-measured-history-from-chainlink-anchor
       (stacked on 0268's branch), four commits. Schema + both view grains +
@@ -37,6 +37,14 @@ history:
       ratified by Adam on the same day; three more emerged, of which the
       composed series running to 2026-09-04 rather than 2026-03-10 is the one
       that changed the design.
+  - date: "2026-09-10"
+    status: completed
+    who: akot
+    note: >
+      Code merged to develop (PR #300). Archived with the production half
+      outstanding: the load, the promote, the API deploy and every
+      deploy-gated criterion below are carried by [[0276]], together with
+      closing [[0247]].
 ---
 
 # Serve USDC's measured USD history
@@ -109,9 +117,10 @@ The acceptance fixture is the falsifying date: **2023-03-11 must close at
 
 Ticked = closed by the code on this branch. Unticked = needs the production
 load and the deploy (Operator Checklist below), or was descoped — each says
-which.
+which. **Archived 2026-09-10: the deploy-gated criteria are deferred to
+[[0276]].**
 
-- [ ] `GET /v1/assets/USDC:GA5Z…/ohlcv` returns `close = 0.96812` (quoted as
+- [ ] (deferred to [[0276]]) `GET /v1/assets/USDC:GA5Z…/ohlcv` returns `close = 0.96812` (quoted as
       `0.9681` in the original criterion), `method = external`,
       `source = chainlink`, `quality = measured` for 2023-03-11
       *(DEPLOY-GATED. The query, the read path and the wire fields all ship
@@ -122,7 +131,7 @@ which.
       through `toString`, and ClickHouse TRIMS a Decimal's trailing zeros, so
       neither `0.96812000000000` nor the rounded QUOTATION `0.9681` matches;
       see Emerged decision 10.)*
-- [ ] No bucket of that series carries `method = peg` between 2021-01-25 and
+- [ ] (deferred to [[0276]]) No bucket of that series carries `method = peg` between 2021-01-25 and
       2026-03-10; `trade_count`/`n_obs` reflect rounds, not 0
       *(DEPLOY-GATED for the first half. ⚠️ The second half is DESCOPED and
       SETTLED: `n_obs` was not added to `usd_rate` or to `Candle`, and Adam
@@ -167,7 +176,7 @@ which.
       decision are recorded in this task *(from [[0247]])* — see Implementation
       Notes; the ticker→issuer gate is CODE
       (`external_rate::check_identity`), not a comment, with its own test
-- [ ] [[0247]] closed as folded into this task; [[0265]] archived
+- [ ] (deferred to [[0276]]) [[0247]] closed as folded into this task; [[0265]] archived
       *(0265 IS archived — the versioned CSV is read from its archive
       directory. 0247 is not closed here: four of its six criteria are closed
       by this branch (see below), but its first — rows actually present in
