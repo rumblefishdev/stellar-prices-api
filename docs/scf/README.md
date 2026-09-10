@@ -121,9 +121,14 @@ defensible.
   Real-time Ingestion. The full API surface, the dashboard, and full-chain
   backfill coverage are later tranches — `milestone-1-evidence.md` §6 says so
   explicitly, and Field 1 of the form answers matches it exactly.
-- **Never screenshot the CloudWatch dashboard.** `prices-production-overview`
-  is a scaffold with no data widgets. The seven alarms are real and
-  fire-tested; the dashboard is not evidence.
+- **The CloudWatch dashboard is evidence again as of Milestone 2.** ⚠️ This
+  rule used to read _"never screenshot the CloudWatch dashboard —
+  `prices-production-overview` is a scaffold with no data widgets"_, and that
+  was correct for Milestone 1. Task 0125 (PR #280, merged 2026-09-07) replaced
+  the scaffold with six widget rows over 50 alarms. Screenshots live in
+  `screenshots/ac8-dashboard-*.png` and are cited from
+  `milestone-2-evidence.md` §7.2. **The M1 rule still applies to the M1
+  package**, which does not claim the dashboard.
 - **The six rollup MVs are present and running in APPEND mode.** `SHOW TABLES`
   WILL list `mv_ohlcv_1m_to_15m … mv_ohlcv_1w_to_1M`, and a reviewer running that
   query must find exactly that. They were briefly dropped after a replace-mode

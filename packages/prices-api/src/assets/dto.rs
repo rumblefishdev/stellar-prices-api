@@ -273,6 +273,27 @@ pub struct AssetListResponse {
 /// `volume_base`, `volume_quote_usd` and `trade_count` are always present: they
 /// do not depend on the USD rate (`volume_quote_usd` is already USD whatever the
 /// quote leg), so a price-less bucket still carries real activity.
+///
+/// ## ⚠️ Dust prints — a present price that is not a market price (task 0116)
+///
+/// A bucket whose entire volume is one or two **stroops** (`1e-7`, the smallest
+/// representable amount) in a single trade sets `close` from an order too small
+/// to carry price information. The arithmetic is right and the trade really
+/// happened; the input is meaningless. Measured on prod:
+///
+/// | `1h` month | one-stroop buckets over $1,000 | worst `close` |
+/// |---|---|---|
+/// | 202502 (repaired) | **85.0%** | $29,606,748 on ~$3 of volume |
+/// | 202608 (live-written) | 22.3% | $3,517,649 on $0.35 of volume |
+///
+/// It costs a fraction of a cent to mint one, and it decays cleanly with size:
+/// buckets carrying at least one whole token are over $1,000 just 0.11% (202502)
+/// and 0.008% (202608) of the time.
+///
+/// **This is not an enrichment defect.** The reference rate applied to these
+/// rows is correct — `close_usd / close` recovers the right XLM/USD price for
+/// the month. See [`Candle::volume_base`] for the filter, and
+/// [`Candle::volume_quote_usd`], which is *not* distorted by them.
 #[derive(Debug, Serialize, serde::Deserialize, clickhouse::Row, ToSchema)]
 pub struct Candle {
     /// Bucket start (ISO-8601 UTC).
@@ -282,6 +303,27 @@ pub struct Candle {
     pub low: Option<String>,
     pub close: Option<String>,
     /// Base-asset volume.
+    ///
+    /// ## Filtering dust prints
+    ///
+    /// With [`Candle::trade_count`] this is the discriminator for the dust
+    /// prints described on [`Candle`]. A bucket with `trade_count == 1` and
+    /// `volume_base` at `0.0000001`-`0.0000009` is a single smallest-possible
+    /// order, and its `close` should not be charted or ranked as a price.
+    ///
+    /// ⚠️ **Do not filter on size alone.** Of the dust buckets that could be
+    /// checked against a non-dust reference price for the same pair, **a third
+    /// were priced correctly** (within 0.1-10x of it). One stroop of a genuinely
+    /// expensive asset is a real order at the right price, so a bare size
+    /// threshold misclassifies precisely the assets worth the most. A size test
+    /// is sound for *suppressing an outlier you already doubt*, and unsound as a
+    /// standalone quality verdict.
+    ///
+    /// The stronger check is disagreement with the asset's own non-dust price —
+    /// but 93% of dust buckets are on assets with no non-dust trading at all in
+    /// the month, so for most of them no such reference exists. That population
+    /// is a different problem (an asset with no meaningful market, task 0274),
+    /// not a bad candle.
     pub volume_base: String,
     /// USD-denominated quote volume, summed over **every** row in the bucket.
     ///
@@ -294,6 +336,10 @@ pub struct Candle {
     /// Read it as "the USD volume we can account for", not as the bucket's total
     /// restated in USD. It is strictly more complete than before the fix — more
     /// legs are counted, not fewer — but it is a subtotal.
+    ///
+    /// ✅ **Unaffected by dust prints** ([`Candle`]). Those buckets carry a few
+    /// dollars of volume at most, so they do not distort a volume aggregate the
+    /// way they distort a price. Only the price fields need the filter.
     pub volume_quote_usd: String,
     pub vwap: Option<String>,
     /// Trades in the bucket. The ceiling is `2^53 - 1`, the largest integer a

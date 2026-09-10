@@ -642,6 +642,45 @@ date, the response includes a `backfill_note` field indicating how far back data
 }
 ```
 
+**⚠️ Dust prints — a present price that is not a market price (task 0116).**
+
+A bucket whose entire volume is one or two **stroops** (`1e-7`, the smallest
+amount Stellar can represent) in a single trade sets `close` from an order too
+small to carry price information. Someone sells a millionth of a token for two
+XLM, and the implied unit price is millions of dollars. The arithmetic is
+correct and the trade really happened — the input is meaningless, and it costs a
+fraction of a cent to mint one.
+
+Measured on production `price_ohlcv_1h`:
+
+| month                     | one-stroop buckets over $1,000 | worst `close`                 |
+| ------------------------- | ------------------------------ | ----------------------------- |
+| 202502 (repaired history) | **85.0%**                      | $29,606,748 on ~$3 of volume  |
+| 202608 (live-written)     | 22.3%                          | $3,517,649 on $0.35 of volume |
+
+The effect decays cleanly with trade size: buckets carrying at least one whole
+token exceed $1,000 just **0.11%** (202502) and **0.008%** (202608) of the time.
+
+`volume_base` and `trade_count` are on every candle, so a consumer can identify
+these without extra fields: `trade_count == 1` together with a `volume_base` of
+`0.0000001`-`0.0000009` is a single smallest-possible order.
+
+> **Do not filter on size alone.** Of the dust buckets that can be checked
+> against a non-dust reference price for the same pair, **a third are priced
+> correctly** — one stroop of a genuinely expensive asset is a real order at the
+> right price. A bare size threshold therefore misclassifies precisely the
+> assets worth the most. Use it to suppress an outlier you already doubt, not as
+> a standalone quality verdict.
+
+`volume_quote_usd` is **not** affected: these buckets carry a few dollars at
+most, so volume aggregates are undistorted. Only the price fields need the
+filter.
+
+Separately, 93% of dust buckets belong to assets with **no** non-dust trading
+anywhere in the month — there is no reference price to check them against, and
+the honest description is an asset with no meaningful market rather than a bad
+candle. That is tracked as task 0274, not here.
+
 #### `GET /assets/{asset_identifier}/price`
 
 Current real-time price (latest snapshot from `current_prices`).
@@ -1431,6 +1470,9 @@ The reviewer should confirm (against the response shape in Section 4.5):
 
 - `GET /backfill/status` returns `sdex.status: "running"` and `sdex.last_push_at` is fresh
   (within the Tranche 3 push-cadence window)
+  > ⚠️ **Amended 2026-09-08** — superseded for the same reason as acceptance
+  > criterion 1 below: the archive completed on 2026-07-27 and reports
+  > `completed`. See the note there.
 - `sdex.earliest_data_available` ≤ 2018-01-01
 - `sdex.current_ledger` is strictly decreasing across successive `GET /backfill/status`
   observations (visible as more pushes complete during the review window)
@@ -1448,6 +1490,15 @@ post-delivery monitoring.
 
 1. `GET /backfill/status` shows `sdex.status: "running"`, `sdex.last_push_at` within the
    Tranche 3 push-cadence window, and `sdex.earliest_data_available` ≤ 2018-01-01
+   > ⚠️ **Amended 2026-09-08 — two of these three clauses became unsatisfiable
+   > because the archive finished early.** The SDEX stream reached `completed` on
+   > 2026-07-27, during Tranche 2, so it no longer reports `running` and nothing
+   > pushes to keep `last_push_at` fresh. The depth clause stands and is met by
+   > six years (2015-11-18). The liveness half should be graded on the signals
+   > that are live post-backfill — the rollup-freshness and ledger-processor lag
+   > alarms, and `realtime_tip_ledger` tracking the chain. Declared in
+   > [`docs/scf/milestone-2-rfp-deviations.md`](scf/milestone-2-rfp-deviations.md)
+   > §4 and carried in the Milestone 2 evidence package §8.
 2. OpenAPI spec passes `openapi-validator` lint with no errors; Swagger UI deployed
 3. Onboarding portal accessible; self-service API key request flow functional
 4. Integration test suite: all tests pass on CI (GitHub Actions link provided)

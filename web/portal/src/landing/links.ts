@@ -54,6 +54,39 @@ export const OPENAPI_JSON = API_ORIGIN
   : '/api/api-docs-json';
 
 /**
+ * The same document as a **file to save**, and the href of the "OpenAPI JSON"
+ * link on the reference page.
+ *
+ * A second constant rather than a repoint of {@link OPENAPI_JSON}, because
+ * that one is also what `docs/ApiReference.tsx` **fetches** to render the
+ * reference: pointing it here would quietly turn the rendered reference into
+ * a build-time snapshot. The fetch keeps the live URL; only the download link
+ * is this copy (task 0270, D-02).
+ *
+ * ⚠️ Bundle-relative, and it must stay that way. `download` is honoured only
+ * on a SAME-ORIGIN href — a browser given a cross-origin one ignores the
+ * attribute and navigates instead. On the shared host the page is on
+ * `sorobanscan.rumblefish.dev` while `API_ORIGIN` is
+ * `prices-api.sorobanscan.rumblefish.dev`, so an `API_ORIGIN`-prefixed href
+ * renders the JSON in a tab. In dev it would look fine — there the href goes
+ * through the Vite proxy and IS same-origin — which is why
+ * `links.spec.ts` asserts this value does not move when `API_ORIGIN` is set.
+ *
+ * The file itself is `public/openapi.json`, the committed output of
+ * `npm run openapi:extract`; CI diffs the two so the copy cannot drift from
+ * what the API serves. It ships as `/api/openapi.json` — a path with an
+ * extension, which the explorer's `/api/*` behaviour serves as a file rather
+ * than rewriting to `index.html` (it rewrites only extensionless paths).
+ */
+export const OPENAPI_JSON_DOWNLOAD = `${ROUTER_BASENAME}/openapi.json`;
+
+/**
+ * What the saved file is called. Names the API, so it is identifiable among
+ * the other `openapi.json`s in a Downloads folder.
+ */
+export const OPENAPI_JSON_FILENAME = 'stellar-prices-api-openapi.json';
+
+/**
  * The API reference route — the live OpenAPI document rendered in the
  * portal's own pieces, in Swagger UI's shape (task 0195,
  * `src/docs/ApiReference.tsx`). A ROUTE like the quick start, so it is a

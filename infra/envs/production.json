@@ -31,6 +31,7 @@
   },
   "opsAlarms": {
     "sdexPushFreshnessSeconds": 604800,
+    "ammPushFreshnessSeconds": 604800,
     "mtlsNotAfterDaysThreshold": 30,
     "rollupLagSeconds": {
       "price_ohlcv_1m": 900,

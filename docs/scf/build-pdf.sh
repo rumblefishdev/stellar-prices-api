@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Build the Milestone 1 evidence PDF from milestone-1-evidence.md.
+# Build a milestone evidence PDF.
+#
+# Usage:
+#   ./build-pdf.sh            # defaults to the newest milestone (2)
+#   ./build-pdf.sh 1          # milestone-1-evidence.md  -> .pdf
+#   ./build-pdf.sh 2          # milestone-2-evidence.md  -> .pdf
+#   ./build-pdf.sh some.md    # any source in this directory
 #
 # Requirements:
 #   Linux (Debian/Ubuntu):
@@ -14,7 +20,7 @@
 #     brew install pandoc typst poppler
 #
 # Output:
-#   docs/scf/milestone-1-evidence.pdf
+#   docs/scf/milestone-<N>-evidence.pdf
 #
 # Why pandoc + typst?
 #   - Typst (the engine) handles Unicode natively — no LaTeX font fiddling
@@ -28,8 +34,15 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-SRC="milestone-1-evidence.md"
-OUT="milestone-1-evidence.pdf"
+# Default to the newest milestone. Passing "1" still rebuilds the Milestone 1
+# PDF byte-for-byte from its own source, so retargeting this script does not
+# strand the earlier package.
+ARG="${1:-2}"
+case "$ARG" in
+    *.md) SRC="$ARG" ;;
+    *)    SRC="milestone-${ARG}-evidence.md" ;;
+esac
+OUT="${SRC%.md}.pdf"
 
 # ---- Tool checks ---------------------------------------------------------
 command -v pandoc >/dev/null || { echo "❌ pandoc not found — see install notes at the top of this script"; exit 1; }

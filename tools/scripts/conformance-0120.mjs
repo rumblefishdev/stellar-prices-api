@@ -62,7 +62,9 @@ async function api(path, opts = {}) {
     let json = null;
     try {
       json = JSON.parse(text);
-    } catch {}
+    } catch {
+      // Non-JSON body (gateway HTML, empty 204) — `text` is kept for the report.
+    }
     return { status: res.status, json, text };
   }
 }
@@ -154,6 +156,28 @@ function allPropsPresent(group, asset, schemaName, body) {
 }
 
 const NUM_RE = /^-?\d+(\.\d+)?$/;
+
+// ---------- OHLCV bucket classification (task 0230) ----------
+// ADR 0011 §5: a bucket that traded but cannot yet be priced is returned
+// PRESENT with null price fields, keeping `volume_base` and `trade_count` real.
+// That is the contract. Asserting "every price field is a decimal string on
+// every bucket" therefore made the suite's verdict depend on how far enrichment
+// had caught up when it ran — USDCAllow, VELO and SHX failed at 13:26 and
+// passed at 13:38 on 2026-08-27 with unchanged code. A conformance report whose
+// result moves with a background worker cannot be cited as evidence, which is
+// the whole reason task 0128 wants one.
+const PRICE_FIELDS = ['open', 'high', 'low', 'close', 'vwap'];
+const VOLUME_FIELDS = ['volume_base', 'volume_quote_usd'];
+
+// 'priced' — every price field present. 'unpriced' — every price field null,
+// the documented not-yet-priceable state. 'mixed' — some but not all, which is
+// genuinely inconsistent and must still fail.
+function bucketKind(c) {
+  const nulls = PRICE_FIELDS.filter((f) => c[f] === null).length;
+  if (nulls === 0) return 'priced';
+  if (nulls === PRICE_FIELDS.length) return 'unpriced';
+  return 'mixed';
+}
 function numericString(group, asset, field, value, { nonzero = false } = {}) {
   const ok =
     typeof value === 'string' &&
@@ -274,6 +298,58 @@ const singlePrices = new Map(); // id -> price body (for the batch comparison)
 // Groups 1–4 + oracles, per asset.
 for (const a of ASSETS) {
   const enc = encodeURIComponent(a.id);
+
+  // ---------- when did this asset last trade? ----------
+  // The 20-asset fixture was ranked by volume on 2026-08-19 and the market has
+  // moved since: RON last traded 2026-09-03 and EQL 2026-08-28. Assertions
+  // phrased as "a liquid asset must have X" therefore encoded a market state
+  // rather than the contract, and fail on a date nobody chose. Both of the
+  // assertions below now derive from this asset's OWN most recent candle, so
+  // the verdict moves only when the API changes — the same principle task 0230
+  // applies to enrichment.
+  let lastTradeMs = null;
+  let lastTradeWidthMs = 86400e3;
+  {
+    const wideEnd = new Date();
+    const wideStart = new Date(wideEnd.getTime() - 90 * 86400e3);
+    const rw = await api(
+      `/v1/assets/${enc}/ohlcv?granularity=1d&start=${wideStart.toISOString()}&end=${wideEnd.toISOString()}`,
+    );
+    const wide = rw.status === 200 ? rw.json.data || [] : [];
+    if (wide.length) lastTradeMs = Date.parse(wide[wide.length - 1].timestamp);
+    record(
+      'ohlcv:probe',
+      a.id,
+      'asset has a reachable candle history (1d over 90 days)',
+      wide.length > 0,
+      `${wide.length} buckets, last ${wide.length ? wide[wide.length - 1].timestamp : 'none'}`,
+    );
+  }
+  // 🔑 A candle's timestamp is its bucket START, not the trade instant. A trade
+  // anywhere inside 2026-09-06 reads as `2026-09-06T00:00:00Z`, up to a full
+  // day earlier than it happened — which is how AUD came out "no trade in 24 h"
+  // at 34.6 h by bucket start while its bucket had ended 10.6 h before. Refine
+  // to the hour whenever the daily probe lands anywhere near the boundary.
+  if (lastTradeMs !== null && Date.now() - lastTradeMs <= 3 * 86400e3) {
+    const fEnd = new Date();
+    const fStart = new Date(fEnd.getTime() - 3 * 86400e3);
+    const rf = await api(
+      `/v1/assets/${enc}/ohlcv?granularity=1h&start=${fStart.toISOString()}&end=${fEnd.toISOString()}`,
+    );
+    const fine = rf.status === 200 ? rf.json.data || [] : [];
+    if (fine.length) {
+      lastTradeMs = Date.parse(fine[fine.length - 1].timestamp);
+      lastTradeWidthMs = 3600e3;
+    }
+  }
+
+  // Three-valued, deliberately. The residual band is one bucket wide and cannot
+  // be resolved from candles at all, so it asserts the weaker "either documented
+  // response" rather than pretending to know which.
+  const tradedWithin = (ms) =>
+    lastTradeMs !== null && Date.now() - lastTradeMs <= ms;
+  const notTradedWithin = (ms) =>
+    lastTradeMs === null || Date.now() - (lastTradeMs + lastTradeWidthMs) > ms;
   console.log(`## ${a.code || a.id.slice(0, 8)} (${a.form})`);
 
   // GET /v1/assets/{id} — detail
@@ -327,12 +403,31 @@ for (const a of ASSETS) {
   // GET /v1/assets/{id}/price
   {
     const r = await api(`/v1/assets/${enc}/price`);
+    // handlers.rs:98 documents 404 as "No current price for the asset:
+    // unknown, or not priced yet". So 404 is part of the contract, and the
+    // question is whether it is JUSTIFIED — an asset that traded in the last
+    // 24 h must carry a current price, and one that did not need not. An
+    // actively-traded asset that 404s still fails, which is the regression
+    // this check exists to catch.
+    const mustPrice = tradedWithin(86400e3);
+    const mustNotPrice = notTradedWithin(86400e3);
+    const lastSeen = lastTradeMs
+      ? new Date(lastTradeMs).toISOString()
+      : 'none in 90d';
     record(
       'price',
       a.id,
-      'returns 200',
-      r.status === 200,
-      `status ${r.status}`,
+      mustPrice
+        ? 'returns 200 for an asset that traded in the last 24h'
+        : mustNotPrice
+          ? 'returns a documented 404, consistent with no trade in the last 24h'
+          : 'returns 200 or a documented 404 (last trade inside the boundary bucket)',
+      mustPrice
+        ? r.status === 200
+        : mustNotPrice
+          ? r.status === 404
+          : r.status === 200 || r.status === 404,
+      `status ${r.status}, last trade ${lastSeen}`,
     );
     if (
       r.status === 200 &&
@@ -347,8 +442,40 @@ for (const a of ASSETS) {
     ) {
       allPropsPresent('price', a.id, 'PriceResponse', r.json);
       singlePrices.set(a.id, r.json);
-      for (const f of ['price_usd', 'vwap_24h'])
-        numericString('price', a.id, f, r.json[f], { nonzero: true });
+      // `method` (task 0178, on the wire since 2026-09-01) says how price_usd
+      // was arrived at, and it decides which derived columns carry a real value
+      // and which carry their documented sentinel:
+      //   traded — a real aggregate of this asset's own candles.
+      //   oracle — a rate for an asset that never trades as a base leg, so it
+      //            has no candles of its own; `vwap_24h "0"` and `sources {}`
+      //            are the CORRECT answers, not missing work.
+      //   ""     — the unavailable sentinel, paired with `price_usd "0"`.
+      // Asserting "never zero" unconditionally read a DECIDED sentinel as a
+      // PENDING defect, which is why this criterion could never go green.
+      const method = r.json.method;
+      const traded = method === 'traded';
+      record(
+        'price',
+        a.id,
+        'method is a documented value',
+        ['traded', 'oracle', ''].includes(method),
+        JSON.stringify(method),
+      );
+      // Assert the pairing in both directions. This holds whichever state the
+      // asset is in, so it does not move with the market.
+      record(
+        'price',
+        a.id,
+        'price_usd is the zero sentinel exactly when method is ""',
+        (Number(r.json.price_usd) === 0) === (method === ''),
+        `price_usd=${r.json.price_usd} method=${JSON.stringify(method)}`,
+      );
+      numericString('price', a.id, 'price_usd', r.json.price_usd, {
+        nonzero: method !== '',
+      });
+      numericString('price', a.id, 'vwap_24h', r.json.vwap_24h, {
+        nonzero: traded,
+      });
       // Parse-only, never non-zero. Runbook 0072: price_xlm / change_24h_pct
       // are legitimately zero on an un-enriched tip. volume_24h_usd is the same
       // shape of false alarm — a tracked asset can genuinely go a day without a
@@ -356,7 +483,19 @@ for (const a of ASSETS) {
       for (const f of ['price_xlm', 'change_24h_pct', 'volume_24h_usd'])
         numericString('price', a.id, f, r.json[f]);
       const srcs = Object.keys(r.json.sources || {});
-      record('price', a.id, 'sources is a non-empty object', srcs.length > 0);
+      // A per-source breakdown exists only where the price came from this
+      // asset's own traded candles. For `oracle` and `""` the documented
+      // answer is `{}` (dto.rs: "no source qualified — the exotic-quote and
+      // all-below-threshold cases, not an error").
+      record(
+        'price',
+        a.id,
+        traded
+          ? 'sources is a non-empty object'
+          : `sources is the documented {} for method ${JSON.stringify(method)}`,
+        traded ? srcs.length > 0 : srcs.length === 0,
+        `${srcs.length} sources`,
+      );
       for (const s of srcs) {
         numericString(
           'price',
@@ -418,18 +557,43 @@ for (const a of ASSETS) {
     ) {
       allPropsPresent(tag, a.id, 'OhlcvResponse', r.json);
       const data = r.json.data || [];
+      // Same reasoning as `/price` above: an empty window is only a defect if
+      // the asset actually traded inside it. EQL's last trade precedes the
+      // 7-day 1h window, so nothing is the correct answer there — and a
+      // non-empty window AFTER the last trade would be a real bug, which the
+      // negative branch asserts rather than waving through.
+      const tradedInWindow =
+        lastTradeMs !== null && lastTradeMs >= start.getTime();
+      const missedWindow =
+        lastTradeMs === null ||
+        lastTradeMs + lastTradeWidthMs <= start.getTime();
+      const lastSeen = lastTradeMs
+        ? new Date(lastTradeMs).toISOString()
+        : 'none in 90d';
       record(
         tag,
         a.id,
-        'window is non-empty for a liquid asset',
-        data.length > 0,
-        `${data.length} buckets`,
+        tradedInWindow
+          ? 'window is non-empty for an asset that traded in it'
+          : missedWindow
+            ? 'window is empty, consistent with the last trade preceding it'
+            : 'window may be empty (last trade inside the boundary bucket)',
+        tradedInWindow
+          ? data.length > 0
+          : missedWindow
+            ? data.length === 0
+            : true,
+        `${data.length} buckets; last trade ${lastSeen}`,
       );
       let ordered = true,
         aligned = true,
         dup = false,
         ohlc = true,
-        numeric = true;
+        numeric = true,
+        volumes = true,
+        unpricedShape = true,
+        mixed = 0,
+        unpriced = 0;
       let prev = -Infinity;
       for (const c of data) {
         const ts = Date.parse(c.timestamp);
@@ -437,24 +601,62 @@ for (const a of ASSETS) {
         if (ts === prev) dup = true;
         if (ts % step !== 0) aligned = false;
         prev = ts;
+        // Volume is real on every bucket, priced or not — that is what
+        // distinguishes "traded, not yet priceable" from "never traded".
+        for (const f of VOLUME_FIELDS)
+          if (!(typeof c[f] === 'string' && NUM_RE.test(c[f]))) volumes = false;
+        const kind = bucketKind(c);
+        if (kind === 'unpriced') {
+          unpriced++;
+          // ADR 0011 §5: price fields null, `method` and `derived` null with
+          // them, volume and trade_count still real.
+          if (
+            c.method !== null ||
+            c.derived !== null ||
+            !Number.isFinite(Number(c.trade_count))
+          )
+            unpricedShape = false;
+          continue;
+        }
+        if (kind === 'mixed') {
+          mixed++;
+          numeric = false;
+          continue;
+        }
         const [o, h, l, cl] = [c.open, c.high, c.low, c.close].map(Number);
-        for (const f of [
-          'open',
-          'high',
-          'low',
-          'close',
-          'volume_base',
-          'volume_quote_usd',
-          'vwap',
-        ])
+        for (const f of PRICE_FIELDS)
           if (!(typeof c[f] === 'string' && NUM_RE.test(c[f]))) numeric = false;
         if (!(l <= Math.min(o, cl) && Math.max(o, cl) <= h)) ohlc = false;
       }
       if (data.length) {
         record(tag, a.id, 'timestamps strictly increasing', ordered && !dup);
         record(tag, a.id, `timestamps aligned to ${gran}`, aligned);
-        record(tag, a.id, 'low <= open,close <= high on every bucket', ohlc);
-        record(tag, a.id, 'all OHLCV values are decimal strings', numeric);
+        record(
+          tag,
+          a.id,
+          'low <= open,close <= high on every priced bucket',
+          ohlc,
+        );
+        record(
+          tag,
+          a.id,
+          'all priced OHLCV values are decimal strings',
+          numeric,
+          mixed ? `${mixed} bucket(s) part-priced` : '',
+        );
+        record(
+          tag,
+          a.id,
+          'volume fields are decimal strings on every bucket',
+          volumes,
+        );
+        record(
+          tag,
+          a.id,
+          'unpriced buckets carry the ADR 0011 §5 shape (method/derived null, trade_count real)',
+          unpricedShape,
+          `${unpriced} of ${data.length} buckets unpriced`,
+        );
         // Both window ends are inclusive (measured 2026-08-19: a 5-day
         // start/end range returns 6 buckets). Undocumented in §4 — flagged as
         // a docs gap by the task, but the check follows the implementation.
@@ -592,6 +794,39 @@ for (const a of ASSETS) {
   console.log(`  ${pages} pages, ${seen.size} distinct assets`);
 }
 
+// ---------- batch/single snapshot alignment ----------
+// `current_prices` refreshes every minute and the suite paces at ~1.1 s, so a
+// single taken in one refresh window and the bulk batch taken in the next
+// disagree by construction. /price is gateway-cached for 10 s while batch is
+// uncached, so a "fresh" single inside that window is the same cached body —
+// hence the wait before each retry.
+const ALIGN_ATTEMPTS = 3;
+const PRICE_CACHE_TTL_MS = 10_000;
+const SNAPSHOT_FIELDS = [
+  'price_usd',
+  'price_xlm',
+  'vwap_24h',
+  'volume_24h_usd',
+];
+const sameSnapshot = (x, y) => SNAPSHOT_FIELDS.every((f) => x[f] === y[f]);
+
+async function alignedPair(id) {
+  for (let attempt = 1; attempt <= ALIGN_ATTEMPTS; attempt++) {
+    if (attempt > 1) await sleep(PRICE_CACHE_TTL_MS + 1000);
+    const s = await api(`/v1/assets/${encodeURIComponent(id)}/price`);
+    const bt = await api(`/v1/prices/batch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ assets: [id] }),
+    });
+    if (s.status !== 200 || bt.status !== 200) continue;
+    const bp = (bt.json.prices || []).find((p) => p.asset === id);
+    if (bp && bp.updated_at === s.json.updated_at)
+      return { single: s.json, batch: bp, attempt };
+  }
+  return null;
+}
+
 // Group 6: POST /v1/prices/batch vs the per-asset singles.
 {
   console.log(`## batch vs single`);
@@ -627,37 +862,33 @@ for (const a of ASSETS) {
         continue;
       }
       if (b.updated_at === single.updated_at) {
-        const same = [
-          'price_usd',
-          'price_xlm',
-          'vwap_24h',
-          'volume_24h_usd',
-        ].every((f) => b[f] === single[f]);
-        record('batch', id, 'batch equals single at the same timestamp', same);
+        record(
+          'batch',
+          id,
+          'batch equals single at the same timestamp',
+          sameSnapshot(b, single),
+        );
       } else {
-        // Gateway caches /price for 10 s while batch is uncached — re-fetch the
-        // single once; by now the cached entry has long expired.
-        const r2 = await api(`/v1/assets/${encodeURIComponent(id)}/price`);
-        const s2 = r2.json;
-        if (r2.status === 200 && s2.updated_at === b.updated_at) {
-          const same = [
-            'price_usd',
-            'price_xlm',
-            'vwap_24h',
-            'volume_24h_usd',
-          ].every((f) => b[f] === s2[f]);
+        // The old path re-fetched the SINGLE and compared it to the bulk batch
+        // taken minutes earlier. That cannot converge: the bulk batch is fixed
+        // in the past while a fresh single only moves forward, so 11 of 19
+        // assets skipped rather than being checked. Re-take BOTH instead, back
+        // to back, and compare that pair.
+        const pair = await alignedPair(id);
+        if (pair) {
           record(
             'batch',
             id,
-            'batch equals re-fetched single at the same timestamp',
-            same,
+            'batch equals single at the same timestamp',
+            sameSnapshot(pair.batch, pair.single),
+            `re-taken as a pair, attempt ${pair.attempt}`,
           );
         } else {
           skip(
             'batch',
             id,
             'batch/single timestamps never aligned',
-            `batch=${b.updated_at} single=${s2?.updated_at}`,
+            `${ALIGN_ATTEMPTS} paired re-takes all straddled a refresh`,
           );
         }
       }

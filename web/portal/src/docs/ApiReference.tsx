@@ -25,7 +25,11 @@ import {
   ValueStrip,
   type TocEntry,
 } from '../landing/DocPrimitives';
-import { OPENAPI_JSON } from '../landing/links';
+import {
+  OPENAPI_JSON,
+  OPENAPI_JSON_DOWNLOAD,
+  OPENAPI_JSON_FILENAME,
+} from '../landing/links';
 import { cardBorder } from '../landing/primitives';
 import { color, font, radius } from '../theme/tokens';
 import {
@@ -1179,7 +1183,17 @@ function Reference({ doc }: { doc: OpenApiDocument }) {
         <>
           Every endpoint, parameter and response, read from the document the API
           serves. The raw{' '}
-          <Link href={OPENAPI_JSON} sx={{ color: color.text.accent }}>
+          {/* Saves a file, and the two attributes that make it do so are a
+              pair: `download` names the file, and the href must be the
+              same-origin copy in this bundle for a browser to honour it at
+              all (see `OPENAPI_JSON_DOWNLOAD`). What the page FETCHES above
+              is still the live `OPENAPI_JSON` — this link is the only place
+              the bundled snapshot is used. */}
+          <Link
+            href={OPENAPI_JSON_DOWNLOAD}
+            download={OPENAPI_JSON_FILENAME}
+            sx={{ color: color.text.accent }}
+          >
             OpenAPI JSON
           </Link>{' '}
           is the same bytes, for generators and other tooling.

@@ -111,8 +111,10 @@ async fn combined_then_sdex_progress_end_to_end() {
         ACTIVATION,
         Observed {
             highest_indexed: ACTIVATION + 1_000,
-            earliest_minute: Some(T0),
-            newest_minute: Some(T1),
+            sdex_earliest: Some(T0),
+            sdex_latest: Some(T1),
+            amm_earliest: Some(T0),
+            amm_latest: Some(T1),
         },
         Phase::Running,
     )
@@ -137,8 +139,10 @@ async fn combined_then_sdex_progress_end_to_end() {
         ACTIVATION,
         Observed {
             highest_indexed: TIP,
-            earliest_minute: Some(T0),
-            newest_minute: Some(T1),
+            sdex_earliest: Some(T0),
+            sdex_latest: Some(T1),
+            amm_earliest: Some(T0),
+            amm_latest: Some(T1),
         },
         Phase::Completed,
     )
@@ -168,8 +172,10 @@ async fn combined_then_sdex_progress_end_to_end() {
         ACTIVATION,
         Observed {
             highest_indexed: TIP,
-            earliest_minute: Some(T0),
-            newest_minute: Some(T1),
+            sdex_earliest: Some(T0),
+            sdex_latest: Some(T1),
+            amm_earliest: Some(T0),
+            amm_latest: Some(T1),
         },
         Phase::Completed,
     )
@@ -185,8 +191,10 @@ async fn combined_then_sdex_progress_end_to_end() {
         ACTIVATION,
         Observed {
             highest_indexed: TIP,
-            earliest_minute: Some(T0 - 1_000), // older → should LOWER earliest
-            newest_minute: Some(T0),           // older → must NOT lower newest
+            sdex_earliest: Some(T0 - 1_000), // older → should LOWER earliest
+            sdex_latest: Some(T0),           // older → must NOT lower newest
+            amm_earliest: Some(T0 - 1_000),
+            amm_latest: Some(T0),
         },
         Phase::Running,
     )
@@ -209,8 +217,10 @@ async fn combined_then_sdex_progress_end_to_end() {
         1,
         Observed {
             highest_indexed: ACTIVATION - 1,
-            earliest_minute: Some(T0 - 500_000),
-            newest_minute: Some(T0),
+            sdex_earliest: Some(T0 - 500_000),
+            sdex_latest: Some(T0),
+            amm_earliest: Some(T0 - 500_000),
+            amm_latest: Some(T0),
         },
         Phase::Completed,
     )
@@ -238,8 +248,10 @@ async fn combined_then_sdex_progress_end_to_end() {
         ACTIVATION,
         Observed {
             highest_indexed: TIP,
-            earliest_minute: Some(T0 - 500_000),
-            newest_minute: Some(T1),
+            sdex_earliest: Some(T0 - 500_000),
+            sdex_latest: Some(T1),
+            amm_earliest: Some(T0 - 500_000),
+            amm_latest: Some(T1),
         },
         Phase::Completed,
     )
