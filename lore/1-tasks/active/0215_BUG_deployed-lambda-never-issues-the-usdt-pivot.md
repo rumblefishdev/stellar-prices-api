@@ -796,13 +796,43 @@ pair on the next run before closing the AC.
       zeroed knob silently restores the unbounded state; zero now sets no option
       and logs at `warn`, pinned by
       `a_zero_execution_bound_is_unlimited_not_instant`.
-- [ ] BE confirm the bump is live **from Caddy's admin API**, not from the
+- [x] The bump is confirmed live **from Caddy's admin API**, not from the
       Caddyfile — their single-file bind mount desynced the two once already, and
       a file-only check cannot tell a real deploy from a phantom one.
+      **Read from the running process 2026-09-10**, `GET /config/` on
+      `app-caddy-1`'s `admin localhost:2019`:
+
+      ```
+      upstream clickhouse:8123
+         dial_timeout             10s
+         read_timeout             7200s
+         response_header_timeout  7200s
+         write_timeout            7200s
+      ```
+
+      ⚠️ **AC amended — was "BE confirm".** Read by us rather than BE, which
+      satisfies the AC's stated reason in full: the reason was admin-API-vs-file,
+      never who holds the terminal, and this IS the running process. BE's
+      independent reading is no longer load-bearing.
+      ⛔ Caddy stores durations in **nanoseconds**, so the raw field is
+      `7200000000000` against a broken `30000000000` — 13 digits vs 11. Convert
+      before reading it; this AC exists because a reading was wrong once.
+      ⛔ BE's repo Caddyfile also says `7200s`. That proves nothing and is the
+      trap: the container spent from 2026-07-06 reading a file that no longer
+      existed at that path (host inode `16777224`, container `16777223`).
 - [ ] We confirm the errors stopped from CloudWatch and `system.query_log`, and
       report it back in the thread. Two-sided, because neither side alone can see
       both halves.
-- [ ] `CleanupRule` verified `DISABLED` before and after the deploy.
+      ✅ **`system.query_log` half done 2026-09-10** — see the re-confirmation
+      section above: `peg:pivot` 1:2 on all eight days, XLM:USDT exactly 1:1,
+      zero statements ending in anything but `QueryFinish`.
+      ⏳ Outstanding: the CloudWatch half, and posting it in the thread.
+- [x] `CleanupRule` verified `DISABLED` before and after the deploy.
+      **After, 2026-09-10:** `prices-production-cleanup` → `State: DISABLED`,
+      `Schedule: cron(0 3 * * ? *)`. **Before** is carried by the readings of
+      2026-08-25 and 2026-08-28, both `DISABLED`, either side of the 08-21 bump.
+      ⚠️ A fresh "before" was unrecoverable by the time this was checked — the
+      deploy was 20 days earlier. Recorded as what it is rather than implied.
 - [x] A missing reference asset is **named in the logs** instead of silently
       narrowing `pivot_ids()`. `resolve_reference_ids` warns with the absent
       code (PR #304, merged 2026-09-10).
