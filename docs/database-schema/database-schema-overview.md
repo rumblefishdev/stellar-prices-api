@@ -645,6 +645,22 @@ asset-id reassignment.
 | `prices.usd_reference_1h`     | hourly | `xlm_usd` per hour bucket                       | hourly companion to the above                                                                                    |
 | `prices.identity_by_contract` | —      | contract → natural identity                     | SAC read-seam resolver (§12.4): map a Soroban-DEX pool leg's contract address to the natural identity to look up |
 
+> ⚠️ **The peg fill in both `price_usd_series` views admits an IMPORTED rate**
+> (task 0267). `usd_rate` rows with `method = 'external'` — task 0265's composed
+> USDC/USD history, loaded by `load-external-rate` — count as a measurement
+> alongside `method = 'oracle'`, and where one bucket holds both, **oracle wins
+> outright** by the rank-first `argMax` tuple, never by recency. `rate_method`
+> on the view says which won, so a TVL computation can tell an imported rate
+> from a polled one.
+>
+> ⚠️ These views bucket an imported row exactly like a poll. `/v1/assets/{id}/ohlcv`
+> additionally treats a **lone daily** imported row as valid for its whole UTC
+> day, as a safety net for a daily-only load. The loader runs at **both** grains
+> (`--grain daily|hourly`) and production carries an imported row for every hour
+> of every covered day, so the two surfaces agree; the net is observable only if
+> someone loads the daily file without the hourly one. See the comment block
+> above the rate join in `views.sql`.
+
 ```sql
 -- One volume-weighted USD close per (natural identity, day bucket). The
 -- cross-source/cross-quote collapse: volume-weighted close_usd over every candle
@@ -877,7 +893,7 @@ CREATE TABLE prices.usd_rate (
     contract_address  String,
     timestamp         DateTime CODEC(DoubleDelta),
     usd_rate          Decimal(38, 14),
-    method            LowCardinality(String),  -- 'oracle'|'peg'|'pivot'|'pivot2'
+    method            LowCardinality(String),  -- 'oracle'|'external'|'peg'|'pivot'|'pivot2'
     reference_asset   String   DEFAULT '',     -- what it pivoted through
     hops              UInt8    DEFAULT 0,      -- 0 oracle/peg, 1 XLM pivot, 2 hop
     version           UInt64
@@ -918,6 +934,19 @@ row**, and the consumer's own peg fallback applies. Synthetic `method = 'peg'`
 rows at `$1` are deliberately **not** written — that would make a fallback
 indistinguishable from a measurement, which is the `close_usd = 0` mistake in a
 new place.
+
+That prohibition stands, and `method = 'external'` does **not** relax it. An
+imported measurement is not a synthetic fill: an `external` row (task 0267) says
+an outside USD series _observed_ this rate at this instant — on 2023-03-11 it
+says **0.9681**, which no `$1` fill could ever say. What the rule forbids is
+inventing a value, not sourcing one elsewhere, so `external` is allowed to reach
+into the deep history a `peg` fill may not. It keeps a word of its own rather
+than riding `oracle` because task 0247 forbids publishing an import as a poll.
+
+⚠️ **`'assumed-par'` is not in this enum and must not be added.** It exists only
+on the `/ohlcv` wire, where task 0268 derives it at read time from a candle's
+`close_usd = close` signature to say "the literal 1.0 was the input". A row here
+asserting that would be exactly the synthetic fill forbidden above.
 
 **Population.** Written by the **Oracle Fetcher** Lambda immediately after it
 writes `oracle_prices`, copying peg-asset observations (USDC/USDT) as

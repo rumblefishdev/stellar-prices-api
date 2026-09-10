@@ -217,7 +217,10 @@ impl CoarseRepairDriver {
              GROUP BY month ORDER BY month",
             db = self.cfg.enrich.database,
             tbl = self.cfg.enrich.table,
-            pred = repair_target_pred(self.cfg.enrich.usd_reset.as_ref()),
+            pred = repair_target_pred(
+                &self.cfg.enrich.database,
+                self.cfg.enrich.usd_reset.as_ref(),
+            ),
             start = self.cfg.start_month,
             end = self.cfg.end_month,
         );

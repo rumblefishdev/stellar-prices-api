@@ -321,17 +321,73 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "Candle",
         "method",
-        "Where the USD rate behind this bucket came from:\n\n* `peg` — no measured rate was \
-         available; USDC was taken at 1 USD.\n* `oracle` — a measured oracle reading.\n* \
-         `traded` — priced through a reference asset's own trades.\n\n`null` when the price \
-         fields are `null`, and always `null` for `base_currency=XLM`, where nothing is \
-         converted.",
+        "Where the USD rate behind this bucket came from:\n\n* `assumed-par` — nothing was \
+         measured; the literal 1.0 supplied the value, i.e. USDC was taken at 1 USD.\n* \
+         `external` — an imported, measured USDC/USD series supplied the rate.\n* `oracle` — \
+         a measured Reflector reading supplied the rate.\n* `traded` — priced through a \
+         reference asset's own trades.\n* `peg` — only on the synthesized USDC self-series \
+         (`GET /assets/USDC:<issuer>/ohlcv`): no measured USDC/USD observation covered the \
+         bucket, so the $1 fallback was rendered. Never appears on a quote leg — there the \
+         same situation is `assumed-par`.\n\nEach value names the INPUT the rate came from, so \
+         `assumed-par` and `external` are never interchangeable: one is an assumption, the \
+         other a measurement that may sit percent off par.\n\nOn the USDC self-series a \
+         bucket that holds both a Reflector reading and an imported one reports `oracle`: a \
+         measured poll outranks an imported rate outright, whichever was observed first. \
+         Observation time only breaks ties between rows of the same kind. The imported \
+         series is loaded at HOURLY grain, so an \
+         hourly request over an imported day reports `external` — and that hour's own \
+         measured rate — for each of its twenty-four hours; on 2023-03-11 the 07:00 bucket \
+         reports the trough rather than the day's close. Where only a daily row exists for \
+         a day, that one row prices every bucket of its UTC day at every `granularity`, so \
+         an imported day mixes the two only where the oracle epoch falls inside it \
+         (2026-03-11): a bucket that extends past 14:00 UTC that day is not priced from \
+         the imported series, which ends at 13:00. The self-series carries the rate row's \
+         own `method`, so a measured rate that reads exactly 1.0 is `external` there.\n\nOn a \
+         quote leg the label is reconstructed at read time — the candle rows carry no \
+         provenance column — so one case is deliberately not separated: a bucket reading \
+         exactly 1.0 reports `assumed-par` whether the dollar was assumed or a measured \
+         rate happened to land on it. The two leave an identical row and carry the same \
+         number, so the label is the conservative one; `external` is reported only for a \
+         bucket whose value was actually scaled by an imported rate.\n\n`null` in three \
+         cases: when the price fields are `null`; always for \
+         `base_currency=XLM`, where nothing is converted; and for a USDC-quoted bucket \
+         below the oracle epoch that carries a converted rate no imported series covers \
+         — nothing can attribute it, and a label would be a claim.",
     ),
     (
         "Candle",
         "open",
         "Opening price of the bucket, in `base_currency`; `null` when the bucket has no \
          price.",
+    ),
+    (
+        "Candle",
+        "quality",
+        "How confident the imported series is in that day's observation. Present only \
+         alongside `source`, i.e. only on the synthesized USDC self-series \
+         (`GET /assets/USDC:<issuer>/ohlcv`) for buckets whose `method` is `external`; \
+         `null` on every other asset, on the `peg` fallback, and whenever the price fields \
+         are `null`.\n\n* `measured` — a real observation from the primary feed.\n* \
+         `measured-disputed` — observed, but a cross-check against a second independent \
+         source disagreed by more than the composer's spread tolerance. The number is real; \
+         treat it as less certain than a plain `measured` day and prefer not to alert on it \
+         alone.\n* `fallback` — the primary feed had nothing for that day, so the secondary \
+         source supplied it. Still an observation, and far better than assuming $1, but a \
+         different instrument on a different venue.\n\nA day with no quality is not a day of \
+         unknown quality — the field simply does not apply outside the imported series.",
+    ),
+    (
+        "Candle",
+        "source",
+        "Which outside USD series the imported rate came from: `chainlink` or `bitstamp`.\n\n\
+         Present only on the synthesized USDC self-series \
+         (`GET /assets/USDC:<issuer>/ohlcv`), and there only for buckets whose `method` is \
+         `external`. It is `null` on every other asset — not because those candles lack \
+         provenance, but because the stored candles carry no column to report it from — \
+         `null` on an `oracle` bucket (a poll has no outside series, even where an outranked \
+         import shares the bucket), `null` on the `peg` fallback, where no series was \
+         consulted at all, and whenever the price fields are `null`. Never the empty \
+         string.",
     ),
     (
         "Candle",
@@ -613,5 +669,58 @@ impl Modify for Descriptions {
                 describe(property, text);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `method` value the API can put on the wire is named in the
+    /// published description (task 0268 review, WR-03). Two emitters feed the
+    /// one `Candle` schema: `queries_ch::usd_method_expr` (the candle path:
+    /// `assumed-par` / `external` / `oracle` / `traded`) and
+    /// `queries_ch::ohlcv_peg_series` (USDC's own series: `peg` / `oracle`). A
+    /// client generated from the schema must never meet a value the contract
+    /// does not name — that was true before 0268 split the vocabulary, and the
+    /// split dropped `peg` from the list while the self-series kept emitting it.
+    ///
+    /// The candle-path vocabulary is READ OFF THE EMITTER (review IN-13): the
+    /// single-quoted literals of `usd_method_expr`'s rendered `multiIf` are the
+    /// labels it can return, so a sixth arm added there fails here until the
+    /// description names it. Only `peg` — emitted by the self-series builder,
+    /// whose SQL carries many unrelated literals — is still listed by hand.
+    #[test]
+    fn candle_method_description_names_every_value_either_emitter_produces() {
+        let (_, _, text) = FIELDS
+            .iter()
+            .find(|(schema, field, _)| *schema == "Candle" && *field == "method")
+            .expect("Candle.method is described");
+        // ⚠️ Read the published vocabulary, NOT every quoted literal in the
+        // statement: the `external` arm consults `usd_rate`, so the rendered SQL
+        // also carries `'UTC'`, `'credit'`, `'USDC'` and the issuer address,
+        // none of which are `method` values.
+        let rendered = crate::assets::queries_ch::usd_method_expr(
+            2,
+            &[7],
+            crate::assets::queries_ch::Granularity::H1,
+        );
+        let emitted = crate::assets::queries_ch::CANDLE_METHOD_LABELS;
+        for value in emitted {
+            assert!(
+                rendered.contains(&format!("'{value}'")),
+                "the emitter no longer renders `{value}`: {rendered}"
+            );
+        }
+        for value in emitted.iter().copied().chain(["peg"]) {
+            assert!(
+                text.contains(&format!("`{value}`")),
+                "Candle.method description does not name `{value}`:\n{text}"
+            );
+        }
+        // And `peg` is scoped to where it can appear, so nobody reads it as a
+        // quote-leg value again.
+        assert!(text.contains("USDC:<issuer>"), "{text}");
+        assert!(text.contains("Never appears on a quote leg"), "{text}");
     }
 }

@@ -337,15 +337,61 @@ SETTINGS index_granularity = 8192;
 -- 0154 ASOFs at the CANDLE's timestamp so the boundary case does not arise there.
 --
 -- ## Columns
---   method  'oracle' — a measured reading (hops = 0)
---           'peg'    — the $1 assumption (hops = 0)
---           'pivot'  — via XLM (hops = 1)          } owned by 0154,
---           'pivot2' — via another rated asset (2) } not written here
+--   method  'oracle'   — a measured reading, polled from Reflector (hops = 0)
+--           'external' — a measured reading IMPORTED from an outside USD
+--                        series (task 0267, hops = 0). Same standing as
+--                        'oracle' as evidence, different provenance: nobody
+--                        here polled it. Kept a distinct word because task
+--                        0247 forbids publishing an import as 'oracle'.
+--           'external-candidate'
+--                      — task 0267's PRE-PROMOTION STAGING value. The
+--                        `load-external-rate` tool writes every imported row
+--                        under this word first, an operator verifies the staged
+--                        rows against the runbook's three checks, and only then
+--                        does `--promote` add the same observations under
+--                        'external'. NO read predicate anywhere names this word:
+--                        not the views, not queries_ch::ohlcv_peg_series, and
+--                        emphatically not enrichment-worker's
+--                        ch_enrich::external_sql, which is what makes staging
+--                        safe — unverified rows are inert by construction rather
+--                        than by anyone's discipline. Staged rows are never
+--                        deleted (they are a different sorting key, see below),
+--                        so a promote ADDS a key rather than moving one.
+--           'peg'      — the $1 assumption (hops = 0)
+--           'pivot'    — via XLM (hops = 1)          } owned by 0154,
+--           'pivot2'   — via another rated asset (2) } not written here
+--   quality — task 0267. The IMPORTING series' own confidence in the day's
+--             observation, carried through 1:1 from the composed CSV so a
+--             consumer can decide whether to trust it:
+--               'measured'          — a real observation from the primary feed
+--               'measured-disputed' — observed, but the cross-check between two
+--                                     independent sources disagreed beyond the
+--                                     composer's spread tolerance
+--               'fallback'          — no primary observation for the day; the
+--                                     composer substituted its secondary source
+--             Every other writer leaves it at the '' DEFAULT — in particular
+--             ORACLE ROWS CARRY '', because "how confident was the outside
+--             series" is not a question a polled Reflector reading answers.
+--             '' therefore means "not applicable", not "unknown quality".
 --   ⚠️ ABSENCE IS THE SIGNAL for pre-oracle history. Deep history (before the
 --   oracle window, ~2025-09) gets NO ROW, and the consumer's own peg fallback
 --   applies. Do NOT write synthetic method='peg' rows at $1 to "fill" it — that
 --   makes a fallback indistinguishable from a measurement, which is precisely
 --   the close_usd = 0 mistake (one value meaning several things) in a new place.
+--
+--   That prohibition stands, and 'external' does NOT relax it: an IMPORTED
+--   MEASUREMENT is not a synthetic fill. A method='external' row says an
+--   outside series observed this rate at this instant — on 2023-03-11 it says
+--   0.9681, which no $1 fill could ever say. What the rule forbids is inventing
+--   a value, not sourcing one elsewhere. Task 0267's backfill is therefore
+--   allowed to reach into deep history where a 'peg' fill would not be.
+--
+--   ⚠️ There is NO 'assumed-par' here, deliberately, and it is not an omission
+--   to "fix". That value exists only on the /ohlcv wire, where it is DERIVED at
+--   read time from a candle's close_usd = close signature (see
+--   prices-api queries_ch::usd_method_expr). Nothing writes it to this table,
+--   because a row asserting "we assumed a dollar" is exactly the synthetic fill
+--   the warning above forbids.
 --
 --   ⚠️ `method` IS PART OF THE SORTING KEY, deliberately. RMT dedups on the
 --   sorting key, so without it a 'pivot' row written by 0154 at the same
@@ -377,6 +423,12 @@ ENGINE = ReplacingMergeTree(version)
 PARTITION BY toYYYYMM(timestamp)
 ORDER BY (asset_kind, asset_code, issuer_address, contract_address, timestamp, method)
 SETTINGS index_granularity = 8192;
+
+-- Idempotent ALTER for databases created before task 0267, mirroring the
+-- current_prices.method pattern above. Positioned AFTER reference_asset so the
+-- two PROVENANCE columns (which outside series, and how good was its
+-- observation) sit together and ahead of the hops/version bookkeeping.
+ALTER TABLE prices.usd_rate ADD COLUMN IF NOT EXISTS quality LowCardinality(String) DEFAULT '' AFTER reference_asset;
 
 ----------------------------------------------------------------------
 -- Backfill bookkeeping.

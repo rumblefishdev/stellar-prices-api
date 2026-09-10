@@ -349,17 +349,48 @@ pub struct Candle {
     /// magnitude below it, so it never binds in practice.
     #[schema(maximum = 9_007_199_254_740_991u64)]
     pub trade_count: u64,
-    /// Where the USD rate behind this bucket came from — [`0165`]'s existing
-    /// vocabulary, reused rather than re-coined (ADR 0011 §4):
+    /// Where the USD rate behind this bucket came from — [`0165`]'s vocabulary,
+    /// reused rather than re-coined (ADR 0011 §4), split by task 0268 so a $1
+    /// assumption and a measurement stop sharing one word:
     ///
-    /// - `peg` — no measured rate was available; the $1 USDC assumption applied.
+    /// - `assumed-par` — nothing was measured; the literal 1.0 supplied the
+    ///   value, i.e. the $1 USDC assumption applied. Task 0268 renamed this from
+    ///   0165's spelling **on the candle path only**; see the note below.
+    /// - `external` — an imported, measured USDC/USD series supplied the rate
+    ///   (task 0267's `usd_rate` rows, applied by the enrichment worker's
+    ///   external tier). USDC closed at 0.9681 on 2023-03-11, so this is not a
+    ///   cosmetic distinction from `assumed-par`.
     /// - `oracle` — a measured Reflector reading.
     /// - `traded` — priced through a reference asset's own traded candles.
+    /// - `peg` — **only on the synthesized USDC self-series**
+    ///   (`GET /assets/USDC:<issuer>/ohlcv`, [`crate::assets::queries_ch::ohlcv_peg_series`]):
+    ///   no measured USDC/USD observation covered the bucket, so the $1
+    ///   fallback was rendered — 0165's original meaning, which still holds
+    ///   there. Never on a quote leg, where the same situation is `assumed-par`.
     ///
-    /// Derived from the candle's quote leg and rate signature, not stored: the
-    /// candle tables carry `close_usd` with no companion provenance column. See
-    /// `queries_ch::ohlcv` for the classification and the prod measurement
-    /// behind it.
+    /// Every value names the INPUT the rate came from, never the outcome: a
+    /// bucket reading exactly 1.0 under `external` or `oracle` is a measurement
+    /// that happened to be at par, which is precisely what `assumed-par` is not.
+    /// One case is deliberately NOT separated. `close_usd = close` is left by
+    /// two different histories — the $1 assumption, or a measured rate that came
+    /// out at exactly 1.00000000 (173 of the 1872 imported days do) — and the
+    /// stored row is identical either way. Those buckets report `assumed-par`.
+    /// The word is conservative and the NUMBER is the same for both, whereas
+    /// claiming a measurement over a bucket the repair pass has not reached
+    /// would misdescribe a value that is wrong by up to 3%.
+    ///
+    /// **Not stored on the candle.** The candle tables carry `close_usd` with no
+    /// companion provenance column, so a quote leg's `method` is reconstructed
+    /// at read time from the quote asset, the bucket timestamp and the imported
+    /// rate's day coverage. One case is therefore not separable and is stated
+    /// rather than hidden: a bucket on a covered day whose own staleness window
+    /// found no rate falls back to the $1 assumption and is still reported
+    /// `external`. Buckets on days with no imported rate at all report
+    /// `assumed-par` correctly. Carrying the tier on the row is the only
+    /// complete fix and is tracked separately.
+    ///
+    /// See `queries_ch::usd_method_expr` for the classification and the prod
+    /// measurement behind it.
     ///
     /// `None` when the price fields are absent, **and also for every
     /// `base_currency=XLM` response** — that mode returns candles as stored, so
@@ -377,7 +408,11 @@ pub struct Candle {
     /// ⚠️ **On the synthesized peg-asset path (§6) nothing is measured, `close`
     /// included.** Canonical USDC has no candles of its own, so every field is
     /// the `usd_rate` observation for the bucket — or the $1 fallback when none
-    /// precedes it, which [`Candle::method`] reports as `peg`. Do not read
+    /// precedes it, which [`Candle::method`] reports as `peg`. That value
+    /// belongs to USDC's OWN synthesized series and not to any quote leg: 0268
+    /// retired `peg` from the candle path in favour of `assumed-par`, but kept
+    /// 0165's meaning here, where "no measured rate was available" is still
+    /// exactly what happened. Do not read
     /// `derived: true` as "only the extremes are reconstructed"; read it as "not
     /// measured on this market".
     ///
@@ -388,6 +423,44 @@ pub struct Candle {
     /// `None` when the price fields are absent, and for `base_currency=XLM`,
     /// where nothing is converted and so nothing is derived.
     pub derived: Option<bool>,
+    /// The outside USD series a `method = 'external'` rate was imported from —
+    /// `chainlink` or `bitstamp` (task 0267, task 0265's composed history).
+    ///
+    /// ⚠️ **Populated only on canonical USDC's OWN synthesized series** (§6, the
+    /// `ohlcv_peg_series` path). `None` on every other asset — not because those
+    /// candles have no provenance, but because the candle TABLES carry no
+    /// provenance column to report it from. That gap is task 0268's Issue 9 and
+    /// is deliberately out of scope here; a value invented for those rows would
+    /// be a claim nothing measured.
+    ///
+    /// Also `None` where the price fields are absent, where the bucket fell
+    /// back to the $1 peg — a fallback has no source, and naming one would make
+    /// an assumption indistinguishable from an observation — and where an
+    /// `oracle` reading won the bucket, even if an outranked import shares it.
+    /// Never `Some("")`: the column DEFAULT is collapsed to NULL in the query
+    /// (review CR-01).
+    ///
+    /// ⚠️ Positional RowBinary: this and [`Candle::quality`] are the LAST two
+    /// fields, and the two outer projections plus all three aggregate arms in
+    /// `queries_ch` emit them in this exact order. Appending at both ends is what
+    /// keeps the preceding eleven positions fixed.
+    pub source: Option<String>,
+    /// The importing series' own confidence in that day's observation
+    /// (task 0267): `measured`, `measured-disputed`, or `fallback`.
+    ///
+    /// - `measured` — a real observation from the primary feed.
+    /// - `measured-disputed` — observed, but a cross-check against a second
+    ///   independent source disagreed beyond the composer's spread tolerance.
+    ///   The number is real; treat it as less certain than a plain `measured`
+    ///   day, and prefer not to build an alert on it alone.
+    /// - `fallback` — the primary feed had nothing for that day and the composer
+    ///   substituted its secondary source. Still an observation, and still far
+    ///   better than the $1 assumption it replaces, but a different instrument
+    ///   on a different venue.
+    ///
+    /// Same scope as [`Candle::source`]: non-null only on USDC's own synthesized
+    /// series, `None` everywhere else and on the peg fallback.
+    pub quality: Option<String>,
 }
 
 /// `GET /assets/{id}/ohlcv` response.

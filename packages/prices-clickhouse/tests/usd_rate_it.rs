@@ -59,10 +59,14 @@ async fn usd_rate_has_the_0154_shape_keyed_on_natural_identity() {
             "usd_rate",
             "method",
             "reference_asset",
+            // Task 0267. Positioned by `ADD COLUMN … AFTER reference_asset` so
+            // the two PROVENANCE columns sit together: which outside series the
+            // rate came from, and how good that series says its observation was.
+            "quality",
             "hops",
             "version",
         ],
-        "0154's exact column set, in order"
+        "0154's exact column set plus task 0267's provenance column, in order"
     );
 
     // ⚠️ The key must be natural identity, NOT asset_id — task 0139 is confirmed
