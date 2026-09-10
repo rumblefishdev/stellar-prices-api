@@ -2,7 +2,7 @@
 id: "0276"
 title: "Roll out 0267 and 0268 on production — load the measured USDC/USD history, deploy the API, re-enrich the USDC-quoted candles"
 type: CHORE
-status: backlog
+status: active
 related_adr: ["0011"]
 related_tasks: ["0267", "0268", "0247", "0265", "0266", "0127", "0128", "0141", "0182", "0228"]
 tags: [layer-backend, layer-api, priority-high, effort-medium, milestone-M3, clickhouse, deployment, data-correctness, stablecoin]
@@ -18,6 +18,10 @@ history:
       Spawned from [[0267]] and [[0268]]. Their code merged to develop on
       2026-09-10 (PR #293 -> e4065b5, PR #300 -> 8090705); every criterion
       they still leave open closes on the production run, which is this task.
+  - date: 2026-09-10
+    status: active
+    who: akot
+    note: "Activated; taken by akot to run the rollout."
 ---
 
 # Roll out 0267 and 0268 on production
