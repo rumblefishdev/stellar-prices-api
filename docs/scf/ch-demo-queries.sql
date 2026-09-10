@@ -1,7 +1,7 @@
 -- SCF Milestones 1 and 2 — ClickHouse demo / evidence queries
 -- (stellar-prices-api)
 --
--- Queries (1)-(9) back milestone-1-evidence.md. Queries (10)-(22), from the
+-- Queries (1)-(11) back milestone-1-evidence.md. Queries (12)-(25), from the
 -- MILESTONE 2 banner onward, back milestone-2-evidence.md.
 --
 -- Run by the operator against PRODUCTION ClickHouse over mTLS, from their own
@@ -178,7 +178,7 @@ ORDER BY task_name;
 --      a CANDLE price. They do set the published current price for the small
 --      number of assets that cannot be priced from trades — one asset, USDC, as
 --      of 2026-09-09 — and `current_prices.method` names the provenance on every
---      row (`traded`, `oracle`, or unset). Query (26) below counts them.
+--      row (`traded`, `oracle`, or unset). Query (25) below counts them.
 --      Shown here to demonstrate the reference feeds are live.
 --      Expect two oracles: reflector (SEP-40, also drives quote->USD conversion)
 --      and redstone. Neither ever sets a candle price.
@@ -218,15 +218,15 @@ ORDER BY venue;
 -- AC 4 — VWAP verifiable against raw price_ohlcv rows
 -- ---------------------------------------------------------------------------
 
--- (10) The published row for one asset, as the API serves it.
---      Compare `sources` and `vwap_24h` against query (11) recomputed by hand.
+-- (12) The published row for one asset, as the API serves it.
+--      Compare `sources` and `vwap_24h` against query (13) recomputed by hand.
 --      Expect: `sources` names each venue with its own price and 24h volume.
 SELECT asset_id, price_usd, price_xlm, vwap_24h, volume_24h_usd,
        change_24h_pct, sources, method, updated_at
 FROM prices.current_prices FINAL
 WHERE asset_id = 4;
 
--- (11) The raw candles the published figure is derived from.
+-- (13) The raw candles the published figure is derived from.
 --      This is the capture that task 0123 re-aggregated in plain Python,
 --      independent of the materialised view's own SQL. Pin the window: the MV
 --      refreshes every minute, so an unpinned comparison proves nothing.
@@ -238,7 +238,7 @@ WHERE asset_id IN (4, 5, 70, 108, 430, 741)
   AND timestamp >= toDateTime('2026-08-25 13:22:00')
   AND timestamp <= toDateTime('2026-08-26 13:22:00');
 
--- (12) Ties across quote legs — why "the latest priced close" is a SET.
+-- (14) Ties across quote legs — why "the latest priced close" is a SET.
 --      Expect: several assets with cnt > 1. This is common, not exotic, and it
 --      is why the reconciliation asserts set membership rather than equality.
 SELECT asset_id, max(timestamp) AS newest_priced, count() AS cnt
@@ -254,25 +254,25 @@ LIMIT 20;
 -- AC 5 — earliest_data_available <= 2022-01-01, reconciled four ways
 -- ---------------------------------------------------------------------------
 
--- (13) What the API reports, read from the row the endpoint reads.
+-- (15) What the API reports, read from the row the endpoint reads.
 --      Expect: sdex.earliest_data_available = 2015-11-18 03:47:00.
 SELECT task_name, status, current_ledger, target_ledger,
        last_push_at, completed_at, earliest_data_available
 FROM prices.backfill_progress FINAL
 ORDER BY task_name;
 
--- (14) What the candles actually contain — the independent check.
+-- (16) What the candles actually contain — the independent check.
 --      The stored value above is a monotonic high-water mark and CANNOT correct
 --      itself downward, so an overstatement would be permanent and invisible.
 --      That is the whole reason this query exists.
---      Expect: 2015-11-18, matching (13).
+--      Expect: 2015-11-18, matching (15).
 SELECT min(timestamp) AS oldest_sdex_candle,
        max(timestamp) AS newest_sdex_candle,
        count()        AS daily_candles
 FROM prices.price_ohlcv_1d
 WHERE source = 'sdex';
 
--- (15) Oldest ACTIVE partition on every candle tier — the third view.
+-- (17) Oldest ACTIVE partition on every candle tier — the third view.
 --      Expect: 201511 on all seven tiers.
 SELECT table, min(partition) AS oldest_partition
 FROM system.parts
@@ -282,7 +282,7 @@ WHERE database = 'prices'
 GROUP BY table
 ORDER BY table;
 
--- (16) Continuity, month by month, across the criterion's window.
+-- (18) Continuity, month by month, across the criterion's window.
 --      Depth alone is not coverage. Expect: days_with_candles equal to the
 --      calendar length of every month from 2022-01 onward, leap day included.
 SELECT toYYYYMM(timestamp)            AS month,
@@ -300,7 +300,7 @@ ORDER BY month;
 -- AC 6 — the USDC exclusion, stated with the data behind it
 -- ---------------------------------------------------------------------------
 
--- (17) Why USDC cannot serve as the spot-check asset.
+-- (19) Why USDC cannot serve as the spot-check asset.
 --      Expect: zero candles. USDC is our top-preference QUOTE asset, so pairs
 --      canonicalise as base=X/quote=USDC and USDC essentially never appears as
 --      a base leg. With no candles of its own, the published series is filled
@@ -312,7 +312,7 @@ WHERE asset_id = (SELECT asset_id FROM prices.assets FINAL
                     AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
                   LIMIT 1);
 
--- (18) The control: the substitute spot-check assets DO have measured trades
+-- (20) The control: the substitute spot-check assets DO have measured trades
 --      on the dates the report compares against Binance.
 --      Expect: real trade_count and non-zero close_usd on each date.
 SELECT toDate(timestamp) AS day, asset_id, source,
@@ -323,7 +323,7 @@ WHERE asset_id = 4
                             '2024-07-01', '2026-06-15')
 ORDER BY day, source;
 
--- (19) ⚠️ The caveat the report states rather than hides: USD coverage is thin,
+-- (21) ⚠️ The caveat the report states rather than hides: USD coverage is thin,
 --      and thinnest where it is oldest. The spot-check assets were chosen from
 --      the priced majority, deliberately.
 --      Expect: ~36% of 2022 daily SDEX candles carry close_usd = 0, ~13% of
@@ -341,7 +341,7 @@ ORDER BY year;
 -- Work items without a numbered criterion (evidence doc §6)
 -- ---------------------------------------------------------------------------
 
--- (20) The minimum-volume source threshold, and why it had to be CONDITIONAL.
+-- (22) The minimum-volume source threshold, and why it had to be CONDITIONAL.
 --      Applied unconditionally a $100 floor would have blanked the VWAP on
 --      96.5% of priced assets, because most venues carry a dollar a day or
 --      less. Expect: the vast majority of venues in the two lowest buckets.
@@ -362,7 +362,7 @@ FROM (
 GROUP BY bucket
 ORDER BY bucket;
 
--- (21) The outlier filter can empty the source set while a price still
+-- (23) The outlier filter can empty the source set while a price still
 --      publishes — a documented property, not a defect. The median
 --      interpolates on an even count, so four values 1,1,3,3 give a median of
 --      2 and every element deviates by 50%.
@@ -372,7 +372,7 @@ FROM prices.current_prices FINAL
 WHERE price_usd > 0
   AND (sources = '' OR sources = '{}');
 
--- (22) Aquarius appears as a named source with real volume (§6.3).
+-- (24) Aquarius appears as a named source with real volume (§6.3).
 --      Expect: aquarius present alongside sdex/soroswap/phoenix.
 SELECT source, count() AS candles, round(sum(volume_quote_usd), 2) AS volume_24h_usd
 FROM prices.price_ohlcv_1m FINAL
@@ -380,7 +380,7 @@ WHERE timestamp >= now() - INTERVAL 24 HOUR
 GROUP BY source
 ORDER BY volume_24h_usd DESC;
 
--- (26) Provenance of every published price. The `method` column is what stops
+-- (25) Provenance of every published price. The `method` column is what stops
 --      an oracle-derived number being read as a traded one.
 --      Expect: `traded` dominant, `oracle` on the handful that cannot be traded-
 --      priced, and a blank group for rows written before the column existed.
