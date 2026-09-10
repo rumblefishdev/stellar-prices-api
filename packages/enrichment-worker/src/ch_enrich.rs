@@ -1147,12 +1147,6 @@ const INSERT_COLUMNS: &str = "timestamp, asset_id, quote_asset_id, source, \
      volume_base, volume_quote, volume_quote_usd, close_usd, vwap, \
      trade_count, version";
 
-/// Peg statement: USDC/USDT-quoted candles get `close_usd = close × $1`. Returns
-/// `None` when neither stablecoin is in the registry (nothing to peg). Bound
-/// parameters, in order: the snapshot watermark (`p.timestamp <= toDateTime(?)`,
-/// shared with the rest of the pass — see [`ChEnrichmentPass::watermark`]) and the
-/// `LIMIT` (batch size). `volume_quote_usd` is only filled when still zero, so an
-/// oracle-set (depeg-aware) value survives.
 /// One statement of a peg-pivot step, with the shape that decides how it is
 /// bound. The two variants take **different bind sequences**, which is why this
 /// is an enum and not a bare `Vec<String>`.
@@ -1204,6 +1198,12 @@ fn plan_peg_pivot_step(
     plan
 }
 
+/// Peg statement: USDC/USDT-quoted candles get `close_usd = close × $1`. Returns
+/// `None` when neither stablecoin is in the registry (nothing to peg). Bound
+/// parameters, in order: the snapshot watermark (`p.timestamp <= toDateTime(?)`,
+/// shared with the rest of the pass — see [`ChEnrichmentPass::watermark`]) and the
+/// `LIMIT` (batch size). `volume_quote_usd` is only filled when still zero, so an
+/// oracle-set (depeg-aware) value survives.
 fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32], window: &str) -> Option<String> {
     if stable_ids.is_empty() {
         return None;
@@ -1599,8 +1599,10 @@ mod tests {
             );
         }
 
-        // Without a USDC market there is nothing to measure a pivot against, so
-        // the step degrades to the peg alone — never to a silent single pivot.
+        // No USDC market means nothing to peg (task 0172 made USDC the ONLY peg
+        // member, so `stable_ids()` is empty and `peg_sql` returns `None`) AND
+        // nothing to measure a pivot against. The step plans nothing at all —
+        // it must never degrade to a silent single pivot.
         let no_usdc = ReferenceIds {
             xlm: Some(5),
             usdc: None,
