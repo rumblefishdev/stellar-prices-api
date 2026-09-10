@@ -677,8 +677,15 @@ batch, inflating `version` for no gain. Pre-existing — not caused by this fix.
 
 - [x] The source is shown correct — `pivot_ids() == [xlm, usdt]` and the peg
       excludes USDT, both green (2026-08-21). The defect is the artifact.
-- [ ] A test asserts `enrich_peg_pivot_step` issues TWO pivot statements, so a
+- [x] A test asserts `enrich_peg_pivot_step` issues TWO pivot statements, so a
       silently-narrowed pivot set fails the suite instead of the quote leg.
+      **PR #304, merged 2026-09-10** (`b7496dd`). `plan_peg_pivot_step` splits
+      planning from sending, and `plan_issues_one_peg_and_two_pivots` asserts one
+      peg, two pivots, refs `[5, 7]` in order, and each pivot's ref id as the SQL
+      literal that made this defect readable in `system.query_log` at all.
+      ⚠️ It runs in CI; the end-to-end coverage that also catches this does NOT
+      — every test in `ch_enrich_it.rs` is `#[ignore]` and needs a live
+      ClickHouse. That is [[0275]].
 - [x] After the fix, `system.query_log` shows `CAST(111 AS UInt32) AS
       ref_asset_id` running on the hourly schedule, outside any hand-run window.
       **Six runs from 15:20:31 UTC, 2026-08-21.**
@@ -689,6 +696,19 @@ batch, inflating `version` for no gain. Pre-existing — not caused by this fix.
       1,895 on the first batch, ~17/batch since.**
 - [ ] `max_execution_time` is set per-caller on our client, and an exceeded bound
       produces a logged ClickHouse exception — verified by inducing, not inferred.
+      **Code in PR #305** (2026-09-10): 120 s on the scheduled worker's client via
+      `ENRICH_MAX_EXECUTION_TIME_SECS`; the operator CLIs stay unbounded on
+      purpose, which is what "per-caller" means here. ⏳ **The induction is
+      outstanding** and is the operator's to run against prod.
+      ⚠️ **Scope decided 2026-09-10 — the worker only, not the CLIs.** After
+      [[0111]] the worst statement on this path is ~3.3 s against the old 45.6 s,
+      so 120 s is ~37x headroom and the number is NOT load-bearing. What earns it
+      is the other end: it sits under the Lambda's 300 s, so a hang is a
+      ClickHouse exception naming the query instead of a bare `Status: timeout`.
+      ⛔ `max_execution_time = 0` is ClickHouse's UNLIMITED, not "instant". A
+      zeroed knob silently restores the unbounded state; zero now sets no option
+      and logs at `warn`, pinned by
+      `a_zero_execution_bound_is_unlimited_not_instant`.
 - [ ] BE confirm the bump is live **from Caddy's admin API**, not from the
       Caddyfile — their single-file bind mount desynced the two once already, and
       a file-only check cannot tell a real deploy from a phantom one.
@@ -696,8 +716,16 @@ batch, inflating `version` for no gain. Pre-existing — not caused by this fix.
       report it back in the thread. Two-sided, because neither side alone can see
       both halves.
 - [ ] `CleanupRule` verified `DISABLED` before and after the deploy.
-- [ ] A missing reference asset fails loudly instead of silently narrowing
-      `pivot_ids()`.
+- [x] A missing reference asset is **named in the logs** instead of silently
+      narrowing `pivot_ids()`. `resolve_reference_ids` warns with the absent
+      code (PR #304, merged 2026-09-10).
+      ⚠️ **AC amended 2026-09-10 — was "fails loudly".** Decided against a hard
+      failure: `stable_ids()`/`pivot_ids()` flattening a `None` away is the
+      defect, and what made it a 26-day outage was the SILENCE, not the
+      tolerance. Partial reference sets are legitimately legal — bootstrap
+      discovers assets in arbitrary order — so a hard error would refuse to start
+      on a fresh registry. The warn removes the silence without inventing a
+      bootstrap/steady-state distinction nothing else in the worker draws.
 
 ## Out of scope
 
