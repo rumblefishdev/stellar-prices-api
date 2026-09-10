@@ -172,6 +172,14 @@ jobs:
       # pre-existing clippy findings; this lints only the crate that owns the
       # ClickHouseWriteLatencyMs publish path (task 0125).
       - run: cargo clippy -p prices-ledger-processor --features lambda --no-deps -- -D warnings
+      # The operator binaries `coarse-repair` and `load-external-rate` declare
+      # `required-features = ["aws-mtls"]`, so `cargo check --workspace` and
+      # `cargo test --workspace` skip them entirely, and the Lambda build names
+      # only its own bins. Without this step the two tools that WRITE to the
+      # production ClickHouse could stop compiling and CI would stay green.
+      # `--all-targets` also lints the crate's tests; `enrichment-worker` was on
+      # no clippy list at all before this (tasks 0267/0268).
+      - run: cargo clippy -p enrichment-worker --features aws-mtls --all-targets --no-deps -- -D warnings
       - run: cargo test --workspace
 
       # The set of Lambda assets is DERIVED from the CDK source rather than
