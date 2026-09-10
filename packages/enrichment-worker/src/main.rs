@@ -141,6 +141,37 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     // Cold start: build the mTLS client (MTLS_SECRET_NAME + CH_DOMAIN) and probe
     // connectivity. Failures here surface as a CloudWatch Init error.
     let client = prices_clickhouse::mtls::client_from_lambda_env(&cfg.database).await?;
+
+    // Task 0215 half 2: bound a single statement's runtime on THIS client.
+    //
+    // Scoped to the scheduled worker on purpose. The operator CLIs
+    // (sdex-backfill, coarse-repair, load-external-rate) share the one
+    // `prices_writer` user and legitimately run far longer statements, so they
+    // are left unbounded — which is precisely why this cannot be a settings
+    // profile and has to be a per-caller client option.
+    //
+    // 120 s is not a load-bearing number. After 0111 the worst statement here
+    // is ~3.3 s, so this is ~37x headroom; what matters is that it sits well
+    // under the Lambda's 300 s, so a statement that hangs is reported by
+    // ClickHouse as `TIMEOUT_EXCEEDED` naming the query, instead of the Lambda
+    // being killed first and leaving only `Status: timeout` on the REPORT line
+    // — a field that says nothing about which statement hung, and that the
+    // 0215 post-mortem records being misread as "no timeouts".
+    let max_execution_time_secs: u64 = env_parse_or("ENRICH_MAX_EXECUTION_TIME_SECS", 120);
+    match prices_clickhouse::execution_bound(max_execution_time_secs) {
+        Some(secs) => tracing::info!(
+            max_execution_time_secs = secs,
+            "per-statement execution bound armed"
+        ),
+        // `0` is ClickHouse's UNLIMITED. Say so, loudly: an unbounded statement
+        // that outruns its caller is the 0215 failure mode, and its whole
+        // hazard is that nothing reports it.
+        None => tracing::warn!(
+            "ENRICH_MAX_EXECUTION_TIME_SECS=0 — statement execution is UNBOUNDED \
+             (ClickHouse reads 0 as unlimited, not as instant)"
+        ),
+    }
+    let client = prices_clickhouse::with_execution_bound(client, max_execution_time_secs);
     // Cheap Arc-backed clones; the preflight probe takes the original by value.
     // The 0111 phase-2 historical drain runs after the live pass in the same
     // invocation and needs its own handle (a cheap Arc-backed clone).
