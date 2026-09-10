@@ -325,11 +325,13 @@ pub struct Candle {
     /// Every value names the INPUT the rate came from, never the outcome: a
     /// bucket reading exactly 1.0 under `external` or `oracle` is a measurement
     /// that happened to be at par, which is precisely what `assumed-par` is not.
-    /// USDC is at exactly par on most days — 174 of the 2049 days in the
-    /// imported series close at exactly 1.00000000 — so this distinction decides
-    /// the label on a large share of the history, and `external` is chosen by
-    /// asking whether an imported rate covers the bucket's UTC day, not by
-    /// inspecting the stored number.
+    /// One case is deliberately NOT separated. `close_usd = close` is left by
+    /// two different histories — the $1 assumption, or a measured rate that came
+    /// out at exactly 1.00000000 (173 of the 1872 imported days do) — and the
+    /// stored row is identical either way. Those buckets report `assumed-par`.
+    /// The word is conservative and the NUMBER is the same for both, whereas
+    /// claiming a measurement over a bucket the repair pass has not reached
+    /// would misdescribe a value that is wrong by up to 3%.
     ///
     /// **Not stored on the candle.** The candle tables carry `close_usd` with no
     /// companion provenance column, so a quote leg's `method` is reconstructed

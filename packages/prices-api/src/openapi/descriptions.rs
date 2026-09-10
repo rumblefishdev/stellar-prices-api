@@ -321,13 +321,13 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          bucket, so the $1 fallback was rendered. Never appears on a quote leg — there the \
          same situation is `assumed-par`.\n\nEach value names the INPUT the rate came from, so \
          `assumed-par` and `external` are never interchangeable: one is an assumption, the \
-         other a measurement that may sit percent off par. A measured rate that happens to \
-         read exactly 1.0 is still `external`; the label is decided by whether an imported \
-         rate covers the bucket's UTC day, not by the value.\n\nOn a quote leg this is \
+         other a measurement that may sit percent off par. On a quote leg the label is \
          reconstructed at read time — the candle rows carry no provenance column — so one \
-         case is not separable: a bucket on a covered day for which no rate resolved inside \
-         its staleness window falls back to the $1 assumption and is still reported \
-         `external`.\n\n`null` when the price fields \
+         case is deliberately not separated: a bucket reading exactly 1.0 reports \
+         `assumed-par` whether the dollar was assumed or a measured rate happened to land \
+         on it. The two leave an identical row and carry the same number, so the label is \
+         the conservative one; `external` is reported only for a bucket whose value was \
+         actually scaled by an imported rate.\n\n`null` when the price fields \
          are `null`, and always `null` for `base_currency=XLM`, where nothing is \
          converted.",
     ),

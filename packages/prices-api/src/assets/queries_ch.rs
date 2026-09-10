@@ -994,59 +994,59 @@ pub async fn ohlcv_peg_series(
 ///
 /// ## The arms, in order, and why each sits where it does
 ///
-/// ⚠️ **A value signature is not provenance.** Until task 0268 this arm list
-/// opened with `close_usd = close -> assumed-par`, which reads the OUTCOME and
-/// calls it the input. USDC sits at exactly par most days: 174 of the 2049 days
-/// in task 0267's imported series close at exactly `1.00000000`, so ~8.5% of
-/// the re-enriched population carries a MEASURED rate whose product is
-/// bit-identical to an assumed one. Those candles were labelled `assumed-par`
-/// while `dto.rs` and the published OpenAPI text promise the opposite in as many
-/// words: *"a bucket reading exactly 1.0 under `external` or `oracle` is a
-/// measurement that happened to be at par, which is precisely what `assumed-par`
-/// is not."* The doc was right and the SQL was wrong.
+/// ⚠️ **At exactly 1.0 the two cases are not separable, and the label leans to
+/// the assumption on purpose.**
 ///
-/// The fix is to consult the rate table instead of the stored bytes: a
-/// pre-epoch USDC-quoted candle is `external` when an imported rate actually
-/// covers its UTC day, whatever the arithmetic came out to. That is the same
-/// uncorrelated day-set the enrichment worker resets on
-/// (`ch_enrich::external_rate_day_pred`), so the read label names the tier that
-/// actually wrote the value.
+/// `close_usd = close` is satisfied by two different histories: the peg tier
+/// multiplied by a literal $1.00, or a MEASURED rate came out at exactly
+/// `1.00000000` (173 of the 1872 loadable days in task 0267's series do). The
+/// stored row is bit-identical either way and the candle tables carry no
+/// provenance column, so no read-side expression can tell them apart.
 ///
-/// 1. `quote_asset_id = usdc AND timestamp < USDC_ORACLE_EPOCH_S AND <the
-///    bucket's UTC day carries an imported rate>` -> **`external`**. Task 0267's
-///    series priced it, via task 0268's external tier.
+/// Task 0268 first tried to break the tie by consulting the rate table — "is
+/// this bucket's UTC day covered by an imported rate" — and testing that BEFORE
+/// the par signature. That is wrong, and dangerously so. Day coverage says
+/// nothing about whether the repair campaign has actually run: the imported
+/// series is 2049 consecutive days spanning essentially all pre-epoch history,
+/// so from the moment the rates land, all 522,321 un-repaired pre-epoch
+/// candles — still holding `close x $1.00` — would report a measured series as
+/// their input. The campaign runs for hours, per grain and per month, and any
+/// month outside its span never gets repaired at all.
 ///
-///    ⚠️ **One residual ambiguity, stated rather than hidden.** Day membership
-///    is not bucket membership: the external tier resolves a rate at the BUCKET
-///    END within a staleness window, so a bucket on a covered day whose own
-///    window found nothing falls to the peg tier and is still reported
-///    `external` here. The candle tables carry no provenance column, so no
-///    read-side expression can separate those two cases — that is task 0268's
-///    Issue 9, and closing it properly means storing the tier on the row.
-///    Between the two available errors this is the rarer one: the day-set is
-///    exactly what the reset zeroed, and a covered day with an unrefillable
-///    bucket also trips the campaign's own `rows_reset ~ rows_enriched` abort.
+/// So the par signature wins, at ANY timestamp, and the label errs toward
+/// "assumed". Two properties make that the right way round:
 ///
-///    ⚠️ **Still sound only because `prices.usd_rate` holds no `oracle` row for
-///    canonical USDC before the epoch.** That claim is in-repo prose, NOT a live
-///    measurement. The 0268 runbook's Appendix B precondition 3 confirms it on
-///    prod before the pass runs, and `assert_no_pre_epoch_oracle_rows` refuses
-///    the pass if it is false.
+/// - The error is free. When a measured rate reads exactly 1.0, the VALUE it
+///   produces is identical to the assumed one — only the word is conservative.
+///   Reporting `external` over an un-repaired $1 misdescribes a number that is
+///   actually wrong by up to 3%.
+/// - It matches what the writer says. `external_sql`'s doc block states that a
+///   post-epoch oracle miss falls to the peg tier and is reported `assumed-par`,
+///   "which is the truth", and the prod measurement below says the same.
+///
+/// What the day-set is still for: a pre-epoch USDC candle that IS scaled can
+/// only have been scaled by the imported series (no pre-epoch USDC oracle row
+/// exists — `assert_no_pre_epoch_oracle_rows` enforces it). If no imported rate
+/// covers its bucket, nothing explains the value, and arm 4 reports null rather
+/// than naming a series that holds nothing for that day.
+///
+/// 1. `quote_asset_id = usdc AND timestamp < epoch AND close_usd != close AND
+///    <an imported rate covers the bucket>` -> **`external`**. Scaled, before
+///    any poll existed: task 0267's series priced it through 0268's external
+///    tier. The coverage test spans the whole BUCKET (one day back through the
+///    bucket's end day), because the tier resolves at the bucket END within
+///    `max(bucket_width, 1 day)` — a weekly or monthly candle is routinely
+///    priced from a mid-period rate.
 /// 2. `quote_asset_id = usdc AND close_usd = close` -> **`assumed-par`**. No
-///    imported rate covers the day, so the peg tier multiplied by a literal
-///    $1.00 and the equality is exact integer arithmetic on the stored decimals.
-///    The word names the INPUT. Task 0268 retired the older spelling here;
-///    `ohlcv_peg_series` keeps it, because on USDC's OWN series it means 0165's
-///    "no measured rate was available" and that is still true.
-/// 3. `quote_asset_id = usdc AND timestamp >= USDC_ORACLE_EPOCH_S` ->
-///    **`oracle`**: at or after the epoch a scaled USDC-quoted candle was priced
-///    from a measured Reflector reading.
-/// 4. `quote_asset_id = usdc` -> **`''`**. Pre-epoch, not at par, and no
-///    imported rate covers the day — a state no tier can produce. It is spelled
-///    out rather than folded into `oracle`, because the old bare-USDC arm
-///    reported a poll that provably did not exist, and a null is the honest
-///    answer to "which input priced this". It also keeps USDC off arm 5 if it is
-///    ever tracked as a pivot.
+///    epoch bound: the peg tier writes $1 after the epoch too, whenever the
+///    oracle tier missed a bucket. See the note above for why this outranks the
+///    measured-at-par case.
+/// 3. `quote_asset_id = usdc AND timestamp >= epoch` -> **`oracle`**: a scaled
+///    USDC leg at or after the epoch was priced from a measured reading.
+/// 4. `quote_asset_id = usdc` -> **`''`**. Scaled, pre-epoch, and no imported
+///    rate covers the bucket — no tier produces this. Null is the honest answer
+///    to "which input priced this"; it also keeps USDC off arm 5 if it is ever
+///    tracked as a pivot.
 /// 5. `quote_asset_id IN (pivots)` -> **`traded`** (ADR 0011 §4; see [`ohlcv`]).
 ///    Omitted ENTIRELY when no pivot reference is tracked — an empty `IN ()` is
 ///    a ClickHouse syntax error, and the label is optional.
@@ -1078,7 +1078,18 @@ pub(crate) fn usd_method_expr(usdc: u32, pivots: &[u32], granularity: Granularit
         format!("quote_asset_id IN ({}), 'traded', ", ids.join(", "))
     };
     let issuer = prices_clickhouse::USDC_ISSUER;
-    let interval = granularity.interval_sql();
+    // ⚠️ UTC-pinned per grain, mirroring `ch_enrich::bucket_end_expr`. ClickHouse
+    // maps `DateTime + INTERVAL n DAY/WEEK/MONTH` onto `addDays`/`addWeeks`/
+    // `addMonths` in the SERVER timezone, which nothing in this repo pins, so
+    // the plain `+ INTERVAL` form slides the coverage window's upper day by the
+    // server's offset — and by a whole hour across a DST boundary. The worker
+    // guards this at length; the read side must not reintroduce it.
+    let bucket_end = match granularity {
+        Granularity::D1 => "addDays(timestamp, 1, 'UTC')".to_string(),
+        Granularity::W1 => "addWeeks(timestamp, 1, 'UTC')".to_string(),
+        Granularity::Mo1 => "addMonths(timestamp, 1, 'UTC')".to_string(),
+        g => format!("timestamp + {}", g.seconds()),
+    };
     // The imported days, as ONE uncorrelated set built per query (ClickHouse
     // renders this as a single `CreatingSet` node, not per row).
     let imported_days = format!(
@@ -1097,13 +1108,12 @@ pub(crate) fn usd_method_expr(usdc: u32, pivots: &[u32], granularity: Granularit
     // day) through the bucket's end day.
     let covered = format!(
         "arrayExists(d -> d >= toDate(timestamp, 'UTC') - 1 \
-                     AND d <= toDate(timestamp + INTERVAL {interval}, 'UTC'), {imported_days})"
+                     AND d <= toDate({bucket_end}, 'UTC'), {imported_days})"
     );
     format!(
         "multiIf(quote_asset_id = {usdc} AND timestamp < toDateTime({epoch}) \
-           AND {covered}, 'external', \
-         quote_asset_id = {usdc} AND timestamp < toDateTime({epoch}) \
-           AND close_usd = close, 'assumed-par', \
+           AND close_usd != close AND {covered}, 'external', \
+         quote_asset_id = {usdc} AND close_usd = close, 'assumed-par', \
          quote_asset_id = {usdc} AND timestamp >= toDateTime({epoch}), 'oracle', \
          quote_asset_id = {usdc}, '', \
          {traded_arm}\
@@ -1407,12 +1417,13 @@ mod tests {
         assert!(par < orc, "par must be tested before oracle: {sql}");
     }
 
-    /// The `external` arm must consult the rate table, not the stored bytes.
-    /// A candle whose measured rate came out at exactly 1.0 is bit-identical to
-    /// a pegged one, so any test of `close_usd` alone cannot tell them apart —
-    /// 174 of task 0267's 2049 imported days close at exactly 1.00000000.
+    /// The `external` arm makes a claim about a MEASURED input, so it must be
+    /// backed by a row in the rate table — a timestamp bound alone would name a
+    /// series that may hold nothing for that day. It is additionally guarded by
+    /// `close_usd != close`, because day coverage says nothing about whether the
+    /// repair campaign has reached this row yet.
     #[test]
-    fn usd_method_expr_external_arm_reads_provenance_not_the_value() {
+    fn usd_method_expr_external_arm_is_backed_by_a_rate_row_and_a_scaled_value() {
         let sql = usd_method_expr(2, &[], Granularity::H1);
         assert!(
             sql.contains("FROM usd_rate FINAL"),
@@ -1433,31 +1444,37 @@ mod tests {
             sql.contains("toDate(timestamp, 'UTC')"),
             "the day-set must name its timezone, not inherit the server's: {sql}"
         );
-        // The external arm's condition must not be reachable by value alone.
-        let ext = sql.find("'external'").unwrap();
-        let par_sig = sql.find("close_usd = close").unwrap();
+        // ⚠️ An un-repaired row still carries `close_usd = close`, and the day-set
+        // cannot see that. Without this guard every un-repaired pre-epoch candle
+        // reports a measured series the moment the rates land — 522,321 of them.
         assert!(
-            ext < par_sig,
-            "the value signature must not gate the measured label: {sql}"
+            sql.contains("AND close_usd != close AND arrayExists"),
+            "the measured label must also require a SCALED value: {sql}"
         );
     }
 
-    /// The par arm is bounded ABOVE by the epoch, and that bound is not
-    /// decoration. `peg_sql` carries no epoch bound, so the peg tier still
-    /// writes `close_usd = close` after the epoch whenever the oracle tier
-    /// missed a bucket — and a poll that read exactly 1.0 leaves the same bytes.
-    /// Without the bound, a post-epoch measurement at par reports `assumed-par`,
-    /// which is the pre-epoch defect this round removed, one side over.
+    /// 🔑 The par arm carries NO epoch bound, and that is deliberate.
+    ///
+    /// `peg_sql` has no epoch bound either, so the peg tier writes `close_usd =
+    /// close` after the epoch whenever the oracle tier missed a bucket — a
+    /// Reflector outage, or a poll gap wider than `window_s`. This file's own
+    /// prod measurement puts that population at 134,193 candles, and
+    /// `external_sql`'s doc block calls reporting them `assumed-par` "the
+    /// truth". Bounding this arm to the pre-epoch side pushed all of them onto
+    /// the `oracle` arm, i.e. reported a poll that never happened — the exact
+    /// mis-attribution task 0247 forbids.
     #[test]
-    fn usd_method_expr_does_not_call_a_post_epoch_bucket_an_assumption() {
+    fn usd_method_expr_reports_a_post_epoch_peg_fallback_as_an_assumption() {
         let sql = usd_method_expr(2, &[], Granularity::H1);
-        let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
         assert!(
-            sql.contains(&format!(
-                "quote_asset_id = 2 AND timestamp < toDateTime({epoch}) \
-           AND close_usd = close, 'assumed-par'"
-            )),
-            "the par arm must be pre-epoch only: {sql}"
+            sql.contains("quote_asset_id = 2 AND close_usd = close, 'assumed-par'"),
+            "the par arm must match at ANY timestamp: {sql}"
+        );
+        let par = sql.find("'assumed-par'").expect("par arm");
+        let orc = sql.find("'oracle'").expect("oracle arm");
+        assert!(
+            par < orc,
+            "par must be tested before oracle, or a post-epoch $1 claims a poll: {sql}"
         );
     }
 
@@ -1467,16 +1484,23 @@ mod tests {
     /// test on the bucket's start day alone reports null for every one of them.
     #[test]
     fn usd_method_expr_covers_the_whole_bucket_at_every_granularity() {
-        for (g, interval) in [
-            (Granularity::H1, "1 HOUR"),
-            (Granularity::D1, "1 DAY"),
-            (Granularity::W1, "1 WEEK"),
-            (Granularity::Mo1, "1 MONTH"),
+        for (g, end) in [
+            (Granularity::H1, "timestamp + 3600"),
+            (Granularity::D1, "addDays(timestamp, 1, 'UTC')"),
+            (Granularity::W1, "addWeeks(timestamp, 1, 'UTC')"),
+            (Granularity::Mo1, "addMonths(timestamp, 1, 'UTC')"),
         ] {
             let sql = usd_method_expr(2, &[], g);
+            // ⚠️ Calendar grains use the UTC-pinned calendar functions, never
+            // `+ INTERVAL n DAY/WEEK/MONTH`, which ClickHouse resolves in the
+            // SERVER timezone (mirrors `ch_enrich::bucket_end_expr`).
             assert!(
-                sql.contains(&format!("toDate(timestamp + INTERVAL {interval}, 'UTC')")),
-                "the coverage test must reach the bucket's end day at {interval}: {sql}"
+                sql.contains(&format!("toDate({end}, 'UTC')")),
+                "the coverage test must reach the bucket's end day at {end}: {sql}"
+            );
+            assert!(
+                !sql.contains("INTERVAL"),
+                "an unpinned INTERVAL resolves in the server timezone: {sql}"
             );
             assert!(
                 sql.contains("d >= toDate(timestamp, 'UTC') - 1"),

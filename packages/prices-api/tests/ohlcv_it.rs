@@ -1617,7 +1617,9 @@ async fn ohlcv_usdc_leg_labels_par_external_and_oracle_by_signature_and_epoch() 
              ('2023-03-11 12:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 50, 10,    10, 1, 1), \
              ('2026-03-11 13:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 48, 9.681, 10, 1, 1), \
              ('2026-03-11 15:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 48, 9.681, 10, 1, 1), \
-             ('2024-06-01 12:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 48, 9.900, 10, 1, 1)"
+             ('2024-06-01 12:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 48, 9.900, 10, 1, 1), \
+             ('2026-03-11 11:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 50, 10,    10, 1, 1), \
+             ('2026-03-11 16:00:00', 3, 2, 'sdex', 10, 10, 10, 10, 5, 50, 10,    10, 1, 1)"
         ))
         .execute()
         .await
@@ -1663,6 +1665,27 @@ async fn ohlcv_usdc_leg_labels_par_external_and_oracle_by_signature_and_epoch() 
             "oracle",
             "same signature as the row above, two hours later: at or after the \
              epoch a scaled USDC leg was priced by a measured Reflector reading",
+        ),
+        (
+            // 🔑 UN-REPAIRED, on a day the imported series DOES cover. Day
+            // coverage says nothing about whether the repair campaign has
+            // reached this row: the campaign runs for hours, per grain and per
+            // month, and skips months outside its span entirely. Labelling this
+            // `external` would report a measured series over a value that is
+            // still `close x $1.00` — 522,321 candles' worth on prod.
+            "2026-03-11T11:00:00Z",
+            "assumed-par",
+            "the day is covered but the value is still the assumed dollar, and \
+             the row cannot say which",
+        ),
+        (
+            // 🔑 Post-epoch and at par: `peg_sql` carries no epoch bound, so the
+            // peg tier writes $1 whenever the oracle tier missed a bucket. The
+            // prod measurement puts that at 134,193 candles. Reporting `oracle`
+            // here claims a poll that never happened.
+            "2026-03-11T16:00:00Z",
+            "assumed-par",
+            "an oracle miss falls to the peg tier, and $1 is what it wrote",
         ),
         (
             // 🔑 Scaled, below the epoch, on a day NO imported rate covers. The
