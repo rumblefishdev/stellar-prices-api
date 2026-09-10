@@ -2,7 +2,7 @@
 id: "0273"
 title: "ch-demo-queries.sql has two queries numbered (10) and two numbered (11) — the Milestone 2 block restarts the sequence its own header says it continues"
 type: DOCS
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0128"]
 tags: [layer-docs, priority-low, effort-small, scf, evidence]
@@ -16,6 +16,20 @@ history:
       Spawned from [[0128]] future work. Found while refreshing the Milestone 2
       evidence package for submission; offered three times during that task and
       deferred each time because it blocks nothing.
+  - date: 2026-09-10
+    status: active
+    who: okarcz
+    note: >
+      Activated. Counting the M2 block before editing shows the target range in
+      Implementation is off by one: the block holds **14** queries
+      (10, 11, 12-22, 26), so continuing from M1's (11) lands on **(12)-(25)**,
+      not (12)-(24). The (12)-(24) figure came from reading the range as
+      (10)-(22) = 13 queries and missing the stray (26). Renumbering to
+      (12)-(25) is what actually satisfies the acceptance criteria as written
+      (no duplicates, no gaps, strictly increasing).
+      Also falsified: "Nothing cross-references these numbers" holds for the
+      other documents but **not inside this file** — four in-file references
+      point at numbers that move.
 ---
 
 # `ch-demo-queries.sql` numbering collides between the two milestones
