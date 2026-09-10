@@ -2,7 +2,7 @@
 id: "0116"
 title: "Dust-trade candles produce absurd close_usd values (up to $29.6M) in every OHLCV granularity"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0114", "0115", "0026", "0144", "0147", "0117"]
 tags: [clickhouse, data-quality, sdex, enrichment, priority-medium, effort-small, milestone-M2]
@@ -31,6 +31,13 @@ history:
       reconciliation against raw price_ohlcv rows) and AC 6 (the USDC 1d
       spot-check) - absurd close_usd values would surface in exactly those two
       checks.
+  - date: 2026-09-10
+    status: active
+    who: okarcz
+    note: >
+      Activated. The measured evidence in this file dates from 2026-07-23 and
+      202607 was then a partial, in-flight month — re-measuring on prod before
+      deriving any threshold.
 ---
 
 # Dust-trade candles produce absurd `close_usd` values
