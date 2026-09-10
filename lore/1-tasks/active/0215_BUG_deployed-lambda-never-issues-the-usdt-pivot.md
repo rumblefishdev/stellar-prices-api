@@ -673,6 +673,42 @@ identical counts, and the baseline shows the same (54,414/44 = 1,236.7). New row
 would vary. It looks like the same rows are re-selected and re-written every
 batch, inflating `version` for no gain. Pre-existing — not caused by this fix.
 
+## ✅ OUR SIDE RE-CONFIRMED — 2026-09-10, 20 days after the fix
+
+Read-only from `system.query_log` as `dev_read` (`readonly = 1`). This is our
+half of the two-sided check; BE's half is the admin-API reading.
+
+| date | peg | pivots | peg:pivot | XLM | USDT | max pivot | not `QueryFinish` |
+|---|---|---|---|---|---|---|---|
+| 09-03 | 109 | 218 | 1:2 | 109 | 109 | 2.58 s | **0** |
+| 09-04 | 477 | 954 | 1:2 | 477 | 477 | 2.72 s | **0** |
+| 09-05 | 518 | 1036 | 1:2 | 518 | 518 | 3.19 s | **0** |
+| 09-06 | 496 | 992 | 1:2 | 496 | 496 | 3.28 s | **0** |
+| 09-07 | 295 | 590 | 1:2 | 295 | 295 | 2.89 s | **0** |
+| 09-08 | 67 | 134 | 1:2 | 67 | 67 | 0.85 s | **0** |
+| 09-09 | 67 | 134 | 1:2 | 67 | 67 | 0.80 s | **0** |
+| 09-10 | 63 | 128 | 1:2 | 64 | 64 | 0.84 s | **0** |
+
+**1:2 on every one of eight days, and XLM:USDT exactly 1:1.** The baseline was
+1:1 peg:pivot with USDT absent from all history. Zero statements ended in
+anything but `QueryFinish` — no exception, and nothing abandoned.
+
+### ⚠️ The 09-08 drop is the backlog ENDING, not a regression
+
+Runs fall ~500/day → 67/day on 09-08, which is close enough to the old
+72/day-one-batch-then-death signature to be misread. `written_rows` separates
+them:
+
+| | 09-06 | 09-09 |
+|---|---|---|
+| pivot rows/day | **4,606,769** | **11,143** |
+| rows per run | **4,644** | **83** |
+
+A `LIMIT`-bound run writes its full `batch_size`; 83 rows means the statement
+ran out of candidates, not out of time. The pass is now keeping up with live
+traffic and finishing early instead of exhausting its 20 batches. The
+556.78M-row XLM backlog [[0111]] projected at ~258 days is **drained**.
+
 ## Acceptance Criteria
 
 - [x] The source is shown correct — `pivot_ids() == [xlm, usdt]` and the peg
