@@ -806,6 +806,286 @@ const PRECISION_FLOOR: &str = "toDecimal128('0.000000000001', 14)";
 ///
 /// ⚠️ The denominator is guarded by the same [`PRECISION_FLOOR`]: an unpriced or
 /// dust-valued XLM bucket yields no price rather than a division blow-up.
+/// The `Denomination::Usd` aggregate list, extracted so a ClickHouse-free test
+/// can read it — see [`OUTER_ALIASES`] for why the column tail is not something
+/// to maintain by hand in three places.
+fn usd_aggregates() -> String {
+    format!(
+        "if(countIf(valid) = 0, NULL, toString(argMaxIf(o_x, (volume_base, quote_asset_id), valid))) AS o, \
+                 if(countIf(valid) = 0, NULL, toString({HIGH_PUBLISHED})) AS h, \
+                 if(countIf(valid) = 0, NULL, toString({LOW_PUBLISHED})) AS l, \
+                 if(countIf(valid) = 0, NULL, toString({CLOSE_EXACT})) AS c, \
+                 toString(sum(volume_base)) AS vb, \
+                 toString(sum(volume_quote_usd)) AS vqu, \
+                 if(countIf(valid) = 0 OR isNull({VWAP_RAW}), NULL, \
+                    toString(least(greatest({VWAP_RAW}, {LOW_PUBLISHED}), {HIGH_PUBLISHED}))) AS vw, \
+                 toUInt64(sum(trade_count)) AS tc, \
+                 nullIf(if(countIf(valid) = 0, NULL, argMaxIf(meth, (volume_base, quote_asset_id), valid)), '') AS meth, \
+                 if(countIf(valid) = 0, NULL, toUInt8(1)) AS drv, \
+                 {PROVENANCE_NULL_TAIL}"
+    )
+}
+
+/// The `Denomination::QuoteLeg` aggregate list. Same extraction, same reason.
+fn quote_leg_aggregates() -> String {
+    format!(
+        "toNullable(toString(argMax(open, volume_base))) AS o, \
+             toNullable(toString(max(high))) AS h, \
+             toNullable(toString(min(low))) AS l, \
+             toNullable(toString(argMax(close, volume_base))) AS c, \
+             toString(sum(volume_base)) AS vb, \
+             toString(sum(volume_quote_usd)) AS vqu, \
+             toNullable(toString(if(isNull(toDecimal128OrNull(toString( \
+                 sum(toFloat64(vwap) * toFloat64(volume_base)) \
+                 / nullIf(sum(toFloat64(volume_base)), 0)), 14)), toDecimal128(0, 14), \
+                 least(greatest(toDecimal128OrNull(toString( \
+                     sum(toFloat64(vwap) * toFloat64(volume_base)) \
+                     / nullIf(sum(toFloat64(volume_base)), 0)), 14), min(low)), max(high))))) AS vw, \
+             toUInt64(sum(trade_count)) AS tc, \
+             CAST(NULL AS Nullable(String)) AS meth, \
+             CAST(NULL AS Nullable(UInt8)) AS drv, \
+             {PROVENANCE_NULL_TAIL}"
+    )
+}
+
+/// The peg-series SQL, as a pure string — extracted for the same reason
+/// [`usd_method_expr`] is: the invariants below are unobservable from the
+/// outside and a ClickHouse-free unit test needs a string it can read.
+///
+/// Pinned by `peg_series_sql_*` in this module's tests.
+fn peg_series_sql(args: &OhlcvArgs, in_xlm: bool, table: &str, conds: &[String]) -> String {
+    // The staleness window: `[floor, bucket end)`.
+    //
+    // For every grain at least ORACLE_POLL_FLOOR_S wide the floor is the
+    // bucket's own start, so the window IS the bucket and this is exactly
+    // `price_usd_series`'s rule — `toStartOfInterval(t, g) = bkt` and
+    // `bkt <= t < bkt + g` are the same predicate, which is what keeps the two
+    // surfaces in agreement (task 0246 AC 1).
+    //
+    // `1m` is the one grain narrower than the oracle's 5-minute cadence, so its
+    // floor widens to ORACLE_POLL_FLOOR_S — see that constant for why a strict
+    // one-bucket window would be a regression there rather than a fix.
+    //
+    // ⚠️ The floor is applied in the OUTER projection, where the bucket row is
+    // `bo` (see below), so it is spelled against `bo`, not `b`.
+    let floor = if args.granularity.seconds() >= ORACLE_POLL_FLOOR_S {
+        "bo.bkt".to_string()
+    } else {
+        format!("bo.bend - INTERVAL {ORACLE_POLL_FLOOR_S} SECOND")
+    };
+    // The no-match sentinels, in one place because every expression below must
+    // agree on what "no usable observation for this bucket" means. Two ways to
+    // fail: nothing matched at all, or what matched is older than the window.
+    //
+    // ⚠️ The window test is not redundant under `join_use_nulls = 0`, it is the
+    // belt: an unmatched ASOF yields the DEFAULT, and for a DateTime that is
+    // `1970-01-01` — which fails the floor too. Under `join_use_nulls = 1` the
+    // matched-row test carries it, since `NULL >= x` is NULL, and `false AND
+    // NULL` is false.
+    //
+    // ⚠️ Task 0267, review round 1 (WR-05 / WR-06). The measured rate is read
+    // through TWO method-specific ASOF joins rather than one `IN ('oracle',
+    // 'external')` subquery, and the split is the whole preference rule:
+    //
+    //   * `ro` — the newest `oracle` reading before the bucket end, valid only
+    //     inside the bucket's own window `[floor, bend)`. Unchanged from 0246.
+    //   * `re` — the newest `external` row before the bucket end, valid for
+    //     the WHOLE UTC DAY it is stamped on: `[toStartOfDay(bkt, 'UTC'), bend)`.
+    //
+    //     ⚠️ This day-wide window is a SAFETY NET, not the loading plan. Since
+    //     the 2026-09-09 hourly decision the loader runs at BOTH grains
+    //     (`--grain daily|hourly`) and production carries an external row for
+    //     every hour of every covered day, so the window is only ever exercised
+    //     by a bucket whose own hour has a row anyway. It exists for the case
+    //     where someone loads the DAILY file alone: task 0268's external tier
+    //     prices every candle of that day — at every grain — from that one row,
+    //     and a one-bucket window here would publish `0.96812`/`external` for
+    //     the 00:00 hour of 2023-03-11 and `1`/`peg` for the other twenty-three,
+    //     while the same day's hourly XLM/USDC candles carried the measured rate
+    //     throughout.
+    //
+    //     ⚠️ `price_usd_series_1h` buckets the rate strictly by the HOUR and has
+    //     NO such net (views.sql). With hourly rows loaded, and with the net
+    //     bounded by the epoch below, the two surfaces agree everywhere — which
+    //     is what task 0246's cross-surface criterion asserts. Two cases used to
+    //     break that: a daily-only load (stated in the views' own comment), and
+    //     the oracle epoch's own day, where the import ends at 13:00 and the
+    //     epoch is 14:00 — an hour at or after 14:00 with no poll in its window
+    //     took the 13:00 import through the day-wide net and published it as
+    //     `external` while the view published `1`/`peg`. The `bo.bkt` bound
+    //     closes the second.
+    //
+    //     ⚠️ `'UTC'` is NAMED (review round 2, CR-02). `usd_rate.timestamp` and
+    //     `price_ohlcv_*.timestamp` are bare `DateTime`, so an unzoned
+    //     `toStartOfDay` resolves in the SERVER timezone and the window slides
+    //     with its UTC offset — at UTC+2 the last two hours of every imported
+    //     day would drop back to `peg`. `ch_enrich.rs` enforces the same rule
+    //     for the external enrichment tier with a unit test; this is the other
+    //     half of the same semantic.
+    //
+    // A valid oracle reading wins the bucket OUTRIGHT, regardless of which row
+    // is newer — the same rule as `views.sql`'s rank-first `argMax` tuple, so
+    // the two surfaces agree on any bucket that holds both, and the ONE such
+    // bucket in production (the 1d bucket of the epoch day, 2026-03-11, which
+    // holds the import at 00:00 and the polls from 14:00) reads `oracle`. The
+    // previous shape ranked oracle only WITHIN an instant and let the ASOF's
+    // recency decide across instants, which is a different rule and would have
+    // published a later import over a poll.
+    //
+    // Within one method the sorting key admits at most one row per instant, so
+    // neither side needs a collapse before the join.
+    //
+    // Both joins are NESTED (`bo` is `b` already joined to `ro`) rather than
+    // chained in one FROM: a nested subquery needs nothing from the multi-JOIN
+    // rewrite and reads the same under both analyzers. Column names on the two
+    // right sides are DISTINCT (`orts`/`erts`, …) for the same reason.
+    //
+    // The two booleans below are the only place "valid" is defined; every
+    // projection reads them, and "neither" is every `multiIf`'s else-branch —
+    // the labelled $1 peg. `ifNull(…, '') != ''` is the matched-row test that
+    // holds under both `join_use_nulls` settings (see the sentinel note in
+    // `ohlcv_peg_series`), and the timestamp test is the window.
+    let o_ok = format!("(ifNull(bo.om, '') != '' AND bo.orts >= {floor})");
+    // ⚠️ The external side is bounded by the BUCKET, not by the imported row.
+    //
+    // The imported series stops below `USDC_ORACLE_EPOCH_S` — the loader and
+    // `promote_statement` both refuse a row at or above it — so a bound on
+    // `re.erts` would be a no-op against real data. The leak is on the other
+    // side: `toStartOfDay(bo.bkt, 'UTC')` is a DAY-wide net, and on the epoch
+    // day itself the import ends at 13:00 while the epoch is 14:00. A bucket at
+    // or after 14:00 that day whose own oracle window found nothing therefore
+    // reached back to the 13:00 import and published it as `external`, while
+    // `price_usd_series_1h` published the $1 peg for the same hour: the two read
+    // surfaces disagreed, and the candle path was the one claiming a measurement
+    // for an hour the imported series does not cover. It is the same post-epoch
+    // mis-attribution `ch_enrich::external_sql` bounds itself against.
+    //
+    // The bound is on `bo.bend`, the bucket's exclusive END, not on its start.
+    // Bounding the START leaves every bucket that SPANS the epoch — the 1d
+    // bucket of 2026-03-11, the 1w bucket from 2026-03-09, the 1M bucket of
+    // March 2026 — still holding the day-wide net, because their starts are all
+    // below the epoch. Normally the oracle rank takes those buckets and nothing
+    // shows; but with no poll anywhere in the bucket (an enrichment outage, or
+    // a whole month of them) the import wins it, and a `granularity=1M` request
+    // for March 2026 publishes the 13:00 import of the 11th as `external` /
+    // `chainlink` / `measured` over twenty days the series does not hold. That
+    // is the same defect one grain up, and relying on the oracle rank to hide
+    // it is not a bound.
+    //
+    // `bend <= epoch` is the real thing: a bucket wholly below the epoch keeps
+    // the day-wide net (the 13:00-14:00 hour ends exactly AT the epoch and
+    // keeps it), and no bucket that extends past the epoch can take an import
+    // at any grain, whether or not a poll exists.
+    let e_ok = format!(
+        "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt, 'UTC') \
+          AND bo.bend <= toDateTime({epoch}))",
+        epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S
+    );
+    let rate = format!("multiIf({o_ok}, bo.orate, {e_ok}, re.erate, toDecimal128(1, 14))");
+
+    let val = if in_xlm {
+        format!(
+            "toNullable(toString(toDecimal128OrNull(toString( \
+             toFloat64({rate}) \
+             / nullIf(toFloat64(bo.den), 0)), 14)))"
+        )
+    } else {
+        format!("toNullable(toString({rate}))")
+    };
+    // The label follows the row that WON, never a hard-coded word: once the
+    // rows say `external`, the API says `external` with no further change.
+    let meth =
+        format!("if(o IS NULL, NULL, toNullable(multiIf({o_ok}, bo.om, {e_ok}, re.em, 'peg')))");
+
+    // Task 0267. The rate's provenance reaches the wire ONLY when an imported
+    // row supplied the rate: NULL when the bucket has no price at all, NULL when
+    // the oracle won (a poll has no outside series and no observation quality to
+    // report — its `reference_asset` is `''` and its `quality` the column
+    // DEFAULT), and NULL on the $1 fallback, which consulted nothing. Naming a
+    // source for a value nobody imported is the exact mistake the
+    // `peg`/`oracle`/`external` split exists to prevent.
+    //
+    // ⚠️ `nullIf(…, '')`, not `toNullable(…)` (review CR-01): `toNullable('')`
+    // is `''`, not NULL, so the DEFAULT would have reached the wire as
+    // `"source": ""` on every oracle-priced bucket — every live USDC bucket in
+    // production — against the OpenAPI text. The same collapse `meth` gets on
+    // the candle path.
+    let src = format!("if(o IS NULL OR {o_ok} OR NOT {e_ok}, NULL, nullIf(re.esource, ''))");
+    let qual = format!("if(o IS NULL OR {o_ok} OR NOT {e_ok}, NULL, nullIf(re.equality, ''))");
+    format!(
+        "SELECT {OUTER_ALIASES} FROM ( \
+           SELECT \
+             formatDateTime(bo.bkt, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
+             {val} AS o, \
+             o AS h, o AS l, o AS c, o AS vw, \
+             '0' AS vb, \
+             '0' AS vqu, \
+             toUInt64(0) AS tc, \
+             {meth} AS meth, \
+             if(o IS NULL, NULL, toNullable(toUInt8(1))) AS drv, \
+             {src} AS src, \
+             {qual} AS qual, \
+             bo.bkt AS bkt \
+           FROM ( \
+             SELECT b.bkt AS bkt, b.bend AS bend, b.k AS k, b.den AS den, \
+                    ro.orts AS orts, ro.orate AS orate, ro.om AS om \
+             FROM ( SELECT timestamp AS bkt, timestamp + INTERVAL {interval} AS bend, \
+                           1 AS k, {denom} AS den \
+                    FROM {table} FINAL WHERE {conds} \
+                    GROUP BY timestamp \
+                    ORDER BY bkt DESC LIMIT {limit} ) AS b \
+             ASOF LEFT JOIN ( \
+                    SELECT 1 AS ok, timestamp AS orts, usd_rate AS orate, \
+                           CAST(method AS String) AS om \
+                    FROM usd_rate FINAL \
+                    WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+                      AND issuer_address = ? AND contract_address = '' \
+                      AND method = 'oracle' ) AS ro \
+               ON b.k = ro.ok AND ro.orts < b.bend \
+           ) AS bo \
+           ASOF LEFT JOIN ( \
+                  SELECT 1 AS ek, timestamp AS erts, usd_rate AS erate, \
+                         CAST(method AS String) AS em, \
+                         reference_asset AS esource, CAST(quality AS String) AS equality \
+                  FROM usd_rate FINAL \
+                  WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+                    AND issuer_address = ? AND contract_address = '' \
+                    AND method = 'external' ) AS re \
+             ON bo.k = re.ek AND re.erts < bo.bend \
+         ) ORDER BY bkt ASC",
+        conds = conds.join(" AND "),
+        limit = args.limit,
+        interval = args.granularity.interval_sql(),
+        denom = if in_xlm {
+            // XLM's USD price for the bucket, from the highest-volume source.
+            format!("argMaxIf(close_usd, volume_base, close_usd >= {PRECISION_FLOOR})")
+        } else {
+            "toDecimal128(1, 14)".to_string()
+        },
+    )
+}
+
+/// The outer projection's alias list, shared by BOTH `/ohlcv` query shapes.
+///
+/// ⚠️ ONE source of truth on purpose. `Candle` derives `clickhouse::Row` and
+/// RowBinary is POSITIONAL and carries no types, so a projection that gains or
+/// loses a column relative to the struct either errors with `InvalidTagEncoding`
+/// or — for lengths 0 and 1 — SILENTLY MIS-FRAMES the rest of the row. Two
+/// hand-maintained copies of this list is exactly the drift that produces a
+/// plausible wrong row on a public endpoint with nothing failing anywhere.
+/// The alias count must equal `Candle`'s field count, and the ORDER must match
+/// the struct's field order.
+const OUTER_ALIASES: &str = "ts, o, h, l, c, vb, vqu, vw, tc, meth, drv, src, qual";
+
+/// Task 0267's two provenance columns as the candle path emits them: NULL.
+///
+/// Neither `ohlcv` arm can populate them — the candle TABLES carry no
+/// provenance column (task 0268's Issue 9), so `source`/`quality` are non-null
+/// only on USDC's own synthesized series. They are still emitted, because
+/// positional RowBinary counts columns, not names.
+const PROVENANCE_NULL_TAIL: &str =
+    "CAST(NULL AS Nullable(String)) AS src, CAST(NULL AS Nullable(String)) AS qual";
+
 pub async fn ohlcv_peg_series(
     ch: &Client,
     args: &OhlcvArgs,
@@ -856,15 +1136,26 @@ pub async fn ohlcv_peg_series(
     // falls in the bucket or the bucket falls back to the labelled peg. There is
     // no window over which a stale reading can be presented as a measurement.
     //
-    // ⚠️ **Only `method = 'oracle'` is accepted now.** The old form ranked
+    // ⚠️ **Only MEASURED rows are accepted.** The old form ranked
     // `oracle > pivot > pivot2 > …` with `argMin(rate, pref)` and rendered a
     // pivot row as `'traded'`. `price_usd_series` and `current.sql`'s tip
     // surface both take measurements or nothing, so this surface was the only
     // one that would have answered from a task 0154 pivot — a second way for the
-    // same two surfaces to disagree, on a bucket that HAS observations. Today it
-    // is a no-op: nothing writes a non-`oracle` row for canonical USDC. If 0154
+    // same two surfaces to disagree, on a bucket that HAS observations. If 0154
     // ever wants pivots on a read surface, it must add them to ALL of them in
     // one change, not inherit one silently here.
+    //
+    // ⚠️ Task 0267 widened "measured" from `= 'oracle'` alone to `oracle` OR
+    // `external` — two method-specific subqueries, each an EQUALITY — and that
+    // is not a relaxation of the rule above: an `external` row is a reading an
+    // OUTSIDE series observed, which is evidence of the same standing as a poll
+    // and merely of different provenance. A `pivot` is COMPUTED from another
+    // asset's price and is still refused, as is the pre-promotion
+    // `external-candidate` staging word, which no read predicate anywhere names
+    // (and which an equality, unlike a `LIKE 'external%'`, cannot reach).
+    // Provenance is what separates them, not authorship. `views.sql`'s two
+    // grains took the identical widening in the same commit — the two surfaces
+    // must move together or they disagree about the same rate.
     //
     // ⚠️ An unmatched joined row does NOT yield NULL. By default
     // (`join_use_nulls = 0`, which is what production runs) it yields the
@@ -890,87 +1181,17 @@ pub async fn ohlcv_peg_series(
     // makes the test hold under `join_use_nulls = 1` too, so the answer no
     // longer depends on a server default in either direction.
     //
-    // ⚠️ The right side is collapsed to ONE row per BUCKET before the join.
-    // `usd_rate` is ORDER BY (…, timestamp, method) with `method` in the key
-    // *deliberately*, so a measured `oracle` and a fallback `peg` can coexist at
-    // the same instant and "the consumer chooses" (`init.sql:280`). This
-    // consumer chooses measured-or-nothing in the WHERE clause, so the tie
-    // cannot be broken by part read order — which it could when the raw table
-    // was joined directly.
-    // The staleness window: `[floor, bucket end)`.
-    //
-    // For every grain at least ORACLE_POLL_FLOOR_S wide the floor is the
-    // bucket's own start, so the window IS the bucket and this is exactly
-    // `price_usd_series`'s rule — `toStartOfInterval(t, g) = bkt` and
-    // `bkt <= t < bkt + g` are the same predicate, which is what keeps the two
-    // surfaces in agreement (task 0246 AC 1).
-    //
-    // `1m` is the one grain narrower than the oracle's 5-minute cadence, so its
-    // floor widens to ORACLE_POLL_FLOOR_S — see that constant for why a strict
-    // one-bucket window would be a regression there rather than a fix.
-    let floor = if args.granularity.seconds() >= ORACLE_POLL_FLOOR_S {
-        "b.bkt".to_string()
-    } else {
-        format!("b.bend - INTERVAL {ORACLE_POLL_FLOOR_S} SECOND")
-    };
-    // The no-match sentinel, in one place because three expressions below must
-    // agree on what "no usable observation for this bucket" means. Two ways to
-    // fail: nothing matched at all, or what matched is older than the window.
-    //
-    // ⚠️ The second test is not redundant under `join_use_nulls = 0`, it is the
-    // belt: an unmatched ASOF yields the DEFAULT, and for a DateTime that is
-    // `1970-01-01` — which fails the floor too. Under `join_use_nulls = 1` the
-    // first test carries it, since `NULL < x` is NULL rather than true.
-    let no_rate = format!("(ifNull(r.meth, '') = '' OR r.rts < {floor})");
-
-    let val = if in_xlm {
-        format!(
-            "toNullable(toString(toDecimal128OrNull(toString( \
-             toFloat64(if({no_rate}, toDecimal128(1, 14), r.rate)) \
-             / nullIf(toFloat64(b.den), 0)), 14)))"
-        )
-    } else {
-        format!("toNullable(toString(if({no_rate}, toDecimal128(1, 14), r.rate)))")
-    };
-    let sql = format!(
-        "SELECT ts, o, h, l, c, vb, vqu, vw, tc, meth, drv FROM ( \
-           SELECT \
-             formatDateTime(b.bkt, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
-             {val} AS o, \
-             o AS h, o AS l, o AS c, o AS vw, \
-             '0' AS vb, \
-             '0' AS vqu, \
-             toUInt64(0) AS tc, \
-             if(o IS NULL, NULL, \
-                toNullable(if({no_rate}, 'peg', 'oracle'))) AS meth, \
-             if(o IS NULL, NULL, toNullable(toUInt8(1))) AS drv, \
-             b.bkt AS bkt \
-           FROM ( SELECT timestamp AS bkt, timestamp + INTERVAL {interval} AS bend, \
-                         1 AS k, {denom} AS den \
-                  FROM {table} FINAL WHERE {conds} \
-                  GROUP BY timestamp \
-                  ORDER BY bkt DESC LIMIT {limit} ) AS b \
-           ASOF LEFT JOIN ( \
-                  SELECT 1 AS k, rts, argMax(rate, rts) AS rate, \
-                         CAST(argMax(m, rts) AS String) AS meth \
-                  FROM ( SELECT timestamp AS rts, usd_rate AS rate, method AS m \
-                         FROM usd_rate FINAL \
-                         WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
-                           AND issuer_address = ? AND contract_address = '' \
-                           AND method = 'oracle' ) \
-                  GROUP BY rts ) AS r \
-             ON b.k = r.k AND r.rts < b.bend \
-         ) ORDER BY bkt ASC",
-        conds = conds.join(" AND "),
-        limit = args.limit,
-        interval = args.granularity.interval_sql(),
-        denom = if in_xlm {
-            // XLM's USD price for the bucket, from the highest-volume source.
-            format!("argMaxIf(close_usd, volume_base, close_usd >= {PRECISION_FLOOR})")
-        } else {
-            "toDecimal128(1, 14)".to_string()
-        },
-    );
+    // ⚠️ Each right side is filtered to ONE method before its join. `usd_rate`
+    // is ORDER BY (…, timestamp, method) with `method` in the key
+    // *deliberately*, so a measured `oracle` and a fallback `peg` — or, since
+    // task 0267, an `oracle` and an `external` — can coexist at the same
+    // instant and "the consumer chooses" (`init.sql:280`). Filtering each side
+    // to a single method in its WHERE clause means no instant holds two rows on
+    // either side, so no tie is ever broken by part read order — which it could
+    // be when the raw table was joined directly. Which SIDE wins a bucket is
+    // decided in the projection, and the note beside the two ASOF joins in
+    // [`peg_series_sql`] is where that reasoning lives.
+    let sql = peg_series_sql(args, in_xlm, &table, &conds);
 
     let mut q = ch.query(&sql).bind(xlm_id).bind(usdc_id);
     if let Some(st) = args.start {
@@ -979,7 +1200,14 @@ pub async fn ohlcv_peg_series(
     if let Some(e) = args.end {
         q = q.bind(e);
     }
-    q.bind(usdc_issuer).fetch_all::<Candle>().await
+    // ⚠️ The issuer binds TWICE: once for the `oracle` subquery and once for
+    // the `external` one, in that textual order. `peg_series_sql_binds_the_
+    // issuer_once_per_method_subquery` pins the count, because a positional
+    // `?` that goes unbound fails at query time, not at compile time.
+    q.bind(usdc_issuer)
+        .bind(usdc_issuer)
+        .fetch_all::<Candle>()
+        .await
 }
 
 /// The candle-path USD provenance classification, as a whole
@@ -1252,19 +1480,7 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
                 // through `toFloat64`, so the two are on different scales and can
                 // cross — task 0229. `least`/`greatest` pull the derived extremes
                 // back over the exact close; see the CLOSE_EXACT note above.
-                format!(
-                    "if(countIf(valid) = 0, NULL, toString(argMaxIf(o_x, (volume_base, quote_asset_id), valid))) AS o, \
-                 if(countIf(valid) = 0, NULL, toString({HIGH_PUBLISHED})) AS h, \
-                 if(countIf(valid) = 0, NULL, toString({LOW_PUBLISHED})) AS l, \
-                 if(countIf(valid) = 0, NULL, toString({CLOSE_EXACT})) AS c, \
-                 toString(sum(volume_base)) AS vb, \
-                 toString(sum(volume_quote_usd)) AS vqu, \
-                 if(countIf(valid) = 0 OR isNull({VWAP_RAW}), NULL, \
-                    toString(least(greatest({VWAP_RAW}, {LOW_PUBLISHED}), {HIGH_PUBLISHED}))) AS vw, \
-                 toUInt64(sum(trade_count)) AS tc, \
-                 nullIf(if(countIf(valid) = 0, NULL, argMaxIf(meth, (volume_base, quote_asset_id), valid)), '') AS meth, \
-                 if(countIf(valid) = 0, NULL, toUInt8(1)) AS drv"
-                ),
+                usd_aggregates(),
             )
         }
         // As stored: no conversion, so nothing is derived and there is no USD
@@ -1300,27 +1516,26 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
             // `ohlcv_xlm_denomination_decodes_rows` — the pre-existing XLM test
             // asserts an EMPTY series, so no row is ever decoded and it cannot
             // catch this.
-            "toNullable(toString(argMax(open, volume_base))) AS o, \
-             toNullable(toString(max(high))) AS h, \
-             toNullable(toString(min(low))) AS l, \
-             toNullable(toString(argMax(close, volume_base))) AS c, \
-             toString(sum(volume_base)) AS vb, \
-             toString(sum(volume_quote_usd)) AS vqu, \
-             toNullable(toString(if(isNull(toDecimal128OrNull(toString( \
-                 sum(toFloat64(vwap) * toFloat64(volume_base)) \
-                 / nullIf(sum(toFloat64(volume_base)), 0)), 14)), toDecimal128(0, 14), \
-                 least(greatest(toDecimal128OrNull(toString( \
-                     sum(toFloat64(vwap) * toFloat64(volume_base)) \
-                     / nullIf(sum(toFloat64(volume_base)), 0)), 14), min(low)), max(high))))) AS vw, \
-             toUInt64(sum(trade_count)) AS tc, \
-             CAST(NULL AS Nullable(String)) AS meth, \
-             CAST(NULL AS Nullable(UInt8)) AS drv"
-                .to_string(),
+            quote_leg_aggregates(),
         ),
     };
 
+    // ⚠️ Task 0267's two provenance columns are emitted by BOTH arms even though
+    // NEITHER can populate them: the candle tables carry no provenance column
+    // (task 0268's Issue 9), so `src`/`qual` are non-null only on USDC's own
+    // synthesized series in `ohlcv_peg_series`.
+    //
+    // They cannot simply be omitted here. `Candle` derives `clickhouse::Row` and
+    // RowBinary is POSITIONAL and carries no types — see the QuoteLeg arm's note
+    // above: the deserializer reads one byte as the Option tag, and a column
+    // count that disagrees with the struct either errors with
+    // `InvalidTagEncoding` or, for lengths 0 and 1, SILENTLY MIS-FRAMES the rest
+    // of the row. Three aggregate strings and two outer projections have to move
+    // together; miss one and the failure is a plausible wrong row on a public
+    // endpoint, not a compile error.
+    // `ohlcv_and_peg_series_project_the_same_alias_tail` is the guard.
     let sql = format!(
-        "SELECT ts, o, h, l, c, vb, vqu, vw, tc, meth, drv FROM ( \
+        "SELECT {OUTER_ALIASES} FROM ( \
            SELECT \
              formatDateTime(timestamp, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
              {aggregates} \
@@ -1681,5 +1896,426 @@ mod tests {
         assert!(SortCol::Volume24h.is_numeric());
         assert!(SortCol::Change24h.is_numeric());
         assert!(!SortCol::Code.is_numeric());
+    }
+    // ------------------------------------------------------------------
+    // Task 0267 — the read-path widening and the two new wire columns.
+    //
+    // CI has no ClickHouse, so the behavioural proof is `#[ignore]` in
+    // tests/ohlcv_it.rs. These pin the SHAPE that test depends on, and one of
+    // them guards a failure mode no behavioural test would ever surface as a
+    // failure: a mis-framed RowBinary row is a plausible WRONG row, not an
+    // error.
+    // ------------------------------------------------------------------
+
+    /// The output aliases of an aggregate list, in order.
+    ///
+    /// A plain identifier after ` AS ` is an output alias; a parenthesised one
+    /// (`CAST(NULL AS Nullable(String))`) is a type and is skipped. Crude on
+    /// purpose — a real SQL parser here would be a dependency and a second thing
+    /// to trust.
+    fn aliases_of(sql: &str) -> Vec<&str> {
+        sql.split(" AS ")
+            .skip(1)
+            .filter_map(|tail| {
+                let word = tail.split([',', ' ']).next()?;
+                (!word.is_empty()
+                    && word
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+                .then_some(word)
+            })
+            .collect()
+    }
+
+    fn peg_args() -> OhlcvArgs {
+        OhlcvArgs {
+            asset_id: 2,
+            denomination: Denomination::QuoteLeg(2),
+            granularity: Granularity::D1,
+            start: None,
+            end: None,
+            limit: 100,
+        }
+    }
+
+    fn peg_sql() -> String {
+        peg_series_sql(
+            &peg_args(),
+            false,
+            "price_ohlcv_1d",
+            &["asset_id = ?".to_string()],
+        )
+    }
+
+    /// The USDC self-series must read an IMPORTED measurement, not only a
+    /// polled one — otherwise task 0267's loaded history is written and never
+    /// served, and every pre-2026 bucket keeps publishing a literal 1.0.
+    ///
+    /// Each method is read through its OWN subquery and its own EQUALITY: an
+    /// `IN` list would be fine too, but a `LIKE`/`startsWith` would reach the
+    /// `external-candidate` staging rows, which are unverified by definition.
+    #[test]
+    fn peg_series_sql_admits_both_measured_methods() {
+        let sql = peg_sql();
+        assert_eq!(
+            sql.matches("AND method = 'oracle' )").count(),
+            1,
+            "exactly one oracle subquery: {sql}"
+        );
+        assert_eq!(
+            sql.matches("AND method = 'external' )").count(),
+            1,
+            "exactly one external subquery — without it the imported rows are \
+             written and never served: {sql}"
+        );
+        // The pre-promotion staging word must stay unreadable. Staged rows are
+        // unverified by definition, and this is the surface that would publish
+        // them. Equality predicates only — no prefix idiom.
+        assert!(!sql.contains("external-candidate"), "{sql}");
+        for idiom in ["LIKE", "startsWith", "external%"] {
+            assert!(
+                !sql.contains(idiom),
+                "`{idiom}` would select the staged rows too: {sql}"
+            );
+        }
+    }
+
+    /// ⚠️ Review WR-05: a valid ORACLE reading wins the WHOLE bucket, the same
+    /// rule as `views.sql`'s rank-first `argMax` tuple — not merely a tie at
+    /// one instant with the ASOF's recency deciding across instants. The
+    /// oracle test comes FIRST in every `multiIf`, and the external branch is
+    /// reached only when it fails, so a later import can never outrank a poll.
+    #[test]
+    fn peg_series_sql_ranks_a_valid_oracle_reading_over_the_whole_bucket() {
+        let sql = peg_sql();
+        let o_ok = "(ifNull(bo.om, '') != '' AND bo.orts >= bo.bkt)";
+        let e_ok = &format!(
+            "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt, 'UTC') \
+          AND bo.bend <= toDateTime({}))",
+            prices_clickhouse::USDC_ORACLE_EPOCH_S
+        );
+        assert!(
+            sql.contains(&format!(
+                "multiIf({o_ok}, bo.orate, {e_ok}, re.erate, toDecimal128(1, 14))"
+            )),
+            "the rate must be oracle-first, then external, then the $1 peg: {sql}"
+        );
+        assert!(
+            sql.contains(&format!("multiIf({o_ok}, bo.om, {e_ok}, re.em, 'peg')")),
+            "the label must follow the same order and the row that won: {sql}"
+        );
+        // Two method-specific ASOFs, each bounded by the bucket END — recency
+        // decides WITHIN a method only.
+        assert!(sql.contains("ON b.k = ro.ok AND ro.orts < b.bend"), "{sql}");
+        assert!(
+            sql.contains("ON bo.k = re.ek AND re.erts < bo.bend"),
+            "{sql}"
+        );
+        // The old shape — a single subquery ranking inside the instant — is gone.
+        assert!(!sql.contains("AS pref"), "{sql}");
+        assert!(!sql.contains("argMax(rate, rts)"), "{sql}");
+        // The oracle window is the bucket's own start for a grain at least as
+        // wide as the poll cadence — unchanged from 0246.
+        assert!(sql.contains("bo.orts >= bo.bkt)"), "{sql}");
+    }
+
+    /// ⚠️ Review WR-06: an `external` row is DAILY and stamped at the UTC day
+    /// start, so it is valid for the WHOLE day at every grain — otherwise, at
+    /// `granularity=1h`, the 00:00 bucket of 2023-03-11 reads `0.96812` and
+    /// the other twenty-three read the $1 peg, while task 0268's external tier
+    /// prices every hourly candle of that day from the same row.
+    #[test]
+    fn peg_series_sql_admits_an_external_row_for_its_whole_utc_day() {
+        for (grain, oracle_floor) in [
+            (Granularity::M1, "bo.bend - INTERVAL 300 SECOND"),
+            (Granularity::H1, "bo.bkt"),
+            (Granularity::D1, "bo.bkt"),
+        ] {
+            let sql = peg_series_sql(
+                &OhlcvArgs {
+                    granularity: grain,
+                    ..peg_args()
+                },
+                false,
+                "price_ohlcv_x",
+                &["asset_id = ?".to_string()],
+            );
+            assert!(
+                sql.contains("re.erts >= toStartOfDay(bo.bkt, 'UTC')"),
+                "{grain:?}: the external floor is the DAY start: {sql}"
+            );
+            assert!(
+                sql.contains(&format!("bo.orts >= {oracle_floor})")),
+                "{grain:?}: the oracle floor is unchanged from 0246: {sql}"
+            );
+            assert!(
+                !sql.contains("re.erts >= bo.bkt"),
+                "{grain:?}: a one-bucket window on the import is the 23-of-24 \
+                 `peg` defect: {sql}"
+            );
+        }
+    }
+
+    /// The label comes from the row that WON, not from a hard-coded word. Once
+    /// the rows say `external`, the API says `external` with no further change.
+    #[test]
+    fn peg_series_sql_reports_the_method_the_row_carries() {
+        let sql = peg_sql();
+        assert!(
+            sql.contains("bo.om, ") && sql.contains("re.em, 'peg')"),
+            "the non-peg branches must forward the row's own method: {sql}"
+        );
+        assert!(
+            !sql.contains(", 'oracle', "),
+            "a hard-coded oracle branch reports every imported rate as a poll: {sql}"
+        );
+        assert!(
+            !sql.contains(", 'external', "),
+            "a hard-coded external branch is the same mistake the other way: {sql}"
+        );
+        // The matched-row sentinel is untouched by this task: an unmatched ASOF
+        // yields the column DEFAULT ('' for the method) under join_use_nulls = 0
+        // and NULL under = 1, and `ifNull(…, '') != ''` reads both. Four
+        // readers — the rate, the label, and the two provenance columns.
+        assert_eq!(sql.matches("ifNull(bo.om, '') != ''").count(), 4, "{sql}");
+        assert_eq!(sql.matches("ifNull(re.em, '') != ''").count(), 4, "{sql}");
+    }
+
+    /// `source` and `quality` are NULL on the peg fallback, on a price-less
+    /// bucket, AND on an oracle-priced bucket. A fallback consulted no series
+    /// and observed nothing; a poll has no outside series. Naming a source for
+    /// either would make an assumption indistinguishable from a measurement —
+    /// the exact conflation this whole subsystem exists to prevent.
+    ///
+    /// 🔴 Review CR-01: the DEFAULT is collapsed with `nullIf(…, '')`, not
+    /// `toNullable(…)`. `toNullable('')` is `''`, so the previous shape put
+    /// `"source": "", "quality": ""` on the wire for every oracle-priced USDC
+    /// bucket — every live bucket in production — against the OpenAPI text,
+    /// and the `#[ignore]` epoch-seam test's `Value::Null` assertion could
+    /// never have held.
+    #[test]
+    fn peg_series_sql_nulls_the_provenance_outside_an_imported_rate() {
+        let sql = peg_sql();
+        let o_ok = "(ifNull(bo.om, '') != '' AND bo.orts >= bo.bkt)";
+        let e_ok = &format!(
+            "(ifNull(re.em, '') != '' AND re.erts >= toStartOfDay(bo.bkt, 'UTC') \
+          AND bo.bend <= toDateTime({}))",
+            prices_clickhouse::USDC_ORACLE_EPOCH_S
+        );
+        for (alias, col) in [("src", "esource"), ("qual", "equality")] {
+            let want = format!(
+                "if(o IS NULL OR {o_ok} OR NOT {e_ok}, NULL, nullIf(re.{col}, '')) AS {alias},"
+            );
+            assert!(
+                sql.contains(&want),
+                "`{alias}` must be NULL unless the IMPORT won, and must collapse \
+                 the '' DEFAULT to NULL: {sql}"
+            );
+        }
+        assert!(!sql.contains("toNullable(re.esource)"), "{sql}");
+        assert!(!sql.contains("toNullable(re.equality)"), "{sql}");
+        assert!(sql.contains("reference_asset AS esource"), "{sql}");
+        assert!(sql.contains("CAST(quality AS String) AS equality"), "{sql}");
+    }
+
+    /// The issuer is bound positionally and appears once per method subquery,
+    /// in the order `oracle` then `external` — exactly the two trailing binds
+    /// in `ohlcv_peg_series`. An unbound `?` fails at query time only.
+    #[test]
+    fn peg_series_sql_binds_the_issuer_once_per_method_subquery() {
+        let sql = peg_sql();
+        assert_eq!(
+            sql.matches("issuer_address = ?").count(),
+            2,
+            "one issuer bind per method subquery: {sql}"
+        );
+        let oracle_at = sql.find("AND method = 'oracle' )").unwrap();
+        let external_at = sql.find("AND method = 'external' )").unwrap();
+        assert!(
+            oracle_at < external_at,
+            "the oracle subquery (and its bind) precede the external one"
+        );
+        // The bucket conds come first, so their binds precede both issuers.
+        assert!(sql.find("asset_id = ?").unwrap() < oracle_at, "{sql}");
+    }
+
+    /// 🔴 Review round 2, CR-02 — every timezone-sensitive expression in the
+    /// peg series NAMES its zone.
+    ///
+    /// `usd_rate.timestamp` and `price_ohlcv_*.timestamp` are bare `DateTime`
+    /// (`grep 'DateTime(' init.sql` finds no `'UTC'` anywhere in the schema), so
+    /// an unzoned `toStartOfDay` resolves in the SERVER timezone. Nothing in
+    /// this repo pins that: `docker-compose.yml` sets no `TZ`, so local and CI
+    /// runs are UTC and every other test passes — while `ch-prod-01` is a
+    /// Hetzner box whose zone is undocumented. At UTC+2 the external floor for
+    /// the 22:00 and 23:00 buckets of every imported day lands ON THE NEXT
+    /// day's start, so a row stamped 00:00 UTC fails it and those hours drop
+    /// back to `1`/`peg` while task 0268's (zone-pinned) external tier has
+    /// already written the measured rate into the very same hours' candles.
+    ///
+    /// The shape mirrors `ch_enrich::every_timezone_sensitive_expression_pins_utc`
+    /// deliberately: this is the read half of the semantic that file enforces on
+    /// the write half, and one rule should be spelled one way.
+    #[test]
+    fn the_peg_series_pins_utc_on_every_timezone_sensitive_expression() {
+        for grain in [Granularity::M1, Granularity::H1, Granularity::D1] {
+            let sql = peg_series_sql(
+                &OhlcvArgs {
+                    granularity: grain,
+                    ..peg_args()
+                },
+                false,
+                "price_ohlcv_x",
+                &["asset_id = ?".to_string()],
+            );
+            let mut seen = 0usize;
+            for f in ["toStartOfDay(", "toDate(", "toStartOfInterval("] {
+                for (i, _) in sql.match_indices(f) {
+                    let tail = &sql[i..];
+                    let close = tail.find(')').unwrap();
+                    assert!(
+                        tail[..close].ends_with("'UTC'"),
+                        "{grain:?}: `{f}` without an explicit zone — the window \
+                         slides with the server's UTC offset: {}",
+                        &tail[..close + 1]
+                    );
+                    seen += 1;
+                }
+            }
+            // Not vacuous: the external floor is the only such expression, and
+            // it is spelled FOUR times — the rate, the label and the two
+            // provenance columns all read it. A rewrite that dropped it would
+            // otherwise pass here silently.
+            assert_eq!(
+                seen, 4,
+                "{grain:?}: expected the external day floor, four readers: {sql}"
+            );
+            assert!(!sql.contains("toStartOfDay(bo.bkt)"), "{grain:?}: {sql}");
+        }
+    }
+
+    /// 🔴 Review round 2, WR-09 — the two surfaces that serve an imported rate
+    /// must SPELL the external predicate the same way, checked without a
+    /// ClickHouse.
+    ///
+    /// They drifted once already: `/ohlcv` gained the day-wide safety net and
+    /// `price_usd_series_1h` did not, and nothing failed — the cross-surface
+    /// integration test could not see it because its fixture seeded oracle rows
+    /// only, and it is `#[ignore]` regardless. This is the cheap half of the
+    /// fix: the words themselves, in CI, on every push.
+    #[test]
+    fn the_views_and_the_peg_series_admit_the_same_external_rows() {
+        let views = prices_clickhouse::VIEWS_SQL;
+        let sql = peg_sql();
+
+        // Both rate surfaces of views.sql admit exactly the two measured words,
+        // spelled identically, and the peg series names the same two.
+        assert_eq!(
+            views.matches("method IN ('oracle', 'external')").count(),
+            2,
+            "price_usd_series and price_usd_series_1h must both admit the \
+             import, spelled the same way"
+        );
+        assert!(sql.contains("AND method = 'external' )"), "{sql}");
+        assert!(sql.contains("AND method = 'oracle' )"), "{sql}");
+
+        // Neither surface may REACH the pre-promotion staging word, by any
+        // idiom — `external-candidate` has `external` as a prefix, so a
+        // `LIKE`/`startsWith` form would select unverified rows.
+        //
+        // ⚠️ Checked as "no prefix idiom", not as "the word is absent": the
+        // views' comment block names the staging word in prose, deliberately,
+        // to say that nothing reads it. `external_rate.rs`'s
+        // `no_shipped_view_reads_the_staging_method` is the test that strips
+        // comments and proves the executable text is clean; this one must not
+        // duplicate it badly.
+        assert!(!sql.contains("external-candidate"), "{sql}");
+        for s in [views, sql.as_str()] {
+            for idiom in ["LIKE", "startsWith", "external%"] {
+                assert!(!s.contains(idiom), "`{idiom}` selects staged rows: {s}");
+            }
+        }
+
+        // Both surfaces rank oracle FIRST and by rank rather than by recency.
+        assert_eq!(
+            views
+                .matches("(if(method = 'oracle', 1, 0), timestamp)")
+                .count(),
+            4,
+            "two argMax tuples per view, rank-first"
+        );
+        let o_ok = sql.find("bo.orts >=").unwrap();
+        let e_ok = sql.find("re.erts >=").unwrap();
+        assert!(
+            o_ok < e_ok,
+            "the oracle test precedes the external one: {sql}"
+        );
+    }
+    /// 🔴 The mis-framing guard, and the reason it exists rather than a
+    /// behavioural test: `Candle` derives `clickhouse::Row`, RowBinary is
+    /// POSITIONAL and carries no types, and a projection that disagrees with the
+    /// struct either errors with `InvalidTagEncoding` or — for lengths 0 and 1 —
+    /// SILENTLY MIS-FRAMES the rest of the row. The failure is a plausible wrong
+    /// row on a public endpoint. Two outer projections and three aggregate
+    /// strings have to move together; this is what says so.
+    ///
+    /// The expected tail is built ONCE and every site is compared against it.
+    #[test]
+    fn every_projection_and_aggregate_ends_with_the_same_provenance_tail() {
+        // The outer projection is a single shared constant, so the two query
+        // shapes cannot disagree by construction. Pin its content anyway — the
+        // constant is only a single source of truth if it is the RIGHT list.
+        let aliases: Vec<&str> = OUTER_ALIASES.split(", ").collect();
+        assert_eq!(
+            aliases.len(),
+            13,
+            "one alias per `Candle` field, in the struct's order: {OUTER_ALIASES}"
+        );
+        assert_eq!(&aliases[11..], &["src", "qual"], "{OUTER_ALIASES}");
+
+        assert_eq!(
+            PROVENANCE_NULL_TAIL,
+            "CAST(NULL AS Nullable(String)) AS src, CAST(NULL AS Nullable(String)) AS qual",
+            "both new columns must be explicitly typed Nullable — the \
+             deserializer reads one byte as the Option tag"
+        );
+
+        // Both `ohlcv` arms end with that exact tail and nothing after it, so a
+        // thirteenth column appended to one arm alone fails here.
+        //
+        // The alias sequence is compared against `OUTER_ALIASES` itself, minus
+        // `ts` (which the outer projection adds), so the aggregates and the
+        // projection cannot drift apart in COUNT or in ORDER — and order is what
+        // matters, because positional RowBinary reads by position, not by name.
+        let want: Vec<&str> = OUTER_ALIASES.split(", ").skip(1).collect();
+        for (name, agg) in [
+            ("Denomination::Usd", usd_aggregates()),
+            ("Denomination::QuoteLeg", quote_leg_aggregates()),
+        ] {
+            assert!(
+                agg.ends_with(PROVENANCE_NULL_TAIL),
+                "{name}'s aggregate list must END with the provenance tail: {agg}"
+            );
+            assert_eq!(
+                aliases_of(&agg),
+                want,
+                "{name} must project exactly `Candle`'s fields, in order: {agg}"
+            );
+        }
+
+        // The peg series populates them for real, so it cannot share the tail —
+        // but it must still project the same two aliases last, in the same
+        // order, and wrap them in the same outer list.
+        let sql = peg_sql();
+        assert!(
+            sql.starts_with(&format!("SELECT {OUTER_ALIASES} FROM (")),
+            "{sql}"
+        );
+        let src_at = sql.find(" AS src,").expect("peg series projects src");
+        let qual_at = sql.find(" AS qual,").expect("peg series projects qual");
+        assert!(
+            src_at < qual_at,
+            "`source` precedes `quality` in `Candle`, so it must precede it here"
+        );
     }
 }

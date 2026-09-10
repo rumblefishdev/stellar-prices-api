@@ -376,7 +376,18 @@ SELECT
        if(max(peg_rate) > 0, max(peg_rate), CAST(1 AS Decimal(38, 14))),
        CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))) AS close_usd,
     CAST(if(max(is_peg) = 1 AND sum(w) = 0,
-            if(max(peg_rate) > 0, 'oracle', 'peg'),
+            -- Three-way since task 0267, because a measured rate can now arrive
+            -- from two provenances. ⚠️ The PEG DISCRIMINATOR STAYS FIRST and
+            -- stays `max(peg_rate) <= 0`: arm B's join_use_nulls note explains
+            -- that an unmatched LEFT JOIN yields the column DEFAULT rather than
+            -- NULL on prod, so "this bucket has no rate at all" reads as 0 in
+            -- peg_rate AND as 0 in rate_rank, and only the peg_rate test reads
+            -- identically under both join_use_nulls settings. Ordering the rank
+            -- test first would work by accident, not by rule.
+            -- Only once a rate EXISTS does the rank say which provenance it came
+            -- from: 2 = 'oracle', 1 = 'external'. See arm B for why the rank is
+            -- numeric rather than a max() over the method string.
+            multiIf(max(peg_rate) <= 0, 'peg', max(rate_rank) = 2, 'oracle', 'external'),
             'traded') AS LowCardinality(String)) AS method
 FROM
 (
@@ -393,7 +404,10 @@ FROM
         toFloat64(p.close_usd) * toFloat64(p.volume_base) AS v,
         toFloat64(p.volume_base)                          AS w,
         toUInt8(0)                                        AS is_peg,
-        CAST(0 AS Decimal(38, 14))                        AS peg_rate
+        CAST(0 AS Decimal(38, 14))                        AS peg_rate,
+        -- UNION ALL matches arms POSITIONALLY and requires an identical column
+        -- count, so this placeholder is structural, not decoration (task 0267).
+        toUInt8(0)                                        AS rate_rank
     FROM prices.price_ohlcv_1d AS p FINAL
     INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
     WHERE p.close_usd > 0
@@ -427,7 +441,17 @@ FROM
         -- would be DEAD CODE on prod. ifNull() only covers a session that sets
         -- join_use_nulls = 1; the `> 0` test in the outer SELECT is the real
         -- discriminator, and it reads the same under both settings.
-        ifNull(r.usd_rate, CAST(0 AS Decimal(38, 14))) AS peg_rate
+        ifNull(r.usd_rate, CAST(0 AS Decimal(38, 14))) AS peg_rate,
+        -- Task 0267. NUMERIC rank, never a max() over the method STRING: that
+        -- would only work by the lexicographic accident that 'oracle' sorts
+        -- above 'external', which is a property of the English words and not of
+        -- the precedence rule. 2 beats 1 by arithmetic.
+        -- Same join_use_nulls rule as peg_rate above: an unmatched LEFT JOIN
+        -- yields the column DEFAULT, so the rank arrives as 0 (not NULL) and the
+        -- ifNull() covers only a session that sets join_use_nulls = 1.
+        multiIf(ifNull(r.rate_method, '') = 'oracle', 2,
+                ifNull(r.rate_method, '') = 'external', 1,
+                0) AS rate_rank
     FROM
     (
         SELECT
@@ -483,10 +507,18 @@ FROM
     -- refuses. Pinned as expected behaviour by views_it.rs::
     -- a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains.
     --
-    -- method = 'oracle' selects a MEASURED reading. usd_rate keys on
+    -- The method predicate selects a MEASURED reading. usd_rate keys on
     -- (identity, timestamp, method) precisely so a task 0154 'pivot' row cannot
     -- silently replace a measurement; the consumer chooses, and this consumer
     -- chooses measured or nothing. Same choice as current.sql's tip surface.
+    --
+    -- Task 0267 widened "measured" from one word to two: 'external' is a reading
+    -- IMPORTED from an outside USD series (init.sql's method vocabulary), which
+    -- is evidence of the same standing as a poll and is admitted here. A DERIVED
+    -- 'pivot'/'pivot2' rate still is not, and neither is the pre-promotion
+    -- 'external-candidate' staging word, which no read predicate names.
+    -- Where one bucket holds BOTH an oracle row and an imported one, oracle wins
+    -- by the explicit rank in the argMax tuple below, never by timestamp.
     --
     -- Flooring uses toStartOfInterval, the SAME function the rollup MVs use to
     -- build these buckets (rollups.sql) — so the two agree under any server
@@ -514,17 +546,55 @@ FROM
     -- under which a daily close can equal the last hourly close of that day at
     -- all (subject to the gap caveat above).
     --
-    -- ⚠️ ONE DELIBERATE DIFFERENCE, and it is not drift. `/ohlcv` serves grains
-    -- this view does not, down to `1m`, and a 1-minute bucket is NARROWER than
-    -- the oracle's 5-minute poll cadence — so scoping strictly to the bucket
-    -- there would leave ~4 buckets in 5 on the $1 fallback and turn the series
-    -- into a square wave. Its window is therefore max(bucket, 300 s), 300 s
-    -- being enrichment's own FORWARD_FILL_WINDOW_S. At `1h` and `1d` — the only
-    -- grains this view has — max(bucket, 300 s) IS the bucket, so the two agree
-    -- exactly wherever they are comparable. Pinned by
-    -- ohlcv_agrees_with_price_usd_series_on_the_same_bucket (ohlcv_it.rs), which
-    -- compares the two surfaces against each other rather than against
-    -- literals.
+    -- ⚠️ TWO DELIBERATE DIFFERENCES from `/ohlcv`, and neither is drift.
+    --
+    -- (1) THE ORACLE WINDOW. `/ohlcv` serves grains this view does not, down to
+    -- `1m`, and a 1-minute bucket is NARROWER than the oracle's 5-minute poll
+    -- cadence — so scoping strictly to the bucket there would leave ~4 buckets
+    -- in 5 on the $1 fallback and turn the series into a square wave. Its
+    -- window is therefore max(bucket, 300 s), 300 s being enrichment's own
+    -- FORWARD_FILL_WINDOW_S. At `1h` and `1d` — the only grains these views
+    -- have — max(bucket, 300 s) IS the bucket, so the two agree exactly
+    -- wherever they are comparable.
+    --
+    -- (2) THE IMPORTED ROW'S WINDOW (task 0267). `/ohlcv` additionally floors
+    -- an `external` row at `toStartOfDay(bkt, 'UTC')`, so ONE imported row is
+    -- valid for the whole UTC day it is stamped on. These views do not: they
+    -- bucket an imported row exactly like a poll, at the bucket it falls in.
+    --
+    -- ⚠️ That is a SAFETY NET on `/ohlcv`, not a difference in what production
+    -- serves. Since the 2026-09-09 hourly decision the loader runs at BOTH
+    -- grains (`load-external-rate --grain daily|hourly`), so `usd_rate` holds
+    -- an `external` row for EVERY HOUR of every covered day and both surfaces
+    -- resolve the same row for the same bucket. The two therefore agree, which
+    -- is what task 0246's cross-surface criterion asserts. The net is
+    -- observable in two cases. One: someone loads the daily file alone and not
+    -- the hourly one — in which case `/ohlcv` publishes the imported rate for
+    -- all 24 hours of a day and `price_usd_series_1h` publishes it for the 00:00
+    -- hour and `1`/'peg' for the other twenty-three. Two, and the reason
+    -- `/ohlcv` now bounds its net by the bucket's END: on the oracle epoch's own
+    -- day the import ends at 13:00 and the epoch is 14:00, so a bucket reaching
+    -- past 14:00 with no poll inside it fell into the day-wide net and was
+    -- published as a measurement the imported series does not hold — at 1h, and
+    -- at 1d/1w/1M for any bucket the oracle rank did not take. That bound is
+    -- `bo.bend <= toDateTime(USDC_ORACLE_EPOCH_S)` (rendered as the literal
+    -- 1773237600) in `peg_series_sql`, which builds `ohlcv_peg_series`.
+    -- The net exists because task 0268's
+    -- external enrichment tier prices every candle of an imported day from that
+    -- one daily row, and `/ohlcv` must not contradict the candles beside it.
+    --
+    -- Widening this view with a UNION ALL / ARRAY JOIN over the 24 hours of an
+    -- imported day was considered and REJECTED (task 0267, review round 2
+    -- WR-09): hourly rows make it unnecessary, and it would have added a second
+    -- rate shape to a view whose whole job is to be the boring one.
+    --
+    -- Pinned by ohlcv_agrees_with_price_usd_series_on_the_same_bucket
+    -- (ohlcv_it.rs), which compares the two surfaces against each other rather
+    -- than against literals, over a fixture that now holds imported hours as
+    -- well as polls, and — without a ClickHouse — by
+    -- the_views_and_the_peg_series_admit_the_same_external_rows
+    -- (prices-api queries_ch.rs), which pins that the two spell the predicate
+    -- the same way.
     LEFT JOIN
     (
         SELECT
@@ -533,9 +603,20 @@ FROM
             issuer_address,
             contract_address,
             toStartOfInterval(timestamp, INTERVAL 1 DAY) AS bucket,
-            argMax(usd_rate, timestamp)                  AS usd_rate
+            -- ⚠️ THE RANK COMES FIRST IN THE TUPLE, and that ordering is the
+            -- whole preference rule (task 0267). argMax over a TUPLE compares
+            -- element by element, so `(rank, timestamp)` means: any 'oracle' row
+            -- in the bucket beats EVERY imported row regardless of when each was
+            -- observed, and the timestamp only breaks ties WITHIN one method.
+            -- Keying on the timestamp alone -- the shape this was before the
+            -- widening -- would let a backfilled import land later in the day
+            -- than the last poll and silently outrank a measured reading.
+            -- argMax over a tuple is an idiom this codebase already ships; see
+            -- the two-key argMaxIf in prices-api queries_ch.rs.
+            argMax(usd_rate, (if(method = 'oracle', 1, 0), timestamp)) AS usd_rate,
+            argMax(method,   (if(method = 'oracle', 1, 0), timestamp)) AS rate_method
         FROM prices.usd_rate FINAL
-        WHERE method = 'oracle'
+        WHERE method IN ('oracle', 'external')
         GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket
     ) AS r
         ON  r.asset_kind       = b.asset_kind
@@ -584,7 +665,18 @@ SELECT
        if(max(peg_rate) > 0, max(peg_rate), CAST(1 AS Decimal(38, 14))),
        CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))) AS close_usd,
     CAST(if(max(is_peg) = 1 AND sum(w) = 0,
-            if(max(peg_rate) > 0, 'oracle', 'peg'),
+            -- Three-way since task 0267, because a measured rate can now arrive
+            -- from two provenances. ⚠️ The PEG DISCRIMINATOR STAYS FIRST and
+            -- stays `max(peg_rate) <= 0`: arm B's join_use_nulls note explains
+            -- that an unmatched LEFT JOIN yields the column DEFAULT rather than
+            -- NULL on prod, so "this bucket has no rate at all" reads as 0 in
+            -- peg_rate AND as 0 in rate_rank, and only the peg_rate test reads
+            -- identically under both join_use_nulls settings. Ordering the rank
+            -- test first would work by accident, not by rule.
+            -- Only once a rate EXISTS does the rank say which provenance it came
+            -- from: 2 = 'oracle', 1 = 'external'. See arm B for why the rank is
+            -- numeric rather than a max() over the method string.
+            multiIf(max(peg_rate) <= 0, 'peg', max(rate_rank) = 2, 'oracle', 'external'),
             'traded') AS LowCardinality(String)) AS method
 FROM
 (
@@ -600,7 +692,10 @@ FROM
         toFloat64(p.close_usd) * toFloat64(p.volume_base) AS v,
         toFloat64(p.volume_base)                          AS w,
         toUInt8(0)                                        AS is_peg,
-        CAST(0 AS Decimal(38, 14))                        AS peg_rate
+        CAST(0 AS Decimal(38, 14))                        AS peg_rate,
+        -- UNION ALL matches arms POSITIONALLY and requires an identical column
+        -- count, so this placeholder is structural, not decoration (task 0267).
+        toUInt8(0)                                        AS rate_rank
     FROM prices.price_ohlcv_1h AS p FINAL
     INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
     WHERE p.close_usd > 0
@@ -634,7 +729,17 @@ FROM
         -- would be DEAD CODE on prod. ifNull() only covers a session that sets
         -- join_use_nulls = 1; the `> 0` test in the outer SELECT is the real
         -- discriminator, and it reads the same under both settings.
-        ifNull(r.usd_rate, CAST(0 AS Decimal(38, 14))) AS peg_rate
+        ifNull(r.usd_rate, CAST(0 AS Decimal(38, 14))) AS peg_rate,
+        -- Task 0267. NUMERIC rank, never a max() over the method STRING: that
+        -- would only work by the lexicographic accident that 'oracle' sorts
+        -- above 'external', which is a property of the English words and not of
+        -- the precedence rule. 2 beats 1 by arithmetic.
+        -- Same join_use_nulls rule as peg_rate above: an unmatched LEFT JOIN
+        -- yields the column DEFAULT, so the rank arrives as 0 (not NULL) and the
+        -- ifNull() covers only a session that sets join_use_nulls = 1.
+        multiIf(ifNull(r.rate_method, '') = 'oracle', 2,
+                ifNull(r.rate_method, '') = 'external', 1,
+                0) AS rate_rank
     FROM
     (
         SELECT
@@ -690,10 +795,18 @@ FROM
     -- refuses. Pinned as expected behaviour by views_it.rs::
     -- a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains.
     --
-    -- method = 'oracle' selects a MEASURED reading. usd_rate keys on
+    -- The method predicate selects a MEASURED reading. usd_rate keys on
     -- (identity, timestamp, method) precisely so a task 0154 'pivot' row cannot
     -- silently replace a measurement; the consumer chooses, and this consumer
     -- chooses measured or nothing. Same choice as current.sql's tip surface.
+    --
+    -- Task 0267 widened "measured" from one word to two: 'external' is a reading
+    -- IMPORTED from an outside USD series (init.sql's method vocabulary), which
+    -- is evidence of the same standing as a poll and is admitted here. A DERIVED
+    -- 'pivot'/'pivot2' rate still is not, and neither is the pre-promotion
+    -- 'external-candidate' staging word, which no read predicate names.
+    -- Where one bucket holds BOTH an oracle row and an imported one, oracle wins
+    -- by the explicit rank in the argMax tuple below, never by timestamp.
     --
     -- Flooring uses toStartOfInterval, the SAME function the rollup MVs use to
     -- build these buckets (rollups.sql) — so the two agree under any server
@@ -721,17 +834,55 @@ FROM
     -- under which a daily close can equal the last hourly close of that day at
     -- all (subject to the gap caveat above).
     --
-    -- ⚠️ ONE DELIBERATE DIFFERENCE, and it is not drift. `/ohlcv` serves grains
-    -- this view does not, down to `1m`, and a 1-minute bucket is NARROWER than
-    -- the oracle's 5-minute poll cadence — so scoping strictly to the bucket
-    -- there would leave ~4 buckets in 5 on the $1 fallback and turn the series
-    -- into a square wave. Its window is therefore max(bucket, 300 s), 300 s
-    -- being enrichment's own FORWARD_FILL_WINDOW_S. At `1h` and `1d` — the only
-    -- grains this view has — max(bucket, 300 s) IS the bucket, so the two agree
-    -- exactly wherever they are comparable. Pinned by
-    -- ohlcv_agrees_with_price_usd_series_on_the_same_bucket (ohlcv_it.rs), which
-    -- compares the two surfaces against each other rather than against
-    -- literals.
+    -- ⚠️ TWO DELIBERATE DIFFERENCES from `/ohlcv`, and neither is drift.
+    --
+    -- (1) THE ORACLE WINDOW. `/ohlcv` serves grains this view does not, down to
+    -- `1m`, and a 1-minute bucket is NARROWER than the oracle's 5-minute poll
+    -- cadence — so scoping strictly to the bucket there would leave ~4 buckets
+    -- in 5 on the $1 fallback and turn the series into a square wave. Its
+    -- window is therefore max(bucket, 300 s), 300 s being enrichment's own
+    -- FORWARD_FILL_WINDOW_S. At `1h` and `1d` — the only grains these views
+    -- have — max(bucket, 300 s) IS the bucket, so the two agree exactly
+    -- wherever they are comparable.
+    --
+    -- (2) THE IMPORTED ROW'S WINDOW (task 0267). `/ohlcv` additionally floors
+    -- an `external` row at `toStartOfDay(bkt, 'UTC')`, so ONE imported row is
+    -- valid for the whole UTC day it is stamped on. These views do not: they
+    -- bucket an imported row exactly like a poll, at the bucket it falls in.
+    --
+    -- ⚠️ That is a SAFETY NET on `/ohlcv`, not a difference in what production
+    -- serves. Since the 2026-09-09 hourly decision the loader runs at BOTH
+    -- grains (`load-external-rate --grain daily|hourly`), so `usd_rate` holds
+    -- an `external` row for EVERY HOUR of every covered day and both surfaces
+    -- resolve the same row for the same bucket. The two therefore agree, which
+    -- is what task 0246's cross-surface criterion asserts. The net is
+    -- observable in two cases. One: someone loads the daily file alone and not
+    -- the hourly one — in which case `/ohlcv` publishes the imported rate for
+    -- all 24 hours of a day and `price_usd_series_1h` publishes it for the 00:00
+    -- hour and `1`/'peg' for the other twenty-three. Two, and the reason
+    -- `/ohlcv` now bounds its net by the bucket's END: on the oracle epoch's own
+    -- day the import ends at 13:00 and the epoch is 14:00, so a bucket reaching
+    -- past 14:00 with no poll inside it fell into the day-wide net and was
+    -- published as a measurement the imported series does not hold — at 1h, and
+    -- at 1d/1w/1M for any bucket the oracle rank did not take. That bound is
+    -- `bo.bend <= toDateTime(USDC_ORACLE_EPOCH_S)` (rendered as the literal
+    -- 1773237600) in `peg_series_sql`, which builds `ohlcv_peg_series`.
+    -- The net exists because task 0268's
+    -- external enrichment tier prices every candle of an imported day from that
+    -- one daily row, and `/ohlcv` must not contradict the candles beside it.
+    --
+    -- Widening this view with a UNION ALL / ARRAY JOIN over the 24 hours of an
+    -- imported day was considered and REJECTED (task 0267, review round 2
+    -- WR-09): hourly rows make it unnecessary, and it would have added a second
+    -- rate shape to a view whose whole job is to be the boring one.
+    --
+    -- Pinned by ohlcv_agrees_with_price_usd_series_on_the_same_bucket
+    -- (ohlcv_it.rs), which compares the two surfaces against each other rather
+    -- than against literals, over a fixture that now holds imported hours as
+    -- well as polls, and — without a ClickHouse — by
+    -- the_views_and_the_peg_series_admit_the_same_external_rows
+    -- (prices-api queries_ch.rs), which pins that the two spell the predicate
+    -- the same way.
     LEFT JOIN
     (
         SELECT
@@ -740,9 +891,20 @@ FROM
             issuer_address,
             contract_address,
             toStartOfInterval(timestamp, INTERVAL 1 HOUR) AS bucket,
-            argMax(usd_rate, timestamp)                  AS usd_rate
+            -- ⚠️ THE RANK COMES FIRST IN THE TUPLE, and that ordering is the
+            -- whole preference rule (task 0267). argMax over a TUPLE compares
+            -- element by element, so `(rank, timestamp)` means: any 'oracle' row
+            -- in the bucket beats EVERY imported row regardless of when each was
+            -- observed, and the timestamp only breaks ties WITHIN one method.
+            -- Keying on the timestamp alone -- the shape this was before the
+            -- widening -- would let a backfilled import land later in the hour
+            -- than the last poll and silently outrank a measured reading.
+            -- argMax over a tuple is an idiom this codebase already ships; see
+            -- the two-key argMaxIf in prices-api queries_ch.rs.
+            argMax(usd_rate, (if(method = 'oracle', 1, 0), timestamp)) AS usd_rate,
+            argMax(method,   (if(method = 'oracle', 1, 0), timestamp)) AS rate_method
         FROM prices.usd_rate FINAL
-        WHERE method = 'oracle'
+        WHERE method IN ('oracle', 'external')
         GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket
     ) AS r
         ON  r.asset_kind       = b.asset_kind

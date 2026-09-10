@@ -645,6 +645,22 @@ asset-id reassignment.
 | `prices.usd_reference_1h`     | hourly | `xlm_usd` per hour bucket                       | hourly companion to the above                                                                                    |
 | `prices.identity_by_contract` | —      | contract → natural identity                     | SAC read-seam resolver (§12.4): map a Soroban-DEX pool leg's contract address to the natural identity to look up |
 
+> ⚠️ **The peg fill in both `price_usd_series` views admits an IMPORTED rate**
+> (task 0267). `usd_rate` rows with `method = 'external'` — task 0265's composed
+> USDC/USD history, loaded by `load-external-rate` — count as a measurement
+> alongside `method = 'oracle'`, and where one bucket holds both, **oracle wins
+> outright** by the rank-first `argMax` tuple, never by recency. `rate_method`
+> on the view says which won, so a TVL computation can tell an imported rate
+> from a polled one.
+>
+> ⚠️ These views bucket an imported row exactly like a poll. `/v1/assets/{id}/ohlcv`
+> additionally treats a **lone daily** imported row as valid for its whole UTC
+> day, as a safety net for a daily-only load. The loader runs at **both** grains
+> (`--grain daily|hourly`) and production carries an imported row for every hour
+> of every covered day, so the two surfaces agree; the net is observable only if
+> someone loads the daily file without the hourly one. See the comment block
+> above the rate join in `views.sql`.
+
 ```sql
 -- One volume-weighted USD close per (natural identity, day bucket). The
 -- cross-source/cross-quote collapse: volume-weighted close_usd over every candle

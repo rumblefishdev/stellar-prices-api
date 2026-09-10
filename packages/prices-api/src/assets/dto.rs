@@ -423,6 +423,44 @@ pub struct Candle {
     /// `None` when the price fields are absent, and for `base_currency=XLM`,
     /// where nothing is converted and so nothing is derived.
     pub derived: Option<bool>,
+    /// The outside USD series a `method = 'external'` rate was imported from —
+    /// `chainlink` or `bitstamp` (task 0267, task 0265's composed history).
+    ///
+    /// ⚠️ **Populated only on canonical USDC's OWN synthesized series** (§6, the
+    /// `ohlcv_peg_series` path). `None` on every other asset — not because those
+    /// candles have no provenance, but because the candle TABLES carry no
+    /// provenance column to report it from. That gap is task 0268's Issue 9 and
+    /// is deliberately out of scope here; a value invented for those rows would
+    /// be a claim nothing measured.
+    ///
+    /// Also `None` where the price fields are absent, where the bucket fell
+    /// back to the $1 peg — a fallback has no source, and naming one would make
+    /// an assumption indistinguishable from an observation — and where an
+    /// `oracle` reading won the bucket, even if an outranked import shares it.
+    /// Never `Some("")`: the column DEFAULT is collapsed to NULL in the query
+    /// (review CR-01).
+    ///
+    /// ⚠️ Positional RowBinary: this and [`Candle::quality`] are the LAST two
+    /// fields, and the two outer projections plus all three aggregate arms in
+    /// `queries_ch` emit them in this exact order. Appending at both ends is what
+    /// keeps the preceding eleven positions fixed.
+    pub source: Option<String>,
+    /// The importing series' own confidence in that day's observation
+    /// (task 0267): `measured`, `measured-disputed`, or `fallback`.
+    ///
+    /// - `measured` — a real observation from the primary feed.
+    /// - `measured-disputed` — observed, but a cross-check against a second
+    ///   independent source disagreed beyond the composer's spread tolerance.
+    ///   The number is real; treat it as less certain than a plain `measured`
+    ///   day, and prefer not to build an alert on it alone.
+    /// - `fallback` — the primary feed had nothing for that day and the composer
+    ///   substituted its secondary source. Still an observation, and still far
+    ///   better than the $1 assumption it replaces, but a different instrument
+    ///   on a different venue.
+    ///
+    /// Same scope as [`Candle::source`]: non-null only on USDC's own synthesized
+    /// series, `None` everywhere else and on the peg fallback.
+    pub quality: Option<String>,
 }
 
 /// `GET /assets/{id}/ohlcv` response.
