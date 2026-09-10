@@ -778,6 +778,29 @@ to check.
    `--snapshots-verified` assertion as Appendix A. A reset with no rollback
    point is not a repair.
 
+6. **The NEW `prices-api` binary is already live — deploy it BEFORE this
+   campaign, never after.** The binary on production before this task labels a
+   USDC-quoted candle `peg` when `close_usd = close` and `oracle` otherwise, so
+   every candle this campaign re-prices below the epoch would be published as a
+   Reflector reading — a poll that did not exist before 2026-03-11 14:00 UTC.
+   Measured on the re-priced 2023-03-11 candles: old binary `oracle`, new
+   binary `external`. The new binary labels each row by its CURRENT state
+   (`close_usd = close` -> `assumed-par`, re-priced -> `external`), so it is
+   truthful at every moment of a campaign that runs for hours. Its schema
+   prerequisite (`usd_rate.quality`) is covered by the 0267 runbook.
+
+   Check: a USDC-quoted candle before 2026-03-11 on `/v1/assets/<asset>/ohlcv`
+   reports `assumed-par`, never `peg`. Seeing `peg` means the old binary — STOP.
+
+7. **No scheduled writer can reach the campaign's rows.** Checked, not assumed:
+   the enrichment Lambda and its historical sweep work only
+   `price_ohlcv_1m` (`CLICKHOUSE_TABLE`, 7-day retention — no pre-epoch rows),
+   and the coarse sweep works the trailing `COARSE_SWEEP_LOOKBACK_MONTHS`
+   (default 2). Confirm that value has not been raised far enough to reach
+   2026-02; if it has, disable the `prices-<env>-coarse-sweep` rule for the
+   duration. A sweeper running pre-0268 code on a row this campaign just zeroed
+   would re-peg it at $1.
+
 ### The granularities that actually hold deep history
 
 `price_ohlcv_1h`, `_4h`, `_1d`, `_1w`, `_1M`. Do not attempt the others:
@@ -850,6 +873,13 @@ campaign touched **567,232** rows in about **4 hours**. If a dry run over
 predicate or with precondition 1 — do not proceed.
 
 ### The baseline (before)
+
+**Measure it live, per table, immediately before the run, and write the numbers
+down — they are the campaign's reference, not the 654,291 in the task title.**
+That figure is a one-off measurement from tasks 0247/0168; the repo also quotes
+522,321 for the same population, and production has kept changing since. A
+stale reference makes the before/after comparison unable to tell a failed
+repair from ordinary data drift.
 
 Per table, the population about to change:
 
@@ -926,6 +956,41 @@ large shortfall points at precondition 2 (a day-end stamping convention) rather
 than at the reset.
 
 ### After — the falsifier
+
+**First, the check that proves nothing was missed.** A USDC-quoted candle that
+still carries `close_usd = close` after the campaign is correct in exactly two
+cases: no imported rate existed in the tier's window (before 2021-01-25, or a
+gap), or the rate there was exactly 1.0 (it happens — Chainlink read par to the
+last digit on 173 of the 1,872 covered days). Anything else is a candle the
+repair did not reach. This query mirrors the external tier's own lookup — an
+ASOF on the bucket END within `max(bucket_width, 1 day)` — and must return **0**
+per table:
+
+```sql
+-- price_ohlcv_1h: bend = timestamp + 3600, window 86400
+-- price_ohlcv_4h: bend = timestamp + 14400, window 86400
+-- price_ohlcv_1d: bend = addDays(timestamp, 1, 'UTC'), window 86400
+SELECT count() AS unexplained_dollar
+FROM ( SELECT p.timestamp + 3600 AS bend, 1 AS k
+       FROM prices.price_ohlcv_1h AS p FINAL
+       WHERE p.quote_asset_id = <USDC asset_id>
+         AND p.timestamp < toDateTime(1773237600)
+         AND p.close_usd = p.close AND p.volume_quote > 0 ) AS p
+ASOF LEFT JOIN ( SELECT 1 AS k, timestamp AS rts, usd_rate AS usd
+                 FROM prices.usd_rate FINAL
+                 WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+                   AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+                   AND contract_address = '' AND method = 'external' AND usd_rate > 0 ) AS r
+  ON r.k = p.k AND r.rts < p.bend
+WHERE r.rts != toDateTime(0) AND r.usd != 1
+  AND (toUInt32(p.bend) - toUInt32(r.rts)) <= 86400
+```
+
+Verified against the real series: a par candle from 2020 (no rate) and one at
+2021-01-30 01:00 (rate exactly 1.0) are not counted; an un-repaired 2023-03-11
+09:00 candle (rate 0.90992869) is. A non-zero count means re-run the campaign
+for that table — the rows are still on the $1 signature, so a second pass
+reaches them.
 
 `native` on 2023-03-11 must now read **~3% below** its USDC-denominated close
 on every grain whose bucket ENDS inside the depeg — `_1h`, `_4h`, `_1d`. As SQL,

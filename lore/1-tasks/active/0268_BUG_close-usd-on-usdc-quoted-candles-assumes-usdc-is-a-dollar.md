@@ -835,3 +835,26 @@ Before, their `required-features = ["aws-mtls"]` kept them out of every CI job.
 binary, so no still-$1 value is labelled measured — not yet in the runbook), and
 re-measuring the 654,291 population before the run. The `peg` -> `assumed-par`
 rename on the candle path is a breaking wire change and needs a release note.
+
+### 2026-09-10 (later) — ordering resolved, recount and after-check in the runbook
+
+- **`assumed-par` stays (user decision).** Considered reverting to `peg` for
+  ADR 0011 consistency and to avoid a breaking change; kept `assumed-par`
+  because stopping `method: peg` on non-stablecoins is this task's stated
+  purpose and an acceptance criterion. Needs a release note (draft in the
+  session: `peg` -> `assumed-par` on quote legs, new `external`).
+- **Deploy ordering — the NEW API binary goes live BEFORE the campaign.** This
+  reverses the earlier recommendation, which predated the `/code-review`
+  labelling fix. The binary on production labels every re-priced pre-epoch
+  candle `oracle` (measured: the re-priced 2023-03-11 candles read `oracle`
+  under the old expression, `external` under the new). The new binary labels
+  each row by its current state, so it is truthful throughout the campaign.
+  Runbook Appendix B precondition 6.
+- **No scheduled writer reaches the campaign's rows** (precondition 7): the
+  enrichment Lambda and its historical sweep work only `price_ohlcv_1m`; the
+  coarse sweep works the trailing 2 months.
+- **The 654,291 figure is no longer the reference.** The runbook's baseline is
+  now measured live per table before the run. The after-check gained an
+  "unexplained dollar" query mirroring the tier's own ASOF: par candles are
+  correct only with no rate in the window or a rate of exactly 1.0; anything
+  else must be 0. Verified against the real series.
