@@ -642,6 +642,45 @@ date, the response includes a `backfill_note` field indicating how far back data
 }
 ```
 
+**⚠️ Dust prints — a present price that is not a market price (task 0116).**
+
+A bucket whose entire volume is one or two **stroops** (`1e-7`, the smallest
+amount Stellar can represent) in a single trade sets `close` from an order too
+small to carry price information. Someone sells a millionth of a token for two
+XLM, and the implied unit price is millions of dollars. The arithmetic is
+correct and the trade really happened — the input is meaningless, and it costs a
+fraction of a cent to mint one.
+
+Measured on production `price_ohlcv_1h`:
+
+| month                     | one-stroop buckets over $1,000 | worst `close`                 |
+| ------------------------- | ------------------------------ | ----------------------------- |
+| 202502 (repaired history) | **85.0%**                      | $29,606,748 on ~$3 of volume  |
+| 202608 (live-written)     | 22.3%                          | $3,517,649 on $0.35 of volume |
+
+The effect decays cleanly with trade size: buckets carrying at least one whole
+token exceed $1,000 just **0.11%** (202502) and **0.008%** (202608) of the time.
+
+`volume_base` and `trade_count` are on every candle, so a consumer can identify
+these without extra fields: `trade_count == 1` together with a `volume_base` of
+`0.0000001`-`0.0000009` is a single smallest-possible order.
+
+> **Do not filter on size alone.** Of the dust buckets that can be checked
+> against a non-dust reference price for the same pair, **a third are priced
+> correctly** — one stroop of a genuinely expensive asset is a real order at the
+> right price. A bare size threshold therefore misclassifies precisely the
+> assets worth the most. Use it to suppress an outlier you already doubt, not as
+> a standalone quality verdict.
+
+`volume_quote_usd` is **not** affected: these buckets carry a few dollars at
+most, so volume aggregates are undistorted. Only the price fields need the
+filter.
+
+Separately, 93% of dust buckets belong to assets with **no** non-dust trading
+anywhere in the month — there is no reference price to check them against, and
+the honest description is an asset with no meaningful market rather than a bad
+candle. That is tracked as task 0274, not here.
+
 #### `GET /assets/{asset_identifier}/price`
 
 Current real-time price (latest snapshot from `current_prices`).
