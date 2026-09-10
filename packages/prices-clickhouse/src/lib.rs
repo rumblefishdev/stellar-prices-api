@@ -109,6 +109,28 @@ pub const USDC_ISSUER: &str = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE3
 /// single-source-of-truth contract.
 pub const USDT_ISSUER: &str = "GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V";
 
+/// The first instant `prices.usd_rate` holds a **measured** `oracle` row for
+/// canonical USDC on prod: **2026-03-11 14:00:00 UTC**.
+///
+/// Load-bearing boundary, and a single Rust source of truth in the same spirit
+/// as [`USDC_ISSUER`] — both `prices-api` and `enrichment-worker` already depend
+/// on this crate, so the two consumers read ONE value and cannot drift:
+///
+/// - **`prices-api` (read side)** — `/ohlcv` derives a candle's provenance from
+///   its rate signature rather than a stored column, so a scaled USDC-quoted
+///   candle stamped *before* this instant was priced by the imported series
+///   (task 0267's `method = 'external'` rows) and one stamped *after* it was
+///   priced by a polled Reflector reading. The label arm keys on this constant.
+/// - **`enrichment-worker` (write side)** — the default upper bound of task
+///   0268's USD reset (`--reset-not-after`). Scoping the reset below this
+///   instant is what makes the oracle-shadow guard's premise false there.
+///
+/// ⚠️ The read side's soundness rests on prod holding **no** `oracle` row for
+/// USDC before this instant. That is in-repo prose (`queries_ch.rs`,
+/// `views.sql`), not a live measurement; the 0268 runbook's Appendix B
+/// precondition 3 is the check that confirms it before the pass runs.
+pub const USDC_ORACLE_EPOCH_S: u32 = 1_773_237_600;
+
 /// ClickHouse client configuration, sourced from environment with local-dev
 /// defaults.
 #[derive(Debug, Clone)]
@@ -210,6 +232,38 @@ pub(crate) fn split_statements(sql: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Days from 1970-01-01 to a civil (y, m, d), Howard Hinnant's `days_from_civil`.
+    ///
+    /// Written out rather than pulled from a date crate on purpose: the point of
+    /// the assertion below is to derive the epoch INDEPENDENTLY of the literal in
+    /// the constant. Re-typing the same digits either side of an `assert_eq!`
+    /// would pass whatever was mistyped.
+    fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let mp = (m + 9) % 12;
+        let doy = (153 * mp + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146_097 + doe - 719_468
+    }
+
+    /// [`USDC_ORACLE_EPOCH_S`] is 2026-03-11T14:00:00Z, and a mistyped digit must
+    /// not be able to ship. The read-side label arm and the 0268 reset's upper
+    /// bound both key on this instant, and both fail SILENTLY if it drifts — a
+    /// too-early epoch relabels genuinely-oracle-priced candles `external`, a
+    /// too-late one relabels imported ones `oracle`. Nothing errors either way.
+    #[test]
+    fn usdc_oracle_epoch_is_2026_03_11t14_00_00z() {
+        let expected = days_from_civil(2026, 3, 11) * 86_400 + 14 * 3_600;
+        assert_eq!(
+            i64::from(USDC_ORACLE_EPOCH_S),
+            expected,
+            "USDC_ORACLE_EPOCH_S must be 2026-03-11T14:00:00Z (the first measured \
+             oracle row for canonical USDC in prices.usd_rate on prod)"
+        );
+    }
 
     #[test]
     fn split_statements_drops_line_comments_and_empty_chunks() {

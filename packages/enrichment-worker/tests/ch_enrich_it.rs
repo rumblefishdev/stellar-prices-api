@@ -13,7 +13,7 @@ use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPa
 use enrichment_worker::repair::{
     CoarseRepairConfig, CoarseRepairDriver, CoarseSweepConfig, run_coarse_sweep,
 };
-use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
+use prices_clickhouse::{USDC_ISSUER, USDC_ORACLE_EPOCH_S, USDT_ISSUER};
 
 fn ch_url() -> String {
     std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string())
@@ -1283,6 +1283,11 @@ async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
     c.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 3,
         not_before: t_new,
+        // The 0182 shape, stated at every site rather than defaulted: unbounded
+        // above and no reference join. Task 0268 added both fields precisely so
+        // each caller has to say which repair it is running.
+        not_after: None,
+        require_external_rate: false,
     });
     let stats = ChEnrichmentPass::new(c).run().await.unwrap();
 
@@ -1354,6 +1359,8 @@ async fn the_usd_reset_refuses_a_quote_leg_that_no_tier_can_reprice() {
     c.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 10,
         not_before: t_new,
+        not_after: None,
+        require_external_rate: false,
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
 
@@ -1391,6 +1398,11 @@ async fn the_usd_reset_refuses_a_bounded_pass() {
     c.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 3,
         not_before: t_new,
+        // The 0182 shape, stated at every site rather than defaulted: unbounded
+        // above and no reference join. Task 0268 added both fields precisely so
+        // each caller has to say which repair it is running.
+        not_after: None,
+        require_external_rate: false,
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
 
@@ -1419,6 +1431,115 @@ async fn the_usd_reset_refuses_a_bounded_pass() {
 /// would be undone by the very next statement in the same pass — and the run
 /// would report a healthy repair over unchanged values, now labelled
 /// `method = 'oracle'`. The pass must refuse instead.
+///
+/// ⚠️ **This test now pins the UNBOUNDED half of the guard.** Task 0268 scoped
+/// the count to `[not_before, not_after)`; with `not_after = None` — the spec
+/// this test builds — it still counts to the end of time, so 0182's all-time
+/// refusal is unchanged. The bounded half is
+/// `the_bounded_usd_reset_is_not_refused_by_oracle_rows_above_its_window`.
+/// 🔑 **The forward-fill band below `not_before`.** The oracle tier ASOFs
+/// `o.timestamp <= p.timestamp` and accepts a reading up to `window_s` old, so a
+/// row stamped just BELOW the reset's floor still re-prices candles just ABOVE
+/// it — inside the very range the reset is about to zero. A guard that starts
+/// counting at `not_before` cannot see that row: it reports a clean premise, the
+/// reset zeroes the band, and the oracle tier refills it from the same reading
+/// the reset existed to remove, relabelled `method = 'oracle'`.
+///
+/// Task 0268 scoped this guard's UPPER bound to the reset window and gave it a
+/// lower bound at the same time; only the upper one needed to move. The floor is
+/// therefore widened by one `window_s`, and this is the test that it is.
+#[tokio::test]
+#[ignore]
+async fn the_usd_reset_is_refused_by_an_oracle_row_that_forward_fills_into_it() {
+    let db = "it_enrich_0182_shadow_band";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    let client = setup_0182(db, t_old, t_new).await;
+
+    // 100 s below the floor — outside [not_before, ..), inside the 300 s window
+    // the oracle tier will forward-fill across.
+    let shadow = t_new - 100;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices \
+             (asset_id, oracle_name, timestamp, price_usd) VALUES \
+             (3, 'reflector', {shadow}, 1.0)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 3,
+        not_before: t_new,
+        not_after: None,
+        require_external_rate: false,
+    });
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+
+    assert!(
+        matches!(err, ChEnrichError::ResetBlockedByOracleRows { quote_asset_id, rows, .. }
+                 if quote_asset_id == 3 && rows == 1),
+        "a reading {}s below the floor still forward-fills into the reset window \
+         and must refuse it, got {err:?}",
+        t_new - shadow
+    );
+
+    let v = close_usd(&client, db, 10, 3, t_new).await;
+    assert!(
+        (v - 10.0).abs() < 1e-4,
+        "a refused reset must not have written anything, got {v}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// The external path is canonical-USDC-only at every site, but the priceability
+/// gate accepts USDT (the peg tier can price it), so
+/// `--reset-quote-asset-id <USDT> --reset-require-external-rate` used to be a
+/// legal combination: it zeroed USDT-quoted rows on USDC's rate days, the
+/// external tier — which only ever runs for USDC — refilled none of them, and
+/// the peg tier wrote $1 back over the lot. Task 0182's incident, different
+/// quote asset. Refused in the library, so no driver can assemble it.
+#[tokio::test]
+#[ignore]
+async fn an_external_reset_refuses_a_quote_leg_that_is_not_canonical_usdc() {
+    let db = "it_enrich_0268_usdt_external";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    // The 0182 fixture is the one that tracks USDT (asset_id 3) as a stable
+    // reference, so `assert_reset_target_is_priceable` passes it and this test
+    // reaches the guard it is about.
+    let client = setup_0182(db, t_old, t_new).await;
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(UsdResetSpec {
+        // asset_id 3 is USDT in this fixture: a stable reference, so the
+        // priceability gate passes it, and the external tier cannot touch it.
+        quote_asset_id: 3,
+        not_before: 0,
+        not_after: Some(prices_clickhouse::USDC_ORACLE_EPOCH_S),
+        require_external_rate: true,
+    });
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+    assert!(
+        matches!(err, ChEnrichError::ResetExternalRateLegIsNotUsdc { quote_asset_id, .. }
+                 if quote_asset_id == 3),
+        "an external reset on a non-USDC leg must be refused, got {err:?}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 #[ignore]
 async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_leg() {
@@ -1443,6 +1564,11 @@ async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_l
     c.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 3,
         not_before: t_new,
+        // The 0182 shape, stated at every site rather than defaulted: unbounded
+        // above and no reference join. Task 0268 added both fields precisely so
+        // each caller has to say which repair it is running.
+        not_after: None,
+        require_external_rate: false,
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
 
@@ -1771,4 +1897,812 @@ async fn a_backfill_into_an_exhausted_month_reopens_it() {
         close_usd(&client, db, 10, 2, feb2).await > 0.0,
         "drift correction closed the loop — the backfilled row is enriched"
     );
+}
+
+// ---- task 0268: the external tier ---------------------------------------
+
+/// Seed one `method = 'external'` row for canonical USDC into a scratch
+/// `usd_rate`, with the writer's exact column list.
+///
+/// ⚠️ **`ts` is stamped at the START of the UTC day, and that pins task 0267's
+/// convention.** The tier resolves at the bucket's END with an ASOF
+/// `rts < bend`, so a day-start stamp is the same day's rate for every bucket in
+/// that day. If 0267 instead stamps its daily rows at day END, every bucket
+/// resolves to the PREVIOUS day's rate — an off-by-one-day error that produces
+/// entirely plausible numbers and fails nowhere. This helper is the thing that
+/// will catch it: 0268's runbook Appendix B, precondition 2, is the query that
+/// confirms the convention on prod before the pass runs.
+async fn seed_external_rate(client: &Client, db: &str, ts: u32, rate: f64) {
+    client
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, \
+              timestamp, usd_rate, method, reference_asset, hops, version) VALUES \
+             ('credit', 'USDC', '{USDC_ISSUER}', '', {ts}, {rate}, 'external', '', 0, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Mark the imported series as HOURLY-loaded, the way production loads it
+/// (daily file first, hourly second). The external reset refuses a sub-daily
+/// table while every imported row sits at UTC midnight, because a candle priced
+/// from the day close then leaves the $1 signature and can never be re-opened.
+///
+/// The marker is one row at 2000-01-01 01:00 UTC: away from midnight, so it
+/// satisfies the gate, and on a day no fixture candle occupies, so neither the
+/// day-set nor any ASOF window can price anything from it.
+async fn seed_hourly_marker(client: &Client, db: &str) {
+    seed_external_rate(client, db, 946_688_400, 1.0).await;
+}
+
+async fn seed_assets_and_candles(client: &Client, db: &str) {
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&CANDLES.replace("{db}", db))
+        .execute()
+        .await
+        .unwrap();
+}
+
+// The deep FOO/USDC fixture candle (`close = 4`, `volume_quote = 4`) and the
+// start of its UTC day, 2020-09-13.
+const DEEP_TS: u32 = 1_600_000_000;
+const DEEP_DAY_START: u32 = 1_599_955_200;
+// The recent oracle-covered FOO/USDC candle (`close = 5`) and its day start.
+const RECENT_TS: u32 = 1_700_000_000;
+const RECENT_DAY_START: u32 = 1_699_920_000;
+// USDC's real close on 2023-03-11 — the number this whole task exists for.
+const DEPEG_RATE: f64 = 0.9681;
+
+/// (a) A USDC-quoted candle the oracle tier left at zero is priced from the
+/// MEASURED rate, not from `× $1`, and `volume_quote_usd` is scaled by the same
+/// rate. `4 × 0.9681 = 3.8724` — the 3.19% the peg tier used to discard.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn external_tier_prices_a_usdc_leg_from_the_measured_rate() {
+    let db = "it_enrich_external_measured";
+    let client = setup_scratch(db).await;
+    seed_assets_and_candles(&client, db).await;
+    seed_external_rate(&client, db, DEEP_DAY_START, DEPEG_RATE).await;
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let got = close_usd(&client, db, 10, 2, DEEP_TS).await;
+    assert!(
+        (got - 3.8724).abs() < 1e-4,
+        "close_usd must be close × the measured rate (4 × 0.9681 = 3.8724), got {got} \
+         — 4.0 means the peg tier priced it and the external tier never ran"
+    );
+
+    let vqu: f64 = client
+        .query(&format!(
+            "SELECT toFloat64(volume_quote_usd) FROM {db}.price_ohlcv_1m FINAL \
+             WHERE asset_id = 10 AND quote_asset_id = 2 AND timestamp = {DEEP_TS}"
+        ))
+        .fetch_one::<f64>()
+        .await
+        .unwrap();
+    assert!(
+        (vqu - 3.8724).abs() < 1e-4,
+        "volume_quote_usd scales by the same rate, got {vqu}"
+    );
+
+    // (d) Idempotent: the tier's candidate filter is `close_usd = 0`, so a second
+    // pass must not find the row again — and must not re-scale an already-scaled
+    // value into 4 × 0.9681².
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+    let again = close_usd(&client, db, 10, 2, DEEP_TS).await;
+    assert!(
+        (again - 3.8724).abs() < 1e-4,
+        "a second pass must leave the value alone, got {again}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// (b) 🔑 THE ORACLE WINS. A polled Reflector reading and an imported rate both
+/// cover the same bucket at DIFFERENT rates: the oracle value is what lands,
+/// because the oracle tier runs first and the external tier's candidate filter
+/// is `close_usd = 0`. A second pass does not move it.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn external_tier_never_overwrites_a_candle_the_oracle_tier_priced() {
+    let db = "it_enrich_external_oracle_wins";
+    let client = setup_scratch(db).await;
+    seed_assets_and_candles(&client, db).await;
+    // The oracle says 1.0012; the imported series says 0.90 for the same day.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES ({RECENT_TS}, 2, 'reflector', 1.0012, '{{}}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    seed_external_rate(&client, db, RECENT_DAY_START, 0.90).await;
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let got = close_usd(&client, db, 10, 2, RECENT_TS).await;
+    assert!(
+        (got - 5.006).abs() < 1e-4,
+        "the oracle value (5 × 1.0012 = 5.006) must win over the import \
+         (5 × 0.90 = 4.5), got {got}"
+    );
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+    let again = close_usd(&client, db, 10, 2, RECENT_TS).await;
+    assert!((again - 5.006).abs() < 1e-4, "idempotent, got {again}");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// (c) 🔑 NO REFERENCE, NO CHANGE — and this is the case task 0268's reset must
+/// never zero.
+///
+/// The only `external` row is 200 days before the candle's bucket, far outside
+/// the derived staleness bound, so the external tier cannot price it. The candle
+/// falls through to the peg tier and keeps `close × $1 = 4.0` exactly. It is not
+/// left at 0, and the pass still makes progress.
+///
+/// This is the 0182 lesson in the write path: task 0182's reset epoch sat 19
+/// hours before the reference market's first candle, so 157 candles were zeroed
+/// and then could not be recomputed. A row with no usable reference must come
+/// out of the pass exactly as it went in.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn external_tier_leaves_a_bucket_with_no_usable_rate_on_the_peg_value() {
+    let db = "it_enrich_external_no_reference";
+    let client = setup_scratch(db).await;
+    seed_assets_and_candles(&client, db).await;
+    seed_external_rate(&client, db, DEEP_DAY_START - 200 * 86_400, DEPEG_RATE).await;
+
+    let stats = ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let got = close_usd(&client, db, 10, 2, DEEP_TS).await;
+    assert!(
+        (got - 4.0).abs() < 1e-4,
+        "with no in-window external rate the peg tier's close × $1 = 4.0 must \
+         stand, got {got} — 0.0 would be the 0182 failure and 3.8724 would mean \
+         the staleness bound never bit"
+    );
+    assert!(
+        stats.rows_enriched > 0,
+        "the pass still prices the other tiers' candles"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Read `volume_quote_usd` from the 1m base table, the companion of [`close_usd`].
+async fn volume_quote_usd(client: &Client, db: &str, asset: u32, quote: u32, ts: u32) -> f64 {
+    client
+        .query(&format!(
+            "SELECT toFloat64(volume_quote_usd) FROM {db}.price_ohlcv_1m FINAL \
+             WHERE asset_id = ? AND quote_asset_id = ? AND timestamp = ?"
+        ))
+        .bind(asset)
+        .bind(quote)
+        .bind(ts)
+        .fetch_one::<f64>()
+        .await
+        .unwrap()
+}
+
+/// Insert one FOO/USDC candle into the 1m base table with the USD columns as
+/// given, so a test can stage a row in a specific pre-enrichment state.
+async fn seed_foo_usdc_candle(client: &Client, db: &str, ts: u32, close: f64, vqu: f64) {
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES ({ts}, 10, 2, 'sdex', {close}, {close}, {close}, {close}, \
+                     1, {close}, {vqu}, 0, {close}, 1, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// (d) 🔑 REVIEW CR-01. A `_1m` candle at **23:30 UTC** resolves to ITS OWN
+/// day's rate, not the next day's.
+///
+/// The first `bucket_end_expr` floored every sub-daily grain to `+ 3600`, so a
+/// 23:30 one-minute bucket got `bend = 00:30` next day and the ASOF `rts < bend`
+/// picked the NEXT day's row from a series stamped at day start. On the depeg
+/// day that is 0.99 instead of 0.9681 — a plausible number, ~2% wrong in the
+/// wrong direction, on the scheduled Lambda's own table. Two rates a day apart,
+/// distinguishable by value, and the candle in the last hour of the first day.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_one_minute_bucket_in_the_last_hour_of_a_day_gets_that_days_rate() {
+    let db = "it_enrich_external_day_boundary";
+    let client = setup_scratch(db).await;
+    seed_assets_and_candles(&client, db).await;
+    // 23:30 UTC on the deep fixture's day (2020-09-13).
+    let late = DEEP_DAY_START + 23 * 3_600 + 30 * 60;
+    seed_foo_usdc_candle(&client, db, late, 4.0, 0.0).await;
+    seed_external_rate(&client, db, DEEP_DAY_START, DEPEG_RATE).await;
+    seed_external_rate(&client, db, DEEP_DAY_START + 86_400, 0.99).await;
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let got = close_usd(&client, db, 10, 2, late).await;
+    assert!(
+        (got - 4.0 * DEPEG_RATE).abs() < 1e-4,
+        "a 23:30 bucket belongs to its own day: expected 4 × 0.9681 = 3.8724, got {got} \
+         — 3.96 means the bucket end overshot midnight and the next day's rate was used"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Read `close_usd` from any candle table — the coarse-grain twin of
+/// [`close_usd`], which is pinned to the 1m base table.
+async fn close_usd_in(client: &Client, db: &str, table: &str, ts: u32) -> f64 {
+    client
+        .query(&format!(
+            "SELECT toFloat64(close_usd) FROM {db}.{table} FINAL \
+             WHERE asset_id = 10 AND quote_asset_id = 2 AND timestamp = ?"
+        ))
+        .bind(ts)
+        .fetch_one::<f64>()
+        .await
+        .unwrap()
+}
+
+/// Insert one unpriced FOO/USDC candle (`close = 4`, `volume_quote = 4`) into
+/// any candle table, so the calendar grains can be exercised on their own
+/// table rather than on the 1m fixture.
+async fn seed_foo_usdc_candle_in(client: &Client, db: &str, table: &str, ts: u32) {
+    client
+        .query(&format!(
+            "INSERT INTO {db}.{table} \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES ({ts}, 10, 2, 'sdex', 4, 4, 4, 4, 1, 4, 0, 0, 4, 1, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// (d2) 🔑 REVIEW WR-10. The `'UTC'` CALENDAR branch of `bucket_end_expr`,
+/// executed against a server, on the table the campaign actually targets.
+///
+/// Every other external-tier fixture runs on `_1m` or `_1h` and takes the
+/// `timestamp + N` branch; `addDays(…, 1, 'UTC')` was asserted as a string
+/// only. A `_1d` candle at day start with rates at day start AND one day later:
+/// the bucket end is `addDays(ts, 1, 'UTC')` = the next midnight, the ASOF is
+/// strict (`rts < bend`), so the SAME day's rate must win and the +1d rate must
+/// not. `3.96` here means the calendar end overshot or the strictness was lost.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_daily_bucket_resolves_the_calendar_bucket_end_against_the_server() {
+    let db = "it_enrich_external_calendar_1d";
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    seed_foo_usdc_candle_in(&client, db, "price_ohlcv_1d", DEEP_DAY_START).await;
+    seed_external_rate(&client, db, DEEP_DAY_START, DEPEG_RATE).await;
+    seed_external_rate(&client, db, DEEP_DAY_START + 86_400, 0.99).await;
+
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1d".to_string();
+    ChEnrichmentPass::new(c).run().await.unwrap();
+
+    let got = close_usd_in(&client, db, "price_ohlcv_1d", DEEP_DAY_START).await;
+    assert!(
+        (got - 4.0 * DEPEG_RATE).abs() < 1e-4,
+        "a daily bucket takes ITS day's rate: expected 4 × 0.9681 = 3.8724, got {got} \
+         — 3.96 means the +1d rate won (rts < bend lost, or the calendar end overshot); \
+         4.0 means the statement never priced it (an execution error would have \
+         surfaced as Err, so check the day-set / staleness bound)"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// (d3) 🔑 REVIEW WR-10, the `addMonths(…, 1, 'UTC')` form. A September 2020
+/// monthly bucket: rates on 09-01, on 09-30 and on 10-01. The calendar end is
+/// 10-01 00:00, so the 09-30 rate wins. A fixed 31-day end (`+ 2_678_400`, the
+/// bug `bucket_end_expr`'s doc block describes) would land on 10-02 and select
+/// the 10-01 rate instead — `3.96`, a plausible number, from the wrong month.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_monthly_bucket_resolves_the_calendar_month_end_against_the_server() {
+    let db = "it_enrich_external_calendar_1m_month";
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    // 2020-09-01 00:00 UTC; 2020-09-30 is 29 days later; 2020-10-01 is 30.
+    let month_start: u32 = 1_598_918_400;
+    seed_foo_usdc_candle_in(&client, db, "price_ohlcv_1M", month_start).await;
+    seed_external_rate(&client, db, month_start, 0.95).await;
+    seed_external_rate(&client, db, month_start + 29 * 86_400, DEPEG_RATE).await;
+    seed_external_rate(&client, db, month_start + 30 * 86_400, 0.99).await;
+
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1M".to_string();
+    ChEnrichmentPass::new(c).run().await.unwrap();
+
+    let got = close_usd_in(&client, db, "price_ohlcv_1M", month_start).await;
+    assert!(
+        (got - 4.0 * DEPEG_RATE).abs() < 1e-4,
+        "a monthly bucket is priced at the month's LAST day: expected 4 × 0.9681 = \
+         3.8724, got {got} — 3.96 is the 10-01 rate (a 31-day end overshot September), \
+         3.80 is the 09-01 rate (resolved at the bucket start)"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// (e) 🔑 REVIEW WR-04. Above `USDC_ORACLE_EPOCH_S` the external tier does NOT
+/// run, even with a covering imported rate and no oracle reading.
+///
+/// The API labels every scaled USDC-quoted candle at or after the epoch
+/// `oracle`. If the tier priced a post-epoch oracle miss from the import, the
+/// wire would report a Reflector poll that never happened. The candle must fall
+/// to the peg tier instead, where its `close_usd = close` signature reads as
+/// `assumed-par` — the truth.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn external_tier_never_prices_a_candle_above_the_oracle_epoch() {
+    let db = "it_enrich_external_epoch_bound";
+    let client = setup_scratch(db).await;
+    seed_assets_and_candles(&client, db).await;
+    // 2026-03-12 01:00 UTC: the day after the epoch, with a rate for that day.
+    let day_after = USDC_ORACLE_EPOCH_S + 36_000;
+    let post = day_after + 3_600;
+    seed_foo_usdc_candle(&client, db, post, 6.0, 0.0).await;
+    seed_external_rate(&client, db, day_after, 0.90).await;
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let got = close_usd(&client, db, 10, 2, post).await;
+    assert!(
+        (got - 6.0).abs() < 1e-4,
+        "above the epoch the tier must not write: expected the peg tier's 6 × $1 = 6.0, \
+         got {got} — 5.4 means the import priced a candle the wire will label `oracle`"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// (f) 🔑 REVIEW WR-06. A row enriched before `close_usd` existed
+/// (`volume_quote_usd = volume_quote × $1`, `close_usd = 0`) comes out with BOTH
+/// USD columns from the one imported rate — never `close_usd` at 0.9681 beside a
+/// `volume_quote_usd` still at par.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn external_tier_recomputes_a_half_priced_row_from_the_one_reference() {
+    let db = "it_enrich_external_half_priced";
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    // volume_quote_usd already at ×$1 (4.0), close_usd still 0.
+    seed_foo_usdc_candle(&client, db, DEEP_TS, 4.0, 4.0).await;
+    seed_external_rate(&client, db, DEEP_DAY_START, DEPEG_RATE).await;
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let c = close_usd(&client, db, 10, 2, DEEP_TS).await;
+    let v = volume_quote_usd(&client, db, 10, 2, DEEP_TS).await;
+    assert!(
+        (c - 3.8724).abs() < 1e-4,
+        "close_usd from the measured rate, got {c}"
+    );
+    assert!(
+        (v - 3.8724).abs() < 1e-4,
+        "volume_quote_usd must be recomputed from the SAME rate, got {v} — 4.0 is the \
+         half-priced row: two USD figures for one candle at different rates"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+// ---- task 0268: the external-scoped reset --------------------------------
+
+/// FOO/USDC candles carrying the peg tier's EXACT signature (`close_usd = close`,
+/// `volume_quote_usd = volume_quote`) — the population task 0268 re-opens. One
+/// falls on a day the imported series covers, one does not.
+async fn setup_0268(db: &str, t_covered: u32, t_uncovered: u32) -> Client {
+    let client = setup_scratch(db).await;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (1,'XLM','classic','',''), (2,'USDC','classic','{USDC_ISSUER}',''), \
+             (10,'FOO','classic','GFOO','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({t_covered},   10, 2,'sdex', 4,4,4,4, 1, 4, 4, 4, 4, 1,1), \
+             ({t_uncovered}, 10, 2,'sdex', 4,4,4,4, 1, 4, 4, 4, 4, 1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+}
+
+fn external_reset() -> UsdResetSpec {
+    UsdResetSpec {
+        quote_asset_id: 2,
+        not_before: 0,
+        not_after: Some(prices_clickhouse::USDC_ORACLE_EPOCH_S),
+        require_external_rate: true,
+    }
+}
+
+/// 🔑 **THE 157-CANDLE REGRESSION.** Task 0182's reset epoch sat 19 hours before
+/// its reference market's first candle. 157 candles were zeroed, nothing could
+/// refill them, and they were left publishing `close_usd = 0` — which ~130
+/// unguarded `argMax(close_usd, …)` sites read as a real price of zero. That is
+/// strictly worse than the wrong-but-visible number the repair set out to fix.
+///
+/// An epoch cannot express "a reference exists HERE". A semi-join can, and this
+/// is the test that it does: two candles with identical signatures, one on a day
+/// the imported series covers and one not. The covered candle is re-priced at the
+/// measured rate; the uncovered one comes out EXACTLY as it went in.
+/// 🔑 **A daily-only load must not reach a sub-daily table.** With only the
+/// daily file loaded every hour of a covered day is priced from that day's one
+/// row — the day CLOSE — and the reset is one-shot per row: it re-opens only rows
+/// still carrying the $1 signature, which a row priced at the day close no longer
+/// does. So loading the hourly file afterwards cannot correct those candles.
+/// Measured before this gate existed: a 2023-03-11 12:00 candle repaired on a
+/// daily-only load stayed at 0.96812 through an hourly load and a second pass;
+/// Chainlink's 12:00 close was 0.90687439.
+///
+/// Daily and coarser tables resolve at the bucket END, where the daily row and
+/// the 23:00 hourly row carry the same close, so they must NOT be refused.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_external_reset_refuses_a_sub_daily_table_on_a_daily_only_load() {
+    let db = "it_enrich_0268_daily_only";
+    let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
+    let client = setup_0268(db, covered, uncovered).await;
+    // Midnight only: exactly what the daily file writes.
+    seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(external_reset());
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+    assert!(
+        matches!(&err, ChEnrichError::ResetRequiresHourlyRates { table } if table == "price_ohlcv_1m"),
+        "a sub-daily table on a daily-only load must be refused, got {err:?}"
+    );
+    // Refused BEFORE writing: the candle still carries its original value.
+    let v = close_usd(&client, db, 10, 2, covered).await;
+    assert!(
+        (v - 4.0).abs() < 1e-9,
+        "a refused reset must not have touched the candle, got {v}"
+    );
+
+    // The same load on a daily table is fine: nothing sub-daily is at stake.
+    let mut d = cfg(db);
+    d.one_shot = true;
+    d.table = "price_ohlcv_1d".to_string();
+    d.usd_reset = Some(external_reset());
+    ChEnrichmentPass::new(d)
+        .run()
+        .await
+        .expect("a daily table must not be gated on the hourly series");
+
+    // And once the hourly file is in, the sub-daily table proceeds.
+    seed_hourly_marker(&client, db).await;
+    let mut h = cfg(db);
+    h.one_shot = true;
+    h.usd_reset = Some(external_reset());
+    let stats = ChEnrichmentPass::new(h).run().await.unwrap();
+    assert_eq!(
+        stats.rows_reset, 1,
+        "with hourly rates loaded the reset proceeds"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_external_reset_never_zeroes_a_bucket_it_cannot_refill() {
+    let db = "it_enrich_0268_reset";
+    let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
+    let client = setup_0268(db, covered, uncovered).await;
+    // Day start of `covered` (2020-09-13) only. `uncovered` (2020-09-18) has no row.
+    seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
+    seed_hourly_marker(&client, db).await;
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(external_reset());
+    let stats = ChEnrichmentPass::new(c).run().await.unwrap();
+
+    assert_eq!(
+        stats.rows_reset, 1,
+        "exactly the covered candle should have been re-opened — re-opening the \
+         uncovered one is the 0182 incident"
+    );
+
+    let fixed = close_usd(&client, db, 10, 2, covered).await;
+    assert!(
+        (fixed - 3.8724).abs() < 1e-4,
+        "the covered candle must be re-priced at the measured rate \
+         (4 x 0.9681 = 3.8724), got {fixed}"
+    );
+
+    let untouched = close_usd(&client, db, 10, 2, uncovered).await;
+    assert!(
+        (untouched - 4.0).abs() < 1e-4,
+        "the uncovered candle must be EXACTLY as it was, got {untouched}. \
+         0.0 is the 0182 incident reproduced: zeroed with nothing able to refill it"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// D-03: with no `external` rows loaded the tool refuses, rather than running and
+/// silently doing nothing. A clean, healthy, entirely empty repair is the same
+/// green all-clear that hid task 0182 for a month.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_external_reset_refuses_when_no_external_rates_are_loaded() {
+    let db = "it_enrich_0268_no_rates";
+    let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
+    let client = setup_0268(db, covered, uncovered).await;
+    // usd_rate deliberately left empty.
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(external_reset());
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+
+    assert!(
+        matches!(err, ChEnrichError::ResetRequiresExternalRates { quote_asset_id }
+                 if quote_asset_id == 2),
+        "expected a refusal when 0267's series is not loaded, got {err:?}"
+    );
+
+    // And it refused BEFORE writing anything.
+    for ts in [covered, uncovered] {
+        let v = close_usd(&client, db, 10, 2, ts).await;
+        assert!(
+            (v - 4.0).abs() < 1e-4,
+            "a refused reset must not have written anything at {ts}, got {v}"
+        );
+    }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// D-06, both halves. The oracle-shadow guard counts inside
+/// `[not_before, not_after)` only.
+///
+/// Canonical USDC has held live oracle rows since 2026-03-11. An all-time count
+/// therefore refuses every reset of the 2020-2025 history those rows cannot
+/// reach — a guard applied where its own premise is false. Bounded below them,
+/// the reset RUNS. Move a single oracle row inside the window and it is refused
+/// again, because there the premise holds: the oracle tier runs first, wins, and
+/// would re-apply the very value the reset removed.
+/// 🔑 REVIEW WR-09. A canonical USDC reading in `oracle_prices` BELOW the epoch
+/// refuses the 0268 mode even when it sits below `--reset-not-before` — where
+/// the oracle-shadow guard's window does not reach but the external tier's
+/// candidate set does. Nothing is written.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_external_reset_refuses_a_pre_epoch_oracle_reading_below_its_own_window() {
+    let db = "it_enrich_0268_pre_epoch_oracle";
+    let client = setup_scratch(db).await;
+    seed_assets_and_candles(&client, db).await;
+    seed_external_rate(&client, db, DEEP_DAY_START, DEPEG_RATE).await;
+    seed_hourly_marker(&client, db).await;
+    // A Reflector reading for USDC a year BEFORE the reset's lower bound and
+    // far below the epoch: invisible to the windowed shadow guard.
+    let reading = DEEP_DAY_START - 365 * 86_400;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES ({reading}, 2, 'reflector', 1.0, '{{}}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 2,
+        not_before: DEEP_DAY_START,
+        not_after: Some(USDC_ORACLE_EPOCH_S),
+        require_external_rate: true,
+    });
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ChEnrichError::ResetBlockedByPreEpochOracleRows {
+                quote_asset_id: 2,
+                rows: 1,
+                ..
+            }
+        ),
+        "expected the pre-epoch oracle refusal, got {err:?}"
+    );
+    // Refused before writing: the deep fixture candle is untouched.
+    let v = close_usd(&client, db, 10, 2, DEEP_TS).await;
+    assert!(
+        (v - 0.0).abs() < 1e-9,
+        "a refused reset must not have written anything, got {v}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_bounded_usd_reset_is_not_refused_by_oracle_rows_above_its_window() {
+    let db = "it_enrich_0268_bounded_guard";
+    let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
+    let client = setup_0268(db, covered, uncovered).await;
+    seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
+    seed_hourly_marker(&client, db).await;
+
+    // A live USDC oracle row ABOVE the reset's upper bound — prod's actual shape.
+    let above = prices_clickhouse::USDC_ORACLE_EPOCH_S + 3_600;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES ({above}, 2, 'reflector', 1.0001, '{{}}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(external_reset());
+    let stats = ChEnrichmentPass::new(c).run().await.unwrap();
+    assert_eq!(
+        stats.rows_reset, 1,
+        "an oracle row above the window must not refuse a reset below it"
+    );
+
+    // Now one INSIDE the window: the premise holds again, so it must refuse.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES ({covered}, 2, 'reflector', 1.0001, '{{}}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let mut c2 = cfg(db);
+    c2.one_shot = true;
+    c2.usd_reset = Some(external_reset());
+    let err = ChEnrichmentPass::new(c2).run().await.unwrap_err();
+    assert!(
+        matches!(err, ChEnrichError::ResetBlockedByOracleRows { quote_asset_id, .. }
+                 if quote_asset_id == 2),
+        "an oracle row inside the window must still refuse, got {err:?}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// The reset obeys `time_window` (the 0111/0114 partition bound), so the repair
+/// driver's month-at-a-time walk stays month-at-a-time. A reset that leaked past
+/// its window would discard values in months the operator never snapshotted, and
+/// the rollback point would not cover them.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_external_reset_touches_only_the_bounded_month() {
+    let db = "it_enrich_0268_month_bound";
+    // 2020-09-13 and 2020-10-02 — different monthly partitions, both covered by
+    // an imported rate, so the ONLY thing that can separate them is the window.
+    let (sep, oct) = (1_600_000_000u32, 1_601_600_000u32);
+    let client = setup_0268(db, sep, oct).await;
+    seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
+    seed_external_rate(&client, db, 1_601_596_800, DEPEG_RATE).await;
+    seed_hourly_marker(&client, db).await;
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(external_reset());
+    // [2020-09-01, 2020-10-01)
+    c.time_window = Some((1_598_918_400, 1_601_510_400));
+    let stats = ChEnrichmentPass::new(c).run().await.unwrap();
+
+    assert_eq!(
+        stats.rows_reset, 1,
+        "only September's candle is in the window"
+    );
+    let s = close_usd(&client, db, 10, 2, sep).await;
+    assert!((s - 3.8724).abs() < 1e-4, "September re-priced, got {s}");
+    let o = close_usd(&client, db, 10, 2, oct).await;
+    assert!(
+        (o - 4.0).abs() < 1e-4,
+        "October is outside the window and must be untouched, got {o}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
 }

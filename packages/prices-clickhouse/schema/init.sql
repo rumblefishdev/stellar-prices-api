@@ -337,15 +337,34 @@ SETTINGS index_granularity = 8192;
 -- 0154 ASOFs at the CANDLE's timestamp so the boundary case does not arise there.
 --
 -- ## Columns
---   method  'oracle' — a measured reading (hops = 0)
---           'peg'    — the $1 assumption (hops = 0)
---           'pivot'  — via XLM (hops = 1)          } owned by 0154,
---           'pivot2' — via another rated asset (2) } not written here
+--   method  'oracle'   — a measured reading, polled from Reflector (hops = 0)
+--           'external' — a measured reading IMPORTED from an outside USD
+--                        series (task 0267, hops = 0). Same standing as
+--                        'oracle' as evidence, different provenance: nobody
+--                        here polled it. Kept a distinct word because task
+--                        0247 forbids publishing an import as 'oracle'.
+--           'peg'      — the $1 assumption (hops = 0)
+--           'pivot'    — via XLM (hops = 1)          } owned by 0154,
+--           'pivot2'   — via another rated asset (2) } not written here
 --   ⚠️ ABSENCE IS THE SIGNAL for pre-oracle history. Deep history (before the
 --   oracle window, ~2025-09) gets NO ROW, and the consumer's own peg fallback
 --   applies. Do NOT write synthetic method='peg' rows at $1 to "fill" it — that
 --   makes a fallback indistinguishable from a measurement, which is precisely
 --   the close_usd = 0 mistake (one value meaning several things) in a new place.
+--
+--   That prohibition stands, and 'external' does NOT relax it: an IMPORTED
+--   MEASUREMENT is not a synthetic fill. A method='external' row says an
+--   outside series observed this rate at this instant — on 2023-03-11 it says
+--   0.9681, which no $1 fill could ever say. What the rule forbids is inventing
+--   a value, not sourcing one elsewhere. Task 0267's backfill is therefore
+--   allowed to reach into deep history where a 'peg' fill would not be.
+--
+--   ⚠️ There is NO 'assumed-par' here, deliberately, and it is not an omission
+--   to "fix". That value exists only on the /ohlcv wire, where it is DERIVED at
+--   read time from a candle's close_usd = close signature (see
+--   prices-api queries_ch::usd_method_expr). Nothing writes it to this table,
+--   because a row asserting "we assumed a dollar" is exactly the synthetic fill
+--   the warning above forbids.
 --
 --   ⚠️ `method` IS PART OF THE SORTING KEY, deliberately. RMT dedups on the
 --   sorting key, so without it a 'pivot' row written by 0154 at the same

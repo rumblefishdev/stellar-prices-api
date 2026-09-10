@@ -321,10 +321,23 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "Candle",
         "method",
-        "Where the USD rate behind this bucket came from:\n\n* `peg` — no measured rate was \
-         available; USDC was taken at 1 USD.\n* `oracle` — a measured oracle reading.\n* \
-         `traded` — priced through a reference asset's own trades.\n\n`null` when the price \
-         fields are `null`, and always `null` for `base_currency=XLM`, where nothing is \
+        "Where the USD rate behind this bucket came from:\n\n* `assumed-par` — nothing was \
+         measured; the literal 1.0 supplied the value, i.e. USDC was taken at 1 USD.\n* \
+         `external` — an imported, measured USDC/USD series supplied the rate.\n* `oracle` — \
+         a measured Reflector reading supplied the rate.\n* `traded` — priced through a \
+         reference asset's own trades.\n* `peg` — only on the synthesized USDC self-series \
+         (`GET /assets/USDC:<issuer>/ohlcv`): no measured USDC/USD observation covered the \
+         bucket, so the $1 fallback was rendered. Never appears on a quote leg — there the \
+         same situation is `assumed-par`.\n\nEach value names the INPUT the rate came from, so \
+         `assumed-par` and `external` are never interchangeable: one is an assumption, the \
+         other a measurement that may sit percent off par. On a quote leg the label is \
+         reconstructed at read time — the candle rows carry no provenance column — so one \
+         case is deliberately not separated: a bucket reading exactly 1.0 reports \
+         `assumed-par` whether the dollar was assumed or a measured rate happened to land \
+         on it. The two leave an identical row and carry the same number, so the label is \
+         the conservative one; `external` is reported only for a bucket whose value was \
+         actually scaled by an imported rate.\n\n`null` when the price fields \
+         are `null`, and always `null` for `base_currency=XLM`, where nothing is \
          converted.",
     ),
     (
@@ -613,5 +626,58 @@ impl Modify for Descriptions {
                 describe(property, text);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `method` value the API can put on the wire is named in the
+    /// published description (task 0268 review, WR-03). Two emitters feed the
+    /// one `Candle` schema: `queries_ch::usd_method_expr` (the candle path:
+    /// `assumed-par` / `external` / `oracle` / `traded`) and
+    /// `queries_ch::ohlcv_peg_series` (USDC's own series: `peg` / `oracle`). A
+    /// client generated from the schema must never meet a value the contract
+    /// does not name — that was true before 0268 split the vocabulary, and the
+    /// split dropped `peg` from the list while the self-series kept emitting it.
+    ///
+    /// The candle-path vocabulary is READ OFF THE EMITTER (review IN-13): the
+    /// single-quoted literals of `usd_method_expr`'s rendered `multiIf` are the
+    /// labels it can return, so a sixth arm added there fails here until the
+    /// description names it. Only `peg` — emitted by the self-series builder,
+    /// whose SQL carries many unrelated literals — is still listed by hand.
+    #[test]
+    fn candle_method_description_names_every_value_either_emitter_produces() {
+        let (_, _, text) = FIELDS
+            .iter()
+            .find(|(schema, field, _)| *schema == "Candle" && *field == "method")
+            .expect("Candle.method is described");
+        // ⚠️ Read the published vocabulary, NOT every quoted literal in the
+        // statement: the `external` arm consults `usd_rate`, so the rendered SQL
+        // also carries `'UTC'`, `'credit'`, `'USDC'` and the issuer address,
+        // none of which are `method` values.
+        let rendered = crate::assets::queries_ch::usd_method_expr(
+            2,
+            &[7],
+            crate::assets::queries_ch::Granularity::H1,
+        );
+        let emitted = crate::assets::queries_ch::CANDLE_METHOD_LABELS;
+        for value in emitted {
+            assert!(
+                rendered.contains(&format!("'{value}'")),
+                "the emitter no longer renders `{value}`: {rendered}"
+            );
+        }
+        for value in emitted.iter().copied().chain(["peg"]) {
+            assert!(
+                text.contains(&format!("`{value}`")),
+                "Candle.method description does not name `{value}`:\n{text}"
+            );
+        }
+        // And `peg` is scoped to where it can appear, so nobody reads it as a
+        // quote-leg value again.
+        assert!(text.contains("USDC:<issuer>"), "{text}");
+        assert!(text.contains("Never appears on a quote leg"), "{text}");
     }
 }

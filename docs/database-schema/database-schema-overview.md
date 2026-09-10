@@ -877,7 +877,7 @@ CREATE TABLE prices.usd_rate (
     contract_address  String,
     timestamp         DateTime CODEC(DoubleDelta),
     usd_rate          Decimal(38, 14),
-    method            LowCardinality(String),  -- 'oracle'|'peg'|'pivot'|'pivot2'
+    method            LowCardinality(String),  -- 'oracle'|'external'|'peg'|'pivot'|'pivot2'
     reference_asset   String   DEFAULT '',     -- what it pivoted through
     hops              UInt8    DEFAULT 0,      -- 0 oracle/peg, 1 XLM pivot, 2 hop
     version           UInt64
@@ -918,6 +918,19 @@ row**, and the consumer's own peg fallback applies. Synthetic `method = 'peg'`
 rows at `$1` are deliberately **not** written — that would make a fallback
 indistinguishable from a measurement, which is the `close_usd = 0` mistake in a
 new place.
+
+That prohibition stands, and `method = 'external'` does **not** relax it. An
+imported measurement is not a synthetic fill: an `external` row (task 0267) says
+an outside USD series _observed_ this rate at this instant — on 2023-03-11 it
+says **0.9681**, which no `$1` fill could ever say. What the rule forbids is
+inventing a value, not sourcing one elsewhere, so `external` is allowed to reach
+into the deep history a `peg` fill may not. It keeps a word of its own rather
+than riding `oracle` because task 0247 forbids publishing an import as a poll.
+
+⚠️ **`'assumed-par'` is not in this enum and must not be added.** It exists only
+on the `/ohlcv` wire, where task 0268 derives it at read time from a candle's
+`close_usd = close` signature to say "the literal 1.0 was the input". A row here
+asserting that would be exactly the synthetic fill forbidden above.
 
 **Population.** Written by the **Oracle Fetcher** Lambda immediately after it
 writes `oracle_prices`, copying peg-asset observations (USDC/USDT) as
