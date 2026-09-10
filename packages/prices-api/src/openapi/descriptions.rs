@@ -321,9 +321,7 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          bucket, so the $1 fallback was rendered. Never appears on a quote leg — there the \
          same situation is `assumed-par`.\n\nEach value names the INPUT the rate came from, so \
          `assumed-par` and `external` are never interchangeable: one is an assumption, the \
-         other a measurement that may sit percent off par. A measured rate that happens to \
-         read exactly 1.0 is still `external`; the label is decided by whether an imported \
-         rate covers the bucket, not by the value.\n\nOn the USDC self-series a \
+         other a measurement that may sit percent off par.\n\nOn the USDC self-series a \
          bucket that holds both a Reflector reading and an imported one reports `oracle`: a \
          measured poll outranks an imported rate outright, whichever was observed first. \
          Observation time only breaks ties between rows of the same kind. The imported \
@@ -334,11 +332,15 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          a day, that one row prices every bucket of its UTC day at every `granularity`, so \
          an imported day mixes the two only where the oracle epoch falls inside it \
          (2026-03-11): a bucket that extends past 14:00 UTC that day is not priced from \
-         the imported series, which ends at 13:00.\n\nOn a quote leg \
-         the label is reconstructed at read time — the candle rows carry no provenance \
-         column — so one case is not separable: a bucket on a covered day for which no rate \
-         resolved inside its staleness window falls back to the $1 assumption and is still \
-         reported `external`.\n\n`null` in three cases: when the price fields are `null`; always for \
+         the imported series, which ends at 13:00. The self-series carries the rate row's \
+         own `method`, so a measured rate that reads exactly 1.0 is `external` there.\n\nOn a \
+         quote leg the label is reconstructed at read time — the candle rows carry no \
+         provenance column — so one case is deliberately not separated: a bucket reading \
+         exactly 1.0 reports `assumed-par` whether the dollar was assumed or a measured \
+         rate happened to land on it. The two leave an identical row and carry the same \
+         number, so the label is the conservative one; `external` is reported only for a \
+         bucket whose value was actually scaled by an imported rate.\n\n`null` in three \
+         cases: when the price fields are `null`; always for \
          `base_currency=XLM`, where nothing is converted; and for a USDC-quoted bucket \
          below the oracle epoch that carries a converted rate no imported series covers \
          — nothing can attribute it, and a label would be a claim.",
