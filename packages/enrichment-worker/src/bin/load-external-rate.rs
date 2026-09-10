@@ -381,11 +381,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // The one gate that retires the whole timezone class (review round 3,
-    // CR-04): every boundary this repo computes is server-local, so nothing
-    // is written unless the server itself is UTC.
-    let tz: String = client.query(SERVER_TIMEZONE_SQL).fetch_one().await?;
-    check_server_timezone(&tz).map_err(|e| e.to_string())?;
-    info!(timezone = %tz, "server timezone verified");
+    // CR-04): every boundary this repo computes is in an implicit timezone, so
+    // nothing is written unless both the server and this session are UTC.
+    let (session_tz, server_tz): (String, String) =
+        client.query(SERVER_TIMEZONE_SQL).fetch_one().await?;
+    check_server_timezone(&session_tz, &server_tz).map_err(|e| e.to_string())?;
+    info!(session = %session_tz, server = %server_tz, "timezone verified");
 
     // The grain-order gate. Until now "daily first, hourly second" was enforced
     // by prose in the runbook and a checklist item in the task; the two grains
@@ -423,8 +424,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "\npromoted the staged rows to method = '{PROMOTED_METHOD}' at version {version}.\n\
              The '{SHADOW_METHOD}' rows are still there and still inert — `method` is part of \
              the sorting key, so this ADDED a key rather than moving one. Nothing was deleted.\n\
-             Next: apply the schema and the views, deploy the API, then run the 2023-03-11 \
-             curl in docs/runbooks/load-external-usdc-rate.md."
+             Next: confirm the read path (section 6 of docs/runbooks/load-external-usdc-rate.md; \
+             the schema and the views were applied in its Preconditions), deploy the API, then \
+             run the 2023-03-11 curl — all BEFORE task 0268's campaign."
         );
     } else {
         println!(

@@ -369,13 +369,15 @@ pub enum LoadError {
     DailyAfterHourly { method: String, rows: u64 },
 
     #[error(
-        "the ClickHouse server reports timezone '{got}', not 'UTC'. Every day and hour \
-         boundary this loader, the views and the enrichment tiers compute is a server-local \
-         boundary (the candle tables are stamped by unzoned toStartOfInterval), so on a \
-         non-UTC server the imported rows would land on the wrong day. Nothing was written. \
-         Set the server timezone to UTC (or run against a UTC replica) and retry."
+        "ClickHouse reports server timezone '{server}' and session timezone '{session}'; \
+         both must be 'UTC'. Every day and hour boundary this loader, the views and the \
+         enrichment tiers compute is an implicit-timezone boundary (the candle tables are \
+         stamped by unzoned toStartOfInterval): the server's for every other client, this \
+         session's for the loader's own checks. On either one non-UTC, the imported rows \
+         would land on the wrong day. Nothing was written. Set the server timezone to UTC \
+         and clear any session_timezone on this user's profile, then retry."
     )]
-    ServerNotUtc { got: String },
+    ServerNotUtc { session: String, server: String },
 
     #[error(
         "line {line} has close '{value}', outside the accepted band [{min}, {max}]. The scale \
@@ -717,21 +719,33 @@ pub fn insert_statements(
         .collect()
 }
 
-/// The query the loader runs BEFORE any write; its single-row answer goes
-/// through [`check_server_timezone`].
-pub const SERVER_TIMEZONE_SQL: &str = "SELECT timezone()";
+/// The query the loader runs BEFORE any write; its single row — (session,
+/// server) — goes through [`check_server_timezone`].
+///
+/// ⚠️ Both functions, because they answer different questions.
+/// `timezone()` is the SESSION's implicit timezone: `session_timezone` if this
+/// user's profile or connection sets one, the server's otherwise. On its own it
+/// can pass on a non-UTC server (a profile that pins `session_timezone = 'UTC'`)
+/// and refuse a UTC one (a profile that pins anything else) — measured on
+/// 26.3.10.60. `serverTimezone()` is what every OTHER client — the views, the
+/// API, the enrichment tiers — falls back to.
+pub const SERVER_TIMEZONE_SQL: &str = "SELECT timezone(), serverTimezone()";
 
 /// Review round 3, CR-04: every day/hour boundary in this repo is computed in
-/// the SERVER's timezone (the candle tables are stamped by unzoned
+/// an implicit timezone (the candle tables are stamped by unzoned
 /// `toStartOfInterval`), so pinning `'UTC'` on one operand of a comparison
 /// only displaces the defect. The one gate that retires the whole class is
-/// refusing to write unless the server itself is UTC. Pure so CI can test it.
-pub fn check_server_timezone(reported: &str) -> Result<(), LoadError> {
-    match reported.trim() {
-        "UTC" | "Etc/UTC" => Ok(()),
-        other => Err(LoadError::ServerNotUtc {
-            got: other.to_string(),
-        }),
+/// refusing to write unless the server is UTC — and, since this loader's own
+/// checks run in its session, the session too. Pure so CI can test it.
+pub fn check_server_timezone(session: &str, server: &str) -> Result<(), LoadError> {
+    let utc = |tz: &str| matches!(tz.trim(), "UTC" | "Etc/UTC");
+    if utc(session) && utc(server) {
+        Ok(())
+    } else {
+        Err(LoadError::ServerNotUtc {
+            session: session.trim().to_string(),
+            server: server.trim().to_string(),
+        })
     }
 }
 
@@ -1730,13 +1744,29 @@ mod tests {
 
     #[test]
     fn the_server_timezone_gate_accepts_only_utc() {
-        assert!(check_server_timezone("UTC").is_ok());
-        assert!(check_server_timezone("Etc/UTC\n").is_ok());
+        assert!(check_server_timezone("UTC", "UTC").is_ok());
+        assert!(check_server_timezone("Etc/UTC\n", "UTC").is_ok());
         for tz in ["Europe/Warsaw", "CET", "", "utc"] {
-            let err = check_server_timezone(tz).unwrap_err();
-            assert!(matches!(err, LoadError::ServerNotUtc { .. }), "{tz}: {err}");
-            assert!(err.to_string().contains("Nothing was written"), "{err}");
+            for (session, server) in [(tz, "UTC"), ("UTC", tz), (tz, tz)] {
+                let err = check_server_timezone(session, server).unwrap_err();
+                assert!(
+                    matches!(err, LoadError::ServerNotUtc { .. }),
+                    "{session}/{server}: {err}"
+                );
+                assert!(err.to_string().contains("Nothing was written"), "{err}");
+            }
         }
-        assert_eq!(SERVER_TIMEZONE_SQL, "SELECT timezone()");
+    }
+
+    /// `timezone()` alone reads the SESSION's timezone: a profile pinning
+    /// `session_timezone = 'UTC'` passes it on a Warsaw server. The server's
+    /// own answer has to be asked for separately, and both reach the check.
+    #[test]
+    fn the_timezone_probe_asks_the_server_as_well_as_the_session() {
+        assert_eq!(SERVER_TIMEZONE_SQL, "SELECT timezone(), serverTimezone()");
+        let err = check_server_timezone("UTC", "Europe/Warsaw").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("server timezone 'Europe/Warsaw'"), "{msg}");
+        assert!(msg.contains("session timezone 'UTC'"), "{msg}");
     }
 }

@@ -129,13 +129,22 @@ not yet had this task's `init.sql` applied, step 3 fails on its first chunk
 with `No such column quality` — loudly, with nothing half-written, but with no
 hint of why. Check before you build.
 
-0. **The server is in UTC.** Run `SELECT timezone()` and stop unless it says
-   `UTC`. Every day and hour boundary in this repo — the candle tables' unzoned
+0. **The server — and your session — are in UTC.** Run
+   `SELECT timezone(), serverTimezone()` and stop unless **both** say `UTC`.
+   Every day and hour boundary in this repo — the candle tables' unzoned
    `toStartOfInterval`, the views' day buckets, the loader's and the tiers'
-   ASOF floors — is computed in the SERVER's timezone, so on a non-UTC server
-   imported rows land on the wrong day and every gate below misreads. The
-   loader refuses to write on its own if this is not `UTC`
-   (`ServerNotUtc`), but check first: the refusal comes after the dry run.
+   ASOF floors — is computed in an implicit timezone: the server's for every
+   client that does not override it (the views, the API, the enrichment
+   tiers), the session's for the queries you run here. On a non-UTC server
+   imported rows land on the wrong day and every gate below misreads.
+
+   `timezone()` alone is not the check. It reports the SESSION's timezone,
+   which a `session_timezone` on the user's profile overrides: on 26.3.10.60,
+   `session_timezone = 'Europe/Warsaw'` makes it answer `Europe/Warsaw` beside
+   a `UTC` `serverTimezone()`. So on its own it can pass a non-UTC server and
+   refuse a UTC one. The loader asks for both and refuses to write unless both
+   are `UTC` (`ServerNotUtc`), but check first: the refusal comes after the
+   dry run.
 
 1. **The schema and the views from this branch are applied to the cluster.**
    The real tool is `prices-clickhouse-init` — there is no `apply-schema`
@@ -585,8 +594,12 @@ the new column is harmless — it simply does not select it.
 
 ## 8. The check that closes the task
 
+The API refuses a request without a key (`403 Forbidden`), so every curl here
+carries one:
+
 ```bash
-curl -s "https://<api-host>/v1/assets/USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN/ohlcv?granularity=1d&start=2023-03-11T00:00:00Z&end=2023-03-11T00:00:00Z&base_currency=USD" \
+curl -s -H "x-api-key: $PRICES_API_KEY" \
+  "https://<api-host>/v1/assets/USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN/ohlcv?granularity=1d&start=2023-03-11T00:00:00Z&end=2023-03-11T00:00:00Z&base_currency=USD" \
   | jq '.data[0] | {timestamp, close, method, source, quality}'
 ```
 
@@ -610,7 +623,8 @@ Preconditions.
 **The hourly falsifier**, which the daily grain cannot produce:
 
 ```bash
-curl -s "https://<api-host>/v1/assets/USDC:GA5Z…/ohlcv?granularity=1h&start=2023-03-11T00:00:00Z&end=2023-03-11T23:00:00Z&base_currency=USD" \
+curl -s -H "x-api-key: $PRICES_API_KEY" \
+  "https://<api-host>/v1/assets/USDC:GA5Z…/ohlcv?granularity=1h&start=2023-03-11T00:00:00Z&end=2023-03-11T23:00:00Z&base_currency=USD" \
   | jq '.data[] | select(.timestamp | test("T(00|07|23):")) | {timestamp, close, method}'
 ```
 
@@ -631,25 +645,45 @@ is the reason section 4½ is part of the procedure and not an optional extra.
 whose rate came from a poll or from the peg. An empty string there is a
 defect, not a value.
 
-Then spot-check a `fallback` and a `measured-disputed` day and confirm `quality`
-reports them — those 28 days are the whole reason the column exists.
+Then spot-check a `fallback` day — 2021-01-25 through 2021-02-16, or
+2021-03-18 — and confirm it reads `source = bitstamp`, `quality = fallback`.
+
+⚠️ **`measured-disputed` does not survive the hourly pass, and that is not a
+failed load.** It is the composer's DAILY cross-check verdict and the hourly
+file has no analogue (section 4½). The hourly rows replace the daily file's at
+every shared midnight (section 0), and every daily-grain surface resolves a day
+from its 23:00 row, so once both files are loaded the four disputed days —
+2022-11-09, 2022-11-23, 2023-01-19, 2023-03-13 — read `quality = measured`
+everywhere, with the same close. The verdict is visible only in the daily
+pass's staged rows (check 4c's form on one of those dates, before section 4½)
+or on a daily-only load. Do not stop the procedure over it.
 
 ---
 
 ## 9. Rollback
 
-**Nothing is deleted, so there is nothing to restore.**
+**Nothing is deleted, so there is no data to restore — but re-applying the
+views does not roll back the API.** Three readers select `method = 'external'`,
+and each comes back on its own path:
 
-Revert the read path's preference to oracle-only — the `WHERE method` predicate
-in `views.sql` (both grains) and in `queries_ch::ohlcv_peg_series` — and re-apply
-the views. The API immediately returns to today's behaviour: the $1 peg,
-labelled `peg`, for every pre-epoch bucket. Every loaded row stays on disk,
-unread.
+1. **The views** (`price_usd_series`, `_1h`). Revert their `WHERE method`
+   predicate to oracle-only and re-apply them with `prices-clickhouse-init`
+   built from the reverted tree (Preconditions, step 1).
+2. **`/ohlcv` for canonical USDC.** `queries_ch::ohlcv_peg_series` reads
+   `usd_rate` itself, and it is compiled into the `api-handler` Lambda. Revert
+   it and redeploy (`make deploy-production-compute`, section 7). Until that
+   deploy lands, the API keeps serving `external` whatever the views say.
+3. **Task 0268's readers** — its external enrichment tier and the quote-leg
+   `method` label — select the same rows. Reverting this task alone leaves them
+   reading. If 0268's campaign has already run, the candles it re-priced come
+   back through Appendix B's FREEZE rollback in
+   `repair-coarse-usd-values.md`, not through anything here.
 
-That is the entire reason the promote is additive rather than a rewrite: the
-rollback is a read-path revert, not a data repair. If instead the rows themselves
-are wrong (a bad CSV got past step 2), the promoted rows can be superseded by a
-corrected load at a higher `version` — still without a delete.
+Once all three are reverted, every loaded row stays on disk, unread. That is
+the reason the promote is additive rather than a rewrite: the rollback is a
+code revert, not a data repair. If instead the rows themselves are wrong (a bad
+CSV got past step 2), supersede them with a corrected load at a higher
+`version` — still without a delete.
 
 ---
 
