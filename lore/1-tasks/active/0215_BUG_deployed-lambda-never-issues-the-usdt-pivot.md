@@ -823,10 +823,25 @@ pair on the next run before closing the AC.
 - [ ] We confirm the errors stopped from CloudWatch and `system.query_log`, and
       report it back in the thread. Two-sided, because neither side alone can see
       both halves.
-      ✅ **`system.query_log` half done 2026-09-10** — see the re-confirmation
-      section above: `peg:pivot` 1:2 on all eight days, XLM:USDT exactly 1:1,
-      zero statements ending in anything but `QueryFinish`.
-      ⏳ Outstanding: the CloudWatch half, and posting it in the thread.
+      ✅ **Both measurement halves done 2026-09-10.** `system.query_log`: see the
+      re-confirmation section above. CloudWatch, `ReadOnlyAccess`, 7-day window
+      on `/aws/lambda/prices-production-enrichment`:
+
+      | | baseline | now |
+      |---|---|---|
+      | `BadResponse("")` | 3/hour for 26 days (144 per 48 h) | **0** |
+      | `Status: timeout` | every invocation, 2026-08-21 | **0** |
+      | invocations/day | **72** (1 EventBridge + 2 async retries) | **24** |
+
+      🔑 **The invocation count is the sharpest of the three.** Async retries
+      exist only because the attempt before them failed, so 72/day → exactly
+      24/day is an independent measurement of the same recovery — taken from
+      Lambda's own metric rather than from either log — and it agrees with
+      `system.query_log` to the hour.
+      ⚠️ `Status: timeout` is a FIELD on the REPORT line on `provided:al2023`,
+      not a `Task timed out` message; grepping the old string returns zero and
+      reads as success. Filtered on the field.
+      ⏳ Outstanding: posting it in the thread.
 - [x] `CleanupRule` verified `DISABLED` before and after the deploy.
       **After, 2026-09-10:** `prices-production-cleanup` → `State: DISABLED`,
       `Schedule: cron(0 3 * * ? *)`. **Before** is carried by the readings of
