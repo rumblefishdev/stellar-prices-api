@@ -93,9 +93,12 @@ Smoke first with `-e RATE=20 -e DURATION=20s` before the full 5-minute run.
 
 ## Which regime to run, and why it matters more than the knobs
 
-The gateway caches `/price` for 10 s **keyed on the path only**, so the pool size
-is the only lever on the hit rate — no query parameter busts it. Over 300 s an
-asset can miss at most 30 times, which fixes the arithmetic:
+The gateway caches `/price` for 10 s, keyed on the path **plus `min_volume_usd`**
+(measured per method, task 0122). ⚠️ **This script sends no query string**, so
+within this harness the pool size is the only lever on the hit rate and the
+arithmetic below holds. It does **not** generalise: a client that varies
+`min_volume_usd` gets one cache entry per value. Over 300 s an asset can miss at
+most 30 times, which fixes the arithmetic:
 
 | pool | run with | max misses of 30 k | the p95 is really measuring |
 |------|----------|--------------------|------------------------------|

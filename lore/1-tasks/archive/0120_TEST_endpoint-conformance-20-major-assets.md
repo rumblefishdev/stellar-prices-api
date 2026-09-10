@@ -2,7 +2,7 @@
 id: "0120"
 title: "Endpoint conformance — all 7 route groups return correct, schema-valid responses for 20 major assets"
 type: TEST
-status: active
+status: completed
 by: []
 related_adr: ["0008"]
 related_tasks: ["0072", "0118", "0119", "0124", "0128", "0135", "0170", "0178", "0225", "0230"]
@@ -12,6 +12,21 @@ links:
   - "../../../packages/prices-api/src/lib.rs"
   - "../../../docs/prices-api-general-overview.md"
 history:
+  - date: 2026-09-07
+    status: completed
+    who: okarcz
+    note: >
+      ✅ **Tranche 2 AC 1 PASSES — 1032 pass, 0 fail, 0 skip, exit 0, twice**
+      (10:40 and 11:09 UTC, 29 minutes apart). PR #290 merged. [[0230]]'s
+      determinism requirement proven by diffing the two reports: **1,032
+      identical verdicts, 0 changed, while 53 details moved** — four assets'
+      unpriced counts went 0→1 at the tip, which under the old assertion flips
+      PASS→FAIL. 🔑 The check count **rose 886 → 1032**: nothing was relaxed,
+      and no production code changed. Every failure that disappeared was a
+      suite defect. Two traps recorded in Issues: the fixture encoded a market
+      state three weeks stale, and the first fix read a candle's bucket-START
+      timestamp as a trade instant (AUD, off by a full bucket width).
+      [[0230]] archived with this task.
   - date: 2026-09-07
     status: active
     who: okarcz
@@ -194,22 +209,23 @@ after 0072 and [[0119]].
       identifier forms
 - [x] All 7 route groups exercised for every asset; every response validates
       against the OpenAPI spec (0 schema failures in the 2026-08-19 run)
-- [ ] **Reworded 2026-09-07.** No documented response field is a stub/sentinel
+- [x] **Reworded 2026-09-07, and met.** No documented response field is a stub/sentinel
       for a liquid asset **except where the contract says otherwise, in which
       case the suite asserts the documented sentinel rather than its absence**.
       The two declared cases: [[0178]]'s `vwap_24h 0` / `sources {}` for a
       quote-only asset, and ADR 0011 §5's null price fields on a traded but
       not-yet-priced bucket. ⚠️ The original wording could never go green —
       it read a *decided* sentinel as a *pending* defect.
-- [ ] 🔑 **Folded in from [[0230]] — the suite's result does not move with
-      enrichment.** A bucket whose price fields are null is asserted against
+- [x] 🔑 **Folded in from [[0230]] — PROVEN, not asserted. The suite's result
+      does not move with enrichment.** A bucket whose price fields are null is asserted against
       the *unpriced* contract (`volume_base` and `trade_count` real, price
       fields null, `method` null) rather than failed for not being a decimal
       string. Proven by running the suite twice across an enrichment catch-up
       and getting the same verdict — the 2026-08-27 counter-example was
       USDCAllow, VELO and SHX failing at 13:26 and passing at 13:38 on
       unchanged code.
-- [ ] **The batch/single check covers all priced assets, not 8 of 19.** Both
+- [x] **The batch/single check covers all priced assets, not 8 of 19** — 0 skips
+      in every run since the fix, against 11.** Both
       calls pinned to the same `updated_at`, or retried inside the minute, so
       the comparison stops declining itself at a minute boundary
       (`current_prices` refreshes every minute; the suite paces at 1 rps).
@@ -221,9 +237,9 @@ after 0072 and [[0119]].
       (all 19 priced assets equal at matching timestamps)
 - [x] Suite is re-runnable (`npm run conformance:0120`) and its JSON report is
       citable evidence for [[0128]]
-- [ ] A **clean production re-run** is recorded, with its report committed and
-      cited by [[0128]] for Tranche 2 AC 1. Any residual failure is either
-      fixed or has a task that owns it, named in the run notes.
+- [x] A **clean production re-run** is recorded — **1032 pass, 0 fail, 0 skip,
+      exit 0**, twice. Reports are gitignored as regenerable, so the citable
+      artefact is the numbers below plus the one-command reproduction.
 - [x] Any defect found is fixed or spawned as its own task — spawned
       [[0210]] and [[0211]]; three interim spawns were retired the
       same day after a cross-check showed okarcz's [[0135]], [[0170]] and
@@ -510,6 +526,92 @@ everywhere; all OHLCV invariants hold wherever data exists.
 The stub/sentinel AC stays open until [[0135]], [[0170]] and [[0178]] land;
 the suite is the acceptance gate — re-run it after each fix and cite the
 green report in [[0128]].
+
+## Run results — 2026-09-07 (okarcz)
+
+All four runs on production, free-tier key, 1 rps, read-only. No load.
+
+| run | time (UTC) | pass | fail | skip |
+| --- | --- | --- | --- | --- |
+| 2026-09-02 (stkrolikiewicz, before this work) | — | 870 | 16 | 0 |
+| 1 — suite fixes only | 10:29 | 1009 | 3 | 0 |
+| 2 — + market-state assertions | 10:36 | 1031 | 1 | 0 |
+| **3 — + bucket-start fix** | **10:40** | **1032** | **0** | **0** |
+| **4 — determinism pass, +29 min** | **11:09** | **1032** | **0** | **0** |
+
+🔑 **The check count ROSE, 886 → 1032. Nothing was relaxed to reach zero** — the
+new assertions are additional, and each replaced an assumption with a
+measurement. **No production code changed on 2026-09-07**; every failure that
+disappeared was a defect in the suite.
+
+### [[0230]]'s acceptance, proven by diffing the two clean reports
+
+1,032 checks compared pairwise between the 10:40 and 11:09 runs:
+
+- **1,032 identical verdicts, 0 changed.**
+- **53 details moved** — enrichment advanced between the runs, exactly as
+  required for the proof to mean anything.
+
+The movement lands where 0230 said it would, at the tip:
+
+```
+native : 0 of 169 buckets unpriced  ->  1 of 168 unpriced
+EURC   : 0 of 169                   ->  1 of 168
+AQUA   : 0 of 169                   ->  1 of 168
+BTC    : 0 of 169                   ->  1 of 168
+```
+
+⚠️ **Under the old assertion those four flip PASS → FAIL.** That is the flake,
+caught in the data rather than argued.
+
+## Issues Encountered
+
+- 🔑 **The three surviving failures after run 1 were NOT API defects.** RON and
+  EQL returned `404` on `/price`, and EQL an empty 7-day 1h window. All three
+  are documented behaviour: `handlers.rs:98` types 404 as *"No current price
+  for the asset: unknown, or not priced yet"*, and RON last traded 2026-09-03,
+  EQL 2026-08-28. **The fixture was ranked by volume on 2026-08-19 and the
+  market moved underneath it.** Assertions phrased *"a liquid asset must have
+  X"* encode a market state, not the contract, and fail on a date nobody chose.
+  Same class as 0230 on a different axis. Fixed by deriving both from the
+  asset's own last candle.
+
+- 🔴 **The fix walked straight into the bucket-start trap.** Run 2 failed AUD
+  alone: `/price` returned 200 where the check demanded 404, because the last
+  trade read as **34.6 h** ago. A candle's timestamp is its **bucket START** —
+  a trade anywhere inside 2026-09-06 is stamped `00:00Z` — so the bucket had
+  actually ended **10.6 h** earlier. The check was off by a full bucket width.
+  Fixed by re-probing at `1h` near the boundary and making the test
+  **three-valued**: certainly inside, certainly outside, or a residual band one
+  bucket wide that accepts either documented response. ⚠️ The residual band is
+  a *weaker* assertion, deliberately — the candles cannot resolve it, and
+  claiming otherwise would assert something unsupported.
+
+- **Pagination moves run to run** — 19 pages / 3,725 distinct here, against
+  18 / 3,567 and 20 / 3,880 before. Owned by [[0261]], not a regression.
+
+## Design Decisions
+
+### From Plan
+
+1. **[[0230]] folded in rather than sequenced after.** It decides whether the
+   report can be *cited*, so shipping 0120 without it would have delivered a
+   flaking artefact to [[0128]].
+
+### Emerged
+
+2. **Assert the documented contract, never an assumed market state.** Applied
+   three times: 0178's sentinels, ADR 0011 §5's unpriced buckets, and the
+   liquidity of the fixture assets. Each replaced *"this asset should have a
+   price"* with *"this asset traded at T, therefore …"*.
+3. **Three-valued liquidity test rather than a wider window.** Widening to 48 h
+   would have hidden the boundary problem and weakened the positive case.
+4. **The fixture list was NOT re-derived.** Re-ranking by today's volume would
+   break comparability with the four prior runs and re-arm the same time bomb
+   for whoever runs it next month.
+5. **Batch/single re-takes BOTH calls.** The old path chased a bulk batch fixed
+   in the past with a single that only moves forward, which cannot converge —
+   that is why 11 of 19 assets skipped rather than failed.
 
 ## Notes
 

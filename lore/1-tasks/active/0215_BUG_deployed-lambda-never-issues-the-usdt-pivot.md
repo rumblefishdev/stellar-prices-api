@@ -2,7 +2,7 @@
 id: "0215"
 title: "Caddy's response_header_timeout of 30s cuts every enrichment pivot at 30.0s — the pass has failed on EVERY invocation since 2026-07-26 and nothing reported it"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0209", "0212", "0111", "0172", "0182", "0141", "0213"]
 tags: ["priority-high", "effort-small", "enrichment", "clickhouse", "deploy", "data-correctness", "milestone-M2"]
@@ -113,6 +113,17 @@ history:
       `?` has NEVER executed, starving 0114's remedy — spawned as 0218. The peg
       statement's constant 1,236 rows/batch spawned as 0219. Remaining here:
       max_execution_time per-caller, and the two guard tests.
+  - date: 2026-09-10
+    status: active
+    who: okarcz
+    note: >
+      Activated to settle what is left. The **defect itself is closed** — BE's
+      Caddy bump landed 2026-08-21 and 4 of 9 ACs are green. What remains is the
+      hardening half, which is entirely ours: `max_execution_time` per-caller on
+      the client (half 2), a test that `enrich_peg_pivot_step` issues TWO pivot
+      statements, and a loud failure when a reference asset is missing. Also
+      re-verifying that the fix has HELD for the three weeks since, rather than
+      assuming it.
 ---
 
 # Every invocation fails on the XLM pivot, so the USDT pivot is never reached

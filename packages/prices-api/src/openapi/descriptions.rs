@@ -119,7 +119,12 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "AmmStream",
         "status",
-        "`running`, `paused`, `completed` or `error`.",
+        "`running`, `paused`, `completed`, `error`, or `stalled`. `stalled` is \
+         derived at read time, not stored: a stream still recorded as \
+         `running` whose last push is more than 7 days old is reported as \
+         `stalled`, because nothing writes a terminal state when a run is \
+         killed. `paused` is the normal resting state of a finished run \
+         that stopped at its planned end rather than at the chain tip.",
     ),
     (
         "AssetDetail",
@@ -252,8 +257,12 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "BackfillStatus",
         "realtime_tip_ledger",
-        "Approximate current ledger sequence of the network — the SDEX stream's \
-         `target_ledger`; `0` when that stream has not reported.",
+        "Current ledger sequence of the network, from the live ingest cursor, \
+         which advances every batch. Falls back to the SDEX stream's \
+         `target_ledger` only while that cursor is unset, and is `0` when \
+         neither is available. It was previously read from `target_ledger` \
+         alone, which is not a chain tip: the backfill rewrites that column \
+         when it pushes, so it freezes when the backfill stops.",
     ),
     (
         "BackfillStatus",
@@ -394,7 +403,15 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "Candle",
         "volume_base",
-        "Volume in units of the asset — the base side of each trade.",
+        "Volume in units of the asset — the base side of each trade. With `trade_count` \
+         this is what identifies a dust print: a bucket whose entire volume is one trade \
+         of the smallest amount Stellar can represent (0.0000001) takes its close from an \
+         order far too small to be a market price, and such closes reach millions of \
+         dollars on a few dollars of volume. Exclude those buckets before charting or \
+         ranking prices. Volume itself is unaffected — they carry almost none. Size alone \
+         is not a quality verdict, though: a smallest-unit trade of a genuinely expensive \
+         asset is a real order at the right price, so use this to suppress a price you \
+         already have reason to doubt rather than as a blanket filter.",
     ),
     (
         "Candle",
@@ -601,7 +618,12 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "SdexStream",
         "status",
-        "`running`, `paused`, `completed` or `error`.",
+        "`running`, `paused`, `completed`, `error`, or `stalled`. `stalled` is \
+         derived at read time, not stored: a stream still recorded as \
+         `running` whose last push is more than 7 days old is reported as \
+         `stalled`, because nothing writes a terminal state when a run is \
+         killed. `paused` is the normal resting state of a finished run \
+         that stopped at its planned end rather than at the chain tip.",
     ),
     (
         "SdexStream",

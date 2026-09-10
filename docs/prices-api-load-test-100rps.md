@@ -43,15 +43,15 @@ cold-start / ClickHouse-side timing needs credentials this machine does not have
 
 ## Environment
 
-|               |                                                                                                 |
-| ------------- | ----------------------------------------------------------------------------------------------- |
-| Endpoint      | `https://prices-api.sorobanscan.rumblefish.dev`                                                 |
-| Region        | `eu-central-1` · stage throttle 200 req/s, burst 400                                            |
-| Gateway cache | enabled, TTL 10 s on `/price`, **key is the path only**                                         |
-| Usage plan    | `prices-production-loadtest-plan` (`i12bsj`) — 150 req/s, burst 300, 1 M/month                  |
-| API key       | `prices-production-loadtest-key-20260819T114230Z` ([registry](runbooks/manual-api-key-tier.md)) |
-| Generator     | k6 v2.2.0, darwin/arm64, single host                                                            |
-| Run date      | 2026-09-03, 06:04–06:16 UTC                                                                     |
+|               |                                                                                                                                                                |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Endpoint      | `https://prices-api.sorobanscan.rumblefish.dev`                                                                                                                |
+| Region        | `eu-central-1` · stage throttle 200 req/s, burst 400                                                                                                           |
+| Gateway cache | enabled, TTL 10 s on `/price`; key is the path **plus `min_volume_usd`** (task 0122) — this run sends no query string, so the pool size is the only lever here |
+| Usage plan    | `prices-production-loadtest-plan` (`i12bsj`) — 150 req/s, burst 300, 1 M/month                                                                                 |
+| API key       | `prices-production-loadtest-key-20260819T114230Z` ([registry](runbooks/manual-api-key-tier.md))                                                                |
+| Generator     | k6 v2.2.0, darwin/arm64, single host                                                                                                                           |
+| Run date      | 2026-09-03, 06:04–06:16 UTC                                                                                                                                    |
 
 ⚠️ **The endpoint changed under this task the day before the run.**
 Task 0126 retired the `execute-api` URL
@@ -73,10 +73,18 @@ throttle.
 ## Method — three regimes, and why the number is meaningless without one
 
 There is **no `X-Cache` header** on this API, so hit and miss cannot be tagged
-per request. The gateway caches on the **path only**, so no query parameter busts
-it and the _pool size is the only lever on hit rate_. Over a 300 s run an asset
-can miss at most 30 times, which fixes the arithmetic and forces three separate
-runs rather than one number:
+per request. ⚠️ **Corrected 2026-09-07 (task 0122, task 0128).** This section
+originally read _"the gateway caches on the path only, so no query parameter
+busts it"_. That is **false as a general statement**: `/price` keys on the path
+**plus `min_volume_usd`**, and `/v1/assets` on seven query parameters. The
+arithmetic below is unaffected, because `price_load.js` sends **no query string**
+— but the precondition has to travel with the figure. A client that varies
+`min_volume_usd` gets a separate cache entry per value and none of these hit
+rates apply.
+
+Within that precondition the _pool size is the only lever on hit rate_. Over a
+300 s run an asset can miss at most 30 times, which fixes the arithmetic and
+forces three separate runs rather than one number:
 
 | #   | regime | pool                                                                                                     | max misses of 30 000 | what its p95 measures                  |
 | --- | ------ | -------------------------------------------------------------------------------------------------------- | -------------------- | -------------------------------------- |

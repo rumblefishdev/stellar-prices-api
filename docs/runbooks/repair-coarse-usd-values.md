@@ -998,7 +998,7 @@ SELECT count() AS unexplained_dollar
 FROM ( SELECT p.timestamp + 3600 AS bend, 1 AS k
        FROM prices.price_ohlcv_1h AS p FINAL
        WHERE p.quote_asset_id = <USDC asset_id>
-         AND p.timestamp < toDateTime(1773237600)
+         AND p.timestamp < toDateTime({epoch:UInt32})
          AND p.close_usd = p.close AND p.volume_quote > 0 ) AS p
 ASOF LEFT JOIN ( SELECT 1 AS k, timestamp AS rts, usd_rate AS usd
                  FROM prices.usd_rate FINAL

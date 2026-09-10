@@ -11,11 +11,12 @@ Three of its rows became funded M2 scope. This is the M2 instance.
 Nothing here is a request to lower a bar. Each entry names the deviation, says
 what we did instead, and supplies the measurement to judge it on.
 
-| #   | RFP / criterion says                                   | We deliver                                                                                          | Where     |
-| --- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------- | --------- |
-| 1   | `Current Price (float USD)`                            | a decimal **string**                                                                                | §1, below |
-| 2   | _"…return `X-Cache: Hit` header"_                      | a reworded criterion, graded on latency and the deployed cache configuration; no such header exists | §2        |
-| 3   | USDC 1d candles verifiable against known price history | XLM and yBTC instead; USDC excluded                                                                 | §3        |
+| #   | RFP / criterion says                                            | We deliver                                                                                          | Where     |
+| --- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | --------- |
+| 1   | `Current Price (float USD)`                                     | a decimal **string**                                                                                | §1, below |
+| 2   | _"…return `X-Cache: Hit` header"_                               | a reworded criterion, graded on latency and the deployed cache configuration; no such header exists | §2        |
+| 3   | USDC 1d candles verifiable against known price history          | XLM and yBTC instead; USDC excluded                                                                 | §3        |
+| 4   | Tranche 3: _"`sdex.status: \"running\"`, `last_push_at` fresh"_ | the archive finished early and reports `completed`; the criterion needs rewording                   | §4        |
 
 ---
 
@@ -264,6 +265,55 @@ it either.
 
 ---
 
+## 4. Tranche 3 asks a reviewer to confirm the backfill is still running
+
+### The deviation
+
+**Tranche 3 acceptance criterion 1** (design document §9) reads:
+
+> `GET /backfill/status` shows `sdex.status: "running"`, `sdex.last_push_at`
+> within the Tranche 3 push-cadence window, and `sdex.earliest_data_available`
+> ≤ 2018-01-01
+
+The same wording appears in the Tranche 3 reviewer-confirmation list. Two of its
+three clauses can no longer be satisfied:
+
+| clause                                             | state                                        |
+| -------------------------------------------------- | -------------------------------------------- |
+| `sdex.status: "running"`                           | **`completed`** since 2026-07-27             |
+| `sdex.last_push_at` within the push-cadence window | nothing pushes any more; the value only ages |
+| `sdex.earliest_data_available` ≤ 2018-01-01        | **met** — 2015-11-18, six years beyond       |
+
+### Why
+
+The criteria were written expecting the archive to still be ingesting through
+Tranche 3. It finished during Tranche 2 instead. `status` and `last_push_at`
+are progress signals for a _running_ backfill, and a finished one has neither by
+definition — a completed archive that keeps pushing would be the defect.
+
+**This is a deviation caused by delivering early, not by falling short.** The
+one clause that measures the _data_ rather than the _process_ is met by six
+years.
+
+### What should replace it
+
+The criterion's intent — "the archive is deep and the pipeline is alive" —
+survives; only its instruments have to change. The depth clause stands as
+written. The liveness half is better served by the signals that are actually
+live post-backfill: the rollup-freshness alarms, the ledger-processor lag alarm,
+and `realtime_tip_ledger` tracking the chain.
+
+This is flagged now, in the Milestone 2 package, rather than discovered by a
+reviewer at Tranche 3 — which is what §8 of the evidence document is for.
+
+### Status
+
+**Disclosed.** No Tranche 2 criterion depends on it. Milestone 2's own AC 5 is
+graded on `earliest_data_available`, which is met and reconciled four ways
+(evidence §5, AC 5).
+
+---
+
 ## How to read this document
 
 Each deviation above is either **defended** (we believe the delivered behaviour
@@ -279,3 +329,7 @@ None is a silent departure.
   same discipline M1 was accepted on.
 - §3 is **disclosed** — the named asset is excluded, with the alternative
   delivered at greater depth than asked.
+- §4 is **disclosed**, and is the only entry here caused by delivering _ahead_
+  of the plan rather than short of it. It affects Tranche 3, not this
+  submission, and is raised now so the wording can be fixed before a reviewer
+  is asked to confirm something that cannot be true.
