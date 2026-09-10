@@ -6,6 +6,7 @@ status: backlog
 related_adr: []
 related_tasks: ["0116", "0147", "0252", "0236"]
 tags: [layer-backend, layer-api, priority-medium, effort-medium, milestone-M3, data-quality, liquidity, api]
+milestone: 3
 links:
   - "../../../packages/prices-api/src/assets/dto.rs"
 history:
