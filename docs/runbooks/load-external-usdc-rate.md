@@ -565,6 +565,15 @@ holds both** and reads `oracle`.
 
 ## 7. Deploy the API
 
+> ⚠️ **This step comes BEFORE task 0268's campaign — never after it.** The
+> binary on production before this work labels a USDC-quoted candle `oracle`
+> whenever `close_usd != close`, so if the campaign re-prices history first,
+> every re-priced candle below the epoch is published as a Reflector reading
+> that did not exist (measured on 2023-03-11: old binary `oracle`, new binary
+> `external`). The new binary labels each row by its current state and stays
+> truthful for the whole campaign. Order: schema -> daily -> hourly -> promote
+> -> THIS deploy -> 0268 campaign.
+
 `Candle` gained two nullable fields (`source`, `quality`) and the response schema
 grew with them. Deploy `prices-api` after the Preconditions: the new binary
 reads `usd_rate.quality` directly (`queries_ch::ohlcv_peg_series` queries the

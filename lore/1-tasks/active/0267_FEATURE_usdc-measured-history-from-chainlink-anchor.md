@@ -882,7 +882,11 @@ Everything below is deploy-gated; none of it ran on this branch.
       in [[0127]]/[[0128]]'s spot-check table with the 0.96812 close
 - [ ] 14. Then, and only then, [[0268]]'s campaign —
       `docs/runbooks/repair-coarse-usd-values.md` Appendix B, whose precondition
-      1 counts exactly the rows step 8 produces
+      1 counts exactly the rows step 8 produces. **Only after step 10's API
+      deploy** (the pre-0268 binary would label every re-priced candle
+      `oracle`; Appendix B precondition 6) and **only with BOTH files promoted**
+      (a daily-only load prices `price_ohlcv_1h` at the day close for good;
+      precondition 1).
 
 ---
 
