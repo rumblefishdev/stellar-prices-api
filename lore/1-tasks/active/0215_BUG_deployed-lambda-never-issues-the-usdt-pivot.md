@@ -709,6 +709,57 @@ ran out of candidates, not out of time. The pass is now keeping up with live
 traffic and finishing early instead of exhausting its 20 batches. The
 556.78M-row XLM backlog [[0111]] projected at ~258 days is **drained**.
 
+# 📕 DEPLOY RUNBOOK — inducing the `max_execution_time` bound
+
+The AC says *verified by inducing, not inferred*, and the induction is the only
+part of half 2 that cannot be done from a test: it has to show ClickHouse
+raising a real exception that the worker logs. Deploy-gated, so it is the
+operator's to run.
+
+**Do not induce with a slow query.** After [[0111]] nothing on this path takes
+more than ~3.3 s, so there is no statement long enough to trip a sane bound.
+Move the bound instead — same mechanism, one reversible env var.
+
+### 1. [local machine, this repo] Merge and deploy PR #305
+
+Normal compute deploy. ⚠️ [[0141]] — confirm the deployed asset actually
+changed; `deploy-production-compute` does not build.
+
+### 2. [local machine, AWS CLI] Drop the bound below the statement duration
+
+```bash
+aws lambda update-function-configuration \
+  --function-name prices-production-enrichment \
+  --region eu-central-1 \
+  --environment "Variables={$(aws lambda get-function-configuration \
+      --function-name prices-production-enrichment --region eu-central-1 \
+      --query 'Environment.Variables' --output json \
+    | python3 -c 'import json,sys; v=json.load(sys.stdin); v["ENRICH_MAX_EXECUTION_TIME_SECS"]="1"; print(",".join(f"{k}={v}" for k,v in v.items()))')}"
+```
+
+⚠️ `update-function-configuration` **replaces** the whole `Environment` block —
+read the current one and edit it, never pass a bare
+`Variables={ENRICH_MAX_EXECUTION_TIME_SECS=1}`, which would wipe `CH_DOMAIN`,
+`MTLS_SECRET_NAME` and the six enrichment vars.
+
+### 3. [local machine, AWS CLI] Invoke and read the log
+
+Wait for the next hourly run, or invoke directly. Expect in
+`/aws/lambda/prices-production-enrichment`:
+
+- a ClickHouse exception naming **`TIMEOUT_EXCEEDED` (code 159)**, with the
+  query in the message
+- ⛔ **NOT** `BadResponse("")`, and **NOT** a bare `Status: timeout` on the
+  REPORT line
+
+That contrast IS the acceptance: the same failure that was invisible for 26
+days now arrives with an error code attached.
+
+### 4. [local machine, AWS CLI] Restore
+
+Same command as step 2 with `"120"`. Then confirm one clean `QueryFinish` pivot
+pair on the next run before closing the AC.
+
 ## Acceptance Criteria
 
 - [x] The source is shown correct — `pivot_ids() == [xlm, usdt]` and the peg
