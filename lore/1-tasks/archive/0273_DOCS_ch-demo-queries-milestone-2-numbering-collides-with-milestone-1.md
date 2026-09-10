@@ -2,7 +2,7 @@
 id: "0273"
 title: "ch-demo-queries.sql has two queries numbered (10) and two numbered (11) — the Milestone 2 block restarts the sequence its own header says it continues"
 type: DOCS
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0128"]
 tags: [layer-docs, priority-low, effort-small, scf, evidence]
@@ -41,6 +41,18 @@ history:
       18 comment lines changed, nothing else — verified mechanically that every
       changed line begins with `--`. Milestone 1's query numbering is unmoved.
       Stays `active` until #302 merges.
+  - date: 2026-09-10
+    status: completed
+    who: okarcz
+    note: >
+      ✅ **Merged in PR #302** (merge commit `2c58b47`) and verified on
+      `develop`: headers run 1-25, contiguous, zero duplicates. All 5 acceptance
+      criteria met, one of them corrected first — the (12)-(24) target was off
+      by one against a 14-query block, so the range shipped as **(12)-(25)**.
+      Two premises in the task file were falsified before any edit: that target
+      range, and "nothing cross-references these numbers" (true of the other
+      documents, false inside this file — four references moved with it).
+      No follow-up work spawned. Nothing ran against production.
 ---
 
 # `ch-demo-queries.sql` numbering collides between the two milestones
