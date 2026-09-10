@@ -677,13 +677,18 @@ it to the constant — two hand-typed epochs are how a precondition ends up
 measuring the wrong window and reporting 0 over the exact assumption it exists
 to check.
 
-0. **The server is in UTC.** Run `SELECT timezone()` and stop unless it says
-   `UTC`. Every day and hour boundary in this repo — the candle tables' unzoned
+0. **The server — and your session — are in UTC.** Run
+   `SELECT timezone(), serverTimezone()` and stop unless **both** say `UTC`.
+   Every day and hour boundary in this repo — the candle tables' unzoned
    `toStartOfInterval`, the views' day buckets, the loader's and the tiers'
-   ASOF floors — is computed in the SERVER's timezone, so on a non-UTC server
-   imported rows land on the wrong day and every gate below misreads. Task
-   0267's loader refuses to write on a non-UTC server; this campaign has no
-   such guard in code, so this line IS the guard.
+   ASOF floors — is computed in an implicit timezone: the server's for every
+   client that does not override it, the session's for the queries you run
+   here. On a non-UTC server imported rows land on the wrong day and every gate
+   below misreads. `timezone()` alone reports only the SESSION's zone, which a
+   profile's `session_timezone` overrides, so it can pass a non-UTC server —
+   ask for `serverTimezone()` too. Task 0267's loader refuses to write unless
+   both are `UTC`; this campaign has no such guard in code, so this line IS the
+   guard.
 
 1. **Task 0267's `external` rows are loaded.** A count of **0 is a hard
    refusal**, not a no-op — the tool exits with
@@ -802,6 +807,32 @@ to check.
    `--snapshots-verified` assertion as Appendix A. A reset with no rollback
    point is not a repair.
 
+   Take them with Step 3b's script, but **not as written** — it is task 0114's,
+   and two of its lines are wrong for this campaign:
+   - **The range.** Step 3b freezes `BETWEEN 202402 AND 202607`. This campaign
+     rewrites the months its dry run lists, which on the versioned files run
+     from 2021-01 to 2026-03, so use `BETWEEN 202101 AND 202603` (or the dry
+     run's own first and last month, if they differ). A month outside the
+     frozen range has no rollback point at all.
+   - **The name.** Use `NAME="repair_0268_prices_${TBL}_${p}"`, not
+     `repair_0114_…`. The prefix is not cosmetic: a `repair_0114_…` snapshot
+     left over from the 2026-07 campaign makes the script report
+     `already-frozen … KEPT` and keep the OLD copy — so the "rollback point"
+     for those months would be the state before 0114's repair, and restoring it
+     would undo that campaign too.
+
+   Run it for all five tables, then verify exactly as Step 3b does, with the
+   new prefix: the snapshot count per table is non-zero and `du -sh` of
+   `shadow/` is not near zero.
+
+   ```bash
+   ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+     'docker exec app-clickhouse-1 ls /var/lib/clickhouse/shadow/ | grep -c repair_0268_prices_price_ohlcv_1d_'
+   ```
+
+   The rollback below and Step 7's `SYSTEM UNFREEZE` then take the
+   `repair_0268_…` names.
+
 6. **The NEW `prices-api` binary is already live — deploy it BEFORE this
    campaign, never after.** The binary on production before this task labels a
    USDC-quoted candle `peg` when `close_usd = close` and `oracle` otherwise, so
@@ -867,19 +898,34 @@ not. Without that refusal the run would report a clean, empty repair.
 series covers**. Both halves matter: the first keeps oracle- and external-priced
 candles out, the second is task 0182's lesson as a predicate.
 
+`<USDC_ID>` is canonical USDC's `asset_id` on prod:
+
+```sql
+SELECT asset_id FROM prices.assets FINAL
+WHERE asset_code = 'USDC' AND contract_address = ''
+  AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+```
+
 Dry run first, one table at a time:
 
 ```bash
-./coarse-repair --table price_ohlcv_1d \
+./target/release/coarse-repair --transport hetzner --table price_ohlcv_1d \
   --start-month 202001 --end-month 202603 \
   --reset-quote-asset-id <USDC_ID> --reset-not-before 0 \
   --reset-require-external-rate \
   --dry-run
 ```
 
-Then the real run, dropping `--dry-run` and adding `--skip-snapshot
---snapshots-verified` per Appendix A's rules. Repeat for `_1h`, `_4h`, `_1w`,
-`_1M`.
+⚠️ **`--transport hetzner` is not optional.** `--transport` defaults to
+`local`, i.e. plain HTTP to `CLICKHOUSE_URL`, itself defaulting to
+`http://localhost:8123`. Without the flag this command reads — and, once
+`--dry-run` is dropped, WRITES — whatever ClickHouse answers on the operator
+box's loopback, and reports it as the campaign.
+
+Then the real run, keeping `--transport hetzner`, dropping `--dry-run` and
+adding `--skip-snapshot --snapshots-verified` per Appendix A's rules. Repeat
+for `_1h` and `_4h` with the same months, and for `_1w` and `_1M` with
+`--end-month 202602` (see above).
 
 ### ⚠️ The dry run is the gate — and zero candidates is a STOP
 
@@ -1055,14 +1101,15 @@ satisfied by a table priced uniformly low.
 
 Then walk `/ohlcv` for a non-USDC asset over the repaired span and confirm the
 `method` field reads `external` on the scaled pre-epoch buckets and
-`assumed-par` on any bucket the series did not cover. Requesting
-`USDC:<issuer>` itself still returns `peg` — that is USDC's own series and is
-deliberately unchanged.
+`assumed-par` on any bucket the series did not cover. `USDC:<issuer>` itself is
+not this campaign's output: it is USDC's own series, which task 0267 already
+serves from the imported rows — `external` below the epoch (`0.96812` on
+2023-03-11), not `peg` — and which nothing here changes.
 
 ### Rollback
 
 Identical to Appendix A: `ALTER TABLE … ATTACH PARTITION … FROM …` out of the
-frozen copies, per month. The reset is a versioned INSERT, never a mutation, so
+frozen copies, per month — the `repair_0268_…` ones from precondition 5. The reset is a versioned INSERT, never a mutation, so
 the pre-reset rows are still on disk under their old version.
 
 ### Run it once
