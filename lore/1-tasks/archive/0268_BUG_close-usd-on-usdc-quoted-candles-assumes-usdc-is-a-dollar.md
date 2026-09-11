@@ -48,6 +48,14 @@ history:
       outstanding: the Appendix B campaign, post_run_0268_it, the per-table
       runtime/rows figures and the [[0266]] re-measurement are carried by
       [[0276]].
+  - date: "2026-09-11"
+    status: completed
+    who: akot
+    note: >
+      The run-gated criteria closed on [[0276]]'s campaign: 9.94 M
+      USDC-quoted candles re-priced in ~24 min, real unexplained_dollar 0 on
+      1h/4h/1d, post_run_0268_it 2/2. Figures in 0276's
+      notes/R-production-run-2026-09-11.md; [[0266]] re-measured there too.
 ---
 
 # Stored USD prices assume USDC is a dollar
@@ -122,11 +130,11 @@ the code, the tests, the runbook and a dry-runnable tool, and the run itself
 waits on [[0267]]'s rows. Which half is done is stated per criterion.
 **Archived 2026-09-10: the run-gated criteria are deferred to [[0276]].**
 
-- [ ] (deferred to [[0276]]) No USDC-quoted candle before 2026-03-11 carries `close_usd == close`
+- [x] (closed by [[0276]], 2026-09-11) No USDC-quoted candle before 2026-03-11 carries `close_usd == close`
       exactly where an `external` rate exists for its bucket *(code half DONE:
       the external tier, its four SQL-string invariants and its three
       behavioural tests. Closes on the run — Appendix B.)*
-- [ ] (deferred to [[0276]]) `native` on 2023-03-11 publishes a USD close that reflects the USDC
+- [x] (closed by [[0276]], 2026-09-11) `native` on 2023-03-11 publishes a USD close that reflects the USDC
       rate that day (≈ 3 % below the USDC-denominated close), on every
       granularity *(the falsifier is now runnable code —
       `packages/enrichment-worker/tests/post_run_0268_it.rs`, both tests
@@ -140,17 +148,17 @@ waits on [[0267]]'s rows. Which half is done is stated per criterion.
       `dto.rs` and `docs/database-schema/database-schema-overview.md`, all in
       one commit with the wire change. `peg` survives only on USDC's own
       series, where 0165's meaning still holds.
-- [ ] (deferred to [[0276]]) The view and stored `close_usd` agree in deep history; the
+- [x] (closed by [[0276]], 2026-09-11) The view and stored `close_usd` agree in deep history; the
       `backfill_note` caveat from [[0267]] is removed *(**not this branch** —
       needs `views.sql:521,728` and `queries_ch.rs:960` widened from
       `method = 'oracle'` to include `'external'`, which is [[0267]] step 2.
       See Issues 1.)*
-- [ ] (deferred to [[0276]]) The pass is bounded and resumable; runtime and rows touched recorded
+- [x] (closed by [[0276]], 2026-09-11) The pass is bounded and resumable; runtime and rows touched recorded
       here, as [[0182]] did *(code half DONE: every new statement carries the
       0111 partition bound on its candidate side, asserted by an occurrence
       count; the reset obeys `time_window`. The figures go here after the
       run.)*
-- [ ] (deferred to [[0276]]) [[0266]]'s dislocation table re-measured after the pass, with the
+- [x] (closed by [[0276]], 2026-09-11) [[0266]]'s dislocation table re-measured after the pass, with the
       result recorded there *(deferred, ratified: post-run operator step.)*
 
 ## Out of scope

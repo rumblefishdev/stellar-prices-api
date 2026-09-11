@@ -45,6 +45,14 @@ history:
       outstanding: the load, the promote, the API deploy and every
       deploy-gated criterion below are carried by [[0276]], together with
       closing [[0247]].
+  - date: "2026-09-11"
+    status: completed
+    who: akot
+    note: >
+      The deploy-gated criteria closed on the production run of [[0276]]:
+      /ohlcv serves 0.96812 external chainlink measured for 2023-03-11, the 1h
+      hours read 0.99503491 / 0.8833 / 0.96812, no peg bucket 2021-01-25 ->
+      2026-03-10, 44 918 external rows. [[0247]] closed.
 ---
 
 # Serve USDC's measured USD history
@@ -120,7 +128,7 @@ load and the deploy (Operator Checklist below), or was descoped — each says
 which. **Archived 2026-09-10: the deploy-gated criteria are deferred to
 [[0276]].**
 
-- [ ] (deferred to [[0276]]) `GET /v1/assets/USDC:GA5Z…/ohlcv` returns `close = 0.96812` (quoted as
+- [x] (closed by [[0276]], 2026-09-11) `GET /v1/assets/USDC:GA5Z…/ohlcv` returns `close = 0.96812` (quoted as
       `0.9681` in the original criterion), `method = external`,
       `source = chainlink`, `quality = measured` for 2023-03-11
       *(DEPLOY-GATED. The query, the read path and the wire fields all ship
@@ -131,7 +139,7 @@ which. **Archived 2026-09-10: the deploy-gated criteria are deferred to
       through `toString`, and ClickHouse TRIMS a Decimal's trailing zeros, so
       neither `0.96812000000000` nor the rounded QUOTATION `0.9681` matches;
       see Emerged decision 10.)*
-- [ ] (deferred to [[0276]]) No bucket of that series carries `method = peg` between 2021-01-25 and
+- [x] (closed by [[0276]], 2026-09-11) No bucket of that series carries `method = peg` between 2021-01-25 and
       2026-03-10; `trade_count`/`n_obs` reflect rounds, not 0
       *(DEPLOY-GATED for the first half. ⚠️ The second half is DESCOPED and
       SETTLED: `n_obs` was not added to `usd_rate` or to `Candle`, and Adam
@@ -176,7 +184,7 @@ which. **Archived 2026-09-10: the deploy-gated criteria are deferred to
       decision are recorded in this task *(from [[0247]])* — see Implementation
       Notes; the ticker→issuer gate is CODE
       (`external_rate::check_identity`), not a comment, with its own test
-- [ ] (deferred to [[0276]]) [[0247]] closed as folded into this task; [[0265]] archived
+- [x] (closed by [[0276]], 2026-09-11) [[0247]] closed as folded into this task; [[0265]] archived
       *(0265 IS archived — the versioned CSV is read from its archive
       directory. 0247 is not closed here: four of its six criteria are closed
       by this branch (see below), but its first — rows actually present in

@@ -2,15 +2,15 @@
 id: "0247"
 title: "Backfill USDC's real USD rate before 2026-03-11 from an external anchor — deep history is denominated in an assumption"
 type: FEATURE
-status: backlog
+status: completed
 related_adr: []
-related_tasks: ["0168", "0167", "0173", "0172", "0165", "0111"]
+related_tasks: ["0168", "0167", "0173", "0172", "0165", "0111", "0265", "0267", "0268", "0276"]
 tags: ["priority-low", "effort-medium", "clickhouse", "data-correctness", "read-surface", "history"]
 links:
   - "../../../packages/prices-clickhouse/schema/init.sql"
   - "../../../packages/enrichment-worker/src/ch_enrich.rs"
 history:
-  - date: 2026-08-31
+  - date: "2026-08-31"
     status: backlog
     who: okarcz
     note: >
@@ -20,7 +20,7 @@ history:
       window can be FILLED. Raised as "the candles must know the real rate" —
       measured on prod and disproved, which is what identified the only route
       that does work: an anchor from outside the USDC-denominated system.
-  - date: 2026-09-07
+  - date: "2026-09-07"
     status: backlog
     who: akot
     note: >
@@ -28,6 +28,15 @@ history:
       and proved the composed series over 2021-01-25 → 2026-03-10. This task's
       loading path and acceptance criteria are folded into [[0267]] as its
       step 1; implement there, close this one when 0267 ships.
+  - date: "2026-09-11"
+    status: completed
+    who: akot
+    note: >
+      Closed as folded into [[0267]] (code) and [[0276]] (the production load
+      of 2026-09-11): 44 918 canonical-USDC `external` rows 2021-01-25 ->
+      2026-03-11 13:00, both price_usd_series grains serve them, 2023-03-11
+      reads 0.96812. Provenance and the ticker->issuer gate are recorded in
+      [[0265]] / [[0267]].
 ---
 
 # Deep history is denominated in USDC, so it cannot price USDC
@@ -142,18 +151,26 @@ argues for a daily grain rather than an hourly one.
 
 ## Acceptance Criteria
 
-- [ ] `prices.usd_rate` carries canonical-USDC rows from 2021-01-25 to
+- [x] `prices.usd_rate` carries canonical-USDC rows from 2021-01-25 to
       `2026-03-11 14:00`, with a `method` distinct from `'oracle'`.
-- [ ] No overlap with our own readings at the same key; the join in
+      *(44 918 `external` rows, 2021-01-25 00:00 → 2026-03-11 13:00 — [[0276]].)*
+- [x] No overlap with our own readings at the same key; the join in
       `price_usd_series*` picks exactly one row per bucket either side of the
       boundary, and there is no discontinuity artefact at 2026-03-11.
-- [ ] `price_usd_series` and `price_usd_series_1h` publish the imported rate for
+      *(The load partitions below the epoch; the 2026-03-11 1d bucket holds
+      both and reads `oracle` by rank — [[0267]], measured in [[0276]].)*
+- [x] `price_usd_series` and `price_usd_series_1h` publish the imported rate for
       deep history and stop reporting `method = 'peg'` for covered buckets.
-- [ ] The March 2023 SVB window reads materially below par — the acceptance
+      *(2023-03-11: 0.96812 daily; 0.99503491 / 0.8833 / 0.96812 hourly, all
+      `external` — [[0276]].)*
+- [x] The March 2023 SVB window reads materially below par — the acceptance
       fixture, because it is the one span where the difference is unmistakable.
-- [ ] The source, its granularity, and the date it was fetched are recorded in
+      *(0.96812 on the day, trough 0.8833 at 07:00 — [[0276]].)*
+- [x] The source, its granularity, and the date it was fetched are recorded in
       the task file. An imported series with no provenance is not evidence.
-- [ ] The ticker→issuer decision is recorded, with [[0173]]'s reasoning applied.
+      *(Recorded in [[0265]], which composed the series, and [[0267]].)*
+- [x] The ticker→issuer decision is recorded, with [[0173]]'s reasoning applied.
+      *(Code, not prose: `external_rate::check_identity` — [[0267]].)*
 
 ## Out of scope
 
