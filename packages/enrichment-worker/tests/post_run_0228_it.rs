@@ -203,7 +203,18 @@ const DEEP: [Grain; 6] = [
 /// the highest `version` any row in the window carries.
 #[derive(clickhouse::Row, serde::Deserialize, Debug, Clone, PartialEq)]
 struct Measurement {
-    ratio: f64,
+    /// `None` when no candle in the window shares a bucket with a priced
+    /// reference candle (`matched == 0`), which the query renders as NULL.
+    ///
+    /// ⚠️ `Option<f64>`, NOT `f64`, because the column is `Nullable(Float64)`:
+    /// the reference vwap divides by `nullIf(sum(volume_base), 0)`, and one
+    /// nullable factor makes the whole median nullable. A plain `f64` decodes
+    /// the RowBinary row one byte off — the NULL flag lands in the mantissa —
+    /// and the falsifier then reports a factor of ±1e230 on a correctly
+    /// repaired table (found by the 0228 prove run against 26.3.10.60).
+    /// `post_run_0268_it`'s `rate: Option<f64>` is the same shape for the same
+    /// reason; [`judge`] treats `None` as a finding, never a pass.
+    ratio: Option<f64>,
     matched: u64,
     rows: u64,
     zeros: u64,
@@ -266,8 +277,9 @@ fn plain_client() -> Client {
 /// `rows` and `zeros`, it simply cannot contribute a ratio.
 ///
 /// One ungrouped aggregate always returns exactly one row — over an empty match
-/// set it returns zero counts and a `NaN` ratio, never zero rows — so this is
-/// `fetch_one` and emptiness is read from the counts.
+/// set it returns zero counts and a NULL ratio (the column is nullable, see
+/// [`Measurement::ratio`]), never zero rows — so this is `fetch_one` and
+/// emptiness is read from the counts.
 async fn measure(ch: &Client, table: &str, from: u32, to: u32) -> Measurement {
     ch.query(&format!(
         "SELECT \
@@ -363,17 +375,27 @@ fn judge(g: &Grain, m: &Measurement, mech: Option<&Mechanism>) -> Option<String>
             m.rows
         ));
     }
-    if m.ratio < SANITY_FLOOR {
+    // Reached only with `matched > 0`, so a NULL here is the query and the
+    // struct disagreeing about the column — a harness defect, reported as such
+    // rather than passed through as a number.
+    let Some(ratio) = m.ratio else {
         return Some(format!(
-            "{t}: carried USDC/USD factor {:.6} < {SANITY_FLOOR} — nothing in the depeg \
-             weekend traded that low; a wrong rate or a wrong column was applied.",
-            m.ratio
+            "{t}: {} candles matched a priced reference but the carried factor came \
+             back NULL — the falsifier's own query or row type is wrong, not the \
+             table. Fix the harness before reading anything else from it.",
+            m.matched
+        ));
+    };
+    if ratio < SANITY_FLOOR {
+        return Some(format!(
+            "{t}: carried USDC/USD factor {ratio:.6} < {SANITY_FLOOR} — nothing in the \
+             depeg weekend traded that low; a wrong rate or a wrong column was applied."
         ));
     }
     match g.check {
         Check::RatioUnder(ceiling) => {
-            if m.ratio >= ceiling {
-                let shape = if m.ratio == 1.0 {
+            if ratio >= ceiling {
+                let shape = if ratio == 1.0 {
                     "exactly 1.0 is the untouched USDC-denominated value"
                 } else {
                     "a hair under par is a PARTIAL campaign"
@@ -383,7 +405,7 @@ fn judge(g: &Grain, m: &Measurement, mech: Option<&Mechanism>) -> Option<String>
                      from par. USDC closed {DEPEG_RATE} on 2023-03-11 and the pivot must \
                      carry that measurement; the campaign did not reach this table \
                      ({shape}). Measured over {} of {} candles.",
-                    m.ratio, m.matched, m.rows
+                    ratio, m.matched, m.rows
                 ));
             }
             None
@@ -463,12 +485,14 @@ async fn the_pivot_leg_carries_no_discount_once_usdc_is_back_at_par() {
         m.matched > 0,
         "no XLM/USDC reference candle shares a bucket on 2023-03-15: {m:?}"
     );
+    let ratio = m
+        .ratio
+        .expect("matched > 0 but the carried factor is NULL — the harness query is wrong");
     assert!(
-        (m.ratio - 1.0).abs() < 0.005,
-        "2023-03-15 carried factor {:.6}, expected ~1.0 (±0.005). A table scaled \
+        (ratio - 1.0).abs() < 0.005,
+        "2023-03-15 carried factor {ratio:.6}, expected ~1.0 (±0.005). A table scaled \
          uniformly low would pass the depeg check and fail here — which is what this \
-         control exists to catch.",
-        m.ratio
+         control exists to catch."
     );
 }
 
@@ -476,7 +500,7 @@ async fn the_pivot_leg_carries_no_discount_once_usdc_is_back_at_par() {
 
 fn carried(ratio: f64, rows: u64) -> Measurement {
     Measurement {
-        ratio,
+        ratio: Some(ratio),
         matched: rows,
         rows,
         zeros: 0,
@@ -625,12 +649,33 @@ fn missing_zeroed_and_unmeasurable_rows_are_findings_not_passes() {
 
     let mut m = carried(DEPEG_RATE, 24);
     m.matched = 0;
-    m.ratio = f64::NAN;
+    m.ratio = None;
     let unmeasurable = judge(g, &m, None).unwrap();
     assert!(
         unmeasurable.contains("cannot be measured"),
         "{unmeasurable}"
     );
+}
+
+/// The harness's own failure mode, pinned. The wire column is nullable, and the
+/// first version of this file decoded it into a plain `f64` — the NULL flag
+/// shifted every byte and the "factor" came out as ±1e230 on a table the tool
+/// had repaired correctly. The struct now carries `Option<f64>`; this test makes
+/// the remaining hole — `None` with `matched > 0`, which can only mean the query
+/// and the type disagree — a finding that names the harness, not the table.
+#[test]
+fn a_null_factor_behind_matched_rows_is_a_harness_finding_not_a_pass() {
+    for g in &DEEP {
+        let (mut m, mech) = repaired(DEPEG_RATE, 3);
+        m.ratio = None;
+        let f = judge(g, &m, Some(&mech))
+            .unwrap_or_else(|| panic!("{}: a NULL factor passed", g.table));
+        assert!(
+            f.contains("NULL") && f.contains("harness"),
+            "{}: the finding must name the harness: {f}",
+            g.table
+        );
+    }
 }
 
 /// A row at `close_usd = 0` WITHOUT volume is the permanent volume-zero floor —
@@ -647,7 +692,7 @@ fn zero_volume_rows_at_close_usd_zero_are_context_not_the_0182_outcome() {
         // The ratio check is still reached behind a clean zeros count.
         if let Check::RatioUnder(_) = g.check {
             let mut par = m.clone();
-            par.ratio = 1.0;
+            par.ratio = Some(1.0);
             assert!(
                 judge(g, &par, None).is_some(),
                 "{}: unpriceable rows masked par",

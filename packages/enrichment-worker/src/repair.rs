@@ -32,7 +32,10 @@ use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPass, repair_target_pred};
+use crate::ch_enrich::{
+    ChEnrichConfig, ChEnrichError, ChEnrichmentPass, assert_external_rates_are_loaded,
+    repair_target_pred,
+};
 
 /// One coarse-repair run over `[start_month, end_month]` (inclusive `YYYYMM`).
 #[derive(Debug, Clone)]
@@ -262,6 +265,19 @@ impl CoarseRepairDriver {
     /// (if enabled), then runs a partition-bounded one-shot enrichment for the
     /// month. Returns the per-month before/after counts.
     pub async fn run(&self) -> Result<RepairSummary, ChEnrichError> {
+        // A rate-gated reset with no `external` series loaded is refused HERE,
+        // before the month enumeration and in a dry run too. The enumeration
+        // below carries the same day-set predicate, so an unloaded series does
+        // not fail it — it empties it, and the run would end green having
+        // touched nothing, which is exactly the false all-clear the flag's
+        // documentation promises cannot happen (tasks 0268/0228; found by the
+        // 0228 prove run). One definition, shared with the pass's own
+        // `reset_step`, so the two cannot drift.
+        if let Some(spec) = self.cfg.enrich.usd_reset.as_ref()
+            && (spec.require_external_rate || spec.require_pivot_usdc_rate)
+        {
+            assert_external_rates_are_loaded(&self.client, &self.cfg.enrich.database, spec).await?;
+        }
         let months = self.months_with_zeros().await?;
         info!(
             count = months.len(),

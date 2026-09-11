@@ -3123,6 +3123,74 @@ async fn the_pivot_reset_refuses_when_no_external_rates_are_loaded() {
         .unwrap();
 }
 
+/// The refusal above, reached through the REPAIR DRIVER — which is how the
+/// operator actually runs a reset (`coarse-repair`), and where it was not
+/// reached at all until the 0228 prove run: the day-set predicate is part of the
+/// driver's month enumeration, so with no `external` rows loaded the driver
+/// found zero months, never built a pass, and exited green with "0 month(s)" —
+/// while `--help` and the runbook promised `ResetRequiresExternalRates`. The
+/// driver now runs the check BEFORE enumerating months, dry run included, so
+/// the promise is kept from the first invocation.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_repair_driver_refuses_an_unloaded_series_before_enumerating_months() {
+    let db = "it_enrich_0228_driver_no_rates";
+    let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
+    let client = setup_0228_reset(db, covered, uncovered).await;
+    // Deliberately no seed_external_rate call.
+
+    let mut enrich = cfg(db);
+    enrich.table = "price_ohlcv_1h".to_string();
+    enrich.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    let driver = |dry_run: bool| {
+        CoarseRepairDriver::with_client(
+            client.clone(),
+            CoarseRepairConfig {
+                enrich: enrich.clone(),
+                start_month: 202_001,
+                end_month: 202_603,
+                snapshot: false,
+                dry_run,
+                one_shot: true,
+                deadline: None,
+            },
+        )
+    };
+
+    // Both the rehearsal and the real run refuse — a dry run that accepts what
+    // the real run refuses is a rehearsal of nothing (0228 review, WR-01).
+    for dry_run in [true, false] {
+        let err = driver(dry_run).run().await.unwrap_err();
+        assert!(
+            matches!(err, ChEnrichError::ResetRequiresExternalRates { quote_asset_id }
+                     if quote_asset_id == 1),
+            "dry_run={dry_run}: an unloaded 0267 series must refuse the driver, got {err:?}"
+        );
+    }
+    // A refused run writes nothing.
+    let (v, ver) = pivot_subject_1h(&client, db, covered).await;
+    assert!(
+        (v - FOO_XLM_CLOSE * XLM_USDC_CLOSE).abs() < 1e-6 && ver == 1,
+        "got {v} v{ver}"
+    );
+
+    // The same driver, once the series is loaded, enumerates the month and runs.
+    seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
+    let summary = driver(false).run().await.unwrap();
+    assert_eq!(summary.months.len(), 1, "{summary:?}");
+    let (v, ver) = pivot_subject_1h(&client, db, covered).await;
+    assert!(
+        (v - FOO_XLM_CLOSE * XLM_USDC_CLOSE * DEPEG_RATE).abs() < 1e-6 && ver == 3,
+        "got {v} v{ver}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
 /// 🔑 **RE-OPENS NOTHING THE SAME PASS CANNOT REFILL.** The day the imported
 /// series does not cover keeps its stored value; only the covered day is
 /// re-priced.

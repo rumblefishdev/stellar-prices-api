@@ -559,6 +559,41 @@ fn external_rate_day_pred(db: &str) -> String {
     )
 }
 
+/// Refuse a rate-gated reset (`require_external_rate`, task 0268, or
+/// `require_pivot_usdc_rate`, task 0228) while `usd_rate` holds no `external`
+/// row for canonical USDC — the exact identity tuple and `method` that
+/// [`external_rate_day_pred`] selects on, so "loaded" here means "the day-set
+/// can match something".
+///
+/// A free function, not only a [`ChEnrichmentPass`] method, because it has TWO
+/// callers that must agree: the pass's `reset_step`, and
+/// [`crate::repair::CoarseRepairDriver::run`] BEFORE it enumerates months. The
+/// second is the one the operator hits. The driver's month enumeration carries
+/// the same day-set predicate, so with nothing loaded it finds no month to
+/// visit, never builds a pass, and — until the 0228 prove run — exited green
+/// with "0 month(s)" while `--help` and the runbook promised this refusal. An
+/// empty campaign that reports itself clean is the false all-clear task 0268's
+/// WR-05 was written against; it must be a refusal, in a dry run too.
+pub async fn assert_external_rates_are_loaded(
+    client: &Client,
+    database: &str,
+    spec: &UsdResetSpec,
+) -> Result<(), ChEnrichError> {
+    let sql = format!(
+        "SELECT count() FROM {database}.usd_rate FINAL \
+         WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+           AND issuer_address = '{USDC_ISSUER}' AND contract_address = '' \
+           AND method = 'external' AND usd_rate > 0"
+    );
+    let rows = client.query(&sql).fetch_one::<u64>().await?;
+    if rows == 0 {
+        return Err(ChEnrichError::ResetRequiresExternalRates {
+            quote_asset_id: spec.quote_asset_id,
+        });
+    }
+    Ok(())
+}
+
 /// What makes a month *worth visiting* for the task 0114 repair driver: it holds
 /// steady-state zeros, **or** it holds rows a reset is going to re-open.
 ///
@@ -1154,20 +1189,7 @@ impl ChEnrichmentPass {
         &self,
         spec: &UsdResetSpec,
     ) -> Result<(), ChEnrichError> {
-        let sql = format!(
-            "SELECT count() FROM {db}.usd_rate FINAL \
-             WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
-               AND issuer_address = '{USDC_ISSUER}' AND contract_address = '' \
-               AND method = 'external' AND usd_rate > 0",
-            db = self.cfg.database,
-        );
-        let rows = self.client.query(&sql).fetch_one::<u64>().await?;
-        if rows == 0 {
-            return Err(ChEnrichError::ResetRequiresExternalRates {
-                quote_asset_id: spec.quote_asset_id,
-            });
-        }
-        Ok(())
+        assert_external_rates_are_loaded(&self.client, &self.cfg.database, spec).await
     }
 
     /// Refuse a `require_external_rate` reset on a sub-daily table unless the

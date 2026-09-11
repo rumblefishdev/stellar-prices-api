@@ -162,8 +162,12 @@ struct Args {
     /// **157 candles were zeroed with nothing able to refill them**. A bucket
     /// with no imported rate is not re-opened at all under this flag.
     ///
-    /// Refused outright when `prices.usd_rate` holds zero `external` rows — the
-    /// tool does not run and quietly do nothing.
+    /// Refused outright when `prices.usd_rate` holds zero `external` rows for
+    /// canonical USDC (`ResetRequiresExternalRates`) — checked first thing after
+    /// connecting, BEFORE the month enumeration and in a dry run too, so the
+    /// tool does not run and quietly do nothing. (The enumeration carries the
+    /// same day-set predicate; an unloaded series would not fail it but empty
+    /// it, and the run would end green having touched nothing.)
     #[arg(long, requires = "reset_quote_asset_id")]
     reset_require_external_rate: bool,
 
@@ -189,8 +193,12 @@ struct Args {
     /// canonical USDC, this one for the legs that pivot off it. Refused by
     /// `UsdResetSpec::validate`, before a connection is opened.
     ///
-    /// Refused outright when `prices.usd_rate` holds zero `external` rows — the
-    /// tool does not run and quietly do nothing.
+    /// Refused outright when `prices.usd_rate` holds zero `external` rows for
+    /// canonical USDC (`ResetRequiresExternalRates`) — checked first thing after
+    /// connecting, BEFORE the month enumeration and in a dry run too, so the
+    /// tool does not run and quietly do nothing. (The enumeration carries the
+    /// same day-set predicate; an unloaded series would not fail it but empty
+    /// it, and the run would end green having touched nothing.)
     #[arg(long, requires = "reset_quote_asset_id")]
     reset_require_pivot_usdc_rate: bool,
 
