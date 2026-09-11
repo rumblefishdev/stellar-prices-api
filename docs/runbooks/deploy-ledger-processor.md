@@ -220,28 +220,36 @@ re-pin to their merge rev.
 | `xdr-protocol-watch.yml`, daily 06:17 UTC | strict   | **mainnet moving while nothing in the repo changes** — the proto27 case, and the reason this is on a clock at all |
 | this runbook, step 0                      | advisory | shipping a binary that cannot decode current ledgers                                                              |
 
-### One-time setup: the Slack webhook
+### One-time setup: Slack delivery
 
-The daily watch posts to **#stellar-prices-api-bot** on failure, and that needs
-a repository secret named `SLACK_WEBHOOK_URL`.
+The daily watch reaches **#stellar-prices-api-bot** through the **Slack GitHub
+app**, which is already installed in the workspace. Run this once, in that
+channel:
 
-⚠️ It is a **Slack incoming webhook**, not the path the alarms use. Every other
-ops alarm reaches that channel through SNS → AWS Chatbot (task 0056), which
-needs AWS credentials this workflow does not have and should not be handed for
-one `curl`. The two routes are independent and both end in the same channel.
+```
+/github subscribe rumblefishdev/stellar-prices-api workflows:{name:"XDR protocol watch"}
+```
 
-1. In Slack, create an incoming webhook for `#stellar-prices-api-bot`.
-2. Add it to the repository: **Settings → Secrets and variables → Actions →
-   New repository secret**, named `SLACK_WEBHOOK_URL`.
-3. Confirm it with a manual run: **Actions → XDR protocol watch → Run
-   workflow**. While we are behind protocol 28 the strict mode fails on
-   purpose, so a correctly wired webhook posts immediately.
+No webhook, no repository secret, no AWS involvement.
 
-**Until that secret exists the workflow still fails correctly** — it just logs
-a warning instead of posting, and the only notification is GitHub's own. That
-one goes to _"the user who last modified the cron syntax in the workflow
-file"_, which is a single inbox, subject to that person's notification
-settings, and silently reassigned by an unrelated edit to the `cron:` line.
+⚠️ **The subscription matches the workflow's `name:` exactly.** Renaming it in
+`.github/workflows/xdr-protocol-watch.yml` silently unsubscribes the channel —
+the workflow keeps failing and the channel stays quiet, which is precisely the
+failure this guard exists to prevent. Rename both together or neither.
+
+The app posts the run and a link rather than the report text, so the check
+writes its output to the run's **summary**: it is the first thing visible after
+clicking through, not something to dig out of a log.
+
+#### Why not an incoming webhook, and why not the alarm path
+
+Recorded because both are the obvious answers and both are closed:
+
+- **An incoming webhook** needs a Slack app, and the workspace is at its
+  installed-app limit.
+- **SNS → AWS Chatbot**, the route every ops alarm uses (task 0056), needs AWS
+  credentials this workflow does not have and should not be handed for one
+  notification.
 
 ## Rollback
 

@@ -19,6 +19,10 @@
 #     checks nothing is precisely the shape of the outage being guarded
 #     against — every signal green, nothing actually verified.
 #
+# A failing run reaches #stellar-prices-api-bot through the Slack GitHub app,
+# subscribed to this workflow by name — see the delivery step below for the
+# command and for why it is not a webhook.
+#
 # Run it by hand any time with `npm run xdr:watch-protocol-gap`.
 name: XDR protocol watch
 
@@ -61,49 +65,36 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           exit $status
 
-      # Delivery, and the reason it is a webhook rather than the usual path:
-      # every other ops alarm reaches #stellar-prices-api-bot through
-      # SNS -> AWS Chatbot (task 0056), which needs AWS credentials this
-      # workflow does not have and should not be given for one curl.
+      # DELIVERY — the Slack GitHub app, subscribed to this workflow by name:
       #
-      # Without this step the only notification is GitHub's own, and GitHub
-      # sends that to "the user who last modified the cron syntax in the
-      # workflow file" — one inbox, subject to that person's notification
-      # settings, silently reassigned by an unrelated edit to the line above.
-      # That is too thin for something that fires about twice a year.
+      #   /github subscribe rumblefishdev/stellar-prices-api \
+      #       workflows:{name:"XDR protocol watch"}
       #
-      # `${{ }}` is expanded into the ENVIRONMENT, never into the script body:
-      # the report contains upstream-controlled text and interpolating it
-      # inline would be a shell-injection seam.
-      - name: 'Post the lag to #stellar-prices-api-bot'
-        if: failure()
+      # ...run once in #stellar-prices-api-bot. There is deliberately no
+      # webhook and no secret here. The obvious route — an incoming webhook —
+      # needs a Slack app, and the workspace is at its installed-app limit; the
+      # other route, the SNS -> AWS Chatbot path every ops alarm uses (task
+      # 0056), needs AWS credentials this workflow does not have and should not
+      # be handed for one notification.
+      #
+      # ⚠️ The subscription matches on the workflow NAME above, exactly.
+      # Renaming `name:` at the top of this file silently unsubscribes the
+      # channel — the workflow keeps failing and the channel keeps quiet, which
+      # is this task's own failure mode. Rename both together or not at all.
+      #
+      # What that costs: the app posts the run and a link, not our text. This
+      # step buys most of it back — the report lands in the run's SUMMARY, so
+      # it is the first thing visible after the click rather than something to
+      # be dug out of a log.
+      - name: Put the report on the run summary
+        if: always()
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           REPORT: ${{ steps.gap.outputs.report }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          set -euo pipefail
-          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
-            echo "::warning::SLACK_WEBHOOK_URL is not set — no Slack message sent."
-            echo "Create a Slack incoming webhook for #stellar-prices-api-bot and"
-            echo "add it as the repository secret SLACK_WEBHOOK_URL."
-            exit 0
-          fi
-          jq -n \
-            --arg text ":rotating_light: *stellar-xdr protocol lag*" \
-            --arg report "$REPORT" \
-            --arg run "$RUN_URL" \
-            '{
-               text: $text,
-               blocks: [
-                 { type: "section",
-                   text: { type: "mrkdwn", text: $text } },
-                 { type: "section",
-                   text: { type: "mrkdwn", text: ("```" + $report + "```") } },
-                 { type: "context",
-                   elements: [ { type: "mrkdwn",
-                     text: ("Protocol 27 froze live ingestion for six days and nothing reported it (tasks 0091/0094). <" + $run + "|Workflow run>") } ] }
-               ]
-             }' \
-            | curl -sS --fail-with-body -X POST -H 'content-type: application/json' \
-                --data @- "$SLACK_WEBHOOK_URL"
+          {
+            echo '## stellar-xdr protocol lag'
+            echo
+            echo '```'
+            echo "$REPORT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
