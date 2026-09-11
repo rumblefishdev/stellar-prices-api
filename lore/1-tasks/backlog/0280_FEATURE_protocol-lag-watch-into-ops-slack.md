@@ -1,5 +1,5 @@
 ---
-id: "0278"
+id: "0280"
 title: "Route the protocol-lag watch into #stellar-prices-api-bot through the existing SNS → Chatbot path"
 type: FEATURE
 status: backlog
@@ -16,6 +16,14 @@ history:
       Spawned from [[0098]]. Its guard delivers through a GitHub issue because
       every Slack route was closed to us; this is the route that would put it
       where the ops alarms already land.
+      ⚠️ Renumbered TWICE the same day, 0278 → 0279 → 0280. 0278 was taken by
+      a teammate's dust-print task pushed at 11:59 and this was filed at 12:15
+      from a REMEMBERED "next free ID"; the repair to 0279 then collided with a
+      freeze-snapshot task that arrived in the same pull. Third and fourth ID
+      collisions in this project. **Derive the number from the tree, right
+      before writing the file** — `find lore/1-tasks lore/2-adrs -maxdepth 2
+      -name '0*' | grep -oE '[0-9]{4}' | sort -n | tail -1` — never from a note,
+      a memory, or an earlier reading in the same session.
 ---
 
 # Protocol-lag watch into the ops Slack channel

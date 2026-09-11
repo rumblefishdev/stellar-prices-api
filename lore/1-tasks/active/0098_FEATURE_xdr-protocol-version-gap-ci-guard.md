@@ -71,7 +71,7 @@ deliberately kept on `branch="develop"` while `stellar-xdr` is exact-pinned (see
       organisation owner; SNS → AWS Chatbot needs AWS credentials this workflow
       does not hold. Chatbot properly would mean a CloudWatch metric from
       something holding credentials, plus a CDK change and a deploy — its own
-      task, filed as [[0278]].
+      task, filed as [[0280]].
 - [ ] Confirmed end to end by a manual `workflow_dispatch` run: the run fails,
       the tracking issue is opened, and the report is on the run summary.
       **Self-testing while it lasts** — we are behind protocol 28, so strict
@@ -129,7 +129,7 @@ webhook (workspace at its installed-app limit), Slack GitHub app (needs an
 **organisation owner** to install it on the GitHub side — the workspace half
 was already installed, which is why this looked like it would work), SNS → AWS
 Chatbot (needs AWS credentials this workflow does not hold). The Chatbot route
-done properly is [[0278]].
+done properly is [[0280]].
 
 ## 2. Watch the repository [GitHub, in a browser]
 
@@ -318,7 +318,7 @@ JSON carrying the report text.
    which is the failure this whole task exists to prevent.
 
    The Chatbot route done properly — a CloudWatch metric published by something
-   holding AWS credentials, plus an alarm — is [[0278]].
+   holding AWS credentials, plus an alarm — is [[0280]].
 
 10. **The watch measures `develop`, not the default branch.** Found while
     answering "does the CI check master or develop?", and it was a real defect:
