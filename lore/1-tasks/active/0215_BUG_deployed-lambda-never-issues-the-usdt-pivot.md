@@ -946,21 +946,35 @@ enriched: 333`, 6.5 s total. After [[0111]] the live statements are genuinely
 sub-second — which confirms the runbook's rule that this cannot be induced with
 a slow query, and shows the 120 s production value has enormous headroom.
 
-### ⏳ Open question — whose bug is it
+### ✅ RESOLVED — it is OURS, and the evidence is both sides of one statement
 
-Handed to the operator as a prod CH read, `dev_read`, `system.query_log`,
-`user = 'prices_writer'`, `exception_code != 0`, last 20 minutes:
+`system.query_log`, `user = 'prices_writer'`, the same second the worker
+logged its empty body:
 
-- **rows with `exception_code = 159`** → ClickHouse threw correctly and our
-  client discards the body. Ours to fix, in the `mtls.rs` / `clickhouse`-crate
-  error path.
-- **no rows** → ClickHouse aborted without recording an exception. A different
-  and more awkward problem, and one to raise with BE.
+```
+event_time:        2026-09-11 11:49:40
+type:              ExceptionWhileProcessing
+exception_code:    159
+query_duration_ms: 1003
+exception:         Code: 159. DB::Exception: Timeout exceeded:
+                   elapsed 1002.319598 ms, maximum: 1000 ms. (TIMEOUT_EXCEEDED)
+query:             INSERT INTO prices.price_ohlcv_1m (timestamp, asset_id, …
+```
 
-`with_execution_bound` sets it as a URL option
-(`client.with_option("max_execution_time", …)`, `prices-clickhouse/src/lib.rs:197`),
-which demonstrably reaches the server — claim 2 proves that. So the suspicion
-is the response path, not the request path.
+**ClickHouse raised exactly what this task's half 2 promised** — the code, the
+elapsed time, the bound crossed, and the statement. Our client reduced all of
+it to `bad response: `.
+
+Three layers exonerated by measurement:
+
+- **the request path** — the bound was enforced to the millisecond, 1002.3 ms
+  against 1000 ms, so `with_execution_bound` reaches the server;
+- **ClickHouse** — it threw, recorded the throw, and its message is complete;
+- **the worker's logging** — `main.rs:289` logs `error = %e`; the `Display` it
+  is handed is already empty.
+
+The loss is between the HTTP response and `clickhouse::error::Error`
+(crate 0.13.3). **Spawned as [[0281]]**, which owns the fix and the re-run.
 
 ### Production state after the run — all restored
 
@@ -994,6 +1008,13 @@ is the response path, not the request path.
       1,895 on the first batch, ~17/batch since.**
 - [ ] `max_execution_time` is set per-caller on our client, and an exceeded bound
       produces a logged ClickHouse exception — verified by inducing, not inferred.
+      🔴 **INDUCED 2026-09-11 AND IT FAILED — see the induction section above.**
+      The bound is set, armed and enforced (killed at 1.004 s against 1 s), but
+      the worker logs `BadResponse("")` while ClickHouse recorded a complete
+      `Code: 159 TIMEOUT_EXCEEDED`. The clause after the "and" is the half that
+      does not hold, and it is the half the whole of half 2 was for.
+      ➡️ **Delegated to [[0281]]**, whose third criterion is exactly this one.
+      This criterion closes when 0281 does.
       **Code in PR #305** (2026-09-10): 120 s on the scheduled worker's client via
       `ENRICH_MAX_EXECUTION_TIME_SECS`; the operator CLIs stay unbounded on
       purpose, which is what "per-caller" means here. ⏳ **The induction is
