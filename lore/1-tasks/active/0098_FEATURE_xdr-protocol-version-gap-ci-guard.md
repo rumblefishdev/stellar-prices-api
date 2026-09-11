@@ -155,9 +155,21 @@ watch.
 The schedule cannot start until the file is on the default branch, and the next
 release merge could be weeks away — the Protocol 28 vote is 2026-09-16.
 
-Open a small PR carrying **`.github/workflows/xdr-protocol-watch.yml` only**,
-`develop` → `master`. Keeping it to the one file avoids dragging 85 unrelated
-commits into a release branch as a side effect of arming a watch.
+Open a small PR carrying **exactly two files**, `develop` → `master`:
+
+```
+.github/workflows/xdr-protocol-watch.yml
+tools/scripts/verify-xdr-protocol-gap.mjs
+```
+
+⚠️ **Two, not one.** `master` has `.nvmrc` and `package.json` but not the
+`xdr:` npm scripts, which is why the workflow invokes
+`node tools/scripts/verify-xdr-protocol-gap.mjs --watch` directly instead of
+going through `npm run`. Through npm it would fail on `master` with "missing
+script" while passing on every branch anyone would think to test it on.
+
+⛔ **Do not merge `develop` into `master` to achieve this.** That is 85
+unrelated commits onto a release branch as a side effect of arming a watch.
 
 **Checkpoint.** Re-run the second command from step 0. It must now print a
 commit. Until it does, everything below is untestable.
