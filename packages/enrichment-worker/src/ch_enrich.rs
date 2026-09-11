@@ -1354,8 +1354,21 @@ impl ChEnrichmentPass {
         refs: &ReferenceIds,
         watermark: u32,
     ) -> Result<(), ChEnrichError> {
-        let window = self.window_pred("p.timestamp");
-        for stmt in plan_peg_pivot_step(&self.cfg.database, &self.cfg.table, refs, &window) {
+        // ⚠️ TWO window fragments, and they are not interchangeable (task 0228).
+        // The peg statement scans `{tbl} AS p` directly, so its partition bound
+        // names `p.timestamp`. The pivot's candidate scan moved into a subquery
+        // with no alias in scope, so its bound names the BARE column — the
+        // `external_sql` form. Handing one string to both would be a syntax error
+        // on whichever statement it did not fit.
+        let peg_window = self.window_pred("p.timestamp");
+        let pivot_window = self.window_pred("timestamp");
+        for stmt in plan_peg_pivot_step(
+            &self.cfg.database,
+            &self.cfg.table,
+            refs,
+            &peg_window,
+            &pivot_window,
+        ) {
             match stmt {
                 StepStatement::Peg { sql } => {
                     self.client
@@ -1366,11 +1379,14 @@ impl ChEnrichmentPass {
                         .await?;
                 }
                 StepStatement::Pivot { sql, .. } => {
+                    // Candidate watermark, reference-subquery watermark, pivot
+                    // staleness, batch size — the candidate subquery is rendered
+                    // first, so its watermark binds first (see [`pivot_sql`]).
                     self.client
                         .query(&sql)
                         .bind(watermark)
-                        .bind(self.cfg.pivot_window_s)
                         .bind(watermark)
+                        .bind(self.cfg.pivot_window_s)
                         .bind(self.cfg.batch_size)
                         .execute()
                         .await?;
@@ -1471,12 +1487,24 @@ impl ChEnrichmentPass {
             let after = self.count_candidates(watermark).await?;
             batches += 1;
             if after >= remaining {
-                // The leftovers have no USD reference at all — their quote is
-                // neither USDC/USDT/XLM (nor oracle-priced). They stay
-                // NULL/`no_reference`, never a wrong value.
+                // The leftovers have no usable USD reference. Two causes now, and
+                // the message names both (task 0228): the quote is neither
+                // USDC/USDT/XLM (nor oracle-priced), OR it is a pivot leg whose
+                // bucket has no measured USDC/USD rate in window, which since 0228
+                // leaves the row unpriced rather than storing the unscaled vwap.
+                // Either way they stay `no_reference`, never a wrong value.
+                //
+                // Still `warn!` where `run_external_tier`'s twin is `info!`, and
+                // deliberately: the external tier has the peg tier below it to
+                // catch what it drops, so its no-progress break is a handover. This
+                // is the LAST tier, so its leftovers are published as
+                // `close_usd = 0` — a state ~130 unguarded `argMax(close_usd, …)`
+                // sites read as a real price. A backlog that stops draining here is
+                // worth a monitoring signal even when the cause is benign.
                 warn!(
                     remaining = after,
-                    "peg-pivot tier made no progress — remaining candles have no USD reference (exotic quotes)"
+                    "peg-pivot tier made no progress — remaining candles have no USD reference \
+                     (exotic quotes, or a pivot leg with no measured USDC/USD rate in window)"
                 );
                 remaining = after;
                 break;
@@ -1707,14 +1735,19 @@ enum StepStatement {
 /// `enrich_fills_close_usd_across_oracle_peg_and_pivot_tiers`) are `#[ignore]`
 /// and need a live ClickHouse, so **they do not run in CI** — see task 0275.
 /// Until they do, this unit test is the only automatic guard on the pivot set.
+///
+/// ⚠️ The two window fragments are NOT interchangeable — see
+/// [`ChEnrichmentPass::enrich_peg_pivot_step`]. `peg_window` is `p.`-qualified;
+/// `pivot_window` names the bare column inside the pivot's candidate subquery.
 fn plan_peg_pivot_step(
     db: &str,
     tbl: &str,
     refs: &ReferenceIds,
-    window: &str,
+    peg_window: &str,
+    pivot_window: &str,
 ) -> Vec<StepStatement> {
     let mut plan = Vec::new();
-    if let Some(sql) = peg_sql(db, tbl, &refs.stable_ids(), window) {
+    if let Some(sql) = peg_sql(db, tbl, &refs.stable_ids(), peg_window) {
         plan.push(StepStatement::Peg { sql });
     }
     // One pivot pass per measured reference asset (XLM, then USDT — task 0172).
@@ -1724,7 +1757,7 @@ fn plan_peg_pivot_step(
     if let Some(usdc_id) = refs.usdc {
         for ref_id in refs.pivot_ids() {
             plan.push(StepStatement::Pivot {
-                sql: pivot_sql(db, tbl, ref_id, usdc_id, window),
+                sql: pivot_sql(db, tbl, ref_id, usdc_id, pivot_window),
                 ref_id,
             });
         }
@@ -2112,52 +2145,199 @@ fn reset_sql(db: &str, tbl: &str, spec: &UsdResetSpec, window: &str) -> String {
     )
 }
 
-/// Pivot statement: candles quoted in `ref_id` get `close_usd = close × ref_usd`,
-/// where `ref_usd` is forward-filled by an `ASOF LEFT JOIN` against the
-/// volume-weighted `ref_id`/USDC series. `ref_id` is XLM, or — since task 0172 —
-/// the depegged USDT, which is priced by measurement rather than assumed to be $1
-/// (see [`ReferenceIds::pivot_ids`]). Computed **inline as a subquery** (no DDL, so the
-/// writer needs no `CREATE TABLE` grant on the shared tenant; task 0083). The
-/// subquery's `WHERE asset_id = ref AND quote_asset_id = usdc` is a sort-key prefix
-/// on `price_ohlcv_1m`, so each batch re-aggregates only that single pair's slice,
-/// not the whole table. `ref_asset_id` is the constant reference id so the ASOF join
-/// keeps its required equality predicate (`r.ref_asset_id = p.quote_asset_id`) and
-/// matches only candles quoted in that reference asset — which is what makes the
-/// XLM and USDT passes disjoint and safe to run in sequence. Bound parameters, in SQL order: the snapshot
-/// watermark (ref subquery), the pivot staleness window (seconds), the snapshot
-/// watermark again (outer, shared with the rest of the pass — see
-/// [`ChEnrichmentPass::watermark`]), and the `LIMIT`.
+/// Pivot statement: candles quoted in `ref_id` get
+/// `close_usd = close × ref_usd × usdc_usd`, where `ref_usd` is the reference
+/// asset's volume-weighted close against USDC (forward-filled by an
+/// `ASOF LEFT JOIN`) and `usdc_usd` is the MEASURED USDC/USD rate at the
+/// candidate's bucket END. `ref_id` is XLM, or — since task 0172 — the depegged
+/// USDT, which is priced by measurement rather than assumed to be $1 (see
+/// [`ReferenceIds::pivot_ids`]).
+///
+/// ## Why the USDC/USD factor is here at all (task 0228, decision A)
+///
+/// `ref_usd` is a price in **USDC**, not in dollars. Until task 0228 this
+/// statement stopped there, so every XLM- and USDT-quoted candle carried the
+/// `USDC = $1` assumption that task 0268 had just removed from the USDC leg
+/// itself — the last population of stored USD values resting on the peg. USDC
+/// closed at **0.9681** on 2023-03-11, so the stored value was ~3.2% high across
+/// the whole pre-epoch pivot population. The factor enters HERE, inside the
+/// write path, rather than on the read side: stored and served must not disagree
+/// again (that was the 0267 state 0268 ended).
+///
+/// ⚠️ **Vocabulary (task 0228, decision E).** A pivot leg's stored USD value is
+/// now `close × the reference's own USDC close × the measured USDC/USD rate`.
+/// That composition coins **no new `method` word**: `/ohlcv` still labels a pivot
+/// leg `traded` (`queries_ch::usd_method_expr`), because the label names how the
+/// price was reached — through the reference asset's own market — not which
+/// factors the arithmetic carried.
+///
+/// ## The reference stays INLINE
+///
+/// Computed inline as a subquery (no DDL, so the writer needs no `CREATE TABLE`
+/// grant on the shared tenant; task 0083). Its
+/// `WHERE asset_id = ref AND quote_asset_id = usdc` is a sort-key prefix, so each
+/// batch re-aggregates only that single pair's slice, not the whole table.
+/// `ref_asset_id` is the constant reference id so the ASOF join keeps its
+/// required equality predicate (`r.ref_asset_id = p.quote_asset_id`) and matches
+/// only candles quoted in that reference asset — which is what makes the XLM and
+/// USDT passes disjoint and safe to run in sequence.
+///
+/// ## Bind order (positional)
+///
+/// 1. the snapshot watermark — inside the CANDIDATE subquery, which is rendered
+///    FIRST (`external_sql`'s layout);
+/// 2. the snapshot watermark again — inside the inline reference subquery;
+/// 3. the pivot staleness window in seconds (`pivot_window_s`), bounding how far
+///    the reference may be forward-filled;
+/// 4. the `LIMIT` (batch size).
+///
+/// ⚠️ The first two moved relative to the pre-0228 statement. The candidate scan
+/// used to be the outer `FROM`; it is now a subquery, because ASOF needs a
+/// materialized COLUMN for its inequality and the bucket end has to be projected
+/// somewhere. Its watermark therefore sits textually BEFORE the reference
+/// subquery's. Positional binds do not fail loudly when reordered — they bind a
+/// batch size as a timestamp at RUN time, on prod — so
+/// `pivot_sql_bind_order_is_watermark_watermark_window_then_limit` pins the text.
+///
+/// ## Why the bucket's END for the rate
+///
+/// See [`bucket_end_expr`] and `external_sql`'s own block: `timestamp` is the
+/// bucket's START but `close` is the period's LAST close, so a rate resolved at
+/// `timestamp` prices a weekly or monthly candle from the day the period opened.
+/// The reference vwap keeps resolving at the bucket START (`r.timestamp <=
+/// p.timestamp`) — that leg is unchanged from the pre-0228 statement and its
+/// staleness is the configurable `pivot_window_s`, not the derived bound.
+///
+/// ## Why `FINAL` plus an explicit `method` per leg, and never `argMax`
+///
+/// `method` is part of `usd_rate`'s sorting key, deliberately, so an `oracle` row
+/// and an `external` row at the same (identity, timestamp) COEXIST rather than
+/// one replacing the other. `argMax(usd_rate, timestamp)` across methods would
+/// let part read order decide which one prices the candle. Each leg picks its
+/// series by name, and the preference (`oracle`, else `external`) is expressed by
+/// the `multiIf` rather than by recency.
+///
+/// ## Why the two rate joins are NESTED, not chained at one level
+///
+/// `queries_ch::peg_series_sql` states the reason and is the only in-repo
+/// precedent for two method-specific ASOF joins: a nested subquery needs nothing
+/// from the multi-JOIN rewrite and reads the same under both analyzers. The two
+/// right sides carry DISTINCT column names (`orts`/`orate` vs `erts`/`erate`) for
+/// the same reason.
+///
+/// ## Why the rate legs are tested POSITIVELY and never for nullity
+///
+/// `join_use_nulls = 0` on prod: an unmatched ASOF yields the column DEFAULT,
+/// which for `Decimal(38, 14)` is `0` and not NULL. A null test would never fire.
+/// The one `IS NOT NULL` in this statement is on the REFERENCE leg, where it is
+/// legal precisely because that subquery's `nullIf(sum(...), 0)` makes the column
+/// Nullable.
+///
+/// An unmatched staleness test fails closed the same way: an unmatched `DateTime`
+/// defaults to 1970, so `bend - rts` is enormous and exceeds the bound.
+///
+/// ## Why a bucket with NEITHER rate is left unpriced
+///
+/// The `multiIf`'s else-branch is 0 and the final `WHERE … > 0` drops the row, so
+/// it stays at `close_usd = 0` for this pass rather than being written as
+/// `0 × close`. That is the module doc's "no reference → never a wrong non-NULL
+/// value" rule (see the top of this file), and it is what makes the 0228 campaign
+/// safe: the reset only re-opens rows a rate can refill.
 fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> String {
+    let bend = bucket_end_expr(tbl, "timestamp");
+    // DERIVED from the table, never configured — see `external_window_s`. Inlined
+    // rather than bound: each `?` is a separate positional parameter, so
+    // referencing it from both rate legs would cost two more binds for a value no
+    // operator may set.
+    let stale = external_window_s(tbl);
+    // "This leg supplied a usable rate for this bucket": matched (the rate is
+    // positive) AND its anchor is within the derived bound of the bucket end.
+    // The ONLY definition of validity; every expression below reads these.
+    let o_ok = format!("(po.orate > 0 AND (toUInt32(po.bend) - toUInt32(po.orts)) <= {stale})");
+    let e_ok = format!("(re.erate > 0 AND (toUInt32(po.bend) - toUInt32(re.erts)) <= {stale})");
+    // A valid ORACLE reading wins the bucket outright — the same preference
+    // `views.sql`'s rank-first tuple and `peg_series_sql`'s `multiIf` apply, so
+    // the write path and the two read surfaces agree on any bucket holding both.
+    // The else-branch is 0, which the outer `WHERE` then drops.
+    let rate = format!("multiIf({o_ok}, po.orate, {e_ok}, re.erate, toDecimal128(0, 14))");
     format!(
         "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
          SELECT \
-             p.timestamp, p.asset_id, p.quote_asset_id, p.source, \
-             p.open, p.high, p.low, p.close, \
-             p.volume_base, p.volume_quote, \
-             if(p.volume_quote_usd > 0, p.volume_quote_usd, CAST(r.usd * toFloat64(p.volume_quote) AS Decimal(38, 14))) AS volume_quote_usd, \
-             CAST(r.usd * toFloat64(p.close) AS Decimal(38, 14)) AS close_usd, \
-             p.vwap, p.trade_count, \
-             p.version + 1 AS version \
-         FROM {db}.{tbl} AS p FINAL \
-         ASOF LEFT JOIN ( \
+             po.timestamp, po.asset_id, po.quote_asset_id, po.source, \
+             po.open, po.high, po.low, po.close, \
+             po.volume_base, po.volume_quote, \
+             if(po.volume_quote_usd > 0, po.volume_quote_usd, CAST(po.refusd * toFloat64(po.volume_quote) * toFloat64({rate}) AS Decimal(38, 14))) AS volume_quote_usd, \
+             CAST(po.refusd * toFloat64(po.close) * toFloat64({rate}) AS Decimal(38, 14)) AS close_usd, \
+             po.vwap, po.trade_count, \
+             po.version + 1 AS version \
+         FROM ( \
              SELECT \
-                 CAST({ref_id} AS UInt32) AS ref_asset_id, \
-                 timestamp, \
-                 sum(toFloat64(close) * toFloat64(volume_base)) / nullIf(sum(toFloat64(volume_base)), 0) AS usd \
-             FROM {db}.{tbl} FINAL \
-             WHERE asset_id = {ref_id} AND quote_asset_id = {usdc_id} \
-               AND timestamp <= toDateTime(?) \
-             GROUP BY timestamp \
-             ORDER BY timestamp \
-         ) AS r \
-             ON r.ref_asset_id = p.quote_asset_id AND r.timestamp <= p.timestamp \
-         WHERE p.quote_asset_id = {ref_id} \
-           AND p.close_usd = 0 \
-           AND p.volume_quote > 0 \
-           AND r.usd IS NOT NULL \
-           AND (p.timestamp - r.timestamp) <= ? \
-           AND p.timestamp <= toDateTime(?){window} \
-         ORDER BY p.timestamp \
+                 pr.timestamp AS timestamp, pr.asset_id AS asset_id, \
+                 pr.quote_asset_id AS quote_asset_id, pr.source AS source, \
+                 pr.open AS open, pr.high AS high, pr.low AS low, pr.close AS close, \
+                 pr.volume_base AS volume_base, pr.volume_quote AS volume_quote, \
+                 pr.volume_quote_usd AS volume_quote_usd, pr.vwap AS vwap, \
+                 pr.trade_count AS trade_count, pr.version AS version, \
+                 pr.k AS k, pr.bend AS bend, pr.refusd AS refusd, \
+                 ro.orts AS orts, ro.orate AS orate \
+             FROM ( \
+                 SELECT \
+                     p.timestamp AS timestamp, p.asset_id AS asset_id, \
+                     p.quote_asset_id AS quote_asset_id, p.source AS source, \
+                     p.open AS open, p.high AS high, p.low AS low, p.close AS close, \
+                     p.volume_base AS volume_base, p.volume_quote AS volume_quote, \
+                     p.volume_quote_usd AS volume_quote_usd, p.vwap AS vwap, \
+                     p.trade_count AS trade_count, p.version AS version, \
+                     p.k AS k, p.bend AS bend, \
+                     r.usd AS refusd \
+                 FROM ( \
+                     SELECT \
+                         timestamp, asset_id, quote_asset_id, source, \
+                         open, high, low, close, \
+                         volume_base, volume_quote, volume_quote_usd, close_usd, vwap, \
+                         trade_count, version, \
+                         1 AS k, \
+                         {bend} AS bend \
+                     FROM {db}.{tbl} FINAL \
+                     WHERE quote_asset_id = {ref_id} \
+                       AND close_usd = 0 \
+                       AND volume_quote > 0 \
+                       AND timestamp <= toDateTime(?){window} \
+                 ) AS p \
+                 ASOF LEFT JOIN ( \
+                     SELECT \
+                         CAST({ref_id} AS UInt32) AS ref_asset_id, \
+                         timestamp, \
+                         sum(toFloat64(close) * toFloat64(volume_base)) / nullIf(sum(toFloat64(volume_base)), 0) AS usd \
+                     FROM {db}.{tbl} FINAL \
+                     WHERE asset_id = {ref_id} AND quote_asset_id = {usdc_id} \
+                       AND timestamp <= toDateTime(?) \
+                     GROUP BY timestamp \
+                     ORDER BY timestamp \
+                 ) AS r \
+                     ON r.ref_asset_id = p.quote_asset_id AND r.timestamp <= p.timestamp \
+                 WHERE r.usd IS NOT NULL \
+                   AND (p.timestamp - r.timestamp) <= ? \
+             ) AS pr \
+             ASOF LEFT JOIN ( \
+                 SELECT 1 AS ok, timestamp AS orts, usd_rate AS orate \
+                 FROM {db}.usd_rate FINAL \
+                 WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+                   AND issuer_address = '{USDC_ISSUER}' AND contract_address = '' \
+                   AND method = 'oracle' AND usd_rate > 0 \
+             ) AS ro \
+                 ON pr.k = ro.ok AND ro.orts < pr.bend \
+         ) AS po \
+         ASOF LEFT JOIN ( \
+             SELECT 1 AS ek, timestamp AS erts, usd_rate AS erate \
+             FROM {db}.usd_rate FINAL \
+             WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+               AND issuer_address = '{USDC_ISSUER}' AND contract_address = '' \
+               AND method = 'external' AND usd_rate > 0 \
+         ) AS re \
+             ON po.k = re.ek AND re.erts < po.bend \
+         WHERE {rate} > 0 \
+         ORDER BY po.timestamp \
          LIMIT ?"
     )
 }
@@ -2405,7 +2585,9 @@ mod tests {
     fn reset_sql_will_not_reopen_a_row_the_pivot_cannot_refill() {
         let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
         assert!(sql.contains("p.volume_quote > 0"));
-        assert!(pivot_sql("prices", "price_ohlcv_1d", 111, 3, "").contains("p.volume_quote > 0"));
+        // Task 0228 moved the pivot's candidate filters into its candidate
+        // subquery, where they are alias-free. Same filter, same meaning.
+        assert!(pivot_sql("prices", "price_ohlcv_1d", 111, 3, "").contains("AND volume_quote > 0"));
     }
 
     /// Additive, like every other statement here — so the FREEZE snapshot the
@@ -2492,25 +2674,277 @@ mod tests {
         assert!(sql.contains("asset_id = 5 AND quote_asset_id = 3"));
         assert!(sql.contains("CAST(5 AS UInt32) AS ref_asset_id"));
         assert!(sql.contains("GROUP BY timestamp"));
-        // ASOF equality predicate + forward-fill inequality.
+        // ASOF equality predicate + forward-fill inequality. The reference leg
+        // still resolves at the bucket START; only the RATE legs moved to the end.
         assert!(sql.contains("r.ref_asset_id = p.quote_asset_id AND r.timestamp <= p.timestamp"));
         // Redundant-but-load-bearing: the ASOF `ON` already constrains
         // p.quote_asset_id to ref_id, but only as a join condition, so the outer
         // scan had no literal on the sort key's 2nd column
         // (asset_id, quote_asset_id, source, timestamp) and read the whole table
         // FINAL. Task 0172 added a second pivot pass, making this a 3-statement
-        // tier in the pass task 0111 is open on. Keep the literal.
-        assert!(sql.contains("WHERE p.quote_asset_id = 5"));
-        assert!(sql.contains("CAST(r.usd * toFloat64(p.close) AS Decimal(38, 14)) AS close_usd"));
-        // Bind order: subquery watermark, staleness window, outer watermark, LIMIT.
-        let sub_wm = sql.find("toDateTime(?)").unwrap();
+        // tier in the pass task 0111 is open on. Keep the literal — task 0228
+        // moved it into the candidate subquery, where it prunes the same way.
+        assert!(sql.contains("WHERE quote_asset_id = 5"));
+    }
+
+    // ---- task 0228: the pivot scales by the measured USDC/USD rate ----------
+
+    /// 🔑 THE 0228 DEFECT, as a string. The stored value is the TRIPLE product —
+    /// the candidate close, the reference's own USDC close, and the measured
+    /// USDC/USD rate. The pre-0228 statement stopped at the pair, which is a price
+    /// in USDC wearing a dollar column name.
+    ///
+    /// Every Float/Decimal boundary is crossed by an explicit `toFloat64`, as
+    /// every other arithmetic site in this repo does: `refusd` is a Float64 (the
+    /// reference subquery's `sum(...) / nullIf(...)`) while `usd_rate` is
+    /// `Decimal(38, 14)`.
+    #[test]
+    fn pivot_sql_writes_close_usd_as_the_triple_product() {
+        let sql = pivot_sql("prices", "price_ohlcv_1m", 5, 3, "");
+        assert!(
+            sql.contains("CAST(po.refusd * toFloat64(po.close) * toFloat64(multiIf("),
+            "close_usd must be close × reference vwap × the measured rate: {sql}"
+        );
+        assert!(sql.contains(") AS Decimal(38, 14)) AS close_usd"), "{sql}");
+        // The pre-0228 pair product must be gone entirely — a leftover would mean
+        // one of the two USD columns still assumes USDC = $1.
+        assert!(
+            !sql.contains("CAST(r.usd * toFloat64(p.close) AS Decimal(38, 14))"),
+            "the unscaled pair product is the defect: {sql}"
+        );
+    }
+
+    /// `volume_quote_usd` stays WRITE-ONCE (BRIEF §5) — an oracle-set, depeg-aware
+    /// figure is never clobbered — but its else-branch is scaled by the SAME rate,
+    /// or the row carries two USD figures derived from different rates: the
+    /// incoherent row `reset_sql`'s doc block rejects.
+    #[test]
+    fn pivot_sql_keeps_volume_quote_usd_write_once_and_scales_its_else_branch() {
+        let sql = pivot_sql("prices", "price_ohlcv_1m", 5, 3, "");
+        assert!(
+            sql.contains("if(po.volume_quote_usd > 0, po.volume_quote_usd,"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("CAST(po.refusd * toFloat64(po.volume_quote) * toFloat64(multiIf("),
+            "the else-branch takes the same rate as close_usd: {sql}"
+        );
+        // Both USD columns carry the rate the same number of times.
+        assert_eq!(
+            sql.matches("toFloat64(multiIf(").count(),
+            2,
+            "exactly the two USD columns are scaled: {sql}"
+        );
+    }
+
+    /// ⚠️ `method` is part of `usd_rate`'s SORTING KEY, so an `oracle` row and an
+    /// `external` row at the same (identity, timestamp) coexist. `argMax` across
+    /// methods would let part read order decide which prices the candle. Two legs,
+    /// each a single `method` equality — the same rule `external_sql` is pinned to.
+    #[test]
+    fn pivot_sql_reads_usd_rate_final_with_two_explicit_methods_never_argmax() {
+        let sql = pivot_sql("prices", "price_ohlcv_1d", 5, 3, "");
+        assert_eq!(
+            sql.matches("usd_rate FINAL").count(),
+            2,
+            "one rate leg per method, each reading FINAL: {sql}"
+        );
+        assert_eq!(sql.matches("method = 'oracle'").count(), 1, "{sql}");
+        assert_eq!(sql.matches("method = 'external'").count(), 1, "{sql}");
+        assert!(
+            !sql.contains("method IN ("),
+            "an IN would let two rows share an anchor instant: {sql}"
+        );
+        assert!(
+            !sql.contains("argMax"),
+            "argMax across methods lets part read order pick the winner: {sql}"
+        );
+    }
+
+    /// All four conjuncts of the identity tuple, on BOTH rate legs. A missing
+    /// `contract_address = ''` silently matches a Soroban USDC row — a different
+    /// asset with the same code and issuer — and prices the whole deep history
+    /// off it.
+    #[test]
+    fn pivot_sql_pins_the_full_usdc_identity_tuple_on_both_rate_legs() {
+        let sql = pivot_sql("prices", "price_ohlcv_1d", 5, 3, "");
+        for conjunct in [
+            "asset_kind = 'credit'",
+            "asset_code = 'USDC'",
+            &format!("issuer_address = '{USDC_ISSUER}'"),
+            "contract_address = ''",
+        ] {
+            assert_eq!(
+                sql.matches(conjunct).count(),
+                2,
+                "{conjunct} must appear on both rate legs: {sql}"
+            );
+        }
+    }
+
+    /// ⚠️ `join_use_nulls = 0` on prod: an unmatched ASOF yields the column
+    /// DEFAULT, which for `Decimal(38, 14)` is 0 and not NULL. A null test on a
+    /// rate would never fire. The legs are therefore tested `> 0`.
+    ///
+    /// The ONE `IS NOT NULL` left is on the REFERENCE leg, and it is legal only
+    /// there: that subquery's `nullIf(sum(...), 0)` makes its column Nullable.
+    #[test]
+    fn pivot_sql_tests_both_rate_legs_positively_never_for_nullity() {
+        let sql = pivot_sql("prices", "price_ohlcv_1d", 5, 3, "");
+        assert!(sql.contains("po.orate > 0"), "{sql}");
+        assert!(sql.contains("re.erate > 0"), "{sql}");
+        // Each leg's own subquery also filters the series positively.
+        assert_eq!(sql.matches("usd_rate > 0").count(), 2, "{sql}");
+        assert!(!sql.contains("orate IS"), "{sql}");
+        assert!(!sql.contains("erate IS"), "{sql}");
+        assert_eq!(
+            sql.matches("IS NOT NULL").count(),
+            1,
+            "only the Nullable reference leg may be null-tested: {sql}"
+        );
+        assert!(sql.contains("r.usd IS NOT NULL"), "{sql}");
+        assert!(!sql.contains("IS NULL"), "{sql}");
+    }
+
+    /// 🔑 The rate legs resolve at the bucket's END, on EVERY grain. `timestamp`
+    /// is the bucket's start but `close` is the period's last close, so a weekly
+    /// candle resolved at its start takes the rate from the day the week opened.
+    ///
+    /// Iterates [`GRAINS`] rather than a list of its own, so a grain added to
+    /// `bucket_end_expr` and forgotten here cannot pass.
+    #[test]
+    fn pivot_sql_resolves_both_rate_legs_at_the_bucket_end_on_every_grain() {
+        for t in GRAINS {
+            let sql = pivot_sql("prices", t, 5, 3, "");
+            let projected = format!("{} AS bend", bucket_end_expr(t, "timestamp"));
+            assert!(
+                sql.contains(&projected),
+                "{t}: the candidate subquery must project its own bucket end: {sql}"
+            );
+            // Strict inequality on both legs, against the materialized column.
+            assert!(sql.contains("ON pr.k = ro.ok AND ro.orts < pr.bend"), "{t}");
+            assert!(sql.contains("ON po.k = re.ek AND re.erts < po.bend"), "{t}");
+        }
+    }
+
+    /// The rate staleness is the INLINED `external_window_s` literal on both legs
+    /// — derived from the table, so no operator can set it short enough to make a
+    /// reset destructive (`external_window_s`'s own argument). The REFERENCE leg
+    /// keeps its configurable `pivot_window_s` bind, which is why
+    /// `coarse-repair` still needs the explicit minimum-width refusal for it.
+    #[test]
+    fn pivot_sql_inlines_the_derived_rate_staleness_and_binds_only_the_reference() {
+        for t in GRAINS {
+            let sql = pivot_sql("prices", t, 5, 3, "");
+            let stale = external_window_s(t);
+            // The rate expression is rendered three times — the two USD columns
+            // and the final filter — so each leg's bound appears three times.
+            for leg in ["po.orts", "re.erts"] {
+                assert_eq!(
+                    sql.matches(&format!("toUInt32({leg})) <= {stale}")).count(),
+                    3,
+                    "{t}: {leg} must inline the derived {stale} s bound: {sql}"
+                );
+            }
+            assert!(
+                sql.contains("(p.timestamp - r.timestamp) <= ?"),
+                "{t}: the reference leg keeps its bound pivot_window_s: {sql}"
+            );
+        }
+    }
+
+    /// The two rate joins are NESTED, not chained at one level, and their right
+    /// sides carry DISTINCT column names — `peg_series_sql`'s rule
+    /// (`queries_ch.rs`: a nested subquery needs nothing from the multi-JOIN
+    /// rewrite and reads the same under both analyzers).
+    #[test]
+    fn pivot_sql_nests_the_two_rate_legs_with_distinct_column_names() {
+        let sql = pivot_sql("prices", "price_ohlcv_1d", 5, 3, "");
+        // The oracle leg is joined INSIDE the subquery the external leg reads.
+        // ⚠️ The trailing token matters: `") AS re"` alone also matches the
+        // reference subquery's `") AS ref_asset_id"`.
+        let ro = sql.find(") AS ro ON").unwrap();
+        let po = sql.find(") AS po ASOF").unwrap();
+        let re = sql.find(") AS re ON").unwrap();
+        assert!(
+            ro < po && po < re,
+            "the oracle leg must close before the level it feeds: {sql}"
+        );
+        // Distinct column names on the two right sides: neither leg's subquery
+        // mentions the other's. A shared name is what the nesting exists to avoid.
+        let oracle_leg = &sql[sql.find("SELECT 1 AS ok").unwrap()..ro];
+        let external_leg = &sql[sql.find("SELECT 1 AS ek").unwrap()..re];
+        assert!(oracle_leg.contains("AS orts") && oracle_leg.contains("AS orate"));
+        assert!(!oracle_leg.contains("erts") && !oracle_leg.contains("erate"));
+        assert!(external_leg.contains("AS erts") && external_leg.contains("AS erate"));
+        assert!(!external_leg.contains("orts") && !external_leg.contains("orate"));
+    }
+
+    /// 🔑 A bucket with NEITHER rate is LEFT UNPRICED, never written as
+    /// `0 × close`. The `multiIf` else-branch is zero and the final filter drops
+    /// it, so the row stays a candidate for a later pass instead of becoming an
+    /// ambiguous stored zero — the module doc's "no reference, never a wrong
+    /// non-NULL value" rule, and the premise the 0228 campaign's reset rests on.
+    #[test]
+    fn pivot_sql_leaves_a_bucket_with_no_usable_rate_unpriced() {
+        let sql = pivot_sql("prices", "price_ohlcv_1d", 5, 3, "");
+        assert!(
+            sql.contains("toDecimal128(0, 14)"),
+            "the else-branch must be zero, not a $1 fallback: {sql}"
+        );
+        assert!(
+            !sql.contains("toDecimal128(1, 14)"),
+            "a $1 else-branch would re-introduce the peg this task removes: {sql}"
+        );
+        let tail = &sql[sql.rfind("WHERE ").unwrap()..];
+        assert!(
+            tail.contains("multiIf(") && tail.contains(") > 0"),
+            "the selected rate must be filtered positively: {tail}"
+        );
+    }
+
+    /// A versioned INSERT, never a mutation, so a FREEZE stays a rollback point —
+    /// and the projection stays positionally aligned with [`INSERT_COLUMNS`].
+    #[test]
+    fn pivot_sql_is_a_versioned_insert_aligned_with_the_insert_columns() {
+        let sql = pivot_sql("prices", "price_ohlcv_1d", 5, 3, "");
+        assert!(
+            sql.starts_with("INSERT INTO prices.price_ohlcv_1d"),
+            "{sql}"
+        );
+        assert!(sql.contains(INSERT_COLUMNS), "{sql}");
+        assert!(sql.contains("po.version + 1 AS version"), "{sql}");
+        assert!(!sql.contains("ALTER TABLE"), "{sql}");
+        // The two USD columns keep their position between volume_quote and vwap.
+        let vqu = sql.find("AS volume_quote_usd").unwrap();
+        let cu = sql.find("AS close_usd").unwrap();
+        let vwap = sql.find("po.vwap").unwrap();
+        assert!(vqu < cu && cu < vwap, "projection order: {sql}");
+    }
+
+    /// Bind order, as documented on the fn: candidate watermark (inside the
+    /// candidate subquery, rendered FIRST), reference-subquery watermark, pivot
+    /// staleness, batch size. Positional binds — a reordering binds the batch size
+    /// as a timestamp and fails at RUN time, on prod.
+    #[test]
+    fn pivot_sql_bind_order_is_watermark_watermark_window_then_limit() {
+        let sql = pivot_sql("prices", "price_ohlcv_1m", 5, 3, "");
+        // Both watermarks render the same fragment; the candidate subquery is
+        // FIRST in the text, the inline reference's is last.
+        let cand_wm = sql.find("AND timestamp <= toDateTime(?)").unwrap();
+        let ref_wm = sql.rfind("AND timestamp <= toDateTime(?)").unwrap();
         let win = sql.find("(p.timestamp - r.timestamp) <= ?").unwrap();
-        let outer_wm = sql.find("p.timestamp <= toDateTime(?)").unwrap();
         let lim = sql.find("LIMIT ?").unwrap();
         assert!(
-            sub_wm < win && win < outer_wm && outer_wm < lim,
-            "bind order: watermark, window, watermark, limit"
+            cand_wm < ref_wm && ref_wm < win && win < lim,
+            "bind order: candidate watermark, reference watermark, window, limit: {sql}"
         );
+        assert_eq!(
+            sql.matches("toDateTime(?)").count(),
+            2,
+            "exactly two watermark binds: {sql}"
+        );
+        assert_eq!(sql.matches('?').count(), 4, "{sql}");
     }
 
     #[test]
@@ -2539,22 +2973,30 @@ mod tests {
         );
     }
 
+    /// The 0111 partition bound goes on the CANDIDATE side only — and since task
+    /// 0228 that side is a subquery with no alias in scope, so the fragment names
+    /// the BARE column (`external_sql`'s form) where the peg statement's stays
+    /// `p.`-qualified.
+    ///
+    /// The occurrence count now proves three things, not one: neither the inline
+    /// reference subquery nor EITHER rate leg carries the partition bound. All
+    /// three must stay unbounded so a month's first buckets can still ASOF back to
+    /// an anchor in an earlier partition.
     #[test]
     fn pivot_sql_bounds_only_the_candidate_side_not_the_reference() {
-        let win = " AND p.timestamp >= toDateTime(100) AND p.timestamp < toDateTime(200)";
+        let win = " AND timestamp >= toDateTime(100) AND timestamp < toDateTime(200)";
         let sql = pivot_sql("prices", "price_ohlcv_1h", 5, 3, win);
-        // The candidate outer scan is bounded …
-        assert!(sql.contains(win));
-        // … but the inline XLM/USDC reference subquery is NOT: it must still
-        // forward-fill an anchor from earlier months, so the month's first buckets
-        // keep a valid pivot reference. The only window fragment present is the one
-        // on `p.timestamp`; the subquery filters on a bare `timestamp`.
+        // The candidate subquery is bounded …
+        assert!(sql.contains(win), "{sql}");
+        // … and nothing else is.
         assert_eq!(
             sql.matches("toDateTime(100)").count(),
             1,
-            "the partition lower bound appears once — on the candidate side only"
+            "the partition lower bound appears once — on the candidate side only: {sql}"
         );
-        // Inlining adds no bind params: still watermark, window, watermark, limit.
+        let unbounded = pivot_sql("prices", "price_ohlcv_1h", 5, 3, "");
+        assert!(!unbounded.contains(">= toDateTime("), "{unbounded}");
+        // Inlining adds no bind params: still watermark, watermark, window, limit.
         assert_eq!(sql.matches('?').count(), 4, "window adds no bind params");
     }
 
@@ -2571,14 +3013,14 @@ mod tests {
     fn plan_issues_one_peg_and_two_pivots() {
         let db = "prices";
         let tbl = "price_ohlcv_1m";
-        let window = "";
+        let (peg_window, pivot_window) = ("", "");
         let refs = ReferenceIds {
             xlm: Some(5),
             usdc: Some(3),
             usdt: Some(7),
         };
 
-        let plan = plan_peg_pivot_step(db, tbl, &refs, window);
+        let plan = plan_peg_pivot_step(db, tbl, &refs, peg_window, pivot_window);
 
         let pivot_refs: Vec<u32> = plan
             .iter()
@@ -2628,9 +3070,41 @@ mod tests {
             usdt: Some(7),
         };
         assert!(
-            plan_peg_pivot_step(db, tbl, &no_usdc, window).is_empty(),
+            plan_peg_pivot_step(db, tbl, &no_usdc, peg_window, pivot_window).is_empty(),
             "no USDC market → no peg and no pivot"
         );
+    }
+
+    /// 🔑 Task 0228's alias split, as a test. The peg statement scans the table
+    /// directly, so its partition bound must be `p.`-qualified; the pivot's
+    /// candidate scan is a subquery with no alias in scope, so its bound must name
+    /// the bare column. Handing ONE window string to both — which is what
+    /// `enrich_peg_pivot_step` did before 0228 — puts a `p.` prefix where no `p`
+    /// exists, or drops one where the alias is required.
+    #[test]
+    fn the_peg_and_pivot_windows_are_qualified_differently() {
+        let refs = ReferenceIds {
+            xlm: Some(5),
+            usdc: Some(3),
+            usdt: None,
+        };
+        let peg_window = " AND p.timestamp >= toDateTime(100) AND p.timestamp < toDateTime(200)";
+        let pivot_window = " AND timestamp >= toDateTime(100) AND timestamp < toDateTime(200)";
+        for stmt in plan_peg_pivot_step("prices", "price_ohlcv_1h", &refs, peg_window, pivot_window)
+        {
+            match stmt {
+                StepStatement::Peg { sql } => {
+                    assert!(sql.contains(peg_window), "peg keeps the alias: {sql}");
+                }
+                StepStatement::Pivot { sql, .. } => {
+                    assert!(sql.contains(pivot_window), "pivot goes bare: {sql}");
+                    assert!(
+                        !sql.contains("AND p.timestamp >= toDateTime(100)"),
+                        "a p.-qualified bound has no `p` in the candidate subquery: {sql}"
+                    );
+                }
+            }
+        }
     }
 
     // ---- task 0268: the external tier -------------------------------------
@@ -3171,6 +3645,12 @@ mod tests {
         assert!(sql.contains("CAST(7 AS UInt32) AS ref_asset_id"));
         assert!(sql.contains("WHERE asset_id = 7 AND quote_asset_id = 3"));
         assert!(sql.contains("r.ref_asset_id = p.quote_asset_id"));
-        assert!(sql.contains("CAST(r.usd * toFloat64(p.close) AS Decimal(38, 14)) AS close_usd"));
+        // Task 0228: the USDT leg is scaled by the measured USDC/USD rate too —
+        // ONE statement fixes both pivot references, as decision A requires.
+        assert!(
+            sql.contains("CAST(po.refusd * toFloat64(po.close) * toFloat64(multiIf("),
+            "{sql}"
+        );
+        assert_eq!(sql.matches("usd_rate FINAL").count(), 2, "{sql}");
     }
 }

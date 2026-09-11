@@ -163,6 +163,12 @@ async fn enrich_fills_close_usd_across_oracle_peg_and_pivot_tiers() {
         .execute()
         .await
         .unwrap();
+    // Task 0228: the pivot now scales by the measured USDC/USD rate, so a pivot
+    // leg with no rate in window is left unpriced. The rate here is deliberately
+    // EXACTLY 1.0 — the tier composition this test is named for stays legible
+    // (4.0 is still 4.0 at every tier), and the scaling itself is proven by
+    // `a_pivot_leg_is_scaled_by_the_measured_usdc_rate_on_the_depeg_day`.
+    seed_external_rate(&client, db, DEEP_DAY_START, 1.0).await;
 
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
 
@@ -1151,6 +1157,10 @@ async fn usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg() {
         .execute()
         .await
         .unwrap();
+    // Task 0228: a pivot leg needs a measured USDC/USD rate in window or it is
+    // left unpriced. EXACTLY 1.0, so this test keeps testing what it is named for
+    // — that 10.0 becomes 1.3 through USDT's own market, not through a $1 peg.
+    seed_external_rate(&client, db, utc_day_start(deep), 1.0).await;
 
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
 
@@ -1223,6 +1233,14 @@ async fn setup_0182(db: &str, t_old: u32, t_new: u32) -> Client {
         .execute()
         .await
         .unwrap();
+    // Task 0228: the reset's refill path IS the pivot, and the pivot now needs a
+    // measured USDC/USD rate for the bucket or it leaves the row unpriced — which
+    // would turn every one of these reset tests into the 0182 incident they exist
+    // to prevent. One rate per fixture day, EXACTLY 1.0, so the 0.13 arithmetic
+    // these tests assert is unchanged.
+    for ts in [t_old, t_new] {
+        seed_external_rate(&client, db, utc_day_start(ts), 1.0).await;
+    }
     client
 }
 
@@ -1919,6 +1937,31 @@ async fn seed_external_rate(client: &Client, db: &str, ts: u32, rate: f64) {
              (asset_kind, asset_code, issuer_address, contract_address, \
               timestamp, usd_rate, method, reference_asset, hops, version) VALUES \
              ('credit', 'USDC', '{USDC_ISSUER}', '', {ts}, {rate}, 'external', '', 0, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// The START of the UTC day holding `ts` — the instant task 0267's daily series
+/// stamps its rows at, and therefore the instant a fixture must seed a rate at
+/// for the bucket-end ASOF to find it. `timestamp` is a bare `DateTime` in UTC,
+/// so this is plain arithmetic and needs no calendar function.
+fn utc_day_start(ts: u32) -> u32 {
+    ts - ts % 86_400
+}
+
+/// Seed one `usd_rate` row for canonical USDC under an explicit `method`, so a
+/// test can stage BOTH series for the same bucket and prove which one wins.
+/// [`seed_external_rate`] is the `'external'` case and carries the day-start
+/// convention note.
+async fn seed_usd_rate(client: &Client, db: &str, ts: u32, rate: f64, method: &str) {
+    client
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, \
+              timestamp, usd_rate, method, reference_asset, hops, version) VALUES \
+             ('credit', 'USDC', '{USDC_ISSUER}', '', {ts}, {rate}, '{method}', '', 0, 1)"
         ))
         .execute()
         .await
@@ -2698,6 +2741,190 @@ async fn the_external_reset_touches_only_the_bounded_month() {
     assert!(
         (o - 4.0).abs() < 1e-4,
         "October is outside the window and must be untouched, got {o}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+// ---- task 0228: the pivot scales by the measured USDC/USD rate -------------
+
+// 2023-03-11 00:00 UTC — the day canonical USDC closed at 0.9681, and the day
+// the whole 0228 campaign is falsified against.
+const DEPEG_DAY: u32 = 1_678_492_800;
+// XLM's stored close against USDC on that day, from the phase-0 measurement.
+const XLM_USDC_CLOSE: f64 = 0.0588;
+// A FOO/XLM candle's close on the same day. Its unscaled USD value is
+// 10 × 0.0588 = 0.588; scaled it is 0.588 × 0.9681 = 0.5692428, i.e. 3.19% below.
+const FOO_XLM_CLOSE: f64 = 10.0;
+
+/// Seed a 2023-03-11 XLM/USDC reference candle and a FOO/XLM pivot subject into
+/// `table`, both at `ts`, and return the scratch client.
+async fn setup_0228_pivot(db: &str, table: &str, ts: u32) -> Client {
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.{table} \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({ts}, 1, 2,'sdex',    {XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE}, \
+              1000,58.8,0,0,{XLM_USDC_CLOSE},1,1), \
+             ({ts},10, 1,'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, \
+              5,50,0,0,{FOO_XLM_CLOSE},1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+}
+
+/// Read `close_usd` of the FOO/XLM pivot subject from any candle table.
+async fn pivot_close_usd_in(client: &Client, db: &str, table: &str, ts: u32) -> f64 {
+    client
+        .query(&format!(
+            "SELECT toFloat64(close_usd) FROM {db}.{table} FINAL \
+             WHERE asset_id = 10 AND quote_asset_id = 1 AND timestamp = ?"
+        ))
+        .bind(ts)
+        .fetch_one::<f64>()
+        .await
+        .unwrap()
+}
+
+/// 🔑 **THE 0228 FALSIFIER.** An XLM-quoted candle on 2023-03-11 must come out
+/// ≈3.19% BELOW what the pre-0228 statement stored, because `ref_usd` is a price
+/// in USDC and USDC closed at 0.9681 that day — not at a dollar.
+///
+/// Run on `_1d` (the calendar `addDays` branch of `bucket_end_expr`) and on `_1h`
+/// (the fixed-width branch), because the two resolve the rate through different
+/// expressions and only executing both proves the bucket end is right on each.
+///
+/// `0.588` here is the defect: it means the rate leg never applied and the stored
+/// value is still denominated in USDC while wearing a dollar column name.
+/// `0.0` means the rate was not found at all, which is the 0182 class of failure.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_pivot_leg_is_scaled_by_the_measured_usdc_rate_on_the_depeg_day() {
+    for (table, ts) in [
+        ("price_ohlcv_1d", DEPEG_DAY),
+        ("price_ohlcv_1h", DEPEG_DAY + 12 * 3_600),
+    ] {
+        let db = &format!("it_enrich_0228_depeg_{}", table.replace("price_ohlcv_", ""));
+        let client = setup_0228_pivot(db, table, ts).await;
+        seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
+
+        let mut c = cfg(db);
+        c.table = table.to_string();
+        ChEnrichmentPass::new(c).run().await.unwrap();
+
+        let unscaled = FOO_XLM_CLOSE * XLM_USDC_CLOSE;
+        let expected = unscaled * DEPEG_RATE;
+        let got = pivot_close_usd_in(&client, db, table, ts).await;
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "{table}: the pivot must scale by the measured USDC/USD rate — expected \
+             {FOO_XLM_CLOSE} × {XLM_USDC_CLOSE} × {DEPEG_RATE} = {expected}, got {got}. \
+             {unscaled} means the rate leg never applied (the 0228 defect); 0 means \
+             no rate was found for the bucket at all."
+        );
+        // The stated acceptance figure, asserted as a figure and not as prose.
+        let shortfall = (unscaled - got) / unscaled;
+        assert!(
+            (shortfall - 0.0319).abs() < 1e-3,
+            "{table}: expected ≈3.19% below the unscaled value, got {:.4}%",
+            shortfall * 100.0
+        );
+
+        client
+            .query(&format!("DROP DATABASE {db}"))
+            .execute()
+            .await
+            .unwrap();
+    }
+}
+
+/// A valid ORACLE reading wins the bucket outright, even against an `external`
+/// row stamped later — the same preference `views.sql`'s rank-first tuple and
+/// `queries_ch::peg_series_sql`'s `multiIf` apply, so the write path and the two
+/// read surfaces cannot disagree on a bucket that holds both.
+///
+/// The two rates are far apart on purpose: recency alone would pick the import.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_pivot_leg_prefers_the_oracle_rate_over_the_external_rate() {
+    let db = "it_enrich_0228_oracle_wins";
+    let client = setup_0228_pivot(db, "price_ohlcv_1d", DEPEG_DAY).await;
+    // The oracle says 0.95 at day start; the import says 0.9681 an hour LATER.
+    seed_usd_rate(&client, db, DEPEG_DAY, 0.95, "oracle").await;
+    seed_external_rate(&client, db, DEPEG_DAY + 3_600, DEPEG_RATE).await;
+
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1d".to_string();
+    ChEnrichmentPass::new(c).run().await.unwrap();
+
+    let expected = FOO_XLM_CLOSE * XLM_USDC_CLOSE * 0.95;
+    let got = pivot_close_usd_in(&client, db, "price_ohlcv_1d", DEPEG_DAY).await;
+    assert!(
+        (got - expected).abs() < 1e-6,
+        "the oracle rate must win outright: expected {expected}, got {got}. \
+         {} would mean the NEWER external row was taken, i.e. the preference \
+         collapsed to recency.",
+        FOO_XLM_CLOSE * XLM_USDC_CLOSE * DEPEG_RATE
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// 🔑 **NO RATE, NO WRITE.** A pivot leg whose bucket has no USDC/USD rate in
+/// window is left at `close_usd = 0` — never written as `0 × close`, and never
+/// written at the raw USDC-denominated vwap.
+///
+/// Both halves matter. Writing zero would publish an ambiguous value to ~130
+/// unguarded `argMax(close_usd, …)` sites; writing the unscaled vwap is the 0228
+/// defect itself. And the row must stay a CANDIDATE, which the second pass here
+/// proves: that is the premise the campaign's reset rests on — a bucket the pivot
+/// cannot price is one the reset must never re-open.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_pivot_leg_with_no_usdc_rate_in_window_is_left_unpriced() {
+    let db = "it_enrich_0228_no_rate";
+    let client = setup_0228_pivot(db, "price_ohlcv_1d", DEPEG_DAY).await;
+    // 200 days early — far outside the derived one-day staleness bound.
+    seed_external_rate(&client, db, DEPEG_DAY - 200 * 86_400, DEPEG_RATE).await;
+
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1d".to_string();
+    ChEnrichmentPass::new(c.clone()).run().await.unwrap();
+
+    let got = pivot_close_usd_in(&client, db, "price_ohlcv_1d", DEPEG_DAY).await;
+    assert_eq!(
+        got,
+        0.0,
+        "with no USDC rate in window the pivot must leave the row unpriced, got \
+         {got} — {} would be the unscaled USDC-denominated value this task exists \
+         to stop storing",
+        FOO_XLM_CLOSE * XLM_USDC_CLOSE
+    );
+
+    // Still a candidate: seed the rate and a later pass prices it.
+    seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
+    ChEnrichmentPass::new(c).run().await.unwrap();
+    let after = pivot_close_usd_in(&client, db, "price_ohlcv_1d", DEPEG_DAY).await;
+    assert!(
+        (after - FOO_XLM_CLOSE * XLM_USDC_CLOSE * DEPEG_RATE).abs() < 1e-6,
+        "an unpriced row must remain a candidate for a later pass, got {after}"
     );
 
     client
