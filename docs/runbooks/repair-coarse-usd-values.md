@@ -692,7 +692,10 @@ to check.
 
 1. **Task 0267's `external` rows are loaded.** A count of **0 is a hard
    refusal**, not a no-op — the tool exits with
-   `ResetRequiresExternalRates` and writes nothing.
+   `ResetRequiresExternalRates` and writes nothing. The check runs first thing
+   after connecting, before the month enumeration, and in a dry run too: a
+   dry run that reports `0 month(s)` on an unloaded series is an older build
+   of the tool (task 0228 closed that gap), not a clean rehearsal.
 
    The procedure that produces those rows is
    `docs/runbooks/load-external-usdc-rate.md` — run it to completion first.
@@ -1252,7 +1255,10 @@ it as `{epoch:UInt32}`.
 1. **Task 0267's `external` rows are loaded and PROMOTED.** Appendix B's
    precondition 1 query, unchanged. A count of **0 is a hard refusal** — the
    tool exits with `ResetRequiresExternalRates` and writes nothing, because an
-   empty day-set would report a clean, entirely empty campaign.
+   empty day-set would report a clean, entirely empty campaign. Checked before
+   the month enumeration, dry run included (`CoarseRepairDriver::run`), so the
+   refusal is the FIRST thing an unloaded series produces, not something the
+   per-month pass may or may not reach.
 
    ⚠️ Unlike Appendix B, **the hourly file is not required here, at any grain.**
    0268 needs it because its candidate is the peg tier's par signature
@@ -1394,6 +1400,17 @@ The tool refuses, before opening a connection:
 - `--reset-not-before` at or above `--reset-not-after` (`ResetWindowEmpty`);
 - `--pivot-window-s` shorter than the table's bucket width, which with a reset
   in play discards a value and then fails to recompute it.
+
+And first thing after connecting, before any month is enumerated, dry run
+included: zero `external` rows for canonical USDC in `prices.usd_rate`
+(`ResetRequiresExternalRates`, precondition 1).
+
+⚠️ A refusal that fires INSIDE the per-month pass — `ResetPivotRateLegIsNotAPivotReference`
+is one — fires AFTER that month's `FREEZE`, and the snapshot stays behind under
+its `repair_0114_…` name. The next real run on the same partition then fails
+with `FreezeDenied … DIRECTORY_ALREADY_EXISTS`. On prod this cannot happen (the
+real run passes `--skip-snapshot`); locally, `ALTER TABLE … UNFREEZE PARTITION
+… WITH NAME` the leftover, or drop it from `shadow/`, before re-running.
 
 Dry run first:
 

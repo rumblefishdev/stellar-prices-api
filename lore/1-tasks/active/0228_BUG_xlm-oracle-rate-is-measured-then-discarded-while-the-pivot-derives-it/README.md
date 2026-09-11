@@ -84,6 +84,26 @@ history:
       must-have; code review: 0 blockers, WR-01 (dry run skipped the pivot
       window guard) fixed in a fourth code commit. STATUS STAYS ACTIVE — the
       campaign, the deploy and the #[ignore] runs are the operator's.
+  - date: "2026-09-11"
+    status: active
+    who: akot
+    note: >
+      Prove run (`/prove`) on the branch against a rootless ClickHouse
+      26.3.10.60 — the prod version. All 43 `#[ignore]` ch_enrich_it tests
+      and the 5 usd_rate_population_it tests PASS; a hand-built Appendix C
+      campaign with the real `coarse-repair` binary scales every one of the
+      six tables to 0.9681 on 2023-03-11 and is value-idempotent at
+      version 5. Two defects found and fixed in a fifth code commit:
+      (1) `post_run_0228_it` decoded a `Nullable(Float64)` ratio into `f64`
+      and reported ±1e230 on a correctly repaired table — the acceptance
+      gate could never pass on prod; now `Option<f64>` like 0268's twin,
+      NULL is a harness finding, CI test added. (2) The
+      `ResetRequiresExternalRates` refusal both flags' `--help` promised
+      was unreachable through the CLI (the unloaded series EMPTIES the
+      month enumeration, so the run ended green with "0 month(s)"); the
+      driver now checks it before enumerating months, dry run included,
+      #[ignore] test added. 44 + 5 ClickHouse tests, 724 CI tests, clippy
+      -D warnings clean. STATUS STAYS ACTIVE for the same reasons as before.
 ---
 
 # We measure XLM's dollar price, throw it away, then derive it from USDC
@@ -539,6 +559,20 @@ Everything below was decided by the executor; the plan left it open.
     1.0 keeps each test testing what it is named for (tier composition, the
     measured-USDT rate, the 0182 reset's refill path) instead of re-deriving new
     expected values, and the scaling itself is proven by dedicated tests.
+21. **The falsifier's `ratio` is `Option<f64>`, and `None` behind `matched > 0`
+    is a finding that names the HARNESS.** The column is `Nullable(Float64)`
+    because the reference vwap divides by `nullIf(sum(volume_base), 0)`; the
+    alternative — `assumeNotNull` in the SQL — would keep the struct plain but
+    silently turn "no reference" into `0.0`. `post_run_0268_it` already carries
+    `rate: Option<f64>` for the same reason, so the twins now share the shape,
+    and the operator reading "the harness query is wrong" is a different
+    situation from "the table is wrong" — the message says which.
+22. **The no-rates refusal lives in `CoarseRepairDriver::run`, not only in the
+    pass, via one free fn `assert_external_rates_are_loaded` that both call.**
+    Putting it in the CLI would have covered one driver; putting it in `run()`
+    covers every driver and the dry run, which WR-01 already established must
+    refuse what the real run refuses. One definition, two call sites, so the
+    two cannot drift.
 
 ## Issues Encountered — for Adam to route
 
@@ -595,6 +629,34 @@ Everything below was decided by the executor; the plan left it open.
    left alone. `cargo clippy -p enrichment-worker --features aws-mtls
    --all-targets -- -D warnings` is clean, and so are `oracle-worker` and
    `prices-api`.
+8. **🔑 The acceptance gate was broken (found by the prove run, fixed).**
+   `post_run_0228_it`'s `measure()` returns `ratio` as `Nullable(Float64)` —
+   the reference vwap's `nullIf` makes the whole median nullable — while
+   `Measurement` declared `f64`. RowBinary decoded one byte off and the
+   falsifier reported a carried factor of `-3.9e230` on a table the tool had
+   just repaired to exactly 0.9681. On prod it would have failed the campaign
+   forever, whatever the data said. Fixed to `Option<f64>` (Decision 21);
+   proven both ways on the local engine: passes on the repaired database,
+   fails with "factor 1.000000 >= 0.99 — indistinguishable from par" on an
+   unrepaired one. CI test `a_null_factor_behind_matched_rows_is_a_harness_finding_not_a_pass`.
+9. **`--help`'s "Refused outright when `usd_rate` holds zero `external` rows"
+   was false through the CLI, for BOTH modes (found by the prove run, fixed).**
+   The refusal sat in the per-month pass, but the day-set predicate is also
+   part of `months_with_zeros`, so an unloaded series produced zero months, no
+   pass, and `exit 0` with "0 month(s): 0 enriched". Inherited from 0268
+   (Appendix B had the same gap). `CoarseRepairDriver::run` now runs the check
+   first, dry run included (Decision 22); `#[ignore]` test
+   `the_repair_driver_refuses_an_unloaded_series_before_enumerating_months`,
+   and the real binary refuses with `ResetRequiresExternalRates`, exit 1, in
+   both modes and in `--dry-run`.
+10. **A refusal that fires inside the per-month pass leaves the FREEZE behind.**
+    The driver freezes the partition, THEN builds the pass whose `reset_step`
+    may refuse (`ResetPivotRateLegIsNotAPivotReference` is new here); the
+    snapshot under `repair_0114_<db>_<table>_<month>` stays, and the next real
+    run on that partition fails with `FreezeDenied … DIRECTORY_ALREADY_EXISTS`.
+    Pre-existing 0114 driver order; prod is unaffected (`--skip-snapshot`);
+    local/CI hits it. Recorded in Appendix C rather than fixed — reordering
+    FREEZE after the pass's refusals is 0114's design to revisit. Spawn list 4.
 
 ## Broken/modified tests
 
@@ -620,6 +682,10 @@ Unit tests (`ch_enrich.rs`):
   assertion changed; the doc now states that it pins the pre-0228 strings too.
 - `usdc_external_reset()` / `usdt_reset()` fixtures — gained
   `require_pivot_usdc_rate: false`, explicitly.
+- `post_run_0228_it.rs` (prove-run commit) — `Measurement::ratio` became
+  `Option<f64>`; `carried()` wraps in `Some`, the "unmeasurable" fixture sets
+  `None` instead of `NAN`, `par.ratio = Some(1.0)`. Intentional: the wire
+  column is nullable (Issues 8). No assertion changed meaning.
 
 Integration tests (`ch_enrich_it.rs`), all for the same reason: making the USDC
 rate mandatory in the pivot means a fixture that seeds none now leaves its
@@ -665,20 +731,44 @@ diff origin/develop peg_identities() body                                       
 diff origin/develop peg_identities_is_exactly_canonical_usdc                          → empty
 ```
 
-⚠️ **`#[ignore]` tests were NOT RUN: no ClickHouse is reachable on this machine**
-(the docker socket is root-only for this user and nothing listens on
-`localhost:8123`). They were written, they compile, and the non-ignored suite
-passes. This is exactly what task 0268 recorded for the same reason. The
-invocations still owed, once a ClickHouse is available:
+### The `#[ignore]` ClickHouse suite — RUN, 2026-09-11 (prove run)
 
-```bash
-docker compose up -d clickhouse          # clickhouse/clickhouse-server:26.3.10.60
-cargo test -p enrichment-worker --test ch_enrich_it -- --ignored
-cargo test -p prices-ingest-core --test usd_rate_population_it -- --ignored
+The docker socket is root-only for this user, so the first pass recorded these
+as "written, compile, NOT RUN". The prove run then started
+`clickhouse-common-static-26.3.10.60` — the exact prod build — as a rootless
+process in a scratch directory and ran everything against it:
+
+```
+cargo test -p enrichment-worker --test ch_enrich_it -- --ignored              → 44 passed, 0 failed  (43 + the new driver refusal)
+cargo test -p prices-ingest-core --test usd_rate_population_it -- --ignored   → 5 passed, 0 failed
+cargo test -p prices-api -- --ignored                                          → 9 passed, 1 failed: backfill_status_maps_both_streams
+                                                                                 ("stalled" vs "running"; prices-api is untouched by this branch, pre-existing)
 ```
 
-`post_run_0228_it` is the operator's after-check and is EXPECTED TO FAIL until
-the campaign runs on production; its pure `judge()` tests pass in CI today.
+Beyond the suite, a hand-built Appendix C campaign with the real `coarse-repair`
+binary (`--transport local`), on all six tables seeded with an XLM/USDC
+reference at vwap 0.0588, a FOO/XLM subject stored UNSCALED at 0.588, and
+0267's daily series for March 2023 (0.9681 on the 11th):
+
+```
+before:  close_usd 0.588   ratio_to_ref 1.0     version 1   (every table)
+after:   close_usd 0.5692428   ratio 0.9681   version 3   (depeg bucket, 15m/1h/4h/1d)
+         close_usd 0.5880588   ratio 1.0001   version 3   (recovered bucket; _1w/_1M rate at bucket end)
+         FOO/XLM 2020-06-01 (no rate that day)  0.588  version 1   ← untouched
+         FOO/USDC par control on the depeg day  5      version 1   ← untouched
+rerun _1d:   identical values, version 5                          ← D-06 value-idempotence
+post_run_0228_it (fixed):  2 passed on this database; 2 failed on an unrepaired copy
+```
+
+And the XLM snapshot path with the real writer and the real
+`measured_identities()`: two readings land as `('native','XLM','','', …,
+'oracle', '', hops 0)`, the 1970 junk reading is dropped, the peg pass adds
+USDC beside them, a second measured pass inserts 0. With those native rows
+present, `price_usd_series` / `_1h` serve `native XLM traded` from XLM's own
+market and nothing keyed on the `usd_rate` rows (D-09, observed).
+
+`post_run_0228_it` remains the operator's after-check and is EXPECTED TO FAIL
+on prod until the campaign runs; its pure `judge()` tests pass in CI today.
 
 One prod query WAS run this session, read-only: the two-ASOF shape probe
 ([notes/sql/q9_asof_shape.sql](notes/sql/q9_asof_shape.sql)) against ClickHouse
@@ -724,8 +814,10 @@ Nothing below can be done from the branch. Work **Appendix C** of
    the same unscaled value, spending the FREEZE point for nothing.
 2. **Confirm the session and server are UTC** (precondition 0).
 3. **Confirm [[0267]]'s `external` rows are loaded and PROMOTED** (precondition
-   1). A count of 0 is a hard refusal. The hourly file is NOT required here —
-   see Design Decision 11 for why, and load it anyway if you can.
+   1). A count of 0 is a hard refusal, and since the prove-run commit the tool
+   really does refuse — before enumerating months, in the dry run too. The
+   hourly file is NOT required here — see Design Decision 11 for why, and load
+   it anyway if you can.
 4. **Confirm the cleanup worker is still dark** (precondition 2) and that the
    **FREEZE snapshots exist and were verified** (precondition 3). This
    population is ~19× Appendix B's; budget the disk first.
@@ -771,6 +863,10 @@ nobody can see.
 3. **Settle `_15m`'s retention** (Issues 5): whether the 30-day policy has ever
    run, and therefore whether 8.9 M pre-epoch rows are in scope for this campaign
    and for any future one.
+4. **Reorder `coarse-repair`'s FREEZE after the pass's refusals** (Issues 10):
+   today a partition is frozen before a reset refusal can fire, and the leftover
+   snapshot blocks the next real run on that partition with `FreezeDenied`.
+   0114's driver, small, low priority; prod never hits it.
 
 ## Notes
 
