@@ -21,6 +21,13 @@ history:
       which was only found AFTER proto27 froze live ingestion for six days —
       filed proactively this time. ⚠️ Blocked in practice on BE bumping
       `xdr-parser`; see the Blocker section.
+  - date: 2026-09-11
+    status: backlog
+    who: okarcz
+    note: >
+      The BE ask is raised — the operator notified BE the same day. Their
+      answer (date, and the rev their `xdr-parser` bump lands on) is still
+      outstanding and is what unblocks our half.
 ---
 
 # stellar-xdr 27 → 28 for Protocol 28 "Adapter"
@@ -111,7 +118,11 @@ a hard compile error, not a warning. So the order is fixed:
 build on the next `cargo update`, whether or not we are ready, so the two halves
 want to move together rather than drift.
 
-➡️ **Raise it with BE now.** This is the long pole and the vote is days out.
+➡️ **The ask is RAISED — the operator told BE on 2026-09-11**, the day this
+task was filed. So the long pole is moving; what is not yet recorded here is
+BE's answer: whether they have a date, and which rev their bump will land on.
+Fill both in when known, and re-pin `xdr-parser` to that rev rather than to
+whatever `branch="develop"` happens to hold.
 
 ## Implementation
 
