@@ -1,26 +1,36 @@
 ---
-id: "0271"
-title: "Soroswap produced no candles for five days (2026-07-06 → 07-11) while Phoenix and Aquarius ran continuously — a live-ingestion gap that starts 37 ledgers past the backfill handoff"
-type: BUG
-status: backlog
-related_adr: []
-related_tasks: ["0264", "0176", "0128", "0088"]
-tags: [layer-backend, priority-medium, effort-medium, milestone-M2, ingestion, data-correctness, soroswap]
-milestone: 2
+title: "Soroswap produced no candles for five days (2026-07-06 -> 07-11) - measured on production"
+type: research
+status: mature
+tags: ["soroswap", "amm", "ingestion", "data-correctness", "measurement", "prod"]
 links:
-  - "../../../packages/soroswap-extractor/src"
-  - "../../../packages/prices-ledger-processor/src"
+  - "../README.md"
+  - "../../../../../packages/soroswap-extractor/src"
+  - "../../../../../packages/prices-ledger-processor/src"
 history:
-  - date: 2026-09-08
-    status: backlog
+  - date: "2026-09-08"
+    status: mature
     who: okarcz
     note: >
-      Measured while scoping [[0176]]/[[0264]] for the Milestone 2 package.
-      Found by locating candles in ledger space via `intDiv(version, 1000)`
-      rather than by timestamp, which is what exposed the alignment to the
-      backfill handoff floor. Disclosed in `milestone-2-evidence.md` §8 with
-      "cause under investigation" and a destination of before Tranche 3.
+      Measured while scoping 0176/0264 for the Milestone 2 package. Found by
+      locating candles in ledger space via intDiv(version, 1000) rather than by
+      timestamp, which is what exposed the alignment to the backfill handoff
+      floor. Disclosed in milestone-2-evidence.md section 8 with "cause under
+      investigation" and a destination of before Tranche 3.
+  - date: "2026-09-11"
+    status: mature
+    who: okarcz
+    note: >
+      Carried here verbatim when task 0271 was folded into 0101 and archived as
+      superseded. Kept as written: it was filed without knowing 0101 already
+      carries a diagnosed cause for the same darkness, and the 07-11 vs 07-15
+      contradiction between the two is the first thing 0101 has to settle. The
+      implementation and acceptance-criteria sections below are superseded by
+      0101's; the evidence is not.
 ---
+
+> 📌 Folded into [[0101]] on 2026-09-11. Filed as task 0271, now archived as
+> superseded. Body preserved verbatim below.
 
 # Soroswap goes dark for five days, starting at the backfill handoff
 

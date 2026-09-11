@@ -2,14 +2,16 @@
 id: "0101"
 title: "Reprice the live-era AMM gap (Phoenix ~2% short + Soroswap 2026-07-06→07-15 hole)"
 type: FEATURE
-status: backlog
+status: active
+assignee: okarcz
 related_adr: []
-related_tasks: ["0099", "0097", "0096", "0065", "0108", "0117", "0127", "0128"]
+related_tasks: ["0271", "0099", "0097", "0096", "0065", "0108", "0117", "0127", "0128", "0264", "0176", "0088"]
 tags: [layer-indexing, priority-medium, effort-medium, milestone-M2, amm, phoenix, soroswap, backfill, clickhouse]
 milestone: 2
 links:
-  - "../../../docs/runbooks/events-sourced-amm-reprice.md"
-  - "../../../packages/prices-clickhouse/schema/preroll-amm-reprice.sql"
+  - "../../../../docs/runbooks/events-sourced-amm-reprice.md"
+  - "../../../../packages/prices-clickhouse/schema/preroll-amm-reprice.sql"
+  - "notes/R-soroswap-five-day-gap-measured-on-prod.md"
 history:
   - date: 2026-07-17
     status: backlog
@@ -31,6 +33,18 @@ history:
       chunks — but the fix is per-process, so the cross-INVOCATION case lands
       here, on the task that actually chooses run boundaries. See
       §Cross-invocation minute boundary.
+  - date: 2026-09-11
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active and assigned. [[0271]] folded in and archived as
+      superseded: it measured the same Soroswap darkness on prod from the other
+      end, without knowing this task already carries a diagnosed cause. Its
+      measurement is preserved verbatim at
+      notes/R-soroswap-five-day-gap-measured-on-prod.md and its acceptance
+      criteria are merged below. Converted file -> directory at the same time
+      (the note pushed it past the ~150-line guidance). NOT started - the first
+      move is the falsification in §Settle this before any run, not a reprice.
 ---
 
 # Reprice the live-era AMM gap
@@ -111,6 +125,62 @@ rule rather than two: **every run boundary must be minute-aligned**, at the
 start as well as the end. `--start = 63352612` inherits its alignment from
 0097's end, so it is safe as written; re-verify if either bound moves.
 
+## Settle this before any run (absorbed from 0271)
+
+[[0271]] measured the Soroswap hole on production on 2026-09-08, from
+`price_ohlcv_1d`, the forever table. Full measurement:
+[notes/R-soroswap-five-day-gap-measured-on-prod.md](notes/R-soroswap-five-day-gap-measured-on-prod.md).
+
+| boundary | ledger |
+| --- | --- |
+| Soroswap's last candle before the gap | **63,352,574** |
+| documented backfill handoff floor | **63,352,611** |
+| Soroswap's first candle after the gap | **63,433,850** |
+
+🔴 **One fact does not fit this task's story.** 0271 has Soroswap resuming on
+**2026-07-11** (10 candles that day, ledger 63,433,850); this task says the 0096
+`topic[0]` bug suppressed every Soroswap candle until the fix deployed
+**2026-07-15**. Both cannot be true. Settle it first — it decides whether the
+range to refill is 07-06→07-11 or 07-06→07-15, and whether one mechanism is at
+work or two:
+
+```sql
+SELECT toDate(timestamp) d, count() FROM prices.price_ohlcv_1d
+WHERE source = 'soroswap' AND timestamp >= '2026-07-05' AND timestamp < '2026-07-20'
+GROUP BY d ORDER BY d
+```
+
+Then falsify the trading lull from **raw swap events**, not candles: Soroswap is
+low-volume enough that a five-day quiet spell is not absurd on its own. If swaps
+exist in `soroban_events` for the range and candles do not, ingestion dropped
+them. If no swaps exist, the venue was genuinely quiet and half this task
+evaporates.
+
+⚠️ **Do not investigate any of this in `price_ohlcv_1m`.** Non-SDEX rows only
+start 2026-07-01 there — AMM history lives in `_1d`/`_1h`. A `_1m` query
+returning zero proves nothing. See [[amm-history-is-not-in-price-ohlcv-1m]].
+
+🔑 **Method worth reusing:** candles carry no ledger column, but
+`version = ledger_seq * 1000 + op_index`, so `intDiv(version, 1000)` locates any
+candle in ledger space. Comparing that against the backfill's documented floor is
+what turned a curiosity into the 37-ledger alignment above.
+
+### Competing causes, both on the table
+
+| cause | predicts |
+| --- | --- |
+| **0096 `topic[0]` bug** (this task's premise) | Soroswap dark from the handoff until the 07-15 deploy, exactly |
+| [[amm-live-pool-registry-preload-gap]] | one venue dark across a restart, others unaffected, no error anywhere — the live processor builds `Registries::new()` empty and drops unregistered-pool swaps silently |
+
+Phoenix and Aquarius ran normally throughout, which fits either. Name the
+mechanism before refilling — a refill without the fix recurs at the next restart.
+
+### Sweep for other instances
+
+The five-day hole was found by accident in one five-week window. Run the same
+`intDiv(version, 1000)` shape over the full AMM range and say whether it has
+happened before.
+
 ## Acceptance Criteria
 
 - [ ] Phoenix candles in `[63352612, end]` reflect the variable-length fix
@@ -125,6 +195,19 @@ start as well as the end. `--start = 63352612` inherits its alignment from
 - [ ] Both run bounds minute-aligned (not just `--end`) — see
       §Cross-invocation minute boundary.
 
+Merged from [[0271]]:
+
+- [ ] The 07-11 vs 07-15 contradiction is resolved and the true Soroswap range
+      is stated — see §Settle this before any run.
+- [ ] Trading-lull vs dropped-ingestion is settled from raw swap events, said
+      plainly either way.
+- [ ] If ingestion: the mechanism is identified and fixed, and it is stated why
+      Phoenix and Aquarius were unaffected.
+- [ ] A sweep over the full AMM range reports whether other instances exist.
+- [ ] `milestone-2-evidence.md` §8's row is updated to the outcome — it currently
+      reads "cause under investigation" and promises resolution before
+      Tranche 3.
+
 ## Notes
 
 - Milestone 2 by explicit decision (2026-07-17): not required for M1, and the
@@ -133,3 +216,11 @@ start as well as the end. `--start = 63352612` inherits its alignment from
 - Everything learned in 0097 — RMT version ties, FINAL-is-mandatory,
   month-chunking, the readonly=1 `SETTINGS` trap, minute-alignment — is captured
   in the pre-roll script header and the runbook. Read those first.
+- ⚠️ **The repair is live-owned range**, so it carries the
+  [[backfill-live-no-code-coordination]] overlap hazard. 0271 raised it against
+  the sdex/combined backfill CLI, which has no per-venue filter (`--mode` is
+  `combined` or `sdex-only`) — a Soroswap refill there would rewrite Phoenix and
+  Aquarius rows live already wrote correctly. **This task's path is the
+  events-sourced CH-to-CH reprice instead**, which rewrites only AMM sources in
+  the ledger range, and rewriting Phoenix is the point here. The surviving edge
+  is minute-alignment at **both** bounds, per §Cross-invocation minute boundary.
