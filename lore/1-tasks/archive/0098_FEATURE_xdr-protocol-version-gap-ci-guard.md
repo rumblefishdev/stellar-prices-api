@@ -2,7 +2,7 @@
 id: "0098"
 title: "Version-gap CI guard — surface stellar-xdr protocol lag before it freezes prod"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0094", "0091"]
 tags: ["milestone-M1", "priority-medium", "effort-small", "phase-live", "ci", "resilience"]
@@ -72,8 +72,23 @@ deliberately kept on `branch="develop"` while `stellar-xdr` is exact-pinned (see
       does not hold. Chatbot properly would mean a CloudWatch metric from
       something holding credentials, plus a CDK change and a deploy — its own
       task, filed as [[0280]].
-- [ ] Confirmed end to end by a manual `workflow_dispatch` run: the run fails,
-      the tracking issue is opened, and the report is on the run summary.
+- [x] 🔴 **The workflow reaches `master`.** `schedule` and `workflow_dispatch`
+      run **only from the default branch**, which here is `master` — a release
+      branch ~85 commits behind `develop`. Merging to `develop` alone would
+      have left the watch dead while every file read present: the guard's own
+      failure mode, wearing a third hat after [[0215]]'s unread Caddyfile and
+      [[0141]]'s unshipped asset.
+      **PR #308, squash-merged (`6278c59`)**, carrying the workflow file only —
+      the watch checks out `develop`, so the script travels with the checkout.
+      Confirmed by `gh workflow list` showing **XDR protocol watch — active**,
+      which is the registration the schedule actually needs; the file being on
+      the branch is not the same claim.
+- [x] **Confirmed end to end 2026-09-11** by a manual `workflow_dispatch` on
+      `master`, run `34589673493`: the run **failed** (the pass condition — we
+      are genuinely behind protocol 28), issue **#309** was opened carrying the
+      report and pointing at [[0277]], the report reached the run summary, and
+      the operator received the notification email. Every link in the chain
+      exercised once, for real.
       **Self-testing while it lasts** — we are behind protocol 28, so strict
       mode fails on purpose. That window closes when [[0277]] lands and the
       check goes green, at which point proving it needs a deliberately wrong
