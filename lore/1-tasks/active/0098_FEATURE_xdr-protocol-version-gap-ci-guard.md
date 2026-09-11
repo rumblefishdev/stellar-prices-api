@@ -61,24 +61,23 @@ deliberately kept on `branch="develop"` while `stellar-xdr` is exact-pinned (see
       noted so the guard doesn't false-alarm on it.
       `docs/runbooks/deploy-ledger-processor.md` gains a
       *Protocol-version lag* section plus a preflight line in step 0.
-- [ ] 🔴 **`#stellar-prices-api-bot` is subscribed to the workflow** via the
-      Slack GitHub app. One `/github subscribe` in the channel; no secret, no
-      webhook, no AWS. Operator's — it is typed in Slack, not in this repo.
-      ⛔ **The webhook approach is RETRACTED, 2026-09-11.** The workspace is at
-      its installed-app limit, so an incoming webhook cannot be created at all.
-      Both other routes are closed too: SNS → AWS Chatbot (the ops-alarm path,
-      task 0056) needs AWS credentials this workflow does not have, and Slack
-      Workflow Builder needs a paid plan.
-- [ ] 🔴 **The workflow reaches `master`.** `schedule` and `workflow_dispatch`
-      run **only from the default branch**, which here is `master` — a release
-      branch 85 commits behind `develop`. Merging to `develop` alone leaves the
-      watch dead while every file reads present. See the runbook's first
-      section.
-- [ ] Confirmed end to end by a manual `workflow_dispatch` run posting to
-      `#stellar-prices-api-bot`. Cheap to check right now and **self-testing
-      while it lasts**: we are behind protocol 28, so strict mode fails on
-      purpose and a correctly wired webhook posts immediately. That window
-      closes when [[0277]] lands.
+- [x] **A failure reaches a person without anyone's permission.** The watch
+      opens and maintains one tracking issue (`GITHUB_TOKEN` + `issues: write`,
+      no secret), and GitHub's scheduled-failure email fires alongside it.
+      ⛔ **Slack is unavailable by THREE independent routes** — recorded so it
+      is not re-attempted: an incoming webhook needs a Slack app and the
+      workspace is at its **installed-app limit**; the Slack GitHub app is in
+      the workspace but **not installed on the GitHub org**, which needs an
+      organisation owner; SNS → AWS Chatbot needs AWS credentials this workflow
+      does not hold. Chatbot properly would mean a CloudWatch metric from
+      something holding credentials, plus a CDK change and a deploy — its own
+      task, filed as [[0278]].
+- [ ] Confirmed end to end by a manual `workflow_dispatch` run: the run fails,
+      the tracking issue is opened, and the report is on the run summary.
+      **Self-testing while it lasts** — we are behind protocol 28, so strict
+      mode fails on purpose. That window closes when [[0277]] lands and the
+      check goes green, at which point proving it needs a deliberately wrong
+      pin.
 
 # 📕 DEPLOY RUNBOOK — arming the watch
 
@@ -119,31 +118,26 @@ git fetch origin -q && git log origin/master --oneline -1 -- .github/workflows/x
 step 4 is done — that empty output is the dead-watch condition, and re-running
 this line is how you confirm step 4 worked.
 
-## 1. Subscribe the channel [Slack, in #stellar-prices-api-bot]
+## 1. Nothing to configure [no action]
 
-Type this in the channel (once; `/github signin` first if it asks):
+Delivery is a GitHub issue the workflow opens itself, using the built-in
+`GITHUB_TOKEN`. No secret, no Slack app, no AWS, nobody's approval. Issues are
+enabled on the repository (checked 2026-09-11).
 
-```
-/github subscribe rumblefishdev/stellar-prices-api workflows:{name:"XDR protocol watch"}
-```
+⛔ **Three Slack routes were tried and all are closed** — do not re-attempt:
+webhook (workspace at its installed-app limit), Slack GitHub app (needs an
+**organisation owner** to install it on the GitHub side — the workspace half
+was already installed, which is why this looked like it would work), SNS → AWS
+Chatbot (needs AWS credentials this workflow does not hold). The Chatbot route
+done properly is [[0278]].
 
-**Checkpoint.** The app replies confirming the subscription and lists what the
-channel is now subscribed to.
+## 2. Watch the repository [GitHub, in a browser]
 
-⚠️ **It matches the workflow's `name:` EXACTLY.** Renaming `name: XDR protocol
-watch` in the workflow silently unsubscribes the channel — failing workflow,
-silent channel. Rename both together or neither.
+An issue only notifies people watching. **Watch → All Activity** (or at least
+Issues) on `rumblefishdev/stellar-prices-api`, or the issue opens into silence.
 
-## 2. Nothing to store [no action]
-
-There is no secret. Left numbered so the step numbers in this runbook match the
-commits and the PR discussion that produced them.
-
-⛔ **An incoming webhook was the original plan and it is not available**: the
-workspace is at its installed-app limit. SNS → AWS Chatbot, the route every ops
-alarm uses, needs AWS credentials this workflow does not have. Workflow Builder
-needs a paid plan. The GitHub app was already installed, which is why this is
-one slash command instead of any of that.
+⚠️ This is the step with no error message. Everything else fails loudly; this
+one just means nobody is told.
 
 ## 3. Merge PR #306 into `develop` [GitHub]
 
@@ -155,18 +149,18 @@ watch.
 The schedule cannot start until the file is on the default branch, and the next
 release merge could be weeks away — the Protocol 28 vote is 2026-09-16.
 
-Open a small PR carrying **exactly two files**, `develop` → `master`:
+Open a small PR carrying **one file**, `develop` → `master`:
 
 ```
 .github/workflows/xdr-protocol-watch.yml
-tools/scripts/verify-xdr-protocol-gap.mjs
 ```
 
-⚠️ **Two, not one.** `master` has `.nvmrc` and `package.json` but not the
-`xdr:` npm scripts, which is why the workflow invokes
-`node tools/scripts/verify-xdr-protocol-gap.mjs --watch` directly instead of
-going through `npm run`. Through npm it would fail on `master` with "missing
-script" while passing on every branch anyone would think to test it on.
+⚠️ **One file, because the workflow checks out `develop` explicitly.** Only the
+workflow definition has to live on the default branch; the script and the pin
+it reads come from the checkout. That also fixes a subtler bug: `master` is a
+release branch ~85 commits behind, so reading its `Cargo.toml` would measure a
+pin nobody deploys — we would bump `stellar-xdr` on `develop`, ship it, and the
+watch would keep reporting the old number until the next release merge.
 
 ⛔ **Do not merge `develop` into `master` to achieve this.** That is 85
 unrelated commits onto a release branch as a side effect of arming a watch.
@@ -187,24 +181,19 @@ the pass condition. While our pin is behind protocol 28 the strict mode is
 supposed to fail, so a red run plus a Slack message is the guard working. A
 green run at this moment would mean the check is not reading what it claims to.
 
-Expect a message in **#stellar-prices-api-bot** from the GitHub app naming the
-workflow and its failed conclusion. Click through and the run's **summary**
-carries the report itself:
+Expect three things:
 
-```
-## stellar-xdr protocol lag
-
-error: stellar-xdr 27 lags the protocol core already supports (28).
-  pinned stellar-xdr 27 | mainnet current 27 | core supports 28
-```
+1. the run **fails** (the pass condition — we are genuinely behind);
+2. an issue titled **"stellar-xdr lags the mainnet protocol"** is opened,
+   carrying the report and linking to [[0277]];
+3. the run's **summary** shows the same report.
 
 ⏳ **This self-test expires.** It works because we are currently behind; once
-[[0277]] lands the check goes green and proving delivery needs a deliberately
-wrong pin. Do it now.
+[[0277]] lands the check goes green, the issue closes itself, and proving
+delivery again needs a deliberately wrong pin. Do it now.
 
-If the run fails but the channel stays quiet, the subscription is the suspect,
-not the workflow — re-run `/github subscribe` and check the workflow `name:`
-still matches character for character.
+Red run but no issue → check the job log for a `gh` permission error, and that
+`permissions: issues: write` survived the merge.
 
 ## 6. Final test [local machine]
 
@@ -217,8 +206,7 @@ appeared in the channel. Tick the two open criteria above.
 
 ## Reverting
 
-`/github unsubscribe rumblefishdev/stellar-prices-api workflows:{name:"XDR protocol watch"}`
-in the channel, and delete the workflow file.
+Delete the workflow file and close the tracking issue.
 The check itself stays useful without either — `npm run xdr:verify-protocol-gap`
 is standalone and is already a preflight step in
 `docs/runbooks/deploy-ledger-processor.md`.
@@ -304,24 +292,42 @@ JSON carrying the report text.
    `ci.yml` is gated on `rust`/`typescript` paths. This one cannot be: the
    condition it watches produces no diff on our side at all.
 
-7. **Delivery is the Slack GitHub app — every other route was closed.**
-   Worked through in order, and worth recording so it is not re-litigated:
+7. **Delivery is a GitHub issue — every Slack route was tried and closed.**
+   Worked through in this order over 2026-09-11, recorded so it is not
+   re-litigated:
 
-   | route | why not |
+   | route | outcome |
    |---|---|
-   | SNS → AWS Chatbot (the ops-alarm path, task 0056) | needs AWS credentials in CI; an OIDC role + CDK change + deploy is disproportionate here |
-   | Slack incoming webhook | needs a Slack app, and **the workspace is at its installed-app limit** |
-   | Slack Workflow Builder | needs a paid plan |
-   | **Slack GitHub app** | **already installed.** One `/github subscribe`, no secret, no AWS |
+   | SNS → AWS Chatbot (the ops-alarm path, task 0056) | ⛔ needs AWS credentials in CI |
+   | Slack incoming webhook | ⛔ needs a Slack app; **workspace is at its installed-app limit** |
+   | Slack Workflow Builder | ⛔ needs a paid plan |
+   | Slack GitHub app | ⛔ in the workspace, but **not installed on the GitHub org** — needs an organisation owner |
+   | **GitHub issue** | ✅ `GITHUB_TOKEN` + `issues: write`. No secret, no app, nobody's approval |
 
-   The cost is that the app posts a run and a link rather than our text, so the
-   report is written to `$GITHUB_STEP_SUMMARY` and is the first thing visible
-   after the click.
+   ⚠️ The Slack GitHub app looked like the answer for several steps because the
+   app *was* installed in Slack. The GitHub-side install is a separate thing,
+   and the app's error message conflates it with "the repository does not
+   exist". The repo is public and demonstrably exists, which is what
+   disambiguated it.
 
-   🔴 **The subscription matches the workflow `name:` exactly**, so renaming it
-   silently unsubscribes the channel: a failing workflow and a quiet channel,
-   which is this task's own failure mode. Named in the workflow, the runbook
-   and here, because nothing enforces it.
+   **It notifies on information, not on schedule.** Opened → notify;
+   LAGGING → BEHIND → notify; same tier next day → body refreshed **silently**;
+   check passes → comment and close. A daily comment on a condition that
+   persists for days is a daily notification saying nothing new, and the
+   reliable outcome is a muted thread — a guard that looks present and is not,
+   which is the failure this whole task exists to prevent.
+
+   The Chatbot route done properly — a CloudWatch metric published by something
+   holding AWS credentials, plus an alarm — is [[0278]].
+
+10. **The watch measures `develop`, not the default branch.** Found while
+    answering "does the CI check master or develop?", and it was a real defect:
+    a `schedule` fires only from `master`, so the obvious checkout reads
+    `master`'s `Cargo.toml` — a release-branch snapshot ~85 commits stale. We
+    would have bumped `stellar-xdr` on `develop`, deployed it, and watched this
+    guard keep reporting the old number until the next release merge. A guard
+    giving a stale reading is worse than no guard. The deploy runbook builds
+    from `develop`, so `develop` is what ships and what gets measured.
 
 8. **No Renovate rule** (the task offered it as optional). There is no Renovate
    config in this repo, so adding one is repo-wide dependency automation rather
