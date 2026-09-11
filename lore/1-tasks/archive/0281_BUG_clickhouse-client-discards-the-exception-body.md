@@ -2,7 +2,7 @@
 id: "0281"
 title: "Our ClickHouse client turns a real server exception into BadResponse(\"\") — the error code, elapsed time and query are all discarded"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0215", "0111", "0214"]
 tags: [layer-backend, priority-high, effort-small, clickhouse, observability, resilience]
@@ -24,6 +24,15 @@ history:
       Activated immediately. It blocks [[0215]]'s last criterion, and it is
       wider than that task: `prices-clickhouse` is shared, so every worker and
       operator CLI currently loses the cause of any failed write.
+  - date: 2026-09-11
+    status: completed
+    who: okarcz
+    note: >
+      Fixed, deployed and verified by induction on production the same day.
+      PR #310 (`9de447b`), deployed to EventBridge and Compute, digest moved
+      `Mx3IIUuT…` → `8/XgyfNI…`. The same statement that logged
+      `bad response: ` at 11:49 logged the full `Code: 159 TIMEOUT_EXCEEDED`
+      at 12:57. Closes [[0215]]'s last technical criterion.
 ---
 
 # The ClickHouse client discards the exception body
@@ -248,6 +257,49 @@ again in the same sitting.
 
 Bound removed, 13 env keys, `prices-production-cleanup` still `DISABLED`.
 
+## ✅ VERIFIED ON PRODUCTION 2026-09-11 — the same failure, now readable
+
+Deployed (EventBridge + Compute, digest `Mx3IIUuT…` → `8/XgyfNI…`) and induced
+with `ENRICH_MAX_EXECUTION_TIME_SECS=1`, exactly as the failed run this
+morning.
+
+### The proof is two log lines, seventy minutes apart
+
+```
+11:49:40  "error":"clickhouse: bad response: "
+
+12:57:59  Clickhouse(BadResponse("Code: 159. DB::Exception: Timeout exceeded:
+           elapsed 1013.727811 ms, maximum: 1000 ms. (TIMEOUT_EXCEEDED)
+           (version 26.3.10.60 (official build))"))
+```
+
+Same statement, same bound, same failure. The only difference is whether a
+reader can tell what happened.
+
+### A sanity invoke first, deliberately
+
+Before inducing, one invocation at the default bound: `execution bound armed
+max_execution_time_secs=120`, `enrichment pass complete, batches 5, enriched
+7663`, 6.5 s, zero errors. That separates "disabling compression broke the read
+path" from "the bound fired", which is precisely the entanglement that made the
+morning's run hard to read. The read path is unaffected.
+
+### The diff corroborated the fix rather than just showing churn
+
+`make diff-production` changed **eight** EventBridge functions, not nine:
+`MtlsNotafterProbeFunction` was absent — and it is the one component that
+builds no ClickHouse client. Exactly the crates using the changed code changed.
+`Prices-production-Compute` carried `LedgerProcessorFunction` and
+`ApiHandlerFunction`, so the API's errors are readable now too.
+
+### Production state after the run
+
+| | |
+|---|---|
+| `ENRICH_MAX_EXECUTION_TIME_SECS` | **removed** — the compiled-in 120 applies |
+| env keys | **13**, `CH_DOMAIN` and `MTLS_SECRET_NAME` intact |
+| `prices-production-cleanup` | **DISABLED** |
+
 ## Acceptance Criteria
 
 - [x] A failing `INSERT … SELECT` surfaces the ClickHouse error **code** and
@@ -257,10 +309,9 @@ Bound removed, 13 env keys, `prices-production-cleanup` still `DISABLED`.
       `execution_bound_error_it`, verified red with the exact message
       *"the error carries no message at all — this is the 0281 defect"* and
       green after. ⚠️ Requires a proxy and fails loudly without one.
-- [ ] The enrichment worker logs `TIMEOUT_EXCEEDED` (159) when its bound is
-      exceeded — which closes [[0215]]'s last criterion.
-      ⏳ **Code merged 2026-09-11 (`9de447b`), deploy outstanding.**
-- [ ] Verified by inducing on prod, the same way 0215's run was: set
-      `ENRICH_MAX_EXECUTION_TIME_SECS=1`, invoke, read the log, restore.
-      ⚠️ Restore in the same sitting; at 1 s the historical sweep dies every
-      invocation.
+- [x] The enrichment worker logs `TIMEOUT_EXCEEDED` (159) when its bound is
+      exceeded — which closes [[0215]]'s last criterion. **Verified 12:57:59
+      UTC, 2026-09-11.**
+- [x] Verified by inducing on prod, the same way 0215's run was. **Done
+      2026-09-11**; restored in the same sitting, bound removed, 13 keys,
+      CleanupRule `DISABLED`.
