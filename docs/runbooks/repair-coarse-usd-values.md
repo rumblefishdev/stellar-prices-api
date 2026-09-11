@@ -833,6 +833,16 @@ to check.
    The rollback below and Step 7's `SYSTEM UNFREEZE` then take the
    `repair_0268_…` names.
 
+   **Without host access** (task 0276, 2026-09-11): `FREEZE` is plain SQL, so
+   any mTLS client certificate whose user holds `ALTER` on `prices` can take the
+   snapshots from a laptop — the same loop over `system.parts`, sent with
+   `curl`. Ask for `alter_partition_verbose_result=1` on each request: the
+   statement then returns one row per frozen part, and **frozen parts =
+   active parts of that partition** is the verification, in place of `ls` and
+   `du` on `shadow/`. On that run: 315 partitions (5 tables × 202101–202603),
+   807 parts, all matched, none pre-existing. Only a _restore_ (copying out of
+   `shadow/`) still needs the host.
+
 6. **The NEW `prices-api` binary is already live — deploy it BEFORE this
    campaign, never after.** The binary on production before this task labels a
    USDC-quoted candle `peg` when `close_usd = close` and `oracle` otherwise, so
@@ -925,7 +935,14 @@ box's loopback, and reports it as the campaign.
 Then the real run, keeping `--transport hetzner`, dropping `--dry-run` and
 adding `--skip-snapshot --snapshots-verified` per Appendix A's rules. Repeat
 for `_1h` and `_4h` with the same months, and for `_1w` and `_1M` with
-`--end-month 202602` (see above).
+`--end-month 202602` (see above) **and `--pivot-window-s 604800` (`_1w`) /
+`--pivot-window-s 2678400` (`_1M`)** — the tool refuses a pivot window shorter
+than the bucket once a reset is on, and exits before connecting.
+
+`--start-month 202101` is the better start than `202001`: the imported series
+begins 2021-01-25, so 2020 holds no reset candidate, and starting there keeps
+every month the run writes inside the `202101–202603` FREEZE range (the 2020
+months would otherwise get additive zero-fills with no snapshot).
 
 ### ⚠️ The dry run is the gate — and zero candidates is a STOP
 
@@ -941,6 +958,44 @@ implied rate of exactly 1.0 across all granularities, and 0182's comparable
 campaign touched **567,232** rows in about **4 hours**. If a dry run over
 2020-2026 reports zero months, or a few dozen rows, something is wrong with the
 predicate or with precondition 1 — do not proceed.
+
+⚠️ **But the dry run cannot show the reset population, so it is only half a
+gate.** Its per-month `zeros` is the driver's enumeration predicate —
+`CANDIDATE_PRED` (**every** unpriced candle with volume, any quote) **OR** the
+reset predicate — so a table full of exotic-quote zeros reports millions
+whatever the reset would do (72.7 M on `_1h` in 2026-09). And 654,291 turned
+out to be the `_1d` figure alone. Count the reset candidates yourself, per
+table, with the tool's own predicate (`reset_pending_pred` in `ch_enrich.rs`,
+epoch from the session parameter):
+
+```sql
+SELECT count() AS reset_candidates, uniqExact(toYYYYMM(timestamp)) AS months,
+       min(timestamp), max(timestamp)
+FROM prices.price_ohlcv_1d FINAL
+WHERE quote_asset_id = <USDC asset_id> AND timestamp >= toDateTime(0)
+  AND (close_usd > 0 OR volume_quote_usd > 0) AND volume_quote > 0
+  AND timestamp < toDateTime({epoch:UInt32}) AND close_usd = close
+  AND toDate(timestamp, 'UTC') IN (
+      SELECT toDate(timestamp, 'UTC') FROM prices.usd_rate FINAL
+      WHERE asset_kind = 'credit' AND asset_code = 'USDC'
+        AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+        AND contract_address = '' AND method = 'external' AND usd_rate > 0)
+```
+
+Measured on prod on 2026-09-11 (task 0276), and what the real run then took:
+
+| Table | Reset candidates | Months | Run time    |
+| ----- | ---------------- | ------ | ----------- |
+| `_1d` | 654,616          | 63     | 2 min 07 s  |
+| `_4h` | 2,701,406        | 63     | 6 min 10 s  |
+| `_1h` | 6,420,215        | 63     | 12 min 55 s |
+| `_1w` | 120,961          | 62     | 1 min 30 s  |
+| `_1M` | 38,724           | 61     | 1 min 23 s  |
+
+`rows_reset − rows_enriched` came out at 150 / 299 / 445 / 75 / 40: exactly the
+`close = 0` rows with volume, which match the par signature at 0 = 0, get their
+`volume_quote_usd` recomputed and keep `close_usd = 0`. That gap is expected;
+a gap larger than the table's `close = 0` count is the abort signal below.
 
 ### The baseline (before)
 
@@ -1061,6 +1116,30 @@ Verified against the real series: a par candle from 2020 (no rate) and one at
 09:00 candle (rate 0.90992869) is. A non-zero count means re-run the campaign
 for that table — the rows are still on the $1 signature, so a second pass
 reaches them.
+
+⚠️ **As written, this query is never 0 after a correct run.** On 2026-09-11
+(task 0276) it returned 14,041 / 7,556 / 2,855 on `_1h` / `_4h` / `_1d`, and
+none of them was a missed candle. Two populations match `close_usd = close`
+legitimately:
+
+- **`close = 0` dust** — 0 = 0; the tier cannot give it a non-zero USD close.
+- **Truncation.** The tier writes `CAST(r.usd * p.close AS Decimal(38, 14))`,
+  which truncates. For a sub-micro close and a rate a few 10⁻⁸ off par the
+  product truncates back to exactly `close` (or to 0 at `close = 1e-14`), so
+  the stored value _is_ the repriced value.
+
+Replace the `SELECT count()` line with this breakdown and require `real = 0`:
+
+```sql
+SELECT count() AS unexplained_dollar_raw,
+       countIf(p.close = 0) AS close_zero_dust,
+       countIf(p.close > 0 AND CAST(r.usd * p.close AS Decimal(38, 14)) = p.close) AS tier_expr_equals_close,
+       countIf(p.close > 0 AND CAST(r.usd * p.close AS Decimal(38, 14)) = 0) AS tier_expr_truncates_to_zero,
+       countIf(p.close > 0 AND CAST(r.usd * p.close AS Decimal(38, 14)) NOT IN (p.close, 0)) AS real
+```
+
+(with `p.close AS close` added to the inner `SELECT`). 0276 measured `real = 0`
+on all three tables.
 
 `native` on 2023-03-11 must now read **~3% below** its USDC-denominated close
 on every grain whose bucket ENDS inside the depeg — `_1h`, `_4h`, `_1d`. As SQL,

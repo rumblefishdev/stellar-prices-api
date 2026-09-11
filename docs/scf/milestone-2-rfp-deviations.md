@@ -263,6 +263,14 @@ it either.
 **Full reasoning and the comparison tables:**
 [`prices-api-backfill-depth-verification.md`](../prices-api-backfill-depth-verification.md) §6.
 
+> **Addendum, 2026-09-11 — this deviation is resolved.** _Added after
+> submission; the paragraphs above are unchanged._ USDC's pre-2026-03-11 series
+> is now measured, not peg-derived (tasks 0267 / 0268, production rollout task
+> 0276). On 2023-03-11 the API returns **0.96812**, `method: external`,
+> `source: chainlink`, `quality: measured` — and 0.8833 at 07:00 on the hourly
+> grain. USDC can now be spot-checked as the criterion asks; see
+> [`milestone-2-evidence.md`](milestone-2-evidence.md), AC 6 addendum.
+
 ---
 
 ## 4. Tranche 3 asks a reviewer to confirm the backfill is still running

@@ -170,6 +170,20 @@ REPLACE`s all six views in `views.sql` from your working tree** — which
    CLICKHOUSE_PASSWORD="$CH_PW" ./prices-clickhouse-init
    ```
 
+   **Without host access** (how task 0276 ran it on 2026-09-11): the grant is
+   what matters, not the loopback. An mTLS client certificate whose ClickHouse
+   user holds `CREATE`, `DROP` and `ALTER` on `prices` can apply the same
+   statements from a laptop. `prices-clickhouse-init` itself only speaks plain
+   HTTP with a user and password, so 0276 used a throwaway runner that built the
+   client with `prices_clickhouse::mtls::client_with_mtls_from_paths` and called
+   the binary's own sequence — `apply_init_sql`, `apply_seed`,
+   `apply_sql(VIEWS_SQL)` — against database `default`. If this is needed again,
+   give the binary an mTLS transport rather than rewriting the runner. Plain
+   views are `SQL SECURITY INVOKER` on this server
+   (`default_normal_view_sql_security`), so re-creating them as another user
+   does not bind them to that user; the rollup MVs (`DEFINER = default`) are not
+   touched without `--rollups`.
+
    Applying the widened views **before** the load is harmless and deliberate:
    they read `method = 'external'`, which holds no rows until step 5's promote,
    so until then they publish exactly what they publish today. The promote is
@@ -226,7 +240,12 @@ REPLACE`s all six views in `views.sql` from your working tree** — which
 
    A view without the widening **fails to parse this** — `method` is projected
    by the widened definition only — so an error here is the unambiguous
-   "the old view is still installed". Expect `0` now, and a non-zero count when
+   "the old view is still installed". ⚠️ Unscoped, the view aggregates every
+   asset: on 2026-09-11 it exceeded the read user's 3.73 GiB per-query limit
+   (`MEMORY_LIMIT_EXCEEDED` in `AggregatingTransform` — the predicate parsed,
+   so the widened view _was_ installed). Scope it to the identity when that
+   happens: add `AND asset_code = 'USDC' AND issuer_address =
+   'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'`. Expect `0` now, and a non-zero count when
    you run it again at step 6. Then `prices-clickhouse-drift` exits 0.
 
 2. **The four mTLS variables and `CH_DATABASE`** are exported (section 1

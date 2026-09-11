@@ -1,8 +1,9 @@
 # Outlier prints in OHLCV candles — why one dust fill can set the price of the day
 
 Measured on 2026-09-11 against production (`ch-prod-01`, ClickHouse 26.3.10.60),
-public Horizon, Bitstamp and Binance. Found during task [0276](../lore/1-tasks/active/0276_CHORE_roll-out-0267-0268-on-production.md)'s
-spot check; the decision on what, if anything, to change is task 0278.
+public Horizon, Bitstamp and Binance. Found during task 0276's spot check (the
+0267/0268 production rollout); the decision on what, if anything, to change is
+task 0278.
 
 Nothing here was caused by the 0267/0268 rollout. That rollout only multiplied
 already-stored values by the measured USDC/USD rate.
