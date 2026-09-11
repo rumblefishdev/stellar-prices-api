@@ -56,18 +56,19 @@ pub const ORACLE_NAME: &str = "reflector";
 /// The identities whose oracle readings are snapshotted into `prices.usd_rate`
 /// (task 0167). Deliberately a **subset** of [`TRACKED_SYMBOLS`].
 ///
-/// ⚠️ **XLM is polled but NOT snapshotted here, and that is a scope boundary,
-/// not an oversight.** XLM is the reference asset the *pivot* tier prices
-/// everything else through, and task 0154 owns the `'pivot'` / `'pivot2'`
-/// methods and the transitivity rules that go with them. Writing XLM rows here
-/// would pre-empt those decisions in a table 0154 then has to live with.
+/// ⚠️ **XLM is not here because it is not a peg**, and that is the whole of the
+/// distinction: this set is named for what its members are. XLM is snapshotted
+/// by [`measured_identities`] beside this fn, added by task 0228 — as
+/// `method = 'oracle'`, `hops = 0`, which is what a polled reading factually is,
+/// no pivot involved.
 ///
-/// ⏳ **But the 13-month expiry argument applies to XLM's history identically**,
-/// and that argument is the whole reason 0167 was pulled forward. If 0154 has
-/// not started before `202509` ages out (~2026-10/11), snapshotting XLM as
-/// `method = 'oracle'`, `hops = 0` — which is what it factually is, no pivot
-/// involved — should be reconsidered on its own merits rather than deferred by
-/// default. Raised explicitly so the omission is a decision, not an accident.
+/// ⏳ The paragraph that stood here deferred that decision to whenever `202509`
+/// aged out of a 13-month window, which was wrong on the facts and is now
+/// resolved. Measured 2026-09-11: `oracle_prices` carries **no TTL** (prod
+/// `engine_full`, `init.sql`); its retention is the cleanup worker's 13-month
+/// policy (`cleanup-worker/src/lib.rs:33`), which is **deployed but dark**; so
+/// the earliest possible loss of an XLM reading is **2027-04-11**. The deferral
+/// was never as urgent as it read, and it has been decided rather than expired.
 /// ⚠️ **USDT was removed from this list by task 0172, and must not be restored
 /// without fixing the symbol→issuer mapping first (task 0173).** Reflector
 /// publishes a feed named for the TICKER "USDT" — Tether's own token, which is
@@ -89,6 +90,53 @@ pub fn peg_identities() -> Vec<AssetIdentity> {
         code: "USDC".to_string(),
         issuer: prices_clickhouse::USDC_ISSUER.to_string(),
     }]
+}
+
+/// The identities whose oracle readings are snapshotted into `prices.usd_rate`
+/// because they are **measured, non-peg** references (task 0228). Today: the
+/// native asset, XLM.
+///
+/// Kept separate from [`peg_identities`] rather than folded into it, because the
+/// two sets are named for what their members ARE. A peg is a claim that the
+/// asset should sit at a dollar and that the reading is there to detect when it
+/// does not; XLM makes no such claim. Same destination table, same
+/// `method = 'oracle'`, `hops = 0`, `reference_asset = ''` — that is what a
+/// polled reading factually is, whatever the asset — but a different reason for
+/// membership, and a reader of either list should not have to infer which one
+/// applies.
+///
+/// ## The identity evidence, which is the only thing that matters here
+///
+/// Task 0173's defect was a set whose member earned its place on an asset CODE.
+/// Reflector publishes a feed named for the ticker "USDT" — Tether's own token,
+/// genuinely at par — and we filed that reading against `USDT_ISSUER`'s address,
+/// a Stellar IOU trading at ~$0.13. The oracle was not wrong; the identity we
+/// filed it under was. `prices.assets` holds ~220 distinct issuers using the code
+/// "USDT" and ~220 using "USDC". **An asset code is not an identity on Stellar.**
+///
+/// XLM is the one case where that failure cannot occur, for three independent
+/// reasons:
+///
+/// 1. **The mapping is the authority, and it is unambiguous.**
+///    `reflector_key_to_identity` is the single gate on what may reach
+///    `prices.oracle_prices`, and it maps `"XLM" | "native"` to
+///    [`AssetIdentity::Native`] — not to a code-and-issuer pair that has to be
+///    matched. `measured_identities_resolve_from_the_reflector_symbol_mapping`
+///    calls it, so this claim is code rather than prose (task 0267's
+///    `check_identity` standard).
+/// 2. **There is no issuer to mis-attribute.** `identity_columns(Native)` is
+///    `("native", "XLM", "", "")` — the issuer and contract columns are empty by
+///    construction, so there is no address to get wrong.
+/// 3. **The native asset has exactly one identity on Stellar.** It is the
+///    protocol's own asset; nobody can issue a second one under the same name,
+///    which is precisely the property the "USDT" ticker lacked.
+///
+/// ⚠️ Adding a member here is a claim that its feed names THAT identity — not
+/// merely that a code matches. Write the evidence above before changing the set;
+/// [`tests::measured_identities_is_exactly_the_native_asset`] pins it so the
+/// change cannot happen silently.
+pub fn measured_identities() -> Vec<AssetIdentity> {
+    vec![AssetIdentity::Native]
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -518,14 +566,23 @@ async fn run_oracle_inner(
     // outage. The 0139 guard inside the copy is the most likely reason to land
     // here, and it is a data condition an operator must resolve, not something
     // a retry fixes.
-    let rates_snapshotted = match writer
-        .populate_usd_rate_from_oracle(&peg_identities(), ORACLE_NAME)
+    // ⚠️ TWO CALLS, not one list (task 0228). `populate_usd_rate_from_oracle`
+    // runs its task-0139 identity guard as a PRE-PASS over the whole slice and
+    // returns before writing anything for ANY identity if one of them fails
+    // (`writer.rs`, pinned by `a_collision_on_one_peg_writes_nothing_for_any_peg`).
+    // Appending XLM to the peg call would therefore let a collision on XLM's
+    // asset_id silently stop USDC's snapshot as well — the two sets have nothing
+    // to do with each other, and one's data condition must not cost the other its
+    // rows. Each call gets its own non-fatal arm and its own per-identity log.
+    let snapshot = async |set: Vec<AssetIdentity>, label: &'static str| match writer
+        .populate_usd_rate_from_oracle(&set, ORACLE_NAME)
         .await
     {
         Ok(stats) => {
             // Logged per-identity: a `max()` across identities would report a
-            // healthy frontier while one peg sat stalled at zero.
+            // healthy frontier while one of them sat stalled at zero.
             tracing::info!(
+                set = label,
                 identities = stats.identities,
                 rows = stats.rows_inserted,
                 newest = ?stats.newest,
@@ -534,10 +591,18 @@ async fn run_oracle_inner(
             stats.rows_inserted
         }
         Err(err) => {
-            tracing::error!(error = %err, "usd_rate snapshot failed; oracle_prices is unaffected");
+            tracing::error!(
+                set = label,
+                error = %err,
+                "usd_rate snapshot failed; oracle_prices is unaffected"
+            );
             0
         }
     };
+    // Summed, so `OracleUsdRatesSnapshotted` keeps meaning "rows this pass added
+    // to usd_rate" and no CloudWatch metric changes shape.
+    let rates_snapshotted =
+        snapshot(peg_identities(), "peg").await + snapshot(measured_identities(), "measured").await;
 
     Ok(OracleStats {
         queried: TRACKED_SYMBOLS.len(),
@@ -710,6 +775,63 @@ mod tests {
              claim that its oracle feed names that ISSUER, not just that code — \
              write the evidence in the doc comment above before changing this."
         );
+    }
+
+    /// Task 0228, the sibling of the test above and for the same reason: the
+    /// measured set is an ALLOWLIST, pinned to an exact literal so a member
+    /// cannot be added silently. Adding one forces a test edit, which forces
+    /// someone to write the justification down first.
+    ///
+    /// **Basis for the one current member:** Reflector's `XLM` feed resolves
+    /// through `reflector_key_to_identity` to the NATIVE asset (pinned by the
+    /// test below), which has no issuer to mis-attribute and exactly one identity
+    /// on Stellar. That is precisely the property task 0173's `USDT` entry
+    /// lacked, and it is the whole argument — see the doc comment on
+    /// [`measured_identities`].
+    #[test]
+    fn measured_identities_is_exactly_the_native_asset() {
+        assert_eq!(
+            measured_identities(),
+            vec![AssetIdentity::Native],
+            "the measured set must be exactly the native asset. Adding a member \
+             is a claim that its oracle feed names THAT identity, not just that \
+             an asset code matches — write the evidence in the doc comment above \
+             before changing this."
+        );
+    }
+
+    /// 🔑 THE IDENTITY CLAIM, AS CODE. `measured_identities`'s doc says Reflector's
+    /// `XLM` symbol is the native asset; this calls the mapping that decides it,
+    /// so the claim is checked rather than asserted in prose (task 0267's
+    /// `check_identity` standard).
+    ///
+    /// `reflector_key_to_identity` is the single authority on what may reach
+    /// `prices.oracle_prices`, so if it ever stopped mapping `XLM` to `Native` —
+    /// or started mapping it to a code-and-issuer pair — the rows this set
+    /// snapshots would be filed under a different identity than the one named
+    /// here, and nothing else in the pipeline would notice.
+    #[test]
+    fn measured_identities_resolve_from_the_reflector_symbol_mapping() {
+        assert_eq!(
+            reflector_key_to_identity("XLM"),
+            Some(AssetIdentity::Native),
+            "Reflector's XLM feed must resolve to the native asset"
+        );
+        assert_eq!(
+            reflector_key_to_identity("native"),
+            Some(AssetIdentity::Native),
+            "the mapping's other spelling of the same identity"
+        );
+        // Every member of the set is reachable from a symbol this worker polls —
+        // a member no feed can produce would snapshot nothing, forever, quietly.
+        for identity in measured_identities() {
+            assert!(
+                TRACKED_SYMBOLS
+                    .iter()
+                    .any(|s| reflector_key_to_identity(s) == Some(identity.clone())),
+                "{identity:?} is in the measured set but no tracked symbol resolves to it"
+            );
+        }
     }
 
     #[test]
