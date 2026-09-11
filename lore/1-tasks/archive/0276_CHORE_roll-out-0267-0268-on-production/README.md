@@ -2,7 +2,7 @@
 id: "0276"
 title: "Roll out 0267 and 0268 on production — load the measured USDC/USD history, deploy the API, re-enrich the USDC-quoted candles"
 type: CHORE
-status: active
+status: completed
 related_adr: ["0011"]
 related_tasks: ["0267", "0268", "0247", "0265", "0266", "0127", "0128", "0141", "0182", "0228", "0278", "0279"]
 tags: [layer-backend, layer-api, priority-high, effort-medium, milestone-M3, clickhouse, deployment, data-correctness, stablecoin]
@@ -33,6 +33,16 @@ history:
       mTLS as dev_shared instead of SSH. Converted to a directory; the run
       record is notes/R-production-run-2026-09-11.md. Spawned [[0278]]
       (dust prints) and [[0279]] (release the FREEZE snapshots on 09-18).
+  - date: "2026-09-11"
+    status: completed
+    who: akot
+    note: >
+      Completed. All 13 criteria ticked (the release note dropped by Adam's
+      decision, 0266 re-measured in the note rather than in 0266). Code on
+      the branch: post_run_0268_it gets an mTLS client. Runbooks corrected,
+      SCF addendum written, 0247 archived, 0267/0268 deferred criteria closed.
+      Follow-ups: [[0278]], [[0279]]; the EventBridge stack and 0215's code
+      are still undeployed by choice.
 ---
 
 # Roll out 0267 and 0268 on production
@@ -85,7 +95,7 @@ measured.
 The full record — commands, figures, timings, checks — is
 [notes/R-production-run-2026-09-11.md](notes/R-production-run-2026-09-11.md).
 Open after this task: the `repair_0268_` FREEZE snapshots are kept until
-2026-09-18 and released by [[0279]].
+2026-09-18 and released by [[0279]]; the dust-print finding is [[0278]].
 
 ## Acceptance Criteria
 

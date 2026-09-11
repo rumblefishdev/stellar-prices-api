@@ -11,6 +11,11 @@
 //!   POST_RUN_0268_VERSION_BEFORE_1W=<n> POST_RUN_0268_VERSION_BEFORE_1M=<n> \
 //!     cargo test -p enrichment-worker --test post_run_0268_it -- --ignored
 //!
+//! Against production over mTLS, replace `CLICKHOUSE_URL` with the four
+//! variables `coarse-repair --transport hetzner` reads (`CH_DOMAIN`,
+//! `MTLS_CERT_PATH`, `MTLS_KEY_PATH`, `MTLS_CA_PATH`) and add
+//! `--features aws-mtls` to the `cargo test`.
+//!
 //! The JUDGEMENT — what counts as repaired — is a pure function ([`judge`]) with
 //! plain unit tests that CI does run, so the harness cannot rot silently the way
 //! its first version did (review WR-01/WR-02: it could not deserialise its own
@@ -207,7 +212,36 @@ struct Mechanism {
     bucket_end_rate: Option<f64>,
 }
 
+/// Production sits behind Caddy's mTLS, which the plain `CLICKHOUSE_URL` path
+/// cannot reach from an operator laptop (task 0276). With `CH_DOMAIN` set, and
+/// built with `--features aws-mtls`, connect the way `coarse-repair
+/// --transport hetzner` does, from the same four variables.
+#[cfg(feature = "aws-mtls")]
 fn client() -> Client {
+    if let Ok(domain) = std::env::var("CH_DOMAIN") {
+        let path = |k: &str| {
+            std::path::PathBuf::from(
+                std::env::var(k).unwrap_or_else(|_| panic!("CH_DOMAIN is set, so {k} must be")),
+            )
+        };
+        return prices_clickhouse::mtls::client_with_mtls_from_paths(
+            &domain,
+            &path("MTLS_CERT_PATH"),
+            &path("MTLS_KEY_PATH"),
+            &path("MTLS_CA_PATH"),
+            &std::env::var("CH_DATABASE").unwrap_or_else(|_| "prices".into()),
+        )
+        .expect("mTLS client");
+    }
+    plain_client()
+}
+
+#[cfg(not(feature = "aws-mtls"))]
+fn client() -> Client {
+    plain_client()
+}
+
+fn plain_client() -> Client {
     Client::default()
         .with_url(
             std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".into()),
