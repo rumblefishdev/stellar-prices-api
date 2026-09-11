@@ -765,8 +765,35 @@ induction below would prove nothing.
 ⚠️ **Already merged** — `8726c76`, 2026-09-10. This step is the deploy only;
 there is nothing left to merge.
 
-Normal compute deploy. ⚠️ [[0141]] — confirm the deployed asset actually
-changed; `deploy-production-compute` does not build.
+🔴 **NOT the Compute stack.** `EnrichmentFunction` is defined in
+`infra/src/lib/stacks/eventbridge-stack.ts`, so the deploy is:
+
+```bash
+cd infra && make diff-production        # read-only first
+make deploy-production-eventbridge
+```
+
+⚠️ **Corrected 2026-09-11.** This step said "normal compute deploy", copied
+from the ledger-processor runbook where ComputeStack is right. `make
+deploy-production-compute` succeeds and ships **nothing relevant** —
+`Prices-production-Compute` carries only `LedgerProcessorFunction` and
+`ApiHandlerFunction`. The induction would then have been run against the old
+binary and "proved" a bound that was never deployed. Caught by reading
+`make diff-production`, which lists the changed function per stack.
+
+⚠️ **Blast radius: nine Lambdas**, not one — asset-discovery, cleanup, supply,
+oracle, enrichment, coarse-sweep and the three probes all take the current
+`develop` build. Unavoidable; CDK deploys at stack granularity.
+
+✅ **The cleanup-rule hazard is cleared by measurement, not assumption.** The
+deploy touches the stack owning `CleanupRule`, and enabling cleanup destroys
+backfill output. CDK declares `enabled: false` (`eventbridge-stack.ts:184`) and
+the live rule reads `DISABLED`, so the two agree and the deploy cannot flip it.
+`make diff-production` also showed **no Rule changes at all** — only
+`Code.S3Key` on the nine functions.
+
+⚠️ [[0141]] — confirm the deployed asset actually changed; the make target does
+not build. Build first with the full asset list (step 1a below).
 
 ### 2. [local machine, AWS CLI] Drop the bound below the statement duration
 
