@@ -1006,15 +1006,26 @@ The loss is between the HTTP response and `clickhouse::error::Error`
 - [x] USDT-quoted `_1m` rows are measurably written — `written_rows > 0` on the
       USDT pivot, recorded before/after. **Before: 0 across all history. After:
       1,895 on the first batch, ~17/batch since.**
-- [ ] `max_execution_time` is set per-caller on our client, and an exceeded bound
+- [x] `max_execution_time` is set per-caller on our client, and an exceeded bound
       produces a logged ClickHouse exception — verified by inducing, not inferred.
-      🔴 **INDUCED 2026-09-11 AND IT FAILED — see the induction section above.**
-      The bound is set, armed and enforced (killed at 1.004 s against 1 s), but
-      the worker logs `BadResponse("")` while ClickHouse recorded a complete
-      `Code: 159 TIMEOUT_EXCEEDED`. The clause after the "and" is the half that
-      does not hold, and it is the half the whole of half 2 was for.
-      ➡️ **Delegated to [[0281]]**, whose third criterion is exactly this one.
-      This criterion closes when 0281 does.
+      ✅ **MET 2026-09-11 at 12:57:59 UTC**, on the second attempt of the day:
+
+      ```
+      Clickhouse(BadResponse("Code: 159. DB::Exception: Timeout exceeded:
+        elapsed 1013.727811 ms, maximum: 1000 ms. (TIMEOUT_EXCEEDED)
+        (version 26.3.10.60 (official build))"))
+      ```
+
+      🔑 **The first attempt FAILED, and that is the whole value of this
+      criterion.** At 11:49 the same induction produced `bad response: ` — the
+      bound fired but the exception was empty, because the ClickHouse client
+      discarded every error body in production ([[0281]]). Every cheaper route
+      said this would work: the settings were right, the mechanism was measured,
+      and 23 clean `TIMEOUT_EXCEEDED` events had been observed the day before —
+      all of them reads, on a different code path. Only running it showed the
+      difference. Had this been inferred, the task would have closed on a fix
+      that bought a ceiling and none of the diagnosability it was written for.
+      [[0281]] is the fix, deployed and archived the same day.
       **Code in PR #305** (2026-09-10): 120 s on the scheduled worker's client via
       `ENRICH_MAX_EXECUTION_TIME_SECS`; the operator CLIs stay unbounded on
       purpose, which is what "per-caller" means here. ⏳ **The induction is
