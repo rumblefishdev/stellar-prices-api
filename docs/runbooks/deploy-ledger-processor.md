@@ -56,7 +56,15 @@ git log --oneline -1                       # confirm the build you intend to shi
 
 aws sts get-caller-identity --query '[Account,Arn]' --output text
 command -v cargo-lambda >/dev/null || pip3 install cargo-lambda
+
+npm run xdr:verify-protocol-gap          # are we behind mainnet's protocol?
 ```
+
+That last line is the protocol-lag guard (task 0098). It is cheap, it needs no
+AWS credentials, and it answers a question this runbook cannot otherwise see:
+whether the binary you are about to ship can decode the ledgers it will be
+handed. See [Protocol-version lag](#protocol-version-lag--the-standing-check)
+below for what its three answers mean.
 
 ### 1. Build the ARM64 bootstrap **with the new code**
 
@@ -146,6 +154,94 @@ plus a DLQ drain if anything dead-lettered. That replay is a separate operation 
 see the ingestion operator guide
 [`running-ingestion-components.md`](running-ingestion-components.md) and, for the
 proto27 case specifically, task 0094.
+
+## Protocol-version lag — the standing check
+
+`stellar-xdr`'s major version tracks the Stellar protocol version: 27 decodes
+protocol 27, 28 decodes 28. When mainnet advances past our pin, the processor
+hits an XDR **decode wall** — and the failure is silent in every way that
+matters.
+
+That is not hypothetical. Protocol 27 "Zipper" froze the live candle frontier
+at ledger `~63,384,067` for **six days**. Throughout, the SQS queue drained
+normally and both it and the DLQ were empty (nothing to redrive), the Lambda
+logged zero parse, XDR, panic or ClickHouse errors, and the doorbell-lag alarm
+stayed green because it watches queue age and the queue was healthy. The pass
+drained its messages and wrote no candles. It was found by reading
+`max(timestamp)` out of `price_ohlcv_1m` by hand.
+
+### The check
+
+```bash
+npm run xdr:verify-protocol-gap      # advisory — also a step in CI
+npm run xdr:watch-protocol-gap       # strict — what the daily workflow runs
+```
+
+It compares our pinned major against Horizon's root document and has three
+answers:
+
+| result      | meaning                                               | do                                                                       |
+| ----------- | ----------------------------------------------------- | ------------------------------------------------------------------------ |
+| **current** | pin matches mainnet                                   | nothing                                                                  |
+| **LAGGING** | `core_supported_protocol_version` is ahead of our pin | mainnet has not voted yet. **This is the lead time** — open the bump now |
+| **BEHIND**  | `current_protocol_version` is ahead of our pin        | the wall is live or one ledger away. Bump **and deploy**, today          |
+
+It also fails when two `stellar-xdr` majors resolve into the lockfile, which is
+the skew described below.
+
+### ⚠️ It reads the REPO, not the deployed binary
+
+This is the check's one real limit, and it is the same trap as
+[task 0141](../../lore/1-tasks/archive/) — merging a fix is not shipping one.
+Task 0091 merged the proto27 bump on 2026-07-14 and **production stayed frozen**
+until 0094 deployed the binary days later. A green protocol check means the
+source is correct; only steps 2 and 5 of this runbook establish that the
+running Lambda is.
+
+The deployed half is covered from the other side, by the
+`prices-production-rollup-freshness-1m` alarm, which measures **data** rather
+than exit status and whose own description names "upstream ingestion has
+halted". Between the two, both halves are watched — neither alone is enough.
+
+### ⚠️ `xdr-parser` must move with us
+
+`packages/prices-ingest-core/src/decode.rs` takes `LedgerCloseMeta` across the
+crate boundary from BE's `xdr-parser`, which we track on `branch="develop"`
+rather than a rev pin — deliberately. So a `stellar-xdr` bump is never ours
+alone: if the two sides disagree on the major, Cargo resolves **both** into the
+graph and the types stop matching. Ask BE to bump `xdr-parser` first, then
+re-pin to their merge rev.
+
+### Where the check runs
+
+| where                                     | mode     | catches                                                                                                           |
+| ----------------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------- |
+| `ci.yml`, job `XDR protocol lag`          | advisory | a PR opened while already BEHIND. Ungated by path filters — the condition produces no diff on our side            |
+| `xdr-protocol-watch.yml`, daily 06:17 UTC | strict   | **mainnet moving while nothing in the repo changes** — the proto27 case, and the reason this is on a clock at all |
+| this runbook, step 0                      | advisory | shipping a binary that cannot decode current ledgers                                                              |
+
+### One-time setup: the Slack webhook
+
+The daily watch posts to **#stellar-prices-api-bot** on failure, and that needs
+a repository secret named `SLACK_WEBHOOK_URL`.
+
+⚠️ It is a **Slack incoming webhook**, not the path the alarms use. Every other
+ops alarm reaches that channel through SNS → AWS Chatbot (task 0056), which
+needs AWS credentials this workflow does not have and should not be handed for
+one `curl`. The two routes are independent and both end in the same channel.
+
+1. In Slack, create an incoming webhook for `#stellar-prices-api-bot`.
+2. Add it to the repository: **Settings → Secrets and variables → Actions →
+   New repository secret**, named `SLACK_WEBHOOK_URL`.
+3. Confirm it with a manual run: **Actions → XDR protocol watch → Run
+   workflow**. While we are behind protocol 28 the strict mode fails on
+   purpose, so a correctly wired webhook posts immediately.
+
+**Until that secret exists the workflow still fails correctly** — it just logs
+a warning instead of posting, and the only notification is GitHub's own. That
+one goes to _"the user who last modified the cron syntax in the workflow
+file"_, which is a single inbox, subject to that person's notification
+settings, and silently reassigned by an unrelated edit to the `cron:` line.
 
 ## Rollback
 

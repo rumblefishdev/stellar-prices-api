@@ -20,6 +20,8 @@
     "openapi:verify-servers": "npm run openapi:extract && node tools/scripts/verify-openapi-servers.mjs",
     "openapi:verify-bundled": "npm run openapi:extract && node tools/scripts/verify-openapi-bundled.mjs",
     "discord:verify-guild": "node tools/scripts/verify-discord-guild.mjs",
+    "xdr:verify-protocol-gap": "node tools/scripts/verify-xdr-protocol-gap.mjs",
+    "xdr:watch-protocol-gap": "node tools/scripts/verify-xdr-protocol-gap.mjs --watch",
     "portal:api-types": "npm run openapi:extract && openapi-typescript target/openapi.json -o web/portal/src/api/generated.ts",
     "infra:bootstrap": "make -C infra bootstrap",
     "infra:synth:cicd": "make -C infra synth-cicd",

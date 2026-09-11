@@ -331,3 +331,29 @@ jobs:
       # the page looks right while the file behind the link is old.
       - name: Verify the bundled OpenAPI document has not drifted
         run: npm run openapi:verify-bundled
+
+  # Protocol-version lag (task 0098). Deliberately UNGATED by `changes`: the
+  # condition this watches is mainnet moving while our pin stands still, and
+  # that produces no diff on our side at all. A guard that only runs when
+  # `packages/**` changes would not have caught proto27, which froze live
+  # ingestion for six days with no commit of ours anywhere near it.
+  #
+  # Soft here — no `--watch`. On a pull request this can only fail when we are
+  # already BEHIND mainnet; a newly announced protocol or a Horizon hiccup
+  # prints a notice and passes, because a developer can fix neither and a gate
+  # that red-lights unrelated PRs gets switched off within a week. The strict
+  # run is the scheduled one, in xdr-protocol-watch.yml.
+  xdr-protocol:
+    name: XDR protocol lag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      # No `npm ci` — the script is dependency-free on purpose, so this stays
+      # a few seconds and cannot be broken by an unrelated install failure.
+      - name: Compare the pinned stellar-xdr against mainnet
+        run: npm run xdr:verify-protocol-gap

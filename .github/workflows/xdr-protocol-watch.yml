@@ -1,0 +1,109 @@
+# Daily watch for stellar-xdr protocol lag (task 0098).
+#
+# THIS FILE, NOT THE CI STEP, IS THE ACTUAL GUARD.
+#
+# Protocol 27 "Zipper" froze our live candle frontier for six days (tasks 0091
+# / 0094). Nothing in this repository changed while that happened — mainnet
+# moved and our pin stood still. A check that runs on push or pull_request
+# cannot see that, because there is no push. So the guard has to be on a
+# clock.
+#
+# `--watch` makes the comparison strict, and the strictness is the point:
+#
+#   * LAGGING (core supports a protocol newer than our pin) FAILS here, where
+#     it is only a notice in CI. Horizon publishes `core_supported_protocol_
+#     version` weeks before the vote, and that gap is the entire lead time
+#     this task exists to buy. A warning nobody is obliged to read is what we
+#     already had.
+#   * An unreachable Horizon FAILS here too. A scheduled watch that quietly
+#     checks nothing is precisely the shape of the outage being guarded
+#     against — every signal green, nothing actually verified.
+#
+# Run it by hand any time with `npm run xdr:watch-protocol-gap`.
+name: XDR protocol watch
+
+on:
+  schedule:
+    # Daily, off the hour — GitHub queues on-the-hour crons hardest and a
+    # protocol vote is never so close that seventeen minutes decides it.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  protocol-gap:
+    name: stellar-xdr vs mainnet protocol
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      # The report is captured as well as printed, so the Slack message can
+      # carry the actual numbers. A notification that only says "a job failed"
+      # sends the reader back to the Actions tab, which is the surface this
+      # whole task exists because nobody watches.
+      - name: Compare the pinned stellar-xdr against mainnet (strict)
+        id: gap
+        run: |
+          set +e
+          report=$(npm run --silent xdr:watch-protocol-gap 2>&1)
+          status=$?
+          echo "$report"
+          {
+            echo 'report<<XDR_REPORT_EOF'
+            echo "$report"
+            echo 'XDR_REPORT_EOF'
+          } >> "$GITHUB_OUTPUT"
+          exit $status
+
+      # Delivery, and the reason it is a webhook rather than the usual path:
+      # every other ops alarm reaches #stellar-prices-api-bot through
+      # SNS -> AWS Chatbot (task 0056), which needs AWS credentials this
+      # workflow does not have and should not be given for one curl.
+      #
+      # Without this step the only notification is GitHub's own, and GitHub
+      # sends that to "the user who last modified the cron syntax in the
+      # workflow file" — one inbox, subject to that person's notification
+      # settings, silently reassigned by an unrelated edit to the line above.
+      # That is too thin for something that fires about twice a year.
+      #
+      # `${{ }}` is expanded into the ENVIRONMENT, never into the script body:
+      # the report contains upstream-controlled text and interpolating it
+      # inline would be a shell-injection seam.
+      - name: 'Post the lag to #stellar-prices-api-bot'
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPORT: ${{ steps.gap.outputs.report }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "::warning::SLACK_WEBHOOK_URL is not set — no Slack message sent."
+            echo "Create a Slack incoming webhook for #stellar-prices-api-bot and"
+            echo "add it as the repository secret SLACK_WEBHOOK_URL."
+            exit 0
+          fi
+          jq -n \
+            --arg text ":rotating_light: *stellar-xdr protocol lag*" \
+            --arg report "$REPORT" \
+            --arg run "$RUN_URL" \
+            '{
+               text: $text,
+               blocks: [
+                 { type: "section",
+                   text: { type: "mrkdwn", text: $text } },
+                 { type: "section",
+                   text: { type: "mrkdwn", text: ("```" + $report + "```") } },
+                 { type: "context",
+                   elements: [ { type: "mrkdwn",
+                     text: ("Protocol 27 froze live ingestion for six days and nothing reported it (tasks 0091/0094). <" + $run + "|Workflow run>") } ] }
+               ]
+             }' \
+            | curl -sS --fail-with-body -X POST -H 'content-type: application/json' \
+                --data @- "$SLACK_WEBHOOK_URL"
