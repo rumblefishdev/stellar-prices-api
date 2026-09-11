@@ -745,6 +745,21 @@ aws lambda get-function-configuration \
 ⚠️ Do not skip this because the PR is merged. Merging is not shipping — 0091
 merged the proto27 fix and production stayed frozen until 0094 deployed it.
 
+**Read 2026-09-11 as `soroban-readonly`, and it says step 1 IS required:**
+
+```
+LastModified:  2026-09-02T09:46:26Z    predates the #305 merge (09-10)
+Bound:         null                     the env var is not set
+CodeSha256:    cYcW1QYuKV++SxFRwZrpsP3rD3i3EOrOx5+86N6CN8g=
+Timeout: 300   Memory: 512
+```
+
+Both signals agree, so there is no ambiguity to resolve. 🔑 **Keep that
+`CodeSha256` — it is the before-value** that makes "confirm the deployed asset
+changed" a comparison rather than an assertion. After the deploy it must be a
+different digest; if it is identical, the deploy shipped the old binary and the
+induction below would prove nothing.
+
 ### 1. [local machine, this repo] Deploy PR #305
 
 ⚠️ **Already merged** — `8726c76`, 2026-09-10. This step is the deploy only;
