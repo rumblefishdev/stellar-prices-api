@@ -2,7 +2,7 @@
 id: "0215"
 title: "Caddy's response_header_timeout of 30s cuts every enrichment pivot at 30.0s — the pass has failed on EVERY invocation since 2026-07-26 and nothing reported it"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0209", "0212", "0111", "0172", "0182", "0141", "0213"]
 tags: ["priority-high", "effort-small", "enrichment", "clickhouse", "deploy", "data-correctness", "milestone-M2"]
@@ -124,6 +124,21 @@ history:
       statements, and a loud failure when a reference asset is missing. Also
       re-verifying that the fix has HELD for the three weeks since, rather than
       assuming it.
+  - date: 2026-09-11
+    status: completed
+    who: okarcz
+    note: >
+      Closed 21 days after the Caddy fix. The last criterion took two
+      inductions: the first, at 11:49, FAILED — the bound fired but the
+      exception was empty, because the ClickHouse client discarded every error
+      body in production. That defect is [[0281]], fixed and deployed the same
+      day, and at 12:57 the same statement logged
+      `Code: 159 TIMEOUT_EXCEEDED` in full. Every cheaper route had said the
+      first attempt would pass; only running it found the gap, which is exactly
+      what "verified by inducing, not inferred" was protecting.
+      Final criterion amended from "report it back in the thread" — the
+      operator holds every access the check needs, so it was measured directly.
+
 ---
 
 # Every invocation fails on the XLM pivot, so the USDT pivot is never reached
@@ -1064,28 +1079,40 @@ The loss is between the HTTP response and `clickhouse::error::Error`
       ⛔ BE's repo Caddyfile also says `7200s`. That proves nothing and is the
       trap: the container spent from 2026-07-06 reading a file that no longer
       existed at that path (host inode `16777224`, container `16777223`).
-- [ ] We confirm the errors stopped from CloudWatch and `system.query_log`, and
-      report it back in the thread. Two-sided, because neither side alone can see
-      both halves.
-      ✅ **Both measurement halves done 2026-09-10.** `system.query_log`: see the
-      re-confirmation section above. CloudWatch, `ReadOnlyAccess`, 7-day window
-      on `/aws/lambda/prices-production-enrichment`:
+- [x] We confirm the errors stopped, measured from CloudWatch, Lambda's own
+      metric and `system.query_log`.
+      ⚠️ **AC AMENDED 2026-09-11 — was "report it back in the thread",
+      two-sided with BE.** Retired because the premise no longer holds: the
+      operator holds every access this check needs, including the Caddy admin
+      API (already read by us on 09-10). The reason for the two-sided wording
+      was that neither party could see both halves; we can see all of them, so
+      a thread post adds ceremony, not evidence.
 
-      | | baseline | now |
+      **Re-measured 2026-09-11, 7-day windows, after both deploys:**
+
+      | check | baseline | now |
       |---|---|---|
-      | `BadResponse("")` | 3/hour for 26 days (144 per 48 h) | **0** |
-      | `Status: timeout` | every invocation, 2026-08-21 | **0** |
-      | invocations/day | **72** (1 EventBridge + 2 async retries) | **24** |
+      | empty `BadResponse("")` in CloudWatch | 3/hour for 26 days (144 per 48 h) | **0** |
+      | any `ERROR` at all | every invocation | **1** — the deliberate 12:57 induction |
+      | invocations/day (Lambda metric) | **72** (1 schedule + 2 async retries) | **24.0**, flat |
+      | `peg : pivot` | 1:1, USDT absent from all history | **1:2 on all 7 days**, XLM:USDT **1:1** |
+      | statements not finishing cleanly | continuous | **2 in 7 days** — both code 159, both today's inductions |
+      | worst statement duration | 45.6 s | **2.89-3.69 s** against a 120 s ceiling (~35x headroom) |
 
-      🔑 **The invocation count is the sharpest of the three.** Async retries
-      exist only because the attempt before them failed, so 72/day → exactly
-      24/day is an independent measurement of the same recovery — taken from
-      Lambda's own metric rather than from either log — and it agrees with
-      `system.query_log` to the hour.
+      🔑 **The invocation count remains the sharpest.** Async retries exist only
+      because the attempt before them failed, so a flat 24.0/day is an
+      independent measurement of the recovery, taken from Lambda's own metric
+      rather than from either log. (Today reads 29; the five extra are the
+      manual invokes of this session, fully accounted for.)
+
+      ⚠️ **A trap this check now carries.** Since [[0281]], a real error IS a
+      `BadResponse` — with content. Grepping the bare word returns today's
+      deliberate inductions and reads like a regression. Filter on the EMPTY
+      form, `BadResponse("")`, which is the outage signature.
       ⚠️ `Status: timeout` is a FIELD on the REPORT line on `provided:al2023`,
       not a `Task timed out` message; grepping the old string returns zero and
-      reads as success. Filtered on the field.
-      ⏳ Outstanding: posting it in the thread.
+      reads as success.
+
 - [x] `CleanupRule` verified `DISABLED` before and after the deploy.
       **After, 2026-09-10:** `prices-production-cleanup` → `State: DISABLED`,
       `Schedule: cron(0 3 * * ? *)`. **Before** is carried by the readings of
