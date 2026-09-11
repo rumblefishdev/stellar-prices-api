@@ -4,13 +4,14 @@ title: "XLM's measured USD rate is fetched every 5 minutes and thrown away, whil
 type: BUG
 status: active
 related_adr: ["0011"]
-related_tasks: ["0167", "0170", "0172", "0182", "0061", "0227", "0173"]
-tags: ["priority-medium", "effort-medium", "oracle", "enrichment", "data-correctness", "usd", "milestone-M2"]
+related_tasks: ["0167", "0170", "0172", "0182", "0061", "0227", "0173", "0267", "0268", "0276", "0154"]
+tags: ["priority-medium", "effort-large", "oracle", "enrichment", "data-correctness", "usd", "milestone-M2"]
 milestone: 2
 links:
-  - "../../../packages/oracle-worker/src/lib.rs"
-  - "../../../packages/enrichment-worker/src/ch_enrich.rs"
-  - "../../../packages/prices-clickhouse/schema/init.sql"
+  - "notes/R-phase0-measurement-2026-09-11.md"
+  - "../../../../packages/oracle-worker/src/lib.rs"
+  - "../../../../packages/enrichment-worker/src/ch_enrich.rs"
+  - "../../../../packages/prices-clickhouse/schema/init.sql"
 history:
   - date: "2026-08-26"
     status: backlog
@@ -37,9 +38,78 @@ history:
       Picked up by akot. Starting with AC 1 — measure the derived pivot
       `ref_usd` for XLM against Reflector's measured reading before any fix
       is chosen.
+  - date: "2026-09-11"
+    status: active
+    who: akot
+    note: >
+      Phase 0 measured on prod (notes/R-phase0-measurement-2026-09-11.md).
+      AC 1 as filed is MET — pivot vs Reflector over 4,413 hours: p50 −1.2 bps,
+      p05/p95 ±35 bps — and the premise is half wrong: the oracle tier already
+      prices XLM-quoted candles from the measurement inside the oracle window
+      (3,601 of 3,643 on 2026-08-01). The real defect is 0268's, one hop over:
+      pivot_sql never multiplies by the USDC/USD rate, so every pre-epoch
+      XLM/USDT-quoted candle still assumes USDC = $1 — 2023-03-11 is stored
+      +3.2 % (7,328 daily candles). RESCOPED: (1) scale the pivot by the
+      measured USDC rate at the bucket end, 0268's shape; (2) full re-enrichment
+      of the ≈190 M XLM-quoted + ≈3.2 M USDT-quoted pre-epoch candles, bounded
+      and resumable; (3) snapshot XLM readings into usd_rate under a set named
+      beside peg_identities(). Retention is NOT a TTL — it is the dark
+      cleanup-worker's policy, earliest loss 2027-04. Decisions ratified by
+      Adam the same day. Converted to a directory.
 ---
 
 # We measure XLM's dollar price, throw it away, then derive it from USDC
+
+## Phase 0 outcome — 2026-09-11, read this before the rest
+
+The sections below are the task **as filed** (2026-08-26). Phase 0 measured
+them on prod — [notes/R-phase0-measurement-2026-09-11.md](notes/R-phase0-measurement-2026-09-11.md)
+— and three of the premises did not survive:
+
+1. **The measurement is not discarded where it exists.** Reflector's `XLM`
+   resolves to `AssetIdentity::Native`, and the oracle tier prices XLM-quoted
+   candles from it directly inside the oracle window. The pivot only prices
+   the deep history, where there is no reading to discard.
+2. **AC 1 is met as written.** Pivot vs Reflector over 4,413 hours: median
+   −1.2 bps, 90 % within ±35 bps. Scaling by USDC/USD moves the median < 3 bps.
+3. **Retention is not a 13-month TTL.** It is the dark cleanup-worker's
+   policy; the readings are intact and the earliest possible loss is 2027-04.
+
+What phase 0 found instead is **task 0268's defect one hop over**: `pivot_sql`
+computes `ref_usd` in USDC units and never multiplies by the measured USDC/USD
+rate. After 0268 rescaled every USDC-quoted candle, the XLM- and USDT-quoted
+candles are the only stored prices still assuming USDC = $1. On 2023-03-11 that
+is **+3.2 % on 7,328 daily candles** (49,090 hourly). The pre-epoch population
+is **≈ 190 M XLM-quoted + ≈ 3.2 M USDT-quoted** candles across seven tables.
+
+### Rescoped implementation (ratified by Adam, 2026-09-11)
+
+1. **Scale the pivot** — `pivot_sql` multiplies `ref_usd` by the USDC/USD
+   rate from `usd_rate` (`external` before the epoch, `oracle` after) resolved
+   at the **bucket end**, the same ASOF shape and staleness rule as 0268's
+   `external_sql`. One statement, so XLM and USDT are fixed together. The
+   `traded` wire label does not change meaning.
+2. **Re-enrich the full pre-epoch population** with 0268's machinery: bounded
+   by the 0111 partition window, resumable, FREEZE per partition, a reset that
+   zeroes only what the same pass can refill. Two things do not carry over
+   and must be built, not loosened: the reset's `require_external_rate` path
+   is USDC-only by design (a new, separately named pivot-leg mode with its own
+   refusal test), and the par signature `close_usd = close` does not select a
+   pivoted row (a new one-definition-three-sites predicate: pivot leg,
+   pre-epoch, `close_usd > 0`, a positive USDC rate exists for the day).
+   Runs as its own CHORE with a runbook appendix, like 0276.
+3. **Snapshot XLM readings into `usd_rate`** as `method = 'oracle'`, `hops = 0`
+   — what they factually are — through a set named for what it is beside
+   `peg_identities()`, whose test stays byte-identical. The identity gate is
+   code (`reflector_key_to_identity("XLM") == Native`, no issuer to
+   mis-attribute), pinned by a test to 0173's standard. Before the first row is
+   written, check how `views.sql`'s `price_usd_series*` and `/ohlcv` treat a
+   native row in `usd_rate`. Correct the stale `202509` comment in
+   `oracle-worker/src/lib.rs`.
+
+Out of scope, unchanged: 0227, 0173, and the `redstone` rows the note reports.
+
+---
 
 ## Summary
 
