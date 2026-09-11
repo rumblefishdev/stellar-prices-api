@@ -407,11 +407,22 @@ pub struct OracleStats {
     /// arrives as a handful of extra skips and looks like nothing; on its own it
     /// is a step off a flat zero (task 0231).
     pub timestamp_rejected: usize,
-    /// Rows written into `prices.usd_rate` by this pass (task 0167). Zero is
-    /// normal on a steady-state run — the snapshot only copies observations it
-    /// does not already hold. It is NOT normal for it to be zero forever while
-    /// `written` keeps climbing; see [`run_oracle`] on why that needs a signal.
+    /// Rows written into `prices.usd_rate` by this pass for the PEG set,
+    /// [`peg_identities`] — canonical USDC (task 0167). Zero is normal on a
+    /// steady-state run — the snapshot only copies observations it does not
+    /// already hold. It is NOT normal for it to be zero forever while `written`
+    /// keeps climbing; see [`run_oracle`] on why that needs a signal.
+    ///
+    /// ⚠️ Peg set ONLY, deliberately not a total. Since task 0228 the enrichment
+    /// pivot's only post-epoch rate is USDC's `oracle` rows, and the snapshot is
+    /// non-fatal — its failure is visible nowhere but here. The measured set
+    /// lands rows on every pass, so a sum would never read zero and would hide
+    /// exactly the stall this series exists to show (0228 review finding 1).
     pub rates_snapshotted: u64,
+    /// Rows written into `prices.usd_rate` by this pass for the MEASURED set,
+    /// [`measured_identities`] — the native asset (task 0228). Its own series,
+    /// for the reason on [`Self::rates_snapshotted`].
+    pub measured_rates_snapshotted: u64,
 }
 
 /// A pass that failed, carrying the counts it had already measured.
@@ -599,10 +610,12 @@ async fn run_oracle_inner(
             0
         }
     };
-    // Summed, so `OracleUsdRatesSnapshotted` keeps meaning "rows this pass added
-    // to usd_rate" and no CloudWatch metric changes shape.
-    let rates_snapshotted =
-        snapshot(peg_identities(), "peg").await + snapshot(measured_identities(), "measured").await;
+    // Counted PER SET, never summed: `OracleUsdRatesSnapshotted` keeps its
+    // pre-0228 meaning (the peg set, i.e. canonical USDC) so a stalled USDC
+    // snapshot still reads zero, and XLM gets `OracleMeasuredRatesSnapshotted`
+    // (0228 review finding 1 — a sum hid the stall the series is for).
+    let rates_snapshotted = snapshot(peg_identities(), "peg").await;
+    let measured_rates_snapshotted = snapshot(measured_identities(), "measured").await;
 
     Ok(OracleStats {
         queried: TRACKED_SYMBOLS.len(),
@@ -610,6 +623,7 @@ async fn run_oracle_inner(
         skipped,
         timestamp_rejected: *timestamp_rejected,
         rates_snapshotted,
+        measured_rates_snapshotted,
     })
 }
 

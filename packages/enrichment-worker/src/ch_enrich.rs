@@ -264,7 +264,9 @@ pub enum ChEnrichError {
     #[error(
         "USD reset refused: --reset-require-pivot-usdc-rate was passed for quote \
          asset_id {quote_asset_id}, which is not one of this pass's pivot \
-         references (pivot: {pivot:?}; canonical USDC is asset_id {usdc_id}).\n\
+         references (pivot: {pivot:?}; canonical USDC is asset_id {usdc_id} — 0 \
+         means it is not in prices.assets at all, and then no pivot runs for ANY \
+         leg).\n\
          This mode re-opens rows the SCALED PIVOT recomputes, and the pivot only \
          runs for a quote leg it has a USDC market to measure against. On any \
          other leg it would zero rows the pivot cannot reach, and the peg tier \
@@ -565,16 +567,16 @@ fn external_rate_day_pred(db: &str) -> String {
 /// [`external_rate_day_pred`] selects on, so "loaded" here means "the day-set
 /// can match something".
 ///
-/// A free function, not only a [`ChEnrichmentPass`] method, because it has TWO
-/// callers that must agree: the pass's `reset_step`, and
-/// [`crate::repair::CoarseRepairDriver::run`] BEFORE it enumerates months. The
-/// second is the one the operator hits. The driver's month enumeration carries
-/// the same day-set predicate, so with nothing loaded it finds no month to
-/// visit, never builds a pass, and — until the 0228 prove run — exited green
-/// with "0 month(s)" while `--help` and the runbook promised this refusal. An
-/// empty campaign that reports itself clean is the false all-clear task 0268's
-/// WR-05 was written against; it must be a refusal, in a dry run too.
-pub async fn assert_external_rates_are_loaded(
+/// Reached from two places that must agree: the pass's `reset_step`, and
+/// [`ChEnrichmentPass::assert_reset_leg_and_rates`], which the repair driver
+/// runs BEFORE it enumerates months. The second is the one the operator hits.
+/// The driver's month enumeration carries the same day-set predicate, so with
+/// nothing loaded it finds no month to visit, never builds a pass, and — until
+/// the 0228 prove run — exited green with "0 month(s)" while `--help` and the
+/// runbook promised this refusal. An empty campaign that reports itself clean
+/// is the false all-clear task 0268's WR-05 was written against; it must be a
+/// refusal, in a dry run too.
+async fn assert_external_rates_are_loaded(
     client: &Client,
     database: &str,
     spec: &UsdResetSpec,
@@ -1112,6 +1114,33 @@ impl ChEnrichmentPass {
         Ok(())
     }
 
+    /// Every refusal of a rate-gated reset that does not depend on the month
+    /// being repaired, run by [`crate::repair::CoarseRepairDriver::run`] BEFORE
+    /// it enumerates months — dry run included — and again by `reset_step`.
+    ///
+    /// The per-month pass is the only place these used to run, and a dry run
+    /// never builds one: the 0228 prove run and review found a dry run that
+    /// listed candidate months for the wrong leg, and for an unloaded series,
+    /// and ended green, while the real run refused — after freezing that month's
+    /// partition. A rehearsal that accepts what the real run refuses is a
+    /// rehearsal of nothing (review WR-01). A no-op for a spec with neither mode.
+    pub async fn assert_reset_leg_and_rates(&self) -> Result<(), ChEnrichError> {
+        let Some(spec) = self.cfg.usd_reset.as_ref() else {
+            return Ok(());
+        };
+        if spec.require_external_rate {
+            self.assert_external_rate_leg_is_usdc(spec).await?;
+        }
+        if spec.require_pivot_usdc_rate {
+            self.assert_pivot_rate_leg_is_a_pivot_reference(spec)
+                .await?;
+        }
+        if spec.require_external_rate || spec.require_pivot_usdc_rate {
+            self.assert_external_rates_are_loaded(spec).await?;
+        }
+        Ok(())
+    }
+
     /// Refuse a `require_external_rate` reset whose quote leg is not canonical
     /// USDC (task 0268 review).
     ///
@@ -1166,7 +1195,13 @@ impl ChEnrichmentPass {
     ) -> Result<(), ChEnrichError> {
         let refs = self.resolve_reference_ids().await?;
         let pivot = refs.pivot_ids();
-        if pivot.contains(&spec.quote_asset_id) {
+        // `can_pivot()`, not `pivot_ids()` alone (0228 review finding 2): the
+        // pivot statement is only planned when canonical USDC resolves, because
+        // its reference market is keyed on USDC's `asset_id`. A leg in
+        // `pivot_ids()` with USDC missing from `prices.assets` passes every
+        // other gate — the no-rates check matches `usd_rate` by identity — and
+        // would be zeroed with no pivot to refill it.
+        if refs.can_pivot() && pivot.contains(&spec.quote_asset_id) {
             return Ok(());
         }
         Err(ChEnrichError::ResetPivotRateLegIsNotAPivotReference {

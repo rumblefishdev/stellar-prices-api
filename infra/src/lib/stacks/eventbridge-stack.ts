@@ -427,7 +427,8 @@ export class EventBridgeStack extends cdk.Stack {
 
     // The worker publishes its pass metrics (OracleRuns, OracleFailedRuns,
     // OracleSymbolsQueried, OracleRowsWritten, OracleRowsSkipped,
-    // OracleTimestampRejected, OracleUsdRatesSnapshotted) under the
+    // OracleTimestampRejected, OracleUsdRatesSnapshotted,
+    // OracleMeasuredRatesSnapshotted — task 0228) under the
     // `Prices/Oracle` namespace (task 0231). PutMetricData has no
     // resource-level scoping, so it is `*` constrained to that namespace, as
     // the enrichment role below already is. The ObservabilityStack's

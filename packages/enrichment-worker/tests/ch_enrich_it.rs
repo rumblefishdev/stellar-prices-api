@@ -3191,6 +3191,157 @@ async fn the_repair_driver_refuses_an_unloaded_series_before_enumerating_months(
         .unwrap();
 }
 
+/// 0228 review finding 2. The pivot only runs when canonical USDC resolves in
+/// `prices.assets` (`plan_peg_pivot_step` needs its `asset_id` for the
+/// reference market), but the pivot-leg gate used to check `pivot_ids()` alone,
+/// and the no-rates gate checks `usd_rate` by IDENTITY, not by `asset_id`. So
+/// with the rates loaded and USDC missing from `assets`, every gate passed, the
+/// reset zeroed the XLM leg, and no pivot ever refilled it — task 0182's
+/// incident with a different missing piece.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_pivot_reset_refuses_when_canonical_usdc_is_not_a_tracked_asset() {
+    let db = "it_enrich_0228_no_usdc_asset";
+    let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
+    let client = setup_0228_reset(db, covered, uncovered).await;
+    seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
+    // Everything but canonical USDC stays registered.
+    client
+        .query(&format!("TRUNCATE TABLE {db}.assets"))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets (asset_id, asset_code, asset_type, issuer_address, contract_address) \
+             VALUES (1,'XLM','classic','',''), (10,'FOO','classic','GFOO','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1h".to_string();
+    c.one_shot = true;
+    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ChEnrichError::ResetPivotRateLegIsNotAPivotReference {
+                quote_asset_id: 1,
+                usdc_id: 0,
+                ..
+            }
+        ),
+        "with canonical USDC untracked no pivot can refill the leg, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("not in prices.assets"),
+        "the refusal must say USDC is the missing piece: {err}"
+    );
+    let (v, ver) = pivot_subject_1h(&client, db, covered).await;
+    assert!(
+        (v - FOO_XLM_CLOSE * XLM_USDC_CLOSE).abs() < 1e-6 && ver == 1,
+        "got {v} v{ver}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// 0228 review finding 3, and its 0268 twin. The two leg refusals —
+/// `ResetPivotRateLegIsNotAPivotReference` and `ResetExternalRateLegIsNotUsdc`
+/// — lived only in the per-month pass, which a dry run never builds. So a dry
+/// run over the WRONG leg listed candidate months and ended green, and only the
+/// real run refused, after freezing that month's partition. The driver now runs
+/// both before enumerating months: the rehearsal refuses what the real run
+/// refuses (WR-01's rule).
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_dry_run_refuses_the_wrong_leg_for_either_rate_gated_mode() {
+    let db = "it_enrich_0228_dry_run_leg";
+    let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
+    let client = setup_0228_reset(db, covered, uncovered).await;
+    seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
+
+    let dry = |spec: UsdResetSpec| {
+        let mut enrich = cfg(db);
+        enrich.table = "price_ohlcv_1h".to_string();
+        enrich.usd_reset = Some(spec);
+        CoarseRepairDriver::with_client(
+            client.clone(),
+            CoarseRepairConfig {
+                enrich,
+                start_month: 202_001,
+                end_month: 202_603,
+                snapshot: true,
+                dry_run: true,
+                one_shot: true,
+                deadline: None,
+            },
+        )
+    };
+
+    // The pivot mode on canonical USDC (asset_id 2 here).
+    let err = dry(UsdResetSpec {
+        quote_asset_id: 2,
+        ..pivot_reset(DEPEG_DAY - 86_400)
+    })
+    .run()
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ChEnrichError::ResetPivotRateLegIsNotAPivotReference {
+                quote_asset_id: 2,
+                ..
+            }
+        ),
+        "a dry run of the pivot mode on USDC must refuse, got {err:?}"
+    );
+
+    // The external mode on the XLM leg (asset_id 1).
+    let err = dry(UsdResetSpec {
+        quote_asset_id: 1,
+        require_external_rate: true,
+        require_pivot_usdc_rate: false,
+        ..pivot_reset(DEPEG_DAY - 86_400)
+    })
+    .run()
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ChEnrichError::ResetExternalRateLegIsNotUsdc {
+                quote_asset_id: 1,
+                ..
+            }
+        ),
+        "a dry run of the external mode on XLM must refuse, got {err:?}"
+    );
+
+    // The right leg still rehearses: one candidate month, nothing written.
+    let summary = dry(pivot_reset(DEPEG_DAY - 86_400)).run().await.unwrap();
+    assert_eq!(summary.months.len(), 1, "{summary:?}");
+    let (v, ver) = pivot_subject_1h(&client, db, covered).await;
+    assert!(
+        (v - FOO_XLM_CLOSE * XLM_USDC_CLOSE).abs() < 1e-6 && ver == 1,
+        "got {v} v{ver}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
 /// 🔑 **RE-OPENS NOTHING THE SAME PASS CANNOT REFILL.** The day the imported
 /// series does not cover keeps its stored value; only the covered day is
 /// re-priced.
