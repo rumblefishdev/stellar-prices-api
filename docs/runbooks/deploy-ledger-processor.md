@@ -30,7 +30,7 @@ Two things you must understand up front:
 
 - You are on `develop` (or the branch carrying the build you intend to ship) and
   it is up to date.
-- `export AWS_PROFILE=soroban-explorer` — the shared account profile.
+- `export AWS_PROFILE=soroban-admin` — the shared account profile.
 - `export AWS_REGION=eu-central-1`.
 - Node per the repo `.nvmrc`.
 - `cargo-lambda` installed (`pip3 install cargo-lambda`).
@@ -48,7 +48,7 @@ Two things you must understand up front:
 ```bash
 cd <repo-root>
 
-export AWS_PROFILE=soroban-explorer
+export AWS_PROFILE=soroban-admin
 export AWS_REGION=eu-central-1
 
 git checkout develop && git pull --ff-only

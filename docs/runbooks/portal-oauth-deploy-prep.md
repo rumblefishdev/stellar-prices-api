@@ -48,7 +48,7 @@ for this.
 
 ## Prerequisites
 
-- `export AWS_PROFILE=soroban-explorer`, `export AWS_REGION=eu-central-1`.
+- `export AWS_PROFILE=soroban-admin`, `export AWS_REGION=eu-central-1`.
 - The two hostnames, both from `infra/envs/production.json` since [0194]
   (2026-08-31): the **page** is served at `portalWebOrigin`
   (`https://sorobanscan.rumblefish.dev`, the block explorer's distribution)

@@ -97,10 +97,10 @@ Use whatever your team uses for account `750702271865`. With AWS SSO that is:
 
 ```bash
 aws configure sso            # first time only; set the start URL + region
-aws sso login --profile soroban-explorer
+aws sso login --profile soroban-admin
 ```
 
-(`soroban-explorer` is the conventional profile name — use yours if different.)
+(`soroban-admin` is the conventional profile name — use yours if different.)
 
 ### 2b. Fetch the writer mTLS bundle → three PEM files
 
@@ -112,7 +112,7 @@ three files (the commands below **never print** the key to your terminal):
 mkdir -p ~/prices-mtls && cd ~/prices-mtls
 
 aws secretsmanager get-secret-value \
-  --profile soroban-explorer \
+  --profile soroban-admin \
   --region eu-central-1 \
   --secret-id prices/production/clickhouse-mtls-prices-ingestion-production \
   --query SecretString --output text > bundle.json
@@ -365,7 +365,7 @@ history while this backfill runs. **Do not re-enable it until §9's pre-roll has
 captured the history into the coarse tables** — otherwise the `1m` partitions
 drop at the next 02:00 UTC and the history is lost again (the exact 0090 bug).
 
-Confirm the current state first (read-only; profile `soroban-explorer`, region
+Confirm the current state first (read-only; profile `soroban-admin`, region
 `eu-central-1`):
 
 ```bash

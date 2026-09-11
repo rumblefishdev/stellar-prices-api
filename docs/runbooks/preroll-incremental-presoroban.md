@@ -136,7 +136,7 @@ non-deterministic under a tie. See §Accepted residual.
    nightly job drops the pre-Soroban `1m` before it is rolled up):
    ```bash
    aws events describe-rule --name prices-production-cleanup --region eu-central-1 \
-     --profile soroban-explorer --query 'State'   # expect "DISABLED"
+     --profile soroban-admin --query 'State'   # expect "DISABLED"
    ```
 4. **Disk headroom** on ch-prod-01 (`df -h /var/lib/docker`) — the pre-Soroban 1m
    is already resident; the coarse append is small, but leave margin.
@@ -336,7 +336,7 @@ re-enable is the operator's call:
 
 ```bash
 aws events enable-rule --name prices-production-cleanup --region eu-central-1 \
-  --profile soroban-explorer
+  --profile soroban-admin
 ```
 
 ⚠️ **As of 2026-08-11 this was deliberately NOT done** — the operator chose to
@@ -346,12 +346,12 @@ rather than falls. Confirm the current state before assuming either way:
 
 ```bash
 aws events describe-rule --name prices-production-cleanup --region eu-central-1 \
-  --profile soroban-explorer --query 'State'
+  --profile soroban-admin --query 'State'
 ```
 
 ⚠️ An `UnrecognizedClientException` here is an **expired SSO session**, not a
 wrong profile name — `aws sso login` and retry. `--profile soroban-admin` also
-works where the documented `soroban-explorer` fails.
+works where the documented `soroban-admin` fails.
 
 ## Accepted residual — ⚠️ the "optional repair" is NO LONGER POSSIBLE
 

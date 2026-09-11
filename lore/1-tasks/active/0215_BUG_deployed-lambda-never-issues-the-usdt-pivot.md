@@ -723,7 +723,7 @@ Move the bound instead — same mechanism, one reversible env var.
 ### 0. [local machine, AWS CLI] Pre-check — has the deploy already happened?
 
 ```bash
-export AWS_PROFILE=soroban-explorer AWS_REGION=eu-central-1
+export AWS_PROFILE=soroban-admin AWS_REGION=eu-central-1
 aws sts get-caller-identity --query Arn --output text
 aws lambda get-function-configuration \
   --function-name prices-production-enrichment --region eu-central-1 \

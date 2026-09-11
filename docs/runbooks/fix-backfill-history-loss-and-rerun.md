@@ -66,13 +66,13 @@ and can take **several days** on a home/office connection. That is expected.
 
 ## 2. Prerequisites (get these before you start)
 
-| #   | You need                                                                                                        | How to check                                                                                                                                              |
-| --- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Access to the backfill machine **`fishuser-hero`** (where the run + repo + certs live)                          | `ssh fishuser-hero` connects                                                                                                                              |
-| 2   | The repo checked out on it at `~/stellar-prices-api`                                                            | `ls ~/stellar-prices-api/packages/prices-clickhouse/schema/preroll.sql`                                                                                   |
-| 3   | The write certs at `~/prices-mtls/` (`prices_writer.crt`, `.key`, `ca.crt`)                                     | `ls ~/prices-mtls/`                                                                                                                                       |
-| 4   | SSH access to the ClickHouse host                                                                               | `ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 'echo ok'`                                                                                       |
-| 5   | AWS access to the prices account able to toggle an EventBridge rule (`events:DisableRule`, `events:EnableRule`) | `aws events describe-rule --profile soroban-explorer --region eu-central-1 --name prices-production-cleanup --query State` prints `ENABLED` or `DISABLED` |
+| #   | You need                                                                                                        | How to check                                                                                                                                           |
+| --- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | Access to the backfill machine **`fishuser-hero`** (where the run + repo + certs live)                          | `ssh fishuser-hero` connects                                                                                                                           |
+| 2   | The repo checked out on it at `~/stellar-prices-api`                                                            | `ls ~/stellar-prices-api/packages/prices-clickhouse/schema/preroll.sql`                                                                                |
+| 3   | The write certs at `~/prices-mtls/` (`prices_writer.crt`, `.key`, `ca.crt`)                                     | `ls ~/prices-mtls/`                                                                                                                                    |
+| 4   | SSH access to the ClickHouse host                                                                               | `ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 'echo ok'`                                                                                    |
+| 5   | AWS access to the prices account able to toggle an EventBridge rule (`events:DisableRule`, `events:EnableRule`) | `aws events describe-rule --profile soroban-admin --region eu-central-1 --name prices-production-cleanup --query State` prints `ENABLED` or `DISABLED` |
 
 If **#5** fails with an access/permission error, you cannot toggle the cleanup job
 yourself — ask the prices-API owner to run steps **3.1** and **7** for you, and do
@@ -83,14 +83,14 @@ starts with `ssh …`).
 
 ### Reference values (used throughout)
 
-| Thing                        | Value                                                                           |
-| ---------------------------- | ------------------------------------------------------------------------------- |
-| ClickHouse host              | `ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161`                       |
-| Run a query                  | `docker exec -i app-clickhouse-1 clickhouse-client --query='…'`                 |
-| Nightly cleanup rule         | `prices-production-cleanup` (region `eu-central-1`, profile `soroban-explorer`) |
-| Soroban activation ledger    | `50457424`                                                                      |
-| Backfill top (do not exceed) | `63352611`                                                                      |
-| Repo pre-roll SQL            | `~/stellar-prices-api/packages/prices-clickhouse/schema/preroll.sql`            |
+| Thing                        | Value                                                                        |
+| ---------------------------- | ---------------------------------------------------------------------------- |
+| ClickHouse host              | `ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161`                    |
+| Run a query                  | `docker exec -i app-clickhouse-1 clickhouse-client --query='…'`              |
+| Nightly cleanup rule         | `prices-production-cleanup` (region `eu-central-1`, profile `soroban-admin`) |
+| Soroban activation ledger    | `50457424`                                                                   |
+| Backfill top (do not exceed) | `63352611`                                                                   |
+| Repo pre-roll SQL            | `~/stellar-prices-api/packages/prices-clickhouse/schema/preroll.sql`         |
 
 For convenience, set a shortcut you can paste into any step:
 
@@ -148,10 +148,10 @@ This stops the job that deletes old 1-minute data, so the re-run's history
 survives long enough to be pre-rolled.
 
 ```bash
-aws events disable-rule --profile soroban-explorer --region eu-central-1 \
+aws events disable-rule --profile soroban-admin --region eu-central-1 \
   --name prices-production-cleanup
 
-aws events describe-rule --profile soroban-explorer --region eu-central-1 \
+aws events describe-rule --profile soroban-admin --region eu-central-1 \
   --name prices-production-cleanup --query State --output text
 ```
 
@@ -408,10 +408,10 @@ Only after step 6 passes. This lets the cleanup job resume; it will drop the
 now-redundant old 1-minute partitions, while the permanent tables keep the history.
 
 ```bash
-aws events enable-rule --profile soroban-explorer --region eu-central-1 \
+aws events enable-rule --profile soroban-admin --region eu-central-1 \
   --name prices-production-cleanup
 
-aws events describe-rule --profile soroban-explorer --region eu-central-1 \
+aws events describe-rule --profile soroban-admin --region eu-central-1 \
   --name prices-production-cleanup --query State --output text
 ```
 
