@@ -190,14 +190,18 @@ pub enum ChEnrichError {
     /// rows it zeroed would be refilled with the same `$1` by the peg tier:
     /// `version` churn, a spent FREEZE rollback point, and no change in value.
     #[error(
-        "USD reset refused: --reset-require-external-rate was passed, but \
-         prices.usd_rate holds 0 rows with method = 'external' for canonical USDC.\n\
-         Task 0267's measured USDC/USD series is not loaded, so this reset can \
-         refill nothing: it would re-open rows only for the peg tier to write the \
-         same $1 back, bumping version and spending the FREEZE rollback point for \
-         no change in value.\n\
+        "USD reset refused: a rate-gated reset mode was passed \
+         (--reset-require-external-rate or --reset-require-pivot-usdc-rate), but \
+         prices.usd_rate holds 0 rows with method = 'external' for canonical USDC \
+         (quote asset_id {quote_asset_id}).\n\
+         Task 0267's measured USDC/USD series is not loaded, so the day-set \
+         predicate both modes share matches nothing and this reset can refill \
+         nothing: it would re-open rows only for the tier below to write the same \
+         $1 back, bumping version and spending the FREEZE rollback point for no \
+         change in value.\n\
          Load and verify 0267's series first — see docs/runbooks/repair-coarse-usd-values.md, \
-         Appendix B, precondition 2 — then re-run."
+         Appendix B precondition 2 (0268 mode) or Appendix C precondition 1 \
+         (0228 mode) — then re-run."
     )]
     ResetRequiresExternalRates { quote_asset_id: u32 },
 
@@ -236,6 +240,44 @@ pub enum ChEnrichError {
          canonical USDC."
     )]
     ResetExternalRateLegIsNotUsdc { quote_asset_id: u32, usdc_id: u32 },
+
+    /// Both reset modes asked for at once (task 0228). They select DIFFERENT
+    /// candidate signatures, and the intersection of the two is empty.
+    #[error(
+        "USD reset refused: --reset-require-external-rate and \
+         --reset-require-pivot-usdc-rate are mutually exclusive (quote asset_id \
+         {quote_asset_id}).\n\
+         The 0268 mode selects rows carrying the peg tier's par signature \
+         (close_usd = close) on canonical USDC; the 0228 mode selects PIVOTED \
+         rows, which never carry that signature. Asking for both renders both \
+         predicates, so the candidate set is empty and the run reports a clean, \
+         entirely empty repair — the same green all-clear that hid task 0182 for \
+         a month.\n\
+         Run one mode per pass: --reset-require-external-rate for the canonical \
+         USDC leg, --reset-require-pivot-usdc-rate for an XLM or USDT leg."
+    )]
+    ResetModesAreMutuallyExclusive { quote_asset_id: u32 },
+
+    /// `require_pivot_usdc_rate` asked for on a quote leg the PIVOT cannot
+    /// refill (task 0228) — the mirror image of
+    /// [`ChEnrichError::ResetExternalRateLegIsNotUsdc`].
+    #[error(
+        "USD reset refused: --reset-require-pivot-usdc-rate was passed for quote \
+         asset_id {quote_asset_id}, which is not one of this pass's pivot \
+         references (pivot: {pivot:?}; canonical USDC is asset_id {usdc_id}).\n\
+         This mode re-opens rows the SCALED PIVOT recomputes, and the pivot only \
+         runs for a quote leg it has a USDC market to measure against. On any \
+         other leg it would zero rows the pivot cannot reach, and the peg tier \
+         would write $1 back over them — task 0182's incident with a different \
+         quote asset.\n\
+         If you meant canonical USDC, that is the 0268 mode: use \
+         --reset-require-external-rate instead."
+    )]
+    ResetPivotRateLegIsNotAPivotReference {
+        quote_asset_id: u32,
+        usdc_id: u32,
+        pivot: Vec<u32>,
+    },
 
     /// A [`UsdResetSpec`] whose `[not_before, not_after)` window is empty (task
     /// 0268 review, WR-05). See [`UsdResetSpec::validate`] for why this is an
@@ -357,6 +399,34 @@ pub struct UsdResetSpec {
     /// span, made once, by hand. A semi-join asks "does a reference exist for
     /// THIS bucket" and cannot be wrong.
     pub require_external_rate: bool,
+    /// When true (task 0228), the candidate set is every already-written row of
+    /// the named PIVOT quote leg for whose bucket a `method = 'external'` USDC
+    /// rate exists — the same [`external_rate_day_pred`] the 0268 mode uses, and
+    /// nothing else appended.
+    ///
+    /// ## Why no par signature, and what that costs
+    ///
+    /// 0268's candidate carries `close_usd = close`, the peg tier's exact
+    /// signature, which is **self-erasing**: once the row is re-priced it stops
+    /// matching, so a second run finds zero candidates. A pivoted row has no such
+    /// signature — it never equalled its own close. Telling "already scaled" from
+    /// "not scaled" would mean comparing `close_usd / close` against the bucket's
+    /// own reference vwap: a CORRELATED join, which the one-definition-three-sites
+    /// rule forbids outright (see [`external_rate_day_pred`]'s "why uncorrelated"
+    /// note), and `version` cannot stand in for it because coarse rollups carry
+    /// large summed versions.
+    ///
+    /// So this mode is **value-idempotent, not a fixed point across runs**: a
+    /// second run over a repaired month recomputes identical values at
+    /// `version + 2`. That is the framing [`repair_target_pred`] already documents
+    /// for the 0182 mode, and it is why this mode is operator-only — the recurring
+    /// sweep keeps its `usd_reset: None` pin. Zero-candidate idempotence would
+    /// need a stored provenance column, i.e. a schema change.
+    ///
+    /// ⚠️ Mutually exclusive with [`UsdResetSpec::require_external_rate`], refused
+    /// by [`UsdResetSpec::validate`]: the two candidate signatures do not
+    /// intersect, so asking for both selects nothing at all.
+    pub require_pivot_usdc_rate: bool,
 }
 
 impl UsdResetSpec {
@@ -376,6 +446,17 @@ impl UsdResetSpec {
     /// can refuse before it opens a connection and the library refuses even
     /// when driven by something other than the CLI.
     pub fn validate(&self) -> Result<(), ChEnrichError> {
+        // Task 0228: the two modes select different candidate signatures, and
+        // both predicates are APPENDED, so asking for both ANDs a par signature
+        // onto a population that by construction never carries one. The result is
+        // an empty candidate set and a green run that touched nothing — the same
+        // shape WR-05 refuses below. Checked first because it is the cheaper
+        // mistake to make and the more confusing one to diagnose.
+        if self.require_external_rate && self.require_pivot_usdc_rate {
+            return Err(ChEnrichError::ResetModesAreMutuallyExclusive {
+                quote_asset_id: self.quote_asset_id,
+            });
+        }
         if let Some(na) = self.not_after
             && self.not_before >= na
         {
@@ -419,6 +500,12 @@ pub fn reset_pending_pred(db: &str, spec: &UsdResetSpec) -> String {
             " AND close_usd = close AND {}",
             external_rate_day_pred(db)
         ));
+    }
+    // Task 0228: the pivot-leg mode appends the SAME rate fragment and NOTHING
+    // else. No par signature — a pivoted row never carries one, so including it
+    // would select nothing (see `UsdResetSpec::require_pivot_usdc_rate`).
+    if spec.require_pivot_usdc_rate {
+        pred.push_str(&format!(" AND {}", external_rate_day_pred(db)));
     }
     pred
 }
@@ -1023,6 +1110,39 @@ impl ChEnrichmentPass {
         }
     }
 
+    /// Refuse a `require_pivot_usdc_rate` reset whose quote leg is not one of the
+    /// pass's pivot references (task 0228) — the mirror image of
+    /// [`Self::assert_external_rate_leg_is_usdc`].
+    ///
+    /// The 0228 mode re-opens rows the SCALED PIVOT recomputes, and
+    /// [`pivot_sql`] only ever runs for a leg in [`ReferenceIds::pivot_ids`],
+    /// against a USDC market. `assert_reset_target_is_priceable` is not enough on
+    /// its own: it accepts canonical USDC too, because the peg and external tiers
+    /// can price it — so `--reset-quote-asset-id <USDC>
+    /// --reset-require-pivot-usdc-rate` would pass that gate while selecting rows
+    /// no pivot pass touches. Canonical USDC is named explicitly in the error,
+    /// because that mistake has an exact right answer: it is the 0268 mode.
+    ///
+    /// Refused here in the library rather than with a CLI `conflicts_with`,
+    /// because the CLI is not the only driver.
+    async fn assert_pivot_rate_leg_is_a_pivot_reference(
+        &self,
+        spec: &UsdResetSpec,
+    ) -> Result<(), ChEnrichError> {
+        let refs = self.resolve_reference_ids().await?;
+        let pivot = refs.pivot_ids();
+        if pivot.contains(&spec.quote_asset_id) {
+            return Ok(());
+        }
+        Err(ChEnrichError::ResetPivotRateLegIsNotAPivotReference {
+            quote_asset_id: spec.quote_asset_id,
+            // 0 means canonical USDC is not a tracked asset here at all — a
+            // different operator error than "wrong leg", and reported as such.
+            usdc_id: refs.usdc.unwrap_or(0),
+            pivot,
+        })
+    }
+
     /// Refuse a `require_external_rate` reset when `prices.usd_rate` holds no
     /// `method = 'external'` row for canonical USDC at all (task 0268).
     ///
@@ -1167,6 +1287,38 @@ impl ChEnrichmentPass {
             // Fifth (review WR-09): the external tier's own premise, measured on
             // the table the oracle tier reads. Independent of `not_before`.
             self.assert_no_pre_epoch_oracle_rows(spec).await?;
+        }
+        // Task 0228's mode, whose refill path is the SCALED PIVOT rather than the
+        // external tier. Same property as every refusal above: nothing is zeroed
+        // unless a tier in THIS pass can put a value back.
+        if spec.require_pivot_usdc_rate {
+            // The pivot only runs for a leg with a USDC market to measure against,
+            // and canonical USDC is not such a leg — that one is the 0268 mode.
+            self.assert_pivot_rate_leg_is_a_pivot_reference(spec)
+                .await?;
+            // The day-set both modes share is USDC's `external` series. Empty
+            // means the campaign would report a clean, entirely empty repair.
+            self.assert_external_rates_are_loaded(spec).await?;
+            // ⚠️ `assert_hourly_rates_are_loaded` is deliberately NOT called here,
+            // and the omission is the reasoning, not an oversight. 0268 needs it
+            // because its candidate is the par signature `close_usd = close`: a
+            // sub-daily USDC candle priced from the DAY close stops carrying that
+            // signature, so loading the hourly file afterwards can never re-open
+            // it — one shot, permanently. A pivoted row carries no such signature,
+            // so this mode's candidate ("a written value, on a day the series
+            // covers") still matches after a repair. Loading the hourly file later
+            // and re-running simply recomputes, which is exactly the
+            // value-idempotence this mode is built on. The gate guards an
+            // irreversibility that does not exist here.
+            //
+            // ⚠️ `assert_no_pre_epoch_oracle_rows` is likewise not called. It
+            // measures the EXTERNAL tier's own premise — that tier recomputes
+            // `volume_quote_usd` unconditionally below the epoch, and its safety
+            // rests on no poll having priced USDC there. The pivot keeps
+            // `volume_quote_usd` write-once, so that premise is not load-bearing
+            // for this mode; the oracle-shadow guard above, which is window-scoped
+            // and runs for every spec, is what stops the oracle tier re-pricing
+            // anything this mode re-opens.
         }
 
         let pending_before = self.count_reset_pending(spec, watermark).await?;
@@ -2121,6 +2273,14 @@ fn reset_sql(db: &str, tbl: &str, spec: &UsdResetSpec, window: &str) -> String {
             external_rate_day_pred(db)
         ));
     }
+    // Task 0228. The rate fragment names `timestamp`, not a projected alias, so
+    // it stays BARE here exactly as it is at the other two sites — which is what
+    // lets the three-sites test prove they are one definition. Only terms naming
+    // a column this statement also projects (`close_usd`, `volume_quote_usd`) need
+    // the `p.` qualifier, and this mode appends none.
+    if spec.require_pivot_usdc_rate {
+        bounds.push_str(&format!(" AND {}", external_rate_day_pred(db)));
+    }
     format!(
         "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
          SELECT \
@@ -2363,6 +2523,21 @@ mod tests {
             not_before: 0,
             not_after: Some(prices_clickhouse::USDC_ORACLE_EPOCH_S),
             require_external_rate: true,
+            require_pivot_usdc_rate: false,
+        }
+    }
+
+    /// A 0228-shaped spec: an XLM quote leg (a pivot reference), bounded above by
+    /// the oracle epoch, and only where the imported USDC series can refill what
+    /// it zeroes. The quote leg is a PIVOT id, which is what separates it from
+    /// [`usdc_external_reset`].
+    fn xlm_pivot_reset() -> UsdResetSpec {
+        UsdResetSpec {
+            quote_asset_id: 4,
+            not_before: 1_611_532_800,
+            not_after: Some(prices_clickhouse::USDC_ORACLE_EPOCH_S),
+            require_external_rate: false,
+            require_pivot_usdc_rate: true,
         }
     }
 
@@ -2391,6 +2566,146 @@ mod tests {
         assert!(
             repair_target_pred("prices", Some(&spec)).contains(&frag),
             "repair_target_pred"
+        );
+    }
+
+    // ---- task 0228: the pivot-leg reset mode -------------------------------
+
+    /// 🔑 THE SAME LOCKSTEP REQUIREMENT, for the pivot-leg mode. One definition
+    /// of "an imported rate covers this bucket's day", rendered at the pending
+    /// count, the reset statement and the month enumeration. The sibling of
+    /// `the_external_predicate_is_one_definition_used_by_all_three_sites`.
+    #[test]
+    fn the_pivot_rate_predicate_is_one_definition_used_by_all_three_sites() {
+        let spec = xlm_pivot_reset();
+        let frag = external_rate_day_pred("prices");
+        assert!(
+            reset_pending_pred("prices", &spec).contains(&frag),
+            "pending"
+        );
+        assert!(
+            reset_sql("prices", "price_ohlcv_1d", &spec, "").contains(&frag),
+            "reset_sql"
+        );
+        assert!(
+            repair_target_pred("prices", Some(&spec)).contains(&frag),
+            "repair_target_pred"
+        );
+    }
+
+    /// 🔑 The 0228 mode appends the rate fragment and NOTHING ELSE. The par
+    /// signature is 0268's, and a pivoted row never carries it — including it here
+    /// would select zero rows and report a clean, entirely empty campaign.
+    #[test]
+    fn the_pivot_reset_carries_no_par_signature() {
+        let pred = reset_pending_pred("prices", &xlm_pivot_reset());
+        assert!(!pred.contains("close_usd = close"), "{pred}");
+        assert!(pred.contains("quote_asset_id = 4"), "{pred}");
+        // The termination term survives: a zeroed row stops matching.
+        assert!(
+            pred.contains("(close_usd > 0 OR volume_quote_usd > 0)"),
+            "{pred}"
+        );
+        // And it mirrors the pivot's own filter, so it cannot zero a row the
+        // pivot is structurally unable to refill.
+        assert!(pred.contains("volume_quote > 0"), "{pred}");
+
+        let sql = reset_sql("prices", "price_ohlcv_1d", &xlm_pivot_reset(), "");
+        assert!(!sql.contains("p.close_usd = p.close"), "{sql}");
+        assert!(!sql.contains(" AND close_usd = close AND"), "{sql}");
+    }
+
+    /// The alias split 0268 learned the hard way, holding for the new mode:
+    /// terms naming a column `reset_sql` also PROJECTS stay `p.`-qualified, while
+    /// the shared rate fragment — which names `timestamp`, not a projected alias —
+    /// stays BARE at all three sites. That is what lets the three-sites test above
+    /// compare the fragment for equality rather than for resemblance.
+    #[test]
+    fn the_pivot_reset_keeps_its_projected_columns_qualified_and_the_rate_bare() {
+        let sql = reset_sql("prices", "price_ohlcv_1h", &xlm_pivot_reset(), "");
+        assert!(
+            sql.contains("CAST(0 AS Decimal(38, 14)) AS close_usd"),
+            "the colliding alias is still declared: {sql}"
+        );
+        assert!(
+            sql.contains("(p.close_usd > 0 OR p.volume_quote_usd > 0)"),
+            "{sql}"
+        );
+        assert!(sql.contains("p.volume_quote > 0"), "{sql}");
+        assert!(sql.contains("p.quote_asset_id = 4"), "{sql}");
+        // The shared fragment is verbatim, unqualified, in the same statement.
+        assert!(
+            sql.contains(&external_rate_day_pred("prices")),
+            "the rate fragment must not be rewritten here: {sql}"
+        );
+    }
+
+    /// The two modes are mutually exclusive, refused PURELY so the CLI can say so
+    /// before it opens a connection and the library says so even when driven by
+    /// something else. Both predicates are appended, so a combined spec ANDs a par
+    /// signature onto a population that never carries one: zero candidates, and a
+    /// run that reports a clean repair having discarded and recomputed nothing.
+    #[test]
+    fn the_two_reset_modes_are_refused_together() {
+        let both = UsdResetSpec {
+            require_external_rate: true,
+            ..xlm_pivot_reset()
+        };
+        assert!(matches!(
+            both.validate(),
+            Err(ChEnrichError::ResetModesAreMutuallyExclusive { quote_asset_id }) if quote_asset_id == 4
+        ));
+        let msg = both.validate().unwrap_err().to_string();
+        assert!(msg.contains("--reset-require-external-rate"), "{msg}");
+        assert!(msg.contains("--reset-require-pivot-usdc-rate"), "{msg}");
+        // Each mode alone is fine, and so is neither.
+        xlm_pivot_reset().validate().unwrap();
+        usdc_external_reset().validate().unwrap();
+        usdt_reset().validate().unwrap();
+    }
+
+    /// WR-05's refusal covers the new mode too, and it is PURE — so the CLI
+    /// refuses an empty `[not_before, not_after)` before it opens a connection,
+    /// and before the driver's month enumeration silently finds nothing.
+    ///
+    /// Kept a unit test rather than a seeded one deliberately: a refusal that
+    /// needs no database is one CI actually runs.
+    #[test]
+    fn an_empty_window_is_refused_for_the_pivot_mode_too() {
+        let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
+        let empty = UsdResetSpec {
+            not_before: epoch,
+            ..xlm_pivot_reset()
+        };
+        assert!(matches!(
+            empty.validate(),
+            Err(ChEnrichError::ResetWindowEmpty { quote_asset_id, .. }) if quote_asset_id == 4
+        ));
+        let inverted = UsdResetSpec {
+            not_before: epoch + 1,
+            ..xlm_pivot_reset()
+        };
+        assert!(inverted.validate().is_err());
+    }
+
+    /// The bounds and the versioned insert survive the new mode, so a FREEZE is
+    /// still a rollback point and the scan still prunes to one partition.
+    #[test]
+    fn the_pivot_reset_keeps_the_partition_window_and_the_versioned_insert() {
+        let win = " AND p.timestamp >= toDateTime(100) AND p.timestamp < toDateTime(200)";
+        let sql = reset_sql("prices", "price_ohlcv_1d", &xlm_pivot_reset(), win);
+        assert!(sql.contains(win), "{sql}");
+        assert!(sql.contains("p.version + 1 AS version"), "{sql}");
+        assert!(!sql.contains("ALTER TABLE"), "{sql}");
+        assert_eq!(
+            sql.matches('?').count(),
+            2,
+            "binds stay watermark, limit: {sql}"
+        );
+        let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
+        assert!(
+            sql.contains(&format!("p.timestamp < toDateTime({epoch})")),
+            "{sql}"
         );
     }
 
@@ -2490,11 +2805,15 @@ mod tests {
         );
     }
 
-    /// 🔑 THE 0182 PATH PROVABLY DOES NOT CHANGE. A spec with
-    /// `require_external_rate = false` and `not_after = None` renders
-    /// byte-identically to the pre-0268 statement in all three sites. Anything
-    /// less than byte equality here means 0268 quietly altered the behaviour of a
-    /// repair mode that has already run against production.
+    /// 🔑 THE 0182 PATH PROVABLY DOES NOT CHANGE. A spec that asks for NEITHER
+    /// rate-gated mode and no upper bound renders byte-identically to the
+    /// pre-0268 statement in all three sites. Anything less than byte equality
+    /// here means a later task quietly altered the behaviour of a repair mode that
+    /// has already run against production.
+    ///
+    /// Task 0228 appends its mode the same way 0268 did, so this test now pins
+    /// the pre-0228 strings as well — the `usdt_reset()` fixture sets both flags
+    /// false and this equality is what proves nothing leaked into that path.
     #[test]
     fn a_0182_shaped_spec_renders_byte_identically_to_the_pre_0268_statement() {
         let spec = usdt_reset();
@@ -2544,9 +2863,11 @@ mod tests {
             quote_asset_id: 111,
             not_before: 1_612_656_000,
             // Task 0182's shape, stated rather than defaulted: unbounded above,
-            // and no reference join. This fixture is what pins that path.
+            // and no reference join of either kind. This fixture is what pins
+            // that path, and every later mode is APPENDED so it stays byte-exact.
             not_after: None,
             require_external_rate: false,
+            require_pivot_usdc_rate: false,
         }
     }
 

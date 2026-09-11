@@ -1306,6 +1306,7 @@ async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
         // each caller has to say which repair it is running.
         not_after: None,
         require_external_rate: false,
+        require_pivot_usdc_rate: false,
     });
     let stats = ChEnrichmentPass::new(c).run().await.unwrap();
 
@@ -1379,6 +1380,7 @@ async fn the_usd_reset_refuses_a_quote_leg_that_no_tier_can_reprice() {
         not_before: t_new,
         not_after: None,
         require_external_rate: false,
+        require_pivot_usdc_rate: false,
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
 
@@ -1421,6 +1423,7 @@ async fn the_usd_reset_refuses_a_bounded_pass() {
         // each caller has to say which repair it is running.
         not_after: None,
         require_external_rate: false,
+        require_pivot_usdc_rate: false,
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
 
@@ -1493,6 +1496,7 @@ async fn the_usd_reset_is_refused_by_an_oracle_row_that_forward_fills_into_it() 
         not_before: t_new,
         not_after: None,
         require_external_rate: false,
+        require_pivot_usdc_rate: false,
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
 
@@ -1543,6 +1547,7 @@ async fn an_external_reset_refuses_a_quote_leg_that_is_not_canonical_usdc() {
         not_before: 0,
         not_after: Some(prices_clickhouse::USDC_ORACLE_EPOCH_S),
         require_external_rate: true,
+        require_pivot_usdc_rate: false,
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
     assert!(
@@ -1587,6 +1592,7 @@ async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_l
         // each caller has to say which repair it is running.
         not_after: None,
         require_external_rate: false,
+        require_pivot_usdc_rate: false,
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
 
@@ -2429,6 +2435,7 @@ fn external_reset() -> UsdResetSpec {
         not_before: 0,
         not_after: Some(prices_clickhouse::USDC_ORACLE_EPOCH_S),
         require_external_rate: true,
+        require_pivot_usdc_rate: false,
     }
 }
 
@@ -2625,6 +2632,7 @@ async fn the_external_reset_refuses_a_pre_epoch_oracle_reading_below_its_own_win
         not_before: DEEP_DAY_START,
         not_after: Some(USDC_ORACLE_EPOCH_S),
         require_external_rate: true,
+        require_pivot_usdc_rate: false,
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
     assert!(
@@ -2926,6 +2934,318 @@ async fn a_pivot_leg_with_no_usdc_rate_in_window_is_left_unpriced() {
         (after - FOO_XLM_CLOSE * XLM_USDC_CLOSE * DEPEG_RATE).abs() < 1e-6,
         "an unpriced row must remain a candidate for a later pass, got {after}"
     );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+// ---- task 0228: the pivot-leg reset mode -----------------------------------
+
+/// The 0228 fixture: a FOO/XLM pivot leg already carrying its UNSCALED value
+/// (`close × ref_vwap`, the 0228 defect) on two days — one the imported USDC
+/// series covers, one it does not — with an XLM/USDC reference candle for each so
+/// the ONLY thing separating them is the rate.
+///
+/// `price_ohlcv_1h` deliberately: a sub-daily coarse table, which is where the
+/// 0268 mode needs its hourly-rates gate and this one does not (a pivoted row
+/// leaves no par signature, so its repair can be redone).
+async fn setup_0228_reset(db: &str, covered: u32, uncovered: u32) -> Client {
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    let stored = FOO_XLM_CLOSE * XLM_USDC_CLOSE;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({covered},   1, 2,'sdex',    {XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE}, 1000,58.8,0,0,{XLM_USDC_CLOSE},1,1), \
+             ({uncovered}, 1, 2,'sdex',    {XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE}, 1000,58.8,0,0,{XLM_USDC_CLOSE},1,1), \
+             ({covered},  10, 1,'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1), \
+             ({uncovered},10, 1,'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+}
+
+/// A 0228-shaped spec over the fixture above: XLM's quote leg, bounded above by
+/// the oracle epoch, and only where the imported series can refill.
+fn pivot_reset(not_before: u32) -> UsdResetSpec {
+    UsdResetSpec {
+        quote_asset_id: 1,
+        not_before,
+        not_after: Some(USDC_ORACLE_EPOCH_S),
+        require_external_rate: false,
+        require_pivot_usdc_rate: true,
+    }
+}
+
+/// `close_usd` and `version` of the FOO/XLM subject in `price_ohlcv_1h`.
+async fn pivot_subject_1h(client: &Client, db: &str, ts: u32) -> (f64, u64) {
+    client
+        .query(&format!(
+            "SELECT toFloat64(close_usd), toUInt64(version) FROM {db}.price_ohlcv_1h FINAL \
+             WHERE asset_id = 10 AND quote_asset_id = 1 AND timestamp = ?"
+        ))
+        .bind(ts)
+        .fetch_one::<(f64, u64)>()
+        .await
+        .unwrap()
+}
+
+/// The mirror image of `an_external_reset_refuses_a_quote_leg_that_is_not_canonical_usdc`.
+///
+/// Canonical USDC passes `assert_reset_target_is_priceable` — the peg and
+/// external tiers can price it — so without this gate
+/// `--reset-quote-asset-id <USDC> --reset-require-pivot-usdc-rate` would zero
+/// USDC-quoted rows that no PIVOT pass ever touches, and the peg tier would write
+/// $1 back over the lot. The error names the 0268 mode, because that mistake has
+/// an exact right answer.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_pivot_reset_refuses_the_canonical_usdc_leg() {
+    let db = "it_enrich_0228_usdc_leg";
+    let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
+    let client = setup_0228_reset(db, covered, uncovered).await;
+    seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
+
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1h".to_string();
+    c.one_shot = true;
+    c.usd_reset = Some(UsdResetSpec {
+        // asset_id 2 is canonical USDC in this fixture: priceable, so the
+        // priceability gate passes it, and no pivot pass can refill it.
+        quote_asset_id: 2,
+        ..pivot_reset(DEPEG_DAY - 86_400)
+    });
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+    assert!(
+        matches!(err, ChEnrichError::ResetPivotRateLegIsNotAPivotReference { quote_asset_id, .. }
+                 if quote_asset_id == 2),
+        "the pivot mode must refuse canonical USDC, got {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("--reset-require-external-rate"),
+        "the refusal must name the mode that DOES fit this leg: {msg}"
+    );
+    // A refused reset writes nothing.
+    let (v, _) = pivot_subject_1h(&client, db, covered).await;
+    assert!((v - FOO_XLM_CLOSE * XLM_USDC_CLOSE).abs() < 1e-6, "got {v}");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// The existing oracle-shadow guard, which the new mode reuses unchanged: the
+/// oracle tier runs first and wins, so resetting while `oracle_prices` holds a
+/// reading for the leg inside the span would re-apply the very rate the reset
+/// exists to replace — and relabel it `method = 'oracle'`.
+///
+/// ⚠️ This is the campaign's likeliest real blocker, not a hypothetical: XLM has
+/// held Reflector readings since 2026-03-11, and `--reset-not-after` defaults to
+/// 14:00 that day. Any XLM reading stamped earlier that day refuses the entire
+/// campaign, for every table and every month. Appendix C's precondition 5 is the
+/// query that finds out before the operator starts.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_pivot_reset_refuses_an_oracle_shadowed_span() {
+    let db = "it_enrich_0228_oracle_shadow";
+    let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
+    let client = setup_0228_reset(db, covered, uncovered).await;
+    seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
+    // One Reflector reading for XLM inside the reset's own window.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES ({covered}, 1, 'reflector', 0.0588, '{{}}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1h".to_string();
+    c.one_shot = true;
+    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+    assert!(
+        matches!(err, ChEnrichError::ResetBlockedByOracleRows { quote_asset_id, rows, .. }
+                 if quote_asset_id == 1 && rows == 1),
+        "an oracle-shadowed span must refuse the pivot reset, got {err:?}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Zero `external` USDC rows is an ERROR, never a warning. With an empty day-set
+/// the predicate matches nothing, so the campaign would report a clean, healthy,
+/// entirely empty repair — the same green all-clear that hid task 0182 for a
+/// month.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_pivot_reset_refuses_when_no_external_rates_are_loaded() {
+    let db = "it_enrich_0228_no_rates";
+    let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
+    let client = setup_0228_reset(db, covered, uncovered).await;
+    // Deliberately no seed_external_rate call.
+
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1h".to_string();
+    c.one_shot = true;
+    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+    assert!(
+        matches!(err, ChEnrichError::ResetRequiresExternalRates { quote_asset_id }
+                 if quote_asset_id == 1),
+        "an unloaded 0267 series must refuse the pivot reset, got {err:?}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// 🔑 **RE-OPENS NOTHING THE SAME PASS CANNOT REFILL.** The day the imported
+/// series does not cover keeps its stored value; only the covered day is
+/// re-priced.
+///
+/// This is the 157-candle lesson of task 0182 as a predicate. Both days carry an
+/// XLM/USDC reference candle, so the reference is NOT what separates them — the
+/// rate is, which is what the day-set predicate is for.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_pivot_reset_never_zeroes_a_bucket_it_cannot_refill() {
+    let db = "it_enrich_0228_uncovered";
+    let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
+    let client = setup_0228_reset(db, covered, uncovered).await;
+    seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
+
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1h".to_string();
+    c.one_shot = true;
+    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    let stats = ChEnrichmentPass::new(c).run().await.unwrap();
+
+    assert_eq!(
+        stats.rows_reset, 1,
+        "only the covered day may be re-opened — the uncovered one has no rate \
+         to refill it with, and zeroing it would strand it at 0"
+    );
+
+    let stored = FOO_XLM_CLOSE * XLM_USDC_CLOSE;
+    let (fixed, _) = pivot_subject_1h(&client, db, covered).await;
+    assert!(
+        (fixed - stored * DEPEG_RATE).abs() < 1e-6,
+        "the covered day must be re-priced at the measured rate ({}), got {fixed}",
+        stored * DEPEG_RATE
+    );
+    let (kept, _) = pivot_subject_1h(&client, db, uncovered).await;
+    assert!(
+        (kept - stored).abs() < 1e-6,
+        "the uncovered day must keep its stored value, got {kept}. 0.0 means it \
+         was re-opened and not refilled, which is worse than the defect."
+    );
+
+    // Both USD columns come from the one reference, or the row is incoherent.
+    let vqu: f64 = client
+        .query(&format!(
+            "SELECT toFloat64(volume_quote_usd) FROM {db}.price_ohlcv_1h FINAL \
+             WHERE asset_id = 10 AND quote_asset_id = 1 AND timestamp = {covered}"
+        ))
+        .fetch_one::<f64>()
+        .await
+        .unwrap();
+    assert!(
+        (vqu - 50.0 * XLM_USDC_CLOSE * DEPEG_RATE).abs() < 1e-6,
+        "volume_quote_usd must be recomputed from the same rate, got {vqu}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// 🔑 **VALUE-IDEMPOTENCE (D-06).** A second run over an already-repaired month
+/// recomputes IDENTICAL values and advances `version` by exactly 2 (reset +
+/// refill).
+///
+/// ⚠️ Zero-candidates-on-rerun is deliberately NOT asserted, and that is a
+/// documented deviation from BRIEF decision C rather than a gap. 0268 gets it for
+/// free because its candidate is the self-erasing `close_usd = close`; a pivoted
+/// row carries no such signature, and manufacturing one would need either a
+/// correlated join (illegal at the month-enumeration site) or a stored provenance
+/// column (a schema change). What IS guaranteed is that a rerun is a no-op in
+/// VALUE — the same framing `repair_target_pred`'s doc already states for the
+/// 0182 mode — and that the mode never reaches the recurring sweep, which pins
+/// `usd_reset: None`.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_pivot_reset_is_value_idempotent_across_runs() {
+    let db = "it_enrich_0228_idempotent";
+    let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
+    let client = setup_0228_reset(db, covered, uncovered).await;
+    seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
+
+    let pass = || {
+        let mut c = cfg(db);
+        c.table = "price_ohlcv_1h".to_string();
+        c.one_shot = true;
+        c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+        c
+    };
+
+    ChEnrichmentPass::new(pass()).run().await.unwrap();
+    let (first, v1) = pivot_subject_1h(&client, db, covered).await;
+    assert!(
+        (first - FOO_XLM_CLOSE * XLM_USDC_CLOSE * DEPEG_RATE).abs() < 1e-6,
+        "run 1 must scale the stored value, got {first}"
+    );
+    assert_eq!(
+        v1, 3,
+        "reset (+1) then refill (+1) over the seeded version 1"
+    );
+
+    ChEnrichmentPass::new(pass()).run().await.unwrap();
+    let (second, v2) = pivot_subject_1h(&client, db, covered).await;
+    assert!(
+        (second - first).abs() < 1e-12,
+        "a rerun must recompute the IDENTICAL value: {first} then {second}. A \
+         drift here would mean the pivot is re-scaling an already-scaled value."
+    );
+    assert_eq!(
+        v2,
+        v1 + 2,
+        "each run costs exactly one reset and one refill — the price of \
+         value-idempotence without a provenance column"
+    );
+
+    // The uncovered day is untouched by either run.
+    let (kept, vk) = pivot_subject_1h(&client, db, uncovered).await;
+    assert!(
+        (kept - FOO_XLM_CLOSE * XLM_USDC_CLOSE).abs() < 1e-6,
+        "got {kept}"
+    );
+    assert_eq!(vk, 1, "never re-opened, so never re-versioned");
 
     client
         .query(&format!("DROP DATABASE {db}"))

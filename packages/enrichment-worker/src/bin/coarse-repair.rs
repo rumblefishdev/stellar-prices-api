@@ -167,6 +167,33 @@ struct Args {
     #[arg(long, requires = "reset_quote_asset_id")]
     reset_require_external_rate: bool,
 
+    /// Task 0228 mode: re-open the already-written USD values of a PIVOT quote
+    /// leg (XLM or USDT) on the days task 0267's imported USDC/USD series covers,
+    /// so the scaled pivot recomputes them.
+    ///
+    /// ⚠️ The second flag in this tool that DISCARDS a computed value. What it
+    /// re-opens is every pivoted row of the leg on a covered day — there is no
+    /// signature narrowing the set further, because a pivoted row never carried
+    /// one (unlike 0268's `close_usd = close`). Consequently the mode is
+    /// **value-idempotent, not a fixed point**: a rerun over a repaired month
+    /// recomputes the same values and bumps `version` by 2 again. That is why it
+    /// is an operator action and never reaches the recurring sweep.
+    ///
+    /// ⚠️ `--reset-not-before` must be the MEASURED first candle of this leg's own
+    /// USDC market, not a convenient round date. Task 0182's reset epoch sat 19
+    /// hours before its reference market's first candle and 157 candles were
+    /// zeroed with nothing able to refill them. Appendix A's USDT figure
+    /// (`1612656000`) is the worked precedent; Appendix C gives the query.
+    ///
+    /// Mutually exclusive with `--reset-require-external-rate`: that mode is for
+    /// canonical USDC, this one for the legs that pivot off it. Refused by
+    /// `UsdResetSpec::validate`, before a connection is opened.
+    ///
+    /// Refused outright when `prices.usd_rate` holds zero `external` rows — the
+    /// tool does not run and quietly do nothing.
+    #[arg(long, requires = "reset_quote_asset_id")]
+    reset_require_pivot_usdc_rate: bool,
+
     /// Assert that the FREEZE snapshots for this span already exist.
     ///
     /// Required to combine `--skip-snapshot` with `--reset-*`. On prod that
@@ -272,14 +299,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         //    assert-shaped guard over that derivation: if someone later turns the
         //    bound into a knob, the refusal is already here rather than being
         //    remembered.
-        if args.reset_require_external_rate {
+        if args.reset_require_external_rate || args.reset_require_pivot_usdc_rate {
             let derived = external_window_s(&args.table);
             if derived < min_window {
                 return Err(format!(
-                    "the external tier's derived staleness bound ({derived} s) is shorter \
-                     than {}'s bucket width ({min_window} s). This is unreachable while the \
-                     bound is derived from the table; if it has been made configurable, \
-                     restore the max(1 day, bucket width) floor before running a reset.",
+                    "the derived USDC-rate staleness bound ({derived} s) is shorter than \
+                     {}'s bucket width ({min_window} s). It gates the external tier and, \
+                     since task 0228, both of the pivot's rate legs. This is unreachable \
+                     while the bound is derived from the table; if it has been made \
+                     configurable, restore the max(1 day, bucket width) floor before \
+                     running a reset.",
                     args.table
                 )
                 .into());
@@ -289,8 +318,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The reset's upper bound, resolved once and logged, because it decides which
     // rows are re-opened and it has a non-obvious default. See --reset-not-after.
+    // Both rate-gated modes default to the SAME constant, and for the same
+    // reason: it is the first instant a poll priced canonical USDC, so it is the
+    // ceiling below which a measured-rate repair is the whole story. Task 0228's
+    // mode inherits it because its rate legs read that same series.
     let not_after = args.reset_not_after.or_else(|| {
-        args.reset_require_external_rate
+        (args.reset_require_external_rate || args.reset_require_pivot_usdc_rate)
             .then_some(USDC_ORACLE_EPOCH_S)
     });
     if args.reset_quote_asset_id.is_some() {
@@ -299,6 +332,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 reset_not_after = na,
                 defaulted = args.reset_not_after.is_none(),
                 require_external_rate = args.reset_require_external_rate,
+                require_pivot_usdc_rate = args.reset_require_pivot_usdc_rate,
                 "USD reset upper bound"
             ),
             None => info!("USD reset is unbounded above (task 0182 behaviour)"),
@@ -326,6 +360,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     not_before,
                     not_after,
                     require_external_rate: args.reset_require_external_rate,
+                    require_pivot_usdc_rate: args.reset_require_pivot_usdc_rate,
                 };
                 // 4. An empty [not_before, not_after) window (task 0268 review,
                 //    WR-05). Refused HERE, before a connection is opened, and
@@ -335,6 +370,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 //    never reached — the run would end green having touched
                 //    nothing. Applies to dry runs too; a dry run over an empty
                 //    window is the false all-clear, not a rehearsal.
+                //
+                // 5. The two rate-gated modes together (task 0228), refused by the
+                //    same call and for the same reason: their candidate signatures
+                //    do not intersect, so the combination is another way to spell
+                //    an unsatisfiable predicate. Delegated to `validate()` rather
+                //    than written as a clap `conflicts_with`, so there is ONE
+                //    definition of the refusal and no driver can assemble it.
                 spec.validate()?;
                 Some(spec)
             }
@@ -470,6 +512,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                  USDC-denominated close, on every granularity) is what closes \
                  acceptance criteria 1 and 2, and it is not implied by a clean run \
                  here."
+            );
+        }
+        if args.reset_require_pivot_usdc_rate {
+            println!(
+                "This was the task 0228 pivot-leg mode. Finish the campaign with \
+                 Appendix C of docs/runbooks/repair-coarse-usd-values.md: the \
+                 after-check (the median implied reference rate on 2023-03-11 must \
+                 fall ~3.19%, per grain) is what closes acceptance criteria 1 and \
+                 2, and it is not implied by a clean run here. Run the falsifier: \
+                 cargo test -p enrichment-worker --test post_run_0228_it -- --ignored"
             );
         }
         if reset > enriched {
