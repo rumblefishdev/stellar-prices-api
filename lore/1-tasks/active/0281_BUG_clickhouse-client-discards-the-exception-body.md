@@ -192,6 +192,62 @@ probe, the API and every operator CLI.
   against the quota — use `sleepEachRow`, which burns time and no rows, or stay
   local. The whole investigation was reproducible locally for nothing.
 
+# 📕 DEPLOY RUNBOOK — shipping the readable-errors fix
+
+**PR #310 is merged (`9de447b`) and NOT deployed.** Merging is not shipping —
+0091 merged the proto27 fix and production stayed frozen until 0094 shipped it.
+
+## ⚠️ The fix touches EVERY component, so decide the scope deliberately
+
+`with_readable_errors` sits in `mtls::client_with_mtls`, the single funnel used
+by the API, every worker, every probe and every operator CLI. So the benefit is
+repo-wide, but the stacks deploy separately:
+
+| stack | carries |
+|---|---|
+| `Prices-production-EventBridge` | enrichment, oracle, cleanup, supply, asset-discovery, coarse-sweep, 3 probes |
+| `Prices-production-Compute` | ledger-processor, api-handler |
+
+⛔ **The enrichment worker is in EventBridge, NOT Compute** — the trap that
+cost a wasted step on 0215's run.
+
+## 1. [local machine, repo] Build every asset, in ONE invocation
+
+```bash
+args=(); while IFS= read -r n; do args+=(-p "$n"); done < <(tools/scripts/lambda-assets.sh)
+cargo lambda build --release --arm64 --features lambda "${args[@]}"
+```
+
+⚠️ Not `-p enrichment-worker` alone — cargo feature unification makes a
+single-crate build a different binary.
+
+## 2. [local machine, infra/] Diff, then deploy
+
+```bash
+cd infra && make diff-production
+make deploy-production-eventbridge     # enrichment and friends
+make deploy-production-compute         # the API and ledger-processor
+```
+
+Expect only `Code.S3Key` changes. Any Rule or IAM change → stop.
+
+**Checkpoint.** `CodeSha256` must move from the value recorded in [[0215]]
+(`Mx3IIUuT1CSHLdMsTWTGvADpmNmVcDGQ96zRnLuNjSM=`, 2026-09-11 11:13:27Z).
+
+## 3. [local machine, AWS CLI] Re-run 0215's induction — it is the acceptance
+
+The full procedure is in [[0215]]'s own runbook. In short: set
+`ENRICH_MAX_EXECUTION_TIME_SECS=1`, invoke, read the log, remove the variable
+again in the same sitting.
+
+**This time the log must read `Code: 159 … TIMEOUT_EXCEEDED`**, not
+`bad response: `. That contrast is the whole acceptance, for this task and for
+0215's last criterion together.
+
+## 4. [local machine] Confirm the restore
+
+Bound removed, 13 env keys, `prices-production-cleanup` still `DISABLED`.
+
 ## Acceptance Criteria
 
 - [x] A failing `INSERT … SELECT` surfaces the ClickHouse error **code** and
@@ -203,6 +259,7 @@ probe, the API and every operator CLI.
       green after. ⚠️ Requires a proxy and fails loudly without one.
 - [ ] The enrichment worker logs `TIMEOUT_EXCEEDED` (159) when its bound is
       exceeded — which closes [[0215]]'s last criterion.
+      ⏳ **Code merged 2026-09-11 (`9de447b`), deploy outstanding.**
 - [ ] Verified by inducing on prod, the same way 0215's run was: set
       `ENRICH_MAX_EXECUTION_TIME_SECS=1`, invoke, read the log, restore.
       ⚠️ Restore in the same sitting; at 1 s the historical sweep dies every
