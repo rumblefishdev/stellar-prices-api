@@ -2,7 +2,7 @@
 id: "0098"
 title: "Version-gap CI guard — surface stellar-xdr protocol lag before it freezes prod"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0094", "0091"]
 tags: ["milestone-M1", "priority-medium", "effort-small", "phase-live", "ci", "resilience"]
