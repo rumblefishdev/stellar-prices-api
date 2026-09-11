@@ -1174,6 +1174,10 @@ POST_RUN_0268_VERSION_BEFORE_1M=<version_before_1M> \
   cargo test -p enrichment-worker --test post_run_0268_it -- --ignored
 ```
 
+Against prod from an operator laptop, `CLICKHOUSE_URL` cannot reach the
+cluster: drop it, export the same `CH_DOMAIN` / `MTLS_*` variables as the
+campaign, and add `--features aws-mtls` to the `cargo test` (task 0276).
+
 Both tests are expected to FAIL before the pass and pass after it. The second
 one (`usdc_is_back_at_par_a_few_days_later`) exists so the first cannot be
 satisfied by a table priced uniformly low.
