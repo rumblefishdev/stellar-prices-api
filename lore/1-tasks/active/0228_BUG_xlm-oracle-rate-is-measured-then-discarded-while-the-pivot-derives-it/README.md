@@ -80,6 +80,10 @@ history:
       written and compile but were NOT RUN —
       no ClickHouse is reachable on this machine, exactly as 0268 recorded. The
       re-enrichment campaign itself is an operator CHORE, not started.
+      Independent verifier: human_needed only on the ClickHouse-gated fifth
+      must-have; code review: 0 blockers, WR-01 (dry run skipped the pivot
+      window guard) fixed in a fourth code commit. STATUS STAYS ACTIVE — the
+      campaign, the deploy and the #[ignore] runs are the operator's.
 ---
 
 # We measure XLM's dollar price, throw it away, then derive it from USDC
@@ -682,6 +686,33 @@ One prod query WAS run this session, read-only: the two-ASOF shape probe
 `close_usd` 0.00144215598065 → scaled 0.00139618 (ref vwap 0.05882353 × rate
 0.96812 `external`), i.e. **−3.19 %** — the acceptance figure, measured on the
 engine, before any of this code existed.
+
+### Independent review and verification, 2026-09-11
+
+Both ran as separate agents after the three commits, on the branch, with no
+access to the executor's notes beyond the plan:
+
+- **Verifier** re-ran every command above itself (0 failed across 36 test
+  binaries; clippy clean; both `diff` gates empty; every `#[ignore]` binary
+  compiles) and read `pivot_sql` end to end. Verdict: 4 of 5 must-haves
+  verified; the fifth — value-idempotence at `version + 2` — is implemented
+  and wired but is a ClickHouse-backed test, so it stays **human_needed**
+  until the harness runs.
+- **Code review** (diff `develop..HEAD` against BRIEF §5): **0 blockers**.
+  - **WR-01, fixed on the branch** — `coarse-repair` gated the
+    `--pivot-window-s` minimum-width guard behind `!args.dry_run`, so
+    Appendix C's "dry run first" would have accepted a window the real run
+    then refused. The window guards now run in dry-run mode too; only the
+    snapshot guard stays real-run-only (a dry run discards nothing).
+    Inherited from the 0182 shape, so Appendix A/B had the same gap.
+  - **WR-02, recorded** — `assert_pivot_rate_leg_is_a_pivot_reference`
+    resolves the leg from `prices.assets` while `assert_external_rates_are_loaded`
+    checks a literal `usd_rate` identity; the two could disagree only in a
+    `prices.assets` inconsistency window. Not changed: both refusals are
+    conservative, and unifying them means threading `ReferenceIds` into the
+    rate check for no measured benefit.
+  - IN-01 (`refs.usdc.unwrap_or(0)` sentinel in the new error variant) and
+    IN-02 (two snapshot round-trips per pass) recorded, not changed.
 
 ## Operator Checklist (the campaign CHORE)
 

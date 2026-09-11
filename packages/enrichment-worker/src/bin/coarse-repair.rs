@@ -271,6 +271,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                  If nobody has, stop: there is no rollback point."
                 .into());
         }
+    }
+    // The window guards below run in dry-run mode TOO (task 0228 review WR-01):
+    // the runbooks say "dry run first", and a dry run that accepts a window the
+    // real run then refuses is a rehearsal of nothing. Only the snapshot guard
+    // above is a real-run concern — a dry run discards nothing.
+    if args.reset_quote_asset_id.is_some() {
         // 2. A staleness window shorter than the table's own bucket width drops
         //    the reference for buckets whose anchor is the previous bucket —
         //    which, before a reset, only left a row unenriched, but now discards
