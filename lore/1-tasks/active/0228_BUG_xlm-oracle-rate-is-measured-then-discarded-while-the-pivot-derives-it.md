@@ -2,7 +2,7 @@
 id: "0228"
 title: "XLM's measured USD rate is fetched every 5 minutes and thrown away, while 11 M candles are priced by deriving it indirectly through USDC"
 type: BUG
-status: backlog
+status: active
 related_adr: ["0011"]
 related_tasks: ["0167", "0170", "0172", "0182", "0061", "0227", "0173"]
 tags: ["priority-medium", "effort-medium", "oracle", "enrichment", "data-correctness", "usd", "milestone-M2"]
@@ -12,7 +12,7 @@ links:
   - "../../../packages/enrichment-worker/src/ch_enrich.rs"
   - "../../../packages/prices-clickhouse/schema/init.sql"
 history:
-  - date: 2026-08-26
+  - date: "2026-08-26"
     status: backlog
     who: okarcz
     note: >
@@ -30,6 +30,13 @@ history:
       ⚠️ Filed as a design question, not a wrong-number claim. Whether the
       derived value materially differs from the measured one is UNMEASURED and
       is the first acceptance criterion.
+  - date: "2026-09-11"
+    status: active
+    who: akot
+    note: >
+      Picked up by akot. Starting with AC 1 — measure the derived pivot
+      `ref_usd` for XLM against Reflector's measured reading before any fix
+      is chosen.
 ---
 
 # We measure XLM's dollar price, throw it away, then derive it from USDC
