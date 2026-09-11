@@ -220,36 +220,46 @@ re-pin to their merge rev.
 | `xdr-protocol-watch.yml`, daily 06:17 UTC | strict   | **mainnet moving while nothing in the repo changes** — the proto27 case, and the reason this is on a clock at all |
 | this runbook, step 0                      | advisory | shipping a binary that cannot decode current ledgers                                                              |
 
-### One-time setup: Slack delivery
+### How a failure reaches a person
 
-The daily watch reaches **#stellar-prices-api-bot** through the **Slack GitHub
-app**, which is already installed in the workspace. Run this once, in that
-channel:
+The daily watch opens **one tracking issue** and keeps it current. No secret,
+no Slack app, no AWS — `GITHUB_TOKEN` with `issues: write` is the whole
+mechanism.
 
-```
-/github subscribe rumblefishdev/stellar-prices-api workflows:{name:"XDR protocol watch"}
-```
+| event                            | what happens                             |
+| -------------------------------- | ---------------------------------------- |
+| first detection                  | issue opened → notifies watchers         |
+| still the same tier next day     | body refreshed, **no comment, silent**   |
+| LAGGING → BEHIND (mainnet voted) | comment → notifies                       |
+| check passes                     | comment + **issue closed automatically** |
 
-No webhook, no repository secret, no AWS involvement.
+It is deliberately not a daily comment. The condition persists for as long as
+the bump takes, and a daily notification saying nothing new gets a thread
+muted — at which point the guard is worse than absent, because it looks
+present. The body is rewritten every run regardless, so the issue is never
+stale even on the silent days.
 
-⚠️ **The subscription matches the workflow's `name:` exactly.** Renaming it in
-`.github/workflows/xdr-protocol-watch.yml` silently unsubscribes the channel —
-the workflow keeps failing and the channel stays quiet, which is precisely the
-failure this guard exists to prevent. Rename both together or neither.
+GitHub's own scheduled-workflow failure email fires daily and separately. It
+goes to _"the user who last modified the cron syntax in the workflow file"_ —
+one inbox, subject to that person's notification settings, and silently
+reassigned by an unrelated edit to the `cron:` line. The issue exists because
+that is too thin on its own.
 
-The app posts the run and a link rather than the report text, so the check
-writes its output to the run's **summary**: it is the first thing visible after
-clicking through, not something to dig out of a log.
+#### Why not Slack
 
-#### Why not an incoming webhook, and why not the alarm path
+All three routes are closed, recorded so they are not re-attempted:
 
-Recorded because both are the obvious answers and both are closed:
-
-- **An incoming webhook** needs a Slack app, and the workspace is at its
+- **Incoming webhook** — needs a Slack app, and the workspace is at its
   installed-app limit.
-- **SNS → AWS Chatbot**, the route every ops alarm uses (task 0056), needs AWS
+- **Slack GitHub app** — installed in the workspace, but not on the GitHub org;
+  installing it needs an organisation owner.
+- **SNS → AWS Chatbot** (the path every ops alarm uses, task 0056) — needs AWS
   credentials this workflow does not have and should not be handed for one
   notification.
+
+Routing through Chatbot properly would mean a CloudWatch metric published by
+something holding AWS credentials — an OIDC role, or a scheduled Lambda beside
+the existing probes — plus a CDK change and a deploy. That is its own task.
 
 ## Rollback
 

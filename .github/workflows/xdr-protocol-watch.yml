@@ -5,23 +5,18 @@
 # Protocol 27 "Zipper" froze our live candle frontier for six days (tasks 0091
 # / 0094). Nothing in this repository changed while that happened — mainnet
 # moved and our pin stood still. A check that runs on push or pull_request
-# cannot see that, because there is no push. So the guard has to be on a
-# clock.
+# cannot see that, because there is no push. So the guard has to be on a clock.
 #
 # `--watch` makes the comparison strict, and the strictness is the point:
 #
 #   * LAGGING (core supports a protocol newer than our pin) FAILS here, where
 #     it is only a notice in CI. Horizon publishes `core_supported_protocol_
-#     version` weeks before the vote, and that gap is the entire lead time
-#     this task exists to buy. A warning nobody is obliged to read is what we
+#     version` weeks before the vote, and that gap is the entire lead time this
+#     task exists to buy. A warning nobody is obliged to read is what we
 #     already had.
 #   * An unreachable Horizon FAILS here too. A scheduled watch that quietly
 #     checks nothing is precisely the shape of the outage being guarded
 #     against — every signal green, nothing actually verified.
-#
-# A failing run reaches #stellar-prices-api-bot through the Slack GitHub app,
-# subscribed to this workflow by name — see the delivery step below for the
-# command and for why it is not a webhook.
 #
 # Run it by hand any time with `npm run xdr:watch-protocol-gap`.
 name: XDR protocol watch
@@ -35,37 +30,42 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   protocol-gap:
     name: stellar-xdr vs mainnet protocol
     runs-on: ubuntu-latest
     steps:
+      # ⚠️ `ref: develop`, and it is load-bearing.
+      #
+      # A `schedule` trigger only fires from the DEFAULT branch, which here is
+      # `master` — a RELEASE branch, ~85 commits behind `develop`. So the
+      # workflow file has to live on `master`, but master's `Cargo.toml` is a
+      # release-old snapshot. Checking out the default branch would read a pin
+      # that nobody deploys: we would bump `stellar-xdr` on `develop`, ship it,
+      # and this watch would keep reporting the old number until the next
+      # release merge — a guard reporting a stale reading, which is worse than
+      # no guard.
+      #
+      # The deploy runbook builds from `develop`, so `develop` is what ships,
+      # so `develop` is what gets measured. This also means only the WORKFLOW
+      # needs to exist on `master`; the script comes from the checkout.
       - uses: actions/checkout@v4
+        with:
+          ref: develop
 
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
 
-      # `node ...` directly, NOT `npm run xdr:watch-protocol-gap`, and that is
-      # load-bearing rather than a style choice.
+      # `node ...` directly rather than `npm run xdr:watch-protocol-gap`: one
+      # less thing that has to agree across branches, and the script is
+      # dependency-free on purpose so there is no `npm ci` to fail.
       #
-      # A `schedule` trigger only fires from the DEFAULT branch, which in this
-      # repository is `master` — a release branch, currently ~85 commits behind
-      # `develop`. So this file has to live on `master` to run at all, and
-      # anything it depends on has to live there too. `master` has `.nvmrc` and
-      # `package.json`, but not the `xdr:` scripts; invoking through npm would
-      # fail there with "missing script" while working perfectly on every
-      # branch anyone tests it on.
-      #
-      # Calling the script directly keeps this workflow portable to `master` as
-      # exactly TWO files — itself and the script — with no package.json edit
-      # dragged onto a release branch. `npm run xdr:verify-protocol-gap` still
-      # exists for humans and for `ci.yml`, which runs from the PR's own branch
-      # and therefore always has it.
-      #
-      # The report is captured as well as printed so the run SUMMARY can carry
-      # it: the Slack GitHub app posts a run and a link, not our text.
+      # The report is captured as well as printed so every downstream step —
+      # the run summary, the issue body — can carry the actual numbers instead
+      # of "a job failed".
       - name: Compare the pinned stellar-xdr against mainnet (strict)
         id: gap
         run: |
@@ -80,27 +80,6 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           exit $status
 
-      # DELIVERY — the Slack GitHub app, subscribed to this workflow by name:
-      #
-      #   /github subscribe rumblefishdev/stellar-prices-api \
-      #       workflows:{name:"XDR protocol watch"}
-      #
-      # ...run once in #stellar-prices-api-bot. There is deliberately no
-      # webhook and no secret here. The obvious route — an incoming webhook —
-      # needs a Slack app, and the workspace is at its installed-app limit; the
-      # other route, the SNS -> AWS Chatbot path every ops alarm uses (task
-      # 0056), needs AWS credentials this workflow does not have and should not
-      # be handed for one notification.
-      #
-      # ⚠️ The subscription matches on the workflow NAME above, exactly.
-      # Renaming `name:` at the top of this file silently unsubscribes the
-      # channel — the workflow keeps failing and the channel keeps quiet, which
-      # is this task's own failure mode. Rename both together or not at all.
-      #
-      # What that costs: the app posts the run and a link, not our text. This
-      # step buys most of it back — the report lands in the run's SUMMARY, so
-      # it is the first thing visible after the click rather than something to
-      # be dug out of a log.
       - name: Put the report on the run summary
         if: always()
         env:
@@ -113,3 +92,113 @@ jobs:
             echo "$REPORT"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # DELIVERY — one tracking issue, opened once and kept current.
+      #
+      # Slack was not available: the workspace is at its installed-app limit so
+      # an incoming webhook cannot be created, the Slack GitHub app needs an
+      # org-owner install we do not have, and SNS -> AWS Chatbot (the ops-alarm
+      # path, task 0056) needs AWS credentials this workflow does not hold.
+      # An issue needs none of that — `GITHUB_TOKEN` and the `issues: write`
+      # permission above are enough.
+      #
+      # WHY IT DOES NOT COMMENT EVERY DAY
+      # ---------------------------------
+      # This condition persists for as long as the bump takes, which is days.
+      # A daily comment on the same issue is a daily notification that says
+      # nothing new, and the reliable outcome of that is a muted thread — at
+      # which point the guard is worse than absent, because it looks present.
+      #
+      # So: notify on the two events that carry information, and stay silent
+      # otherwise.
+      #
+      #   opened      first detection                        -> notification
+      #   escalated   LAGGING -> BEHIND, mainnet has voted    -> notification
+      #   unchanged   still the same tier                     -> body refresh
+      #                                                          only, SILENT
+      #   resolved    check passes                            -> comment+close
+      #
+      # The body is rewritten every run either way, so the issue is never
+      # stale even on the silent days. GitHub's own scheduled-workflow failure
+      # email fires daily and independently of all this; it goes to whoever
+      # last edited the `cron:` line above.
+      - name: Open or update the tracking issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REPORT: ${{ steps.gap.outputs.report }}
+          OUTCOME: ${{ steps.gap.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          TITLE='stellar-xdr lags the mainnet protocol'
+
+          # Exact-title match rather than a label: a label has to exist before
+          # it can be applied, and a missing one fails the step at the moment
+          # it is most needed.
+          number=$(gh issue list --repo "$REPO" --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"$TITLE\")] | first | .number // empty")
+
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -n "$number" ]; then
+              gh issue comment "$number" --repo "$REPO" --body \
+                "Resolved — the pinned \`stellar-xdr\` is level with mainnet again. Closed automatically by [this run]($RUN_URL)."
+              gh issue close "$number" --repo "$REPO"
+              echo "closed #$number"
+            else
+              echo "check passed, no open issue — nothing to do"
+            fi
+            exit 0
+          fi
+
+          # BEHIND means mainnet has already voted past us; LAGGING means it
+          # has not yet. The transition between them is the single most
+          # important moment in this issue's life, so it is the one thing
+          # besides creation that is allowed to notify.
+          tier=LAGGING
+          case "$REPORT" in *"is BEHIND mainnet protocol"*) tier=BEHIND ;; esac
+
+          body=$(cat <<EOF
+          <!-- xdr-protocol-watch tier=$tier -->
+          \`\`\`
+          $REPORT
+          \`\`\`
+
+          **What this is.** The pinned \`stellar-xdr\` major tracks the Stellar
+          protocol version. When mainnet advances past it the ledger-processor
+          hits an XDR decode wall — and that failure is silent: the SQS queue
+          drains normally, the DLQ stays empty, the Lambda logs no errors, and
+          the doorbell-lag alarm watches queue age, which stays healthy. That
+          is how protocol 27 froze the live candle frontier for six days.
+
+          **What to do.** The bump is tracked as lore task **0277**, which also
+          records the blocker: BE must bump \`xdr-parser\` first, because
+          \`prices-ingest-core/src/decode.rs\` takes \`LedgerCloseMeta\` across
+          that crate boundary.
+
+          Opened and maintained automatically by \`.github/workflows/xdr-protocol-watch.yml\`
+          (lore task 0098). It closes itself when the check passes. Last run:
+          [$RUN_URL]($RUN_URL)
+          EOF
+          )
+          body=$(printf '%s\n' "$body" | sed 's/^          //')
+
+          if [ -z "$number" ]; then
+            url=$(gh issue create --repo "$REPO" --title "$TITLE" --body "$body")
+            echo "opened $url"
+            exit 0
+          fi
+
+          previous=$(gh issue view "$number" --repo "$REPO" --json body --jq .body)
+          gh issue edit "$number" --repo "$REPO" --body "$body"
+
+          case "$previous" in
+            *"tier=$tier"*)
+              echo "#$number still $tier — body refreshed, no comment" ;;
+            *)
+              gh issue comment "$number" --repo "$REPO" --body \
+                "⚠️ **Escalated to $tier.** Mainnet has moved past our pin — the decode wall is live or one ledger away. See [this run]($RUN_URL)."
+              echo "#$number escalated to $tier" ;;
+          esac
