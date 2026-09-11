@@ -720,7 +720,35 @@ operator's to run.
 more than ~3.3 s, so there is no statement long enough to trip a sane bound.
 Move the bound instead — same mechanism, one reversible env var.
 
-### 1. [local machine, this repo] Merge and deploy PR #305
+### 0. [local machine, AWS CLI] Pre-check — has the deploy already happened?
+
+```bash
+export AWS_PROFILE=soroban-explorer AWS_REGION=eu-central-1
+aws sts get-caller-identity --query Arn --output text
+aws lambda get-function-configuration \
+  --function-name prices-production-enrichment --region eu-central-1 \
+  --query '{LastModified:LastModified,Bound:Environment.Variables.ENRICH_MAX_EXECUTION_TIME_SECS}' \
+  --output json
+```
+
+**Checkpoint, and it decides whether step 1 is needed:**
+
+- `Bound` is `null` **and** `LastModified` predates the PR #305 merge
+  (2026-09-10) → the new binary is NOT deployed. Do step 1.
+- `Bound` is `"120"` → already deployed and configured. **Skip step 1**, go
+  to step 2.
+- `Bound` is `null` but `LastModified` is recent → ambiguous, and this is
+  exactly [[0141]]. The variable is optional, so its absence does not prove the
+  binary is old. Treat as not-deployed and do step 1; a redundant deploy is
+  cheap, a phantom induction is not.
+
+⚠️ Do not skip this because the PR is merged. Merging is not shipping — 0091
+merged the proto27 fix and production stayed frozen until 0094 deployed it.
+
+### 1. [local machine, this repo] Deploy PR #305
+
+⚠️ **Already merged** — `8726c76`, 2026-09-10. This step is the deploy only;
+there is nothing left to merge.
 
 Normal compute deploy. ⚠️ [[0141]] — confirm the deployed asset actually
 changed; `deploy-production-compute` does not build.
@@ -759,6 +787,22 @@ days now arrives with an error code attached.
 
 Same command as step 2 with `"120"`. Then confirm one clean `QueryFinish` pivot
 pair on the next run before closing the AC.
+
+⚠️ **Do not leave the bound at 1 s.** Every enrichment statement dies while it
+is there, which re-creates the outage this task exists to fix — visibly this
+time, but still. Restore in the same sitting.
+
+### 5. [BE thread] Post our side of the two-sided check
+
+The last unticked item after the induction, and the measurements are already
+done — they are in the *"We confirm the errors stopped"* criterion above:
+`BadResponse("")` 3/hour → **0**, `Status: timeout` every invocation → **0**,
+and invocations/day **72 → 24**, which is the sharpest of the three because
+async retries only exist when the attempt before them failed.
+
+While you are there: nudge BE on **[[0277]]** — the `xdr-parser` bump to
+`stellar-xdr 28`. Protocol 28 votes 2026-09-16 17:00 UTC and we cannot move
+until they do.
 
 ## ✅ The `max_execution_time` MECHANISM is already proven — 2026-09-10
 
