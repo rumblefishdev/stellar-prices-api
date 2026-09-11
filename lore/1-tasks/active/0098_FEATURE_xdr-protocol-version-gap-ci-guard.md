@@ -51,8 +51,155 @@ deliberately kept on `branch="develop"` while `stellar-xdr` is exact-pinned (see
 
 ## Acceptance Criteria
 
-- [ ] Guard exists (CI job and/or Renovate rule) tracking `stellar-xdr` vs the
-      live mainnet protocol version.
-- [ ] It warns/fails when the pinned protocol lags the network protocol.
-- [ ] Behaviour documented in the deploy runbook; `xdr-parser` develop-pin caveat
+- [x] Guard exists (CI job and/or Renovate rule) tracking `stellar-xdr` vs the
+      live mainnet protocol version. **PR #306** — `verify-xdr-protocol-gap.mjs`,
+      wired into `ci.yml` (advisory) and `xdr-protocol-watch.yml` (daily,
+      strict). No Renovate rule; see Design Decisions.
+- [x] It warns/fails when the pinned protocol lags the network protocol.
+      **Two tiers**, and the warning one is the valuable one — see below.
+- [x] Behaviour documented in the deploy runbook; `xdr-parser` develop-pin caveat
       noted so the guard doesn't false-alarm on it.
+      `docs/runbooks/deploy-ledger-processor.md` gains a
+      *Protocol-version lag* section plus a preflight line in step 0.
+- [ ] 🔴 **`SLACK_WEBHOOK_URL` exists as a repository secret.** Operator's, and
+      the delivery does not work without it — the workflow still fails
+      correctly, but logs a warning instead of posting. Steps are in the
+      runbook. ⚠️ A Slack **incoming webhook**, NOT the SNS → AWS Chatbot path
+      the ops alarms use: this workflow has no AWS credentials and should not
+      be handed them for one `curl`.
+- [ ] Confirmed end to end by a manual `workflow_dispatch` run posting to
+      `#stellar-prices-api-bot`. Cheap to check right now and **self-testing
+      while it lasts**: we are behind protocol 28, so strict mode fails on
+      purpose and a correctly wired webhook posts immediately. That window
+      closes when [[0277]] lands.
+
+## Implementation Notes
+
+Shipped on `feat/0098_xdr-protocol-version-gap-ci-guard`, **PR #306**.
+450 lines, no new dependency.
+
+**What it reads.** Horizon's root document, one GET, no credentials:
+
+```
+current_protocol_version        27   what mainnet runs NOW
+core_supported_protocol_version 28   what core is READY to run
+```
+
+…against the `stellar-xdr` major in `Cargo.toml`. The mapping the check
+encodes is that the crate's MAJOR version tracks the protocol version — 27
+decodes protocol 27, 28 decodes 28. That assumption is stated in the script
+header so a future reader can test it rather than infer it.
+
+**Three checks, not one:**
+
+| check | fails when |
+|---|---|
+| BEHIND | `ours < current_protocol_version` — mainnet has moved past us |
+| LAGGING | `ours < core_supported_protocol_version` — an upgrade is available |
+| lockfile | two `stellar-xdr` majors resolved, or the lock disagrees with the pin |
+
+The third is [[0277]]'s compile break, named precisely instead of surfacing as
+a wall of trait errors.
+
+**Measured on the day it was written** — the guard fired its warning tier
+correctly against live mainnet, five days before the Protocol 28 vote:
+
+```
+notice: stellar-xdr 27 lags the protocol core already supports (28).
+  pinned stellar-xdr 27 | mainnet current 27 | core supports 28
+```
+
+**All eight paths exercised** before commit, against a stub Horizon on
+localhost and stub manifests in a throwaway tree: BEHIND, LAGGING, current,
+unreachable-soft, unreachable-strict, two-majors, lock-disagrees-with-pin,
+pin-missing. The Slack payload was posted to a local sink and confirmed valid
+JSON carrying the report text.
+
+## Design Decisions
+
+### From Plan
+
+1. **Horizon's root document as the source**, as the task specified. It needs
+   no credentials, no SDK and no AWS, which is what keeps the check runnable
+   from CI, from a laptop and from the deploy runbook's preflight identically.
+
+### Emerged
+
+2. **Two tiers, and `core_supported` is the one that does the work.** The task
+   said "warn/fail when ours < network", which reads as one comparison. Horizon
+   publishes two numbers, and the useful one is `core_supported_protocol_version`
+   because it rises **weeks before the vote**. By the time `current` moves we
+   are already in the outage. So LAGGING is the early warning and BEHIND is the
+   backstop, not the other way round.
+
+3. **The scheduled workflow is the guard; the CI job is a convenience.** This
+   is the decision that matters most and it is not what the task title
+   ("version-gap CI guard") implies. Nothing in this repo changed while proto27
+   froze us — mainnet moved and our pin stood still — so a `push` /
+   `pull_request` check sees no event at all and would not have caught the very
+   incident it was spawned from. The clock is the mechanism.
+
+4. **PR CI is advisory; only the scheduled run is strict.** A PR must never go
+   red because the Stellar Foundation announced something or Horizon had a bad
+   minute. A developer can fix neither, and a gate that red-lights unrelated
+   PRs gets switched off within a week — at which point the guard is worse than
+   absent, because it looks present. BEHIND still fails on a PR.
+
+5. **An unreachable Horizon FAILS under `--watch`.** A scheduled watch that
+   quietly checks nothing has the exact shape of the outage being guarded
+   against: every signal green, nothing actually verified. It is only a notice
+   on a PR.
+
+6. **The CI job is ungated by `changes` path filters.** Every other job in
+   `ci.yml` is gated on `rust`/`typescript` paths. This one cannot be: the
+   condition it watches produces no diff on our side at all.
+
+7. **Slack via an incoming webhook, not the existing alarm path.** The ops
+   alarms reach `#stellar-prices-api-bot` through SNS → AWS Chatbot (task
+   0056). GitHub Actions cannot reach that without AWS credentials, and this
+   repo's CI holds **no secrets at all** today. An OIDC role + CDK change +
+   deploy to send one message is disproportionate to an `effort-small` task.
+   The two routes are independent and land in the same channel.
+
+8. **No Renovate rule** (the task offered it as optional). There is no Renovate
+   config in this repo, so adding one is repo-wide dependency automation rather
+   than a rule — a much larger change than this task. It would also solve a
+   different problem: Renovate fires when a **crate version publishes**, while
+   the thing that hurt us is **mainnet voting**. The daily watch covers both,
+   because `core_supported` moves either way.
+
+9. **The two-tier decision was put to the operator, and Slack was chosen.** The
+   alternatives were GitHub's own notification (zero config) or additionally
+   opening a GitHub issue. Issues were ruled out on evidence: `gh issue list`
+   returns empty — the repo has never used them, so an issue would be a dead
+   letter.
+
+## Issues Encountered
+
+- **YAML ate the channel name.** `- name: Post the lag to #stellar-prices-api-bot`
+  parses as a comment from the `#` onward, silently truncating the step name to
+  "Post the lag to". Caught by parsing the workflow with PyYAML and printing the
+  step names rather than by reading it. Quoted the string. Worth remembering:
+  any `#` in an unquoted YAML scalar is a comment, and a channel name is the
+  most likely place to hit it.
+
+- **Neither `develop` nor `master` has branch protection**, so the advisory CI
+  job is not a required status check and cannot block a merge. That is recorded
+  rather than changed — turning on branch protection is a repo-policy decision,
+  not this task's, and it would not help the proto27 case anyway (no PR was
+  involved).
+
+## Known Limit — it reads the REPO, not the deployed binary
+
+Stated in the runbook and the script header rather than left implicit, because
+it is the same trap as [[0141]]: **merging a fix is not shipping one.** 0091
+merged the proto27 bump on 2026-07-14 and production stayed frozen until 0094
+deployed the binary days later. A green protocol check means the source is
+correct; only a deploy establishes that the running Lambda is.
+
+The deployed half is covered from the other side by
+`prices-production-rollup-freshness-1m`, which measures **data** rather than MV
+exit status and whose description already names "upstream ingestion has
+halted". Between the two, both halves are watched — neither alone is enough.
+That pairing is now written down in the runbook so the next reader does not
+have to rediscover which check covers which half.
