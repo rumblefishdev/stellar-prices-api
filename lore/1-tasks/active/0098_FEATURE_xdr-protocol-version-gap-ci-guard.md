@@ -67,11 +67,148 @@ deliberately kept on `branch="develop"` while `stellar-xdr` is exact-pinned (see
       runbook. ⚠️ A Slack **incoming webhook**, NOT the SNS → AWS Chatbot path
       the ops alarms use: this workflow has no AWS credentials and should not
       be handed them for one `curl`.
+- [ ] 🔴 **The workflow reaches `master`.** `schedule` and `workflow_dispatch`
+      run **only from the default branch**, which here is `master` — a release
+      branch 85 commits behind `develop`. Merging to `develop` alone leaves the
+      watch dead while every file reads present. See the runbook's first
+      section.
 - [ ] Confirmed end to end by a manual `workflow_dispatch` run posting to
       `#stellar-prices-api-bot`. Cheap to check right now and **self-testing
       while it lasts**: we are behind protocol 28, so strict mode fails on
       purpose and a correctly wired webhook posts immediately. That window
       closes when [[0277]] lands.
+
+# 📕 DEPLOY RUNBOOK — arming the watch
+
+Three things must be true before the guard actually guards: the workflow is on
+the **default branch**, the `SLACK_WEBHOOK_URL` secret exists, and one manual
+run has been seen to post. None is enforced by code.
+
+## 🔴 FIRST — `schedule` only runs from the DEFAULT branch, and ours is `master`
+
+GitHub runs a `schedule` trigger **only from the repository's default branch**,
+and only shows the `workflow_dispatch` "Run workflow" button for a workflow that
+exists there. This repository's default branch is **`master`**, a release branch
+last touched 2026-09-09 and currently **85 commits behind `develop`**.
+
+So merging PR #306 into `develop` gives us the advisory CI job — `pull_request`
+runs from the PR's own branch — and **leaves the daily watch dead**. The file
+would be present, the task would read closed, and nothing would ever fire.
+
+⚠️ That is this task's own failure mode wearing a different hat, and the third
+instance of it in a fortnight: [[0215]]'s Caddyfile that the container was not
+reading, [[0141]]'s lambda asset that never shipped, and now a workflow on the
+wrong branch. **Verify the state the running system holds, not the file you
+merged.**
+
+`deploy-board.yml` is not a counter-example — it triggers on `push`, which runs
+from the pushed branch.
+
+## 0. Pre-check [local machine, stellar-prices-api repo]
+
+Run all commands together:
+
+```bash
+gh repo view --json defaultBranchRef --jq .defaultBranchRef.name
+git fetch origin -q && git log origin/master --oneline -1 -- .github/workflows/xdr-protocol-watch.yml
+```
+
+**Checkpoint.** The first prints `master`. The second prints **nothing** until
+step 4 is done — that empty output is the dead-watch condition, and re-running
+this line is how you confirm step 4 worked.
+
+## 1. Create the incoming webhook [Slack, in a browser]
+
+Slack → the workspace's app settings → **Incoming Webhooks** → *Add New Webhook
+to Workspace* → choose **#stellar-prices-api-bot**. Copy the
+`https://hooks.slack.com/services/...` URL.
+
+⚠️ This is a **bearer credential** — anyone holding it can post to the channel.
+It is deliberately NOT the SNS → AWS Chatbot route the ops alarms use; that one
+needs AWS credentials this workflow does not have.
+
+## 2. Store it as a repository secret [local machine, your OWN terminal]
+
+Run this command:
+
+```bash
+gh secret set SLACK_WEBHOOK_URL --repo rumblefishdev/stellar-prices-api
+```
+
+It prompts, reads the value from stdin, and the URL never enters `argv` or
+shell history.
+
+⛔ **Do NOT run this through Claude Code's `!` prefix.** That pipes the output
+into the conversation transcript, and this command is interactive with a secret
+in it. Your own terminal, or the browser equivalent: *Settings → Secrets and
+variables → Actions → New repository secret*.
+
+**Checkpoint.** `gh secret list --repo rumblefishdev/stellar-prices-api` shows
+`SLACK_WEBHOOK_URL` with an updated timestamp. It lists names only, never
+values. Repository secrets are available to workflows on **every** branch, so
+this step does not care which branch the workflow is on.
+
+## 3. Merge PR #306 into `develop` [GitHub]
+
+Normal review and merge. This arms the advisory CI job. It does **not** arm the
+watch.
+
+## 4. Get the workflow onto `master` [local machine, stellar-prices-api repo]
+
+The schedule cannot start until the file is on the default branch, and the next
+release merge could be weeks away — the Protocol 28 vote is 2026-09-16.
+
+Open a small PR carrying **`.github/workflows/xdr-protocol-watch.yml` only**,
+`develop` → `master`. Keeping it to the one file avoids dragging 85 unrelated
+commits into a release branch as a side effect of arming a watch.
+
+**Checkpoint.** Re-run the second command from step 0. It must now print a
+commit. Until it does, everything below is untestable.
+
+## 5. Prove delivery end to end [GitHub Actions, or local]
+
+```bash
+gh workflow run xdr-protocol-watch.yml --repo rumblefishdev/stellar-prices-api --ref master
+```
+
+Or: *Actions → XDR protocol watch → Run workflow*.
+
+**Checkpoint — what a good result looks like.** The run **FAILS**, and that is
+the pass condition. While our pin is behind protocol 28 the strict mode is
+supposed to fail, so a red run plus a Slack message is the guard working. A
+green run at this moment would mean the check is not reading what it claims to.
+
+Expect in **#stellar-prices-api-bot**:
+
+```
+🚨 stellar-xdr protocol lag
+error: stellar-xdr 27 lags the protocol core already supports (28).
+  pinned stellar-xdr 27 | mainnet current 27 | core supports 28
+```
+
+⏳ **This self-test expires.** It works because we are currently behind; once
+[[0277]] lands the check goes green and proving delivery needs a deliberately
+wrong pin. Do it now.
+
+If the run fails but no Slack message arrives, look for
+`SLACK_WEBHOOK_URL is not set` in the job log — that is step 2 not having
+landed, not a broken webhook.
+
+## 6. Final test [local machine]
+
+```bash
+gh run list --workflow xdr-protocol-watch.yml --repo rumblefishdev/stellar-prices-api --limit 3
+```
+
+**Done when** a run is listed, its conclusion is `failure`, and the message
+appeared in the channel. Tick the two open criteria above.
+
+## Reverting
+
+Delete the secret (`gh secret delete SLACK_WEBHOOK_URL`) and the workflow file.
+The check itself stays useful without either — `npm run xdr:verify-protocol-gap`
+is standalone and is already a preflight step in
+`docs/runbooks/deploy-ledger-processor.md`.
 
 ## Implementation Notes
 
