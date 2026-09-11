@@ -888,6 +888,89 @@ Not the mechanism — only the plumbing:
 change outright (code 164), so the URL-parameter path only exists for
 `prices_writer`. It needs the deploy.
 
+## 🔴 INDUCTION RUN 2026-09-11 — the bound WORKS, the diagnosability DOES NOT
+
+Deployed and induced against prod. **The acceptance criterion is not met, and
+inferring it would have shipped a fix that does not deliver its stated
+benefit.** This is the exact case "verified by inducing, not inferred" exists
+for.
+
+### What was deployed
+
+`Prices-production-EventBridge` (⚠️ **not** Compute — see the runbook). Asset
+confirmed changed against the recorded baseline:
+
+```
+before  cYcW1QYuKV++SxFRwZrpsP3rD3i3EOrOx5+86N6CN8g=   2026-09-02
+after   Mx3IIUuT1CSHLdMsTWTGvADpmNmVcDGQ96zRnLuNjSM=   2026-09-11 11:13:27Z
+```
+
+### Three claims, two proven
+
+1. ✅ **The client reads and arms the option.** Logged on cold start, at both
+   values — `per-statement execution bound armed max_execution_time_secs=120`
+   (11:45:27, from the compiled-in default with no env var set) and
+   `…=1` (11:49:31, from `ENRICH_MAX_EXECUTION_TIME_SECS=1`).
+2. ✅ **ClickHouse enforces it.** The historical sweep started 11:49:39.073 and
+   failed 11:49:40.111 — **1.04 s against a 1 s bound**. The statement was
+   killed, on time.
+3. 🔴 **The worker does NOT log a ClickHouse exception.** It logged:
+
+   ```
+   "historical sweep failed (non-fatal — live pass unaffected)",
+   "error":"clickhouse: bad response: "
+   ```
+
+   That is **`BadResponse("")`** — the empty body. No error code, no elapsed
+   time, no query text. It is the exact signature that went unreported for 26
+   days and that half 2 was written to replace.
+
+### Why this matters more than it looks
+
+The value of half 2 was never the ceiling — it was the **failure mode**
+(hazard 3). A bound that fires but reports as an empty body leaves a recurrence
+exactly as undiagnosable as 2026-07-26. On this evidence the fix currently buys
+a ceiling and nothing else.
+
+⚠️ The 2026-09-10 measurement that made this look settled — 23 clean
+`TIMEOUT_EXCEEDED` events in `system.query_log` — was taken on `dev_read`
+**SELECT** queries. It proved ClickHouse throws; it did **not** prove our client
+surfaces the throw, and those are different claims on different code paths.
+The worker's failing statement is an `INSERT … SELECT` issued through
+`clickhouse::Client::query`, not a read.
+
+### The live pass is fine, and that is its own data point
+
+At a **1 second** bound the live pass still completed: `batches: 5,
+enriched: 333`, 6.5 s total. After [[0111]] the live statements are genuinely
+sub-second — which confirms the runbook's rule that this cannot be induced with
+a slow query, and shows the 120 s production value has enormous headroom.
+
+### ⏳ Open question — whose bug is it
+
+Handed to the operator as a prod CH read, `dev_read`, `system.query_log`,
+`user = 'prices_writer'`, `exception_code != 0`, last 20 minutes:
+
+- **rows with `exception_code = 159`** → ClickHouse threw correctly and our
+  client discards the body. Ours to fix, in the `mtls.rs` / `clickhouse`-crate
+  error path.
+- **no rows** → ClickHouse aborted without recording an exception. A different
+  and more awkward problem, and one to raise with BE.
+
+`with_execution_bound` sets it as a URL option
+(`client.with_option("max_execution_time", …)`, `prices-clickhouse/src/lib.rs:197`),
+which demonstrably reaches the server — claim 2 proves that. So the suspicion
+is the response path, not the request path.
+
+### Production state after the run — all restored
+
+| | |
+|---|---|
+| `ENRICH_MAX_EXECUTION_TIME_SECS` | **removed**, back to the CDK-declared state; the compiled-in default of 120 applies |
+| env keys | **13**, `CH_DOMAIN` and `MTLS_SECRET_NAME` intact |
+| `prices-production-cleanup` | **DISABLED**, `cron(0 3 * * ? *)` |
+| `LastUpdateStatus` | `Successful` |
+
 ## Acceptance Criteria
 
 - [x] The source is shown correct — `pivot_ids() == [xlm, usdt]` and the peg
