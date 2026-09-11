@@ -118,12 +118,89 @@ currently reaches us stripped of its cause.
   query id, and the exception is durably recorded there. Belt and braces for a
   path whose whole purpose is being readable after the fact.
 
+## Implementation Notes
+
+Fixed in **PR #310**, branch `fix/0281_clickhouse-client-discards-the-exception-body`.
+
+### The cause — a fallback that does not fire
+
+`collect_bad_response` (crate 0.13.3) LZ4-decodes the error body and falls back
+to the raw bytes on failure:
+
+```rust
+let bytes = collect_bytes(stream).await.unwrap_or(raw_bytes);
+```
+
+Straight to ClickHouse the decode **fails**, the fallback fires, the message
+survives. Through a proxy the chunk reframing makes the decode **succeed with
+zero bytes** — `Ok(empty)` — so `unwrap_or` never runs and the message becomes
+`""`. Our client never called `with_compression`, so it ran the crate default
+of `Lz4`, and every production client reaches ClickHouse through Caddy.
+
+### Measured three ways, CH 26.3.10.60, same statement
+
+| path | error the caller receives |
+|---|---|
+| direct | `bad response: Code: 159. DB::Exception: Timeout exceeded: elapsed 1000.178179 ms, maximum: 1000 ms. (TIMEOUT_EXCEEDED)` |
+| through Caddy | `bad response: ` |
+| through Caddy, compression off | the full message returns |
+
+`curl` reads the body in **all three** — so Caddy forwards it correctly and the
+loss is entirely in the crate's decode path.
+
+### 🔴 It was never only timeouts
+
+Through the proxy, **every** error status lost its body — measured on `404`
+UNKNOWN_TABLE, `400` SYNTAX_ERROR and `408` TIMEOUT_EXCEEDED alike. So every
+server-side failure in production — including the `Code: 243` disk-full class
+from [[0204]] — has been arriving stripped of its cause, for every worker,
+probe, the API and every operator CLI.
+
+## Design Decisions
+
+### Emerged
+
+1. **The fix lives in a named shared function, not inline.** `with_readable_errors`
+   in `prices-clickhouse`, called by `mtls::client_with_mtls` — the single
+   funnel every component uses. Inline, the test would have had to build its own
+   client and would not have guarded the real one.
+
+2. **The test FAILS when its proxy is missing, rather than skipping.** Straight
+   to ClickHouse it passes whether or not the defect is present, because the
+   fallback fires. A test that cannot fail is worse than no test: it reports
+   success. `CLICKHOUSE_PROXY_URL` unset is therefore an error with an
+   explanation, and `scripts/ch-proxy-0281.sh` stands the proxy up.
+
+3. **Compression disabled rather than the crate bumped.** 0.15.2 exists against
+   our pinned 0.13.3 and may fix the fallback, but that is a multi-version bump
+   across every crate here — its own change, on its own evidence. Recorded in
+   the code comment so the cheaper option is not lost.
+
+4. **The trade-off is stated in the code, not just the PR.** Response bandwidth
+   on reads, against errors that cannot be diagnosed at all. The comment says
+   plainly that this is not a performance setting and points at this task,
+   because the obvious future "cleanup" is to restore the default.
+
+## Issues Encountered
+
+- ⚠️ **I exhausted the shared `dev_read` hourly quota on production** while
+  hunting for a slow query to time out: `SELECT count() FROM numbers(1e11)`
+  reads 100 billion rows and the quota is 100 billion/hour, so one probe spent
+  the lot and blocked `chq` for the whole team until the top of the hour. The
+  API and the workers were unaffected (different users). Lesson: `numbers()`
+  looks free because it touches no table, but every generated row counts
+  against the quota — use `sleepEachRow`, which burns time and no rows, or stay
+  local. The whole investigation was reproducible locally for nothing.
+
 ## Acceptance Criteria
 
-- [ ] A failing `INSERT … SELECT` surfaces the ClickHouse error **code** and
+- [x] A failing `INSERT … SELECT` surfaces the ClickHouse error **code** and
       message to the caller; `BadResponse("")` no longer occurs for a statement
-      ClickHouse recorded an exception for.
-- [ ] Reproduced in a test against CH **26.3.10.60**, red before the fix.
+      ClickHouse recorded an exception for. **PR #310.**
+- [x] Reproduced in a test against CH **26.3.10.60**, red before the fix.
+      `execution_bound_error_it`, verified red with the exact message
+      *"the error carries no message at all — this is the 0281 defect"* and
+      green after. ⚠️ Requires a proxy and fails loudly without one.
 - [ ] The enrichment worker logs `TIMEOUT_EXCEEDED` (159) when its bound is
       exceeded — which closes [[0215]]'s last criterion.
 - [ ] Verified by inducing on prod, the same way 0215's run was: set
