@@ -61,12 +61,14 @@ deliberately kept on `branch="develop"` while `stellar-xdr` is exact-pinned (see
       noted so the guard doesn't false-alarm on it.
       `docs/runbooks/deploy-ledger-processor.md` gains a
       *Protocol-version lag* section plus a preflight line in step 0.
-- [ ] 🔴 **`SLACK_WEBHOOK_URL` exists as a repository secret.** Operator's, and
-      the delivery does not work without it — the workflow still fails
-      correctly, but logs a warning instead of posting. Steps are in the
-      runbook. ⚠️ A Slack **incoming webhook**, NOT the SNS → AWS Chatbot path
-      the ops alarms use: this workflow has no AWS credentials and should not
-      be handed them for one `curl`.
+- [ ] 🔴 **`#stellar-prices-api-bot` is subscribed to the workflow** via the
+      Slack GitHub app. One `/github subscribe` in the channel; no secret, no
+      webhook, no AWS. Operator's — it is typed in Slack, not in this repo.
+      ⛔ **The webhook approach is RETRACTED, 2026-09-11.** The workspace is at
+      its installed-app limit, so an incoming webhook cannot be created at all.
+      Both other routes are closed too: SNS → AWS Chatbot (the ops-alarm path,
+      task 0056) needs AWS credentials this workflow does not have, and Slack
+      Workflow Builder needs a paid plan.
 - [ ] 🔴 **The workflow reaches `master`.** `schedule` and `workflow_dispatch`
       run **only from the default branch**, which here is `master` — a release
       branch 85 commits behind `develop`. Merging to `develop` alone leaves the
@@ -117,36 +119,31 @@ git fetch origin -q && git log origin/master --oneline -1 -- .github/workflows/x
 step 4 is done — that empty output is the dead-watch condition, and re-running
 this line is how you confirm step 4 worked.
 
-## 1. Create the incoming webhook [Slack, in a browser]
+## 1. Subscribe the channel [Slack, in #stellar-prices-api-bot]
 
-Slack → the workspace's app settings → **Incoming Webhooks** → *Add New Webhook
-to Workspace* → choose **#stellar-prices-api-bot**. Copy the
-`https://hooks.slack.com/services/...` URL.
+Type this in the channel (once; `/github signin` first if it asks):
 
-⚠️ This is a **bearer credential** — anyone holding it can post to the channel.
-It is deliberately NOT the SNS → AWS Chatbot route the ops alarms use; that one
-needs AWS credentials this workflow does not have.
-
-## 2. Store it as a repository secret [local machine, your OWN terminal]
-
-Run this command:
-
-```bash
-gh secret set SLACK_WEBHOOK_URL --repo rumblefishdev/stellar-prices-api
+```
+/github subscribe rumblefishdev/stellar-prices-api workflows:{name:"XDR protocol watch"}
 ```
 
-It prompts, reads the value from stdin, and the URL never enters `argv` or
-shell history.
+**Checkpoint.** The app replies confirming the subscription and lists what the
+channel is now subscribed to.
 
-⛔ **Do NOT run this through Claude Code's `!` prefix.** That pipes the output
-into the conversation transcript, and this command is interactive with a secret
-in it. Your own terminal, or the browser equivalent: *Settings → Secrets and
-variables → Actions → New repository secret*.
+⚠️ **It matches the workflow's `name:` EXACTLY.** Renaming `name: XDR protocol
+watch` in the workflow silently unsubscribes the channel — failing workflow,
+silent channel. Rename both together or neither.
 
-**Checkpoint.** `gh secret list --repo rumblefishdev/stellar-prices-api` shows
-`SLACK_WEBHOOK_URL` with an updated timestamp. It lists names only, never
-values. Repository secrets are available to workflows on **every** branch, so
-this step does not care which branch the workflow is on.
+## 2. Nothing to store [no action]
+
+There is no secret. Left numbered so the step numbers in this runbook match the
+commits and the PR discussion that produced them.
+
+⛔ **An incoming webhook was the original plan and it is not available**: the
+workspace is at its installed-app limit. SNS → AWS Chatbot, the route every ops
+alarm uses, needs AWS credentials this workflow does not have. Workflow Builder
+needs a paid plan. The GitHub app was already installed, which is why this is
+one slash command instead of any of that.
 
 ## 3. Merge PR #306 into `develop` [GitHub]
 
@@ -178,10 +175,13 @@ the pass condition. While our pin is behind protocol 28 the strict mode is
 supposed to fail, so a red run plus a Slack message is the guard working. A
 green run at this moment would mean the check is not reading what it claims to.
 
-Expect in **#stellar-prices-api-bot**:
+Expect a message in **#stellar-prices-api-bot** from the GitHub app naming the
+workflow and its failed conclusion. Click through and the run's **summary**
+carries the report itself:
 
 ```
-🚨 stellar-xdr protocol lag
+## stellar-xdr protocol lag
+
 error: stellar-xdr 27 lags the protocol core already supports (28).
   pinned stellar-xdr 27 | mainnet current 27 | core supports 28
 ```
@@ -190,9 +190,9 @@ error: stellar-xdr 27 lags the protocol core already supports (28).
 [[0277]] lands the check goes green and proving delivery needs a deliberately
 wrong pin. Do it now.
 
-If the run fails but no Slack message arrives, look for
-`SLACK_WEBHOOK_URL is not set` in the job log — that is step 2 not having
-landed, not a broken webhook.
+If the run fails but the channel stays quiet, the subscription is the suspect,
+not the workflow — re-run `/github subscribe` and check the workflow `name:`
+still matches character for character.
 
 ## 6. Final test [local machine]
 
@@ -205,7 +205,8 @@ appeared in the channel. Tick the two open criteria above.
 
 ## Reverting
 
-Delete the secret (`gh secret delete SLACK_WEBHOOK_URL`) and the workflow file.
+`/github unsubscribe rumblefishdev/stellar-prices-api workflows:{name:"XDR protocol watch"}`
+in the channel, and delete the workflow file.
 The check itself stays useful without either — `npm run xdr:verify-protocol-gap`
 is standalone and is already a preflight step in
 `docs/runbooks/deploy-ledger-processor.md`.
@@ -291,12 +292,24 @@ JSON carrying the report text.
    `ci.yml` is gated on `rust`/`typescript` paths. This one cannot be: the
    condition it watches produces no diff on our side at all.
 
-7. **Slack via an incoming webhook, not the existing alarm path.** The ops
-   alarms reach `#stellar-prices-api-bot` through SNS → AWS Chatbot (task
-   0056). GitHub Actions cannot reach that without AWS credentials, and this
-   repo's CI holds **no secrets at all** today. An OIDC role + CDK change +
-   deploy to send one message is disproportionate to an `effort-small` task.
-   The two routes are independent and land in the same channel.
+7. **Delivery is the Slack GitHub app — every other route was closed.**
+   Worked through in order, and worth recording so it is not re-litigated:
+
+   | route | why not |
+   |---|---|
+   | SNS → AWS Chatbot (the ops-alarm path, task 0056) | needs AWS credentials in CI; an OIDC role + CDK change + deploy is disproportionate here |
+   | Slack incoming webhook | needs a Slack app, and **the workspace is at its installed-app limit** |
+   | Slack Workflow Builder | needs a paid plan |
+   | **Slack GitHub app** | **already installed.** One `/github subscribe`, no secret, no AWS |
+
+   The cost is that the app posts a run and a link rather than our text, so the
+   report is written to `$GITHUB_STEP_SUMMARY` and is the first thing visible
+   after the click.
+
+   🔴 **The subscription matches the workflow `name:` exactly**, so renaming it
+   silently unsubscribes the channel: a failing workflow and a quiet channel,
+   which is this task's own failure mode. Named in the workflow, the runbook
+   and here, because nothing enforces it.
 
 8. **No Renovate rule** (the task offered it as optional). There is no Renovate
    config in this repo, so adding one is repo-wide dependency automation rather
