@@ -6,7 +6,7 @@
 //! crates own their own row structs and writers; this crate only stands up the
 //! schema and hands out a configured client.
 
-use clickhouse::Client;
+use clickhouse::{Client, Compression};
 
 /// Optional env-var helpers (`env_or` / `env_parse_or`) shared by the worker
 /// Lambdas. Companion to `mtls::require_env` (the must-be-set case).
@@ -197,6 +197,34 @@ pub fn with_execution_bound(client: Client, secs: u64) -> Client {
         Some(secs) => client.with_option("max_execution_time", secs.to_string()),
         None => client,
     }
+}
+
+/// Configure `client` so a failed statement reaches the caller carrying
+/// ClickHouse's own message (task 0281).
+///
+/// ⚠️ **Not a performance setting.** With the crate's default
+/// `Compression::Lz4`, EVERY ClickHouse error arrives as `BadResponse("")` —
+/// an empty string. Not only timeouts: unknown table, syntax error, quota
+/// exceeded and disk-full all lose their code and message, becoming
+/// indistinguishable from a network blip. That is the signature that hid task
+/// 0215's outage for 26 days.
+///
+/// The mechanism is a fallback that fails to fire. `collect_bad_response`
+/// LZ4-decodes the error body and falls back to the raw bytes on failure:
+///
+/// ```text
+/// let bytes = collect_bytes(stream).await.unwrap_or(raw_bytes);
+/// ```
+///
+/// Straight to ClickHouse the decode fails, the fallback fires, the message
+/// survives. Through a proxy the chunk reframing makes the decode *succeed*
+/// with zero bytes, so `unwrap_or` never runs. Every production client reaches
+/// ClickHouse through Caddy.
+///
+/// Every client built in this crate must go through here, so the guard cannot
+/// be lost by someone constructing a client a different way.
+pub fn with_readable_errors(client: Client) -> Client {
+    client.with_compression(Compression::None)
 }
 
 /// The effective per-statement bound for a configured value: `None` when there
