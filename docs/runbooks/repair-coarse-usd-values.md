@@ -906,6 +906,13 @@ above `--reset-not-after` (a mistyped year, the epoch pasted into the wrong
 flag) exits with `ResetWindowEmpty` before a connection is opened, dry run or
 not. Without that refusal the run would report a clean, empty repair.
 
+Two more refusals fire first thing after connecting, before any month is
+enumerated, dry run included: a quote leg that is not canonical USDC
+(`ResetExternalRateLegIsNotUsdc`) and zero `external` rows loaded
+(`ResetRequiresExternalRates`). Until task 0228 both lived only in the
+per-month pass, which a dry run never builds, so a rehearsal over the wrong leg
+or an unloaded series ended green.
+
 `--reset-require-external-rate` narrows the candidate set to
 `close_usd = close` (the peg tier's exact signature) **on the days the imported
 series covers**. Both halves matter: the first keeps oracle- and external-priced
@@ -1395,19 +1402,31 @@ The tool refuses, before opening a connection:
 - `--reset-require-pivot-usdc-rate` together with
   `--reset-require-external-rate` (`ResetModesAreMutuallyExclusive`) — they
   select different candidate signatures and the intersection is empty;
-- `--reset-quote-asset-id <USDC_ID>` with this mode
-  (`ResetPivotRateLegIsNotAPivotReference`) — that leg is Appendix B's;
 - `--reset-not-before` at or above `--reset-not-after` (`ResetWindowEmpty`);
 - `--pivot-window-s` shorter than the table's bucket width, which with a reset
   in play discards a value and then fails to recompute it.
 
-And first thing after connecting, before any month is enumerated, dry run
-included: zero `external` rows for canonical USDC in `prices.usd_rate`
-(`ResetRequiresExternalRates`, precondition 1).
+And first thing after connecting, before any month is enumerated, **dry run
+included** (they need `prices.assets` and `prices.usd_rate`, so not before the
+connection):
 
-⚠️ A refusal that fires INSIDE the per-month pass — `ResetPivotRateLegIsNotAPivotReference`
-is one — fires AFTER that month's `FREEZE`, and the snapshot stays behind under
-its `repair_0114_…` name. The next real run on the same partition then fails
+- a quote leg the scaled pivot cannot refill
+  (`ResetPivotRateLegIsNotAPivotReference`) — canonical USDC, which is
+  Appendix B's leg, any non-reference asset, **and any leg at all while
+  canonical USDC is missing from `prices.assets`** (reported as `usdc_id: 0`),
+  because the pivot's reference market is keyed on USDC's `asset_id` and never
+  runs without it;
+- zero `external` rows for canonical USDC in `prices.usd_rate`
+  (`ResetRequiresExternalRates`, precondition 1).
+
+Until task 0228's review both lived only in the per-month pass, which a dry run
+never builds: a rehearsal over the wrong leg listed candidate months and ended
+green, and only the real run refused.
+
+⚠️ A refusal that fires INSIDE the per-month pass — `ResetBlockedByOracleRows`
+(the oracle-shadow guard, precondition 5) and `ResetTargetHasNoPricingPath`
+still do — fires AFTER that month's `FREEZE`, and the snapshot stays behind
+under its `repair_0114_…` name. The next real run on the same partition then fails
 with `FreezeDenied … DIRECTORY_ALREADY_EXISTS`. On prod this cannot happen (the
 real run passes `--skip-snapshot`); locally, `ALTER TABLE … UNFREEZE PARTITION
 … WITH NAME` the leftover, or drop it from `shadow/`, before re-running.

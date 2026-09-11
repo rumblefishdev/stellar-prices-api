@@ -104,6 +104,23 @@ history:
       driver now checks it before enumerating months, dry run included,
       #[ignore] test added. 44 + 5 ClickHouse tests, 724 CI tests, clippy
       -D warnings clean. STATUS STAYS ACTIVE for the same reasons as before.
+  - date: "2026-09-11"
+    status: active
+    who: akot
+    note: >
+      Code review (`/code-review`, origin/develop...HEAD) — 3 findings, all
+      confirmed and fixed in a sixth code commit. (1) Medium: the snapshot
+      counts were SUMMED into `OracleUsdRatesSnapshotted`, so XLM's rows
+      would hide a stalled USDC snapshot, the pivot's only post-epoch rate;
+      now per set, the peg series back to its pre-0228 meaning plus a new
+      `OracleMeasuredRatesSnapshotted`. (2) Low: the pivot-leg gate passed
+      with canonical USDC missing from `prices.assets` (rates matched by
+      identity), zeroing a leg no pivot refills — `rows_reset 1,
+      rows_enriched 0` reproduced on 26.3.10.60; now gated on
+      `can_pivot()`. (3) Low: both leg refusals ran only inside the
+      per-month pass, so a dry run over the wrong leg ended green; the
+      driver now runs them before enumerating months. 46 + 5 ClickHouse
+      tests, 725 CI tests, clippy clean, Lambda builds of both crates OK.
 ---
 
 # We measure XLM's dollar price, throw it away, then derive it from USDC
@@ -414,8 +431,11 @@ low table cannot pass.
 `measured_identities()` returns `[AssetIdentity::Native]`, with its evidence in
 the doc comment and in two tests. The snapshot site issues **two separate**
 `populate_usd_rate_from_oracle` calls, each with its own non-fatal arm and its
-own per-identity log line, summing into `rates_snapshotted` so
-`OracleUsdRatesSnapshotted` keeps its meaning.
+own per-identity log line. The counts are published PER SET —
+`OracleUsdRatesSnapshotted` for the peg set (its pre-0228 meaning, canonical
+USDC) and `OracleMeasuredRatesSnapshotted` for XLM. The first version summed
+them into the one series; review finding 1 showed that hides a stalled USDC
+snapshot behind XLM's rows (Decision 23).
 
 **`populate_usd_rate_from_oracle`'s guards, read against the current tree and
 reported rather than worked around** (BRIEF decision D asked for exactly this):
@@ -567,12 +587,30 @@ Everything below was decided by the executor; the plan left it open.
     `rate: Option<f64>` for the same reason, so the twins now share the shape,
     and the operator reading "the harness query is wrong" is a different
     situation from "the table is wrong" — the message says which.
-22. **The no-rates refusal lives in `CoarseRepairDriver::run`, not only in the
-    pass, via one free fn `assert_external_rates_are_loaded` that both call.**
-    Putting it in the CLI would have covered one driver; putting it in `run()`
-    covers every driver and the dry run, which WR-01 already established must
-    refuse what the real run refuses. One definition, two call sites, so the
-    two cannot drift.
+22. **The month-independent reset refusals run in `CoarseRepairDriver::run`,
+    before the month enumeration, through one pass method
+    `assert_reset_leg_and_rates` that `reset_step` also relies on.** First the
+    no-rates refusal (prove run), then — after review finding 3 — both leg
+    refusals too. Putting them in the CLI would have covered one driver; in
+    `run()` they cover every driver and the dry run, which WR-01 already
+    established must refuse what the real run refuses. The same methods at
+    both sites, so the two cannot drift. `ResetBlockedByOracleRows` and
+    `ResetTargetHasNoPricingPath` were left in the pass only: they are not
+    this task's refusals and their placement predates it (Issues 10).
+23. **The snapshot metrics are per set; the peg series keeps its pre-0228
+    meaning.** Review finding 1. Alternatives were a separate peg-only metric
+    beside the sum (a new name for the old meaning, so every existing reader
+    would silently switch to the total) or the sum alone (the defect). Keeping
+    `OracleUsdRatesSnapshotted` = peg set and adding
+    `OracleMeasuredRatesSnapshotted` changes no existing series; the namespace
+    is unchanged, so the IAM grant needs nothing. No alarm reads either today.
+24. **The pivot-leg gate requires `can_pivot()`, not only membership in
+    `pivot_ids()`.** Review finding 2. This is the concrete case behind WR-02
+    below: the leg check read `prices.assets` and the rate check `usd_rate` by
+    identity, and a canonical USDC missing from the former passed both. Gating
+    on `can_pivot()` — which already existed for the planner — makes the gate
+    say exactly what the planner needs. The error reports `usdc_id: 0` for that
+    case and its text now says what 0 means.
 
 ## Issues Encountered — for Adam to route
 
@@ -651,12 +689,26 @@ Everything below was decided by the executor; the plan left it open.
    both modes and in `--dry-run`.
 10. **A refusal that fires inside the per-month pass leaves the FREEZE behind.**
     The driver freezes the partition, THEN builds the pass whose `reset_step`
-    may refuse (`ResetPivotRateLegIsNotAPivotReference` is new here); the
-    snapshot under `repair_0114_<db>_<table>_<month>` stays, and the next real
-    run on that partition fails with `FreezeDenied … DIRECTORY_ALREADY_EXISTS`.
-    Pre-existing 0114 driver order; prod is unaffected (`--skip-snapshot`);
-    local/CI hits it. Recorded in Appendix C rather than fixed — reordering
-    FREEZE after the pass's refusals is 0114's design to revisit. Spawn list 4.
+    may refuse; the snapshot under `repair_0114_<db>_<table>_<month>` stays,
+    and the next real run on that partition fails with `FreezeDenied …
+    DIRECTORY_ALREADY_EXISTS`. Observed in the prove run with
+    `ResetPivotRateLegIsNotAPivotReference`, which review finding 3 has since
+    moved ahead of the enumeration (Decision 22). What still fires in the pass
+    is `ResetBlockedByOracleRows` (precondition 5 — the likeliest campaign stop)
+    and `ResetTargetHasNoPricingPath`. Pre-existing 0114 driver order; prod is
+    unaffected (`--skip-snapshot`); local/CI hits it. Recorded in Appendix C
+    rather than fixed. Spawn list 4.
+11. **Code review, 2026-09-11 (`/code-review` on `origin/develop...HEAD`):
+    three findings, all confirmed against the code and fixed.** Medium — the
+    summed snapshot metric (Decision 23). Low — the pivot-leg gate without
+    `can_pivot()`, reproduced on 26.3.10.60 as `rows_reset: 1,
+    rows_enriched: 0` before the fix (Decision 24,
+    `the_pivot_reset_refuses_when_canonical_usdc_is_not_a_tracked_asset`).
+    Low — Appendix C claimed the USDC-leg refusal fired before connecting while
+    the code ran it only in the pass, so a dry run passed it green (Decision
+    22, `a_dry_run_refuses_the_wrong_leg_for_either_rate_gated_mode`, which
+    also covers the 0268 mode's `ResetExternalRateLegIsNotUsdc` — same gap).
+    The review found no defect in the rewritten `pivot_sql`.
 
 ## Broken/modified tests
 
@@ -686,6 +738,10 @@ Unit tests (`ch_enrich.rs`):
   `Option<f64>`; `carried()` wraps in `Some`, the "unmeasurable" fixture sets
   `None` instead of `NAN`, `par.ratio = Some(1.0)`. Intentional: the wire
   column is nullable (Issues 8). No assertion changed meaning.
+- `oracle-worker/src/metrics.rs` (review commit) — the four `OracleStats`
+  fixtures gained `measured_rates_snapshotted: 0`, and
+  `maps_every_pass_stat` now expects 8 metrics (was 7) and asserts the new
+  series. Intentional: one metric added (Decision 23).
 
 Integration tests (`ch_enrich_it.rs`), all for the same reason: making the USDC
 rate mandatory in the pivot means a fixture that seeds none now leaves its
@@ -800,7 +856,9 @@ access to the executor's notes beyond the plan:
     checks a literal `usd_rate` identity; the two could disagree only in a
     `prices.assets` inconsistency window. Not changed: both refusals are
     conservative, and unifying them means threading `ReferenceIds` into the
-    rate check for no measured benefit.
+    rate check for no measured benefit. **Superseded** by the later code
+    review: one such window — canonical USDC absent from `prices.assets` —
+    was not conservative, it zeroed a leg. Closed by Decision 24.
   - IN-01 (`refs.usdc.unwrap_or(0)` sentinel in the new error variant) and
     IN-02 (two snapshot round-trips per pass) recorded, not changed.
 
