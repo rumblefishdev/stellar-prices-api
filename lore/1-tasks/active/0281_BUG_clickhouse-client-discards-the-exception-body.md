@@ -2,7 +2,7 @@
 id: "0281"
 title: "Our ClickHouse client turns a real server exception into BadResponse(\"\") — the error code, elapsed time and query are all discarded"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0215", "0111", "0214"]
 tags: [layer-backend, priority-high, effort-small, clickhouse, observability, resilience]
@@ -17,6 +17,13 @@ history:
       criterion and proved this instead. Measured on both sides the same
       minute: ClickHouse raised a complete `TIMEOUT_EXCEEDED` and the worker
       logged an empty body.
+  - date: 2026-09-11
+    status: active
+    who: okarcz
+    note: >
+      Activated immediately. It blocks [[0215]]'s last criterion, and it is
+      wider than that task: `prices-clickhouse` is shared, so every worker and
+      operator CLI currently loses the cause of any failed write.
 ---
 
 # The ClickHouse client discards the exception body
