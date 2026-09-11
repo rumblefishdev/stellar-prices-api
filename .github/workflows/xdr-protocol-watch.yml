@@ -47,15 +47,30 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      # The report is captured as well as printed, so the Slack message can
-      # carry the actual numbers. A notification that only says "a job failed"
-      # sends the reader back to the Actions tab, which is the surface this
-      # whole task exists because nobody watches.
+      # `node ...` directly, NOT `npm run xdr:watch-protocol-gap`, and that is
+      # load-bearing rather than a style choice.
+      #
+      # A `schedule` trigger only fires from the DEFAULT branch, which in this
+      # repository is `master` — a release branch, currently ~85 commits behind
+      # `develop`. So this file has to live on `master` to run at all, and
+      # anything it depends on has to live there too. `master` has `.nvmrc` and
+      # `package.json`, but not the `xdr:` scripts; invoking through npm would
+      # fail there with "missing script" while working perfectly on every
+      # branch anyone tests it on.
+      #
+      # Calling the script directly keeps this workflow portable to `master` as
+      # exactly TWO files — itself and the script — with no package.json edit
+      # dragged onto a release branch. `npm run xdr:verify-protocol-gap` still
+      # exists for humans and for `ci.yml`, which runs from the PR's own branch
+      # and therefore always has it.
+      #
+      # The report is captured as well as printed so the run SUMMARY can carry
+      # it: the Slack GitHub app posts a run and a link, not our text.
       - name: Compare the pinned stellar-xdr against mainnet (strict)
         id: gap
         run: |
           set +e
-          report=$(npm run --silent xdr:watch-protocol-gap 2>&1)
+          report=$(node tools/scripts/verify-xdr-protocol-gap.mjs --watch 2>&1)
           status=$?
           echo "$report"
           {
