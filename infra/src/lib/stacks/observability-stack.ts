@@ -329,6 +329,13 @@ export class ObservabilityStack extends cdk.Stack {
    */
   public readonly oracleTimestampRejectedAlarm: cloudwatch.Alarm;
   /**
+   * No fresh canonical-USDC rate reached `prices.usd_rate` for three hours
+   * while the poll kept writing (task 0228, review round 2). The dependency
+   * alarm: since 0228 the enrichment pivot's only post-epoch USDC rate is this
+   * snapshot, and the worker treats its failure as non-fatal.
+   */
+  public readonly oracleUsdcSnapshotStalledAlarm: cloudwatch.Alarm;
+  /**
    * Platform-metric health alarms for the scheduled workers whose only other
    * alarm reads a metric the worker itself publishes (task 0112). Keyed by
    * worker name: `errors`, `duration`, `noInvocations`.
@@ -652,6 +659,79 @@ export class ObservabilityStack extends cdk.Stack {
     this.oracleTimestampRejectedAlarm.addAlarmAction(snsAction);
     this.oracleTimestampRejectedAlarm.addOkAction(snsAction);
 
+    // The dependency alarm (task 0228, review round 2, finding 1). Since 0228
+    // the enrichment pivot multiplies every XLM- and USDT-quoted candle by the
+    // measured USDC/USD rate from `prices.usd_rate`, resolved at the bucket end
+    // within `max(1 day, bucket width)`. Post-epoch the ONLY supplier of those
+    // rows is the oracle worker's snapshot of canonical USDC — a copy step it
+    // deliberately treats as non-fatal, because failing it would stop the poll
+    // itself. So a stalled snapshot is invisible from every existing signal:
+    // -dark-feed stays OK (rows ARE being written), the enrichment backlog
+    // alarm stays OK (the oracle tier keeps enriching, so EnrichmentRowsEnriched
+    // never reads 0), and the pivot tier's own no-progress branch is a warn!.
+    // 24 hours later every pivot-priced candle lands at close_usd = 0, which
+    // ~130 unguarded argMax(close_usd, …) sites read as a real price.
+    //
+    // The shape is the one `OracleStats::rates_snapshotted` names: the peg-set
+    // snapshot count sustained at zero WHILE OracleRowsWritten climbs. The
+    // second factor is what separates "the copy step stopped" from "the feed
+    // is dark", which is -dark-feed's job. It also catches Reflector's USDC
+    // feed freezing on one lastprice timestamp (the poll still writes, the
+    // ReplacingMergeTree dedups, nothing new to copy) — a different cause with
+    // the same consequence for the pivot, so it belongs here too.
+    //
+    // 1-hour buckets, three in a row: a single pass copying nothing is normal
+    // (the snapshot is incremental by watermark, and a repeated Reflector
+    // timestamp copies nothing), so the sustain has to span many passes. Three
+    // hours is far enough from a 12-pass jitter to be a real stall and leaves
+    // ~21 hours before the pivot's one-day bound starts writing zeros. FILL on
+    // the snapshot count only: a pass that dies before its publish emits no
+    // datapoint for either series, and that is -dark-feed's case, not this
+    // one's — so missing `written` leaves the expression missing and
+    // NOT_BREACHING keeps an idle environment OK.
+    const snapshotBucket = cdk.Duration.hours(1);
+    this.oracleUsdcSnapshotStalledAlarm = new cloudwatch.Alarm(
+      this,
+      'OracleUsdcSnapshotStalledAlarm',
+      {
+        alarmName: `prices-${config.envName}-oracle-usdc-snapshot-stalled`,
+        alarmDescription: `No fresh canonical-USDC rate reached prices.usd_rate for 3 hours (OracleUsdRatesSnapshotted = 0 across 3 hourly buckets) while the Reflector poll kept writing (OracleRowsWritten > 0). Since task 0228 the enrichment pivot prices every XLM- and USDT-quoted candle the oracle tier misses by this rate, resolved within one day of the bucket end: ~21h from the first breach those candles land at close_usd = 0, which rollups and /ohlcv read as a real price, and nothing else fires (the snapshot is non-fatal, -dark-feed sees rows written, the backlog alarm sees the oracle tier enriching). Logs /aws/lambda/prices-${config.envName}-oracle: ERROR "usd_rate snapshot failed" set=peg means the copy step fails (likely the 0139 identity guard, a data condition, or a persistent OOM); "usd_rate snapshot" set=peg rows=0 every pass with no ERROR means Reflector's USDC timestamp is frozen. Fix the supply; the pivot self-heals once fresh rows land.`,
+        metric: new cloudwatch.MathExpression({
+          // 1 when nothing was snapshotted AND the poll wrote rows, else 0.
+          // Comparison operators yield per-datapoint 0/1 series in CW metric
+          // math; the product is the logical AND (same idiom as the
+          // enrichment backlog alarm above).
+          expression: '(FILL(snapshotted, 0) < 1) * (written > 0)',
+          usingMetrics: {
+            snapshotted: new cloudwatch.Metric({
+              namespace: 'Prices/Oracle',
+              metricName: 'OracleUsdRatesSnapshotted',
+              dimensionsMap: { Environment: config.envName },
+              statistic: 'Sum',
+              period: snapshotBucket,
+            }),
+            written: new cloudwatch.Metric({
+              namespace: 'Prices/Oracle',
+              metricName: 'OracleRowsWritten',
+              dimensionsMap: { Environment: config.envName },
+              statistic: 'Sum',
+              period: snapshotBucket,
+            }),
+          },
+          period: snapshotBucket,
+          label: 'OracleUsdcSnapshotStalled',
+        }),
+        threshold: 1,
+        evaluationPeriods: 3,
+        datapointsToAlarm: 3,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.oracleUsdcSnapshotStalledAlarm.addAlarmAction(snsAction);
+    this.oracleUsdcSnapshotStalledAlarm.addOkAction(snsAction);
+
     new cdk.CfnOutput(this, 'OracleDarkFeedAlarmName', {
       value: this.oracleDarkFeedAlarm.alarmName,
       description: `Oracle dark-feed alarm for ${config.envName}`,
@@ -659,6 +739,10 @@ export class ObservabilityStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'OracleTimestampRejectedAlarmName', {
       value: this.oracleTimestampRejectedAlarm.alarmName,
       description: `Oracle timestamp-rejection alarm for ${config.envName}`,
+    });
+    new cdk.CfnOutput(this, 'OracleUsdcSnapshotStalledAlarmName', {
+      value: this.oracleUsdcSnapshotStalledAlarm.alarmName,
+      description: `Oracle USDC usd_rate snapshot stall alarm for ${config.envName}`,
     });
 
     // SDEX push freshness (§5.6 / Tranche-1 AC #5). The backfill-freshness-probe
@@ -2107,6 +2191,24 @@ export class ObservabilityStack extends cdk.Stack {
             dimensionsMap: envDims,
             statistic: 'Sum',
             label: 'rows written',
+          }),
+          // The two usd_rate snapshot series beside the rows they copy from
+          // (task 0228): the peg set is what -oracle-usdc-snapshot-stalled
+          // watches, and the two are separate so a stalled USDC copy cannot
+          // hide behind XLM's rows.
+          new cloudwatch.Metric({
+            namespace: 'Prices/Oracle',
+            metricName: 'OracleUsdRatesSnapshotted',
+            dimensionsMap: envDims,
+            statistic: 'Sum',
+            label: 'USDC rates snapshotted',
+          }),
+          new cloudwatch.Metric({
+            namespace: 'Prices/Oracle',
+            metricName: 'OracleMeasuredRatesSnapshotted',
+            dimensionsMap: envDims,
+            statistic: 'Sum',
+            label: 'XLM rates snapshotted',
           }),
         ],
         right: [
