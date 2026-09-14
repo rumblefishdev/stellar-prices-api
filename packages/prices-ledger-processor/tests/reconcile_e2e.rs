@@ -216,6 +216,12 @@ async fn gap_stop_when_no_new_ledger() {
     assert_eq!(stats.rows_emitted, 0);
 }
 
+/// MODIFIED for task 0282 / review of PR #313 finding 4. This used to call
+/// `run(16)`, which after the hold-back change took the early return on both
+/// passes — so every assertion compared `0 == 0` and the test would have kept
+/// passing with `flush_older_than`, the cursor write, or row emission broken
+/// outright. It now drives `run_terminal`, which flushes, so the comparison is
+/// between two runs that actually wrote something.
 #[tokio::test]
 async fn idempotent_on_re_run_from_same_cursor() {
     skip_if_no_fixtures!();
@@ -223,17 +229,82 @@ async fn idempotent_on_re_run_from_same_cursor() {
         let dir = tempdir().unwrap();
         let cursor = StubFileCursor::new(dir.path().join("cursor.txt"));
         cursor.write(FIRST_FIXTURE - 1).await.unwrap();
-        reconciler(fixtures_dir(), cursor).run(16).await.unwrap()
+        reconciler(fixtures_dir(), cursor)
+            .run_terminal(16)
+            .await
+            .unwrap()
     };
 
     let first = run().await;
     let second = run().await;
 
+    assert!(
+        first.rows_emitted > 0,
+        "the comparison below is worthless unless the run actually wrote candles"
+    );
     assert_eq!(first.start_cursor, second.start_cursor);
     assert_eq!(first.end_cursor, second.end_cursor);
     assert_eq!(first.ledgers_persisted, second.ledgers_persisted);
     assert_eq!(
         first.rows_emitted, second.rows_emitted,
         "row count must be deterministic across identical runs"
+    );
+}
+
+/// Review of PR #313 finding 2, end to end: a run whose whole iteration budget
+/// lands inside one minute must still advance. Without the escape hatch the
+/// cursor never moves and the same ledgers are re-read forever, silently.
+///
+/// The three fixtures share a minute, so `max_iterations = 3` reproduces the
+/// deadlock shape exactly: budget spent, no complete minute.
+#[tokio::test]
+async fn a_budget_exhausted_inside_one_minute_still_advances() {
+    skip_if_no_fixtures!();
+    let dir = tempdir().unwrap();
+    let cursor = StubFileCursor::new(dir.path().join("cursor.txt"));
+    cursor.write(FIRST_FIXTURE - 1).await.unwrap();
+
+    let stats = reconciler(fixtures_dir(), cursor)
+        .run(3)
+        .await
+        .expect("forced-progress run should succeed");
+
+    assert_eq!(
+        stats.end_cursor, LAST_FIXTURE,
+        "budget exhausted inside one minute: flush the partial minute and advance"
+    );
+    assert!(
+        stats.rows_emitted > 0,
+        "the forced flush must actually write the partial minute, not drop it"
+    );
+    assert_eq!(
+        stats.ledgers_held_back, 0,
+        "a forced run holds nothing back — everything was flushed"
+    );
+
+    // And the cursor is durable, so the next invocation resumes past it.
+    let resumed = StubFileCursor::new(dir.path().join("cursor.txt"));
+    assert_eq!(resumed.read().await.unwrap(), LAST_FIXTURE);
+}
+
+/// Review of PR #313 finding 3: `bin/cli.rs` calls the reconciler once and then
+/// exits, so a held-back minute would never be written by anyone. The terminal
+/// variant flushes it.
+#[tokio::test]
+async fn a_terminal_run_flushes_the_open_minute() {
+    skip_if_no_fixtures!();
+    let dir = tempdir().unwrap();
+    let cursor = StubFileCursor::new(dir.path().join("cursor.txt"));
+    cursor.write(FIRST_FIXTURE - 1).await.unwrap();
+
+    let stats = reconciler(fixtures_dir(), cursor)
+        .run_terminal(16)
+        .await
+        .expect("terminal run should succeed");
+
+    assert_eq!(stats.end_cursor, LAST_FIXTURE);
+    assert!(
+        stats.rows_emitted > 0,
+        "a one-shot run must not drop its final minute — nothing re-reads it"
     );
 }

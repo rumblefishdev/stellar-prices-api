@@ -22,10 +22,23 @@
 //! production 2026-09-14, buckets spanning 4+ ledgers retained **15%** of their
 //! trades, and Aquarius was losing ~50% of its trades every day.
 //!
-//! ⚠️ The cost is latency: a minute's candles are published only once a ledger
-//! from the FOLLOWING minute has been fetched, so the newest candle can be up to
-//! ~1 minute behind rather than ~5 seconds. Check the
-//! `prices-production-rollup-freshness-1m` threshold (task 0137) before deploy.
+//! Two costs, both deliberate:
+//!
+//! ⚠️ **Latency.** A minute's candles are published only once a ledger from the
+//! FOLLOWING minute has been fetched, so the newest candle can be up to ~1 minute
+//! behind rather than ~5 seconds. Measured against the alarm that watches this:
+//! `prices-production-rollup-freshness-1m` fires above **900 s** and production
+//! sits at a steady **18 s**, so ~78 s worst case stays an order of magnitude
+//! clear. The coarse tiers shift by the same ~60 s against thresholds of 3,600 s
+//! and up.
+//!
+//! ⚠️ **Re-reads.** Each doorbell re-fetches and re-decodes every ledger held
+//! back since the minute last turned — 1 object on the first doorbell of a
+//! minute, growing to ~12 on the last, so roughly a 6-7x average increase in S3
+//! GETs, zstd decompression and extraction work. That is the price of keeping no
+//! accumulator state between invocations, which is what makes a cold start
+//! behave like a warm one. It scales with ledgers-per-minute, the same factor
+//! that drives the `forced_progress` escape hatch below.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -127,7 +140,30 @@ where
         }
     }
 
+    /// One reconcile run for a LONG-RUNNING caller (the Lambda). Minutes the
+    /// run did not see the end of are held back for the next run.
     pub async fn run(&self, max_iterations: usize) -> Result<RunStats, ReconcileError> {
+        self.run_inner(max_iterations, false).await
+    }
+
+    /// One reconcile run for a ONE-SHOT caller (`bin/cli.rs`), which exits when
+    /// this returns. There is no "next run" to re-read held-back ledgers, so the
+    /// open minute is flushed rather than dropped.
+    ///
+    /// ⚠️ That last minute may therefore be PARTIAL — it carries only the trades
+    /// this process saw. For a terminal replay that is the right trade (a partial
+    /// candle beats a silently missing one), but it is why the CLI is not a way
+    /// to repair a range: use `events-backfill`, which accumulates the whole
+    /// range before writing.
+    pub async fn run_terminal(&self, max_iterations: usize) -> Result<RunStats, ReconcileError> {
+        self.run_inner(max_iterations, true).await
+    }
+
+    async fn run_inner(
+        &self,
+        max_iterations: usize,
+        terminal: bool,
+    ) -> Result<RunStats, ReconcileError> {
         let mut st = self.state.lock().await;
         // Deref the guard once so `registries` and `assets` can be borrowed as
         // disjoint fields (a borrow through the guard's DerefMut each time would
@@ -146,10 +182,17 @@ where
         let mut sdex = CandleAccumulator::new();
         let mut amm: HashMap<&'static str, CandleAccumulator> = HashMap::new();
         let mut oracle: Vec<OracleSample> = Vec::new();
-        // (ledger_sequence, minute_start) for every ledger this run decoded, so
-        // the run can end on a whole-minute boundary instead of wherever the
-        // feed happened to run out.
-        let mut ledger_minutes: Vec<(u64, u32)> = Vec::new();
+        // (ledger_sequence, minute_start, is_last_ledger_of_its_object) for every
+        // ledger this run decoded, so the run can end on a whole-minute boundary
+        // instead of wherever the feed happened to run out.
+        //
+        // The third element guards a latent coupling: `ledger_s3_key` assumes
+        // `ledgers_per_file = 1`, so the cursor must land on an OBJECT boundary —
+        // `ledger_s3_key(interior_ledger + 1)` would resolve to a key that does
+        // not exist and the run would gap-stop forever. Before this task the
+        // cursor was always `obj_max`, so that held for free; the minute-boundary
+        // rewind can pick an interior ledger, so it has to be enforced.
+        let mut ledger_minutes: Vec<(u64, u32, bool)> = Vec::new();
 
         for _ in 0..max_iterations {
             let next = current + 1;
@@ -165,6 +208,7 @@ where
 
             let lcms = decode_object(&bytes).map_err(|e| ReconcileError::Decode(e.to_string()))?;
             let mut obj_max = current;
+            let mut obj_ledgers: Vec<(u64, u32)> = Vec::new();
             for lcm in &lcms {
                 // Classic SDEX trades from operation results.
                 for trade in extract_trades(lcm) {
@@ -180,9 +224,17 @@ where
                 // Same bucketing the accumulator uses (`bucket.rs::merge`), so
                 // these minute keys and the candle keys cannot drift apart.
                 let minute = (ledger_close_time(lcm) as u32 / 60) * 60;
-                ledger_minutes.push((seq, minute));
+                obj_ledgers.push((seq, minute));
                 obj_max = obj_max.max(seq);
             }
+            // Flag only this object's HIGHEST ledger as a valid cursor landing
+            // point (see `ledger_minutes` above).
+            let obj_last = obj_ledgers.iter().map(|(s, _)| *s).max();
+            ledger_minutes.extend(
+                obj_ledgers
+                    .into_iter()
+                    .map(|(s, m)| (s, m, Some(s) == obj_last)),
+            );
 
             current = obj_max.max(next);
             persisted += 1;
@@ -242,7 +294,13 @@ where
         // that is the deliberate trade: a candle that may be undercounted beats a
         // pipeline that has silently stopped. It is logged at WARN because it
         // means `maxIterations` is now too small for the chain's block rate.
-        let forced = forced_progress(complete_end, persisted, max_iterations);
+        let forced = forced_progress(
+            complete_end,
+            persisted,
+            max_iterations,
+            ledger_minutes.len(),
+            terminal,
+        );
         if forced {
             tracing::warn!(
                 start,
@@ -266,11 +324,13 @@ where
             .await?;
         state.persisted_asset_watermark = state.assets.watermark();
 
+        // `unwrap_or(current)` not `start`: an object that decoded to no ledgers
+        // still advanced `current` past it, and that advance must not be lost.
         let highest_decoded = ledger_minutes
             .iter()
-            .map(|(s, _)| *s)
+            .map(|(s, _, _)| *s)
             .max()
-            .unwrap_or(start);
+            .unwrap_or(current);
         let advance_to = if forced {
             Some(highest_decoded)
         } else {
@@ -382,8 +442,30 @@ where
 /// ledgers and hold back exactly the same way, forever. See the WARN-logged
 /// block in [`Reconciler::run`] for why a possibly-undercounted candle is the
 /// better side of that trade.
-fn forced_progress(complete_end: Option<u64>, persisted: u64, max_iterations: usize) -> bool {
-    complete_end.is_none() && persisted as usize >= max_iterations
+fn forced_progress(
+    complete_end: Option<u64>,
+    persisted: u64,
+    max_iterations: usize,
+    decoded_ledgers: usize,
+    terminal: bool,
+) -> bool {
+    if complete_end.is_some() {
+        return false;
+    }
+    // A one-shot caller has no next run to re-read anything.
+    if terminal {
+        return true;
+    }
+    // Budget spent inside one minute: a later run would fetch the same ledgers
+    // and hold back identically, forever.
+    if persisted as usize >= max_iterations {
+        return true;
+    }
+    // An object that decoded to NO ledgers leaves nothing to bound a minute
+    // with, so `run_boundary` returns `(0, None)` and the run would hold back
+    // zero ledgers forever while the cursor sat still. Pre-0282 this case
+    // advanced past the object; keep doing that.
+    persisted > 0 && decoded_ledgers == 0
 }
 
 /// Ledgers decoded by this run that sit ABOVE the cursor it will write, and so
@@ -392,10 +474,10 @@ fn forced_progress(complete_end: Option<u64>, persisted: u64, max_iterations: us
 /// Must be called with the run's FINAL cursor, not the highest ledger decoded —
 /// against the latter the predicate is false by construction and this silently
 /// returns 0 for every run.
-fn held_back_count(ledger_minutes: &[(u64, u32)], cursor_end: u64) -> usize {
+fn held_back_count(ledger_minutes: &[(u64, u32, bool)], cursor_end: u64) -> usize {
     ledger_minutes
         .iter()
-        .filter(|(s, _)| *s > cursor_end)
+        .filter(|(s, _, _)| *s > cursor_end)
         .count()
 }
 
@@ -409,12 +491,16 @@ fn held_back_count(ledger_minutes: &[(u64, u32)], cursor_end: u64) -> usize {
 /// `None` for the second element means every ledger in the run belongs to the
 /// open minute, so the run has nothing it can safely write. See the task-0282
 /// block in [`Reconciler::run`] for why writing it anyway loses data.
-fn run_boundary(ledger_minutes: &[(u64, u32)]) -> (u32, Option<u64>) {
-    let open_minute = ledger_minutes.iter().map(|(_, m)| *m).max().unwrap_or(0);
+fn run_boundary(ledger_minutes: &[(u64, u32, bool)]) -> (u32, Option<u64>) {
+    let open_minute = ledger_minutes.iter().map(|(_, m, _)| *m).max().unwrap_or(0);
     let complete_end = ledger_minutes
         .iter()
-        .filter(|(_, m)| *m < open_minute)
-        .map(|(s, _)| *s)
+        // `obj_end` only: the cursor must land on an object boundary, because
+        // `ledger_s3_key` assumes one ledger per object and the next key is
+        // derived from the cursor. An interior ledger would produce a key that
+        // does not exist and the run would gap-stop forever.
+        .filter(|(_, m, obj_end)| *m < open_minute && *obj_end)
+        .map(|(s, _, _)| *s)
         .max();
     (open_minute, complete_end)
 }
@@ -425,6 +511,52 @@ mod tests {
 
     use super::{forced_progress, held_back_count};
 
+    /// Finding 5: an object that decodes to NO ledgers used to leave
+    /// `run_boundary` at `(0, None)`, so the run "held back" zero ledgers and
+    /// the cursor sat still forever. Pre-0282 it advanced past the object.
+    #[test]
+    fn an_object_that_decodes_to_no_ledgers_still_advances() {
+        assert!(
+            forced_progress(None, 1, 16, 0, false),
+            "nothing decoded but an object was consumed: advance, do not hold"
+        );
+        assert!(
+            !forced_progress(None, 0, 16, 0, false),
+            "no object consumed either — that is the ordinary idle run"
+        );
+    }
+
+    /// Finding 3: a one-shot caller (`bin/cli.rs`) exits when the run returns,
+    /// so there is no next run to re-read held-back ledgers. It flushes.
+    #[test]
+    fn a_terminal_run_always_flushes() {
+        assert!(forced_progress(None, 1, 16, 3, true));
+        assert!(
+            !forced_progress(Some(101), 1, 16, 3, true),
+            "a complete minute needs no forcing, terminal or not"
+        );
+    }
+
+    /// Finding 7: `ledger_s3_key` assumes one ledger per object, so the cursor
+    /// must land on an object boundary. With multi-ledger batches the minute
+    /// boundary can fall inside an object, and parking there would make the
+    /// next key resolve to something that does not exist.
+    #[test]
+    fn the_cursor_never_parks_inside_a_multi_ledger_object() {
+        // One object holds 100-102; the minute turns at 102, mid-object.
+        let ledgers = [(100, 60, false), (101, 60, false), (102, 120, true)];
+        let (open, end) = run_boundary(&ledgers);
+        assert_eq!(open, 120);
+        assert_eq!(
+            end, None,
+            "101 completes a minute but is interior — refuse it and hold back"
+        );
+
+        // Same minutes, but now the object ends at 101: that IS a legal landing.
+        let split = [(100, 60, false), (101, 60, true), (102, 120, true)];
+        assert_eq!(run_boundary(&split).1, Some(101));
+    }
+
     /// Regression, code review of PR #313 finding 1: `held_back` was computed
     /// against the highest ledger DECODED rather than the cursor the run
     /// actually writes. `current >= s` holds for every decoded ledger by
@@ -432,7 +564,12 @@ mod tests {
     /// where the whole point is that it is NOT 0.
     #[test]
     fn held_back_counts_ledgers_above_the_written_cursor() {
-        let ledgers = [(100, 60), (101, 60), (102, 120), (103, 120)];
+        let ledgers = [
+            (100, 60, true),
+            (101, 60, true),
+            (102, 120, true),
+            (103, 120, true),
+        ];
         assert_eq!(
             held_back_count(&ledgers, 101),
             2,
@@ -453,7 +590,7 @@ mod tests {
     #[test]
     fn a_budget_exhausted_inside_one_minute_forces_progress() {
         assert!(
-            forced_progress(None, 16, 16),
+            forced_progress(None, 16, 16, 16, false),
             "budget spent, no complete minute: must flush and advance or deadlock"
         );
     }
@@ -461,15 +598,15 @@ mod tests {
     #[test]
     fn forced_progress_does_not_fire_while_the_run_can_still_grow() {
         assert!(
-            !forced_progress(None, 3, 16),
+            !forced_progress(None, 3, 16, 3, false),
             "under budget — the next run fetches more and the minute will close"
         );
         assert!(
-            !forced_progress(Some(101), 16, 16),
+            !forced_progress(Some(101), 16, 16, 16, false),
             "a complete minute exists, so there is nothing to force"
         );
         assert!(
-            !forced_progress(Some(101), 3, 16),
+            !forced_progress(Some(101), 3, 16, 3, false),
             "the ordinary healthy run"
         );
     }
@@ -479,14 +616,19 @@ mod tests {
     /// the first invocation without the escape hatch.
     #[test]
     fn the_smallest_legal_iteration_budget_does_not_deadlock() {
-        assert!(forced_progress(None, 1, 1));
+        assert!(forced_progress(None, 1, 1, 1, false));
     }
 
     /// The ordinary case: a run straddles a minute boundary, so the earlier
     /// minute is complete and the later one is still being filled.
     #[test]
     fn a_run_straddling_a_boundary_ends_on_the_last_complete_minute() {
-        let ledgers = vec![(100, 60), (101, 60), (102, 120), (103, 120)];
+        let ledgers = vec![
+            (100, 60, true),
+            (101, 60, true),
+            (102, 120, true),
+            (103, 120, true),
+        ];
         let (open, end) = run_boundary(&ledgers);
         assert_eq!(open, 120, "the newest minute touched is the open one");
         assert_eq!(
@@ -501,7 +643,7 @@ mod tests {
     /// replaces rather than sums.
     #[test]
     fn a_run_inside_a_single_minute_writes_nothing() {
-        let ledgers = vec![(100, 60), (101, 60), (102, 60)];
+        let ledgers = vec![(100, 60, true), (101, 60, true), (102, 60, true)];
         let (open, end) = run_boundary(&ledgers);
         assert_eq!(open, 60);
         assert_eq!(end, None, "no complete minute — hold everything back");
@@ -512,9 +654,9 @@ mod tests {
     /// exactly the behaviour that stops the 15%-retention case.
     #[test]
     fn a_single_ledger_run_holds_back_until_the_minute_turns() {
-        assert_eq!(run_boundary(&[(100, 60)]).1, None);
+        assert_eq!(run_boundary(&[(100, 60, true)]).1, None);
         assert_eq!(
-            run_boundary(&[(100, 60), (101, 120)]).1,
+            run_boundary(&[(100, 60, true), (101, 120, true)]).1,
             Some(100),
             "once the minute turns, the completed minute is released"
         );
@@ -524,8 +666,8 @@ mod tests {
     /// that: it is derived from close times, not from position in the vec.
     #[test]
     fn the_boundary_does_not_depend_on_arrival_order() {
-        let forward = run_boundary(&[(100, 60), (101, 120), (102, 120)]);
-        let shuffled = run_boundary(&[(102, 120), (100, 60), (101, 120)]);
+        let forward = run_boundary(&[(100, 60, true), (101, 120, true), (102, 120, true)]);
+        let shuffled = run_boundary(&[(102, 120, true), (100, 60, true), (101, 120, true)]);
         assert_eq!(forward, shuffled);
         assert_eq!(forward.1, Some(100));
     }
@@ -534,7 +676,7 @@ mod tests {
     /// run: minute 60 is still complete even though minute 120 never appears.
     #[test]
     fn a_gap_in_minutes_still_releases_the_older_one() {
-        let (open, end) = run_boundary(&[(100, 60), (101, 60), (102, 300)]);
+        let (open, end) = run_boundary(&[(100, 60, true), (101, 60, true), (102, 300, true)]);
         assert_eq!(open, 300);
         assert_eq!(end, Some(101));
     }
