@@ -224,7 +224,34 @@ where
         // survive between invocations, so a cold start behaves like a warm one.
         let (open_minute, complete_end) = run_boundary(&ledger_minutes);
 
-        let held_back = ledger_minutes.iter().filter(|(s, _)| *s > current).count();
+        // FIX 2 — forced progress. Holding back is only safe while a LATER run
+        // can reach the next minute. If this run filled its whole iteration
+        // budget and every ledger still shared one minute, waiting cannot help:
+        // the next run fetches the same ledgers, finds the same open minute, and
+        // holds back again — forever, with no error, no Err arm, and no alarm
+        // (the SQS doorbell is consumed successfully every time, so
+        // `ApproximateAgeOfOldestMessage` stays at 0). Ingestion would stop dead
+        // while every signal read healthy.
+        //
+        // Production runs `maxIterations: 16` against ~12 ledgers/minute at a 5 s
+        // close time — four of headroom. A tighter close time or one dense minute
+        // is enough to cross it.
+        //
+        // So in exactly that case, flush the open minute and advance anyway. That
+        // re-exposes the task-0282 partial-write hazard for that ONE minute, and
+        // that is the deliberate trade: a candle that may be undercounted beats a
+        // pipeline that has silently stopped. It is logged at WARN because it
+        // means `maxIterations` is now too small for the chain's block rate.
+        let forced = forced_progress(complete_end, persisted, max_iterations);
+        if forced {
+            tracing::warn!(
+                start,
+                max_iterations,
+                ledgers = ledger_minutes.len(),
+                open_minute,
+                "iteration budget exhausted inside ONE minute — flushing a PARTIAL                  minute to keep the cursor moving; raise ledgerProcessor.maxIterations                  above the ledgers-per-minute rate (task 0282)"
+            );
+        }
 
         // Write newly-interned assets FIRST — the candles below reference their
         // surrogate ids, so persisting the dimension row before the fact rows
@@ -239,7 +266,18 @@ where
             .await?;
         state.persisted_asset_watermark = state.assets.watermark();
 
-        let Some(current) = complete_end else {
+        let highest_decoded = ledger_minutes
+            .iter()
+            .map(|(s, _)| *s)
+            .max()
+            .unwrap_or(start);
+        let advance_to = if forced {
+            Some(highest_decoded)
+        } else {
+            complete_end
+        };
+
+        let Some(current) = advance_to else {
             // Every ledger in this run belongs to the minute still being filled.
             // Write no CANDLES and leave the cursor where it was: the next run
             // re-reads these ledgers and completes the minute in one write.
@@ -264,6 +302,16 @@ where
             });
         };
 
+        // Computed AFTER `current` is bound to the run's real end — an earlier
+        // revision of this computed it against the outer `current` (the highest
+        // ledger DECODED), where the predicate is false by construction and the
+        // field was always 0 on the path that matters.
+        let held_back = held_back_count(&ledger_minutes, current);
+
+        // A forced run flushes EVERYTHING (see the escape hatch above); a normal
+        // run flushes only minutes it saw the end of.
+        let flush_boundary = if forced { u32::MAX } else { open_minute };
+
         // Flush + write candles/oracle, then advance the cursor LAST (barrier).
         let mut rows_emitted = 0u64;
 
@@ -280,7 +328,7 @@ where
 
         // `flush_older_than` leaves the open minute in the accumulator, which
         // is then dropped — its ledgers are re-read next run, not lost.
-        let sdex_candles = sdex.flush_older_than(open_minute);
+        let sdex_candles = sdex.flush_older_than(flush_boundary);
         rows_emitted += sdex_candles.len() as u64;
         let t = Instant::now();
         self.sink.write_candles(&sdex_candles, "sdex").await?;
@@ -292,7 +340,7 @@ where
         }
 
         for (source, mut acc) in amm {
-            let candles = acc.flush_older_than(open_minute);
+            let candles = acc.flush_older_than(flush_boundary);
             rows_emitted += candles.len() as u64;
             let t = Instant::now();
             self.sink.write_candles(&candles, source).await?;
@@ -327,6 +375,30 @@ where
     }
 }
 
+/// Whether the run must flush a partial minute to keep the cursor moving.
+///
+/// True only when the run found no complete minute AND had already spent its
+/// whole iteration budget — i.e. a later run would fetch exactly the same
+/// ledgers and hold back exactly the same way, forever. See the WARN-logged
+/// block in [`Reconciler::run`] for why a possibly-undercounted candle is the
+/// better side of that trade.
+fn forced_progress(complete_end: Option<u64>, persisted: u64, max_iterations: usize) -> bool {
+    complete_end.is_none() && persisted as usize >= max_iterations
+}
+
+/// Ledgers decoded by this run that sit ABOVE the cursor it will write, and so
+/// will be re-read next run.
+///
+/// Must be called with the run's FINAL cursor, not the highest ledger decoded —
+/// against the latter the predicate is false by construction and this silently
+/// returns 0 for every run.
+fn held_back_count(ledger_minutes: &[(u64, u32)], cursor_end: u64) -> usize {
+    ledger_minutes
+        .iter()
+        .filter(|(s, _)| *s > cursor_end)
+        .count()
+}
+
 /// Split a run's decoded ledgers at the last whole-minute boundary.
 ///
 /// Returns `(open_minute, last_ledger_of_the_last_complete_minute)`. The open
@@ -350,6 +422,65 @@ fn run_boundary(ledger_minutes: &[(u64, u32)]) -> (u32, Option<u64>) {
 #[cfg(test)]
 mod tests {
     use super::run_boundary;
+
+    use super::{forced_progress, held_back_count};
+
+    /// Regression, code review of PR #313 finding 1: `held_back` was computed
+    /// against the highest ledger DECODED rather than the cursor the run
+    /// actually writes. `current >= s` holds for every decoded ledger by
+    /// construction, so the count was always 0 — including on the normal path,
+    /// where the whole point is that it is NOT 0.
+    #[test]
+    fn held_back_counts_ledgers_above_the_written_cursor() {
+        let ledgers = [(100, 60), (101, 60), (102, 120), (103, 120)];
+        assert_eq!(
+            held_back_count(&ledgers, 101),
+            2,
+            "102 and 103 are above the cursor and will be re-read"
+        );
+        assert_eq!(
+            held_back_count(&ledgers, 103),
+            0,
+            "nothing held back when the cursor reaches the last decoded ledger"
+        );
+    }
+
+    /// Regression, code review of PR #313 finding 2: holding back is only safe
+    /// while a LATER run can reach the next minute. A run that spent its whole
+    /// iteration budget inside one minute would otherwise re-read the same
+    /// ledgers forever — silently, with no error and no alarm, because every
+    /// doorbell is still consumed successfully.
+    #[test]
+    fn a_budget_exhausted_inside_one_minute_forces_progress() {
+        assert!(
+            forced_progress(None, 16, 16),
+            "budget spent, no complete minute: must flush and advance or deadlock"
+        );
+    }
+
+    #[test]
+    fn forced_progress_does_not_fire_while_the_run_can_still_grow() {
+        assert!(
+            !forced_progress(None, 3, 16),
+            "under budget — the next run fetches more and the minute will close"
+        );
+        assert!(
+            !forced_progress(Some(101), 16, 16),
+            "a complete minute exists, so there is nothing to force"
+        );
+        assert!(
+            !forced_progress(Some(101), 3, 16),
+            "the ordinary healthy run"
+        );
+    }
+
+    /// `maxIterations: 1` is accepted by the config validator today
+    /// (`infra/src/lib/types.ts:936` only enforces >= 1) and would deadlock on
+    /// the first invocation without the escape hatch.
+    #[test]
+    fn the_smallest_legal_iteration_budget_does_not_deadlock() {
+        assert!(forced_progress(None, 1, 1));
+    }
 
     /// The ordinary case: a run straddles a minute boundary, so the earlier
     /// minute is complete and the later one is still being filled.
