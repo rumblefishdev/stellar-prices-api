@@ -88,6 +88,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 skipped = stats.skipped,
                 timestamp_rejected = stats.timestamp_rejected,
                 rates_snapshotted = stats.rates_snapshotted,
+                measured_rates_snapshotted = stats.measured_rates_snapshotted,
                 "oracle-worker run complete"
             );
             Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({
@@ -96,6 +97,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 "skipped": stats.skipped,
                 "timestamp_rejected": stats.timestamp_rejected,
                 "rates_snapshotted": stats.rates_snapshotted,
+                "measured_rates_snapshotted": stats.measured_rates_snapshotted,
             }))
         }
     }))

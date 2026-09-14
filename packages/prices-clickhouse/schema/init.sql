@@ -360,6 +360,15 @@ SETTINGS index_granularity = 8192;
 --           'peg'      — the $1 assumption (hops = 0)
 --           'pivot'    — via XLM (hops = 1)          } owned by 0154,
 --           'pivot2'   — via another rated asset (2) } not written here
+--   ⚠️ NO WORD IS COINED FOR THE ENRICHMENT PIVOT, deliberately (task 0228).
+--   Since 0228 a pivot-leg candle's stored `close_usd` is the reference asset's
+--   own MEASURED close against USDC, scaled by the measured USDC/USD rate from
+--   this table (`ch_enrich::pivot_sql` ASOF-joins the 'oracle' series, else the
+--   'external' one, at the bucket's end). That composition changes no provenance:
+--   `/ohlcv` still labels such a candle `traded`, because the label names how the
+--   price was reached — through the reference asset's own market — not which
+--   factors the arithmetic carried. The rows READ here are ordinary 'oracle' /
+--   'external' rows; nothing new is WRITTEN here on that account.
 --   quality — task 0267. The IMPORTING series' own confidence in the day's
 --             observation, carried through 1:1 from the composed CSV so a
 --             consumer can decide whether to trust it:
