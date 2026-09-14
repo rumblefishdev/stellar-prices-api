@@ -71,6 +71,25 @@ history:
     status: active
     who: okarcz
     note: >
+      Dry run EXECUTED on prod (steps 1-4 of the runbook are done; nothing
+      written). Tick counts match raw soroban_events counts exactly for all
+      three venues - aquarius 115,268, phoenix 1,442, soroswap 7,786 - with zero
+      unresolved pools, so extraction is proven correct. Three findings, and two
+      of this task's premises did not survive. (a) Phoenix's 7-event premise
+      does NOT apply in this window: every swap group is fully populated, all
+      seven field events at exactly 1,442, so 0099's fix recovers nothing here.
+      (b) One pool registered venue=phoenix emits Soroswap-style swap events -
+      that is the whole "swaps failed dispatch: 70" figure. (c) 🔴 Aquarius is
+      losing ~50% of its trades LIVE, today, and was short on every day of this
+      window too; spawned as 0282. Consequence: aquarius is not the control this
+      file assumes and a write run would move it +27% in the window, so the
+      write run is sequenced behind 0282's diagnosis. Also corrected: step 4's
+      "aquarius should match what live already wrote" check was pointed the
+      wrong way - live is the short side, not the tool.
+  - date: 2026-09-14
+    status: active
+    who: okarcz
+    note: >
       Run plan written as the §RUN RUNBOOK section, bounds measured against
       default.ledgers. ONE run, [63352609, 63518022], because events-backfill has
       no venue filter and Phoenix's buggy window contains Soroswap's. Re-measured
@@ -312,12 +331,16 @@ Range is **165,414 ledgers** — one chunk at the 320k default. Live's tip is
    2026-09-14 from EventBridge (`State: DISABLED`) and CloudTrail (disabled
    2026-07-20 16:22:33, last fire 2026-07-20, zero invocations in 56 days). Step
    satisfied, and durable — `enabled: false` is in the CDK since 0204.
-4. **[prod host] Dry-run** `events-backfill --dry-run --verbose` over the bounds,
-   under `tmux`. Compare its per-source tick counts against raw swap counts from
-   `soroban_events` for the same range (query shape in the notes). ⚠️ Aquarius
-   should come back matching what live already wrote; if it does not, the
-   extraction path has changed since July and the blast radius is bigger than
-   this task — **stop and re-scope**.
+4. ✅ **[prod host] Dry-run DONE 2026-09-14.** Tick counts match raw event
+   counts **exactly** for all three venues — aquarius 115,268, phoenix 1,442,
+   soroswap 7,786 — with `unresolved pools: 0` and `swaps dropped: 0`.
+   Extraction is proven correct against the source.
+   ⛔ **An earlier revision of this step said "aquarius should match what live
+   already wrote; if not, stop". That check was pointed the wrong way** and
+   would have halted the run for the wrong reason. Live is the short side, not
+   the tool. The correct comparison — the one the notes always specified — is
+   against `default.soroban_events`, and it passes perfectly.
+   🔴 Three findings came out of it; see §What the dry run changed.
 5. 🔴 **[local repo, branch + PR] Adapt `preroll-amm-reprice.sql` BEFORE step 8.**
    This is a code change, not a param tweak. Three defects for a mid-month
    window, all of which 0097's window happened to avoid:
@@ -368,6 +391,41 @@ Range is **165,414 ledgers** — one chunk at the 320k default. Live's tip is
     agree and a deploy of an unrelated stack cannot flip it on. (An earlier
     revision of this section said the opposite; that described the pre-0204
     state.)
+
+### 🔴 What the dry run changed (2026-09-14)
+
+Two of this task's premises did not survive contact with the measurement.
+
+**1. Phoenix's 7-event premise does not apply in this window.** Every Phoenix
+swap group in `[63352609, 63518022]` is fully populated — all seven field events
+at exactly **1,442** (`sell_token`, `buy_token`, `offer_amount`,
+`return_amount`, `spread_amount`, `referral_fee_amount`,
+`actual received amount`), with `sender` at 1,447. **There are no 7-event
+groups**, so 0099's variable-length fix recovers nothing here. The stored
+shortfall (1,306 against 1,442 extracted) is a different defect — the same one
+in finding 3.
+
+**2. One pool registered as `venue='phoenix'` emits Soroswap-style `swap`
+events** — 70 of them, from a single contract, and they are the entire
+`swaps failed dispatch: 70` figure. Either a `pool_registry` misclassification
+or a Phoenix shape nothing handles. Small, but it is a real hole and it should
+not be closed by silently ignoring it.
+
+**3. 🔴 Aquarius is not a bystander — it is losing ~50% of its trades, live,
+today.** Filed as [[0282]]. In this window it is short on every single day
+(8-52%); over 2026-09-09..09-14 live stored 31,653 of 63,344 raw trades. The
+same extraction chain recovers 100%, so the extractor is exonerated and the
+live path is not.
+
+⚠️ **Consequence for this task: a write run would move aquarius by +27% in the
+window.** This file's acceptance criteria treat aquarius as untouched and use it
+as the control. That is void. **0101's write run is sequenced behind [[0282]]'s
+diagnosis** — repairing eleven days while the venue sheds half its trades daily
+fixes the floor under a running tap, and 0282 may change what the repair should
+produce.
+
+✅ Nothing above implicates the reprice tool. Its correctness is what made all
+three findings measurable.
 
 ### Where it runs, and who runs it
 
