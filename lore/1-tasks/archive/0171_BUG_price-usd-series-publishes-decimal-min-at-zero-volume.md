@@ -2,10 +2,10 @@
 id: "0171"
 title: "price_usd_series* publish Decimal128::MIN (-1.7e24) for any asset whose only priced candles carry zero volume — a non-Nullable CAST swallows the nullIf"
 type: BUG
-status: active
+status: completed
 assignee: akot
 related_adr: []
-related_tasks: ["0165", "0116", "0144", "0151", "0150", "0061"]
+related_tasks: ["0165", "0116", "0144", "0151", "0150", "0061", "0198"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "data-correctness", "read-surface", "be-interop", "milestone-M2"]
 milestone: 2
@@ -45,6 +45,20 @@ history:
       :666 on develop) and disagree on its failure mode: this task says it
       publishes Decimal128::MIN, 0198 measured an exception (code 349) on the
       prod pin. Settling which one is first.
+  - date: "2026-09-14"
+    status: completed
+    who: akot
+    note: >
+      Fixed on PR #312 together with [[0198]]. Arm A of both series grains and
+      both usd_reference grains now admit a candle only with volume_base > 0,
+      so a zero-weight group never forms and the CAST never sees NULL. Settled
+      the 0171-vs-0198 disagreement: BOTH are right on 26.3.10.60 — the
+      interpreted CAST raises code 349, the JIT-compiled one (default, after
+      3 executions) publishes Decimal128::MIN. Prod blast radius measured at
+      ZERO zero-volume priced candles on either grain, so no row changes today.
+      3 new #[ignore] tests (both grains, both JIT modes, red on develop /
+      green on the fix) + 1 unit test pinning the predicate on all 4
+      statements; 16 ignored + 36 unit tests pass on 26.3.10.60.
 ---
 
 # `price_usd_series*` publish `Decimal128::MIN` at zero volume
@@ -173,16 +187,29 @@ number than a gap.
 - [x] Decision recorded (omit / unweighted / other) with BE's input, and why.
       ✅ **2026-08-11 — OMIT THE ROW**, quoted verbatim above with their
       reasoning ("misses are absent" is what their whole read path assumes).
-- [ ] Neither grain of `price_usd_series*` can publish a non-positive
+- [x] Neither grain of `price_usd_series*` can publish a non-positive
       `close_usd`; asserted by **value**, never by `IS NULL`.
-- [ ] `usd_reference*` audited for the same shape and fixed or cleared on
-      the record.
-- [ ] Regression test on 26.3.10.60 covering the non-peg zero-volume case —
+      ✅ `a_zero_volume_only_base_is_absent_and_its_neighbours_still_publish`
+      asserts `countIf(toFloat64(close_usd) <= 0) = 0` on both grains, in
+      both JIT modes.
+- [x] `usd_reference*` audited for the same shape and fixed or cleared on
+      the record. ✅ Same shape, same failure, **fixed** (`volume_base > 0`
+      beside `close > 0`), pinned by
+      `usd_reference_omits_a_bucket_whose_reference_candles_have_no_volume`.
+      The rest of the schema grepped: every other `nullIf(` is a plain
+      Float64 `vwap` (preroll*/rollups) or is wrapped in `ifNull` (current.sql).
+      Only `views.sql` had the `CAST(… AS Decimal)` shape.
+- [x] Regression test on 26.3.10.60 covering the non-peg zero-volume case —
       the one 0165's peg guard deliberately does **not** reach.
-- [ ] A prod count of how many `(identity, bucket)` rows are affected today,
+      ✅ Red on `develop`'s `views.sql` (sentinel row present / code 349
+      raised, per JIT mode), green on the fix.
+- [x] A prod count of how many `(identity, bucket)` rows are affected today,
       so the blast radius is known before changing behaviour.
-- [ ] If any row is omitted, [[0150]] (materialising the series) is checked so
+      ✅ **Zero** — see Implementation Notes. No row changes on deploy.
+- [x] If any row is omitted, [[0150]] (materialising the series) is checked so
       the new predicate is not lost at materialisation time.
+      ✅ No row is omitted today, but 0150 now carries the predicate as a
+      settled precondition (its §4) and an acceptance criterion.
 
 ## Notes
 
@@ -195,3 +222,113 @@ number than a gap.
   ClickHouse yields `inf`/`nan`, which casts to Decimal just as badly.
 - 0165 ships `countIf(toFloat64(close_usd) <= 0) = 0` assertions in `views_it.rs`
   for the fixtures it covers; extend that pattern rather than inventing another.
+
+## Implementation Notes
+
+PR #312, branch `fix/0171_price-usd-series-publishes-decimal-min-at-zero-volume`,
+one PR for this task and [[0198]]. Three files:
+
+- `packages/prices-clickhouse/schema/views.sql` — arm A of `price_usd_series`
+  and `price_usd_series_1h` reads `WHERE p.close_usd > 0 AND p.volume_base > 0`;
+  `usd_reference` and `usd_reference_1h` read
+  `AND p.close > 0 AND p.volume_base > 0`. Header comments rewritten: the
+  "known residual, deliberately NOT fixed" paragraph from 0165 is now the
+  record of how it was closed, including the JIT finding below.
+- `packages/prices-clickhouse/src/lib.rs` — unit test
+  `views_sql_every_weighted_surface_admits_only_candles_with_volume` pins the
+  predicate on all four statements, so a fix that reaches one grain fails CI.
+- `packages/prices-clickhouse/tests/views_it.rs` — three `#[ignore]` tests
+  (need ClickHouse 26.3.10.60; run with `cargo test -p prices-clickhouse --test
+  views_it -- --ignored`):
+  - `a_zero_volume_only_base_is_absent_and_its_neighbours_still_publish` —
+    the non-peg case at both grains, in both JIT modes; also asserts FOO and
+    USDC in the same query keep their values (the availability half of 0198).
+  - `a_zero_volume_candle_beside_a_real_one_changes_nothing` — a zero-volume
+    print at a different price next to a real one moves nothing, so the fix is
+    exactly the omission of the un-computable group.
+  - `usd_reference_omits_a_bucket_whose_reference_candles_have_no_volume` —
+    the audit item, both grains, both JIT modes.
+
+**Verification (2026-09-14, rootless 26.3.10.60 in the scratchpad):**
+red on `develop`'s `views.sql` — `a_zero_volume_only_base…` and
+`usd_reference_omits…` fail, with `Code: 349` interpreted and the sentinel row
+compiled; green on the fix — 16/16 ignored `views_it` tests and 36/36 unit
+tests pass; `cargo fmt --check` clean.
+
+**Prod blast radius (2026-09-14, `dev_read` over mTLS):**
+
+| Query | 1d | 1h |
+|-------|----|----|
+| candles with `close_usd > 0 AND volume_base = 0` | 0 | 0 |
+| `(asset_id, timestamp)` groups whose priced candles all have zero volume | 0 | n/a (memory limit; implied 0 by the row above) |
+| XLM/USDC reference candles with `close > 0 AND volume_base = 0` | 0 | 0 |
+
+The view-level `countIf(toFloat64(close_usd) <= 0)` on prod was not run: with
+zero trigger candles the arm A population is unchanged, and arm B publishes
+`1`. Prod runs `compile_expressions = 1`, `min_count_to_compile_expression = 3`.
+
+**Why the fix is `WHERE volume_base > 0` and not `HAVING sum(w) > 0`:** the
+task suggested `HAVING`; the `WHERE` form is equivalent for the group (a
+zero-volume candle contributes `v = 0, w = 0` to a weighted mean, so dropping
+it changes no value) and keeps the guard on the row the view admits, where the
+`close_usd > 0` guard already lives and where the unit test can read it.
+
+## Issues Encountered
+
+- **0171 and 0198 disagreed on the failure mode, and both were right.** On
+  26.3.10.60 the outcome of `CAST(NULL AS Decimal(38, 14))` depends on the
+  expression JIT. `SETTINGS compile_expressions = 0` — or a cold server before
+  the expression has been executed `min_count_to_compile_expression` (3)
+  times — raises `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN` (code 349) and fails
+  the whole query. Once compiled, the same CAST publishes `Decimal128::MIN`.
+  Found because the very first red run on a fresh server raised 349 and every
+  later one published the sentinel; bisected with curl over
+  `compress`/format/GET-vs-POST/analyzer/threads before `compile_expressions`
+  explained all of it. Consequence for prod: right after a restart the read
+  surface raises, once warm it lies — which is why BE's zero-count and 0198's
+  measurement could both hold.
+- **`dev_read` is a readonly user** and rejects `max_execution_time` in the
+  URL; the 1h group count then hit the 3.73 GiB memory cap. The candle-level
+  count answers the same question, so it was not retried.
+- **The first draft's comments said 349 "was not reproducible".** Wrong;
+  corrected in `views.sql` and `views_it.rs` before commit.
+
+## Design Decisions
+
+### From Plan
+
+1. **Omit the row (option 1).** BE's 2026-08-11 decision, quoted above. A
+   zero-weight `(identity, bucket)` is absent from both grains; §12.3 already
+   classifies an absent row as `no_asset_price`.
+2. **Assert by value, never by `IS NULL`.** The column is non-Nullable, so
+   `IS NULL` is vacuously false. Every test uses
+   `countIf(toFloat64(close_usd) <= 0) = 0` or an exact row list.
+3. **`usd_reference*` gets the same fix**, not just an audit note: a garbage
+   XLM reference poisons every pivot-priced asset.
+
+### Emerged
+
+4. **`WHERE p.volume_base > 0` on arm A instead of `HAVING sum(w) > 0`.**
+   Same rows, and the predicate sits next to `close_usd > 0` where the
+   `lib.rs` test can pin it textually. Arm B (the peg placeholder, `w = 0` by
+   construction) is untouched, so 0165's fallback still fires.
+5. **Regression tests run each read twice, interpreted first.** Without the
+   `compile_expressions = 0` pass the red run only shows 349 on a cold server,
+   which no CI can promise. Interpreted goes first because that is the
+   whole-query failure.
+6. **No new task for the JIT behaviour itself.** It is a ClickHouse property,
+   not ours; the record lives in the `views.sql` header and here. The only
+   defence is never handing the CAST a NULL, which is what the fix does.
+
+**Broken/modified tests:**
+- `peg_asset_with_only_zero_volume_candles_falls_back_instead_of_publishing_garbage`
+  — doc comment only. It said fixture A "RAISES code 349 rather than
+  publishing Decimal128::MIN"; now says both happen and which mode gives
+  which. The assertions are unchanged and the test still passes: with the
+  zero-volume arm-A row gone, USDC's group is the placeholder alone and the
+  0165 fallback still fires.
+
+## Future Work
+
+- [[0150]] carries the predicate as §4 and an acceptance criterion; nothing
+  else spawned.
