@@ -906,12 +906,19 @@ above `--reset-not-after` (a mistyped year, the epoch pasted into the wrong
 flag) exits with `ResetWindowEmpty` before a connection is opened, dry run or
 not. Without that refusal the run would report a clean, empty repair.
 
-Two more refusals fire first thing after connecting, before any month is
-enumerated, dry run included: a quote leg that is not canonical USDC
-(`ResetExternalRateLegIsNotUsdc`) and zero `external` rows loaded
-(`ResetRequiresExternalRates`). Until task 0228 both lived only in the
-per-month pass, which a dry run never builds, so a rehearsal over the wrong leg
-or an unloaded series ended green.
+Every other refusal that does not depend on the month fires first thing after
+connecting, before any month is enumerated, dry run included: a quote leg that
+is not canonical USDC (`ResetExternalRateLegIsNotUsdc`), zero `external` rows
+loaded (`ResetRequiresExternalRates`), a leg no tier can price
+(`ResetTargetHasNoPricingPath`), an oracle-shadowed span
+(`ResetBlockedByOracleRows`), no hourly rows on a sub-daily table
+(`ResetRequiresHourlyRates`) and a pre-epoch USDC poll
+(`ResetBlockedByPreEpochOracleRows`). Until task 0228 all of them lived only in
+the per-month pass, which a dry run never builds, so a rehearsal over the wrong
+leg or an unloaded series ended green; 0228's second review round found the
+same for the other four and moved the whole list into one method the driver and
+the pass both run (`assert_reset_is_admissible`). What the dry run accepts, the
+real run accepts.
 
 `--reset-require-external-rate` narrows the candidate set to
 `close_usd = close` (the peg tier's exact signature) **on the days the imported
@@ -1407,8 +1414,8 @@ The tool refuses, before opening a connection:
   in play discards a value and then fails to recompute it.
 
 And first thing after connecting, before any month is enumerated, **dry run
-included** (they need `prices.assets` and `prices.usd_rate`, so not before the
-connection):
+included** (they need `prices.assets`, `prices.usd_rate` and
+`prices.oracle_prices`, so not before the connection):
 
 - a quote leg the scaled pivot cannot refill
   (`ResetPivotRateLegIsNotAPivotReference`) — canonical USDC, which is
@@ -1416,20 +1423,27 @@ connection):
   canonical USDC is missing from `prices.assets`** (reported as `usdc_id: 0`),
   because the pivot's reference market is keyed on USDC's `asset_id` and never
   runs without it;
+- a leg no tier in the pass can price at all (`ResetTargetHasNoPricingPath`);
+- **an oracle-shadowed span (`ResetBlockedByOracleRows`, precondition 5)** —
+  the refusal most likely to stop you, and until 0228's second review round the
+  one a dry run could not reach;
 - zero `external` rows for canonical USDC in `prices.usd_rate`
   (`ResetRequiresExternalRates`, precondition 1).
 
-Until task 0228's review both lived only in the per-month pass, which a dry run
-never builds: a rehearsal over the wrong leg listed candidate months and ended
-green, and only the real run refused.
+Until task 0228's review the leg and rates checks lived only in the per-month
+pass, which a dry run never builds: a rehearsal over the wrong leg listed
+candidate months and ended green, and only the real run refused. The first fix
+hoisted those two and left the other refusals where they were, so a rehearsal
+over an oracle-shadowed span still passed. All of a reset's month-independent
+refusals now live in ONE method (`ChEnrichmentPass::assert_reset_is_admissible`)
+that the driver runs before enumerating months and the per-month pass runs
+again. **What the dry run accepts, the real run accepts.**
 
-⚠️ A refusal that fires INSIDE the per-month pass — `ResetBlockedByOracleRows`
-(the oracle-shadow guard, precondition 5) and `ResetTargetHasNoPricingPath`
-still do — fires AFTER that month's `FREEZE`, and the snapshot stays behind
-under its `repair_0114_…` name. The next real run on the same partition then fails
-with `FreezeDenied … DIRECTORY_ALREADY_EXISTS`. On prod this cannot happen (the
-real run passes `--skip-snapshot`); locally, `ALTER TABLE … UNFREEZE PARTITION
-… WITH NAME` the leftover, or drop it from `shadow/`, before re-running.
+⚠️ The only thing that can still fail INSIDE the per-month pass is the
+ClickHouse write itself, and on prod the real run passes `--skip-snapshot`, so
+no `FREEZE` is left behind by the tool. Locally, if an older build refuses
+after freezing, `ALTER TABLE … UNFREEZE PARTITION … WITH NAME` the leftover, or
+drop it from `shadow/`, before re-running.
 
 Dry run first:
 
@@ -1471,6 +1485,29 @@ WHERE quote_asset_id = <XLM_ID> AND timestamp >= toDateTime(<FIRST_REF_CANDLE>)
         AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
         AND contract_address = '' AND method = 'external' AND usd_rate > 0)
 ```
+
+The tool's own predicate carries one more term, added by 0228's second review
+round: the bucket's UTC day must also hold a **usable reference candle** — the
+leg's own candle against canonical USDC, `close > 0 AND volume_base > 0`, in
+the same table — because that is the other thing the scaled pivot needs to
+refill a row it re-opened. Without it a bucket on a rate-covered day whose
+XLM/USDC (or USDT/USDC) market had gone quiet was zeroed and left at 0 for the
+abort signal to find after the write. Add it to the count above to match the
+tool exactly:
+
+```sql
+  AND toDate(timestamp, 'UTC') IN (
+      SELECT toDate(timestamp, 'UTC') FROM prices.price_ohlcv_1d FINAL
+      WHERE asset_id = <XLM_ID> AND quote_asset_id = <USDC_ID>
+        AND close > 0 AND volume_base > 0)
+```
+
+On `_1d`, `_1w` and `_1M` this is exact: a same-day reference at the same grain
+is the bucket's own. On the intraday grains it is conservative in the safe
+direction — a bucket whose only reference sits on the previous day is skipped,
+not stranded — and the residual case (a market silent for a whole
+`--pivot-window-s` before the bucket and trading later that day) is what the
+abort signal below still exists for.
 
 Compare it against the population table above. A count within an order of
 magnitude is a real result; zero months, or a few dozen rows against a 10 M-row
@@ -1559,11 +1596,14 @@ recomputed — the one outcome worse than the defect. The tool prints it and tel
 you to stop. **Do not continue to the next table.** Roll the current one back
 from its FREEZE snapshot.
 
-Under this mode a large shortfall points at one of two things: a
-`--reset-not-before` below the reference market's first candle (the 157-candle
-failure — re-measure it), or a `--pivot-window-s` shorter than the gap between a
-bucket and its nearest reference bucket. The USDC rate itself cannot be the
-cause: it is the shared predicate, so a row with no rate was never re-opened.
+Under this mode a shortfall can only come from the intraday grains, and from
+one shape: a bucket whose reference market was silent for a whole
+`--pivot-window-s` before it and traded later the same day. Neither the USDC
+rate nor a reference-less day can be the cause any more: both are terms of the
+candidate predicate, so a row with no rate, or no reference candle on its day,
+was never re-opened. On `_1d`, `_1w` and `_1M` the reference term is exact and
+a shortfall there means the predicate or `--pivot-window-s` (which the tool
+refuses below the bucket width) is wrong — stop and check the build.
 
 ### After — the falsifier
 

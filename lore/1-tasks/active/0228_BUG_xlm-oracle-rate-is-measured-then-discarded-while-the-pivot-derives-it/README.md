@@ -121,6 +121,30 @@ history:
       per-month pass, so a dry run over the wrong leg ended green; the
       driver now runs them before enumerating months. 46 + 5 ClickHouse
       tests, 725 CI tests, clippy clean, Lambda builds of both crates OK.
+  - date: "2026-09-14"
+    status: active
+    who: akot
+    note: >
+      Second review round, by okarcz on PR #311 — four findings, all
+      confirmed against the code and fixed (Issues 12, Decisions 25–28).
+      (1) The pivot now depends on the oracle worker's non-fatal USDC
+      snapshot with no alarm on it: new ObservabilityStack alarm
+      `-oracle-usdc-snapshot-stalled` (peg-set snapshot at 0 for 3 hourly
+      buckets while OracleRowsWritten > 0), synth verified, needs the
+      Observability stack deployed too. (2) The dry run still skipped four
+      refusals, including the oracle-shadow guard precondition 5 calls the
+      likeliest blocker: every month-independent refusal now lives in one
+      method, `assert_reset_is_admissible`, run by the driver and by
+      `reset_step`; #[ignore] test reproduced the green dry run first.
+      (3) The 0228 candidate carried no reference-market term, so a
+      rate-covered bucket whose XLM/USDC market was silent was zeroed and
+      not refilled — reproduced (rows_reset 2, one stranded at 0); a second
+      day-set, `pivot_reference_day_pred`, now renders at all three sites
+      with its own lockstep test. (4) `_1m`/`_1M` derived the same
+      baseline variable name; explicit match, CI-pinned. Also: the module
+      header still described the pivot as `close × ref_usd`; fixed. 48 + 5
+      ClickHouse tests on 26.3.10.60, clippy clean, infra lint/typecheck
+      and synth clean.
 ---
 
 # We measure XLM's dollar price, throw it away, then derive it from USDC
@@ -537,9 +561,12 @@ Everything below was decided by the executor; the plan left it open.
     so the premise is not load-bearing here. The window-scoped oracle-shadow
     guard, which runs for every spec, is what stops the oracle tier re-pricing
     anything this mode re-opens.
-13. **`repair_target_pred` needed no change**, as the plan anticipated: it
-    composes `reset_pending_pred`, so the new fragment reaches the month
-    enumeration for free. The three-sites test proves it.
+13. **`repair_target_pred` needed no change for the rate fragment**, as the
+    plan anticipated: it composes `reset_pending_pred`, so that fragment reaches
+    the month enumeration for free. The second review round's reference-market
+    term (Decision 27) needed the TABLE name at both renderers, which the
+    enumeration site already had in hand; the signatures grew one parameter and
+    the three-sites tests prove both fragments.
 14. **The mutual-exclusion refusal lives in `validate()`, not in clap.** One
     definition, so no driver — CLI or otherwise — can assemble the combination,
     and the CLI still refuses before opening a connection.
@@ -588,22 +615,25 @@ Everything below was decided by the executor; the plan left it open.
     and the operator reading "the harness query is wrong" is a different
     situation from "the table is wrong" — the message says which.
 22. **The month-independent reset refusals run in `CoarseRepairDriver::run`,
-    before the month enumeration, through one pass method
-    `assert_reset_leg_and_rates` that `reset_step` also relies on.** First the
-    no-rates refusal (prove run), then — after review finding 3 — both leg
-    refusals too. Putting them in the CLI would have covered one driver; in
-    `run()` they cover every driver and the dry run, which WR-01 already
-    established must refuse what the real run refuses. The same methods at
-    both sites, so the two cannot drift. `ResetBlockedByOracleRows` and
-    `ResetTargetHasNoPricingPath` were left in the pass only: they are not
-    this task's refusals and their placement predates it (Issues 10).
+    before the month enumeration, through one pass method that `reset_step`
+    also calls.** First the no-rates refusal (prove run), then — after review
+    finding 3 — both leg refusals too. Putting them in the CLI would have
+    covered one driver; in `run()` they cover every driver and the dry run,
+    which WR-01 already established must refuse what the real run refuses.
+    ⚠️ As first written this was TWO lists — the hoisted method held three
+    checks and `reset_step` its own six — with a comment claiming they could
+    not drift. `ResetBlockedByOracleRows` and `ResetTargetHasNoPricingPath`
+    were left in the pass on the reasoning that they predate the task; that
+    left the campaign's likeliest blocker unreachable by a dry run. Superseded
+    by Decision 26.
 23. **The snapshot metrics are per set; the peg series keeps its pre-0228
     meaning.** Review finding 1. Alternatives were a separate peg-only metric
     beside the sum (a new name for the old meaning, so every existing reader
     would silently switch to the total) or the sum alone (the defect). Keeping
     `OracleUsdRatesSnapshotted` = peg set and adding
     `OracleMeasuredRatesSnapshotted` changes no existing series; the namespace
-    is unchanged, so the IAM grant needs nothing. No alarm reads either today.
+    is unchanged, so the IAM grant needs nothing. Since the second review round
+    the peg series is read by `-oracle-usdc-snapshot-stalled` (Decision 25).
 24. **The pivot-leg gate requires `can_pivot()`, not only membership in
     `pivot_ids()`.** Review finding 2. This is the concrete case behind WR-02
     below: the leg check read `prices.assets` and the rate check `usd_rate` by
@@ -611,6 +641,62 @@ Everything below was decided by the executor; the plan left it open.
     on `can_pivot()` — which already existed for the planner — makes the gate
     say exactly what the planner needs. The error reports `usdc_id: 0` for that
     case and its text now says what 0 means.
+25. **The snapshot dependency gets an ALARM, not a fatal snapshot.** Second
+    review round, finding 1. Since 0228 the pivot's only post-epoch USDC rate
+    is the oracle worker's `usd_rate` snapshot, which the worker treats as
+    non-fatal for a reason that still holds — failing it would stop the poll
+    and kill both tiers. The reviewer's alternative shape is what shipped:
+    `prices-{env}-oracle-usdc-snapshot-stalled` reads
+    `OracleUsdRatesSnapshotted` (peg set, so finding 1 of round one is what
+    makes it possible) sustained at 0 across three hourly buckets while
+    `OracleRowsWritten > 0`. Hourly, not the dark-feed's 10 minutes: a single
+    pass copying nothing is normal (incremental by watermark, and a repeated
+    Reflector timestamp copies nothing), so the sustain must span many passes;
+    three hours still leaves ~21 hours before the pivot's one-day bound writes
+    zeros. NOT_BREACHING on missing data, because "no passes at all" is the
+    dark-feed alarm's case. The second factor also catches Reflector's USDC
+    feed freezing on one timestamp — same consequence for the pivot, so the
+    description names both causes and how the logs tell them apart. The
+    existing backlog alarm cannot see this stall: its condition is "enriched
+    < 1", and the oracle tier keeps enriching. ⚠️ This changes the deploy
+    scope: the Observability stack, not only EventBridge. Synth's own
+    description-length guard caught the first draft at 1,495 chars.
+26. **ONE list of month-independent refusals, `assert_reset_is_admissible`,
+    called by the driver before enumeration and by `reset_step`.** Second
+    review round, finding 2, superseding Decision 22's split. Every check that
+    takes only the spec and the pass config — `validate`, the pricing-path
+    guard, the oracle-shadow guard, both leg guards, the loaded-rates check,
+    and the 0268 mode's hourly-series and pre-epoch-oracle checks — is in it,
+    in `reset_step`'s old order so the two paths report the same refusal. Only
+    the one-shot requirement stays in `reset_step`: it is a property of the
+    pass mode, not of the data. The RED test drove a dry run over an
+    unpriceable leg, an unloaded hourly series and an oracle-shadowed span
+    through the driver and watched it exit green. Consequence for Issues 10:
+    nothing the tool refuses can now fire after a FREEZE.
+27. **The pivot-leg candidate carries a SECOND day-set: a usable reference
+    candle on the bucket's UTC day.** Second review round, finding 3. The
+    module's rule is that a row no tier can refill is never re-opened, and
+    the 0228 mode obeyed it for the rate only; the pivot also needs the leg's
+    own candle against USDC within `pivot_window_s`, and the candidate said
+    nothing about that. Reproduced on 26.3.10.60 before the fix: two
+    rate-covered days, one with no XLM/USDC candle, `rows_reset = 2` and the
+    second stranded at 0. `pivot_reference_day_pred` is the same uncorrelated
+    `IN (SELECT …)` shape as the rate fragment, over the SAME table at the same
+    grain, with canonical USDC resolved by identity inside it so no reference
+    lookup precedes rendering. Exact on `_1d`/`_1w`/`_1M` (a same-day
+    reference at the same grain is the bucket's own); on the intraday grains
+    it under-reaches in the safe direction (a previous-day reference inside
+    the window is not counted) and leaves one narrow over-reach (a market
+    silent for a whole window and trading later that day) to the post-check.
+    A correlated `EXISTS` on the window would be exact and is a syntax error at
+    the enumeration site — the same reason the rate fragment is uncorrelated.
+    Runbook Appendix C's manual count carries the term now.
+28. **The baseline variable name is an explicit match, not a case-folded
+    derivation.** Second review round, finding 4. `to_ascii_uppercase()` gave
+    `_1m` and `_1M` the same name; latent under D-07, but the docstring's
+    promise was that the runbook and the file cannot drift, and that promise
+    would have judged a future minute grain against the monthly baseline with
+    no error. Two arms, `None` for everything else, pinned in CI.
 
 ## Issues Encountered — for Adam to route
 
@@ -693,11 +779,12 @@ Everything below was decided by the executor; the plan left it open.
     and the next real run on that partition fails with `FreezeDenied …
     DIRECTORY_ALREADY_EXISTS`. Observed in the prove run with
     `ResetPivotRateLegIsNotAPivotReference`, which review finding 3 has since
-    moved ahead of the enumeration (Decision 22). What still fires in the pass
-    is `ResetBlockedByOracleRows` (precondition 5 — the likeliest campaign stop)
-    and `ResetTargetHasNoPricingPath`. Pre-existing 0114 driver order; prod is
-    unaffected (`--skip-snapshot`); local/CI hits it. Recorded in Appendix C
-    rather than fixed. Spawn list 4.
+    moved ahead of the enumeration (Decision 22). After the second review round
+    (Decision 26) NO refusal of the tool's own fires inside the pass any more;
+    the only thing that can fail after the FREEZE is the ClickHouse write
+    itself. Pre-existing 0114 driver order; prod is unaffected
+    (`--skip-snapshot`); local/CI hits it only on a write failure. Spawn list
+    4, demoted accordingly.
 11. **Code review, 2026-09-11 (`/code-review` on `origin/develop...HEAD`):
     three findings, all confirmed against the code and fixed.** Medium — the
     summed snapshot metric (Decision 23). Low — the pivot-leg gate without
@@ -709,6 +796,15 @@ Everything below was decided by the executor; the plan left it open.
     22, `a_dry_run_refuses_the_wrong_leg_for_either_rate_gated_mode`, which
     also covers the 0268 mode's `ResetExternalRateLegIsNotUsdc` — same gap).
     The review found no defect in the rewritten `pivot_sql`.
+12. **Second code review, 2026-09-14, by okarcz on PR #311: four findings,
+    all confirmed and fixed** (Decisions 25–28, history 2026-09-14). The
+    largest is not the code but what the branch had changed without saying so:
+    the pivot tier stopped being oracle-free and started depending on another
+    Lambda's non-fatal copy step, with the docstring admitting the dependency
+    and nothing watching it. The module header in `ch_enrich.rs` still
+    described tier 3 as `close × ref_usd`; it now carries the factor and the
+    dependency. The reviewer's reading of the SQL, the bind order and the
+    nested rate legs matched the code exactly.
 
 ## Broken/modified tests
 
@@ -867,7 +963,10 @@ access to the executor's notes beyond the plan:
 Nothing below can be done from the branch. Work **Appendix C** of
 `docs/runbooks/repair-coarse-usd-values.md` and use this as the index.
 
-1. **Deploy the branch first.** The campaign's refill path is the SCALED pivot;
+1. **Deploy the branch first — EventBridge AND Observability.** The
+   `-oracle-usdc-snapshot-stalled` alarm (Decision 25) lives in the
+   Observability stack; the pivot's new dependency ships blind without it.
+   The campaign's refill path is the SCALED pivot;
    running it against the old statement would reset rows and rewrite them with
    the same unscaled value, spending the FREEZE point for nothing.
 2. **Confirm the session and server are UTC** (precondition 0).
@@ -894,6 +993,8 @@ Nothing below can be done from the branch. Work **Appendix C** of
    the last two as `POST_RUN_0228_VERSION_BEFORE_1W` / `_1M` and refuses to pass
    without them.
 10. **Dry run each table.** ⚠️ Zero candidate months is a STOP, not an all-clear.
+    Since the second review round the dry run runs every refusal the real run
+    does (Decision 26): a green dry run means the real run will not refuse.
 11. **Real run, one table and one leg at a time**, with `--pivot-window-s`
     widened for `_1w`/`_1M`. Abort if `rows_reset` far exceeds `rows_enriched`;
     roll that table back from its snapshot before touching the next.
@@ -921,10 +1022,11 @@ nobody can see.
 3. **Settle `_15m`'s retention** (Issues 5): whether the 30-day policy has ever
    run, and therefore whether 8.9 M pre-epoch rows are in scope for this campaign
    and for any future one.
-4. **Reorder `coarse-repair`'s FREEZE after the pass's refusals** (Issues 10):
-   today a partition is frozen before a reset refusal can fire, and the leftover
-   snapshot blocks the next real run on that partition with `FreezeDenied`.
-   0114's driver, small, low priority; prod never hits it.
+4. **Reorder `coarse-repair`'s FREEZE after the pass's own checks** (Issues
+   10): since Decision 26 every refusal fires before any FREEZE, so only a
+   ClickHouse write failure can now leave a snapshot behind and block the next
+   real run with `FreezeDenied`. 0114's driver, small, lowest priority; prod
+   never hits it (`--skip-snapshot`).
 
 ## Notes
 
