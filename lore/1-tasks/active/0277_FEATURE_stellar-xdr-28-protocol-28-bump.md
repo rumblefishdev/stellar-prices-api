@@ -175,13 +175,97 @@ required step, not a side effect.
 - Verify the crossing, as [[0094]] did: watch `max(timestamp)` per source in
   `price_ohlcv_1m` advance past the activation ledger rather than freeze at it.
 
+## 🔑 The bump is done — and a clean compile proves NOTHING here
+
+Bumped 2026-09-14 on `feat/0277_stellar-xdr-28-protocol-28-bump`.
+`Cargo.toml:28` → `=28.0.0`; `cargo update -p xdr-parser` moved the lock from
+`d61b359f` (proto27) to BE's develop head `31be5f74`. The lock resolves
+**exactly one** `stellar-xdr`, so the dual-major hazard this task warned about
+did not materialise.
+
+`cargo check --workspace --all-targets`: **clean, zero warnings.**
+`cargo test --workspace`: **905 passed, 0 failed**, 190 ignored (the CH
+integration tests).
+
+### ⛔ CORRECTION — this task's central prediction was wrong
+
+The Implementation section says of the `LedgerCloseMeta` match sites:
+
+> They match `V0/V1/V2` exhaustively, so a new variant is a compile error,
+> which is the good case.
+
+**There is no compile error, and there was never going to be one.** CAP-83 does
+not touch `LedgerCloseMeta` — it adds `EmptyTxSet` to **`StellarValueExt`**, the
+union nested inside `StellarValue`:
+
+| type | 27 | 28 |
+| --- | --- | --- |
+| `LedgerCloseMeta` | `V0/V1/V2` | `V0/V1/V2` — **unchanged** |
+| `StellarValueExt` | `Basic`, `Signed`, `EmptyTxSet` behind `#[cfg(feature = "cap_0083")]` | `Basic`, `Signed`, `EmptyTxSet` — **ungated** |
+
+Our exhaustive matches are all on `LedgerCloseMeta` (`decode.rs:25-27`,
+`filter.rs:127-137`, `filter.rs:148-158`, `soroban.rs:166-176`), and the only
+thing we read out of the SCP value is `scp_value.close_time` — a plain field of
+`StellarValue`, unaffected by the `ext` discriminant. **Nothing we match on
+changed shape, so the compiler had nothing to say.**
+
+⚠️ **Therefore "it builds" is not evidence of Protocol 28 readiness**, and must
+not be reported as such. The next protocol bump should not expect the compiler
+to catch it either.
+
+### ✅ The exposure was real, and it was decode — proven, not assumed
+
+`stellar-xdr 27`, `stellar_value_ext.rs:142-147`:
+
+```rust
+#[cfg(feature = "cap_0083")]
+StellarValueType::EmptyTxSet => {
+    Self::EmptyTxSet(StellarValueProposedValue::read_xdr(r)?)
+}
+#[allow(unreachable_patterns)]
+_ => return Err(Error::Invalid),
+```
+
+We never enabled `cap_0083`, so under 27 the **first ledger carrying an empty
+tx set** hits `_ => Err(Error::Invalid)`. BE's parser fails the **whole batch**
+(`xdr-parser/src/lib.rs:111`), `decode_object` returns `ReconcileError::Decode`,
+the run returns on the `?` — **cursor unmoved**. That is the proto27 freeze,
+mechanism for mechanism. Under 28 the variant is ungated and decodes.
+
+🔑 **This confirms the task's own warning that the break need not land at
+17:00 UTC.** Protocol 28 activating does not by itself produce an empty tx set;
+the wall is the first *empty* ledger, which may be hours or days later. So
+"nothing broke at the vote" is a false all-clear, and it is an argument for
+deploying **before** 09-16 rather than watching after it.
+
+### ✅ An empty-tx-set ledger already advances the cursor — verified, no change needed
+
+`reconcile.rs:129-158`: the cursor is driven by **objects fetched**, not by
+trades found. `current = obj_max.max(next)` and `persisted += 1` run regardless
+of whether `extract_trades` or `process_ledger` returned anything, and
+`ledger_sequence` reads `ledger_header.header.ledger_seq`, which every variant
+carries. A trade-less ledger therefore decodes, extracts nothing, and the run
+still writes the advanced cursor at `:223`. **No code change is required for the
+second half of AC 3** — recorded as verified rather than assumed.
+
+### ⚠️ Pre-existing clippy noise, deliberately not fixed here
+
+`cargo clippy --workspace --all-targets -- -D warnings` fails locally with 10
+warnings (`collapsible_if` ×5, `no_effect` ×3, `items_after_test_module`,
+`div_ceil`, …). **Byte-for-byte the same set on clean `develop`**, none
+XDR-related — a newer local clippy than CI's, which is green. Left alone so the
+bump diff stays two files.
+
 ## Acceptance Criteria
 
 - [x] **BE has bumped `xdr-parser` to `stellar-xdr 28` and the rev is recorded here** — `840f2b58`, on their `develop`. See §Blocker CLEARED.
-- [ ] Workspace pin is `=28.0.0`; `cargo check --workspace` and the full test
-      suite are green.
-- [ ] Any new `LedgerCloseMeta` / `StellarValue` variant is handled explicitly,
-      and an empty-tx-set ledger **advances the cursor** instead of stalling it.
+- [x] **Workspace pin is `=28.0.0`; `cargo check --workspace` and the full test
+      suite are green** — 905 passed / 0 failed, one `stellar-xdr` in the lock.
+- [x] **Any new `LedgerCloseMeta` / `StellarValue` variant is handled explicitly,
+      and an empty-tx-set ledger advances the cursor** — no new `LedgerCloseMeta`
+      variant exists (the change is `StellarValueExt::EmptyTxSet`, ungated in 28),
+      and the cursor advance is driven by objects fetched, not trades found.
+      Both verified against the source, not assumed. See §CORRECTION.
 - [ ] The bumped ledger-processor is **deployed** and the deployed asset is
       confirmed changed — not merely merged. 0091 merged on 2026-07-14 and prod
       stayed frozen until 0094 deployed it.
