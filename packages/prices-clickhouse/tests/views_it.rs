@@ -1986,16 +1986,23 @@ async fn a_measured_rate_at_exactly_par_is_labelled_oracle_not_peg() {
 //     the Nullable and publishes Decimal128::MIN (≈ -1.7e24) flagged
 //     `method = 'traded'` — 0171's reading, a correctness failure.
 //
-// The tests below run every read in both modes so a regression fails either
-// way. The fix is the same for both: BE's 2026-08-11 decision on 0171 is
-// "omit the row", and arm A now requires `volume_base > 0`, which such a
-// group cannot satisfy, so it never forms and the CAST never sees NULL.
+// The tests below run every read in both modes, each FORCED by settings, so a
+// regression fails either way regardless of how warm the server is. (Review
+// on PR #312: with the server default, a cold server stays interpreted for
+// the first 3 executions, so whether the compiled path was reached at all
+// depended on execution counts leaked from other tests.) The fix is the same
+// for both: BE's 2026-08-11 decision on 0171 is "omit the row", and arm A now
+// requires `volume_base > 0`, which such a group cannot satisfy, so it never
+// forms and the CAST never sees NULL.
 // ----------------------------------------------------------------------
 
 /// The two JIT modes a read can hit; see the block comment above. Interpreted
-/// first, because that is the whole-query failure; the empty suffix is the
-/// server default (compiled once warm).
-const JIT_MODES: [&str; 2] = [" SETTINGS compile_expressions = 0", ""];
+/// first, because that is the whole-query failure; then compiled on the FIRST
+/// execution (`min_count_to_compile_expression = 0`), which is the silent one.
+const JIT_MODES: [&str; 2] = [
+    " SETTINGS compile_expressions = 0",
+    " SETTINGS compile_expressions = 1, min_count_to_compile_expression = 0",
+];
 
 /// Seeds three assets and, on BOTH candle grains, a FOO/USDC candle with real
 /// volume (so FOO publishes 5 and USDC gets its 0165 placeholder) plus a
