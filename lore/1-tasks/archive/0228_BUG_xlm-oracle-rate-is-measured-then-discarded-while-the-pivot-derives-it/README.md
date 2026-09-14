@@ -2,9 +2,9 @@
 id: "0228"
 title: "XLM's measured USD rate is fetched every 5 minutes and thrown away, while 11 M candles are priced by deriving it indirectly through USDC"
 type: BUG
-status: active
+status: completed
 related_adr: ["0011"]
-related_tasks: ["0167", "0170", "0172", "0182", "0061", "0227", "0173", "0267", "0268", "0276", "0154"]
+related_tasks: ["0167", "0170", "0172", "0182", "0061", "0227", "0173", "0267", "0268", "0276", "0154", "0278", "0251", "0200"]
 tags: ["priority-medium", "effort-large", "oracle", "enrichment", "data-correctness", "usd", "milestone-M2"]
 milestone: 2
 links:
@@ -145,6 +145,45 @@ history:
       header still described the pivot as `close × ref_usd`; fixed. 48 + 5
       ClickHouse tests on 26.3.10.60, clippy clean, infra lint/typecheck
       and synth clean.
+  - date: "2026-09-14"
+    status: active
+    who: akot
+    note: >
+      PR #311 merged to develop (d9e25da) and DEPLOYED to production by akot
+      at 14:00 UTC: Prices-production-EventBridge (all nine worker Lambdas,
+      built locally from d9e25da) then Prices-production-Observability.
+      `cdk diff` showed Lambda code only on EventBridge, and on Observability
+      the new alarm, the dashboard body and two outputs — no removals, no IAM
+      or rule change. Verified on prod: the first oracle pass (14:02 UTC)
+      copied 53,453 XLM readings into usd_rate (earliest 2026-03-11 14:00:00),
+      then one per pass; both snapshot metrics publish with
+      Environment=production; -oracle-usdc-snapshot-stalled is OK on real data;
+      prices-production-cleanup stays DISABLED; zero Lambda errors across the
+      nine workers; the first enrichment pass (14:17 UTC) priced every XLM- and
+      USDT-quoted 1m candle of the 13:00 hour (USDT is priced by the pivot
+      alone, so this is the scaled pivot working). The one WARN in that pass
+      ("enriched 0 rows despite a non-empty backlog") also appears at 12:17 and
+      13:17, before the deploy — the historical sweep re-checking tiny months,
+      not a regression. Lambda code from before the deploy kept locally for
+      rollback. The first coarse-sweep pass (14:30 UTC) swept all six tables
+      with none failed, as the two passes before the deploy did. See
+      "Deployed to production" below.
+  - date: "2026-09-14"
+    status: completed
+    who: akot
+    note: >
+      CLOSED by akot. The code half is merged, deployed and verified on
+      production. The re-enrichment campaign (Appendix C) was NOT run and is
+      not claimed: rescoped criterion 2 stays open, and akot chose to leave the
+      spawn list as a list rather than open tasks for it — it is the record of
+      what remains (the campaign, the redstone rows which [[0251]] already
+      covers, `_15m`'s retention which belongs with [[0200]], and the FREEZE
+      ordering). Until the campaign runs, every pre-epoch XLM- and USDT-quoted
+      coarse candle still carries USDC = $1. Found after the deploy: the
+      [[0278]] dust-close findings still hold on production, and on 2023-03-11
+      the campaign will move XLM-quoted candles from 0.0588 to 0.0569 against a
+      market of ~0.0794, because the pivot's XLM reference that day is the dust
+      close 1/17 — see the spawn list, item 1.
 ---
 
 # We measure XLM's dollar price, throw it away, then derive it from USDC
@@ -337,11 +376,11 @@ decides whether this task is worth anything at all.
 
 | # | Criterion | Closes |
 |---|-----------|--------|
-| 1 | `pivot_sql` multiplies by the USDC/USD rate at the bucket end, with `external_sql`'s invariants | ✅ **on the branch** — code + SQL-string tests |
-| 2 | An XLM-quoted 1d candle on 2023-03-11 comes out ≈3.2 % low | ⚠️ **test written, NOT RUN** (no ClickHouse here); closes on prod after the campaign, via `post_run_0228_it` |
-| 3 | The pivot-leg reset is bounded, resumable, one-predicate-three-sites, refuses what it must | ✅ **on the branch** for the pure parts; the refusal/idempotence tests are `#[ignore]` and unrun |
+| 1 | `pivot_sql` multiplies by the USDC/USD rate at the bucket end, with `external_sql`'s invariants | ✅ **deployed 2026-09-14**; USDT-quoted 1m candles, which only the pivot prices, verified priced after the first pass |
+| 2 | An XLM-quoted 1d candle on 2023-03-11 comes out ≈3.2 % low | ❌ **open at close** — proven by the hand-built campaign on 26.3.10.60 (0.588 → 0.5692428); on prod it needs the campaign (spawn list 1), not run |
+| 3 | The pivot-leg reset is bounded, resumable, one-predicate-three-sites, refuses what it must | ✅ **merged**; the `#[ignore]` suite ran on 26.3.10.60 (48/48 after the second review round). Exercised on prod only by the campaign |
 | 4 | Runbook appendix with preconditions, baseline, expected figures, rollback | ✅ **on the branch** — Appendix C |
-| 5 | XLM readings land in `usd_rate` as `oracle`/`hops 0` through a named set | ✅ **on the branch** in code; the rows appear on the **first prod run after deploy** |
+| 5 | XLM readings land in `usd_rate` as `oracle`/`hops 0` through a named set | ✅ **verified on prod 2026-09-14** — 53,453 rows on the first pass, earliest 2026-03-11 14:00:00, then one per pass |
 | 6 | Lore AC 1 recorded as met, AC 2's count as the phase-0 table | ✅ **this file** |
 
 ## Out of scope
@@ -958,9 +997,38 @@ access to the executor's notes beyond the plan:
   - IN-01 (`refs.usdc.unwrap_or(0)` sentinel in the new error variant) and
     IN-02 (two snapshot round-trips per pass) recorded, not changed.
 
-## Operator Checklist (the campaign CHORE)
+## Deployed to production — 2026-09-14
 
-Nothing below can be done from the branch. Work **Appendix C** of
+Run by akot from `develop` at `d9e25da`, EventBridge first, then Observability.
+Nine worker Lambdas built locally (`cargo lambda build --release --arm64
+--features lambda`, cargo-lambda 1.9.1, rustc 1.97.1). The local Zig is
+0.17-dev, one ahead of CI's 0.16, and it warns `ignoring deprecated linker
+optimization setting "1"` on every link — harmless; the binaries are aarch64
+ELF.
+
+| Check | Result |
+|---|---|
+| `cdk diff`, EventBridge | `[~]` Lambda code on all nine functions, nothing else |
+| `cdk diff`, Observability | `[+]` the stall alarm and its output; dashboard body; `DashboardAlarmCount` 50 → 51 |
+| Lambdas updated | 14:00:56 UTC, `LastUpdateStatus: Successful` |
+| `prices-production-cleanup` | `DISABLED` |
+| First oracle pass, 14:02 UTC | `set=peg rows=1`, `set=measured rows=53453` |
+| `usd_rate`, native XLM, `oracle` | 53,454 rows, 2026-03-11 14:00:00 → 14:05 on the day |
+| Snapshot metrics | both series present with `Environment=production` |
+| `-oracle-usdc-snapshot-stalled` | `OK` from 14:02 UTC, evaluated on real data |
+| Lambda errors since deploy | 0 on all nine |
+| First enrichment pass, 14:17 UTC | 5,131 rows enriched; XLM- and USDT-quoted 1m candles of the 13:00 hour all priced |
+| First coarse-sweep pass, 14:30 UTC | 6 tables swept, 0 failed, no deadline hit, 1,423 rows enriched, 0 errors — in line with 12:30 (1,288) and 13:30 (1,912) before the deploy |
+
+Rollback was prepared rather than needed: each function's pre-deploy code was
+downloaded (`aws lambda get-function … Code.Location`) before the deploy, so
+`aws lambda update-function-code` can restore it without rebuilding an old
+commit.
+
+## Operator Checklist (the campaign — NOT run at close)
+
+Step 1 is done (above). Steps 2–13 are the campaign, which was not run before
+this task closed; see the spawn list, item 1. Nothing below can be done from the branch. Work **Appendix C** of
 `docs/runbooks/repair-coarse-usd-values.md` and use this as the index.
 
 1. **Deploy the branch first — EventBridge AND Observability.** The
@@ -1004,24 +1072,42 @@ Nothing below can be done from the branch. Work **Appendix C** of
 13. **Walk `/ohlcv`** for an XLM-quoted asset and confirm `method` still reads
     `traded`. A changed label is a finding (D-05).
 
-## Spawn list for Adam
+## Spawn list for Adam — left as a list at close
 
-These are a list rather than task files on purpose: a lore task is created
-atomically on `develop` (pull → create → push) and this session works on a
-feature branch with no push, so creating them here would put them somewhere
-nobody can see.
+These were a list rather than task files while the work lived on a feature
+branch. At close (2026-09-14) akot chose to keep them as a list rather than
+open tasks, so this section is the record of what remains after 0228.
 
 1. **CHORE — run the 0228 pivot-leg re-enrichment campaign on production.**
    [[0276]]'s shape. Twelve passes (six tables × two legs), ≈4 h 40 m of pure
    work for the XLM leg by the runbook's estimate, gated on Appendix C's six
-   preconditions. Closes rescoped criteria 2 and 3 on prod. Blocked on this
-   branch being merged and deployed.
+   preconditions. Closes rescoped criterion 2 on prod. **Unblocked since the
+   2026-09-14 deploy.** Three things learned since, for whoever runs it:
+   - Precondition 5 (oracle shadow) probably passes with the default
+     `--reset-not-after`: the earliest XLM reading the deploy copied is
+     `2026-03-11 14:00:00`, and the guard counts only readings strictly below
+     the bound. Run the query on `oracle_prices` anyway — that is what the
+     guard reads.
+   - `_15m` (item 3) has to be decided before the campaign, together with
+     [[0200]]'s question of whether cleanup comes back.
+   - ⚠️ On 2023-03-11 the campaign moves XLM-quoted candles FURTHER from the
+     market, correctly. The XLM/USDC daily close that day is a dust print, 1/17
+     ([[0278]]), so 7,328 XLM-quoted 1d candles read XLM at 0.0588 against
+     ~0.0794 (26 % low); the correct USDC factor takes them to 0.0569 (28 %
+     low). The reference is what is wrong, not the factor, and
+     `post_run_0228_it` still passes because it judges against the reference
+     market. 0278 question 5 (pivot from the bucket VWAP) would fix the
+     reference; if it ships after the campaign, the campaign has to be re-run,
+     so decide the order first.
 2. **Decide what owns the `redstone` rows** — 419,519 rows at `asset_id = 0`,
-   `price_usd = 0` in `oracle_prices` (Issues 4). They match no asset, price
-   nothing, and no task claims them.
+   `price_usd = 0` in `oracle_prices` (Issues 4). They match no asset and
+   price nothing. [[0251]] (RedStone blob decode, backlog) already names the
+   `asset_id = 0` sentinel and is the natural owner.
 3. **Settle `_15m`'s retention** (Issues 5): whether the 30-day policy has ever
    run, and therefore whether 8.9 M pre-epoch rows are in scope for this campaign
-   and for any future one.
+   and for any future one. [[0174]] records the 30-day retention as by design;
+   the rows exist because cleanup has been disabled since 2026-07-20, which is
+   [[0200]]'s open question.
 4. **Reorder `coarse-repair`'s FREEZE after the pass's own checks** (Issues
    10): since Decision 26 every refusal fires before any FREEZE, so only a
    ClickHouse write failure can now leave a snapshot behind and block the next
