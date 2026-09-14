@@ -41,6 +41,18 @@ history:
       numbers. The eventbridge-stack.ts declaration AC is now the urgent half of
       this task rather than tidy-up: with the rule load-bearing for data
       retention, a stack deploy that silently re-enables it is a data-loss path.
+  - date: 2026-09-14
+    status: backlog
+    who: okarcz
+    note: >
+      ⛔ CORRECTION to the entry above, same day - its closing claim is WRONG and
+      was repeated from a stale memory rather than read from the source.
+      eventbridge-stack.ts:180-185 declares the cleanup rule with enabled:false,
+      added by task 0204 on 2026-08-20 with a load-bearing comment explaining
+      exactly this hazard. CDK and production agree; a deploy of an unrelated
+      stack can NOT silently re-enable cleanup. That acceptance criterion of this
+      task is therefore already DONE, and what remains here is only the
+      enable-or-disable decision itself, now due after M3.
 ---
 
 # Is `prices-production-cleanup` still worth running?
