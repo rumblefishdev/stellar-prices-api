@@ -256,6 +256,58 @@ warnings (`collapsible_if` ×5, `no_effect` ×3, `items_after_test_module`,
 XDR-related — a newer local clippy than CI's, which is green. Left alone so the
 bump diff stays two files.
 
+## ✅ DEPLOYED — ledger-processor, 2026-09-14 14:48:22 UTC
+
+ComputeStack deployed in 18.31 s. The running binary moved — this is the
+artefact [[0091]] lacked:
+
+| | |
+| --- | --- |
+| `CodeSha256` **before** | `hRIt7mT8VI4Fn6EYVCSURmtuTBO3YFk7wCUM8Eysi7g=` (2026-09-11 12:52) |
+| `CodeSha256` **after** | **`BC3Nde5a2gKrvu7dZz97O20qkwLi6NTkdSsVRmx7o8c=`** (2026-09-14 14:48:22) |
+| architecture | `arm64` |
+
+✅ **The deploy caused no stop and no gap**, as predicted. Verified at 14:50 UTC,
+two minutes after:
+
+| source | latest candle | behind |
+| --- | --- | --- |
+| aquarius | 14:50:00 | 31 s |
+| sdex | 14:50:00 | 31 s |
+| soroswap | 14:49:00 | 91 s |
+| phoenix | 14:45:00 | 331 s |
+
+Candles were written in **every minute across the 14:48:22 boundary** — 14:47,
+14:48, 14:49, 14:50 all populated for sdex and aquarius. No interruption.
+
+⚠️ **Phoenix's 331 s is sparsity, not a stall** — it produces only 2-7 candles
+per hour (3 h sample: 7, 3, 2 candles over 4, 3, 2 distinct minutes). Do not read
+it as a freeze.
+
+The new binary is confirmed *running*, not merely installed — first reconcile
+completed 21 s after the deploy:
+
+```
+14:48:43Z  reconcile run complete  start=64426154 end=64426155 persisted=1 rows=48
+14:48:48Z  reconcile run complete  start=64426155 end=64426156 persisted=1 rows=29
+```
+
+Main queue 0, in-flight 0, **DLQ 0**, zero errors since the deploy.
+
+🔑 **Incidental confirmation of [[0282]]:** `persisted = 1` on every run — one
+ledger per reconcile, which is exactly the worst case for the per-bucket write
+contention. Live, in production, right now.
+
+### ⏳ Still owed on 0277
+
+1. `asset-discovery` on the 28 binary — see §SCOPE CORRECTION. **Cleared to
+   proceed:** the `aws-cdk-fish` deploy at 14:00:50 UTC was from `develop`
+   (`d9e25da`, PR #311 / 0228, merged 13:35 UTC; recorded in `b7c693e`), so
+   rebuilding all eleven crates from current `develop` is **strictly forward** —
+   that same code plus this bump. Nothing is dropped.
+2. The crossing measurement, 2026-09-16 17:00 UTC.
+3. Confirm `prices-production-rollup-freshness-1m` covered it.
+
 ## 🔴 SCOPE CORRECTION — `asset-discovery` has the same decode wall
 
 **Found 2026-09-14 while diffing the deploy.** This task, its runbook and its
@@ -418,9 +470,10 @@ few seconds of lag. **No stop, no gap.**
       variant exists (the change is `StellarValueExt::EmptyTxSet`, ungated in 28),
       and the cursor advance is driven by objects fetched, not trades found.
       Both verified against the source, not assumed. See §CORRECTION.
-- [ ] The bumped ledger-processor is **deployed** and the deployed asset is
-      confirmed changed — not merely merged. 0091 merged on 2026-07-14 and prod
-      stayed frozen until 0094 deployed it.
+- [x] **The bumped ledger-processor is deployed and the deployed asset is
+      confirmed changed** — `CodeSha256` `hRIt7mT8…Eysi7g=` → `BC3Nde5a…x7o8c=`
+      at 2026-09-14 14:48:22 UTC, reconcile runs confirmed after it, DLQ 0, no
+      gap. See §DEPLOYED.
 - [ ] 🔴 **`asset-discovery` is deployed on the 28 binary too** — it is the only
       other deployed Lambda that calls `decode_object`, it runs hourly, and it
       was shipped on proto-27 19 minutes before this bump merged. See
