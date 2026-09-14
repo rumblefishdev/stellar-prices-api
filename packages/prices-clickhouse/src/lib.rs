@@ -755,6 +755,49 @@ mod tests {
         ]
     }
 
+    /// The two `usd_reference` grain statements, squashed — the series'
+    /// companion surfaces, which carry the same weighted-average shape.
+    fn reference_grains() -> Vec<(&'static str, String)> {
+        let stmts = split_statements(VIEWS_SQL);
+        let find = |needle: &str| -> String {
+            squash(
+                stmts
+                    .iter()
+                    .find(|s| s.contains(needle))
+                    .unwrap_or_else(|| panic!("no view statement containing `{needle}`")),
+            )
+        };
+        vec![
+            ("usd_reference", find("prices.usd_reference AS")),
+            ("usd_reference_1h", find("prices.usd_reference_1h AS")),
+        ]
+    }
+
+    /// Tasks 0171 / 0198. Every weighted-average surface admits a candle only
+    /// with `volume_base > 0`, so `sum(w)` can never be 0 for a group that
+    /// exists and `CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))` can
+    /// never see NULL — which on 26.3.10.60 it silently turns into
+    /// Decimal128::MIN (≈ -1.7e24) flagged `traded`. The behavioural proof is
+    /// `#[ignore]` in tests/views_it.rs; this pins the predicate in CI, on
+    /// all four statements, so a fix that reaches only one grain fails here.
+    #[test]
+    fn views_sql_every_weighted_surface_admits_only_candles_with_volume() {
+        for (name, stmt) in series_grains() {
+            assert!(
+                stmt.contains("WHERE p.close_usd > 0 AND p.volume_base > 0"),
+                "{name}: arm A must require volume_base > 0 beside close_usd > 0 \
+                 (tasks 0171/0198), got no such predicate"
+            );
+        }
+        for (name, stmt) in reference_grains() {
+            assert!(
+                stmt.contains("AND p.close > 0 AND p.volume_base > 0"),
+                "{name}: the reference must require volume_base > 0 beside close > 0 \
+                 (task 0171 audit), got no such predicate"
+            );
+        }
+    }
+
     /// Task 0267 decision C. An IMPORTED measurement (`method = 'external'`)
     /// is evidence of the same standing as a polled one and must be readable
     /// by both grains — otherwise the loaded USDC history is written and never

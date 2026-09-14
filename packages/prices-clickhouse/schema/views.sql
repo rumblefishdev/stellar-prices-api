@@ -275,6 +275,14 @@
 -- signal the reader LEFT JOINs for systemic-blackout detection. Identity-resolved
 -- (not asset_id) so it survives asset-id reassignment. Reads `close` (always
 -- present from the backfill), independent of enrichment timing.
+--
+-- ⚠️ `volume_base > 0` is REQUIRED, not a tidy-up (task 0171). The reference
+-- is a weighted average; a bucket whose only XLM/USDC candles carry zero volume
+-- has sum(volume_base) = 0, and CAST(… / nullIf(…, 0) AS Decimal(38, 14)) on
+-- 26.3.10.60 either raises code 349 (interpreted) or publishes Decimal128::MIN
+-- as XLM's USD price (JIT-compiled; see the price_usd_series header). Such a
+-- bucket is ABSENT instead — `no_reference` is a legitimate §12.3 state, a
+-- garbage reference is not. Same rule as arm A of the series.
 ----------------------------------------------------------------------
 
 CREATE OR REPLACE VIEW prices.usd_reference AS
@@ -287,15 +295,19 @@ INNER JOIN prices.assets AS quote FINAL ON quote.asset_id = p.quote_asset_id
 WHERE base.asset_code = 'XLM' AND base.issuer_address = '' AND base.contract_address = ''
   AND quote.asset_code = 'USDC'
   AND quote.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
-  AND p.close > 0
+  AND p.close > 0 AND p.volume_base > 0
 GROUP BY p.timestamp;
 
 ----------------------------------------------------------------------
 -- prices.price_usd_series — one USD close per (natural identity, day bucket).
 -- The cross-source/cross-quote collapse: volume-weighted close_usd over every
 -- candle of the asset in the bucket (ADR 0004 per-source rows merge at read
--- time). Arm A emits only priced rows (close_usd > 0) — status 'ok'; misses are
--- absent and classified by the reader against usd_reference (see header).
+-- time). Arm A emits only priced rows that carry weight (close_usd > 0 AND
+-- volume_base > 0) — status 'ok'; misses are absent and classified by the
+-- reader against usd_reference (see header). A zero-volume candle is dead
+-- weight in a weighted average (v = 0, w = 0), so requiring volume changes no
+-- published value — it only stops a group made ONLY of such candles from
+-- forming, which is the tasks 0171/0198 case below.
 --
 -- ⚠️ ARM B IS NOT SUBJECT TO THAT PREDICATE, which changes the read-time status
 -- contract for peg identities. A peg asset gets its fallback row in any bucket
@@ -355,14 +367,25 @@ GROUP BY p.timestamp;
 -- as measured, in the column BE multiplies into TVL. `sum(w) = 0` returns the
 -- fallback instead: correct, and the safer failure.
 --
--- ⚠️ KNOWN RESIDUAL, deliberately NOT fixed here. The fallback can only fire
--- where arm B emitted a placeholder, i.e. where the peg asset is a QUOTE leg in
--- that bucket. A peg asset appearing ONLY as a zero-volume BASE has
--- max(is_peg) = 0 and still publishes Decimal128::MIN. That is PRE-EXISTING
--- (the historical view carried the identical expression) and NOT peg-specific:
--- any asset whose only priced candles carry zero volume hits it. Fixing it
--- means deciding whether such a row should be omitted entirely — a change to
--- the "misses are absent" contract that needs BE input. Its own task.
+-- ⚠️ The residual that guard could not reach — CLOSED by tasks 0171/0198.
+-- The fallback fires only where arm B emitted a placeholder, i.e. where the
+-- peg asset is a QUOTE leg in that bucket. Any asset appearing ONLY as a
+-- zero-volume BASE has max(is_peg) = 0, reached the CAST with sum(w) = 0, and
+-- published Decimal128::MIN flagged `traded` — NOT peg-specific, and
+-- pre-existing (the historical view carried the identical expression). BE
+-- decided 2026-08-11: OMIT THE ROW — "misses are absent" is the contract their
+-- whole read path assumes, and a published sentinel is a magic constant every
+-- consumer must know forever. Arm A therefore requires `volume_base > 0`, so
+-- a zero-weight group never forms and the CAST never sees NULL; the peg
+-- placeholder (w = 0 by construction) is untouched because it lives in arm B.
+-- Task 0198 recorded the same case as RAISING CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN
+-- (code 349). BOTH readings are right on 26.3.10.60; the expression JIT picks
+-- one. Interpreted, the CAST raises 349 and the WHOLE query fails. Once
+-- `compile_expressions` (default 1) has compiled it — after
+-- `min_count_to_compile_expression` (default 3) executions — the compiled
+-- CAST publishes Decimal128::MIN instead. A cold server raises, a warm one
+-- lies. Pinned in both modes by
+-- `a_zero_volume_only_base_is_absent_and_its_neighbours_still_publish`.
 ----------------------------------------------------------------------
 
 CREATE OR REPLACE VIEW prices.price_usd_series AS
@@ -410,7 +433,7 @@ FROM
         toUInt8(0)                                        AS rate_rank
     FROM prices.price_ohlcv_1d AS p FINAL
     INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
-    WHERE p.close_usd > 0
+    WHERE p.close_usd > 0 AND p.volume_base > 0
 
     UNION ALL
 
@@ -646,7 +669,7 @@ INNER JOIN prices.assets AS quote FINAL ON quote.asset_id = p.quote_asset_id
 WHERE base.asset_code = 'XLM' AND base.issuer_address = '' AND base.contract_address = ''
   AND quote.asset_code = 'USDC'
   AND quote.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
-  AND p.close > 0
+  AND p.close > 0 AND p.volume_base > 0
 GROUP BY p.timestamp;
 
 -- Peg-fill arm mirrors price_usd_series exactly (task 0165) — same two arms,
@@ -698,7 +721,7 @@ FROM
         toUInt8(0)                                        AS rate_rank
     FROM prices.price_ohlcv_1h AS p FINAL
     INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
-    WHERE p.close_usd > 0
+    WHERE p.close_usd > 0 AND p.volume_base > 0
 
     UNION ALL
 
