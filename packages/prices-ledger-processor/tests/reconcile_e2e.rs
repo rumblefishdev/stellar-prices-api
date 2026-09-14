@@ -136,9 +136,15 @@ async fn assets_from_a_failed_run_are_written_on_the_next_run() {
     // assets (next_id advanced), but the durable watermark did NOT advance — so
     // those assets are re-offered and written, not skipped.
     let second = reconciler.run(16).await.expect("retry run should succeed");
-    assert!(
-        second.ledgers_persisted > 0,
-        "run 2 reprocesses the fixtures"
+    // MODIFIED for task 0282, intentional, not a regression: the three fixtures
+    // all share one minute, so run 2 decodes them, writes their assets, then
+    // holds the candles back rather than emitting a partial minute. "Reprocessed
+    // the fixtures" is therefore counted by `ledgers_held_back`, not
+    // `ledgers_persisted`. The assertion this test exists for — that the failed
+    // run's interned assets are re-offered and written — is unchanged below.
+    assert_eq!(
+        second.ledgers_held_back, 3,
+        "run 2 reprocesses the fixtures (held back: all three share one minute)"
     );
     assert!(
         sink.assets_written.load(Ordering::Relaxed) > 0,
@@ -146,8 +152,23 @@ async fn assets_from_a_failed_run_are_written_on_the_next_run() {
     );
 }
 
+/// MODIFIED for task 0282, intentional, not a regression. This test used to
+/// assert the cursor advanced to `LAST_FIXTURE` and all three ledgers were
+/// persisted. All three fixtures (62460540-62460542) close inside the SAME
+/// minute, so under the pre-0282 contract the run wrote that minute as a
+/// candle — a partial one, which the next run's higher-`version` write then
+/// REPLACED rather than summed, silently dropping the earlier slice. That is
+/// the defect, and this test was pinning it.
+///
+/// The contract now: decode everything, write the assets, and hold the candles
+/// back until a ledger from the FOLLOWING minute proves the minute is closed.
+/// So the cursor must NOT move here, and nothing may be written.
+///
+/// The advance case cannot be exercised from these fixtures — there is no
+/// ledger from a later minute among them — so it is covered by the
+/// `run_boundary` unit tests in `reconcile.rs` instead.
 #[tokio::test]
-async fn contiguous_run_decodes_real_fixtures_and_advances_cursor() {
+async fn a_run_inside_one_minute_decodes_but_holds_the_cursor() {
     skip_if_no_fixtures!();
     let dir = tempdir().unwrap();
     let cursor = StubFileCursor::new(dir.path().join("cursor.txt"));
@@ -160,17 +181,24 @@ async fn contiguous_run_decodes_real_fixtures_and_advances_cursor() {
 
     assert_eq!(stats.start_cursor, FIRST_FIXTURE - 1);
     assert_eq!(
-        stats.end_cursor, LAST_FIXTURE,
-        "cursor should advance to the last contiguous fixture ledger"
+        stats.end_cursor,
+        FIRST_FIXTURE - 1,
+        "cursor must NOT advance: every fixture ledger is in the still-open minute"
     );
     assert_eq!(
-        stats.ledgers_persisted, 3,
-        "all three contiguous fixtures should be processed"
+        stats.ledgers_held_back, 3,
+        "all three fixtures decoded, all three held back"
     );
+    assert_eq!(
+        stats.ledgers_persisted, 0,
+        "nothing may be persisted from an open minute"
+    );
+    assert_eq!(stats.rows_emitted, 0, "no partial candle may be written");
 
-    // Cursor file persisted at the last ledger → next invocation resumes here.
+    // Cursor file unchanged → the next invocation re-reads these ledgers and
+    // completes the minute in a single write once it turns over.
     let resumed = StubFileCursor::new(dir.path().join("cursor.txt"));
-    assert_eq!(resumed.read().await.unwrap(), LAST_FIXTURE);
+    assert_eq!(resumed.read().await.unwrap(), FIRST_FIXTURE - 1);
 }
 
 #[tokio::test]

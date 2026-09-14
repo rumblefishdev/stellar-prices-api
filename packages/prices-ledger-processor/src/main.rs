@@ -206,6 +206,7 @@ async fn handler(
                     start = stats.start_cursor,
                     end = stats.end_cursor,
                     persisted = stats.ledgers_persisted,
+                    held_back = stats.ledgers_held_back,
                     rows = stats.rows_emitted,
                     "doorbell processed"
                 );
