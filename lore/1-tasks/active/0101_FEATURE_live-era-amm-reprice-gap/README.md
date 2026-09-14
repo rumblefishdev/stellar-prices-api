@@ -13,6 +13,7 @@ links:
   - "../../../../packages/prices-clickhouse/schema/preroll-amm-reprice.sql"
   - "notes/R-soroswap-five-day-gap-measured-on-prod.md"
   - "notes/R-soroswap-gap-is-one-bug-resumption-is-a-replay-position.md"
+  - "notes/R-pre-run-baseline-2026-09-14.md"
 history:
   - date: 2026-07-17
     status: backlog
@@ -299,10 +300,14 @@ Range is **165,414 ledgers** — one chunk at the 320k default. Live's tip is
 1. **[local repo] Build and ship the binary**, then prove it runs on the box:
    `cargo build --release -p events-backfill`, `scp` it to `~/events-backfill`,
    and run `~/events-backfill --version` over ssh before trusting it.
-2. **[read-only] Baselines FIRST** (the criterion 0097 could not meet). Capture,
-   as files: SDEX row count + `1d` tip; per-source row counts and volume sums in
-   the window at `1m` and every coarse level; current `close_usd` coverage per
-   source (step 10 compares against it). `chq` as `dev_read` is enough.
+2. ✅ **[read-only] Baselines CAPTURED 2026-09-14, before any write** —
+   [notes/R-pre-run-baseline-2026-09-14.md](notes/R-pre-run-baseline-2026-09-14.md).
+   SDEX per level + the July partition, AMM per source at `1m` over the exact
+   window and at every coarse level over whole July buckets, with `close_usd`
+   coverage. Re-run the identical queries after step 9 and diff.
+   🔑 **Aquarius is the control** — its totals must come back unchanged.
+   🔑 Soroswap's earliest `1m` row currently reads **2026-07-11 21:00**; after
+   the run it must read `2026-07-06 09:3x`. That single cell is the task.
 3. ✅ **`prices-production-cleanup` is confirmed DISABLED** — verified
    2026-09-14 from EventBridge (`State: DISABLED`) and CloudTrail (disabled
    2026-07-20 16:22:33, last fire 2026-07-20, zero invocations in 56 days). Step
