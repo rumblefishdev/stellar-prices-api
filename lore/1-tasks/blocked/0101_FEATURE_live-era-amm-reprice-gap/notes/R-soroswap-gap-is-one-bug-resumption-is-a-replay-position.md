@@ -106,14 +106,14 @@ was not ours and was not a release.
 | **2026-07-15 15:57Z** | **0096 Soroswap extractor fix deployed** (PR #112, `2c53ee4`) |
 
 From `price_ohlcv_1h`, the first Soroswap candle after the gap is
-**2026-07-11 21:00**, ledger **63,434,026**.
+**2026-07-11 21:00**, ledger **63,433,850**.
 
 The arithmetic closes it. The replay ran 63,384,068 → ~63,434,000 in the ~19 h
 between the xdr-27 deploy and the extractor deploy: **~2,630 ledgers/hour, about
 3.6× real time** — the shape of a catch-up, not of live tailing. From 15:57Z
 onward every ledger the replay touched went through the *fixed* extractor, so
 Soroswap candles start at whatever ledger the replay had reached. That ledger is
-63,434,026, and it closed on 07-11 21:00.
+63,433,850, and it closed on 07-11 21:00.
 
 🔑 **63,433,850 is a cursor position, not a market event and not a second bug.**
 [[0271]] read it as evidence of a distinct mechanism because it predates the
@@ -121,15 +121,18 @@ known fix; it postdates nothing — it is downstream of it.
 
 ## What this changes for the reprice
 
-- **Soroswap refill range: `63,352,612` → `63,434,025`**, i.e. up to the first
-  ledger the replay repriced correctly. Repricing past that rewrites rows the
-  fixed extractor already wrote correctly, for no gain.
+- **Soroswap is dark through ledger `63,433,849`** — the replay's first
+  correctly-priced ledger is `63,433,850`. Repricing past it only rewrites rows
+  the fixed extractor already wrote correctly: harmless, but not the point.
   ⚠️ The upper bound still has to be **minute-aligned** per the task's
-  §Cross-invocation minute boundary — 63,434,026 closed mid-minute, so the run
-  bound must be snapped to the minute edge, not set to this ledger.
-- **Phoenix is untouched by any of this.** Its range is still
-  `[63352612, deploy_ledger]` with `deploy_ledger` at 2026-07-17 11:57:52, and
-  it still needs DELETE-first in `1m` and coarse for the version-tie reason.
+  §Cross-invocation minute boundary. ⚠️ And the resumption minute **21:00 is
+  itself partial**: the replay entered it mid-minute at ledger 63,433,850, so
+  the run must **cover** that minute rather than stop below it.
+- **Phoenix is untouched by any of this.** Its buggy window still runs to the
+  0099 deploy at 2026-07-17 11:57:52 (ledger `63,518,000`), and it still needs
+  DELETE-first in `1m` and coarse for the version-tie reason. Since Phoenix's
+  window **contains** Soroswap's, one run covers both — see the task's
+  §📕 RUN RUNBOOK.
 - **No live-path fix is owed before refilling.** The mechanism was 0096 and it
   is fixed and deployed. There is no recurrence-at-next-restart hazard, which is
   what the registry hypothesis would have implied.

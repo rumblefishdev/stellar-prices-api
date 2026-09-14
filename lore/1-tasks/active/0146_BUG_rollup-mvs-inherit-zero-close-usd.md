@@ -2,7 +2,8 @@
 id: "0146"
 title: "All six rollup MVs zero a coarse row's close_usd when its newest sub-bucket is un-enriched"
 type: BUG
-status: backlog
+status: active
+assignee: akot
 related_adr: []
 related_tasks: ["0144", "0145", "0142", "0137", "0148", "0149", "0095", "0136"]
 tags:
@@ -28,6 +29,16 @@ history:
       and relies on `insert_null_as_default = 1`. Nothing wrong on prod today
       (zero `volume_base = 0` rows on any tier); to be made explicit when the
       MVs are re-created here. No other change.
+  - date: "2026-09-14"
+    status: active
+    who: akot
+    note: >
+      Activated; taken by akot after [[0171]]/[[0198]] (PR #312). First of the
+      remaining 0144 chain because all its preconditions are closed (0142,
+      0137, 0145) and it changes the data [[0147]] will measure its threshold
+      on. Pre-flight before the first DROP: confirm the MV re-aggregation
+      windows do not reach back to 2026-08-13, or [[0212]]'s peg-valued _1m
+      rows re-enter the coarse tiers.
 ---
 
 # Rollup MVs inherit `close_usd = 0` from an un-enriched sub-bucket

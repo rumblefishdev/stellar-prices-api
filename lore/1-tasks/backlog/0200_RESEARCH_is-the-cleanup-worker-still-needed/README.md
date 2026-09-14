@@ -24,6 +24,35 @@ history:
       task: measured 1m disk usage came in far below the assumption the retention
       policy was designed against, so the premise for having a cleanup worker at
       all is worth re-testing rather than assumed.
+  - date: 2026-09-14
+    status: backlog
+    who: okarcz
+    note: >
+      🔒 OPERATOR DECISION - the rule stays DISABLED until M3 is complete, to
+      keep historical backfill data in the database. That does not close this
+      task, it dates it: the decision this task exists to make is now due AFTER
+      M3, not before, and no repair task may re-enable the rule in the meantime
+      (0101's criterion to that effect was withdrawn the same day). Measured
+      2026-09-14 and worth carrying into the decision: the rule has been DISABLED
+      since 2026-07-20 16:22:33 with zero invocations in 56 days and nothing
+      broken, while price_ohlcv_1m has grown to 793,157,850 rows / 20.33 GiB -
+      the largest table in prices, oldest row 2015-11-18, on the disk shared with
+      BE who filled it once already. So both sides of the decision now have
+      numbers. The eventbridge-stack.ts declaration AC is now the urgent half of
+      this task rather than tidy-up: with the rule load-bearing for data
+      retention, a stack deploy that silently re-enables it is a data-loss path.
+  - date: 2026-09-14
+    status: backlog
+    who: okarcz
+    note: >
+      ⛔ CORRECTION to the entry above, same day - its closing claim is WRONG and
+      was repeated from a stale memory rather than read from the source.
+      eventbridge-stack.ts:180-185 declares the cleanup rule with enabled:false,
+      added by task 0204 on 2026-08-20 with a load-bearing comment explaining
+      exactly this hazard. CDK and production agree; a deploy of an unrelated
+      stack can NOT silently re-enable cleanup. That acceptance criterion of this
+      task is therefore already DONE, and what remains here is only the
+      enable-or-disable decision itself, now due after M3.
 ---
 
 # Is `prices-production-cleanup` still worth running?
