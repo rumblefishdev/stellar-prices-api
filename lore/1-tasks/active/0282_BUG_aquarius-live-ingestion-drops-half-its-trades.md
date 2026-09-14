@@ -1,6 +1,6 @@
 ---
 id: "0282"
-title: "Live ingestion discards ~50% of every Aquarius trade, every day, and has done for at least ten weeks — the same extraction code recovers 100% of them"
+title: "Candle writes are replaced instead of summed whenever a minute bucket spans a reconcile run — Aquarius loses ~50% of its trades daily, and SDEX is affected too"
 type: BUG
 status: active
 assignee: okarcz
@@ -170,11 +170,47 @@ straddle the most ledgers. Phoenix (19 pools) and Soroswap (221) have the same
 defect at lower rates — Phoenix stored 1,306 against 1,442 extracted in the July
 window, which this explains and 0099's 7-event gate does not.
 
-🔴 **SDEX is written by the same loop** (`reconcile.rs:202`, same accumulator,
-same flush) and is **not** excluded by anything measured here. Whether it is
-affected is the first question to answer, because it is the main product and a
-correspondingly larger estate. It cannot be checked against `soroban_events` —
-it needs a different source of truth.
+### 🔴 SDEX IS AFFECTED — confirmed 2026-09-14
+
+Caught directly. BE holds no classic-trades table, so there is no external
+source of truth for SDEX; instead the **losing writes themselves** were observed
+before the background merge destroyed them.
+
+A contested bucket is visible as **more than one physical row** for the same
+`(timestamp, asset_id, quote_asset_id, source)` in a non-FINAL read. Sampling
+the in-flight minute three times, 20 s apart:
+
+| sample | sdex buckets | contested | |
+| --- | --- | --- | --- |
+| 1 | 834 | 0 | merges had collapsed them |
+| 2 | 940 | 0 | merges had collapsed them |
+| 3 | 595 | **23** | **3.87%** |
+
+⚠️ **3.87% is a lower bound, not a rate.** RMT merges collapse duplicate rows
+within seconds, so a snapshot sees only what has not yet merged. Two of three
+samples saw nothing at all while the defect was certainly occurring.
+
+The captured aquarius example, same mechanism, with both sides still present:
+
+| bucket | trade_count | volume_base | version | ledger |
+| --- | --- | --- | --- | --- |
+| `11:04`, asset 4 / quote 3 | 2 | 2,513.6719 | 64423761005 | 64,423,761 |
+| `11:04`, asset 4 / quote 3 | 1 | 1,000.0000 | 64423766004 | 64,423,766 |
+
+Two writes, five ledgers apart, same minute. RMT keeps the higher version, so
+**1 trade / 1,000 survives and 2 trades / 2,513.67 is discarded**. The true
+minute is 3 trades / 3,513.67.
+
+⚠️ **Correction to the wording above: it is one write per RUN, not per ledger.**
+The accumulator flushes once per reconcile run, and a run covers a few ledgers —
+the captured pair is five apart. A bucket is only damaged when it **spans a run
+boundary**, which is why single-ledger buckets are always intact. The retention
+arithmetic matching last-*ledger* so closely implies most runs are short.
+
+**Quantifying SDEX needs a different instrument**, since the evidence
+self-destructs: either tight sampling of the in-flight minute over a long
+period (lower bound only), instrumenting the writer to count buckets it writes
+more than once, or reconciling against Horizon / the ledger archive.
 
 ### What the fix has to do
 
@@ -245,9 +281,10 @@ has been discarding half a venue for months. Any fix should close that too.
 - [x] **Why it grew from ~10% to ~50% is stated** — loss is a function of
       ledgers per run, and steady-state (one ledger per doorbell) is the worst
       case. See §ROOT CAUSE.
-- [ ] 🔴 **Whether SDEX is affected is answered.** Same loop, same accumulator,
-      same flush; nothing measured here excludes it, and it cannot be checked
-      against `soroban_events`.
+- [x] 🔴 **Whether SDEX is affected is answered: YES.** 23 contested buckets of
+      595 caught in one snapshot. Magnitude still unknown — see §SDEX.
+- [ ] SDEX's loss is **quantified**, with an instrument that does not depend on
+      catching duplicates before the merge.
 - [ ] A decision is recorded on repairing the historical estate, with a range.
 - [ ] Live-path drops become observable — a dropped swap leaves a trace
       somewhere, rather than nothing at all.
