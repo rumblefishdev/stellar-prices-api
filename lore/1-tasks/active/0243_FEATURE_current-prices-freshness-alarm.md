@@ -2,7 +2,7 @@
 id: "0243"
 title: "No alarm watches current_prices freshness — a dead mv_current_prices serves a frozen price behind a healthy HTTP 200"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0178", "0137", "0204", "0218"]
 tags:
@@ -31,6 +31,20 @@ history:
       Observability construct references current_prices. Kept out of 0178
       because that task is a data-correctness fix and this is an ops gap that
       predates it and outlives it.
+  - date: 2026-09-14
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated. Item 11 of Oskar's backlog summary shared on 2026-09-14, beside
+      0214 + 0223 (item 10), and started first because it is the smallest of the
+      three and the only one whose failure a consumer sees: a stopped
+      mv_current_prices serves a frozen price behind HTTP 200. Two facts read
+      from the code that shape the work. rollup-freshness-probe builds its query
+      around `max(timestamp)`, and current_prices has no `timestamp` column
+      (init.sql:155), so the probe needs a per-table age column — `updated_at`
+      here. And `updated_at` is `now()` at every refresh, so this alarm catches
+      a dead refresh, not stale input; stale input stays the rollup alarms' job,
+      as the 2026-09-14 Galexie stall showed when rollup-freshness-1m fired.
 ---
 
 # `current_prices` can freeze and nothing notices
