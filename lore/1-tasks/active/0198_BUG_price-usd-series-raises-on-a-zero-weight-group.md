@@ -2,7 +2,8 @@
 id: "0198"
 title: "A single zero-volume asset can take down price_usd_series entirely — the view RAISES, it does not degrade"
 type: BUG
-status: backlog
+status: active
+assignee: akot
 related_adr: []
 related_tasks: ["0172", "0165", "0116", "0150"]
 tags:
@@ -30,6 +31,13 @@ history:
       the other 0183 was already active and its thirteen slices are a contiguous
       block; these three were backlog with no work in flight. Referring sites
       updated: views.sql, views_it.rs, 0172, 0182, 0168.
+  - date: "2026-09-14"
+    status: active
+    who: akot
+    note: >
+      Activated; taken by akot together with [[0171]], one branch and one PR
+      for both — same views.sql expression, and BE's 2026-08-11 answer on 0171
+      (omit the row) is the contract decision this task's AC 3 asks for.
 ---
 
 # `price_usd_series` raises `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN` on a zero-weight group
