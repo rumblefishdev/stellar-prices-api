@@ -2,7 +2,8 @@
 id: "0282"
 title: "Live ingestion discards ~50% of every Aquarius trade, every day, and has done for at least ten weeks — the same extraction code recovers 100% of them"
 type: BUG
-status: backlog
+status: active
+assignee: okarcz
 related_adr: []
 related_tasks: ["0080", "0101", "0100", "0097", "0203"]
 tags: [priority-high, effort-medium, milestone-M3, amm, aquarius, ingestion, data-correctness, data-loss, clickhouse]
@@ -26,6 +27,14 @@ history:
       daily, today included. Filed separately from 0101 because it is an active
       production defect, not a historical repair, and because it is larger than
       the gap 0101 exists to close.
+  - date: 2026-09-14
+    status: active
+    who: okarcz
+    note: >
+      Promoted the day it was filed. 0101 moves to blocked by this task: its
+      write run would rewrite aquarius rows this defect is still producing, and
+      its acceptance criteria use aquarius as an untouched control. First move is
+      the pool-set vs sample question, which decides the mechanism.
 ---
 
 # Aquarius live ingestion drops about half of every day's trades
@@ -104,19 +113,104 @@ swaps dropped (unresolved):0
 115,268 ticks against **115,268** raw `trade` events in the same range — exact.
 The live path stored 90,667 for the same span.
 
-## Leads, in order
 
-1. **Concentrated-liquidity pools (first suspect, NOT the answer yet).**
+## 🔑 ROOT CAUSE — confirmed 2026-09-14
+
+**Neither a pool set nor a sample. It is per-bucket write contention.**
+
+`price_ohlcv_1m` is `ReplacingMergeTree(version)` keyed on
+`(timestamp, asset_id, quote_asset_id, source)` — **not** on the pool. Any
+`(minute, pair)` bucket written **more than once** keeps only the write with the
+highest `version`; every earlier write is replaced, not summed.
+
+Measured over ledgers > 63,900,000, joining raw events to the stored candles:
+
+| bucket touched by | raw trades | stored | predicted if only the last write survives | retained |
+| --- | --- | --- | --- | --- |
+| 1 ledger | 14,222 | 14,222 | 14,222 | **100.0%** |
+| 2-3 ledgers | 13,837 | 5,800 | 5,796 | **41.9%** (predicted 41.9%) |
+| 4+ ledgers | 23,362 | 3,528 | 3,509 | **15.1%** (predicted 15.0%) |
+
+Stored tracks the last-write prediction to within **0.6%** across all three
+classes. A bucket confined to one ledger is perfect; everything else loses all
+but its final write.
+
+### Why, in the code
+
+`reconcile.rs:125-126` builds a `CandleAccumulator` per source and the loop is
+explicitly *"accumulate across the whole contiguous run, flush once at the
+end"*, flushing at `:202` / `:214`. **That is correct — within one run.** In
+production a doorbell-driven run is **one ledger**, so "flush once at the end of
+the run" means *flush once per ledger*, and a minute bucket spans ~12 ledgers at
+5 s each. Every one of those ledgers issues its own write for the same bucket,
+and RMT keeps the last.
+
+🔑 **This is [[0065]]'s "cross-invocation minute boundary", and it is not a
+run-boundary edge case.** [[0101]] carries it as a hazard to respect when
+*choosing backfill bounds*: the accumulator keeps the boundary minute open
+within a process run, and "that guard does not span separate invocations". True
+— and in live, every ledger is a separate invocation, so the guard never
+applies at all. What was filed as an operator footgun is the dominant live
+data-loss mechanism.
+
+### Why it grew from ~10% to ~50%
+
+Loss is a function of **ledgers per run**. During the July window the processor
+spent long stretches catching up after the proto27 freeze, processing many
+ledgers per invocation — so buckets were accumulated properly and loss was
+~10%. In steady state it handles one ledger per doorbell, which is the
+worst case, and loss settles at ~50%. **The system loses the most data when it
+is healthiest.**
+
+### Why aquarius is worst
+
+It is not aquarius-specific. Aquarius has **488 registered pools**, many trading
+the same asset pairs, so its `(minute, pair)` buckets are the most crowded and
+straddle the most ledgers. Phoenix (19 pools) and Soroswap (221) have the same
+defect at lower rates — Phoenix stored 1,306 against 1,442 extracted in the July
+window, which this explains and 0099's 7-event gate does not.
+
+🔴 **SDEX is written by the same loop** (`reconcile.rs:202`, same accumulator,
+same flush) and is **not** excluded by anything measured here. Whether it is
+affected is the first question to answer, because it is the main product and a
+correspondingly larger estate. It cannot be checked against `soroban_events` —
+it needs a different source of truth.
+
+### What the fix has to do
+
+Make the bucket write **additive rather than replacing**, or ensure exactly one
+write per bucket ever happens. The mechanism is already proven in this codebase:
+`events-backfill` accumulates the full range before writing one row per bucket
+and recovers 100%. Options worth weighing: widen the run so a bucket cannot
+straddle it (fragile — it only narrows the window), carry the open minute across
+invocations in durable state, or move `1m` to a summing engine so concurrent
+partial writes add. The last changes the table contract and needs its own
+decision.
+
+## Superseded leads (kept — they were how it was found)
+
+⛔ All three were **wrong**, and are kept only so they are not re-run.
+
+1. ⛔ **Concentrated-liquidity pools.** FALSIFIED — aquarius `trade` events have
+   exactly **one** shape in the window (4 topics: `trade`, token_in, token_out,
+   user; 446,108 events, 212 pools). There is no shape split to explain a
+   split outcome.
    24 aquarius pools also emit `pool_state`, the CLMM marker, and they account
    for **169,286 of 446,031** recent trades — **37.9%**. That is the right order
    of magnitude but does not reach 41-57%, so it cannot be the whole story.
    [[0080]] is exactly this shape check and should be folded in or done first.
-2. **Registry coverage at live time.** The reprice filters by
+2. ⛔ **Registry coverage at live time.** FALSIFIED as the cause — there are
+   **zero** minutes where trades exist and no candle was stored, which is what a
+   dropped pool set would produce. (Still worth noting separately: all 488
+   aquarius and all 19 phoenix `pool_registry` rows have **empty
+   `token0`/`token1`**; only soroswap's 221 are populated. It does not cause
+   this, because the tokens are carried in the event topics.) The reprice filters by
    `prices.pool_registry`; live builds its own view. 168 aquarius contracts
    emitted trades in the July window against 488 registered. If live's registry
    is narrower than the backfill's at any moment, its swaps are dropped —
    silently, because they do not reach `unresolved_pools` either (see below).
-3. **Something between the doorbell and dispatch.** The shared extraction chain
+3. ✅ **Something between the doorbell and dispatch** — this one was right, and
+   resolved above. The shared extraction chain
    is exonerated by measurement, so the divergence is upstream of it: which
    events live sees, or which it hands to the reconciler.
 
@@ -144,11 +238,16 @@ has been discarding half a venue for months. Any fix should close that too.
 
 ## Acceptance Criteria
 
-- [ ] The mechanism is identified and stated plainly, with the pool-set vs
-      sample question answered from measurement.
+- [x] **The mechanism is identified** — per-bucket RMT write contention, and
+      the pool-set vs sample question is answered: **neither**. See §ROOT CAUSE.
 - [ ] The live path is fixed and verified by the same raw-vs-stored comparison
       running at ~0% loss for a full day.
-- [ ] It is stated why the shortfall grew from ~10% (July) to ~50% (September).
+- [x] **Why it grew from ~10% to ~50% is stated** — loss is a function of
+      ledgers per run, and steady-state (one ledger per doorbell) is the worst
+      case. See §ROOT CAUSE.
+- [ ] 🔴 **Whether SDEX is affected is answered.** Same loop, same accumulator,
+      same flush; nothing measured here excludes it, and it cannot be checked
+      against `soroban_events`.
 - [ ] A decision is recorded on repairing the historical estate, with a range.
 - [ ] Live-path drops become observable — a dropped swap leaves a trace
       somewhere, rather than nothing at all.

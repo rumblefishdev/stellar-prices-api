@@ -2,7 +2,7 @@
 id: "0101"
 title: "Reprice the live-era AMM gap (Phoenix ~2% short + Soroswap 2026-07-06→07-11 hole)"
 type: FEATURE
-status: active
+status: blocked
 assignee: okarcz
 related_adr: []
 related_tasks: ["0271", "0099", "0097", "0096", "0065", "0108", "0117", "0127", "0128", "0264", "0176", "0088"]
@@ -86,6 +86,21 @@ history:
       write run is sequenced behind 0282's diagnosis. Also corrected: step 4's
       "aquarius should match what live already wrote" check was pointed the
       wrong way - live is the short side, not the tool.
+  - date: 2026-09-14
+    status: blocked
+    who: okarcz
+    by: ["0282"]
+    note: >
+      Blocked on 0282, whose root cause was confirmed the same day: live writes
+      one candle row per LEDGER for a bucket that spans ~12 of them, and
+      ReplacingMergeTree keeps only the last - so aquarius retains 100% of
+      single-ledger buckets, 41.9% of 2-3 ledger buckets and 15.1% of 4+ (each
+      matching the last-write-wins prediction to within 0.6%). This task cannot
+      finish while that runs: its criteria use aquarius as an untouched control,
+      a repriced range would immediately start losing rows again at the live
+      frontier, and the same defect explains phoenix's shortfall here better
+      than 0099's 7-event gate does. The dry run stands and nothing was
+      written.
   - date: 2026-09-14
     status: active
     who: okarcz
