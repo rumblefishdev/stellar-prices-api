@@ -2,7 +2,7 @@
 id: "0277"
 title: "Bump stellar-xdr 27→28 before Protocol 28 (Adapter) activates on 2026-09-16 — BE must bump xdr-parser first"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0091", "0094", "0098", "0064"]
 tags: [layer-backend, priority-high, effort-small, phase-live, clickhouse, resilience, ingestion, deployment]
@@ -28,6 +28,15 @@ history:
       The BE ask is raised — the operator notified BE the same day. Their
       answer (date, and the rev their `xdr-parser` bump lands on) is still
       outstanding and is what unblocks our half.
+  - date: 2026-09-14
+    status: active
+    who: okarcz
+    note: >
+      Activated — the blocker is CLEARED. BE bumped `xdr-parser`'s `stellar-xdr`
+      to 28 in `840f2b58` ("feat(lore-0548): bump stellar-xdr to 28 for the
+      protocol-28 vote", 2026-09-10), merged and now an ancestor of their
+      `develop` head `31be5f74`. Their own task is 0548. Two days before the
+      pubnet vote.
 ---
 
 # stellar-xdr 27 → 28 for Protocol 28 "Adapter"
@@ -91,7 +100,7 @@ arrives.
 holds, it removes the "nothing broke at 17:00, we're fine" false all-clear — and
 it is an argument for deploying *before* the vote rather than watching after it.
 
-## 🔴 Blocker — BE must bump `xdr-parser` first
+## ✅ Blocker CLEARED 2026-09-14 — BE has bumped `xdr-parser`
 
 **We cannot do this unilaterally.** `prices-ingest-core/src/decode.rs` calls
 BE's `xdr_parser::decompress_zstd` + `deserialize_batch` and consumes the
@@ -118,11 +127,29 @@ a hard compile error, not a warning. So the order is fixed:
 build on the next `cargo update`, whether or not we are ready, so the two halves
 want to move together rather than drift.
 
-➡️ **The ask is RAISED — the operator told BE on 2026-09-11**, the day this
-task was filed. So the long pole is moving; what is not yet recorded here is
-BE's answer: whether they have a date, and which rev their bump will land on.
-Fill both in when known, and re-pin `xdr-parser` to that rev rather than to
-whatever `branch="develop"` happens to hold.
+✅ **BE delivered, and it is already merged.** Read from their repo
+2026-09-14:
+
+| | value |
+| --- | --- |
+| BE bump commit | `840f2b58b67c842295b2ad0f16cb2778a5edf294` |
+| message | `feat(lore-0548): bump stellar-xdr to 28 for the protocol-28 vote` |
+| authored | 2026-09-10 12:14 +0200 |
+| on `origin/develop`? | **yes** — ancestor of develop head `31be5f74` (2026-09-14 14:16) |
+| BE `Cargo.toml:40` now | `stellar-xdr = { version = "28" }` |
+| their task | BE 0548 — *Protocol 28 readiness: Galexie 28.0.1 pin + stellar-xdr 27→28* |
+
+⚠️ **BE's `master` still reads `"27"`** — only `develop` carries the bump. That
+is the branch we track, so it reaches us, but it means "BE is on 28" is true of
+`develop` only.
+
+⚠️ Our lock was still pinned at the **proto27** rev
+`d61b359f39994c7ef5f5bde8a0d709cf81a1026c` — unmoved since BE #325 — so the bump
+did **not** reach our build on its own. `cargo update -p xdr-parser` is a
+required step, not a side effect.
+
+⚠️ BE also confirmed **Galexie 28.0.1 is exporting** after a restart
+(`31be5f74`), so the objects we read are already proto-28 capable.
 
 ## Implementation
 
@@ -150,7 +177,7 @@ whatever `branch="develop"` happens to hold.
 
 ## Acceptance Criteria
 
-- [ ] BE has bumped `xdr-parser` to `stellar-xdr 28` and the rev is recorded here.
+- [x] **BE has bumped `xdr-parser` to `stellar-xdr 28` and the rev is recorded here** — `840f2b58`, on their `develop`. See §Blocker CLEARED.
 - [ ] Workspace pin is `=28.0.0`; `cargo check --workspace` and the full test
       suite are green.
 - [ ] Any new `LedgerCloseMeta` / `StellarValue` variant is handled explicitly,
