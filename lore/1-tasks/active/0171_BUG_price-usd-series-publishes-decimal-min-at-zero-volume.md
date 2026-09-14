@@ -2,7 +2,8 @@
 id: "0171"
 title: "price_usd_series* publish Decimal128::MIN (-1.7e24) for any asset whose only priced candles carry zero volume — a non-Nullable CAST swallows the nullIf"
 type: BUG
-status: backlog
+status: active
+assignee: akot
 related_adr: []
 related_tasks: ["0165", "0116", "0144", "0151", "0150", "0061"]
 tags:
@@ -35,6 +36,15 @@ history:
       with ZERO occurrences in their read windows today, so this is insurance on
       both sides rather than a live incident. Implement HAVING sum(w) > 0 on both
       grains; the row-count change is now the riskiest part, not the omission.
+  - date: "2026-09-14"
+    status: active
+    who: akot
+    note: >
+      Activated; taken by akot together with [[0198]], one branch and one PR
+      for both. They are the same expression in views.sql (still at :377 and
+      :666 on develop) and disagree on its failure mode: this task says it
+      publishes Decimal128::MIN, 0198 measured an exception (code 349) on the
+      prod pin. Settling which one is first.
 ---
 
 # `price_usd_series*` publish `Decimal128::MIN` at zero volume
