@@ -3342,6 +3342,118 @@ async fn a_dry_run_refuses_the_wrong_leg_for_either_rate_gated_mode() {
         .unwrap();
 }
 
+/// 0228 review round 2, finding 2. Hoisting the two LEG refusals left four more
+/// that a dry run still never reached, because they lived only in `reset_step`
+/// and a dry run never builds a pass: the oracle-shadow guard and the
+/// pricing-path guard (every spec), and the hourly-series and pre-epoch-oracle
+/// guards (the 0268 mode). The oracle-shadow one is the refusal Appendix C's
+/// precondition 5 calls the campaign's likeliest blocker — so the rehearsal
+/// passed and the real run refused, on exactly the case the operator was most
+/// likely to hit. Every month-independent refusal now runs in the driver before
+/// any month is enumerated, dry run included, through ONE list that
+/// `reset_step` runs too.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() {
+    let db = "it_enrich_0228_dry_run_all";
+    let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
+    let client = setup_0228_reset(db, covered, uncovered).await;
+    seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
+
+    let dry = |spec: UsdResetSpec| {
+        let mut enrich = cfg(db);
+        enrich.table = "price_ohlcv_1h".to_string();
+        enrich.usd_reset = Some(spec);
+        CoarseRepairDriver::with_client(
+            client.clone(),
+            CoarseRepairConfig {
+                enrich,
+                start_month: 202_001,
+                end_month: 202_603,
+                snapshot: true,
+                dry_run: true,
+                one_shot: true,
+                deadline: None,
+            },
+        )
+    };
+
+    // A leg that no tier can price (asset_id 99 is not in `assets` at all), on
+    // the plain 0182-shaped reset — the one spec neither leg guard covers.
+    let err = dry(UsdResetSpec {
+        quote_asset_id: 99,
+        require_pivot_usdc_rate: false,
+        ..pivot_reset(DEPEG_DAY - 86_400)
+    })
+    .run()
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ChEnrichError::ResetTargetHasNoPricingPath {
+                quote_asset_id: 99,
+                ..
+            }
+        ),
+        "a dry run over an unpriceable leg must refuse, got {err:?}"
+    );
+
+    // The 0268 mode on a sub-daily table with only the DAILY series loaded.
+    let err = dry(UsdResetSpec {
+        quote_asset_id: 2,
+        require_external_rate: true,
+        require_pivot_usdc_rate: false,
+        ..pivot_reset(DEPEG_DAY - 86_400)
+    })
+    .run()
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, ChEnrichError::ResetRequiresHourlyRates { ref table } if table == "price_ohlcv_1h"),
+        "a dry run of the external mode on _1h without hourly rates must refuse, got {err:?}"
+    );
+
+    // One Reflector reading for XLM inside the reset's own window: the
+    // oracle-shadow guard, precondition 5.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES ({covered}, 1, 'reflector', 0.0588, '{{}}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    let err = dry(pivot_reset(DEPEG_DAY - 86_400))
+        .run()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ChEnrichError::ResetBlockedByOracleRows {
+                quote_asset_id: 1,
+                rows: 1,
+                ..
+            }
+        ),
+        "a dry run over an oracle-shadowed span must refuse, got {err:?}"
+    );
+
+    // Nothing was written by any of the refused rehearsals.
+    let (v, ver) = pivot_subject_1h(&client, db, covered).await;
+    assert!(
+        (v - FOO_XLM_CLOSE * XLM_USDC_CLOSE).abs() < 1e-6 && ver == 1,
+        "got {v} v{ver}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
 /// 🔑 **RE-OPENS NOTHING THE SAME PASS CANNOT REFILL.** The day the imported
 /// series does not cover keeps its stored value; only the covered day is
 /// re-priced.
@@ -3395,6 +3507,78 @@ async fn the_pivot_reset_never_zeroes_a_bucket_it_cannot_refill() {
     assert!(
         (vqu - 50.0 * XLM_USDC_CLOSE * DEPEG_RATE).abs() < 1e-6,
         "volume_quote_usd must be recomputed from the same rate, got {vqu}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// 🔑 The same rule, for the OTHER thing the pivot needs (0228 review round 2,
+/// finding 3). The test above separates its two days by the RATE; here both
+/// days carry an imported rate and what separates them is the REFERENCE: the
+/// second day has no XLM/USDC candle within `pivot_window_s` of it, so the
+/// scaled pivot cannot price it. The 0228 candidate used to carry no
+/// reference-market term at all — it re-opened "every written row of the leg on
+/// a covered day" — so this row was zeroed, not refilled, and left at
+/// `close_usd = 0` for the `reset > enriched` post-check to find AFTER the
+/// write. The reset now also requires a usable reference candle on the bucket's
+/// UTC day, at the same grain, in the same table the pivot reads.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_pivot_reset_never_zeroes_a_bucket_whose_reference_market_is_silent() {
+    let db = "it_enrich_0228_no_reference";
+    let (with_ref, without_ref) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    let stored = FOO_XLM_CLOSE * XLM_USDC_CLOSE;
+    // ONE XLM/USDC reference candle, on the first day only; a FOO/XLM subject on
+    // both days, each carrying a stored (pre-0228) value.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({with_ref},    1, 2,'sdex',    {XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE}, 1000,58.8,0,0,{XLM_USDC_CLOSE},1,1), \
+             ({with_ref},   10, 1,'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1), \
+             ({without_ref},10, 1,'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // BOTH days are rate-covered: the rate is not what separates them here.
+    seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
+    seed_external_rate(&client, db, DEPEG_DAY + 5 * 86_400, DEPEG_RATE).await;
+
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1h".to_string();
+    c.one_shot = true;
+    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    let stats = ChEnrichmentPass::new(c).run().await.unwrap();
+
+    assert_eq!(
+        stats.rows_reset, 1,
+        "only the day with a reference candle may be re-opened — the other has \
+         nothing for the pivot to price it from, and zeroing it strands it at 0"
+    );
+    let (fixed, _) = pivot_subject_1h(&client, db, with_ref).await;
+    assert!(
+        (fixed - stored * DEPEG_RATE).abs() < 1e-6,
+        "the day with a reference must be re-priced at the measured rate ({}), got {fixed}",
+        stored * DEPEG_RATE
+    );
+    let (kept, ver) = pivot_subject_1h(&client, db, without_ref).await;
+    assert!(
+        (kept - stored).abs() < 1e-6 && ver == 1,
+        "the day without a reference must keep its stored value untouched, got \
+         {kept} v{ver}. 0.0 means it was re-opened and not refilled, which is \
+         worse than the defect."
     );
 
     client

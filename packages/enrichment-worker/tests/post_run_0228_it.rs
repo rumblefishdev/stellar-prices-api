@@ -331,10 +331,17 @@ fn version_before_from_env(table: &str) -> Option<u64> {
 }
 
 /// The variable name the runbook's "before" step must export for `table`;
-/// `None` for anything that is not a `price_ohlcv_*` grain. Derived, so the
-/// runbook and this file cannot drift apart.
+/// `None` for anything that is not a MECHANISM grain. One arm per grain, not a
+/// derivation: `to_ascii_uppercase()` on the raw suffix gave `_1m` and `_1M`
+/// the same name, so a minute grain added to the campaign later would have been
+/// judged against the monthly baseline with no error (0228 review round 2,
+/// finding 4). The runbook exports exactly these two names.
 fn version_before_var_name(table: &str) -> Option<String> {
-    let suffix = table.strip_prefix("price_ohlcv_")?.to_ascii_uppercase();
+    let suffix = match table {
+        "price_ohlcv_1w" => "1W",
+        "price_ohlcv_1M" => "1M",
+        _ => return None,
+    };
     Some(format!("POST_RUN_0228_VERSION_BEFORE_{suffix}"))
 }
 
@@ -762,6 +769,14 @@ fn the_version_baseline_is_read_from_a_per_table_variable() {
         Some("POST_RUN_0228_VERSION_BEFORE_1W")
     );
     assert_eq!(version_before_var_name("not_a_table"), None);
+    // The two grains that differ only by case must not share a baseline
+    // (0228 review round 2, finding 4). `_1m` is out of the campaign by D-07,
+    // so it names NO variable rather than the monthly grain's.
+    assert_eq!(version_before_var_name("price_ohlcv_1m"), None);
+    assert_ne!(
+        version_before_var_name("price_ohlcv_1m"),
+        version_before_var_name("price_ohlcv_1M")
+    );
     assert_eq!(parse_version_before(Some(" 7 ")), Some(7));
     assert_eq!(parse_version_before(Some("")), None);
     assert_eq!(parse_version_before(Some("seven")), None);

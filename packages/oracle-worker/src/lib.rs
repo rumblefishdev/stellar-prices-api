@@ -418,6 +418,13 @@ pub struct OracleStats {
     /// non-fatal — its failure is visible nowhere but here. The measured set
     /// lands rows on every pass, so a sum would never read zero and would hide
     /// exactly the stall this series exists to show (0228 review finding 1).
+    ///
+    /// This series is load-bearing: the ObservabilityStack's
+    /// `prices-{env}-oracle-usdc-snapshot-stalled` alarm reads it (0228 review
+    /// round 2, finding 1) and fires when it stays at zero for three hours while
+    /// `written` keeps climbing — long before the pivot's one-day staleness
+    /// bound turns the stall into unpriced candles. Rename it and the alarm
+    /// goes blind without erroring.
     pub rates_snapshotted: u64,
     /// Rows written into `prices.usd_rate` by this pass for the MEASURED set,
     /// [`measured_identities`] — the native asset (task 0228). Its own series,
