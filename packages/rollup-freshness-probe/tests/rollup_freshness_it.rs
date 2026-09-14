@@ -997,3 +997,194 @@ async fn an_invisible_database_suppresses_the_counts_instead_of_paging() {
         "must not page as if the rollup chain were deleted"
     );
 }
+
+// ---- current_prices writer liveness (task 0243) ------------------------------
+//
+// Both tests run in a scratch database built from the real schema, so they never
+// TRUNCATE anything in `prices.*`, cannot race each other, and are immune to
+// whatever a local `prices.mv_current_prices` happens to be doing.
+
+fn scratch_rewrite(sql: &str, db: &str) -> String {
+    sql.replace("prices.", &format!("{db}."))
+        .replace("IF NOT EXISTS prices", &format!("IF NOT EXISTS {db}"))
+}
+
+/// A fresh scratch database holding the full `init.sql` schema, and a client
+/// bound to it — so the exact production query (unqualified table name) resolves.
+async fn scratch_db(db: &str) -> Client {
+    let admin = Client::default().with_url(ch_url());
+    exec(&admin, &format!("DROP DATABASE IF EXISTS {db}")).await;
+    exec(&admin, &format!("CREATE DATABASE {db}")).await;
+    prices_clickhouse::apply_sql(&admin, &scratch_rewrite(prices_clickhouse::INIT_SQL, db))
+        .await
+        .expect("init schema");
+    Client::default().with_url(ch_url()).with_database(db)
+}
+
+async fn drop_scratch_db(db: &str) {
+    let admin = Client::default().with_url(ch_url());
+    let _ = admin
+        .query(&format!("DROP DATABASE IF EXISTS {db}"))
+        .execute()
+        .await;
+}
+
+async fn current_prices_age(
+    c: &Client,
+) -> rollup_freshness_probe::current_prices::CurrentPricesAge {
+    c.query(rollup_freshness_probe::current_prices::current_prices_age_query())
+        .fetch_one()
+        .await
+        .expect("the production current_prices query executes and deserializes")
+}
+
+/// Task 0243: the exact production query against a real `current_prices` schema
+/// — empty, stale, and holding an unmerged newer version — and the FINAL
+/// correction to the task sketch, pinned against the engine rather than argued.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn current_prices_age_query_executes_and_breaches_when_stale_or_empty() {
+    use rollup_freshness_probe::EMPTY_TIER_SENTINEL_SECONDS;
+    use rollup_freshness_probe::current_prices::{AGE_BOUND_SECONDS, current_prices_metric};
+
+    let db = "it_current_prices_age_0243";
+    let c = scratch_db(db).await;
+
+    // Empty: one row comes back even over zero rows (there is no HAVING), and
+    // what gets published is the sentinel, not the ~56-year epoch age.
+    let empty = current_prices_age(&c).await;
+    assert_eq!(empty.row_count, 0);
+    let m = current_prices_metric(&empty);
+    assert_eq!(m.table, "current_prices");
+    assert_eq!(m.value, EMPTY_TIER_SENTINEL_SECONDS as f64);
+
+    // Stale: last rewritten 20 minutes ago, so over the bound and published as-is.
+    exec(
+        &c,
+        "INSERT INTO current_prices (asset_id, updated_at) SELECT 1, now() - INTERVAL 20 MINUTE",
+    )
+    .await;
+    let stale = current_prices_age(&c).await;
+    assert_eq!(stale.row_count, 1);
+    assert!(
+        (1190..=1260).contains(&stale.age_seconds),
+        "a row written 20 min ago must read ~1200 s, got {}",
+        stale.age_seconds
+    );
+    assert!(stale.age_seconds > AGE_BOUND_SECONDS);
+    assert_eq!(
+        current_prices_metric(&stale).value,
+        stale.age_seconds as f64
+    );
+
+    // FINAL invariance: a newer, still unmerged version of the same asset must be
+    // the one measured, with or without FINAL — the version column IS updated_at.
+    exec(
+        &c,
+        "INSERT INTO current_prices (asset_id, updated_at) SELECT 1, now() - INTERVAL 30 SECOND",
+    )
+    .await;
+    let plain = current_prices_age(&c).await.age_seconds;
+    let with_final: i64 = c
+        .query(
+            "SELECT toInt64(toUnixTimestamp(now()) - toUnixTimestamp(max(updated_at))) \
+             FROM current_prices FINAL",
+        )
+        .fetch_one()
+        .await
+        .expect("FINAL reading");
+    assert!(
+        (plain - with_final).abs() <= 1,
+        "without FINAL {plain} s, with FINAL {with_final} s"
+    );
+    assert!(
+        (25..=45).contains(&plain),
+        "the newer version must be the one measured, got {plain} s"
+    );
+
+    drop_scratch_db(db).await;
+}
+
+/// Task 0243: the link the alarm rests on, end to end on the pinned engine.
+/// While `mv_current_prices` runs, the age stays low; once it is STOPPED the age
+/// grows one-for-one with the clock and the rows stay put; START + REFRESH bring
+/// it back. It doubles as a rehearsal of the production commands in task 0283.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn a_stopped_mv_current_prices_freezes_updated_at_and_its_age_grows() {
+    let db = "it_current_prices_mv_0243";
+    let c = scratch_db(db).await;
+
+    // The real MV, with its 1-minute schedule shortened so the test runs in seconds.
+    let original = scratch_rewrite(prices_clickhouse::CURRENT_SQL, db);
+    let mv_sql = original.replace("REFRESH EVERY 1 MINUTE", "REFRESH EVERY 2 SECOND");
+    assert_ne!(mv_sql, original, "the schedule swap must apply");
+    let mv_client = Client::default()
+        .with_url(ch_url())
+        .with_option("allow_experimental_refreshable_materialized_view", "1");
+    prices_clickhouse::apply_sql(&mv_client, &mv_sql)
+        .await
+        .expect("create mv_current_prices");
+
+    // One priced candle, so the MV has a row to write.
+    exec(
+        &c,
+        &format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES (now(), 1, 2, 'sdex', 2, 2, 2, 2, 50, 100, 100, 2, 2, 1, 1)"
+        ),
+    )
+    .await;
+    exec(&c, &format!("SYSTEM REFRESH VIEW {db}.mv_current_prices")).await;
+
+    // Running: the writer keeps rewriting, so the age stays within a few seconds.
+    let mut running = None;
+    for _ in 0..40 {
+        let a = current_prices_age(&c).await;
+        if a.row_count > 0 {
+            running = Some(a);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let running = running.expect("mv_current_prices did not populate current_prices in time");
+    assert!(
+        running.age_seconds <= 4,
+        "a running writer keeps the age low, got {} s",
+        running.age_seconds
+    );
+
+    // Stopped: the table keeps its rows and the age climbs with the clock.
+    exec(&c, &format!("SYSTEM STOP VIEW {db}.mv_current_prices")).await;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let a0 = current_prices_age(&c).await;
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    let a1 = current_prices_age(&c).await;
+    assert_eq!(
+        a1.row_count, a0.row_count,
+        "a stopped writer leaves its last rows in place"
+    );
+    assert!(
+        a1.age_seconds >= a0.age_seconds + 5,
+        "the age must grow once the writer stops: {} s -> {} s",
+        a0.age_seconds,
+        a1.age_seconds
+    );
+
+    // Restarted: START + REFRESH bring the age back down.
+    exec(&c, &format!("SYSTEM START VIEW {db}.mv_current_prices")).await;
+    exec(&c, &format!("SYSTEM REFRESH VIEW {db}.mv_current_prices")).await;
+    let mut recovered = false;
+    for _ in 0..40 {
+        if current_prices_age(&c).await.age_seconds <= 4 {
+            recovered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(recovered, "START + REFRESH did not bring the age back down");
+
+    drop_scratch_db(db).await;
+}

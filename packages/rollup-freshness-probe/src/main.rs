@@ -3,7 +3,9 @@
 //! EventBridge `rate(15 minutes)` → this binary. Each run reads the rollup lag of
 //! every OHLCV granularity over the 0052 mTLS ClickHouse client and republishes
 //! it as the `Prices/Rollup` `RollupLagSeconds` CloudWatch metric that the
-//! per-tier rollup freshness alarms watch.
+//! per-tier rollup freshness alarms watch. It also reads how long ago
+//! `current_prices` was last rewritten (task 0243) and publishes that under the
+//! same metric with `Table = current_prices`.
 //!
 //!     cargo lambda build -p rollup-freshness-probe --release --arm64 --features lambda
 //!
@@ -15,6 +17,9 @@
 #[tokio::main]
 async fn main() -> Result<(), lambda_runtime::Error> {
     use lambda_runtime::{LambdaEvent, run, service_fn};
+    use rollup_freshness_probe::current_prices::{
+        CurrentPricesAge, current_prices_age_query, current_prices_metric,
+    };
     use rollup_freshness_probe::disk::{DiskUsage, disk_metrics, disk_query, publish_disk};
     use rollup_freshness_probe::mv_drift::{
         MV_DRIFT_CRITICAL_METRIC, MV_DRIFT_METRIC, describe, drift_metrics, publish_drift,
@@ -105,6 +110,29 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     }
                 }
                 Err(e) => failures.push(format!("rollup read: {e}")),
+            }
+
+            // ---- 1b. current_prices writer liveness (task 0243) ----------
+            //
+            // Its own read, not a branch of the tier query: a failure here must
+            // not cost the tier metrics, and vice versa. Placed before the slower
+            // checks below, because a hard Lambda timeout loses whatever has not
+            // been published yet and this datum is one cheap read.
+            let mut current_age: Option<CurrentPricesAge> = None;
+            match ch
+                .query(current_prices_age_query())
+                .fetch_one::<CurrentPricesAge>()
+                .await
+            {
+                Ok(age) => {
+                    current_age = Some(age);
+                    let metric = current_prices_metric(&age);
+                    if let Err(e) = publish(&cw, &environment, std::slice::from_ref(&metric)).await
+                    {
+                        failures.push(format!("current-prices publish: {e}"));
+                    }
+                }
+                Err(e) => failures.push(format!("current-prices read: {e}")),
             }
 
             // ---- 2. ClickHouse disk headroom (task 0204, gap 1) -----------
@@ -237,6 +265,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             // this line is the only record of what the healthy checks measured.
             tracing::info!(
                 tiers,
+                current_prices_rows = current_age.map(|a| a.row_count).unwrap_or_default(),
+                current_prices_age_seconds = current_age.map(|a| a.age_seconds).unwrap_or_default(),
                 checks_failed = failures.len(),
                 disk_free_percent = free_percent.unwrap_or_default(),
                 disk_available_bytes = disk_reading.map(|u| u.available_bytes).unwrap_or_default(),
@@ -261,6 +291,10 @@ async fn main() -> Result<(), lambda_runtime::Error> {
 
             Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({
                 "published": published,
+                "current_prices": {
+                    "rows": current_age.map(|a| a.row_count),
+                    "age_seconds": current_age.map(|a| a.age_seconds),
+                },
                 "disk": {
                     "free_percent": free_percent,
                     "available_bytes": disk_reading.map(|u| u.available_bytes),

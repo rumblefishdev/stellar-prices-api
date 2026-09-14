@@ -54,6 +54,12 @@ pub mod mv_drift;
 /// other alarm here.
 pub mod usd_sanity;
 
+/// `current_prices` writer liveness (task 0243). Rides in the same invocation
+/// and publishes under the same [`METRIC_NAME`] with `Table = current_prices` —
+/// but it is **not** a rollup tier and must never be added to [`ROLLUP_TIERS`];
+/// see [`current_prices`] for why.
+pub mod current_prices;
+
 /// CloudWatch namespace for the rollup freshness metric. Must match the
 /// `cloudwatch:namespace` condition on the Lambda role's `PutMetricData` grant
 /// and the alarm wiring in `infra/`.
