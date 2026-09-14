@@ -296,31 +296,73 @@ Range is **165,414 ledgers** — one chunk at the 320k default. Live's tip is
 
 ### Sequence
 
-1. **Baselines FIRST** (the criterion 0097 could not meet). Capture, as files:
-   SDEX row count + `1d` tip; per-source row counts and volume sums in the window
-   at `1m` and every coarse level. `chq` as `dev_read` is enough for all of it.
-2. ✅ **`prices-production-cleanup` is confirmed DISABLED** — verified
+1. **[local repo] Build and ship the binary**, then prove it runs on the box:
+   `cargo build --release -p events-backfill`, `scp` it to `~/events-backfill`,
+   and run `~/events-backfill --version` over ssh before trusting it.
+2. **[read-only] Baselines FIRST** (the criterion 0097 could not meet). Capture,
+   as files: SDEX row count + `1d` tip; per-source row counts and volume sums in
+   the window at `1m` and every coarse level; current `close_usd` coverage per
+   source (step 10 compares against it). `chq` as `dev_read` is enough.
+3. ✅ **`prices-production-cleanup` is confirmed DISABLED** — verified
    2026-09-14 from EventBridge (`State: DISABLED`) and CloudTrail (disabled
    2026-07-20 16:22:33, last fire 2026-07-20, zero invocations in 56 days). Step
-   satisfied; re-check only if an EventBridge stack deploy lands meanwhile.
-3. **Dry-run** `events-backfill --dry-run --verbose` over the bounds. Compare its
-   per-source tick counts against raw swap counts from `soroban_events` for the
-   same range (query shape in the notes). ⚠️ Aquarius should come back matching
-   what live already wrote; if it does not, the extraction path has changed since
-   July and the blast radius is bigger than this task — **stop and re-scope**.
-4. **DELETE first**, scoped to the window, `SETTINGS mutations_sync = 2`:
-   `phoenix` **and** `soroswap`, in `price_ohlcv_1m` **and** every coarse level.
-   Not aquarius.
-5. **Run** the same command without `--dry-run`, under `tmux`.
-6. **Verify `1m`** per source against the dry-run counts.
-7. **Pre-roll** coarse with `preroll-amm-reprice.sql`, FINAL, month-chunked.
-8. **Verify conservation** per source, one granularity at a time.
-9. **Do NOT re-enable `prices-production-cleanup`.** 🔒 Operator decision
-   2026-09-14: it stays DISABLED until M3 is complete. One fire would drop every
-   `1m` row older than 7 days — 793M rows back to 2015, not merely this window.
-   ⚠️ It can also be re-enabled **by accident**: `eventbridge-stack.ts` declares
-   the rule with no `enabled: false`, so any EventBridge stack deploy flips it
-   back on. If one happens during this work, re-check `describe-rule` after.
+   satisfied, and durable — `enabled: false` is in the CDK since 0204.
+4. **[prod host] Dry-run** `events-backfill --dry-run --verbose` over the bounds,
+   under `tmux`. Compare its per-source tick counts against raw swap counts from
+   `soroban_events` for the same range (query shape in the notes). ⚠️ Aquarius
+   should come back matching what live already wrote; if it does not, the
+   extraction path has changed since July and the blast radius is bigger than
+   this task — **stop and re-scope**.
+5. 🔴 **[local repo, branch + PR] Adapt `preroll-amm-reprice.sql` BEFORE step 8.**
+   This is a code change, not a param tweak. Three defects for a mid-month
+   window, all of which 0097's window happened to avoid:
+   - **Params** are hardcoded to 0097 (`start_ts = '2024-02-20 17:00:10'`,
+     `end_ts = '2026-07-06 09:35:16'`).
+   - 🔴 **STAGE 1's year chunks only half-respect the params.** The middle chunk
+     is hardcoded `>= '2025-01-01' AND < '2026-01-01'` and the third is
+     `>= '2026-01-01' AND < {end_ts}`. Pointed at a July-2026 window it re-rolls
+     **all of 2025 and the first half of 2026** — rows STAGE 0 never deleted, so
+     phoenix version-ties survive there untouched. Replace the chunking with one
+     bounded chunk.
+   - 🔴 **Bucket alignment.** 0097's window ended on a boundary; this one sits
+     **mid-month**. The `1M` bucket is stamped `2026-07-01`, *below* `start_ts`,
+     so STAGE 0 will not delete it and STAGE 2 will insert a **partial** July
+     monthly bucket beside the existing full one. Same for the `1w` buckets
+     straddling both ends. Fix: align the pre-roll window to **whole coarse
+     buckets** — rebuild phoenix+soroswap coarse across all of July, from the
+     week containing 07-01 to the week containing 07-31. Safe precisely because
+     cleanup has been off: `1m` holds all of July, so whole buckets can be
+     rebuilt from it.
+   - **STAGE 0 scope** widens from phoenix-only to
+     `source IN ('phoenix','soroswap')`.
+6. **[prod host] DELETE first in `price_ohlcv_1m`**, scoped to the window,
+   `SETTINGS mutations_sync = 2`: `phoenix` **and** `soroswap`. Not aquarius.
+   (Coarse deletes are STAGE 0 of the pre-roll, step 8.)
+7. **[prod host] Run** step 4's command without `--dry-run`.
+8. **[read-only] Verify `1m`** per source against the dry-run counts.
+9. **[prod host] Pre-roll** with the adapted script. Keep **FINAL** — the targets
+   are not TRUNCATEd, so non-FINAL double-counts. ⚠️ If a DELETE errors, **stop**:
+   an emptied coarse level with no re-insert is a history hole.
+10. **[read-only] Verify conservation** per source, one granularity at a time,
+    and SDEX untouched against step 2's baseline.
+11. **[read-only, after enrichment has run] Confirm `close_usd` recovers.**
+    ⚠️ The reprice writes **`close_usd = 0`** — `OhlcvCandle` has no such field
+    and `writer.rs:177` says so outright (*"DEFAULT 0 — the 0026 enrichment
+    Lambda fills this"*). So every row this run rewrites loses its enriched USD
+    price until the enrichment pass re-prices it, and BE reads `close_usd` only
+    ([[be-reads-close-usd-only-not-volume-columns]]).
+    ✅ **It recovered after 0097** — measured 2026-09-14 over that range:
+    phoenix **100%**, soroswap **95.9%**, aquarius 67.5% priced. Expect the same
+    shape here. If July stays at zero, enrichment's frontier does not reach back
+    that far, and that is the concrete case for [[0148]].
+12. **Do NOT re-enable `prices-production-cleanup`.** 🔒 Operator decision
+    2026-09-14: it stays DISABLED until M3 is complete. One fire would drop every
+    `1m` row older than 7 days — 793M rows back to 2015, not merely this window.
+    ✅ It can **no longer** be re-enabled by accident: `eventbridge-stack.ts`
+    declares `enabled: false` since task 0204 (2026-08-20), so CDK and production
+    agree and a deploy of an unrelated stack cannot flip it on. (An earlier
+    revision of this section said the opposite; that described the pre-0204
+    state.)
 
 ### Where it runs, and who runs it
 
@@ -334,15 +376,22 @@ This is a **prod write**, so the operator runs every step from 4 onward, and the
 `--dry-run` in step 3 too ([[feedback-user-runs-prod-ch-queries]]). The baseline
 and verification reads in steps 1, 6 and 8 are `dev_read` and need no hand-off.
 
-### 🔴 Settle before step 4 — the 0267/0268 overlap
+### ✅ Settled — the 0267/0268 overlap is NOT a conflict
 
-[[0276]] rolled the 0267/0268 USDC corrections onto production on 2026-09-10/11,
-and [[0279]] holds `repair_0268_` snapshots until 2026-09-18. **This reprice
-rewrites July AMM rows, which is exactly the range those corrections touched.**
-Establish whether `events-backfill` writes `close_usd` at all, and if it does,
-whether re-deriving it now reproduces the corrected values or reverts them.
-If it reverts them, this task waits for — or coordinates with — that work.
-⚠️ Those tasks are **akot's**; report, do not act ([[team-adam-kot-task-ownership]]).
+Raised because [[0276]] rolled the 0267/0268 USDC corrections onto production on
+2026-09-10/11 and [[0279]] holds `repair_0268_` snapshots until 2026-09-18, over
+the same July range this reprice rewrites. **Answered from the source
+2026-09-14: `events-backfill` never writes `close_usd`.** `OhlcvCandle`
+(`bucket.rs:8-23`) has no such field, and the writer says so at
+`writer.rs:177` — *"DEFAULT 0 — the 0026 enrichment Lambda fills this"*.
+
+So the reprice cannot revert anyone's corrected values to an older formula. What
+it does is **zero** `close_usd` on every row it rewrites, after which the
+enrichment pass re-prices them using whatever logic is current — which *is* the
+0267/0268-corrected logic. The outcome is right; the cost is a visible window of
+zeros in between. Tracked as step 11, not as a blocker.
+⚠️ Those tasks are **akot's** — report, do not act
+([[team-adam-kot-task-ownership]]).
 
 ## Acceptance Criteria
 
