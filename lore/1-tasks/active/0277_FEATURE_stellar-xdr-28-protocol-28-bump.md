@@ -308,6 +308,66 @@ contention. Live, in production, right now.
 2. The crossing measurement, 2026-09-16 17:00 UTC.
 3. Confirm `prices-production-rollup-freshness-1m` covered it.
 
+## ✅ DEPLOYED — `asset-discovery` + the EventBridge stack, 2026-09-14 15:06:51 UTC
+
+Deployed in 23.28 s, after rebuilding all eleven Lambda crates from `develop`.
+Every EventBridge function moved; `api-handler` correctly did **not**, because
+ComputeStack was not redeployed.
+
+| function | `CodeSha256` after | moved |
+| --- | --- | --- |
+| **asset-discovery** | `B9geHxzCQsDYKwpraobpzhgzVKJCubAKQgutV6SMW0M=` | ✅ from `AM7q55L+…` |
+| oracle | `3HQnn30aC8EL3z+sZM7qZamzMC9i8JShHLg80w4WCKQ=` | ✅ |
+| enrichment | `s0sGCezaVuR8yglOnLOwYvHYh9eaV7vlh0K93JOI/7A=` | ✅ |
+| coarse-sweep | `wFdD+SGkfkOrTGC5cMoakr20jVSn5AQhgCfc5m6zbcU=` | ✅ |
+| cleanup | `wriq0Z1MDI2upRsVkZwxiR+0k2sUUqMoH4VGQbTk8ek=` | ✅ |
+| supply | `vqMGEv8E+MxtF40A3ZDQdNmpleWs3xUF3zPpVknH1r8=` | ✅ |
+| backfill-freshness-probe | `8ZmZSJ/Au6f/5xFSxJCL2qzbyR0evARSDS4HtYrXcKU=` | ✅ |
+| rollup-freshness-probe | `zkGAhZs9/5KN2OxGHgGTUIFLgdYxj+TaoQT/PkDGPKk=` | ✅ |
+| mtls-notafter-probe | `lI9Gg/n0FLyJoKmK/5OEHMRnl5+gNy+v2z730AFTBTs=` | ✅ |
+
+🔒 **`prices-production-cleanup` is still `DISABLED`** — checked on prod before
+and after, and the diff touched no Rule `State`. The M3 decision in
+[[cleanup-rule-shreds-backfill-output]] is intact.
+
+✅ **Post-deploy health, 15:08 UTC:** zero errors across all nine functions and
+the ledger-processor; **51 of 51 alarms OK**; DLQ 0; candles written in every
+minute across the 15:06:51 boundary (15:04 → 15:08, sdex and aquarius
+continuous). sdex/aquarius 43 s behind, soroswap 163 s.
+
+⚠️ **Phoenix reads 1,423 s behind and that is NORMAL.** Measured over 24 h its
+candle gaps are **median 540 s, p90 4,080 s** (recent: 18, 50, 29, 23 min). It has
+19 pools and trades sparsely. ⛔ **Do not read a Phoenix gap of tens of minutes
+as a stall** — this is the second time in one session it looked like one.
+
+### ⚠️ The ComputeStack diff now reads dirty, and that is expected
+
+The ledger-processor rebuilt in the eleven-crate group hashes
+`2811985ca7f3…`, against the deployed `73535f9850df…` — **with no code change on
+`develop` between the two builds**, only docs commits. This is
+[[lambda-asset-diff-is-feature-unification]]: the deployed binary was built with
+`-p prices-ledger-processor` alone, the new one in a group build, so shared
+dependencies compile with a unioned feature set.
+
+**Decision: do NOT redeploy ComputeStack for this.** The running binary is
+verified, carries `stellar-xdr 28` and is processing ledgers cleanly; a redeploy
+buys nothing functional. The diff stays dirty until the next genuine ComputeStack
+deploy.
+
+🔑 **Corroborating signal:** five of the nine EventBridge crates (`cleanup`,
+`supply`, and all three probes) built **byte-identical** hashes from the 09-11 and
+the 16:56 trees, while `asset-discovery`, `oracle`, `enrichment` and
+`coarse-sweep` changed — exactly the set touched by the XDR bump and 0228.
+
+### The EventBridge diff also repaired mangled text
+
+Four `Events::Rule` Descriptions and four `CloudWatch::Alarm` AlarmDescriptions
+changed **text only** — `?` back to `—`, `→` and `§`. The deployed templates had
+been synthesised from a shell with a different locale. Cosmetic; no behaviour.
+CDK hides these behind *"Omitted N changes … likely mangled non-ASCII"*, so
+**`--strict` is required to see them** — without it you cannot tell a cosmetic
+omission from a hidden functional one.
+
 ## 🔴 SCOPE CORRECTION — `asset-discovery` has the same decode wall
 
 **Found 2026-09-14 while diffing the deploy.** This task, its runbook and its
@@ -474,10 +534,10 @@ few seconds of lag. **No stop, no gap.**
       confirmed changed** — `CodeSha256` `hRIt7mT8…Eysi7g=` → `BC3Nde5a…x7o8c=`
       at 2026-09-14 14:48:22 UTC, reconcile runs confirmed after it, DLQ 0, no
       gap. See §DEPLOYED.
-- [ ] 🔴 **`asset-discovery` is deployed on the 28 binary too** — it is the only
-      other deployed Lambda that calls `decode_object`, it runs hourly, and it
-      was shipped on proto-27 19 minutes before this bump merged. See
-      §SCOPE CORRECTION.
+- [x] 🔴 **`asset-discovery` is deployed on the 28 binary too** — `CodeSha256`
+      `AM7q55L+…` → `B9geHxzCQsDYKwpraobpzhgzVKJCubAKQgutV6SMW0M=` at
+      2026-09-14 15:06:51 UTC, with all nine EventBridge functions, cleanup
+      still DISABLED, 51/51 alarms OK. See §DEPLOYED — asset-discovery.
 - [ ] The live candle frontier is measured crossing the Protocol 28 activation
       ledger, recorded before/after — the same check that resolved proto27's
       active-vs-latent question.
