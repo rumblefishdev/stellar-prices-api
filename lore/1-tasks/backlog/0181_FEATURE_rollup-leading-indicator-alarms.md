@@ -107,6 +107,9 @@ twice.
 - Publish as additional metrics under the existing `Prices/Rollup` namespace so
   the IAM grant needs no change: e.g. `PendingMutationAgeSeconds`,
   `MaxActivePartsPerTable` (dimension `Table`), `ViewRefreshExceptions`.
+- ⚠️ `RollupLagSeconds` with `Table=current_prices` is taken since [[0243]] (the
+  current_prices writer-liveness check, 2026-09-14). Pick names that do not
+  collide with it.
 - ⚠️ **Overlaps [[0109]]'s guard**, which already has to watch `system.mutations`.
   Settle ownership before building — the 0137 acceptance criterion was written
   as "here or in 0109, without duplicating each other".

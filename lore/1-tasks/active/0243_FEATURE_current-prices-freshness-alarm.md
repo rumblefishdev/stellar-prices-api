@@ -109,3 +109,78 @@ one, per the working agreement on reusing tested code.
 - Worth checking at the same time whether `prices.assets` and
   `prices.asset_supply` have the same blind spot — both are single-writer
   tables feeding the same read surface.
+
+## Design decisions — 2026-09-14
+
+Planned before any code; the implementation lands on a branch.
+
+1. **A separate check, not an eighth tier.** `ROLLUP_TIERS`' empty-tier sentinel
+   rule is positional (fine → coarse) and 11 unit tests pin the list;
+   `current_prices` has no `timestamp` column. New module `current_prices.rs`
+   beside `disk.rs` / `mv_drift.rs`, with its own query and its own block in the
+   handler, so a failed read cannot suppress another check.
+2. **An empty table breaches.** The MV emits one row per asset with a 1-minute
+   candle in the last 24 h (`current.sql:486-495`) and runs in REPLACE mode, so an
+   empty table means the API serves nothing. No `HAVING` gate: `count() = 0`
+   publishes `EMPTY_TIER_SENTINEL_SECONDS`.
+3. **No `FINAL` — this corrects the sketch above.** The version column is
+   `updated_at` itself (`ReplacingMergeTree(updated_at)`), so the newest row
+   survives any merge and `max(updated_at)` cannot differ. An IT pins it.
+4. **Same metric, new dimension value:** `Prices/Rollup` `RollupLagSeconds` with
+   `Table=current_prices`. No new publish code, no IAM change (the grant is
+   conditioned on the namespace only).
+5. **Own config key and own alarm.** `validateConfig` requires `rollupLagSeconds`
+   to cover exactly the seven tiers, and the rollup loop would name this
+   `rollup-freshness-current_prices` with a bucket-shaped description. New key
+   `opsAlarms.currentPricesFreshnessSeconds`, alarm
+   `prices-{env}-current-prices-freshness`.
+6. **`treatMissingData: MISSING`.** The probe always publishes this datum, so its
+   absence means a dead probe — already covered by the probe's worker-health
+   alarms — and must not resolve a latched ALARM (the rule at
+   `observability-stack.ts:1194-1207`).
+7. **Threshold 900 s**, derived below. No dashboard widget: the alarm joins the
+   derived alarm strip on its own.
+
+### Bound derivation
+
+| quantity | value | source |
+|---|---|---|
+| refresh interval | 60 s | `current.sql:156` |
+| refresh duration, measured | 85–267 ms | [[0072]], [[0135]] |
+| worst accepted refresh | 40 s — the runbook's stop line | `docs/runbooks/0072-current-prices-mv-rollout.md:160-167` |
+| healthy peak (interval + worst refresh) | **100 s**, enforced at synth | — |
+| bound | **900 s** = 15 missed refreshes | the `1m` tier's bound at the same probe cadence |
+
+`updated_at` is the refresh START, so a healthy age sawtooths from 0 to 60 s. A
+stall under 15 min never pages; one of 30 min or more always does (bound plus one
+15-min probe period). A tighter bound buys nothing: the probe cadence dominates
+detection.
+
+### What it catches, and what it does not
+
+It watches the WRITER, not its input. During the 2026-09-14 Galexie stall
+`updated_at` kept advancing by construction — the MV reruns on stale candles — and
+`rollup-freshness-1m` fired. That is the intended division of labour.
+
+### Verification — decided 2026-09-14
+
+A real `SYSTEM STOP VIEW` on production freezes `GET /price` for ~16 min on the
+shared cluster while the Milestone 2 reviewer key is live, so the production
+induction is **deferred to [[0283]]**. This task proves the chain without it and
+records the induction criterion as **"Test-covered, not prod-induced"** ([[0218]]'s
+standard):
+
+- an IT stops a real `mv_current_prices` locally and asserts the age grows;
+- a temporary action-less clone alarm on the real metric must reach ALARM, proving
+  the alarm reads exactly what the probe publishes;
+- `set-alarm-state` ALARM → OK on the real alarm proves the Slack routing.
+
+### Findings for the Notes above
+
+- `prices.asset_supply` has one hourly writer and the same blind spot — spawned as
+  [[0284]].
+- `prices.assets` is **not** single-writer: every upsert stamps `updated_at`, and
+  asset-discovery re-emits ~204k rows an hour, so its `max(updated_at)` measures
+  asset-discovery activity rather than freshness. No alarm.
+- The [[0178]] manual check (`updated_at` advancing across two refresh cycles)
+  stays for attended MV recreates: it answers in ~2 min, this alarm in 15–30 min.
