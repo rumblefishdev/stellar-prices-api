@@ -927,23 +927,23 @@ async fn peg_member_that_also_trades_as_a_base_keeps_its_market_value() {
 /// "Fixture A" — an asset appearing ONLY as a zero-volume base, with no
 /// placeholder — cannot reach the fallback at all, because `max(is_peg)` is 0.
 ///
-/// ⚠️ **CORRECTION (task 0172): fixture A does NOT "publish Decimal128::MIN".**
-/// This comment claimed it did. Measured on the prod pin (26.3.10.60), the
-/// `nullIf(sum(w), 0)` NULL fails the `CAST` to non-Nullable `Decimal(38,14)`
-/// and the query RAISES `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN` (code 349) —
-/// so it does not corrupt one row, it takes down `price_usd_series` for every
-/// row in the result. Arm A filters only on `p.close_usd > 0`, never on
-/// `volume_base > 0`, so any priced-but-zero-volume bucket can trigger it.
-/// That is PRE-EXISTING and not peg-specific; fixing it means deciding whether
-/// such a row should be omitted entirely — a change to the "misses are absent"
-/// contract that needs BE input. Tracked separately; deliberately NOT fixed here.
+/// Fixture A was CLOSED by tasks 0171/0198: arm A now requires
+/// `volume_base > 0`, so a zero-weight group never forms and such an asset is
+/// absent (BE's "misses are absent" contract), see
+/// `a_zero_volume_only_base_is_absent_and_its_neighbours_still_publish`.
+/// A task 0172 note here once said fixture A RAISES code 349 rather than
+/// publishing Decimal128::MIN. Both happen on 26.3.10.60 — interpreted it
+/// raises, JIT-compiled it publishes the sentinel (see the 0171/0198 block
+/// below) — and the fix is the same either way.
+///
+/// This test still pins the OTHER half — the 0165 guard for a peg asset that
+/// trades as a zero-volume base beside its placeholder — which the 0171 filter
+/// does not reach: with the zero-volume arm-A row gone, USDC's group is the
+/// placeholder alone, sum(w) = 0, and the fallback must still fire.
 ///
 /// ⚠️ This fixture used USDT until task 0172 removed USDT from the peg set
 /// (it depegged in June 2022 and is now priced by measurement, not assumed to
-/// be $1). USDT can no longer stand in for a peg asset here — with no
-/// placeholder it lands in fixture A and this test fails with code 349 rather
-/// than exercising the guard. USDC is now the only peg asset and the only
-/// valid subject for this test.
+/// be $1). USDC is now the only peg asset and the only valid subject here.
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
 async fn peg_asset_with_only_zero_volume_candles_falls_back_instead_of_publishing_garbage() {
@@ -1960,6 +1960,264 @@ async fn a_measured_rate_at_exactly_par_is_labelled_oracle_not_peg() {
         fallback_method, "peg",
         "the bucket with no reading is the fallback and must say so"
     );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+// ----------------------------------------------------------------------
+// Tasks 0171 / 0198 — a zero-weight group is ABSENT, never a sentinel.
+//
+// Arm A admitted a candle on `close_usd > 0` alone. A group whose priced
+// candles ALL carry `volume_base = 0` therefore reached
+// `CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))` with `sum(w) = 0`.
+// What that CAST does with the NULL on 26.3.10.60 depends on the expression
+// JIT, which is why 0171 and 0198 measured different things and were BOTH
+// right:
+//
+//   * interpreted (`compile_expressions = 0`, or a cold server before the
+//     expression has run `min_count_to_compile_expression` = 3 times): it
+//     RAISES CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN (code 349) and the whole
+//     query fails — 0198's reading, an availability failure;
+//   * JIT-compiled (the default once warm, which prod always is): it strips
+//     the Nullable and publishes Decimal128::MIN (≈ -1.7e24) flagged
+//     `method = 'traded'` — 0171's reading, a correctness failure.
+//
+// The tests below run every read in both modes, each FORCED by settings, so a
+// regression fails either way regardless of how warm the server is. (Review
+// on PR #312: with the server default, a cold server stays interpreted for
+// the first 3 executions, so whether the compiled path was reached at all
+// depended on execution counts leaked from other tests.) The fix is the same
+// for both: BE's 2026-08-11 decision on 0171 is "omit the row", and arm A now
+// requires `volume_base > 0`, which such a group cannot satisfy, so it never
+// forms and the CAST never sees NULL.
+// ----------------------------------------------------------------------
+
+/// The two JIT modes a read can hit; see the block comment above. Interpreted
+/// first, because that is the whole-query failure; then compiled on the FIRST
+/// execution (`min_count_to_compile_expression = 0`), which is the silent one.
+const JIT_MODES: [&str; 2] = [
+    " SETTINGS compile_expressions = 0",
+    " SETTINGS compile_expressions = 1, min_count_to_compile_expression = 0",
+];
+
+/// Seeds three assets and, on BOTH candle grains, a FOO/USDC candle with real
+/// volume (so FOO publishes 5 and USDC gets its 0165 placeholder) plus a
+/// BAR/FOO candle that is priced but carries ZERO volume — task 0198's
+/// "fixture A": an asset that is only ever a zero-volume BASE and never a peg
+/// quote leg, so neither the 0165 guard nor anything else can rescue it.
+async fn seed_zero_volume_only_base(client: &Client, db: &str) {
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','',''), \
+             (11,'BAR','classic','GBAR','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    for tbl in ["price_ohlcv_1d", "price_ohlcv_1h"] {
+        client
+            .query(&format!(
+                "INSERT INTO {db}.{tbl} \
+                 (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+                 (1620000000,10, 2,'sdex', 5,5,5,5,           7,35,35,5,5,1,1), \
+                 (1620000000,11,10,'sdex', 0.5,0.5,0.5,0.5,   0,0,0,0.5,0.5,1,1)"
+            ))
+            .execute()
+            .await
+            .unwrap();
+    }
+}
+
+/// Tasks 0171 / 0198 — the non-peg zero-volume case, at both grains, in
+/// both JIT modes.
+///
+/// Before the fix BAR published Decimal128::MIN as `traded` (compiled) or the
+/// query raised code 349 (interpreted). After it BAR is absent in both modes,
+/// and — the availability half of 0198 — its neighbours FOO and USDC in the
+/// SAME query still publish exactly what they published before.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_zero_volume_only_base_is_absent_and_its_neighbours_still_publish() {
+    let db = "it_views_zero_weight_absent";
+    let client = setup_scratch(db).await;
+    seed_zero_volume_only_base(&client, db).await;
+
+    for view in ["price_usd_series", "price_usd_series_1h"] {
+        for jit in JIT_MODES {
+            let rows: Vec<(String, f64, String)> = client
+                .query(&format!(
+                    "SELECT asset_code, toFloat64(close_usd), method FROM {db}.{view} \
+                     ORDER BY asset_code{jit}"
+                ))
+                .fetch_all::<(String, f64, String)>()
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("{view}{jit}: must not raise on a zero-weight group: {e}")
+                });
+
+            assert_eq!(
+                rows.iter().map(|(c, _, _)| c.as_str()).collect::<Vec<_>>(),
+                vec!["FOO", "USDC"],
+                "{view}{jit}: BAR's only priced candle has no volume, so BAR must be \
+                 ABSENT (BE's 'misses are absent' contract) and nothing else may go missing"
+            );
+            assert_eq!(
+                rows[0].1, 5.0,
+                "{view}{jit}: FOO's traded value must be untouched"
+            );
+            assert_eq!(rows[0].2, "traded");
+            assert_eq!(
+                rows[1].1, 1.0,
+                "{view}{jit}: USDC's peg fallback must survive the fix"
+            );
+            assert_eq!(rows[1].2, "peg");
+
+            // Asserted by VALUE: `IS NULL` is vacuously false on a non-Nullable column.
+            let garbage: u64 = client
+                .query(&format!(
+                    "SELECT countIf(toFloat64(close_usd) <= 0) FROM {db}.{view}{jit}"
+                ))
+                .fetch_one::<u64>()
+                .await
+                .unwrap();
+            assert_eq!(
+                garbage, 0,
+                "{view}{jit}: no row may publish a non-positive close_usd"
+            );
+        }
+    }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// A zero-volume candle beside a real one was already dead weight (v = 0,
+/// w = 0 add nothing to a weighted average). Dropping it from arm A must
+/// therefore change NO published value — this pins that the fix is exactly the
+/// omission of the un-computable group and nothing else.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_zero_volume_candle_beside_a_real_one_changes_nothing() {
+    let db = "it_views_zero_weight_mixed";
+    let client = setup_scratch(db).await;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    for tbl in ["price_ohlcv_1d", "price_ohlcv_1h"] {
+        // Two sources in one bucket: a real 7-unit print at 5 and a zero-volume
+        // print at a DIFFERENT price (4), which must not be able to pull the
+        // average — the weighted mean of the pair is 5 whether or not it is there.
+        client
+            .query(&format!(
+                "INSERT INTO {db}.{tbl} \
+                 (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+                 (1620000000,10,2,'sdex',    5,5,5,5, 7,35,35,5,5,1,1), \
+                 (1620000000,10,2,'soroswap',4,4,4,4, 0,0,0,4,4,1,1)"
+            ))
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    for view in ["price_usd_series", "price_usd_series_1h"] {
+        let (close, method): (f64, String) = client
+            .query(&format!(
+                "SELECT toFloat64(close_usd), method FROM {db}.{view} WHERE asset_code = 'FOO'"
+            ))
+            .fetch_one::<(f64, String)>()
+            .await
+            .unwrap();
+        assert_eq!(
+            close, 5.0,
+            "{view}: the zero-volume print must carry no weight"
+        );
+        assert_eq!(method, "traded");
+    }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0171's audit item — `usd_reference{,_1h}` carry the same
+/// `CAST(… / nullIf(sum(volume_base), 0) AS Decimal)` shape over XLM/USDC
+/// candles, filtered on `close > 0` only. A bucket whose reference candles all
+/// carry zero volume published Decimal128::MIN as the XLM reference (or raised
+/// code 349, interpreted), which every pivot-priced asset's status
+/// classification hangs off. It must be absent instead: `no_reference` is a
+/// legitimate §12.3 state, a garbage reference is not.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn usd_reference_omits_a_bucket_whose_reference_candles_have_no_volume() {
+    let db = "it_views_zero_weight_reference";
+    let client = setup_scratch(db).await;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (1,'XLM','native','','',''), \
+             (2,'USDC','classic','{USDC_ISSUER}','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    for tbl in ["price_ohlcv_1d", "price_ohlcv_1h"] {
+        // Bucket 1620000000: a real XLM/USDC print. Bucket 1620086400: only a
+        // zero-volume one.
+        client
+            .query(&format!(
+                "INSERT INTO {db}.{tbl} \
+                 (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+                 (1620000000,1,2,'sdex', 0.1,0.1,0.1,0.1, 100,10,10,0.1,0.1,1,1), \
+                 (1620086400,1,2,'sdex', 0.2,0.2,0.2,0.2,   0, 0, 0,0.2,0.2,1,1)"
+            ))
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    for view in ["usd_reference", "usd_reference_1h"] {
+        for jit in JIT_MODES {
+            let rows: Vec<(u32, f64)> = client
+                .query(&format!(
+                    "SELECT toUInt32(bucket), toFloat64(xlm_usd) FROM {db}.{view} \
+                     ORDER BY bucket{jit}"
+                ))
+                .fetch_all::<(u32, f64)>()
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("{view}{jit}: must not raise on a zero-weight bucket: {e}")
+                });
+            assert_eq!(
+                rows,
+                vec![(1620000000, 0.1)],
+                "{view}{jit}: the zero-volume bucket must be ABSENT (no_reference), \
+                 not a sentinel"
+            );
+        }
+    }
 
     client
         .query(&format!("DROP DATABASE {db}"))

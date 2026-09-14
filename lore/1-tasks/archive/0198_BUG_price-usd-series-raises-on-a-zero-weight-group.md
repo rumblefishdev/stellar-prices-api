@@ -2,10 +2,10 @@
 id: "0198"
 title: "A single zero-volume asset can take down price_usd_series entirely — the view RAISES, it does not degrade"
 type: BUG
-status: active
+status: completed
 assignee: akot
 related_adr: []
-related_tasks: ["0172", "0165", "0116", "0150"]
+related_tasks: ["0172", "0165", "0116", "0150", "0171"]
 tags:
   ["priority-high", "effort-small", "clickhouse", "data-correctness", "read-api", "milestone-M2"]
 milestone: 2
@@ -38,6 +38,19 @@ history:
       Activated; taken by akot together with [[0171]], one branch and one PR
       for both — same views.sql expression, and BE's 2026-08-11 answer on 0171
       (omit the row) is the contract decision this task's AC 3 asks for.
+  - date: "2026-09-14"
+    status: completed
+    who: akot
+    note: >
+      Fixed on PR #312 with [[0171]]: arm A requires volume_base > 0, so the
+      zero-weight group never forms. The 349-vs-sentinel disagreement is
+      settled and this task's measurement stands: the INTERPRETED CAST raises
+      code 349 (compile_expressions = 0, or a cold server before the
+      expression has run 3 times); the JIT-COMPILED one publishes
+      Decimal128::MIN. Prod (JIT on, threshold 3) therefore raises right
+      after a restart and lies once warm. Regression test runs both modes and
+      fails with 349 on develop. Prod count: zero priced zero-volume candles
+      on either grain today.
 ---
 
 # `price_usd_series` raises `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN` on a zero-weight group
@@ -103,10 +116,66 @@ better for their join.
 
 ## Acceptance Criteria
 
-- [ ] Reproduce on the prod pin with a minimal fixture (an asset that is only a
+- [x] Reproduce on the prod pin with a minimal fixture (an asset that is only a
       zero-volume base, not a peg quote leg)
-- [ ] Confirm whether any asset on prod currently satisfies the condition
-- [ ] Fix chosen with BE input on the omitted-vs-fallback contract
-- [ ] Regression test that fails with code 349 before the fix
-- [ ] Correct the stale `Decimal128::MIN` claim wherever it appears
+      ✅ `seed_zero_volume_only_base` in `views_it.rs` (BAR/FOO at zero volume
+      beside a real FOO/USDC print). On 26.3.10.60 it raises 349 interpreted
+      and publishes the sentinel compiled — see Issues Encountered.
+- [x] Confirm whether any asset on prod currently satisfies the condition
+      ✅ None: 0 candles with `close_usd > 0 AND volume_base = 0` on either
+      grain, 0 zero-volume XLM/USDC reference candles (2026-09-14, `dev_read`).
+- [x] Fix chosen with BE input on the omitted-vs-fallback contract
+      ✅ Option 1 (filter arm A on `volume_base > 0`), which is BE's
+      2026-08-11 "omit the row" decision on [[0171]].
+- [x] Regression test that fails with code 349 before the fix
+      ✅ `a_zero_volume_only_base_is_absent_and_its_neighbours_still_publish`
+      and `usd_reference_omits_a_bucket_whose_reference_candles_have_no_volume`
+      read with `SETTINGS compile_expressions = 0` first; on `develop`'s
+      `views.sql` both panic with `Code: 349`.
+- [x] Correct the stale `Decimal128::MIN` claim wherever it appears
       (`views.sql`, `views_it.rs`)
+      ✅ Not stale after all — both claims were true. `views.sql`'s series
+      header and the 0165 test's doc now say which mode gives which.
+
+## Implementation Notes
+
+Fixed on PR #312 together with [[0171]]; the full record (files, verification,
+prod counts, design decisions) is in 0171's Implementation Notes. This task's
+own contribution:
+
+- **The failure mode is JIT-dependent, and this task's measurement stands.**
+  `SETTINGS compile_expressions = 0`, or a cold server before the expression
+  has run `min_count_to_compile_expression` (3) times, raises code 349 and
+  fails the whole query — the availability failure described above. Once
+  compiled, the same CAST publishes `Decimal128::MIN` — 0171's reading. Prod
+  runs `compile_expressions = 1`, threshold 3, so it raises right after a
+  restart and lies once warm.
+- **The regression test fails with 349 before the fix, deterministically.**
+  Both behavioural tests read each view under `SETTINGS compile_expressions =
+  0` first, then under the server default; on `develop`'s `views.sql` the
+  first pass panics with `Code: 349` on `price_usd_series` and on
+  `usd_reference`.
+- **USDT check.** Not needed as a separate query: the prod count of candles
+  with `close_usd > 0 AND volume_base = 0` is 0 on both grains for every
+  asset, USDT included.
+- **Fix option chosen: 1** (filter arm A on `volume_base > 0`). Option 2 (a
+  total fallback) and option 3 (`ifNull`) both publish a value the consumer has
+  to know about, which is exactly what BE rejected on 0171.
+
+## Issues Encountered
+
+See 0171 — the JIT bisect, the readonly `dev_read` user, and the first
+draft's wrong "not reproducible" comment.
+
+## Design Decisions
+
+### From Plan
+
+1. **Omit, do not degrade or substitute.** BE's contract decision on 0171.
+
+### Emerged
+
+2. **The "stale claim" acceptance criterion was satisfied by correcting the
+   correction.** The `views.sql` note this task set out to fix was not wrong;
+   it was half the picture. Both halves are now recorded where the expression
+   lives.
