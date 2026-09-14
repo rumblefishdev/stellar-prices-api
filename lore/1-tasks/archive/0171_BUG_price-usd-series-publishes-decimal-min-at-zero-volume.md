@@ -196,9 +196,22 @@ number than a gap.
       the record. ✅ Same shape, same failure, **fixed** (`volume_base > 0`
       beside `close > 0`), pinned by
       `usd_reference_omits_a_bucket_whose_reference_candles_have_no_volume`.
-      The rest of the schema grepped: every other `nullIf(` is a plain
-      Float64 `vwap` (preroll*/rollups) or is wrapped in `ifNull` (current.sql).
-      Only `views.sql` had the `CAST(… AS Decimal)` shape.
+      The rest of the schema grepped. `current.sql` wraps its divisions in
+      `ifNull`. **Correction from PR #312's review (finding 1):** the `vwap`
+      of the six rollup MVs and the `preroll*.sql` sites,
+      `volume_quote / nullIf(volume_base, 0)`, is `Nullable(Decimal(38,14))`
+      written into the non-Nullable `vwap` column — the same Nullable →
+      non-Nullable shape, on the WRITE path. Checked, and it cannot fire the
+      way the views did: on an `INSERT` (plain `INSERT SELECT` and a
+      refreshable `APPEND` MV both measured on 26.3.10.60)
+      `insert_null_as_default = 1` — the default, and prod's value — turns
+      the NULL into the column default `0`, which is exactly what ingest's
+      `finalise_vwap` leaves in a zero-volume minute. Only
+      `insert_null_as_default = 0` raises code 349. Prod on 2026-09-14 has
+      **zero** `volume_base = 0` rows on `_1m`, `_15m` and `_1h`, and every
+      rollup MV is `Scheduled` with no exception. Left as is here — an edit to
+      `rollups.sql` does not land without DROP + re-CREATE — and carried into
+      [[0146]] as an explicit `ifNull(…, 0)` for when the MVs are re-created.
 - [x] Regression test on 26.3.10.60 covering the non-peg zero-volume case —
       the one 0165's peg guard deliberately does **not** reach.
       ✅ Red on `develop`'s `views.sql` (sentinel row present / code 349
@@ -292,6 +305,20 @@ it changes no value) and keeps the guard on the row the view admits, where the
   count answers the same question, so it was not retried.
 - **The first draft's comments said 349 "was not reproducible".** Wrong;
   corrected in `views.sql` and `views_it.rs` before commit.
+- **The first shipped `JIT_MODES` did not deterministically reach the compiled
+  path** (PR #312 review, finding 3). Its second entry was the server default,
+  and on a cold server the default stays interpreted for the first three
+  executions — measured: executions 2 and 3 raised 349, the sentinel only
+  appeared from the fourth. The red run had seen the sentinel because earlier
+  tests had warmed the expression. Fixed by forcing the mode:
+  `SETTINGS compile_expressions = 1, min_count_to_compile_expression = 0`,
+  which compiles on the first execution (measured: sentinel on execution 1 of
+  a fresh server).
+- **`usd_reference*` now carries a contract change worth telling BE** (review,
+  non-finding): a bucket whose only XLM/USDC candles carry zero volume reads
+  as `no_reference` (systemic blackout) rather than `no_asset_price`.
+  Documented in §3.2 of `docs/database-schema/database-schema-overview.md`;
+  zero such buckets on prod today.
 
 ## Design Decisions
 
