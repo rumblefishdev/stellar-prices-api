@@ -256,6 +256,97 @@ warnings (`collapsible_if` ×5, `no_effect` ×3, `items_after_test_module`,
 XDR-related — a newer local clippy than CI's, which is green. Left alone so the
 bump diff stays two files.
 
+# 📕 DEPLOY RUNBOOK — 0277
+
+Merged as **`bcc82f7`** on `develop` (PR #314, squashed, 2026-09-14). **Not yet
+deployed.** The generic procedure is
+[`docs/runbooks/deploy-ledger-processor.md`](../../../docs/runbooks/deploy-ledger-processor.md);
+this section carries only what is specific to the protocol crossing.
+
+⚠️ **Deploy BEFORE the vote (2026-09-16 17:00 UTC), not after.** `stellar-xdr 28`
+decodes protocol-27 ledgers perfectly well, so shipping early costs nothing —
+whereas the decode wall lands on the **first empty-tx-set ledger**, which may be
+hours or days after activation and will look unrelated when it arrives.
+⛔ **"Nothing broke at 17:00" is NOT an all-clear** and must not be recorded as one.
+
+## Step 0 — [local machine, repo root] preflight
+
+```bash
+export AWS_PROFILE=soroban-admin
+export AWS_REGION=eu-central-1
+git checkout develop && git pull --ff-only
+git log --oneline -1                  # expect bcc82f7 or later
+npm run xdr:verify-protocol-gap       # expect: pinned 28 | mainnet current 27 | core supports 28
+```
+
+Before the vote the guard reads **"current"** because our pin (28) is no longer
+behind mainnet (27). After the vote mainnet's `current` becomes 28 and it still
+reads current. Either is fine; **BEHIND** at any point means the wall is live.
+
+## Step 1 — [local machine, repo root] build the bootstrap
+
+🔴 **This is the step that gets skipped, and skipping it deploys the OLD binary
+with a green result.** `--features lambda` is mandatory — the bin is
+`required-features = ["lambda"]` and builds to nothing without it.
+
+```bash
+cargo lambda build -p prices-ledger-processor --release --arm64 --features lambda
+ls -l target/lambda/prices-ledger-processor/bootstrap   # mtime MUST be seconds ago
+file target/lambda/prices-ledger-processor/bootstrap    # ELF 64-bit ... ARM aarch64
+```
+
+## Step 2 — [local machine, `infra/`] preview, then deploy the ComputeStack only
+
+```bash
+cd infra
+make diff-production            # expect ONLY the Lambda code asset hash to change
+make deploy-production-compute  # NOT `make deploy-production` (that is all stacks)
+```
+
+If the diff proposes IAM, SQS, env-var or other-stack edits — **stop**.
+
+## Step 3 — [local machine] prove the RUNNING binary changed
+
+```bash
+aws lambda get-function-configuration \
+  --function-name prices-production-ledger-processor \
+  --query '[LastModified,Runtime,Architectures[0],CodeSha256]' --output text
+```
+
+`LastModified` seconds ago, `arm64`. **Record `CodeSha256` in this task file** —
+that is the artefact 0091 lacked and 0094 had to supply days later.
+
+## Step 4 — [prod CH, as `dev_read`] the crossing measurement
+
+Capture **before** the vote and again **after**, so the criterion is a diff and
+not an impression:
+
+```sql
+SELECT source, max(timestamp) AS latest_candle, now() - max(timestamp) AS behind_sec
+FROM prices.price_ohlcv_1m GROUP BY source ORDER BY source
+```
+
+`behind_sec` near 0 = healthy. `price_ohlcv_1m` has **no ledger column** —
+freshness is by candle `timestamp` ([[proto27-xdr26-live-freeze]]).
+
+## Step 5 — [AWS] confirm the alarm actually covers this
+
+`prices-production-rollup-freshness-1m` is claimed to cover halted upstream
+ingestion ([[0137]]). This crossing is its **first real test against this
+specific failure**. Record whether it stayed OK, or fired and cleared — the
+criterion is "confirmed", not "assumed".
+
+⚠️ Watch the DLQ (`prices-ingest-dlq-production`) through the crossing too. A
+cold-start Init failure DLQs rather than gapping, and is recoverable by redrive.
+
+## Expected disturbance from the deploy itself: none
+
+The doorbell is a **queue** (14-day retention), the cursor is written **last**
+(`reconcile.rs:223`) so an interrupted run redoes ledgers rather than skipping
+them, `reservedConcurrentExecutions = 1` and `batchSize = 1` prevent racing
+runs, and `maxReceiveCount = 10` absorbs swap churn. Expect one cold start and a
+few seconds of lag. **No stop, no gap.**
+
 ## Acceptance Criteria
 
 - [x] **BE has bumped `xdr-parser` to `stellar-xdr 28` and the rev is recorded here** — `840f2b58`, on their `develop`. See §Blocker CLEARED.
