@@ -1,6 +1,6 @@
 ---
 id: "0101"
-title: "Reprice the live-era AMM gap (Phoenix ~2% short + Soroswap 2026-07-06→07-15 hole)"
+title: "Reprice the live-era AMM gap (Phoenix ~2% short + Soroswap 2026-07-06→07-11 hole)"
 type: FEATURE
 status: active
 assignee: okarcz
@@ -12,6 +12,7 @@ links:
   - "../../../../docs/runbooks/events-sourced-amm-reprice.md"
   - "../../../../packages/prices-clickhouse/schema/preroll-amm-reprice.sql"
   - "notes/R-soroswap-five-day-gap-measured-on-prod.md"
+  - "notes/R-soroswap-gap-is-one-bug-resumption-is-a-replay-position.md"
 history:
   - date: 2026-07-17
     status: backlog
@@ -45,6 +46,26 @@ history:
       criteria are merged below. Converted file -> directory at the same time
       (the note pushed it past the ~150-line guidance). NOT started - the first
       move is the falsification in §Settle this before any run, not a reprice.
+  - date: 2026-09-14
+    status: active
+    who: okarcz
+    note: >
+      The falsification is DONE and the premise survives, narrowed. Measured on
+      prod as dev_read; full working at
+      notes/R-soroswap-gap-is-one-bug-resumption-is-a-replay-position.md. (1) Not
+      a trading lull - Soroswap swaps exist in default.soroban_events on every
+      dark day (268-3,919/day) while candles are zero. (2) ONE mechanism, the
+      0096 topic[0] bug; the pool-registry preload gap is not implicated. (3) The
+      07-11 vs 07-15 contradiction dissolves - neither is a bug boundary.
+      07-15 15:57Z is the extractor-fix deploy; 07-11 21:00 is where the
+      post-proto27 catch-up replay was standing at that moment, so every ledger
+      after it was repriced by the fixed binary in flight. Dark range is
+      therefore 07-06 09:35 -> 07-11 21:00, ~5.4 days not 9, and the Soroswap
+      refill shrinks to [63352612, 63434025] snapped to a minute edge. Two
+      method corrections recorded: intDiv(version,1000) is only a ledger in
+      single-member buckets (the coarse rollups sum version), and
+      prices.unresolved_pools holds backfill rows only, so it cannot witness a
+      live drop. Still NOT started on the reprice itself.
 ---
 
 # Reprice the live-era AMM gap
@@ -59,11 +80,17 @@ deploys. Task 0097 repriced everything up to the SDEX live floor
 | gap | range | what's wrong |
 |---|---|---|
 | **Phoenix ~2.1%** | `[63352612, deploy_ledger]` (deploy = 2026-07-17 11:57:52) | Live wrote candles with the `n >= 8` gate, silently dropping every 7-event swap. |
-| **Soroswap ZERO** | 2026-07-06 → **2026-07-15** | Live ran with the 0096 `topic[0]` bug until the fix deployed on 07-15 — it emitted **no** soroswap candles at all. |
+| **Soroswap ZERO** | `[63352612, 63434025]` = 2026-07-06 09:35 → **2026-07-11 21:00** | Live ran with the 0096 `topic[0]` bug and emitted **no** soroswap candles. It stops at 07-11 not because anything was fixed then, but because that is where the post-proto27 catch-up replay stood when the 07-15 fix deployed — from that ledger on, the replay repriced with the fixed binary. |
 
-So Soroswap history is complete up to 07-06 (0097) and from 07-15 (live), with
-**~9 days missing between**. Do not describe Soroswap history as continuous until
-this lands.
+So Soroswap history is complete up to 07-06 (0097) and from 07-11 21:00 (the
+replay), with **~5.4 days missing between**. Do not describe Soroswap history as
+continuous until this lands.
+
+> ✅ **Measured 2026-09-14**, not assumed — see
+> [notes/R-soroswap-gap-is-one-bug-resumption-is-a-replay-position.md](notes/R-soroswap-gap-is-one-bug-resumption-is-a-replay-position.md).
+> The range was **07-06 → 07-15 (~9 days)** in every earlier revision of this
+> file. It is shorter. Repricing past `63434025` rewrites rows the fixed
+> extractor already wrote correctly.
 
 ## Context
 
@@ -125,69 +152,85 @@ rule rather than two: **every run boundary must be minute-aligned**, at the
 start as well as the end. `--start = 63352612` inherits its alignment from
 0097's end, so it is safe as written; re-verify if either bound moves.
 
-## Settle this before any run (absorbed from 0271)
+## Settled 2026-09-14 — was "Settle this before any run" (absorbed from 0271)
 
-[[0271]] measured the Soroswap hole on production on 2026-09-08, from
-`price_ohlcv_1d`, the forever table. Full measurement:
+✅ **Done. The premise survives, narrowed.** Full working:
+[notes/R-soroswap-gap-is-one-bug-resumption-is-a-replay-position.md](notes/R-soroswap-gap-is-one-bug-resumption-is-a-replay-position.md).
+[[0271]]'s original measurement is preserved at
 [notes/R-soroswap-five-day-gap-measured-on-prod.md](notes/R-soroswap-five-day-gap-measured-on-prod.md).
 
 | boundary | ledger |
 | --- | --- |
 | Soroswap's last candle before the gap | **63,352,574** |
 | documented backfill handoff floor | **63,352,611** |
-| Soroswap's first candle after the gap | **63,433,850** |
+| Soroswap's first candle after the gap | **63,434,026** (2026-07-11 21:00) |
 
-🔴 **One fact does not fit this task's story.** 0271 has Soroswap resuming on
-**2026-07-11** (10 candles that day, ledger 63,433,850); this task says the 0096
-`topic[0]` bug suppressed every Soroswap candle until the fix deployed
-**2026-07-15**. Both cannot be true. Settle it first — it decides whether the
-range to refill is 07-06→07-11 or 07-06→07-15, and whether one mechanism is at
-work or two:
+**Three answers:**
 
-```sql
-SELECT toDate(timestamp) d, count() FROM prices.price_ohlcv_1d
-WHERE source = 'soroswap' AND timestamp >= '2026-07-05' AND timestamp < '2026-07-20'
-GROUP BY d ORDER BY d
-```
+1. **Not a trading lull.** Soroswap swaps exist in `default.soroban_events` on
+   every dark day — 387 / 336 / 3,919 / 268 on 07-07 → 07-10 — against **zero**
+   candles. Input present, output absent: ingestion dropped them.
+2. **One mechanism, the 0096 `topic[0]` bug.**
+   [[amm-live-pool-registry-preload-gap]] is **not** implicated and no live-path
+   fix is owed before refilling.
+3. **07-11 vs 07-15 dissolves — neither is a bug boundary.** The envelope is
+   `[String("SoroswapPair"), Symbol("swap")]` on every single day 07-04 → 07-16,
+   so the broken extractor would have dropped 07-11 → 07-14 exactly as it
+   dropped 07-07 → 07-10. And no deploy happened between 07-08 15:48 and
+   07-14 17:06. What actually happened: live froze on proto27 at ledger
+   ~63,384,067, the xdr-27 build deployed 07-14 ~21:00 and began a catch-up
+   replay, and the 0096 fix deployed **07-15 15:57Z** — at which moment the
+   replay was standing at ledger ~63,434,000. Every ledger after that went
+   through the fixed extractor. **63,433,850 is a cursor position, not a second
+   bug.** The arithmetic checks: 63,384,068 → ~63,434,000 in ~19 h is
+   ~2,630 ledgers/hour, ≈3.6× real time — a catch-up, not live tailing.
 
-Then falsify the trading lull from **raw swap events**, not candles: Soroswap is
-low-volume enough that a five-day quiet spell is not absurd on its own. If swaps
-exist in `soroban_events` for the range and candles do not, ingestion dropped
-them. If no swaps exist, the venue was genuinely quiet and half this task
-evaporates.
+**Why Phoenix and Aquarius were unaffected:** their extractors read the action
+from the slot their venues use. Soroswap is the only venue putting a `String`
+constant in `topic[0]`, which is also why its events carry a `NULL` `signature`
+([[soroban-events-gotchas]] #3). Treat it as a permanent special case.
 
 ⚠️ **Do not investigate any of this in `price_ohlcv_1m`.** Non-SDEX rows only
 start 2026-07-01 there — AMM history lives in `_1d`/`_1h`. A `_1m` query
 returning zero proves nothing. See [[amm-history-is-not-in-price-ohlcv-1m]].
 
-🔑 **Method worth reusing:** candles carry no ledger column, but
-`version = ledger_seq * 1000 + op_index`, so `intDiv(version, 1000)` locates any
-candle in ledger space. Comparing that against the backfill's documented floor is
-what turned a curiosity into the 37-ledger alignment above.
+### ⚠️ Correction — `intDiv(version, 1000)` is NOT a general method
 
-### Competing causes, both on the table
+Earlier revisions of this file called it "a method worth reusing". It holds in
+`price_ohlcv_1m`, where `version = ledger_seq * 1000 + op_index`. It does **not**
+hold in the coarse tables: the rollup MVs aggregate with `sum(version)`
+([[rollup-mvs-replace-mode-wipe]]), so a multi-minute bucket carries a sum, not a
+ledger. Visible in the data — `aquarius` on 2026-07-10 reports a "ledger" of
+**380,487,849**, which has never existed. It gave a true answer for the July
+Soroswap boundaries only because those buckets have one contributing candle each.
+**Sanity-check the magnitude against real ledger height before believing it.**
 
-| cause | predicts |
-| --- | --- |
-| **0096 `topic[0]` bug** (this task's premise) | Soroswap dark from the handoff until the 07-15 deploy, exactly |
-| [[amm-live-pool-registry-preload-gap]] | one venue dark across a restart, others unaffected, no error anywhere — the live processor builds `Registries::new()` empty and drops unregistered-pool swaps silently |
+### ⚠️ `prices.unresolved_pools` cannot witness a live drop
 
-Phoenix and Aquarius ran normally throughout, which fits either. Name the
-mechanism before refilling — a refill without the fix recurs at the next restart.
+Every row has `source = 'backfill'` (138 pools, 7,887 swaps, `last_ledger`
+topping out at 63,352,576 — the handoff floor). The live path never writes there.
+The table that exists to record "a swap we could not classify" is blind to the
+process that produced this gap.
 
 ### Sweep for other instances
 
-The five-day hole was found by accident in one five-week window. Run the same
-`intDiv(version, 1000)` shape over the full AMM range and say whether it has
-happened before.
+The hole was found by accident in one five-week window. Sweep the full AMM range
+and say whether it has happened before. ⚠️ Do **not** sweep with
+`intDiv(version, 1000)` per the correction above — sweep on **candle absence per
+source per day** in `price_ohlcv_1d`, then confirm each candidate against raw
+swap counts in `default.soroban_events`, which is the shape that actually settled
+this one.
 
 ## Acceptance Criteria
 
 - [ ] Phoenix candles in `[63352612, end]` reflect the variable-length fix
       (compare against `soroban_events`: 8-event **and** 7-event groups both
       priced), in `1m` **and** coarse.
-- [ ] Soroswap candles exist for 2026-07-06 → 07-15 in `1m` and coarse; Soroswap
-      history is continuous from activation to the live tip.
+- [ ] Soroswap candles exist for `[63352612, 63434025]` (2026-07-06 09:35 →
+      07-11 21:00, minute-snapped) in `1m` and coarse; Soroswap history is
+      continuous from activation to the live tip.
+      ⚠️ Range **corrected 2026-09-14** from 07-06 → 07-15; do not reprice past
+      `63434025`, those rows are already right.
 - [ ] Conservation holds per source at every granularity; no level below `1m`.
 - [ ] SDEX untouched (row count + `1d` tip unchanged — **capture the baseline
       BEFORE the run this time**; 0097 skipped it and could only sanity-check).
@@ -197,22 +240,39 @@ happened before.
 
 Merged from [[0271]]:
 
-- [ ] The 07-11 vs 07-15 contradiction is resolved and the true Soroswap range
-      is stated — see §Settle this before any run.
-- [ ] Trading-lull vs dropped-ingestion is settled from raw swap events, said
-      plainly either way.
-- [ ] If ingestion: the mechanism is identified and fixed, and it is stated why
-      Phoenix and Aquarius were unaffected.
+- [x] **The 07-11 vs 07-15 contradiction is resolved and the true Soroswap range
+      is stated.** Neither date is a bug boundary. 07-15 15:57Z is the 0096
+      extractor-fix deploy; 07-11 21:00 is where the post-proto27 catch-up replay
+      was standing at that moment, so it repriced everything after it with the
+      fixed binary. True range: **07-06 09:35 → 07-11 21:00**, `[63352612,
+      63434025]`, ~5.4 days. See §Settled 2026-09-14.
+- [x] **Trading-lull vs dropped-ingestion is settled from raw swap events.** It
+      is **dropped ingestion.** Soroswap swaps exist in
+      `default.soroban_events` on every dark day — 387 / 336 / 3,919 / 268 on
+      07-07 → 07-10 — against zero candles.
+- [x] **The mechanism is identified, and it was already fixed.** The 0096
+      `topic[0]` bug, fixed and deployed 2026-07-15 15:57Z (PR #112, `2c53ee4`);
+      nothing further is owed on the live path, and there is no
+      recurrence-at-next-restart hazard.
+      Phoenix and Aquarius were unaffected because their extractors read the
+      action from the slot their venues actually use — Soroswap is the only venue
+      with a `String` constant in `topic[0]`, which is also why its events carry
+      a `NULL` `signature`.
 - [ ] A sweep over the full AMM range reports whether other instances exist.
+      ⚠️ Sweep on **candle absence per source per day** in `price_ohlcv_1d`, then
+      confirm each candidate against raw swap counts — **not** with
+      `intDiv(version, 1000)`, which is only a ledger in single-member buckets.
 - [ ] `milestone-2-evidence.md` §8's row is updated to the outcome — it currently
       reads "cause under investigation" and promises resolution before
-      Tranche 3.
+      Tranche 3. **The outcome now exists**, so this is writing it up, not
+      investigating.
 
 ## Notes
 
 - Milestone 2 by explicit decision (2026-07-17): not required for M1, and the
-  data is only ~2% off for Phoenix plus a 9-day Soroswap window. Don't let it
-  pull focus from M1.
+  data is only ~2% off for Phoenix plus a Soroswap window since measured at
+  **~5.4 days** (2026-09-14), not the 9 assumed when this was written. Don't let
+  it pull focus from M1.
 - Everything learned in 0097 — RMT version ties, FINAL-is-mandatory,
   month-chunking, the readonly=1 `SETTINGS` trap, minute-alignment — is captured
   in the pre-roll script header and the runbook. Read those first.

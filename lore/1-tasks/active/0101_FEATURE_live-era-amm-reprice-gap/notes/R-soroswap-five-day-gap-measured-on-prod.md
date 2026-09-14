@@ -2,6 +2,8 @@
 title: "Soroswap produced no candles for five days (2026-07-06 -> 07-11) - measured on production"
 type: research
 status: mature
+spawns:
+  - notes/R-soroswap-gap-is-one-bug-resumption-is-a-replay-position.md
 tags: ["soroswap", "amm", "ingestion", "data-correctness", "measurement", "prod"]
 links:
   - "../README.md"
@@ -27,7 +29,25 @@ history:
       contradiction between the two is the first thing 0101 has to settle. The
       implementation and acceptance-criteria sections below are superseded by
       0101's; the evidence is not.
+  - date: "2026-09-14"
+    status: mature
+    who: okarcz
+    note: >
+      ANSWERED by
+      notes/R-soroswap-gap-is-one-bug-resumption-is-a-replay-position.md. The
+      evidence below stands unchanged; its reading does not. 63,433,850 is not a
+      distinct mechanism — it is where the post-proto27 catch-up replay was
+      standing when the 0096 extractor fix deployed on 07-15 15:57Z. One
+      mechanism, and the dark range is 07-06 09:35 to 07-11 21:00. Also
+      falsified here: the trading-lull alternative, from raw swap events.
 ---
+
+> ✅ **Answered 2026-09-14** —
+> [R-soroswap-gap-is-one-bug-resumption-is-a-replay-position.md](R-soroswap-gap-is-one-bug-resumption-is-a-replay-position.md).
+> The measurement below is correct. Its open question — whether 07-11 implies a
+> second mechanism — is closed: it does not. ⚠️ The `intDiv(version, 1000)`
+> method used below is only a ledger in **single-member** buckets; see that
+> note's correction before reusing it on a coarse table.
 
 > 📌 Folded into [[0101]] on 2026-09-11. Filed as task 0271, now archived as
 > superseded. Body preserved verbatim below.
