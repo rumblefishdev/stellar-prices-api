@@ -37,9 +37,68 @@ history:
       protocol-28 vote", 2026-09-10), merged and now an ancestor of their
       `develop` head `31be5f74`. Their own task is 0548. Two days before the
       pubnet vote.
+  - date: 2026-09-14
+    status: active
+    who: okarcz
+    note: >
+      SHIPPED — 5 of 7 criteria met. PR #314 merged (`bcc82f7`) and BOTH Lambdas
+      that decode ledger XDR are deployed on `stellar-xdr 28`: ledger-processor
+      14:48:22 UTC, asset-discovery 15:06:51 UTC, each confirmed by a moved
+      `CodeSha256`. No stop and no gap — candles continuous across both deploy
+      boundaries, 51/51 alarms OK, DLQ 0, zero errors. Scope was corrected
+      mid-task: asset-discovery was missing from the original criteria and would
+      have been left on proto-27. Remaining work is gated on the 2026-09-16
+      17:00 UTC vote — the crossing measurement and the alarm confirmation —
+      so the task stays ACTIVE until then.
 ---
 
 # stellar-xdr 27 → 28 for Protocol 28 "Adapter"
+
+## 📊 STATUS — 2026-09-14 15:11 UTC · ACTIVE, 5 of 7 criteria met
+
+**Shipped and verified in production. Two criteria remain, both gated on the
+vote (2026-09-16 17:00 UTC).**
+
+| # | criterion | state |
+| --- | --- | --- |
+| 1 | BE bumped `xdr-parser`, rev recorded | ✅ `840f2b58` |
+| 2 | Pin `=28.0.0`, check + tests green | ✅ 905 pass / 0 fail |
+| 3 | New variant handled; empty-tx-set advances the cursor | ✅ verified in source |
+| 4 | ledger-processor **deployed**, asset confirmed changed | ✅ 14:48:22 UTC |
+| 5 | `asset-discovery` deployed on 28 | ✅ 15:06:51 UTC |
+| 6 | Frontier measured **crossing** the activation ledger | ⏳ **09-16** |
+| 7 | `rollup-freshness-1m` confirmed to cover it | ⏳ **09-16** |
+
+### Where it stands
+
+`stellar-xdr` is pinned `=28.0.0`, `xdr-parser` at BE's `31be5f74`, merged as
+`bcc82f7`. **Both** deployed Lambdas that call `decode_object` now run the 28
+binary — the second one, `asset-discovery`, was **not in this task's original
+scope** and would have been left on proto-27; see §SCOPE CORRECTION.
+
+Production is healthy as of 15:11 UTC: 51/51 alarms OK, DLQ 0, zero errors on
+any function since either deploy, candles continuous across both boundaries.
+
+### What is owed, and when
+
+- **2026-09-16, before 17:00 UTC** — capture the frontier as the pre-crossing
+  baseline (§DEPLOY RUNBOOK step 4).
+- **After the vote** — re-capture and diff. ⛔ **A quiet 17:00 is NOT an
+  all-clear**: the wall is the first *empty-tx-set* ledger, which may be hours or
+  days later. Keep watching until one has demonstrably been decoded.
+- **Confirm `prices-production-rollup-freshness-1m`** stayed OK, or fired and
+  cleared. This crossing is the first real test of that alarm against this
+  failure mode, and the criterion is "confirmed", not "assumed".
+- ⏳ **`asset-discovery`'s first hourly pass on the new binary** had not yet run
+  at 15:11 UTC (deployed 15:06, `rate(1 hour)`). Zero errors so far; confirm one
+  clean pass.
+
+### Not blocking, recorded so it is not re-investigated
+
+- The **ComputeStack diff reads dirty** — cargo feature unification, deliberately
+  not redeployed. See §DEPLOYED — asset-discovery.
+- **Phoenix lagging tens of minutes is normal** (24 h gaps: median 540 s, p90
+  4,080 s). It looked like a stall twice in one session and was not.
 
 ## Summary
 
