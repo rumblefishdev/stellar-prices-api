@@ -61,11 +61,33 @@ history:
       post-proto27 catch-up replay was standing at that moment, so every ledger
       after it was repriced by the fixed binary in flight. Dark range is
       therefore 07-06 09:35 -> 07-11 21:00, ~5.4 days not 9, and the Soroswap
-      refill shrinks to [63352612, 63434025] snapped to a minute edge. Two
+      refill shrinks to 07-06 09:35 -> 07-11 21:00, ledger 63,433,849. Two
       method corrections recorded: intDiv(version,1000) is only a ledger in
       single-member buckets (the coarse rollups sum version), and
       prices.unresolved_pools holds backfill rows only, so it cannot witness a
       live drop. Still NOT started on the reprice itself.
+  - date: 2026-09-14
+    status: active
+    who: okarcz
+    note: >
+      Run plan written as the §RUN RUNBOOK section, bounds measured against
+      default.ledgers. ONE run, [63352609, 63518022], because events-backfill has
+      no venue filter and Phoenix's buggy window contains Soroswap's. Re-measured
+      three July-era premises in §Implementation and TWO ARE FALSE. (a) --start
+      63352612 is NOT minute-aligned - 0097 ended at 09:35:16, mid-minute, so the
+      documented start splits minute 09:35 across two invocations; corrected to
+      63352609. (b) The 1m partitions are NOT gone - cleanup has been off since
+      ~07-20 and 1m holds rows back to 2015-11-18, with the whole July AMM window
+      present (51,116 aquarius / 1,620 soroswap / 1,025 phoenix). That inverts
+      the risk: re-enabling cleanup AFTER the run is now the destructive step,
+      not a precondition. (c) "Soroswap needs no delete" is false - it has two
+      rows inside the dark window and the 21:00 one is a PARTIAL, since the
+      replay entered that minute mid-way. Also corrected the resumption ledger
+      from 63,434,026 to 63,433,850: the first figure came from min() over _1d
+      where version is a SUM, which is the exact trap documented the same day.
+      Live contention is gone (tip is two months past the window). Flagged for
+      settlement before any delete: the 0267/0268 USDC corrections akot rolled
+      out 09-10/11 cover this same July range.
 ---
 
 # Reprice the live-era AMM gap
@@ -80,7 +102,7 @@ deploys. Task 0097 repriced everything up to the SDEX live floor
 | gap | range | what's wrong |
 |---|---|---|
 | **Phoenix ~2.1%** | `[63352612, deploy_ledger]` (deploy = 2026-07-17 11:57:52) | Live wrote candles with the `n >= 8` gate, silently dropping every 7-event swap. |
-| **Soroswap ZERO** | `[63352612, 63434025]` = 2026-07-06 09:35 → **2026-07-11 21:00** | Live ran with the 0096 `topic[0]` bug and emitted **no** soroswap candles. It stops at 07-11 not because anything was fixed then, but because that is where the post-proto27 catch-up replay stood when the 07-15 fix deployed — from that ledger on, the replay repriced with the fixed binary. |
+| **Soroswap ZERO** | 2026-07-06 09:35 → **2026-07-11 21:00**, last dark ledger `63433849` | Live ran with the 0096 `topic[0]` bug and emitted **no** soroswap candles. It stops at 07-11 not because anything was fixed then, but because that is where the post-proto27 catch-up replay stood when the 07-15 fix deployed — from that ledger on, the replay repriced with the fixed binary. |
 
 So Soroswap history is complete up to 07-06 (0097) and from 07-11 21:00 (the
 replay), with **~5.4 days missing between**. Do not describe Soroswap history as
@@ -89,8 +111,9 @@ continuous until this lands.
 > ✅ **Measured 2026-09-14**, not assumed — see
 > [notes/R-soroswap-gap-is-one-bug-resumption-is-a-replay-position.md](notes/R-soroswap-gap-is-one-bug-resumption-is-a-replay-position.md).
 > The range was **07-06 → 07-15 (~9 days)** in every earlier revision of this
-> file. It is shorter. Repricing past `63434025` rewrites rows the fixed
-> extractor already wrote correctly.
+> file. It is shorter. Repricing past the resumption only rewrites rows the
+> fixed extractor already wrote correctly — harmless, but not the point of the
+> run. See §📕 RUN RUNBOOK for the bounds actually used.
 
 ## Context
 
@@ -110,26 +133,51 @@ operational re-run, not new engineering.
 
 ## Implementation
 
-Same sequence as 0097 §1–4 — but note the differences below, which are the whole
-reason this isn't a trivial repeat:
+Same sequence as 0097 §1–4. ⚠️ **Three of the four premises below were written in
+July and were re-measured on 2026-09-14. Two of them are now false.** Corrections
+inline; the executable version is §📕 RUN RUNBOOK.
 
-1. **Pick `--end` deliberately.** Live is actively writing. The end ledger must
-   sit safely behind the live frontier **and be minute-aligned**, or the
-   boundary minute is contested between this reprice and live: RMT keeps
-   `max(version)`, live's ledgers are higher, so our partial loses. Observed in
-   0097 exactly this way at `09:35`. `--start` = `63352612`.
-2. **Disable `prices-production-cleanup` first.** `price_ohlcv_1m` is a 7-day
-   transient and the 07-06→~07-10 partitions are **already gone** — this reprice
-   rewrites historical `1m`, so cleanup must stay off until the pre-roll
-   verifies. Re-enable after. (The 0090 incident is exactly this.)
-3. **Phoenix needs DELETE-first in `1m` AND coarse.** This is the sharp edge: the
-   recovered 7-event swaps sit **mid-bucket**, so they raise volume/trade_count
-   **without** raising the bucket's `max(ledger*1000 + op_index)`. The corrected
-   row therefore **ties** the stale one on `version`, and RMT's tie-break is not
-   contractual — the fix can silently fail to land while the data looks fine.
-   0097 solved this in coarse with a scoped `ALTER TABLE … DELETE … SETTINGS
-   mutations_sync = 2`; here it applies to `1m` too, since live already wrote
-   those minutes. Soroswap needs no delete (no rows to contest).
+1. **Pick the bounds deliberately.**
+   ⚠️ **The live-contention hazard is GONE.** This was written when the range
+   abutted the live frontier. Live is now two months past it (tip 2026-09-14),
+   so no minute in this window is contested with live.
+   🔴 **But `--start = 63352612` is NOT minute-aligned and never was.** 0097
+   ended at `63352611` = **09:35:16** — mid-minute. Starting at `63352612`
+   splits minute `09:35` across two invocations, which is precisely the
+   undercount in §Cross-invocation minute boundary, and it is why 0097 was
+   observed misbehaving "at 09:35". **Start at `63352609`**, the first ledger of
+   that minute, so this run owns the whole minute and its complete candle
+   carries the highest version.
+2. **`prices-production-cleanup` must stay disabled — now by standing decision.**
+   🔒 **Operator, 2026-09-14: it stays DISABLED until M3 is complete**, to keep
+   historical backfill data in the database. So this is no longer a window this
+   task opens and closes; it is a precondition already met and not this task's to
+   reverse.
+   ⚠️ **It is already disabled, and has been since ~2026-07-20** (the 0215 root
+   cause turns on that date). Measured 09-14: `price_ohlcv_1m` holds rows back
+   to **2015-11-18**, and the July AMM window is fully present — 51,116
+   aquarius, 1,620 soroswap, 1,025 phoenix. So the claim that "the 07-06→07-10
+   partitions are already gone" is **false**; nothing has been lost to
+   retention.
+   🔴 **This inverts the risk.** The danger is no longer that the rows vanished
+   before the run — it is that **re-enabling cleanup after the run drops every
+   `1m` row older than 7 days**, this window included. Re-enable **only** after
+   the pre-roll has landed in coarse *and* verified. That is the 0090 incident,
+   and it is now the single most destructive step in this task.
+3. **DELETE-first in `1m` AND coarse — for Phoenix *and* Soroswap.**
+   The sharp edge is unchanged: recovered swaps sit **mid-bucket**, so they
+   raise volume/trade_count **without** raising the bucket's
+   `max(ledger*1000 + op_index)`. The corrected row **ties** the stale one on
+   `version`, and RMT's tie-break is not contractual — the fix can silently fail
+   to land while the data looks fine. Scoped
+   `ALTER TABLE … DELETE … SETTINGS mutations_sync = 2`, as 0097 did in coarse.
+   🔴 **"Soroswap needs no delete (no rows to contest)" is false.** Soroswap has
+   **two** rows inside the dark window — `21:00` (ledger 63,433,850) and `21:06`
+   (63,433,917). The `21:00` one is a **partial**: the replay entered that minute
+   mid-way, so the minute holds some swaps the buggy binary dropped. It ties on
+   version for the same reason Phoenix does. Delete both venues.
+   Aquarius needs no delete — it was never miswritten, and a rewrite that
+   reproduces identical values ties harmlessly.
 4. **Pre-roll** with `preroll-amm-reprice.sql`, params adjusted to this window.
    Keep **FINAL** (the target levels are not TRUNCATEd → non-FINAL
    double-counts) and keep the **month-chunking** (a year-bounded FINAL exceeds
@@ -163,7 +211,7 @@ start as well as the end. `--start = 63352612` inherits its alignment from
 | --- | --- |
 | Soroswap's last candle before the gap | **63,352,574** |
 | documented backfill handoff floor | **63,352,611** |
-| Soroswap's first candle after the gap | **63,434,026** (2026-07-11 21:00) |
+| Soroswap's first candle after the gap | **63,433,850** (2026-07-11 21:00) |
 
 **Three answers:**
 
@@ -221,20 +269,101 @@ source per day** in `price_ohlcv_1d`, then confirm each candidate against raw
 swap counts in `default.soroban_events`, which is the shape that actually settled
 this one.
 
+## 📕 RUN RUNBOOK
+
+Planned 2026-09-14, bounds measured against `default.ledgers`. Read
+[`docs/runbooks/events-sourced-amm-reprice.md`](../../../../docs/runbooks/events-sourced-amm-reprice.md)
+first — this section only records what is *different* for this window.
+
+**Tool: `events-backfill`, the CH-to-CH reprice from 0097.** Not the
+sdex/combined backfill CLI — that re-downloads ledgers, has no per-venue filter,
+and would touch SDEX.
+
+### One run, not two
+
+`events-backfill` takes only `--start`/`--end` in ledger space; it has **no
+venue filter** and reprices every AMM source in the range. Phoenix's buggy window
+**contains** Soroswap's, so a single run covers both, and two runs would only add
+two more boundary minutes to get wrong.
+
+| bound | ledger | closed_at | why |
+| --- | --- | --- | --- |
+| `--start` | **`63352609`** | 2026-07-06 09:35:00 | first ledger of the minute 0097 ended inside. ⚠️ **Not** `63352612` — see §Implementation 1 |
+| `--end` | **`63518022`** | 2026-07-17 11:59:59 | last ledger of 11:59; the 0099 deploy is at 11:57:52 (ledger `63518000`), and the extra two minutes absorb Lambda containers still serving the old binary |
+
+Range is **165,414 ledgers** — one chunk at the 320k default. Live's tip is
+2026-09-14, two months clear, so nothing here is contested with live.
+
+### Sequence
+
+1. **Baselines FIRST** (the criterion 0097 could not meet). Capture, as files:
+   SDEX row count + `1d` tip; per-source row counts and volume sums in the window
+   at `1m` and every coarse level. `chq` as `dev_read` is enough for all of it.
+2. ✅ **`prices-production-cleanup` is confirmed DISABLED** — verified
+   2026-09-14 from EventBridge (`State: DISABLED`) and CloudTrail (disabled
+   2026-07-20 16:22:33, last fire 2026-07-20, zero invocations in 56 days). Step
+   satisfied; re-check only if an EventBridge stack deploy lands meanwhile.
+3. **Dry-run** `events-backfill --dry-run --verbose` over the bounds. Compare its
+   per-source tick counts against raw swap counts from `soroban_events` for the
+   same range (query shape in the notes). ⚠️ Aquarius should come back matching
+   what live already wrote; if it does not, the extraction path has changed since
+   July and the blast radius is bigger than this task — **stop and re-scope**.
+4. **DELETE first**, scoped to the window, `SETTINGS mutations_sync = 2`:
+   `phoenix` **and** `soroswap`, in `price_ohlcv_1m` **and** every coarse level.
+   Not aquarius.
+5. **Run** the same command without `--dry-run`, under `tmux`.
+6. **Verify `1m`** per source against the dry-run counts.
+7. **Pre-roll** coarse with `preroll-amm-reprice.sql`, FINAL, month-chunked.
+8. **Verify conservation** per source, one granularity at a time.
+9. **Do NOT re-enable `prices-production-cleanup`.** 🔒 Operator decision
+   2026-09-14: it stays DISABLED until M3 is complete. One fire would drop every
+   `1m` row older than 7 days — 793M rows back to 2015, not merely this window.
+   ⚠️ It can also be re-enabled **by accident**: `eventbridge-stack.ts` declares
+   the rule with no `enabled: false`, so any EventBridge stack deploy flips it
+   back on. If one happens during this work, re-check `describe-rule` after.
+
+### Where it runs, and who runs it
+
+⚠️ **On the Hetzner host as ClickHouse's `default` user against
+`localhost:8123`** — the tool's single client reads `default.*` (BE's tables) and
+writes `prices.*`, and the prices mTLS user cannot read `default.*`. Connect per
+[[hetzner-ch-prod-ssh-access]]. Password via `read -rs` into the env, never
+`--clickhouse-password` (argv is world-readable via `/proc/<pid>/cmdline`).
+
+This is a **prod write**, so the operator runs every step from 4 onward, and the
+`--dry-run` in step 3 too ([[feedback-user-runs-prod-ch-queries]]). The baseline
+and verification reads in steps 1, 6 and 8 are `dev_read` and need no hand-off.
+
+### 🔴 Settle before step 4 — the 0267/0268 overlap
+
+[[0276]] rolled the 0267/0268 USDC corrections onto production on 2026-09-10/11,
+and [[0279]] holds `repair_0268_` snapshots until 2026-09-18. **This reprice
+rewrites July AMM rows, which is exactly the range those corrections touched.**
+Establish whether `events-backfill` writes `close_usd` at all, and if it does,
+whether re-deriving it now reproduces the corrected values or reverts them.
+If it reverts them, this task waits for — or coordinates with — that work.
+⚠️ Those tasks are **akot's**; report, do not act ([[team-adam-kot-task-ownership]]).
+
 ## Acceptance Criteria
 
 - [ ] Phoenix candles in `[63352612, end]` reflect the variable-length fix
       (compare against `soroban_events`: 8-event **and** 7-event groups both
       priced), in `1m` **and** coarse.
-- [ ] Soroswap candles exist for `[63352612, 63434025]` (2026-07-06 09:35 →
-      07-11 21:00, minute-snapped) in `1m` and coarse; Soroswap history is
-      continuous from activation to the live tip.
-      ⚠️ Range **corrected 2026-09-14** from 07-06 → 07-15; do not reprice past
-      `63434025`, those rows are already right.
+- [ ] Soroswap candles exist for 2026-07-06 09:35 → 07-11 21:00 in `1m` and
+      coarse; Soroswap history is continuous from activation to the live tip.
+      ⚠️ Range **corrected 2026-09-14** from 07-06 → 07-15. ⚠️ The resumption
+      minute **21:00 is itself partial** — the replay entered it mid-minute at
+      ledger 63,433,850 — so the run must cover it, not stop below it.
 - [ ] Conservation holds per source at every granularity; no level below `1m`.
 - [ ] SDEX untouched (row count + `1d` tip unchanged — **capture the baseline
       BEFORE the run this time**; 0097 skipped it and could only sanity-check).
-- [ ] `prices-production-cleanup` re-enabled after verification.
+- [x] ~~`prices-production-cleanup` re-enabled after verification.~~
+      🔒 **WITHDRAWN 2026-09-14 by operator decision** — the rule stays
+      **DISABLED until M3 is complete**, to keep historical backfill data in the
+      database. This task must not re-enable it, and the run is not blocked by
+      it: verified from EventBridge + CloudTrail that it has been disabled since
+      **2026-07-20 16:22:33** and has not fired in 56 days, so the July `1m` rows
+      this reprice targets are intact. Releasing it is [[0200]]'s call, after M3.
 - [ ] Both run bounds minute-aligned (not just `--end`) — see
       §Cross-invocation minute boundary.
 
@@ -245,7 +374,7 @@ Merged from [[0271]]:
       extractor-fix deploy; 07-11 21:00 is where the post-proto27 catch-up replay
       was standing at that moment, so it repriced everything after it with the
       fixed binary. True range: **07-06 09:35 → 07-11 21:00**, `[63352612,
-      63434025]`, ~5.4 days. See §Settled 2026-09-14.
+      last dark ledger 63,433,849, ~5.4 days. See §Settled 2026-09-14.
 - [x] **Trading-lull vs dropped-ingestion is settled from raw swap events.** It
       is **dropped ingestion.** Soroswap swaps exist in
       `default.soroban_events` on every dark day — 387 / 336 / 3,919 / 268 on
