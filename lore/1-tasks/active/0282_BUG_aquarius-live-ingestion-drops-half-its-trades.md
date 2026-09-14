@@ -170,7 +170,49 @@ straddle the most ledgers. Phoenix (19 pools) and Soroswap (221) have the same
 defect at lower rates — Phoenix stored 1,306 against 1,442 extracted in the July
 window, which this explains and 0099's 7-event gate does not.
 
-### 🔴 SDEX IS AFFECTED — confirmed 2026-09-14
+### ⛔ RETRACTED — "SDEX IS AFFECTED" was WRONG. SDEX loss is UNMEASURED.
+
+**Retracted 2026-09-14, same day, before any code was written.** The contested
+SDEX buckets are **not** partial slices. Captured with every column:
+
+```
+sdex 11:14 a=4     q=111 tc=1 vb=0.7684586         vq=0.911451   o=c=1.186077 v=64423870000
+sdex 11:14 a=4     q=111 tc=1 vb=0.7684586         vq=0.911451   o=c=1.186077 v=64423870001
+sdex 11:14 a=79851 q=3   tc=1 vb=792346985.1833504 vq=0.0000001  o=c=0        v=64423863003
+sdex 11:14 a=79851 q=3   tc=1 vb=792346985.1833504 vq=0.0000001  o=c=0        v=64423863004
+```
+
+**Byte-identical in every field**, differing only in `version` by one in
+`op_index`. That is the **same trade written twice**, not two slices of a
+minute. RMT keeps one, `trade_count` and volume come out correct, and **nothing
+is lost.** Contrast the genuine aquarius case, where the two rows carry
+*different* data (`tc 2 / vol 2,513.67` against `tc 1 / vol 1,000`).
+
+So: **SDEX has no measured loss.** It remains *plausible* on the mechanism —
+same loop, same accumulator, same flush — but it is unmeasured, and "contested
+bucket count" turned out to be the wrong instrument because it cannot tell a
+duplicate from a slice. Distinguish them by **comparing the rows' payloads**,
+not by counting them.
+
+### 🔑 A separate, real finding: `operation_index` is not stable across re-processing
+
+`reconcile.rs:6-7` claims re-processing is *"idempotent: ReplacingMergeTree
+collapses re-inserts by `version`"*. **It does not.** The pairs above are the
+same trade at two different `op_index` values, so `version` differs and RMT
+keeps both as distinct rows rather than collapsing them.
+
+Benign today — the duplicates carry identical payloads, so the surviving row is
+correct. But the stated idempotency guarantee is false, and it is the guarantee
+that makes crash-recovery safe. A re-insert that carries a **higher version and
+less data** is exactly the aquarius failure, so this is the same hazard one step
+away from firing.
+
+⚠️ Also note `version = ledger_sequence * 1000 + operation_index`
+(`bucket.rs:48`) allows only **1000 operations per ledger**. A ledger with more
+collides into the next ledger's version space. Not observed, but unbounded by
+anything in the code.
+
+### Original (aquarius) evidence, which stands
 
 Caught directly. BE holds no classic-trades table, so there is no external
 source of truth for SDEX; instead the **losing writes themselves** were observed
