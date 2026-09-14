@@ -2,15 +2,23 @@
 id: "0252"
 title: "The API publishes no asset-identity signal — asset codes are not unique, 415 issuers publish BTC, and the only thing ordering them is a volume figure that overclaims what it measures"
 type: FEATURE
-status: active
+status: backlog
 related_adr: []
 related_tasks: ["0210", "0120", "0139", "0040", "0119", "0118", "0178"]
-tags: [layer-backend, layer-api, priority-high, effort-large, milestone-M3, api, security, metadata]
-milestone: 3
+tags: [layer-backend, layer-api, priority-low, effort-large, api, security, metadata]
 links:
   - "../../../packages/prices-api/src/assets/queries_ch.rs"
   - "../../../packages/prices-ingest-core/src/writer.rs"
 history:
+  - date: 2026-09-14
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Parked. Back to backlog, out of milestone 3, down to priority-low. This is
+      a side thread — a proposal and a set of notes, not scheduled work — and it
+      is dropped for now. The measurements, the SEP-1 finding and the proposed
+      table and response shapes stay below as input for whoever picks it up;
+      none of it is agreed and nothing is implemented.
   - date: 2026-09-02
     status: active
     who: stkrolikiewicz
