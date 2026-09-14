@@ -256,6 +256,67 @@ warnings (`collapsible_if` ×5, `no_effect` ×3, `items_after_test_module`,
 XDR-related — a newer local clippy than CI's, which is green. Left alone so the
 bump diff stays two files.
 
+## 🔴 SCOPE CORRECTION — `asset-discovery` has the same decode wall
+
+**Found 2026-09-14 while diffing the deploy.** This task, its runbook and its
+acceptance criteria named **only** the ledger-processor. That is wrong:
+**exactly two deployed Lambdas call `decode_object`**, and the second is
+`asset-discovery`.
+
+```rust
+// packages/asset-discovery/src/lib.rs:228
+let key = ledger_s3_key(ledger as i64);
+let Some(bytes) = fetcher.fetch(&key).await? else { break };
+let metas = decode_object(&bytes)?;
+```
+
+It is a live EventBridge Lambda on `rate(1 hour)`, **ENABLED**, so on the first
+empty-tx-set ledger it fails exactly as the ledger-processor would. `oracle-worker`
+is clear — it depends on `stellar-xdr` transitively but never decodes a ledger.
+
+⚠️ **It is on proto-27 and this deploy does not fix it.** The EventBridge stack
+was deployed **2026-09-14 14:00:50 UTC**, and PR #314 merged at **14:19:29 UTC** —
+19 minutes later. The running binary cannot contain the bump.
+
+### ⛔ Do NOT deploy the EventBridge stack from the local machine as-is
+
+Measured against production, not assumed:
+
+| | |
+| --- | --- |
+| EventBridge stack last updated | 2026-09-14 14:00:50 UTC, by principal **`aws-cdk-fish`** (a different machine) |
+| Compute stack last updated | 2026-09-11 12:52:50 UTC |
+| local `target/lambda/*` (except the ledger-processor) | **2026-09-11 14:47** |
+
+Local is **behind** production for all nine EventBridge Lambdas, so a deploy from
+this tree would **roll back** the 14:00 deploy. `cdk diff Prices-production-EventBridge`
+confirms all nine would change. **Rebuild every Lambda crate from current
+`develop` first** — the canonical list is `tools/scripts/lambda-assets.sh`
+(11 crates), and `--features lambda` plus explicit `-p` are both mandatory.
+
+❓ **Open question for the operator:** was the 14:00 `aws-cdk-fish` deploy from
+`develop`, or from a branch? If `develop`, rebuilding from current `develop` is
+strictly forward (it is that same code plus this bump). If a branch, rebuilding
+would drop whatever was on it.
+
+### ✅ The ComputeStack deploy itself is clean — verified, not assumed
+
+`cdk diff Prices-production-Compute --method=template` (template-only, no
+changeset) returns **exactly one** changed resource:
+
+```
+[~] AWS::Lambda::Function LedgerProcessorFunction
+ └─ Code.S3Key: ae261f9a… → 73535f98…
+✨ Number of stacks with differences: 1
+```
+
+`ApiHandlerFunction` does **not** change. No IAM, SQS or env-var edits.
+
+⚠️ **The runbook's "expect only the ComputeStack asset to change" is misleading**
+because `make diff-production` runs `cdk diff` **unscoped** — it diffs every
+stack, so it will always show the EventBridge assets too. Diff the stack you are
+about to deploy, by name, with `--method=template`.
+
 # 📕 DEPLOY RUNBOOK — 0277
 
 Merged as **`bcc82f7`** on `develop` (PR #314, squashed, 2026-09-14). **Not yet
@@ -360,6 +421,10 @@ few seconds of lag. **No stop, no gap.**
 - [ ] The bumped ledger-processor is **deployed** and the deployed asset is
       confirmed changed — not merely merged. 0091 merged on 2026-07-14 and prod
       stayed frozen until 0094 deployed it.
+- [ ] 🔴 **`asset-discovery` is deployed on the 28 binary too** — it is the only
+      other deployed Lambda that calls `decode_object`, it runs hourly, and it
+      was shipped on proto-27 19 minutes before this bump merged. See
+      §SCOPE CORRECTION.
 - [ ] The live candle frontier is measured crossing the Protocol 28 activation
       ledger, recorded before/after — the same check that resolved proto27's
       active-vs-latent question.
