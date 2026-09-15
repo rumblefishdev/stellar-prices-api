@@ -37,6 +37,22 @@ history:
       separately.
       Found while investigating an unrelated oracle OOM page ([[0226]]) — the
       oracle's -errors alarm turned out not to be where this task said it was.
+  - date: 2026-09-15
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      ⚠️ Two couplings with [[0214]]'s stuck-alarm digest, deployed today, that
+      change how the options below must be costed. (1) The digest does NOT cover
+      this defect and must not be treated as covering it: it re-reads alarms that
+      are OFF OK, while this task is about alarms that read OK while blind — the
+      two are orthogonal. (2) ⛔ Option 2, composite alarms, would be INVISIBLE to
+      the digest: `alarm_digest::describe` filters `AlarmType::MetricAlarm` and
+      its docs justify that with "this stack defines no composite alarms". Ship
+      composites without changing that filter and the new single green light is
+      exactly the kind of alarm nothing re-surfaces. Also note the daily probe,
+      already flagged below as the awkward case, now carries the digest as a
+      second job, so its 1/1 -errors alarm became more load-bearing than when
+      this task was written.
 ---
 
 # The worker `-errors` and `-duration-near-timeout` alarms read OK on no data
@@ -127,6 +143,9 @@ AC should say which it observed.
      alarm's job. Cheapest; changes no behaviour.
   2. **Composite alarm** — `-errors` OK **and** `-no-invocations` OK — so a
      single green light means both "ran" and "ran cleanly".
+     ⛔ If this ships, `alarm_digest::describe` ([[0214]]) must stop filtering
+     `AlarmType::MetricAlarm`, or the new composites are invisible to the daily
+     re-read and can latch unnoticed — the defect 0214 was built to end.
   3. **`MISSING`** instead of `NOT_BREACHING`, so an idle period holds the prior
      state rather than asserting health. Subtler than it looks; check against a
      daily-cadence probe before adopting.
