@@ -2,9 +2,9 @@
 id: "0214"
 title: "prices-production-enrichment-errors has been in ALARM for 24 days and nobody acted — the alarm worked, the process did not"
 type: BUG
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0204", "0209", "0212", "0026", "0111"]
+related_tasks: ["0204", "0209", "0212", "0026", "0111", "0214", "0215", "0223", "0226", "0243", "0283"]
 tags: ["priority-high", "effort-small", "observability", "enrichment", "ops", "milestone-M2"]
 milestone: 2
 links:
@@ -48,6 +48,24 @@ history:
       latched or noisy alarm that nobody re-surfaces — is untouched, and the
       live instance today is prices-production-oracle-errors: 62 state changes
       in 7 days, each one a Slack message, measured 2026-09-15.
+  - date: 2026-09-15
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      All four criteria closed. The first three were a write-up of a defect that
+      [[0111]] had already ended; the fourth was the actual work — a daily
+      re-read of every prices-{env}- alarm, riding the mTLS probe's existing
+      rate(1 day) rather than becoming a tenth Lambda. PR #316, merge 5018e21,
+      deployed 12:22:20 UTC. 17 unit tests (+7 new), 4 review findings from
+      okarcz applied, 2 real publishes to the ops channel to settle the message
+      format. ⚠️ Two things a later session must not re-derive: the ops topic's
+      ONLY subscriber is Chatbot, which drops unrecognised payloads silently and
+      logs nothing, so the envelope could only be settled by publishing for real;
+      and `sns:Publish` from inside the Lambda is still unexercised on production
+      because 0 of 52 alarms were off OK — deferred to [[0283]] part B, which
+      induces it with a throwaway alarm rather than falsifying a real one. That
+      gap is acceptable only because a failed publish fails the invocation and
+      pages, so it cannot reproduce the silence this task is about.
 ---
 
 # An enrichment alarm has been in ALARM for 24 days
@@ -129,9 +147,10 @@ it should be re-read before the next alarm is designed to latch.
 - [x] The relationship to [[0209]] is stated explicitly — related or not — so
       the next person does not re-derive it. Same worker, different symptom,
       different fix; below.
-- [ ] ⚠️ A mechanism exists that would surface a latched alarm within a day.
+- [x] ⚠️ A mechanism exists that would surface a latched alarm within a day.
       Without this the same thing happens again, and [[0204]] gap 3 has two
-      alarms deliberately designed to latch. **This is the whole remaining task.**
+      alarms deliberately designed to latch. **Shipped and deployed 2026-09-15**
+      — see below. One link is deferred to [[0283]] part B and named explicitly.
 
 ## Measured 2026-09-15 — problem 1 is over, and here is the arithmetic
 
@@ -182,3 +201,99 @@ landed this morning, at 02:13 and 06:35 UTC. That is the same failure as the
 latch, from the other end: a channel nobody can read is a channel nobody reads.
 The noise half belongs to [[0223]] and [[0226]]; this task owns the "nobody
 re-surfaced it" half.
+
+## The mechanism — a daily re-read, shipped 2026-09-15
+
+PR [#316](https://github.com/rumblefishdev/stellar-prices-api/pull/316), merged
+`5018e21`, deployed to production 12:22:20 UTC.
+
+Once a day the `mtls-notafter-probe` reads every `prices-{env}-` alarm and
+publishes one message naming those off OK for over an hour, oldest first. It is
+silent when the account is healthy.
+
+### Design decisions
+
+#### From plan
+
+1. **It rides the mTLS probe rather than becoming a tenth Lambda.** That probe
+   already runs on `rate(1 day)`, which is exactly the cadence this wants. The
+   two jobs share nothing but the trigger, so the digest collects its own failure
+   the way the rollup probe collects one per check.
+2. **Silent when healthy.** A daily "all good" would be new noise on the very
+   channel this task exists to keep readable.
+3. **A one-hour floor (`MIN_STUCK_SECONDS`).** Against a once-a-day snapshot,
+   anything lower reports flaps as zators — `prices-production-oracle-errors`
+   changed state 62 times in the week measured above, and reprinting those would
+   defeat the point. The 2026-07-27 latch would have been caught on its first
+   digest either way. Flap volume belongs to [[0223]] and [[0226]].
+4. **`INSUFFICIENT_DATA` counts as off OK.** A publisher that dies leaves its
+   alarm there, not in ALARM, and nothing else re-surfaces that state.
+
+#### Emerged
+
+5. **The payload is AWS Chatbot's custom-notification envelope, not a string.**
+   Found while reading the topic: its only subscriber is Chatbot, which forwards
+   only payloads it recognises and drops the rest **silently**. There is no email
+   subscriber to catch the difference and — since our config logs at `ERROR` and
+   a silent drop is not an error — no log either. ⚠️ So this could not be settled
+   by reading config; it took a real publish to the real channel, verified
+   2026-09-15 13:45 CEST (`MessageId 641a8633-…`, SNS `Delivered=1, Failed=0`).
+6. **Console deep links instead of a code fence.** A second real publish
+   (`MessageId 20750a69-…`) confirmed Chatbot renders Slack `<url|text>`. The
+   ``` fence had to go, since links render as literal text inside one — trading
+   column alignment for one-click access. `each_alarm_is_one_click_from_its_console_page`
+   pins the exact URL **and** asserts no fence, so a later tidy-up that restores
+   alignment cannot silently kill the links.
+7. **`StateTransitionedTimestamp`, not `StateUpdatedTimestamp`** — from review.
+   The latter also moves when `EvaluationState` changes, so a transient
+   `PARTIAL_DATA` flip on a 28-day latch would drop that alarm from the digest or
+   print `2h 13m` for it: this task's own bug, one field over. Currently a no-op
+   — all 52 production alarms have the two equal — which is exactly why it had to
+   be reasoned from the docs rather than measured.
+8. **`asyncRetryAttempts: 0` on the probe** — from review. Lambda's default of 2
+   was harmless while the handler only did idempotent `PutMetricData`; the digest
+   `sns:Publish`es before the handler can fail on an unreadable cert, so a day
+   with both would post the identical digest three times. Retries bought nothing
+   for alarming anyway: the error alarm is threshold 1 over 1 period.
+9. **Zero matched alarms is an error, not `Ok(0)`.** An unset `ENV_NAME` yields
+   the prefix `prices-unknown-`, which matches nothing and would read as a
+   healthy account — the same silent no-op this task is about. Went further than
+   the reviewer's suggestion of logging it.
+10. **`cloudwatch:DescribeAlarms` granted on `*`**, though an `alarm:prices-{env}-*`
+    ARN simulates as allowed. It is a LIST call, where a resource-scoped grant is
+    the kind that passes the simulator and denies at runtime; a denial fails the
+    probe and pages, which is worse than what the scope buys — hiding other
+    teams' alarm *names* from a read-only Lambda in our own account.
+
+### Verified on production, 2026-09-15
+
+| link | evidence |
+|---|---|
+| deploy | `✅ Prices-production-EventBridge`, 74.7 s, function `LastModified 12:22:20Z` |
+| config | `OPS_ALARMS_TOPIC_ARN` set; `MaximumRetryAttempts: 0` on both the EventInvokeConfig and the rule target |
+| alarm read | probe log `{"message":"alarm digest read","prefix":"prices-production-","matched":52}` |
+| zero-match guard | passed (52 > 0) |
+| decision to stay silent | response `"stuck_alarms": 0`; SNS `NumberOfMessagesPublished = 0` over the window |
+| cert half still works | 281 days for both roles, 920 ms, no error |
+| Chatbot renders the envelope | real publish, screenshot on the channel |
+| Chatbot renders the links | real publish, name clickable to the console |
+| `sns:Publish` from the Lambda role | `simulate-principal-policy` on the real role → `allowed` |
+
+⚠️ **What is NOT proven, stated plainly.** With 0 of 52 alarms off OK the
+publishing branch never executed, so `sns:Publish` **from inside the Lambda** is
+unexercised on production; the two verification messages were published by the
+admin principal, not by the function's role. Deferred to [[0283]] part B, which
+induces it with a throwaway `prices-production-tmp-…` alarm rather than falsifying
+a real one.
+
+This is [[0218]]'s **"test-covered, not prod-induced"** standard, the same one
+[[0243]] closed under a day earlier. It is acceptable here for a specific reason:
+**a broken publish path cannot go quiet.** The digest failure lands in `problems`
+and fails the invocation, which trips the probe's ops-wired error alarm — so the
+one failure mode this task exists to prevent is the one this gap cannot produce.
+
+## Future Work
+
+- [[0283]] part B — induce the digest on production and close the gap above.
+- Flap volume on the ops channel ([[0223]], [[0226]]) — the other half of
+  "a channel nobody can read is a channel nobody reads". Not this task.
