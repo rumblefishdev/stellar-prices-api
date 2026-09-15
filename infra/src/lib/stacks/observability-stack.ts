@@ -277,6 +277,11 @@ export class ObservabilityStack extends cdk.Stack {
    * specific tier without depending on declaration order.
    */
   public readonly rollupFreshnessAlarms: Record<string, cloudwatch.Alarm>;
+  /**
+   * `current_prices` writer-liveness alarm (task 0243): fires when
+   * `mv_current_prices` stops rewriting the table.
+   */
+  public readonly currentPricesFreshnessAlarm: cloudwatch.Alarm;
   /** ClickHouse host free-space alarm (task 0204, gap 1). */
   public readonly chDiskFreeAlarm: cloudwatch.Alarm;
   /** Live ledger-processor ingestion-lag alarm (task 0056 finding B). */
@@ -923,6 +928,50 @@ export class ObservabilityStack extends cdk.Stack {
       ),
     );
 
+    // current_prices writer liveness (task 0243).
+    //
+    // `prices.current_prices` has one writer, the refreshable MV
+    // `mv_current_prices`, and nothing watched it: a stopped writer leaves the
+    // last rows in place and GET /price keeps answering 200 with a frozen price.
+    // The probe publishes the table's age (`now() - max(updated_at)`) under the
+    // rollup metric with `Table=current_prices`. It is NOT a rollup tier, so it
+    // gets its own config key, name and description instead of a slot in the
+    // loop above, whose names and wording are bucket-shaped.
+    //
+    // treatMissingData: MISSING, not the NOT_BREACHING the tier alarms use. The
+    // probe publishes this datum on EVERY successful read — the age, or the
+    // empty-table sentinel — so a missing datum only ever means the probe did
+    // not run, which its own worker-health alarms report. Under NOT_BREACHING
+    // that gap would resolve a latched ALARM and post a false "recovered" into
+    // Slack; see the same reasoning at the mv-drift alarms below.
+    this.currentPricesFreshnessAlarm = new cloudwatch.Alarm(
+      this,
+      'CurrentPricesFreshnessAlarm',
+      {
+        alarmName: `prices-${config.envName}-current-prices-freshness`,
+        alarmDescription: `prices.current_prices is stale or empty (over ${config.opsAlarms.currentPricesFreshnessSeconds}s since its last rewrite). STALE, a real age: mv_current_prices, its sole writer (REFRESH EVERY 1 MINUTE), has stopped, fails every refresh, or was dropped, and GET /price still answers HTTP 200 with frozen prices. Diagnose via system.view_refreshes as the ClickHouse default user (view = 'mv_current_prices'); recover with SYSTEM START VIEW / SYSTEM REFRESH VIEW prices.mv_current_prices, or re-apply schema/current.sql if the view is gone (docs/runbooks/0072-current-prices-mv-rollout.md). EMPTY, a value near 315360000 s: the last refresh returned no rows, because the writer is broken OR its input is empty: no 1-minute candle landed in 24 h. Check rollup-freshness-1m first: if it is firing too, ingestion is the fault and restarting this view fixes nothing. Stale candles alone never age this signal: updated_at is the refresh start. Threshold: config.opsAlarms.currentPricesFreshnessSeconds (task 0243).`,
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Rollup',
+          metricName: 'RollupLagSeconds',
+          dimensionsMap: {
+            Environment: config.envName,
+            Table: 'current_prices',
+          },
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(15),
+        }),
+        threshold: config.opsAlarms.currentPricesFreshnessSeconds,
+        // 1 of 2, never 1 of 1: the same reasoning as the tier alarms above.
+        evaluationPeriods: 2,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.MISSING,
+      },
+    );
+    this.currentPricesFreshnessAlarm.addAlarmAction(snsAction);
+    this.currentPricesFreshnessAlarm.addOkAction(snsAction);
+
     // ClickHouse host free space (task 0204, gap 1). The 2026-08-13 stall ran
     // 11.5 h and was found by reading Lambda panic logs — `asset-discovery`,
     // `supply` and `ledger-processor` all failing with CH `Code: 243` — because
@@ -1536,7 +1585,7 @@ export class ObservabilityStack extends cdk.Stack {
         timeout: cdk.Duration.minutes(1),
         cadence: cdk.Duration.minutes(15),
         impact:
-          'Every rollup-freshness alarm goes dark: they read Prices/Rollup RollupLagSeconds, which only this probe publishes, so a frozen rollup chain would stop being reported rather than reported as frozen — the exact nine-day blind spot of task 0136. Since task 0204 the ClickHouse free-space alarm rides on the same probe, so it goes dark too: a filling shared volume would also stop being reported.',
+          'Every rollup-freshness alarm goes dark: they read Prices/Rollup RollupLagSeconds, which only this probe publishes, so a frozen rollup chain would stop being reported rather than reported as frozen — the exact nine-day blind spot of task 0136. Since task 0204 the ClickHouse free-space alarm rides on the same probe, so it goes dark too: a filling shared volume would also stop being reported. Since task 0243 the current-prices-freshness alarm rides on it as well, so a frozen current_prices would go unreported.',
       },
       {
         name: 'mtls-notafter-probe',

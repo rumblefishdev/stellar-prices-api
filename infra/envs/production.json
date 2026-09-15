@@ -42,6 +42,7 @@
       "price_ohlcv_1w": 864000,
       "price_ohlcv_1M": 3888000
     },
+    "currentPricesFreshnessSeconds": 900,
     "ledgerProcessorLagSeconds": 120,
     "chDiskFreePercent": 20,
     "dlqEscalationDepths": [10, 50],
