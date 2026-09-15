@@ -14,6 +14,7 @@ import {
   workerFunctionName,
   SCHEDULED_WORKERS,
   SCHEDULE_DISABLED_WORKERS,
+  WORKERS_WITHOUT_HEALTH_ALARMS,
 } from '../lambda-baseline.js';
 import {
   ingestDlqName,
@@ -138,7 +139,7 @@ function addWorkerHealthAlarms(
     `${idPrefix}WorkerDurationAlarm`,
     {
       alarmName: `prices-${envName}-${name}-duration-near-timeout`,
-      alarmDescription: `The ${name} worker is running at ≥80% of its ${timeout.toHumanString()} Lambda timeout (Duration.Maximum ≥ ${durationThresholdMs} ms for two consecutive periods). It has not failed yet, but it is trending at the wall and will start timing out. ${impact} Investigate before it becomes an outage — this is the warning enrichment did not have in 2026-07.`,
+      alarmDescription: `The ${name} worker is running at ≥80% of its ${timeout.toHumanString()} Lambda timeout (Duration.Maximum ≥ ${durationThresholdMs} ms for two consecutive periods). It has not failed yet, but it is trending at the wall and will start timing out. ${impact} Investigate before it becomes an outage — this is the warning enrichment did not have in 2026-07. OK also means "nothing ran" — liveness is prices-${envName}-${name}-no-invocations (task 0223).`,
       metric: metric('Duration', 'Maximum', cadence),
       threshold: durationThresholdMs,
       evaluationPeriods: 2,
@@ -1104,8 +1105,10 @@ export class ObservabilityStack extends cdk.Stack {
       'LedgerProcessorErrorAlarm',
       {
         alarmName: `prices-${config.envName}-ledger-processor-errors`,
-        alarmDescription:
-          'The live ledger-processor Lambda is throwing invocation errors (AWS/Lambda Errors ≥ 1 over 5 min). Distinct from a poison-pill doorbell (see the DLQ alarm): this is the handler crashing. Check the ledger-processor logs.',
+        // Hand-rolled outside createWorkerLambda, so the liveness sentence that
+        // helper appends to every worker's -errors alarm is repeated here by hand
+        // (task 0223) — the third of three builders, easy to miss.
+        alarmDescription: `The live ledger-processor Lambda is throwing invocation errors (AWS/Lambda Errors ≥ 1 over 5 min). Distinct from a poison-pill doorbell (see the DLQ alarm): this is the handler crashing. Check the ledger-processor logs. OK here means no failing invocation was observed in the last period; a function that is not invoked at all publishes nothing and ALSO reads OK. Liveness is prices-${config.envName}-ledger-processor-no-invocations (task 0223).`,
         metric: new cloudwatch.Metric({
           namespace: 'AWS/Lambda',
           metricName: 'Errors',
@@ -1507,22 +1510,31 @@ export class ObservabilityStack extends cdk.Stack {
     // detection window. Neither can silently disarm an alarm. Threading the
     // functions through was judged not worth the stack coupling — see
     // §Design Decisions in task 0112.
-    // Not every scheduled worker has these two platform alarms. The three
-    // without are listed HERE, by name, so the gap is a decision on record and
-    // the assertion below forces one for any worker added later:
-    // - cleanup: its rule is DISABLED (task 0200) — a no-invocations alarm
-    //   would fire forever.
-    // - asset-discovery, supply: run hourly/daily with a cheap, bounded body;
-    //   their `-errors` alarm (createWorkerLambda) is the coverage today.
-    //   asset-discovery is the subject of task 0256 (the ledger scan has never
-    //   run on production) — revisit both there. Recorded in task 0125 Future
-    //   Work.
-    const workersWithoutHealthAlarms: readonly string[] = [
-      'cleanup',
-      'asset-discovery',
-      'supply',
-    ];
+    // Not every scheduled worker has these two platform alarms. The ones
+    // without live in WORKERS_WITHOUT_HEALTH_ALARMS (lambda-baseline.ts), each
+    // with its reason, because createWorkerLambda prints that reason into the
+    // worker's -errors alarm description — the gap has to be visible where an
+    // operator reads it, not only here. The assertion below forces a decision
+    // for any worker added later. Task 0223 moved `supply` OUT of that list:
+    // its earlier exemption ("the -errors alarm is the coverage") was circular,
+    // since -errors reads OK on zero invocations.
+    const workersWithoutHealthAlarms: readonly string[] = Object.keys(
+      WORKERS_WITHOUT_HEALTH_ALARMS,
+    );
     const workerHealth: Array<WorkerHealthAlarmProps> = [
+      {
+        // Task 0223. Exempt until then on the grounds that its -errors alarm
+        // was "the coverage" — which reads OK when nothing runs. The only
+        // writer of prices.asset_supply, and nothing else watches it (0284 is
+        // still backlog).
+        name: 'supply',
+        idPrefix: 'Supply',
+        functionName: workerFunctionName(config.envName, 'supply'),
+        timeout: cdk.Duration.minutes(5),
+        cadence: cdk.Duration.hours(1),
+        impact:
+          'market_cap_usd in current_prices is price × token_supply from prices.asset_supply, whose only writer is this worker: market caps go stale silently while prices keep moving.',
+      },
       {
         name: 'enrichment',
         idPrefix: 'Enrichment',
