@@ -2,7 +2,7 @@
 id: "0214"
 title: "prices-production-enrichment-errors has been in ALARM for 24 days and nobody acted — the alarm worked, the process did not"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0204", "0209", "0212", "0026", "0111"]
 tags: ["priority-high", "effort-small", "observability", "enrichment", "ops", "milestone-M2"]
@@ -35,6 +35,19 @@ history:
       rows land and every data-level signal reads normal. This alarm is the ONLY
       thing that could have caught it. See 0215 for the timeline and 0111 for the
       throughput consequence.
+  - date: 2026-09-15
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated. Item 10 of Oskar's backlog summary, taken after [[0243]]
+      shipped; [[0223]] is the other half and follows this one rather than
+      sharing its branch. ⚠️ Problem 1 is already over and this task's first
+      three criteria are now a write-up, not an investigation: the errors ended
+      on 2026-08-24 when [[0111]] deployed, and the alarm has read OK since,
+      apart from the deliberate 0215 induction on 2026-09-11. Problem 2 — a
+      latched or noisy alarm that nobody re-surfaces — is untouched, and the
+      live instance today is prices-production-oracle-errors: 62 state changes
+      in 7 days, each one a Slack message, measured 2026-09-15.
 ---
 
 # An enrichment alarm has been in ALARM for 24 days
