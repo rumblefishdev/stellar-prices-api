@@ -2,7 +2,7 @@
 id: "0243"
 title: "No alarm watches current_prices freshness — a dead mv_current_prices serves a frozen price behind a healthy HTTP 200"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0178", "0137", "0204", "0218"]
 tags:
@@ -45,6 +45,20 @@ history:
       here. And `updated_at` is `now()` at every refresh, so this alarm catches
       a dead refresh, not stale input; stale input stays the rollup alarms' job,
       as the 2026-09-14 Galexie stall showed when rollup-freshness-1m fired.
+  - date: 2026-09-15
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Shipped and verified on production the same day. PR #315 (one review from
+      okarcz, its medium finding folded in), 5 unit tests and 2 ClickHouse ITs,
+      EventBridge deployed 09:06 UTC and Observability 09:14 UTC.
+      prices-production-current-prices-freshness went INSUFFICIENT_DATA -> OK on
+      a real 56 s reading, an action-less clone alarm proved the alarm reads the
+      metric the probe publishes, and a set-alarm-state round trip delivered
+      ALARM and OK to the ops Slack channel. 4 of 5 criteria met; the production
+      induction (stopping mv_current_prices for real) is deferred to [[0283]]
+      and recorded as "test-covered, not prod-induced". Spawned [[0283]] and
+      [[0284]]; [[0181]] noted that Table=current_prices is taken.
 ---
 
 # `current_prices` can freeze and nothing notices
@@ -92,13 +106,22 @@ one, per the working agreement on reusing tested code.
 
 ## Acceptance Criteria
 
-- [ ] An alarm exists that fires when `current_prices` stops advancing.
-- [ ] Its bound is derived from the refresh interval, not guessed, and the
-      derivation is written down.
+- [x] An alarm exists that fires when `current_prices` stops advancing.
+      `prices-production-current-prices-freshness`, live since 2026-09-15
+      11:14:15 CEST. See the deploy record below.
+- [x] Its bound is derived from the refresh interval, not guessed, and the
+      derivation is written down. See the bound-derivation table.
 - [ ] Verified by INDUCING the condition, not by reading the definition —
-      the standard this repo has held since [[0204]].
-- [ ] Routed to the same Slack channel as the existing ops alarms.
-- [ ] Does not depend on any `system.*` table.
+      the standard this repo has held since [[0204]]. **Test-covered, not
+      prod-induced** ([[0218]]'s wording): an IT stops a real
+      `mv_current_prices` and asserts the age grows, and an action-less clone
+      alarm on the real production metric reached ALARM. Stopping the view on
+      production is deferred to [[0283]].
+- [x] Routed to the same Slack channel as the existing ops alarms. Three
+      transitions on 2026-09-15 each executed the ops SNS action; see below.
+- [x] Does not depend on any `system.*` table. The query reads
+      `prices.current_prices` only; `system.view_refreshes` appears in the alarm
+      description as human diagnosis, never on the alarm path.
 
 ## Notes
 
@@ -189,3 +212,100 @@ standard):
   asset-discovery activity rather than freshness. No alarm.
 - The [[0178]] manual check (`updated_at` advancing across two refresh cycles)
   stays for attended MV recreates: it answers in ~2 min, this alarm in 15–30 min.
+
+## ✅ DEPLOYED — 2026-09-15, both stacks
+
+Merged as PR #315 (`00e38a8` on `develop`, squashed) after Oskar's review; the
+review's medium finding is folded in (`43bdf31`, see below). Deployed from
+`develop` at `00e38a8` by stkrolikiewicz, EventBridge first, then Observability.
+
+### Build — the macOS trap worth recording for [[0239]]
+
+`tools/scripts/lambda-assets.sh` uses `mapfile`, which the system `bash 3.2` on
+macOS does not have, so the canonical crate list cannot be produced the way CI
+produces it. The list was derived with the script's own `grep` in zsh instead,
+and checked to be exactly 11 crates before building:
+
+```
+grep -rhoE "'\.\./target/lambda/[^']*'" infra/src | tr -d "'" \
+  | sed 's#\.\./target/lambda/##' | sed '/^$/d' | sort -u
+```
+
+Group build of all 11 crates, `--release --arm64 --features lambda`, 225 s,
+rustc 1.97.1 / cargo-lambda 1.9.1 / zig 0.16.0 (the CI pins). The probe binary
+carries the new query (`grep -a -c 'FROM current_prices'` → 1; `strings` on
+macOS refuses the ELF, `grep -a` does not).
+
+### EventBridge — 09:04:42 → 09:06:17 UTC, deploy 22.04 s
+
+`cdk diff Prices-production-EventBridge --method=template --strict` showed, and
+nothing else:
+
+| change | count | reading |
+|---|---|---|
+| Lambda code asset | 9 | only `rollup-freshness-probe` is a source change |
+| Rule + alarm descriptions | 8 | mangled `?` restored to `—`, `→`, `§` |
+| CDK metadata | 1 | cosmetic |
+
+The other eight binaries are **build churn, not new code**: no commit has
+touched those crates or their shared dependencies since the 2026-09-14 15:06:51
+UTC deploy, and a Rust binary embeds the building machine's paths. Same shape as
+[[0277]]'s and [[0228]]'s deploys of this stack.
+
+🔒 `prices-production-cleanup` **DISABLED before and after**, and the diff
+touched no Rule `State`.
+
+Probe invoked by hand straight after: `StatusCode 200`, no `FunctionError`, and
+the new field present — `current_prices: {rows: 3448, age_seconds: 56}`. The
+metric registered as `Prices/Rollup RollupLagSeconds` with
+`{Environment=production, Table=current_prices}`. Probe errors since deploy: 0.
+
+### Observability — 09:13:36 → 09:14:37 UTC, deploy 27.22 s
+
+One alarm created, `DashboardAlarmCount` 51 → 52, dashboard body updated, and 32
+alarm descriptions repaired (the same mangled-text class). No thresholds,
+actions, metrics or IAM touched.
+
+Deployed alarm, read back from production: threshold 900, `GreaterThanThreshold`,
+period 900, `Maximum`, 2 evaluation periods, 1 datapoint to alarm,
+`treatMissingData: missing`, dimensions `Environment=production` +
+`Table=current_prices`, one alarm action and one OK action.
+
+### The evidence, from the alarm's own history
+
+| time (CEST) | event |
+|---|---|
+| 11:14:15 | alarm created |
+| 11:15:19 | INSUFFICIENT_DATA → OK on a real datapoint (56 s), SNS action executed |
+| 11:17:09 | **clone alarm** `tmp-0243-current-prices` (no actions, threshold 0) reached ALARM on the same series |
+| 11:17:20 | OK → ALARM, set by hand for the routing test, SNS action executed |
+| 11:19:03 | ALARM → OK, restored by CloudWatch's own next evaluation, SNS action executed |
+
+All three actions report `Successfully executed action
+arn:aws:sns:eu-central-1:750702271865:prices-production-ops-alarms`, which is the
+ops → Chatbot → Slack path the other alarms use. The clone was deleted
+immediately after; `describe-alarms --alarm-name-prefix tmp-0243` returns none.
+
+✅ **Delivery confirmed in the channel, not only in the alarm history.** All
+three messages arrived: the 11:15 OK, then the ALARM carrying the state reason
+`task 0243 routing test — manual state set, NOT a real breach; current_prices is
+healthy`, then the 11:19 OK. The alarm description renders correctly in Slack,
+em dashes and all — the mangled-text repair this deploy carried.
+
+The clone is what proves the alarm is not blind: it read the same namespace,
+metric and dimensions the probe publishes and breached on a real value. A
+dimension typo — [[0204]]'s "10 of 13 alarms blind" — would have left it in
+INSUFFICIENT_DATA forever.
+
+### Integration tests
+
+Both `#[ignore]` ITs pass locally against ClickHouse 26.3.10.60 in 10.37 s. The
+second one stops and restarts a real `mv_current_prices` with `SYSTEM STOP VIEW`
+/ `START VIEW`, asserts the age grows one-for-one with the clock while stopped
+and drops back after `REFRESH`. CI does not run them ([[0275]]).
+
+### Incidental measurement
+
+The same probe run read ClickHouse free disk at **21.18 %**, just above the 20 %
+bound of `prices-production-ch-disk-free`. Not firing, little headroom, worth an
+eye.
