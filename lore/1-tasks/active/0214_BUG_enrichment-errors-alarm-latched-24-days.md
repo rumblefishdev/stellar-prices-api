@@ -121,12 +121,64 @@ it should be re-read before the next alarm is designed to latch.
 
 ## Acceptance Criteria
 
-- [ ] The cause of the errors is **measured** from logs, not inferred, with the
-      first occurrence dated and the frequency stated.
-- [ ] Either the errors stop, or the alarm is re-tuned to something actionable
-      and the reasoning is written down.
-- [ ] The relationship to [[0209]] is stated explicitly — related or not — so
-      the next person does not re-derive it.
+- [x] The cause of the errors is **measured** from logs, not inferred, with the
+      first occurrence dated and the frequency stated. See the measurement below.
+- [x] Either the errors stop, or the alarm is re-tuned to something actionable
+      and the reasoning is written down. **They stopped**, on 2026-08-24, and the
+      alarm was left exactly as it is — see below for why no re-tune is owed.
+- [x] The relationship to [[0209]] is stated explicitly — related or not — so
+      the next person does not re-derive it. Same worker, different symptom,
+      different fix; below.
 - [ ] ⚠️ A mechanism exists that would surface a latched alarm within a day.
       Without this the same thing happens again, and [[0204]] gap 3 has two
-      alarms deliberately designed to latch.
+      alarms deliberately designed to latch. **This is the whole remaining task.**
+
+## Measured 2026-09-15 — problem 1 is over, and here is the arithmetic
+
+CloudWatch, `AWS/Lambda Errors` on `prices-production-enrichment`, daily sums:
+
+| day | errors |
+|---|---|
+| 2026-08-16 … 08-23 | **72 every single day** |
+| 2026-08-24 | 24, then nothing |
+| 2026-08-25 … 09-10 | 0 |
+| 2026-09-11 | 1 |
+
+72 a day is exactly 3 an hour — one scheduled trigger plus two Lambda async
+retries, on an hourly worker. So [[0214]]'s 2026-08-21 reading ("every
+invocation, 3x/hour") held for at least the nine days the 30-day metric window
+still shows, and the alarm's own history dates the start at 2026-07-27T00:20:07Z:
+**28 days of an every-invocation failure behind one latched alarm.**
+
+**What ended it: [[0111]], not a fix aimed at this task.** 0111 deployed
+2026-08-24 **08:03:24 UTC** (partition-bounded enrichment passes) and the alarm
+went ALARM → OK at **08:31:48 UTC**, 28 minutes later. The 24 errors on 08-24 are
+the eight hours before that deploy. Nothing has errored since, apart from the
+single error on 2026-09-11, which is [[0215]]'s deliberate 12:57 UTC induction of
+the execution bound — the alarm fired for it at 14:58 CEST and cleared an hour
+later, which is the behaviour we want.
+
+**Why the alarm is not re-tuned.** The criterion offers "either the errors stop
+or the alarm is re-tuned". They stopped, so the alarm is correct as written: it
+fired on a real, continuous failure and it cleared when the failure ended. The
+defect was never the alarm's sensitivity — it was that nobody re-read it for 28
+days. Re-tuning would have hidden a true positive.
+
+**Relationship to [[0209]], stated so nobody re-derives it.** Same worker, two
+different symptoms, two different fixes. The errors here are
+`Clickhouse(BadResponse(""))` from a statement cut at the proxy, ended by 0111's
+partition bound and structurally removed by [[0215]]'s execution bound (with
+[[0281]] making the empty error body readable at last). 0209 — the USDT pivot
+never pricing a `price_ohlcv_1m` row — was a silent no-op with no error at all,
+starting 2026-08-13, and was closed by 0215. Neither caused the other; both were
+invisible for the same reason.
+
+### The live instance of problem 2, measured the same day
+
+`prices-production-oracle-errors` changed state **62 times in 7 days** (about 31
+ALARM/OK pairs), and every transition posts to the ops Slack channel because
+`createWorkerLambda` wires an OK action as well ([[0112]]). Two of those pairs
+landed this morning, at 02:13 and 06:35 UTC. That is the same failure as the
+latch, from the other end: a channel nobody can read is a channel nobody reads.
+The noise half belongs to [[0223]] and [[0226]]; this task owns the "nobody
+re-surfaced it" half.
