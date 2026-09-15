@@ -1525,8 +1525,8 @@ export class ObservabilityStack extends cdk.Stack {
       {
         // Task 0223. Exempt until then on the grounds that its -errors alarm
         // was "the coverage" — which reads OK when nothing runs. The only
-        // writer of prices.asset_supply, and nothing else watches it (0284 is
-        // still backlog).
+        // writer of prices.asset_supply, and nothing else watches it yet
+        // (its freshness alarm is task 0284).
         name: 'supply',
         idPrefix: 'Supply',
         functionName: workerFunctionName(config.envName, 'supply'),
@@ -1621,6 +1621,18 @@ export class ObservabilityStack extends cdk.Stack {
           throw new Error(
             `ObservabilityStack: worker "${name}" must be in exactly one of workerHealth or workersWithoutHealthAlarms ` +
               `(in workerHealth: ${has}, exempt: ${exempt})`,
+          );
+        }
+      }
+      // A worker whose schedule is disabled on purpose must also be exempt
+      // here, or its -no-invocations alarm fires forever — and since task
+      // 0214 the daily digest would then re-surface it every single day.
+      // This is the cleanup case (task 0200) made a rule rather than a comment.
+      for (const name of SCHEDULE_DISABLED_WORKERS) {
+        if (!workersWithoutHealthAlarms.includes(name)) {
+          throw new Error(
+            `ObservabilityStack: "${name}" is in SCHEDULE_DISABLED_WORKERS but not in WORKERS_WITHOUT_HEALTH_ALARMS — ` +
+              'its -no-invocations alarm would latch forever; exempt it with a reason (lambda-baseline.ts)',
           );
         }
       }
