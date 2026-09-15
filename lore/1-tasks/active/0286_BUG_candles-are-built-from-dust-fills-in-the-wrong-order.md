@@ -2,7 +2,7 @@
 id: "0286"
 title: "Candles take every fill at equal weight, including stroop-dust, in the wrong intra-ledger order — rebuild OHLC from price-forming fills with a windowed close, then re-ingest the history"
 type: BUG
-status: backlog
+status: active
 related_adr: ["0287"]
 related_tasks: ["0278", "0276", "0266", "0228", "0146", "0142", "0137", "0200", "0088", "0282"]
 tags: [layer-backend, priority-high, effort-large, ohlcv, ingest, enrichment, clickhouse, data-correctness, api-contract]
@@ -29,6 +29,13 @@ history:
       with their measured basis; D9 (cross-source median on the read path) is
       deliberately out of scope. Phases below are sequencing inside this
       task, not separate deliverables.
+  - date: "2026-09-15"
+    status: active
+    who: akot
+    note: >
+      Activated by Adam; branch feat/0286 cut from develop. Phase 1 first
+      (price-forming fills, pf_* columns, windowed close in the rollups, ADR
+      0287 already accepted).
 ---
 
 # Candles are built from dust fills in the wrong order
