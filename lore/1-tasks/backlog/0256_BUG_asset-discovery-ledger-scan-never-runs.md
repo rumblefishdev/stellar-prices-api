@@ -4,7 +4,7 @@ title: "asset-discovery's ledger scan has never run on production — the worker
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0210", "0054", "0218"]
+related_tasks: ["0210", "0054", "0218", "0223"]
 tags: [layer-backend, priority-high, effort-small, milestone-M2, ingest, defect]
 milestone: 2
 links:
@@ -17,6 +17,22 @@ history:
       Found while deploying [[0210]]'s symbol stage. Reading the worker's
       CloudWatch logs to confirm the symbol stage showed that every run since
       at least 07:17 UTC ends in the same WARN and `scanned: 0`.
+  - date: 2026-09-15
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      ⚠️ A liveness decision is now parked HERE, explicitly. [[0223]] measured
+      that asset-discovery has no `-no-invocations` alarm — one of only two
+      scheduled workers without one — and that the code comment exempting it
+      (`observability-stack.ts:1515`, "its -errors alarm is the coverage today")
+      is circular, since a -errors alarm reads OK when nothing runs at all. 0223
+      gave `supply` its health alarms and deliberately did NOT do the same here,
+      because this task says the worker's scan is a no-op and the stage may be
+      removed: alarming the liveness of dead code is not coverage. Whoever
+      closes this task must settle it one way or the other — add the worker to
+      `workerHealth` (two alarms, an `impact` sentence, and 0222-style
+      induction) or record why a worker that survives this task still needs no
+      liveness alarm. Closing 0256 without deciding leaves the hole 0223 found.
 ---
 
 # The ledger scan is dead code in production

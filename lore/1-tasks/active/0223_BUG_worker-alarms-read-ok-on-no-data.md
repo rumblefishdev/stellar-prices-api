@@ -209,3 +209,95 @@ AC should say which it observed.
 Discovered while answering [[0222]]'s AC 6 rather than by an incident. Recorded
 because "we checked and they have a different problem" is a finding, not a
 non-finding.
+
+## Framing — decided 2026-09-15, from a production count
+
+Enumerated with `describe-alarms` against production rather than from the code,
+because the code's own list was already stale once (2026-08-26) and the task
+tells the next person to count before changing anything.
+
+### The count: 16, not 15
+
+| family | alarms | eval | `treatMissingData` |
+|---|---|---|---|
+| `-errors` | **10** — 9 via `createWorkerLambda` + `ledger-processor-errors` hand-rolled | 1/1 | `notBreaching` |
+| `-duration-near-timeout` | **6** — `addWorkerHealthAlarms` | 2/2 | `notBreaching` |
+
+⚠️ The table above in "Where these alarms actually live" says **5** duration
+alarms. It is 6: `oracle` is in `workerHealth` too. The correction of 2026-08-26
+fixed the `-errors` half and left the duration count wrong.
+
+### The measurement that settles the framing
+
+Whether a green `-errors` is *honest* depends on one thing: does something else
+answer "did the worker run at all?". Cross-referenced against the
+`-no-invocations` family ([[0222]], `treatMissingData: breaching`):
+
+| worker | `-errors` | duration | liveness (`-no-invocations`) |
+|---|---|---|---|
+| oracle, enrichment, coarse-sweep | ✓ | ✓ | ✓ |
+| backfill-freshness-probe, rollup-freshness-probe, mtls-notafter-probe | ✓ | ✓ | ✓ |
+| ledger-processor | ✓ | — | ✓ |
+| **asset-discovery** | ✓ | — | **none** |
+| **supply** | ✓ | — | **none** |
+| cleanup | ✓ | — | none — rule `DISABLED` since [[0200]] |
+
+So the binary question this task asks has a **split** answer:
+
+- **Seven `-errors` alarms and all six duration alarms are conditional by design
+  and honest.** Liveness is answered by a sibling alarm on the same dashboard
+  strip, which goes red when the worker dies while `-errors` stays green. The
+  only defect is that nothing *says* so.
+- **Two are a real hole.** `asset-discovery` and `supply` have no liveness alarm.
+  🔑 And the comment exempting them, `observability-stack.ts:1515`, reads:
+  *"their `-errors` alarm (createWorkerLambda) is the coverage today."* That is
+  **circular**: the exemption from a liveness alarm is justified by the alarm
+  this task exists because it is blind to a dead worker. Neither has data-level
+  cover either — `asset_supply` freshness is still backlog [[0284]], and [[0243]]
+  found `assets` unsuitable for a freshness alarm.
+- **One is moot.** `cleanup`'s rule is disabled on purpose; OK on no data is
+  correct and only needs saying.
+
+Both uncovered workers were checked to be alive before deciding anything, so a
+new liveness alarm would not be born latched: `prices-production-asset-discovery`
+and `prices-production-asset-supply` both `ENABLED`, `rate(1 hour)`, **24
+invocations every day 2026-09-08 → 09-14**.
+
+### Decisions
+
+1. **`treatMissingData` changes nowhere.** AC 6 ("1/1 and 2/2 costed
+   separately") is answered: neither evaluation shape changes. `NOT_BREACHING`
+   is the right answer for a conditional alarm, and the fix for the two
+   unconditional cases is not to make `-errors` do liveness's job.
+2. **Composite alarms (option 2) rejected.** They would be invisible to
+   [[0214]]'s digest, which filters `AlarmType::MetricAlarm` — a new single green
+   light beyond the daily re-read is the defect 0214 was built to end.
+3. **`supply` gets health alarms — scope widened, deliberately.** This task
+   listed the no-invocations family as out of scope (that referred to [[0222]]'s
+   fix of the *existing* ones). Adding one for a worker that has none is the
+   direct consequence of the framing, and `addWorkerHealthAlarms` builds the pair,
+   so supply gets duration too (harmless on a bounded 5-min body). Agreed with
+   stkrolikiewicz 2026-09-15.
+4. **`asset-discovery` is deferred to [[0256]], on purpose.** That task says the
+   worker's scan is currently a no-op ("re-seeds hourly and scans nothing") and
+   may be removed. Alarming the liveness of dead code is not coverage. The
+   exemption comment already says "revisit in 0256"; this makes the liveness
+   question an explicit item there rather than something 0256 can close around.
+5. **Documenting has the same three-builder trap as fixing.** The appended
+   sentence must land in all three places — `createWorkerLambda` (9),
+   the hand-rolled `ledger-processor-errors` (1), `addWorkerHealthAlarms` (6) —
+   or this repeats [[0222]]'s miss in documentation form. The two exempt workers
+   get a *different* sentence at their call sites (cleanup: rule disabled;
+   asset-discovery: no liveness alarm, see 0256), so the helper must know which
+   workers are exempt: `workersWithoutHealthAlarms` moves next to
+   `SCHEDULED_WORKERS` in `lambda-baseline.ts`, which also removes a
+   cross-stack duplicate.
+6. **Induction, AC 7:** for the new supply alarm, exactly [[0222]]'s method — a
+   temporary action-less clone at `Period=300` created right after the hourly
+   run, which transitions to ALARM within ~10 min of natural silence and is
+   deleted before the next run. No rule is disabled, nobody is paged. The
+   documentation half has nothing to induce; the underlying property (AWS/Lambda
+   publishes nothing on zero invocations) is 0222's measured finding.
+7. **AC 4 ([[0220]]):** answered from its own AC — `Invocations` stayed at 1/hour
+   for the whole soak, so every period had a datapoint and OK meant *observed
+   healthy*, not *no data*. Note appended there.
