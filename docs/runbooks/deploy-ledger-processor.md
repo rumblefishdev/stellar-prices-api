@@ -21,6 +21,34 @@ Two things you must understand up front:
    that path is exactly what ships. **If you skip the build step, you silently
    redeploy the old binary.**
 
+### ⚠️ This runbook covers ONE of the two Lambdas that decode ledger XDR
+
+Exactly **two** deployed Lambdas call `decode_object`, and they sit in
+**different stacks**:
+
+| Lambda                               | stack                           | deploy target                        |
+| ------------------------------------ | ------------------------------- | ------------------------------------ |
+| `prices-production-ledger-processor` | `Prices-production-Compute`     | `make deploy-production-compute`     |
+| `prices-production-asset-discovery`  | `Prices-production-EventBridge` | `make deploy-production-eventbridge` |
+
+`oracle-worker` depends on `stellar-xdr` but never decodes a ledger, so it is
+out of scope for a decode change.
+
+🔴 **A protocol / XDR bump is not shipped until BOTH are deployed.** Task 0277
+discovered `asset-discovery` missing from its own scope and would have left it
+on the previous `stellar-xdr`. If what you are shipping touches decode, plan
+both deploys before you start. The steps below apply unchanged to the
+EventBridge stack — substitute the build and the deploy target:
+
+```bash
+cargo lambda build -p asset-discovery --release --arm64 --features lambda
+cd infra && make deploy-production-eventbridge
+```
+
+⚠️ `--features lambda` is mandatory here too: `asset-discovery`'s bin is
+`required-features = ["lambda"]`, so a build without it **silently skips the bin
+and produces no bootstrap** — the same trap as step 1 below.
+
 > First shipped this way in task 0066 (RustFunction adoption is a later
 > follow-up). The proto27 unfreeze (tasks 0091 → 0094) is the motivating case:
 > the xdr-27 decode fix (PR #104) only reaches the running Lambda once deployed
@@ -90,13 +118,38 @@ deploy on a stale/missing artifact.
 
 ### 3. Preview the change (read-only, safe)
 
+🔴 **Do NOT use `make diff-production`.** It runs `cdk diff` with **no stack
+filter** (`infra/Makefile:42`), so it prints every stack in the app and a routine
+code deploy looks alarming. Diff the stack you are actually deploying, **by
+name**:
+
 ```bash
-cd infra && make diff-production
+cd infra
+npx cdk --app "node dist/bin/production.js" diff Prices-production-Compute \
+  --method=template --strict
 ```
+
+- `--method=template` compares templates only — **no changeset is created**, so
+  this is a pure read against the account.
+- 🔴 **`--strict` is mandatory.** Without it CDK hides changes behind
+  _"Omitted N changes … likely mangled non-ASCII"_. Those have been harmless
+  before (repairs to mangled `—` / `→` / `§` inside rule and alarm
+  descriptions), but **you cannot tell cosmetic from functional without
+  looking**, and the omission message will not tell you which you have.
+
+⚠️ **`cdk` runs `dist/`, not `src/`.** If you edited a stack, run
+`npx nx build infra` first or you will diff the _previous_ version of your own
+change. The `make` targets do this for you via `build-production`; the raw
+`npx cdk` command above does not.
 
 Expect **only** the ComputeStack Lambda code asset (a new code hash /
 `AssetParameters…S3Key`) to change. If the diff proposes IAM, SQS, env-var, or
 other-stack edits you did not intend → **stop and investigate** before deploying.
+
+⚠️ **A dirty-looking asset hash is not always a real change.** A Lambda rebuilt
+in a group build can hash differently with no code change between, via cargo
+feature unification. Verify the _running_ binary's `CodeSha256` (step 5) rather
+than trusting the diff alone.
 
 ### 4. Deploy (scoped to ComputeStack)
 
