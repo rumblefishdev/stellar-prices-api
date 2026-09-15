@@ -4,7 +4,7 @@ title: "Decide whether to act on dust prints in OHLCV candles — a 34-stroop po
 type: RESEARCH
 status: backlog
 related_adr: []
-related_tasks: ["0276", "0116", "0135", "0217", "0238", "0228"]
+related_tasks: ["0276", "0116", "0135", "0217", "0238", "0228", "0200"]
 tags: [layer-backend, priority-medium, effort-medium, ohlcv, ingest, enrichment, data-quality, decision]
 links:
   - "../../../../docs/ohlcv-outlier-prints-analysis.md"
@@ -13,6 +13,8 @@ links:
   - "../../../../packages/prices-ingest-core/src/filter.rs"
   - "../../../../packages/prices-clickhouse/schema/rollups.sql"
   - "../../../../packages/enrichment-worker/src/ch_enrich.rs"
+  - "../../../../docs/runbooks/repair-coarse-usd-values.md"
+  - "../../archive/0228_BUG_xlm-oracle-rate-is-measured-then-discarded-while-the-pivot-derives-it/README.md"
 history:
   - date: "2026-09-11"
     status: backlog
@@ -25,6 +27,17 @@ history:
       key has no transaction index. Full analysis with measurements in
       docs/ohlcv-outlier-prints-analysis.md. This task decides what to do
       about it — including nothing.
+  - date: "2026-09-15"
+    status: backlog
+    who: akot
+    note: >
+      Two decisions by akot about [[0228]]'s re-enrichment campaign (runbook
+      Appendix C, not run when 0228 closed), recorded here because this task
+      now gates it. (1) The campaign runs AFTER question 5 is settled, and
+      after its fix is deployed if the answer is yes — otherwise the
+      ~190 M-candle reset runs twice. (2) `_15m` is in the campaign's scope. No
+      task opened for the campaign itself. See "Decided: 0228's campaign waits
+      for question 5".
 ---
 
 # Decide whether to act on dust prints in OHLCV candles
@@ -97,6 +110,37 @@ Each has a recommendation from the analysis; the decision may be "no".
 7. **Do nothing.** Document the behaviour in the API docs and the
    general overview instead. Valid if the cost of 1–6 is judged higher than
    the impact.
+
+## Decided: 0228's campaign waits for question 5
+
+Decided by akot on 2026-09-15. [[0228]] closed with its re-enrichment campaign
+not run: runbook Appendix C, twelve passes (six coarse tables × the XLM and
+USDT legs). Until it runs, every pre-epoch XLM- and USDT-quoted coarse candle
+still assumes USDC = $1. The campaign's operator checklist and its spawn list
+item 1 are in 0228's archived README.
+
+**Why this task gates it.** The pivot stores
+`close_usd = close × XLM reference in USDC × USDC/USD rate`. 0228 fixed the
+third factor; question 5 would fix the second. `pivot_sql` only prices rows
+with `close_usd = 0`, so neither fix reaches history until the campaign
+resets those rows and re-prices them. Run the campaign before question 5 lands
+and the reset has to be repeated afterwards. On 2023-03-11, where the XLM/USDC
+daily close is the 1/17 dust print, running first would move 7,328 XLM-quoted
+1d candles from 0.0588 to 0.0569 against a market of ~0.0794 (0228 spawn list
+item 1).
+
+1. **The campaign runs after question 5.** If the answer is yes, it runs
+   after that fix is deployed, so one campaign repairs both factors. If the
+   answer is no, nothing holds the campaign back any more.
+2. **`_15m` is in the campaign's scope** (0228 Issues 5, about 8.9 M
+   pre-epoch rows). This does not wait for [[0200]]: if cleanup is ever
+   re-enabled it removes those rows anyway, and if not they would otherwise
+   keep USDC = $1 for good. Appendix C's `_15m` count still runs at campaign
+   time to size that pass.
+
+**Not decided:** question 6 (history). A repair that rewrites historical
+closes changes the first two factors too, so if 6 is yes, its order relative
+to the campaign needs the same decision.
 
 ## Implementation Plan
 
