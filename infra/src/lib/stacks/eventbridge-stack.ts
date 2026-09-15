@@ -830,9 +830,13 @@ export class EventBridgeStack extends cdk.Stack {
       rule: this.mtlsNotafterProbeRule,
       environment: {
         MTLS_PROBE_SECRETS: `ingestion=${discoveryMtlsSecretName},api=${apiMtlsSecretName}`,
+        // Second job on the same daily run: the stuck-alarm digest (task 0214).
+        // It publishes here, the topic the alarms themselves use, so the re-read
+        // lands in the channel where the original was scrolled past.
+        OPS_ALARMS_TOPIC_ARN: opsAlarmsTopic.topicArn,
       },
       alarmDescription:
-        'mTLS NotAfter probe invocation errors — cert days-to-expiry metric may be stale, blinding the expiry alarm.',
+        'mTLS NotAfter probe invocation errors — cert days-to-expiry metric may be stale, blinding the expiry alarm. Also covers the daily stuck-alarm digest (task 0214): if this fires, latched alarms are no longer being re-surfaced.',
       alarmPeriod: cdk.Duration.days(1),
       errorAlarmActions: [opsAlarmAction],
     });
@@ -857,6 +861,31 @@ export class EventBridgeStack extends cdk.Stack {
         conditions: {
           StringEquals: { 'cloudwatch:namespace': 'Prices/Mtls' },
         },
+      }),
+    );
+    // Task 0214's daily digest: read our own alarms' state, and publish the
+    // stuck ones to the ops topic.
+    //
+    // `*` deliberately, though an `alarm:prices-${env}-*` ARN simulates as
+    // allowed: DescribeAlarms is a LIST call, and a resource-scoped grant on a
+    // list call is the kind of thing that authorizes in the IAM simulator and
+    // denies at runtime. A denial here does not fail quietly — it fails the
+    // probe, which pages the ops channel — so the failure mode is worse than
+    // what the scope buys, which is hiding other teams' alarm NAMES from a
+    // read-only Lambda in our own account. The env filter lives in the code
+    // (`alarm_digest::run` passes `prices-{env}-` as the prefix).
+    notafter.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadPricesAlarmState',
+        actions: ['cloudwatch:DescribeAlarms'],
+        resources: ['*'],
+      }),
+    );
+    notafter.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'PublishStuckAlarmDigest',
+        actions: ['sns:Publish'],
+        resources: [opsAlarmsTopic.topicArn],
       }),
     );
 
