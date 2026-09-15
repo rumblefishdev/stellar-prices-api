@@ -21,6 +21,15 @@
 //! is a writer that stopped: a dropped view, a stopped view, or a refresh that
 //! fails every cycle.
 //!
+//! ⚠️ **One exception: a long enough input outage EMPTIES the table.** The MV only
+//! emits assets with a 1-minute candle in the last 24 h, so an ingestion outage of
+//! a day or more — with the USDC rate stale too, or its one synthesised row would
+//! remain — leaves a healthy view writing zero rows, and this check publishes the
+//! empty sentinel. The sentinel therefore means "the writer is broken **or** its
+//! input has been empty for a day". The alarm description sends the on-call to
+//! `rollup-freshness-1m` first: if that is firing too, ingestion is the fault and
+//! restarting this view fixes nothing. (Raised in review of PR #315.)
+//!
 //! ## Why it is not an eighth entry in [`crate::ROLLUP_TIERS`]
 //!
 //! - The tiers' empty-tier sentinel rule is positional (fine → coarse); this
@@ -32,14 +41,14 @@
 //!
 //! ## Why empty breaches, and why there is no `HAVING`
 //!
-//! The MV emits one row per asset with a 1-minute candle in the last 24 h, and
-//! REPLACE mode makes the table exactly that output — so an empty
-//! `current_prices` means the API serves nothing. Unlike a freshly-provisioned
-//! rollup tier, that is never healthy. The query therefore has no
-//! `HAVING count() > 0` gate: an aggregate without `GROUP BY` returns one row even
-//! over zero rows, `row_count` tells the two cases apart, and an empty table
-//! publishes [`crate::EMPTY_TIER_SENTINEL_SECONDS`] instead of the ~56-year epoch
-//! age that `max()` over nothing yields.
+//! REPLACE mode makes the table exactly the MV's output, so an empty
+//! `current_prices` means the API serves nothing — whichever of the two causes
+//! above produced it. Unlike a freshly-provisioned rollup tier, that is never
+//! healthy. The query therefore has no `HAVING count() > 0` gate: an aggregate
+//! without `GROUP BY` returns one row even over zero rows, `row_count` tells the
+//! two cases apart, and an empty table publishes
+//! [`crate::EMPTY_TIER_SENTINEL_SECONDS`] instead of the ~56-year epoch age that
+//! `max()` over nothing yields.
 //!
 //! ## Why no `FINAL`
 //!
@@ -84,6 +93,15 @@ pub const HEALTHY_PEAK_SECONDS: i64 = REFRESH_INTERVAL_SECONDS + WORST_ACCEPTED_
 /// [`crate::ROLLUP_TIERS`]. The deployed threshold is
 /// `config.opsAlarms.currentPricesFreshnessSeconds`. Change both, or neither.
 pub const AGE_BOUND_SECONDS: i64 = 900;
+
+// Checked at compile time in every build, the Lambda build included — not only
+// under `cargo test`. A bound at or below the healthy peak fires on a healthy
+// table. (A runtime assert on two constants is also clippy's
+// `assertions_on_constants`.)
+const _: () = assert!(
+    AGE_BOUND_SECONDS > HEALTHY_PEAK_SECONDS,
+    "the alarm bound must exceed the healthy peak, or it fires on a healthy table"
+);
 
 /// One reading of `current_prices`: how many rows it holds and how long ago its
 /// newest row was written.
@@ -154,14 +172,6 @@ mod tests {
             "an empty table must breach"
         );
     }
-
-    // Checked at compile time rather than in a #[test]: both sides are
-    // constants, and a runtime assert on constants is clippy's
-    // assertions_on_constants.
-    const _: () = assert!(
-        AGE_BOUND_SECONDS > HEALTHY_PEAK_SECONDS,
-        "the alarm bound must exceed the healthy peak, or it fires on a healthy table"
-    );
 
     #[test]
     fn the_query_reads_updated_at_without_final_having_or_system_tables() {
