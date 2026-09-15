@@ -2,8 +2,8 @@
 id: "0278"
 title: "Decide whether to act on dust prints in OHLCV candles — a 34-stroop pool fill can set the day's close, and through the pivot, the USD price of thousands of other candles"
 type: RESEARCH
-status: backlog
-related_adr: []
+status: completed
+related_adr: ["0287"]
 related_tasks: ["0276", "0116", "0135", "0217", "0238", "0228", "0200", "0286"]
 tags: [layer-backend, priority-medium, effort-medium, ohlcv, ingest, enrichment, data-quality, decision]
 links:
@@ -99,6 +99,18 @@ history:
       deliverable) and the count of candles the pivot priced from a
       quantised close (0286 phase 3's validation). Stays in backlog until
       those two land, then archive.
+  - date: "2026-09-15"
+    status: completed
+    who: akot
+    note: >
+      CLOSED by akot. ADR 0287 written and accepted (D3–D8 as one contract:
+      window VWAP of price-forming fills, extremes from the same fills, one
+      definition per tier, fields redefined). The last step-1 gap measured on
+      prod: ≈ 293 k XLM-quoted candles across 15m…1w were priced from a
+      quantised XLM/USDC close (143 577 on 1h alone), the before-figure for
+      0286 phase 3. All seven questions answered, every criterion ticked.
+      Implementation is [[0286]]; the pivot's two references are its own
+      change in ch_enrich.rs, noted under question 5; D9 deferred.
 ---
 
 # Decide whether to act on dust prints in OHLCV candles
@@ -312,20 +324,33 @@ last column.
 
 ## Acceptance Criteria
 
-- [ ] Step 1's three gaps measured and appended to the doc — **two of three**:
-      other assets measured (yXLM, AQUA — liquid ones; no reference exists for
-      a thin pair) and the Soroban order-key audit done (sort by transaction
-      hash, `event_index` scope still to check) in
-      notes/R-measurements-2026-09-15.md; the count of candles the pivot
-      priced from a quantised close is **not** done — it belongs to 0286
-      phase 3's validation.
+- [x] Step 1's three gaps measured and appended to the doc
+      ✅ other assets: yXLM and AQUA (liquid ones; no reference exists for a
+      thin pair) and the Soroban order-key audit (sort by transaction hash,
+      `event_index` scope still to check) in
+      notes/R-measurements-2026-09-15.md. ✅ Candles the pivot priced from a
+      quantised XLM/USDC close (exact ratio n/d, d ≤ 200, > 5 % off the
+      bucket VWAP, before 2026-03-11), measured on prod 2026-09-15:
+
+      | Tier | Quantised reference buckets | XLM-quoted candles priced from them | Assets |
+      | --- | --- | --- | --- |
+      | 15m | 221 | 22 760 | 6 350 |
+      | 1h | 120 | 143 577 | 23 789 |
+      | 4h | 39 | 85 699 | 24 276 |
+      | 1d | 6 | 30 064 | 19 502 |
+      | 1w | 1 | 10 938 | 10 938 |
+      | 1M | 0 | 0 | 0 |
+
+      ≈ 293 k candles across 15m…1w; 1m not counted (outside [[0228]]'s
+      campaign by its D-07). This is [[0286]] phase 3's before-figure.
 - [x] A recorded answer (yes / no / later, with reason) for each of questions 1–7
       ✅ 2026-09-15, inline under each question, resting on D1–D10.
 - [x] ~~One backlog task per "yes"~~ **One task for all of it** — [[0286]],
       by Adam's decision; carries the measured numbers as acceptance criteria.
-- [ ] ADR drafted if the meaning of `close` (or a new field) changes on the wire
-      — it does (D8); the ADR is 0286 phase 1's first deliverable, not drafted
-      here.
+- [x] ADR drafted if the meaning of `close` (or a new field) changes on the wire
+      ✅ ADR 0287, accepted by Adam 2026-09-15: window VWAP of price-forming
+      fills for `open`/`close`, their extremes for `high`/`low`, one
+      definition on every tier, fields redefined rather than a `settle` field.
 - [x] ~~If everything is "no"~~ — not the case.
 
 ## Notes

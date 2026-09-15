@@ -3,13 +3,14 @@ id: "0286"
 title: "Candles take every fill at equal weight, including stroop-dust, in the wrong intra-ledger order — rebuild OHLC from price-forming fills with a windowed close, then re-ingest the history"
 type: BUG
 status: backlog
-related_adr: []
+related_adr: ["0287"]
 related_tasks: ["0278", "0276", "0266", "0228", "0146", "0142", "0137", "0200", "0088", "0282"]
 tags: [layer-backend, priority-high, effort-large, ohlcv, ingest, enrichment, clickhouse, data-correctness, api-contract]
 links:
-  - "../backlog/0278_RESEARCH_decide-whether-to-act-on-dust-prints-in-ohlcv/README.md"
-  - "../backlog/0278_RESEARCH_decide-whether-to-act-on-dust-prints-in-ohlcv/notes/S-close-estimator-and-pivot-reference.md"
-  - "../backlog/0278_RESEARCH_decide-whether-to-act-on-dust-prints-in-ohlcv/notes/R-measurements-2026-09-15.md"
+  - "../../2-adrs/0287_candle-prices-come-from-price-forming-fills-and-a-windowed-close.md"
+  - "../archive/0278_RESEARCH_decide-whether-to-act-on-dust-prints-in-ohlcv/README.md"
+  - "../archive/0278_RESEARCH_decide-whether-to-act-on-dust-prints-in-ohlcv/notes/S-close-estimator-and-pivot-reference.md"
+  - "../archive/0278_RESEARCH_decide-whether-to-act-on-dust-prints-in-ohlcv/notes/R-measurements-2026-09-15.md"
   - "../../../docs/ohlcv-outlier-prints-analysis.md"
   - "../../../packages/prices-ingest-core/src/filter.rs"
   - "../../../packages/prices-ingest-core/src/tick.rs"
@@ -78,9 +79,10 @@ same thing.
     MVs under [[0146]]'s rules ([[0142]] drift detection, [[0137]] freshness
     alarm, 0095 invariants). Coordinate with 0146 — ideally one re-CREATE
     window for both.
-- **D8 — ADR**: `close` and `open` change meaning on the wire (window VWAP,
-  not last/first print); `high`/`low` are extremes of price-forming fills.
-  Draft the ADR before the rollup change lands.
+- **D8 — ADR 0287** (accepted 2026-09-15): `close` and `open` change meaning
+  on the wire (window VWAP, not last/first print); `high`/`low` are extremes
+  of price-forming fills. The implementation must match it; a deviation
+  found while building goes back into the ADR, not silently into the code.
 - Pre-roll the coarse tiers (`preroll*.sql`) with the new definitions where
   1m data exists.
 
@@ -133,7 +135,8 @@ Phase 1:
       by an `#[ignore]` test on 26.3.10.60 reproducing 2026-04-02 (dust in the
       last minute, close from the window).
 - [ ] `low ≤ open, close ≤ high` holds on every tier by construction (test).
-- [ ] ADR accepted for the new meaning of `open`/`close`/`high`/`low`.
+- [x] ADR accepted for the new meaning of `open`/`close`/`high`/`low` —
+      ADR 0287, 2026-09-15, before this task started.
 - [ ] Six MVs re-created with APPEND + `sum(version)` + aligned windows
       verified, per-MV freshness recovered ([[0146]]'s checklist).
 - [ ] Measured on the first week of new data: residual high/low bias vs
@@ -154,7 +157,10 @@ Phase 3:
       `sum(volume_base)`, `sum(volume_quote)`, `sum(trade_count)` equal the
       FREEZE snapshot; differences only in OHLC.
 - [ ] Coarse tiers pre-rolled; XLM/USDC 1d closes on the seven dust days of
-      the analysis are within 5 % of Bitstamp.
+      the analysis are within 5 % of Bitstamp; the count of XLM-quoted
+      candles priced from a quantised XLM/USDC close (0278's before-figure:
+      22 760 / 143 577 / 85 699 / 30 064 / 10 938 on 15m / 1h / 4h / 1d / 1w)
+      is zero after the re-ingest and pre-roll.
 - [ ] [[0228]]'s campaign preconditions re-checked against the repaired
       reference before it runs.
 
