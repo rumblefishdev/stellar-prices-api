@@ -7,7 +7,7 @@ related_adr: []
 related_tasks: ["0282", "0101", "0096", "0097", "0099", "0080"]
 tags: [layer-indexing, priority-medium, effort-medium, amm, soroswap, phoenix, ingestion, data-correctness, clickhouse]
 links:
-  - "../../active/0282_BUG_aquarius-live-ingestion-drops-half-its-trades.md"
+  - "../../active/0282_BUG_aquarius-live-ingestion-drops-half-its-trades/README.md"
   - "../../blocked/0101_FEATURE_live-era-amm-reprice-gap/README.md"
 history:
   - date: 2026-09-15
