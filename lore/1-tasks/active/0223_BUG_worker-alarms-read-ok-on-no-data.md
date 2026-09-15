@@ -301,3 +301,54 @@ invocations every day 2026-09-08 → 09-14**.
 7. **AC 4 ([[0220]]):** answered from its own AC — `Invocations` stayed at 1/hour
    for the whole soak, so every period had a datapoint and OK meant *observed
    healthy*, not *no data*. Note appended there.
+
+## Deployed 2026-09-15 — and a defect caught in pre-flight
+
+PRs [#317](https://github.com/rumblefishdev/stellar-prices-api/pull/317)
+(merge `aead679`) and [#318](https://github.com/rumblefishdev/stellar-prices-api/pull/318)
+(merge `fe50cf9`), deployed together.
+
+| stack | time (UTC) | what |
+|---|---|---|
+| EventBridge | 14:21:51 | 9 `-errors` descriptions, nothing else — no IAM, no code, no env |
+| Observability | 14:22:26 | 7 descriptions, **1** new alarm, dashboard strip 52 → 53 |
+
+Verified on production after the deploy: all 16 `-errors` / `-duration-near-timeout`
+alarms carry the `task 0223` sentence (longest 945 / 1024);
+`prices-production-supply-no-invocations` exists — `3/3`, `breaching`, one ALARM
+and one OK action — born `INSUFFICIENT_DATA` at 14:22:31Z; **no**
+`supply-duration-near-timeout` exists; 53 alarms match the prefix.
+
+### Emerged — the second alarm for supply was a self-inflicted latch
+
+#317 as merged gave supply the standard health **pair**. Reading supply's
+`Duration.Maximum` to fix the induction window showed **~240.5 s on every run**,
+against a 300 s timeout: exactly the 80 % threshold the duration alarm uses.
+Cause is in the source, not the metric — `DEFAULT_TIME_BUDGET_SECS = 240`
+(`supply-worker/src/lib.rs:27`, [[0084]]): the Horizon walk stops at 240 s by
+design. Deployed as merged, `supply-duration-near-timeout` would have latched on
+its second evaluation and been re-surfaced by [[0214]]'s digest every day — the
+failure this task exists to remove, produced by this task.
+
+Fixed in #318 **before** anything reached production: `addWorkerHealthAlarms`
+gains `noDurationAlarm?: string`, set to the reason, which skips the duration
+alarm for a worker whose run length is a budget rather than a symptom. Same
+pattern as `WORKERS_WITHOUT_HEALTH_ALARMS` — the exception is data with a
+reason, not a comment.
+
+⚠️ Two lessons worth more than the fix. First: **"green on the diff" is not
+"safe to deploy"** — the diff was exactly as intended both times; what it could
+not show is what the metric would do against the threshold. Reading the metric
+before the first deploy is the check that caught it. Second, on my own method:
+the first negative test of the new synth assertion (post-approval commit on
+#317) was **inconclusive** — synth failed, but on the pre-existing assertion,
+not the new one. "It failed" is not "it failed for my reason"; the error text has
+to be read. Reordered so the specific check runs first, and re-proved.
+
+### AC 3, the daily probe, explicitly
+
+`mtls-notafter-probe` (86400 s) is unchanged in behaviour: its `-errors` and
+duration alarms received a description each and nothing else. Its liveness
+alarm already exists from [[0222]]. Under this task's framing there was nothing
+to change for it — the awkward case is awkward only for options that alter
+evaluation, and none shipped.
