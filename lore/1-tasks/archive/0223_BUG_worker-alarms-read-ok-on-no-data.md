@@ -2,9 +2,9 @@
 id: "0223"
 title: "The -errors and -duration-near-timeout worker alarms read OK on no data — a green light that means nothing was published, not that nothing was wrong"
 type: BUG
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0222", "0218", "0214", "0220", "0204", "0226", "0112", "0256", "0284", "0200"]
+related_tasks: ["0222", "0218", "0214", "0220", "0204", "0226", "0112", "0256", "0284", "0200", "0084", "0288"]
 tags: [layer-infra, priority-medium, effort-small, observability, cloudwatch, alarms, ops]
 milestone: 2
 links:
@@ -73,6 +73,22 @@ history:
       its scan is currently a no-op and may be removed, and alarming the liveness
       of dead code is not coverage. `treatMissingData` changes nowhere; composite
       alarms rejected — they would be invisible to 0214's digest.
+  - date: 2026-09-15
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      All seven criteria closed the same day. PRs #317 + #318, deployed 14:21 and
+      14:22 UTC; 16 alarm descriptions now say what their OK means, supply has a
+      liveness alarm (born 14:22:31Z, OK at 14:24:18Z on real history, routed to
+      Slack — screenshot recorded), induced with a Period=300 action-less clone
+      that went OK 14:25:34Z → ALARM 14:33:34Z on the worker's natural inter-run
+      silence and was deleted at 14:34:13Z; zero SNS publishes in its window.
+      ⚠️ The finding to keep: #317 as merged would have given supply a duration
+      alarm that latched forever, because its run length is a 240 s budget by
+      design (0084) against a 300 s timeout — caught by reading the metric
+      before the first deploy, fixed in #318 before anything reached production.
+      asset-discovery's liveness is parked in [[0256]] explicitly. Spawned
+      [[0288]] for the synth guard that does not cover EventBridge's alarms.
 ---
 
 # The worker `-errors` and `-duration-near-timeout` alarms read OK on no data
@@ -184,20 +200,29 @@ AC should say which it observed.
 
 ## Acceptance Criteria
 
-- [ ] The framing is decided and written down: conditional-by-design, or a defect
-      to fix.
-- [ ] A green reading on these alarms is unambiguous to an operator who did not
+- [x] The framing is decided and written down: conditional-by-design, or a defect
+      to fix. **Both, per worker** — see "Framing — decided 2026-09-15".
+- [x] A green reading on these alarms is unambiguous to an operator who did not
       write them — from the description or the dashboard, not from the code.
-- [ ] The daily-cadence probe (`mtls-notafter`, 86400 s) is checked explicitly
-      under whichever option ships; it is the one most likely to break.
-- [ ] [[0220]]'s soak evidence is re-read against the outcome and its AC states
-      whether OK meant "observed healthy" or "no data".
-- [ ] All three builders are covered, or the ones deliberately left alone are
+      All 16 descriptions say what OK means and name the liveness sibling or the
+      reason there is none; for the seven conditional workers the strip already
+      shows that sibling next to the green tile. Rendered in Slack — screenshot.
+- [x] The daily-cadence probe (`mtls-notafter`, 86400 s) is checked explicitly
+      under whichever option ships; it is the one most likely to break. No
+      evaluation change shipped, so nothing to break — "AC 3" below.
+- [x] [[0220]]'s soak evidence is re-read against the outcome and its AC states
+      whether OK meant "observed healthy" or "no data". Observed healthy —
+      `Invocations` 1/hour all week; note appended to 0220.
+- [x] All three builders are covered, or the ones deliberately left alone are
       named with a reason. A fix that lands in one helper and silently misses the
-      other two repeats [[0222]]'s hand-rolled-alarm trap.
-- [ ] The `1/1` error alarms are costed separately from the `2/2` duration
-      alarms; they are not the same change.
-- [ ] Verified by inducing, on [[0218]]'s standard — not by reading the config.
+      other two repeats [[0222]]'s hand-rolled-alarm trap. Covered: 9 via
+      `createWorkerLambda`, 1 hand-rolled, 6 via `addWorkerHealthAlarms` —
+      verified on production, 16/16 carry the sentence.
+- [x] The `1/1` error alarms are costed separately from the `2/2` duration
+      alarms; they are not the same change. Neither evaluation shape changed;
+      the duration family got the short sentence for the 1024 cap.
+- [x] Verified by inducing, on [[0218]]'s standard — not by reading the config.
+      The new supply liveness alarm, induced 2026-09-15 — record below.
 
 ## Out of scope
 
@@ -352,3 +377,37 @@ duration alarms received a description each and nothing else. Its liveness
 alarm already exists from [[0222]]. Under this task's framing there was nothing
 to change for it — the awkward case is awkward only for options that alter
 evaluation, and none shipped.
+
+## Induced 2026-09-15 — the supply liveness alarm, with nothing stopped
+
+[[0222]]'s method, exactly: a clone of the deployed
+`prices-production-supply-no-invocations` — same `FILL(invocations, 0)`, `< 1`,
+`3/3`, `breaching` — differing only in `Period` (300 instead of 3600), **no
+actions**, created 9 minutes after the hourly run at 14:17Z. The worker's
+natural 55-minute silence between runs, seen in 5-minute buckets, is the
+induction; no rule was disabled and no data stopped.
+
+```
+14:22:31Z  real alarm born            INSUFFICIENT_DATA
+14:24:18Z  real alarm → OK            3/3 hourly buckets held the 11:17/12:17/13:17 runs
+                                      (query-anchored windows, 0222 finding 1) — Slack OK, screenshot
+14:25:14Z  clone created              INSUFFICIENT_DATA
+14:25:34Z  clone → OK                 1 of 3: the 14:17Z run in the bucket starting 14:15
+14:33:34Z  clone → ALARM              3 of 3 zero: 14:18, 14:23, 14:28
+14:34:13Z  clone deleted              `--alarm-name-prefix tmp-0223` empty
+```
+
+SNS `NumberOfMessagesPublished` on the ops topic over 14:25–14:35Z: none. The
+real alarm never left OK. Nine minutes of one extra alarm object was the whole
+footprint.
+
+⚠️ For the next induction: the real alarm went OK **two minutes** after birth,
+not at the next run — CloudWatch evaluates existing metric history immediately.
+Plan the clone right after a run, not around the next one.
+
+## Future Work
+
+- [[0288]] — the 1024-character description guard walks only
+  ObservabilityStack; EventBridgeStack's ten `-errors` alarms are unchecked.
+- asset-discovery's liveness — parked in [[0256]] with the decision written
+  there, not here.
