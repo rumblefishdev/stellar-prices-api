@@ -78,6 +78,14 @@ pub struct RunStats {
     /// run. A steadily non-zero value is normal; a value that never falls to
     /// zero while the cursor never moves means the feed has stopped advancing.
     pub ledgers_held_back: u64,
+    /// Whether this run hit the forced-progress escape hatch and flushed a
+    /// PARTIAL minute to keep the cursor moving (task 0282).
+    ///
+    /// ⚠️ True means this run re-created the task-0282 loss for that one minute.
+    /// It is published as `ForcedPartialFlushes` so an alarm can see it — a WARN
+    /// line alone is not observable, and every other signal on this path reads
+    /// healthy (the doorbell is consumed, the queue drains, no error is raised).
+    pub forced_partial_flush: bool,
     pub rows_emitted: u64,
     /// Candle-INSERT latency for this run, or `None` when the run wrote no
     /// candles at all. `None` rather than a zeroed struct so an idle run
@@ -246,6 +254,7 @@ where
                 end_cursor: start,
                 ledgers_persisted: 0,
                 ledgers_held_back: 0,
+                forced_partial_flush: false,
                 rows_emitted: 0,
                 // Nothing was persisted, so no INSERT happened: no datapoint.
                 ch_write: None,
@@ -357,6 +366,8 @@ where
                 end_cursor: start,
                 ledgers_persisted: 0,
                 ledgers_held_back: ledger_minutes.len() as u64,
+                // Holding back is the DESIGNED path, not the escape hatch.
+                forced_partial_flush: false,
                 rows_emitted: 0,
                 ch_write: None,
             });
@@ -429,6 +440,7 @@ where
             end_cursor: current,
             ledgers_persisted: persisted,
             ledgers_held_back: held_back as u64,
+            forced_partial_flush: forced,
             rows_emitted,
             ch_write: (!ch_write.samples_ms.is_empty()).then_some(ch_write),
         })
