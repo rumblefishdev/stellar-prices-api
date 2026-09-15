@@ -123,6 +123,11 @@ Planned before any code; the implementation lands on a branch.
    candle in the last 24 h (`current.sql:486-495`) and runs in REPLACE mode, so an
    empty table means the API serves nothing. No `HAVING` gate: `count() = 0`
    publishes `EMPTY_TIER_SENTINEL_SECONDS`.
+   ⚠️ **Empty has two causes** (review of PR #315): a broken writer, or an input
+   gone empty — no 1-minute candle for 24 h, i.e. ingestion down for a day, with
+   the USDC rate stale too. The alarm description names both and sends the
+   on-call to `rollup-freshness-1m` first, so a healthy view is not restarted
+   for an ingestion outage.
 3. **No `FINAL` — this corrects the sketch above.** The version column is
    `updated_at` itself (`ReplacingMergeTree(updated_at)`), so the newest row
    survives any merge and `max(updated_at)` cannot differ. An IT pins it.
