@@ -57,6 +57,10 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     let cw = Arc::new(aws_sdk_cloudwatch::Client::new(&aws_cfg));
     let sns = Arc::new(aws_sdk_sns::Client::new(&aws_cfg));
     let environment = Arc::new(prices_clickhouse::env::env_or("ENV_NAME", "unknown"));
+    // Only used to build console deep links in the digest. Always set by the
+    // Lambda runtime; a wrong value costs a dead link, not a failed run, so it
+    // gets a default rather than the Init guard the topic ARN has.
+    let region = Arc::new(prices_clickhouse::env::env_or("AWS_REGION", "eu-central-1"));
     tracing::info!(
         environment = %environment,
         roles = targets.len(),
@@ -69,6 +73,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         let sns = sns.clone();
         let topic_arn = topic_arn.clone();
         let environment = environment.clone();
+        let region = region.clone();
         async move {
             let now_unix = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -136,7 +141,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             // not also silence the digest, which is the one thing that would
             // surface such a latch. It collects its own failure the same way.
             let (stuck, digest_failure) =
-                match alarm_digest::run(&cw, &sns, &topic_arn, &environment, now_unix).await {
+                match alarm_digest::run(&cw, &sns, &topic_arn, &environment, &region, now_unix)
+                    .await
+                {
                     Ok(n) => {
                         tracing::info!(stuck_alarms = n, "stuck-alarm digest complete");
                         (Some(n), None)

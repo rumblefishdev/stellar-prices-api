@@ -70,12 +70,30 @@ pub fn stuck(alarms: &[AlarmState], now_unix: i64) -> Vec<&AlarmState> {
 /// to work through, it is an outage — and Chatbot caps `description` length.
 const MAX_LISTED: usize = 25;
 
+/// Console deep link for one alarm, in Slack's `<url|text>` mrkdwn — which is
+/// what Chatbot's `client-markdown` resolves to.
+///
+/// Our alarm names are CDK-generated and only ever `[a-z0-9-]`, so they need no
+/// percent-encoding. A wrong or empty `region` yields a dead link, not broken
+/// rendering: Slack still shows the name.
+fn alarm_link(region: &str, name: &str) -> String {
+    format!(
+        "<https://{region}.console.aws.amazon.com/cloudwatch/home?region={region}\
+         #alarmsV2:alarm/{name}|{name}>"
+    )
+}
+
 /// The readable digest, or `None` when there is nothing to say.
 ///
 /// `None` is the normal case and means **publish nothing** — see the module
 /// docs on why silence is the design rather than an omission.
+///
+/// Deliberately NOT a ``` block, though one would column-align the states:
+/// links do not render inside a code fence, and a digest whose whole purpose is
+/// to make somebody act is worth more one click away than neatly aligned.
 pub fn digest_description(
     environment: &str,
+    region: &str,
     alarms: &[AlarmState],
     now_unix: i64,
 ) -> Option<String> {
@@ -85,24 +103,27 @@ pub fn digest_description(
     }
 
     let mut out = format!(
-        "{} alarm(s) in {} have been off OK for over {}.\n```\n",
+        "{} alarm(s) in {} have been off OK for over {}.\n\n",
         stuck.len(),
         environment,
         humanise_age(MIN_STUCK_SECONDS)
     );
     for a in stuck.iter().take(MAX_LISTED) {
         out.push_str(&format!(
-            "{:<17} {}  (for {})\n",
+            "\u{2022} {} - {} (for {})\n",
             a.state,
-            a.name,
+            alarm_link(region, &a.name),
             humanise_age(now_unix.saturating_sub(a.since_unix))
         ));
     }
     if stuck.len() > MAX_LISTED {
-        out.push_str(&format!("... and {} more\n", stuck.len() - MAX_LISTED));
+        out.push_str(&format!(
+            "\u{2022} ... and {} more\n",
+            stuck.len() - MAX_LISTED
+        ));
     }
     out.push_str(
-        "```\nDaily re-read (task 0214). CloudWatch notifies on state changes only, so an \
+        "\nDaily re-read (task 0214). CloudWatch notifies on state changes only, so an \
          alarm that fired once and was scrolled past never speaks again. This is that second \
          chance, not a new incident.",
     );
@@ -125,8 +146,13 @@ pub fn chatbot_envelope(title: &str, description: &str) -> String {
 }
 
 /// The full payload to `sns:Publish`, or `None` when everything is OK.
-pub fn digest_payload(environment: &str, alarms: &[AlarmState], now_unix: i64) -> Option<String> {
-    let description = digest_description(environment, alarms, now_unix)?;
+pub fn digest_payload(
+    environment: &str,
+    region: &str,
+    alarms: &[AlarmState],
+    now_unix: i64,
+) -> Option<String> {
+    let description = digest_description(environment, region, alarms, now_unix)?;
     Some(chatbot_envelope(
         &format!("{environment}: alarms stuck off OK"),
         &description,
@@ -203,6 +229,7 @@ pub async fn run(
     sns: &aws_sdk_sns::Client,
     topic_arn: &str,
     environment: &str,
+    region: &str,
     now_unix: i64,
 ) -> Result<usize, String> {
     let prefix = format!("prices-{environment}-");
@@ -222,7 +249,7 @@ pub async fn run(
     }
 
     let reported = stuck(&alarms, now_unix).len();
-    if let Some(payload) = digest_payload(environment, &alarms, now_unix) {
+    if let Some(payload) = digest_payload(environment, region, &alarms, now_unix) {
         sns.publish()
             .topic_arn(topic_arn)
             .subject(format!("{environment}: {reported} alarm(s) stuck off OK"))
@@ -251,6 +278,7 @@ mod tests {
     use super::*;
 
     const NOW: i64 = 1_789_000_000;
+    const REGION: &str = "eu-central-1";
 
     fn alarm(name: &str, state: &str, age_seconds: i64) -> AlarmState {
         AlarmState {
@@ -263,8 +291,8 @@ mod tests {
     #[test]
     fn a_healthy_account_says_nothing_at_all() {
         let alarms = vec![alarm("prices-production-a", "OK", 10 * 86_400)];
-        assert_eq!(digest_description("production", &alarms, NOW), None);
-        assert_eq!(digest_payload("production", &alarms, NOW), None);
+        assert_eq!(digest_description("production", REGION, &alarms, NOW), None);
+        assert_eq!(digest_payload("production", REGION, &alarms, NOW), None);
         assert!(stuck(&alarms, NOW).is_empty());
     }
 
@@ -274,7 +302,7 @@ mod tests {
         // snapshot that caught one mid-flip must not report it as ignored.
         let alarms = vec![alarm("prices-production-oracle-errors", "ALARM", 180)];
         assert!(stuck(&alarms, NOW).is_empty());
-        assert_eq!(digest_payload("production", &alarms, NOW), None);
+        assert_eq!(digest_payload("production", REGION, &alarms, NOW), None);
     }
 
     #[test]
@@ -284,7 +312,7 @@ mod tests {
             "ALARM",
             28 * 86_400 + 4 * 3_600,
         )];
-        let msg = digest_description("production", &alarms, NOW).expect("one stuck alarm");
+        let msg = digest_description("production", REGION, &alarms, NOW).expect("one stuck alarm");
         assert!(msg.contains("1 alarm(s) in production"), "{msg}");
         assert!(msg.contains("prices-production-enrichment-errors"), "{msg}");
         assert!(msg.contains("28d 4h"), "{msg}");
@@ -300,9 +328,30 @@ mod tests {
             "INSUFFICIENT_DATA",
             3 * 3_600,
         )];
-        let msg = digest_description("production", &alarms, NOW).expect("one stuck alarm");
+        let msg = digest_description("production", REGION, &alarms, NOW).expect("one stuck alarm");
         assert!(msg.contains("INSUFFICIENT_DATA"), "{msg}");
         assert!(msg.contains("3h 0m"), "{msg}");
+    }
+
+    #[test]
+    fn each_alarm_is_one_click_from_its_console_page() {
+        let alarms = vec![alarm(
+            "prices-production-enrichment-errors",
+            "ALARM",
+            86_400,
+        )];
+        let msg = digest_description("production", REGION, &alarms, NOW).expect("one stuck alarm");
+        assert!(
+            msg.contains(
+                "<https://eu-central-1.console.aws.amazon.com/cloudwatch/home\
+                 ?region=eu-central-1#alarmsV2:alarm/prices-production-enrichment-errors\
+                 |prices-production-enrichment-errors>"
+            ),
+            "{msg}"
+        );
+        // A code fence would render the link as literal text, so there must not
+        // be one — this is the trade the format was changed for.
+        assert!(!msg.contains("```"), "{msg}");
     }
 
     #[test]
@@ -314,7 +363,7 @@ mod tests {
             "ALARM",
             86_400,
         )];
-        let payload = digest_payload("production", &alarms, NOW).expect("one stuck alarm");
+        let payload = digest_payload("production", REGION, &alarms, NOW).expect("one stuck alarm");
         let v: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
         assert_eq!(v["version"], "1.0");
         assert_eq!(v["source"], "custom");
@@ -333,7 +382,7 @@ mod tests {
         let alarms: Vec<AlarmState> = (0..MAX_LISTED + 5)
             .map(|i| alarm(&format!("prices-production-a{i}"), "ALARM", 7 * 86_400))
             .collect();
-        let msg = digest_description("production", &alarms, NOW).expect("all stuck");
+        let msg = digest_description("production", REGION, &alarms, NOW).expect("all stuck");
         assert!(
             msg.contains(&format!("{} alarm(s) in production", MAX_LISTED + 5)),
             "{msg}"
@@ -379,7 +428,7 @@ mod tests {
             state: "ALARM".to_string(),
             since_unix: since_from(Some(transitioned), Some(updated)).expect("dated"),
         }];
-        let msg = digest_description("production", &alarms, NOW).expect("still stuck");
+        let msg = digest_description("production", REGION, &alarms, NOW).expect("still stuck");
         assert!(msg.contains("28d 4h"), "{msg}");
     }
 
