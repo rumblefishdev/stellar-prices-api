@@ -116,8 +116,18 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             // them) before surfacing any failure — a partial outage must not
             // stale-out the certs that DID read cleanly. `publish` no-ops on an
             // empty slice, so a total failure just skips straight to the error.
-            if !samples.is_empty() {
-                publish(&cw, &environment, &samples).await?;
+            //
+            // Collected, not `?`: a throttled PutMetricData used to be the only
+            // work in this handler, so early-returning was free. It is not any
+            // more — `?` here would skip the digest below for the whole day and
+            // report it as a cert-probe outage, with nothing saying the digest
+            // never ran.
+            let mut publish_failure: Option<String> = None;
+            if !samples.is_empty()
+                && let Err(err) = publish(&cw, &environment, &samples).await
+            {
+                tracing::error!(error = %err, "cert metric publish failed");
+                publish_failure = Some(format!("cert metric publish failed: {err}"));
             }
 
             // Second job on the same schedule (task 0214): re-read every
@@ -150,6 +160,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     targets.len(),
                     failures.join(", "),
                 ));
+            }
+            if let Some(err) = publish_failure {
+                problems.push(err);
             }
             if let Some(err) = digest_failure {
                 problems.push(format!("stuck-alarm digest did not run: {err}"));

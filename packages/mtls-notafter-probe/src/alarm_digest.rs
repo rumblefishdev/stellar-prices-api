@@ -41,7 +41,8 @@ pub struct AlarmState {
     pub name: String,
     /// `OK`, `ALARM` or `INSUFFICIENT_DATA`, verbatim from CloudWatch.
     pub state: String,
-    /// `StateUpdatedTimestamp` as unix seconds.
+    /// `StateTransitionedTimestamp` as unix seconds — when the state last
+    /// actually CHANGED. Not `StateUpdatedTimestamp`: see [`describe`].
     pub since_unix: i64,
 }
 
@@ -132,11 +133,30 @@ pub fn digest_payload(environment: &str, alarms: &[AlarmState], now_unix: i64) -
     ))
 }
 
+/// Which of CloudWatch's two timestamps dates a stuck alarm. Pulled out of
+/// [`describe`] so the choice is testable without an AWS client — the reason it
+/// matters is in that function's docs.
+pub fn since_from(transitioned: Option<i64>, updated: Option<i64>) -> Option<i64> {
+    transitioned.or(updated)
+}
+
 /// Every `prices-{env}-` alarm's current state, for [`digest_payload`].
 ///
 /// Reads metric alarms only — this stack defines no composite alarms — and
 /// pages, because `DescribeAlarms` caps a response at 100 and the account is
 /// already near that.
+///
+/// ## `StateTransitionedTimestamp`, not `StateUpdatedTimestamp`
+///
+/// The two read alike and are equal on all 50 production alarms right now, but
+/// AWS defines them differently: `StateUpdatedTimestamp` is the last update to
+/// `StateValue` **or `EvaluationState`**, while `StateTransitionedTimestamp` is
+/// when `StateValue` itself last changed — which is the quantity "how long has
+/// this been off OK" actually means. A transient `PARTIAL_DATA` flip on a
+/// 28-day latch refreshes the former and not the latter, so reading the former
+/// would silently drop the alarm from the digest, or print `2h 13m` for
+/// something ignored for a month. That is this task's own bug, re-introduced
+/// one field over.
 #[cfg(feature = "lambda")]
 pub async fn describe(
     client: &aws_sdk_cloudwatch::Client,
@@ -155,15 +175,20 @@ pub async fn describe(
         for a in page.metric_alarms() {
             // An alarm missing any of the three is not one we can date, and
             // guessing a state would either invent an incident or hide one.
-            let (Some(name), Some(state), Some(since)) =
-                (a.alarm_name(), a.state_value(), a.state_updated_timestamp())
-            else {
+            let (Some(name), Some(state), Some(since)) = (
+                a.alarm_name(),
+                a.state_value(),
+                since_from(
+                    a.state_transitioned_timestamp().map(|t| t.secs()),
+                    a.state_updated_timestamp().map(|t| t.secs()),
+                ),
+            ) else {
                 continue;
             };
             out.push(AlarmState {
                 name: name.to_string(),
                 state: state.as_str().to_string(),
-                since_unix: since.secs(),
+                since_unix: since,
             });
         }
     }
@@ -180,7 +205,22 @@ pub async fn run(
     environment: &str,
     now_unix: i64,
 ) -> Result<usize, String> {
-    let alarms = describe(cw, &format!("prices-{environment}-")).await?;
+    let prefix = format!("prices-{environment}-");
+    let alarms = describe(cw, &prefix).await?;
+    tracing::info!(prefix, matched = alarms.len(), "alarm digest read");
+
+    // Zero matches is never legitimate here — production alone has 50 — so it
+    // means the prefix is wrong (an unset or renamed `ENV_NAME` yields
+    // `prices-unknown-`). Left as `Ok(0)` that reads as a clean bill of health
+    // and the digest stays green and mute forever, which is precisely the
+    // silent no-op this whole task exists to end. Fail loudly instead.
+    if alarms.is_empty() {
+        return Err(format!(
+            "no alarms matched `{prefix}` — check ENV_NAME; the digest would report \
+             a healthy account by reading nothing"
+        ));
+    }
+
     let reported = stuck(&alarms, now_unix).len();
     if let Some(payload) = digest_payload(environment, &alarms, now_unix) {
         sns.publish()
@@ -316,6 +356,31 @@ mod tests {
             names,
             vec!["prices-production-old", "prices-production-young"]
         );
+    }
+
+    #[test]
+    fn a_state_transition_dates_the_latch_not_a_state_update() {
+        // The 28-day latch, with an EvaluationState flip 20 minutes ago that
+        // refreshed StateUpdatedTimestamp without changing StateValue. Reading
+        // the refreshed one drops the alarm from the digest entirely — this
+        // task's own bug, one field over.
+        let transitioned = NOW - (28 * 86_400 + 4 * 3_600);
+        let updated = NOW - 1_200;
+        assert_eq!(
+            since_from(Some(transitioned), Some(updated)),
+            Some(transitioned)
+        );
+        // Fall back only when CloudWatch omits the transition timestamp.
+        assert_eq!(since_from(None, Some(updated)), Some(updated));
+        assert_eq!(since_from(None, None), None);
+
+        let alarms = vec![AlarmState {
+            name: "prices-production-enrichment-errors".to_string(),
+            state: "ALARM".to_string(),
+            since_unix: since_from(Some(transitioned), Some(updated)).expect("dated"),
+        }];
+        let msg = digest_description("production", &alarms, NOW).expect("still stuck");
+        assert!(msg.contains("28d 4h"), "{msg}");
     }
 
     #[test]

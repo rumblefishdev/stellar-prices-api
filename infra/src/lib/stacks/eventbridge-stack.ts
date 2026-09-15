@@ -839,6 +839,15 @@ export class EventBridgeStack extends cdk.Stack {
         'mTLS NotAfter probe invocation errors — cert days-to-expiry metric may be stale, blinding the expiry alarm. Also covers the daily stuck-alarm digest (task 0214): if this fires, latched alarms are no longer being re-surfaced.',
       alarmPeriod: cdk.Duration.days(1),
       errorAlarmActions: [opsAlarmAction],
+      // No async retries. Lambda's default of 2 was harmless while this probe
+      // only did idempotent PutMetricData, but the stuck-alarm digest (task
+      // 0214) sns:Publishes BEFORE the handler can fail on an unreadable cert —
+      // so on a day when both happen, the retries post the identical digest to
+      // the ops channel three times, to the one channel this task exists to
+      // keep readable. Retries bought nothing for alarming either: the error
+      // alarm is threshold 1 over 1 period, so a blip pages whether or not the
+      // retry then succeeds.
+      asyncRetryAttempts: 0,
     });
     this.mtlsNotafterProbeFunction = notafter.function;
 
