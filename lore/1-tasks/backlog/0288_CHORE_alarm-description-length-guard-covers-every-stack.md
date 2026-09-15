@@ -15,7 +15,7 @@ history:
     who: stkrolikiewicz
     note: >
       Spawned from [[0223]] future work. Found while appending a sentence to all
-      16 worker alarms: the guard (`assertAlardescriptionsFitCloudWatch`,
+      16 worker alarms: the guard (`assertAlarmDescriptionsFitCloudWatch`,
       observability-stack.ts ~2370) caught the one duration alarm that crossed
       1024, but it walks only ObservabilityStack's construct tree. The nine
       `-errors` alarms built by `createWorkerLambda` live in EventBridgeStack
