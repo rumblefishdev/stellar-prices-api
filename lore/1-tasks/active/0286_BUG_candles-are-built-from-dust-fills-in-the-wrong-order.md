@@ -33,7 +33,8 @@ history:
     status: active
     who: akot
     note: >
-      Activated by Adam; branch feat/0286 cut from develop. Phase 1 first
+      Activated by Adam; branch fix/0286_candles-are-built-from-dust-fills-in-the-wrong-order
+      cut from develop. Phase 1 first
       (price-forming fills, pf_* columns, windowed close in the rollups, ADR
       0287 already accepted).
 ---
