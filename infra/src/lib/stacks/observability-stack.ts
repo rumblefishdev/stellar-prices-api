@@ -288,6 +288,8 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly ledgerProcessorLagAlarm: cloudwatch.Alarm;
   /** Live ledger-processor invocation-error alarm (task 0056 finding B). */
   public readonly ledgerProcessorErrorAlarm: cloudwatch.Alarm;
+  /** Task 0282: the reconcile loop flushed a PARTIAL minute to avoid deadlocking. */
+  public readonly ledgerProcessorForcedPartialFlushAlarm: cloudwatch.Alarm;
   /** Live ledger-processor DLQ-depth alarm (task 0056 finding B). Rung 1. */
   public readonly ledgerProcessorDlqAlarm: cloudwatch.Alarm;
   /**
@@ -1123,6 +1125,51 @@ export class ObservabilityStack extends cdk.Stack {
     );
     this.ledgerProcessorErrorAlarm.addAlarmAction(snsAction);
     this.ledgerProcessorErrorAlarm.addOkAction(snsAction);
+
+    // Task 0282 — the forced-progress escape hatch fired. The reconcile loop
+    // may only write a minute once it has walked PAST the end of it; if the
+    // whole iteration budget is spent inside ONE minute it can never do so, and
+    // holding back forever would stop ingestion dead with every external signal
+    // reading healthy (doorbell consumed, queue drained, no error, no DLQ). So
+    // it flushes the partial minute instead and keeps moving — deliberately
+    // trading a possibly-undercounted candle for a live pipeline.
+    //
+    // That trade MUST be visible. A WARN line is not observability: this is the
+    // one path where the 0282 fix re-creates the 0282 defect, and the candle it
+    // writes looks entirely plausible. The processor publishes
+    // `ForcedPartialFlushes` only when it fires (never a 0), so NOT_BREACHING +
+    // `>= 1` is the whole alarm and a healthy run puts nothing on the wire.
+    //
+    // Expected to never fire: measured 2026-09-15 over 7 days / 10,560 minutes,
+    // pubnet peaked at 12 ledgers/min against `maxIterations: 32`. That is
+    // precisely why it needs an alarm rather than a log — nobody will be reading
+    // the logs on the day the block rate changes.
+    this.ledgerProcessorForcedPartialFlushAlarm = new cloudwatch.Alarm(
+      this,
+      'LedgerProcessorForcedPartialFlushAlarm',
+      {
+        alarmName: `prices-${config.envName}-ledger-processor-forced-partial-flush`,
+        alarmDescription:
+          "The ledger-processor spent its whole MAX_ITERATIONS budget inside ONE minute and flushed a PARTIAL minute to keep the cursor moving (task 0282 forced_progress). That minute's candles are undercounted — the exact loss 0282 fixes — and nothing else can see it: the doorbell is consumed, the queue drains, no error is raised. Means ledgers-per-minute has reached maxIterations (32); raise config.ledgerProcessor.maxIterations above the chain's block rate and redeploy the ComputeStack. Measured 2026-09-15: pubnet peaks at 12 ledgers/min, so this should never fire.",
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Ingest',
+          metricName: 'ForcedPartialFlushes',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        // The metric is emitted ONLY when the hatch fires, so "missing" is the
+        // healthy steady state and must not breach.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ledgerProcessorForcedPartialFlushAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorForcedPartialFlushAlarm.addOkAction(snsAction);
 
     // Poison-pill / permanent-failure doorbells: under reportBatchItemFailures a
     // handler that keeps failing one item re-drives it (no Lambda Error) until

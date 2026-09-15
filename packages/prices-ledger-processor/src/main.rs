@@ -206,6 +206,8 @@ async fn handler(
                     start = stats.start_cursor,
                     end = stats.end_cursor,
                     persisted = stats.ledgers_persisted,
+                    held_back = stats.ledgers_held_back,
+                    forced_partial_flush = stats.forced_partial_flush,
                     rows = stats.rows_emitted,
                     "doorbell processed"
                 );
@@ -216,7 +218,15 @@ async fn handler(
                 // can reach the `Err` arm below, which is the sole path that
                 // pushes a `BatchItemFailure`. Best-effort: a CloudWatch failure
                 // is a warning, never a redelivered doorbell.
-                let m = metrics::write_latency_metrics(stats.ch_write);
+                let mut m = metrics::write_latency_metrics(stats.ch_write);
+                // Task 0282 — the forced-progress escape hatch is the one path
+                // that re-creates the loss this fix exists to prevent, and it is
+                // invisible from outside: the doorbell is consumed successfully,
+                // the queue drains, and the partial candle looks plausible. Ride
+                // along on the same PutMetricData so an alarm can see it.
+                m.extend(metrics::forced_partial_flush_metrics(
+                    stats.forced_partial_flush,
+                ));
                 if let Err(e) = metrics::publish(&cw, &env_name, &m).await {
                     warn!(error = %e, "cloudwatch metric publish failed (non-fatal)");
                 }
