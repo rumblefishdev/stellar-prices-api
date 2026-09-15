@@ -4,7 +4,7 @@ title: "No alarm watches current_prices freshness — a dead mv_current_prices s
 type: FEATURE
 status: completed
 related_adr: []
-related_tasks: ["0178", "0137", "0204", "0218"]
+related_tasks: ["0178", "0137", "0204", "0218", "0283", "0284"]
 tags:
   [
     "priority-high",
