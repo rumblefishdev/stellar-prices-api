@@ -35,6 +35,21 @@ history:
       write run would rewrite aquarius rows this defect is still producing, and
       its acceptance criteria use aquarius as an untouched control. First move is
       the pool-set vs sample question, which decides the mechanism.
+  - date: 2026-09-15
+    status: active
+    who: okarcz
+    note: >
+      Re-measured on production as dev_read. The MECHANISM stands and is now
+      confirmed against a last-write-wins ceiling (09-13: predicted 56.6%,
+      actual 51.9% — just below, as it must be). Two surrounding claims did
+      NOT. The loss never grew: every live-processed day measures ~45-55%,
+      July included. The July ~10% days were written by an ACCUMULATING path,
+      and the break is 2026-07-15/16 — the day 0064's durable cursor replaced
+      the /tmp cursor that had been re-walking the same span and accidentally
+      masking the defect. Two acceptance criteria were ticked on those wrong
+      readings and are un-ticked here. Also recorded: a fourth fix option
+      (ledger in the sort key), a cost analysis that removes cost from the
+      decision, and that PR #313 already carries a fix awaiting review.
 ---
 
 # Aquarius live ingestion drops about half of every day's trades
@@ -92,10 +107,11 @@ The same comparison over 0101's July window, ledgers 63352609..63518022:
 | 2026-07-16 | 12,945 | 6,196 | 52.1 |
 | 2026-07-17 | 4,189 | 2,440 | 41.8 |
 
-⚠️ **Short on every single day.** Not concentrated in the proto27 freeze
-(2026-07-08 → 07-15), which is what a replay artefact would look like. And the
-rate has roughly **quadrupled** since July — ~10% then, ~50% now — so whatever
-this is, it is getting worse.
+⛔ **CORRECTED 2026-09-15 — this table does not measure the live path, and the
+two conclusions drawn from it were both wrong.** It is short on every day, but
+07-06 → 07-15 was written by an accumulating path and only 07-16 onward is live.
+It IS concentrated in the proto27 freeze, and it is NOT getting worse. See
+§"Why it did NOT grow".
 
 ### The same code recovers all of them
 
@@ -140,27 +156,84 @@ but its final write.
 `reconcile.rs:125-126` builds a `CandleAccumulator` per source and the loop is
 explicitly *"accumulate across the whole contiguous run, flush once at the
 end"*, flushing at `:202` / `:214`. **That is correct — within one run.** In
-production a doorbell-driven run is **one ledger**, so "flush once at the end of
-the run" means *flush once per ledger*, and a minute bucket spans ~12 ledgers at
-5 s each. Every one of those ledgers issues its own write for the same bucket,
-and RMT keeps the last.
+steady state a doorbell-driven run is **one ledger** — not because `batchSize`
+forces it (see below), but because the cursor is already at the tip, so each
+doorbell finds exactly one new ledger to walk. "Flush once at the end of the
+run" therefore means *flush once per ledger*, and a minute bucket spans ~11
+ledgers at ~5.5 s each. Every one issues its own write for the same bucket, and
+RMT keeps the last.
+
+⚠️ **The run is bounded by `MAX_ITERATIONS = 16`, not by 1** — a run *can* walk
+up to 16 contiguous ledgers when the cursor is behind. Steady state is the
+one-ledger case, and it is the worst case. Measured over 7 days (10,560
+minutes): 10 ledgers/min 24.2%, 11 ledgers 75.7%, 12 ledgers 0.05%, never more.
+See §"Why it did NOT grow".
 
 🔑 **This is [[0065]]'s "cross-invocation minute boundary", and it is not a
 run-boundary edge case.** [[0101]] carries it as a hazard to respect when
 *choosing backfill bounds*: the accumulator keeps the boundary minute open
 within a process run, and "that guard does not span separate invocations". True
-— and in live, every ledger is a separate invocation, so the guard never
-applies at all. What was filed as an operator footgun is the dominant live
-data-loss mechanism.
+— and in live steady state each doorbell is its own invocation walking a single
+ledger, so the guard effectively never applies. What was filed as an operator
+footgun is the dominant live data-loss mechanism.
 
-### Why it grew from ~10% to ~50%
+### ⛔ Why it did NOT grow — CORRECTED 2026-09-15
 
-Loss is a function of **ledgers per run**. During the July window the processor
-spent long stretches catching up after the proto27 freeze, processing many
-ledgers per invocation — so buckets were accumulated properly and loss was
-~10%. In steady state it handles one ledger per doorbell, which is the
-worst case, and loss settles at ~50%. **The system loses the most data when it
-is healthiest.**
+**The premise was false. There was no growth to explain.** Measured on
+production as `dev_read`, the live path has lost ~45-55% on every day it
+actually processed, July included.
+
+🔑 **The instrument: compare actual retention to the last-write-wins ceiling.**
+Predicted = the share of raw trades landing in each `(minute, contract)`
+bucket's **highest** ledger. That is a contract-level *upper* bound, because the
+real bucket key is pair-level and more crowded — so a live-written day must land
+**below** it. A day landing **above** it cannot have been written one-ledger-at-
+a-time at all.
+
+| day | raw | predicted | actual | reading |
+| --- | --- | --- | --- | --- |
+| 2026-07-06 | 13,899 | 50.8% | 74.0% | **+23 — accumulated** |
+| 2026-07-07 | 15,007 | 48.4% | 75.4% | **+27 — accumulated** |
+| 2026-07-08 | 11,174 | 56.7% | 81.2% | **+25 — accumulated** |
+| 2026-07-10 | 10,025 | 62.9% | 89.2% | **+26 — accumulated** |
+| 2026-07-12 | 7,246 | 64.0% | 89.3% | **+25 — accumulated** |
+| 2026-07-14 | 8,788 | 66.8% | 92.0% | **+25 — accumulated** |
+| 2026-07-15 | 11,172 | 58.8% | 87.3% | **+29 — accumulated** |
+| 2026-07-16 | 12,945 | 54.1% | 47.9% | −6 — live |
+| 2026-07-17 | 9,394 | 61.1% | 55.1% | −6 — live |
+| 2026-07-18 | 6,990 | 68.1% | 63.7% | −4 — live |
+| 2026-09-13 | 9,986 | 56.6% | 51.9% | −5 — live |
+
+✅ The instrument reproduces this file's own raw counts exactly — 07-07, 07-08,
+07-10, 07-12, 07-14, 07-15, 07-16, 09-12 (6,694) and 09-13 (9,986) all match to
+the row. 07-06 and 07-17 differ only because the table above uses whole days and
+§Evidence used 0101's partial ledger bounds.
+
+🔑 **What actually changed is [[0064]], deployed 2026-07-15.** Before it the
+cursor lived in `/tmp` and reset to `INITIAL_CURSOR = 63,352,611` on every
+Lambda recycle, so the reconcile loop *"oscillated floor → ~63,372k → floor
+forever"* — re-walking the same span in multi-ledger runs, re-accumulating each
+bucket whole and writing it back complete. That is the +23 to +29 signature, and
+it stops dead at 07-16, the first full day on the durable ClickHouse cursor.
+
+⚠️ **So the defect did not get worse — fixing the freeze stopped masking it.**
+A broken cursor was accidentally repairing this bug as a side effect of its own
+failure. [[0064]] was correct and necessary; it simply removed the accident.
+
+⚠️ **A run is NOT always one ledger.** `MAX_ITERATIONS = 16` on production: the
+loop walks up to 16 contiguous ledgers from the cursor, stopping at the first
+gap. `batchSize: 1` caps *doorbells* per invocation, not ledgers per run. So
+"loss is a function of ledgers per run" is right, and widening the run is
+mechanically available — it is just not what happened in July.
+
+⛔ **A catch-up burst does NOT reduce loss on its own — measured, not assumed.**
+On 2026-09-14 Galexie stalled *delivery* for ~35 min (the network kept closing
+10-11 ledgers/min throughout), then a ~380-ledger backlog drained in one burst.
+Retention did not move: **39.5% before / 40.7% during / 36.3% after**, and every
+minute from 11:00 to 12:29 sat at or below the ceiling. The backlog was in
+Galexie's uploads, not our cursor, so the loop never got far enough behind to
+walk long runs. ⚠️ Do not treat "it was catching up" as evidence of accumulation
+without checking the cursor lag.
 
 ### Why aquarius is worst
 
@@ -170,7 +243,49 @@ straddle the most ledgers. Phoenix (19 pools) and Soroswap (221) have the same
 defect at lower rates — Phoenix stored 1,306 against 1,442 extracted in the July
 window, which this explains and 0099's 7-event gate does not.
 
-### 🔴 SDEX IS AFFECTED — confirmed 2026-09-14
+### ⛔ RETRACTED — "SDEX IS AFFECTED" was WRONG. SDEX loss is UNMEASURED.
+
+**Retracted 2026-09-14, same day, before any code was written.** The contested
+SDEX buckets are **not** partial slices. Captured with every column:
+
+```
+sdex 11:14 a=4     q=111 tc=1 vb=0.7684586         vq=0.911451   o=c=1.186077 v=64423870000
+sdex 11:14 a=4     q=111 tc=1 vb=0.7684586         vq=0.911451   o=c=1.186077 v=64423870001
+sdex 11:14 a=79851 q=3   tc=1 vb=792346985.1833504 vq=0.0000001  o=c=0        v=64423863003
+sdex 11:14 a=79851 q=3   tc=1 vb=792346985.1833504 vq=0.0000001  o=c=0        v=64423863004
+```
+
+**Byte-identical in every field**, differing only in `version` by one in
+`op_index`. That is the **same trade written twice**, not two slices of a
+minute. RMT keeps one, `trade_count` and volume come out correct, and **nothing
+is lost.** Contrast the genuine aquarius case, where the two rows carry
+*different* data (`tc 2 / vol 2,513.67` against `tc 1 / vol 1,000`).
+
+So: **SDEX has no measured loss.** It remains *plausible* on the mechanism —
+same loop, same accumulator, same flush — but it is unmeasured, and "contested
+bucket count" turned out to be the wrong instrument because it cannot tell a
+duplicate from a slice. Distinguish them by **comparing the rows' payloads**,
+not by counting them.
+
+### 🔑 A separate, real finding: `operation_index` is not stable across re-processing
+
+`reconcile.rs:6-7` claims re-processing is *"idempotent: ReplacingMergeTree
+collapses re-inserts by `version`"*. **It does not.** The pairs above are the
+same trade at two different `op_index` values, so `version` differs and RMT
+keeps both as distinct rows rather than collapsing them.
+
+Benign today — the duplicates carry identical payloads, so the surviving row is
+correct. But the stated idempotency guarantee is false, and it is the guarantee
+that makes crash-recovery safe. A re-insert that carries a **higher version and
+less data** is exactly the aquarius failure, so this is the same hazard one step
+away from firing.
+
+⚠️ Also note `version = ledger_sequence * 1000 + operation_index`
+(`bucket.rs:48`) allows only **1000 operations per ledger**. A ledger with more
+collides into the next ledger's version space. Not observed, but unbounded by
+anything in the code.
+
+### Original (aquarius) evidence, which stands
 
 Caught directly. BE holds no classic-trades table, so there is no external
 source of truth for SDEX; instead the **losing writes themselves** were observed
@@ -222,6 +337,85 @@ straddle it (fragile — it only narrows the window), carry the open minute acro
 invocations in durable state, or move `1m` to a summing engine so concurrent
 partial writes add. The last changes the table contract and needs its own
 decision.
+
+### ⏳ PR #313 already carries a fix — open, unreviewed
+
+`fix/0282_reconcile-flushes-partial-minutes`, "end a reconcile run on a whole
+minute" (588+/24-, 6 files), open and mergeable with **no review**. It holds
+back any minute the run did not see the END of, rewinds the cursor to the last
+ledger of the last complete minute, and re-reads the held-back ledgers next run
+— so no accumulator state has to survive between invocations and a cold start
+behaves like a warm one.
+
+⚠️ **Three things to check before it ships:**
+
+1. 🔴 **Do not deploy it across the Protocol 28 crossing.** [[0277]] still owes a
+   before/after frontier measurement at the 2026-09-16 17:00 UTC activation.
+   Changing the reconcile loop in the same window makes an ingestion hiccup
+   un-attributable. Sequence them.
+2. ⚠️ **The deadlock escape hatch is thin, and its only signal is a WARN.** If a
+   minute ever holds ≥ `maxIterations` ledgers the run can never see past it and
+   would hold back forever — doorbells consumed successfully, queue age 0, no
+   alarm. The PR forces a partial flush and logs WARN. Measured over 7 days
+   (10,560 minutes): **10 ledgers 24.2%, 11 ledgers 75.7%, 12 ledgers 0.05%,
+   never more than 12** — so the worst walk is 13 against a budget of 16. Not
+   fragile (reaching 16 needs a ~3.75 s close time, a deliberate network
+   change), but raise `maxIterations` anyway — headroom is a cap, not a cost —
+   and alarm on that WARN.
+3. ⚠️ **Publishing latency.** A minute's candles land only once a ledger from the
+   following minute is fetched, so the newest candle is up to ~60-78 s old
+   instead of ~5 s. `rollup-freshness-1m` fires at 900 s, so the alarm is clear
+   — but check the API consumers, not just the alarm ([[0246]] is what a
+   staleness assumption costs).
+
+### 🔑 A fourth option, not previously listed: put the ledger in the sort key
+
+Keep `ReplacingMergeTree` — keep idempotency — but extend `ORDER BY` with the
+ledger so two writes for the same minute no longer collide. Nothing is replaced
+because nothing shares a key; re-inserting the same ledger still collapses. The
+minute-level total moves to the read/rollup path.
+
+⛔ **Why a plain summing engine is the weakest option.** It is not idempotent,
+and this design's crash recovery *depends* on idempotency (`reconcile.rs:6-7` —
+the cursor is written last so a crashed run is re-processed). With
+`maxReceiveCount: 10` a doorbell can be redelivered ten times, so summing turns
+a bounded silent under-count into an unbounded silent **over**-count — and
+over-counting is worse, because under-counting is detectable against raw events
+and inflated volume is not. Compounding it, `operation_index` is not stable
+across re-processing (see above), so nothing would dedupe. Separately, only
+`trade_count` and the three `volume_*` columns actually sum; `high`/`low` need
+max/min, and **`open`, `close` and `close_usd` are order-dependent** and need
+`argMin`/`argMax` state — which means `AggregatingMergeTree`, new column types,
+and a rewrite of every reader. `_1m` feeds `mv_ohlcv_1m_to_15m` (and the whole
+rollup chain), `mv_current_prices`, and many `FROM price_ohlcv_1m FINAL` sites,
+and BE reads `close_usd` — the one column that cannot be added up.
+
+| | hold-back (#313) | ledger in the sort key |
+| --- | --- | --- |
+| publishing delay | up to ~1 min | none |
+| extra S3 fetching | ~6-7x | none |
+| idempotent | yes | yes |
+| rows in `_1m` | unchanged | ~12x more |
+| blast radius | the processor | schema + every `_1m` reader |
+
+### 💰 Cost is NOT a factor — measured, so it can stop being argued
+
+At ~15,480 ledgers/day, one ledger per S3 object, bucket and Lambda both in
+`eu-central-1` **same region and account, so transfer is free**:
+
+- **S3 GETs** — a minute of *n* ledgers is re-read `n(n+1)/2` times, ≈ 6x at 11
+  ledgers/min. 470k → ~3.06M GETs/month, **+≈$1/month** at $0.0004/1,000.
+- **Lambda** — invocation count is unchanged (same doorbells); only duration
+  grows. 266 ms avg today; even at 1.5 s that is **+≈$3/month** at 512 MB arm64.
+  ⚠️ Not a timeout risk: p99 is 452 ms and max 2.4 s against a **60 s** timeout.
+- **ClickHouse writes drop ~10x** (15,480/day → ~1,440/day) and save **nothing**
+  — it is a flat-rate self-hosted Hetzner box, not a metered service. Egress
+  falls 2-3 GB/month, inside the 100 GB free allowance.
+
+**Net ≈ +$4/month.** The real gain from 10x fewer INSERTs is *capacity*: ~10x
+fewer parts to merge on a box shared with BE, where we are 3.3% of a disk BE has
+already filled once ([[hetzner-disk-is-shared-and-be-owns-96pct]]). Decide on
+latency vs blast radius, not on the bill.
 
 ## Superseded leads (kept — they were how it was found)
 
@@ -278,11 +472,16 @@ has been discarding half a venue for months. Any fix should close that too.
       the pool-set vs sample question is answered: **neither**. See §ROOT CAUSE.
 - [ ] The live path is fixed and verified by the same raw-vs-stored comparison
       running at ~0% loss for a full day.
-- [x] **Why it grew from ~10% to ~50% is stated** — loss is a function of
-      ledgers per run, and steady-state (one ledger per doorbell) is the worst
-      case. See §ROOT CAUSE.
-- [x] 🔴 **Whether SDEX is affected is answered: YES.** 23 contested buckets of
-      595 caught in one snapshot. Magnitude still unknown — see §SDEX.
+- [x] ⛔ **The "~10% → ~50% growth" question is answered by DISSOLVING it** —
+      re-measured 2026-09-15, there was no growth. Every live-processed day is
+      ~45-55%; the July ~10% days were written by an accumulating path, and the
+      break is [[0064]]'s durable cursor on 2026-07-15/16. ⚠️ This criterion was
+      previously ticked with the OPPOSITE answer. See §"Why it did NOT grow".
+- [ ] ⛔ **Whether SDEX is affected is NOT answered** — previously ticked "YES"
+      on 23 contested buckets of 595; that reading was retracted the same day
+      (the rows are byte-identical duplicates, not slices) and the tick was
+      never removed. SDEX remains plausible on the mechanism and **unmeasured**.
+      See §RETRACTED.
 - [ ] SDEX's loss is **quantified**, with an instrument that does not depend on
       catching duplicates before the merge.
 - [ ] A decision is recorded on repairing the historical estate, with a range.
@@ -297,3 +496,8 @@ has been discarding half a venue for months. Any fix should close that too.
   move aquarius by +27% in its window. 0101 is sequenced behind this decision.
 - The reprice tool is **not** implicated and needs no change — its correctness
   is what made this measurable.
+- ⏳ **PR #313 is open and unreviewed** — the fix exists, nothing is deployed.
+  See §"PR #313 already carries a fix".
+- ⚠️ **This task's TITLE still says "and SDEX is affected too"**, which was
+  retracted on 2026-09-14. It is what the board renders, so it is worth
+  correcting deliberately rather than silently.

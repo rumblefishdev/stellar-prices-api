@@ -276,6 +276,29 @@ export interface EnvironmentConfig {
      */
     readonly rollupLagSeconds: Readonly<Record<string, number>>;
     /**
+     * Age threshold in seconds for the `current_prices` writer-liveness alarm
+     * (task 0243). The rollup-freshness-probe publishes
+     * `now() - max(updated_at)` of `prices.current_prices` as `Prices/Rollup`
+     * `RollupLagSeconds` with `Table=current_prices`; the alarm fires when it
+     * exceeds this.
+     *
+     * `updated_at` is stamped at the START of every refresh of
+     * `mv_current_prices` (REFRESH EVERY 1 MINUTE), so this watches the WRITER,
+     * not its input: stale candles still read fresh here — that is
+     * `rollupLagSeconds.price_ohlcv_1m`'s job.
+     *
+     * Derivation: the healthy peak is the 60 s interval plus the 40 s refresh
+     * the rollout runbook treats as its stop line, 100 s
+     * (`CURRENT_PRICES_HEALTHY_PEAK_SECONDS`, enforced by `validateConfig`).
+     * 900 s is 15 missed refreshes, the bound the `1m` tier uses at the same
+     * 15-minute probe cadence — and that cadence dominates detection anyway:
+     * a stall under 15 min never pages, one of 30 min or more always does.
+     * Mirrored as `AGE_BOUND_SECONDS` in
+     * `packages/rollup-freshness-probe/src/current_prices.rs`; this config is
+     * authoritative. Change both, or neither.
+     */
+    readonly currentPricesFreshnessSeconds: number;
+    /**
      * Ingestion-lag threshold (seconds) for the live ledger-processor alarm
      * (task 0056 finding B). Watches the `prices-ingest-{env}` SQS queue's
      * `ApproximateAgeOfOldestMessage` — the honest "processor is falling
@@ -477,6 +500,16 @@ export const ROLLUP_HEALTHY_PEAK_SECONDS: Readonly<Record<string, number>> = {
   // does not exist until a week actually STARTS inside that month.
   price_ohlcv_1M: 31 * 86_400 + 86_400 + 6 * 86_400,
 };
+
+/**
+ * The oldest a **healthy** `prices.current_prices` reads (task 0243): one full
+ * `REFRESH EVERY 1 MINUTE` interval since the last refresh started, plus the
+ * 40 s refresh the rollout runbook treats as its stop line
+ * (docs/runbooks/0072-current-prices-mv-rollout.md). Mirrors
+ * `HEALTHY_PEAK_SECONDS` in `packages/rollup-freshness-probe/src/current_prices.rs`.
+ * `opsAlarms.currentPricesFreshnessSeconds` must exceed it.
+ */
+export const CURRENT_PRICES_HEALTHY_PEAK_SECONDS = 60 + 40;
 
 /**
  * Validates an EnvironmentConfig at synth time. Throws on missing
@@ -863,6 +896,18 @@ export function validateConfig(config: EnvironmentConfig): void {
           );
         }
       }
+    }
+    if (
+      !Number.isInteger(ops.currentPricesFreshnessSeconds) ||
+      ops.currentPricesFreshnessSeconds <= CURRENT_PRICES_HEALTHY_PEAK_SECONDS
+    ) {
+      // The same sawtooth trap as the rollup tiers: a healthy table's age climbs
+      // to a full refresh interval (plus the refresh itself) before the next
+      // rewrite, so a threshold at or below that fires on a healthy table and
+      // gets muted.
+      errors.push(
+        `opsAlarms.currentPricesFreshnessSeconds must be an integer above the healthy peak of ${CURRENT_PRICES_HEALTHY_PEAK_SECONDS}s (60 s refresh interval + 40 s worst accepted refresh), or the alarm fires on a healthy table; got: ${ops.currentPricesFreshnessSeconds}`,
+      );
     }
     if (
       !Number.isInteger(ops.ledgerProcessorLagSeconds) ||

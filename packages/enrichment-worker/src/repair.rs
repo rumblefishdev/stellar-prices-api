@@ -219,6 +219,7 @@ impl CoarseRepairDriver {
             tbl = self.cfg.enrich.table,
             pred = repair_target_pred(
                 &self.cfg.enrich.database,
+                &self.cfg.enrich.table,
                 self.cfg.enrich.usd_reset.as_ref(),
             ),
             start = self.cfg.start_month,
@@ -262,6 +263,19 @@ impl CoarseRepairDriver {
     /// (if enabled), then runs a partition-bounded one-shot enrichment for the
     /// month. Returns the per-month before/after counts.
     pub async fn run(&self) -> Result<RepairSummary, ChEnrichError> {
+        // Every month-independent refusal of a reset — the wrong quote leg for
+        // its mode, no `external` series loaded, an oracle-shadowed span, a leg
+        // no tier can price, and the 0268 mode's two series checks — runs HERE,
+        // before the month enumeration and in a dry run too. The per-month pass
+        // is the only other place they run, and a dry run never builds one;
+        // worse, an unloaded series does not fail the enumeration below (it
+        // carries the same day-set predicate), it empties it, and the run ends
+        // green having touched nothing. Found by the 0228 prove run and its two
+        // review rounds. `reset_step` calls the SAME method — one list, not two
+        // that must be kept in step by hand.
+        ChEnrichmentPass::with_client(self.client.clone(), self.cfg.enrich.clone())
+            .assert_reset_is_admissible()
+            .await?;
         let months = self.months_with_zeros().await?;
         info!(
             count = months.len(),
