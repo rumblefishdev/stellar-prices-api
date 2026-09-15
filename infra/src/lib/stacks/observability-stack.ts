@@ -1614,16 +1614,6 @@ export class ObservabilityStack extends cdk.Stack {
     // falls through silently (deep review WR-02, PR #280 review finding 2).
     {
       const covered = new Set<string>(workerHealth.map((w) => w.name));
-      for (const name of SCHEDULED_WORKERS) {
-        const has = covered.has(name);
-        const exempt = workersWithoutHealthAlarms.includes(name);
-        if (has === exempt) {
-          throw new Error(
-            `ObservabilityStack: worker "${name}" must be in exactly one of workerHealth or workersWithoutHealthAlarms ` +
-              `(in workerHealth: ${has}, exempt: ${exempt})`,
-          );
-        }
-      }
       // A worker whose schedule is disabled on purpose must also be exempt
       // here, or its -no-invocations alarm fires forever — and since task
       // 0214 the daily digest would then re-surface it every single day.
@@ -1633,6 +1623,16 @@ export class ObservabilityStack extends cdk.Stack {
           throw new Error(
             `ObservabilityStack: "${name}" is in SCHEDULE_DISABLED_WORKERS but not in WORKERS_WITHOUT_HEALTH_ALARMS — ` +
               'its -no-invocations alarm would latch forever; exempt it with a reason (lambda-baseline.ts)',
+          );
+        }
+      }
+      for (const name of SCHEDULED_WORKERS) {
+        const has = covered.has(name);
+        const exempt = workersWithoutHealthAlarms.includes(name);
+        if (has === exempt) {
+          throw new Error(
+            `ObservabilityStack: worker "${name}" must be in exactly one of workerHealth or workersWithoutHealthAlarms ` +
+              `(in workerHealth: ${has}, exempt: ${exempt})`,
           );
         }
       }
