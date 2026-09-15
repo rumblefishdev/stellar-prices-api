@@ -2,9 +2,9 @@
 id: "0223"
 title: "The -errors and -duration-near-timeout worker alarms read OK on no data — a green light that means nothing was published, not that nothing was wrong"
 type: BUG
-status: backlog
+status: active
 related_adr: []
-related_tasks: ["0222", "0218", "0214", "0220", "0204", "0226", "0112"]
+related_tasks: ["0222", "0218", "0214", "0220", "0204", "0226", "0112", "0256", "0284", "0200"]
 tags: [layer-infra, priority-medium, effort-small, observability, cloudwatch, alarms, ops]
 milestone: 2
 links:
@@ -53,6 +53,26 @@ history:
       already flagged below as the awkward case, now carries the digest as a
       second job, so its 1/1 -errors alarm became more load-bearing than when
       this task was written.
+  - date: 2026-09-15
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated, the other half of Oskar's item 10, straight after [[0214]].
+      Framing decided before any code, from a production count rather than the
+      code: 16 alarms, not 15 (6 duration — `oracle` has one too — plus 10
+      -errors). ⚠️ The binary question this task asks has a split answer. Seven
+      -errors alarms and all six duration alarms are conditional-by-design AND
+      honest, because each of those workers has a `-no-invocations` alarm with
+      `treatMissingData: breaching` answering "did it run at all". Two do not:
+      asset-discovery and supply have no liveness alarm, and the code comment
+      exempting them (`observability-stack.ts:1515`) justifies that with "their
+      -errors alarm is the coverage today" — i.e. with the very alarm this task
+      exists because it is blind to a dead worker. Circular. Decided with
+      stkrolikiewicz: supply gets health alarms (scope widened, see below);
+      asset-discovery is deferred to [[0256]] on purpose, because that task says
+      its scan is currently a no-op and may be removed, and alarming the liveness
+      of dead code is not coverage. `treatMissingData` changes nowhere; composite
+      alarms rejected — they would be invisible to 0214's digest.
 ---
 
 # The worker `-errors` and `-duration-near-timeout` alarms read OK on no data
