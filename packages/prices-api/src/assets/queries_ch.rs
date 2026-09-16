@@ -730,6 +730,43 @@ const VWAP_RAW: &str = "toDecimal128OrNull(toString( \
 /// bucket returns, without price fields.
 const PRECISION_FLOOR: &str = "toDecimal128('0.000000000001', 14)";
 
+/// The price-forming mean in USD mode, before clamping — task 0286.
+///
+/// `pf_price_volume` is the sum of `price x volume_base` over the bucket's
+/// price-forming fills, in the QUOTE asset, so it scales by the same per-row
+/// `rate` every other derived field does (`pfpv_x`); `pf_volume` is their base
+/// volume and needs no conversion. Weighting the ratio per row rather than
+/// averaging the per-row ratios is what makes the merge across sources a
+/// volume-weighted mean rather than a mean of means.
+///
+/// ⚠️ `nullIf(..., 0)` on the outside. A row that formed a price has positive
+/// amounts on both legs by construction, so the numerator is zero only when no
+/// price-forming fill is behind the bucket at all — and a `0` published here
+/// would be read as a price, and would then be CLAMPED UP to `low` by the band
+/// below, inventing a value out of an absence. This is also what an old row
+/// reports: before task 0286's migration the column does not exist, and its
+/// DEFAULT is `volume_quote`, which a fixture or a legacy writer may never have
+/// filled.
+const PF_VWAP_USD_RAW: &str = "nullIf(toDecimal128OrNull(toString( \
+                     sumIf(toFloat64(pfpv_x), valid) \
+                     / nullIf(sumIf(toFloat64(pf_volume), valid), 0)), 14), 0)";
+
+/// The quote-leg arm's price-forming gate, spelled once. Unlike the USD arm
+/// there is no `valid` to hang it on: that expression exists to say "this row
+/// can be converted to USD", and this arm converts nothing.
+const PF_ROWS: &str = "pf_trade_count > 0";
+
+/// The quote-leg arm's published extremes — gated, so a dust row's high can
+/// never become the bucket's.
+const QL_HIGH: &str = "maxIf(high, pf_trade_count > 0)";
+const QL_LOW: &str = "minIf(low, pf_trade_count > 0)";
+
+/// The quote-leg arm's price-forming mean, in the stored denomination. Same
+/// zero rule as [`PF_VWAP_USD_RAW`].
+const PF_VWAP_QL_RAW: &str = "nullIf(toDecimal128OrNull(toString( \
+                 sumIf(toFloat64(pf_price_volume), pf_trade_count > 0) \
+                 / nullIf(sumIf(toFloat64(pf_volume), pf_trade_count > 0), 0)), 14), 0)";
+
 /// Synthesize a USD series for a **peg asset** — one that is only ever stored as
 /// a quote leg, never as a base (ADR 0011 §6).
 ///
@@ -822,28 +859,77 @@ fn usd_aggregates() -> String {
                  toUInt64(sum(trade_count)) AS tc, \
                  nullIf(if(countIf(valid) = 0, NULL, argMaxIf(meth, (volume_base, quote_asset_id), valid)), '') AS meth, \
                  if(countIf(valid) = 0, NULL, toUInt8(1)) AS drv, \
+                 toNullable(toUInt64(sum(pf_trade_count))) AS pftc, \
+                 if(isNull({PF_VWAP_USD_RAW}), NULL, \
+                    toString(least(greatest({PF_VWAP_USD_RAW}, {LOW_PUBLISHED}), {HIGH_PUBLISHED}))) AS pfvw, \
+                 {CLOSE_DIVERGENT_PLACEHOLDER}, \
                  {PROVENANCE_NULL_TAIL}"
+    )
+}
+
+/// The `Denomination::Usd` per-row projection, extracted for the same reason
+/// [`usd_aggregates`] is: `valid` decides which rows may supply a price, and
+/// since task 0286 that includes "held a price-forming fill". A ClickHouse-free
+/// test has to be able to read the predicate.
+fn usd_projection(refs: &UsdRefs, granularity: Granularity) -> String {
+    let usdc = refs.usdc;
+    let floor = PRECISION_FLOOR;
+    // The whole classification, extracted so its arm ORDER is testable
+    // without a ClickHouse — see [`usd_method_expr`].
+    let meth_arm = usd_method_expr(usdc, &refs.pivots, granularity);
+    // ⚠️ `pf_trade_count > 0` is a conjunct of `valid` rather than a filter on
+    // the subquery: `valid` gates the PRICE expressions only, while
+    // `sum(volume_base)`, `sum(volume_quote_usd)` and `sum(trade_count)`
+    // aggregate over every row. A `WHERE` here would delete a dust-only
+    // bucket's activity along with its price, which is task 0286's wrong
+    // answer, not its fix.
+    format!(
+        "timestamp, volume_base, volume_quote_usd, trade_count, quote_asset_id, \
+         pf_trade_count, pf_volume, \
+         (close >= {floor} AND close_usd >= {floor} \
+           AND pf_trade_count > 0 \
+           AND (quote_asset_id = {usdc} OR close_usd != close)) AS valid, \
+         toFloat64(close_usd) / nullIf(toFloat64(close), 0) AS rate, \
+         toDecimal128OrNull(toString(toFloat64(open) * rate), 14) AS o_x, \
+         toDecimal128OrNull(toString(toFloat64(high) * rate), 14) AS h_x, \
+         toDecimal128OrNull(toString(toFloat64(low)  * rate), 14) AS l_x, \
+         close_usd AS c_x, \
+         toDecimal128OrNull(toString(toFloat64(vwap) * rate), 14) AS w_x, \
+         toDecimal128OrNull(toString(toFloat64(pf_price_volume) * rate), 14) AS pfpv_x, \
+         {meth_arm}"
     )
 }
 
 /// The `Denomination::QuoteLeg` aggregate list. Same extraction, same reason.
 fn quote_leg_aggregates() -> String {
+    // The merged vwap, over the price-forming rows only. A dust-only ROW's
+    // `vwap` column is a dust price like its close, so letting it into the
+    // weighted mean would put back on the wire exactly what the gate on
+    // `o`/`h`/`l`/`c` takes off.
+    let vwap_raw = "toDecimal128OrNull(toString( \
+                 sumIf(toFloat64(vwap) * toFloat64(volume_base), pf_trade_count > 0) \
+                 / nullIf(sumIf(toFloat64(volume_base), pf_trade_count > 0), 0)), 14)";
+    // ⚠️ Every price aggregate below is a `-If` and every one of them is
+    // WRAPPED. Over zero matching rows `maxIf`/`minIf`/`argMaxIf` return the
+    // type's DEFAULT — `0` — rather than NULL (verified on 26.3.10.60), so an
+    // unwrapped `minIf(low, ...)` would publish `low = 0` on a bucket of
+    // nothing but dust: a price, asserted, where the bucket has none.
     format!(
-        "toNullable(toString(argMax(open, volume_base))) AS o, \
-             toNullable(toString(max(high))) AS h, \
-             toNullable(toString(min(low))) AS l, \
-             toNullable(toString(argMax(close, volume_base))) AS c, \
+        "if(countIf({PF_ROWS}) = 0, NULL, toString(argMaxIf(open, volume_base, {PF_ROWS}))) AS o, \
+             if(countIf({PF_ROWS}) = 0, NULL, toString({QL_HIGH})) AS h, \
+             if(countIf({PF_ROWS}) = 0, NULL, toString({QL_LOW})) AS l, \
+             if(countIf({PF_ROWS}) = 0, NULL, toString(argMaxIf(close, volume_base, {PF_ROWS}))) AS c, \
              toString(sum(volume_base)) AS vb, \
              toString(sum(volume_quote_usd)) AS vqu, \
-             toNullable(toString(if(isNull(toDecimal128OrNull(toString( \
-                 sum(toFloat64(vwap) * toFloat64(volume_base)) \
-                 / nullIf(sum(toFloat64(volume_base)), 0)), 14)), toDecimal128(0, 14), \
-                 least(greatest(toDecimal128OrNull(toString( \
-                     sum(toFloat64(vwap) * toFloat64(volume_base)) \
-                     / nullIf(sum(toFloat64(volume_base)), 0)), 14), min(low)), max(high))))) AS vw, \
+             if(countIf({PF_ROWS}) = 0, NULL, toString(if(isNull({vwap_raw}), toDecimal128(0, 14), \
+                 least(greatest({vwap_raw}, {QL_LOW}), {QL_HIGH})))) AS vw, \
              toUInt64(sum(trade_count)) AS tc, \
              CAST(NULL AS Nullable(String)) AS meth, \
              CAST(NULL AS Nullable(UInt8)) AS drv, \
+             toNullable(toUInt64(sum(pf_trade_count))) AS pftc, \
+             if(isNull({PF_VWAP_QL_RAW}), NULL, \
+                toString(least(greatest({PF_VWAP_QL_RAW}, {QL_LOW}), {QL_HIGH}))) AS pfvw, \
+             {CLOSE_DIVERGENT_PLACEHOLDER}, \
              {PROVENANCE_NULL_TAIL}"
     )
 }
@@ -1023,6 +1109,7 @@ fn peg_series_sql(args: &OhlcvArgs, in_xlm: bool, table: &str, conds: &[String])
              toUInt64(0) AS tc, \
              {meth} AS meth, \
              if(o IS NULL, NULL, toNullable(toUInt8(1))) AS drv, \
+             {PF_NULL_TAIL}, \
              {src} AS src, \
              {qual} AS qual, \
              bo.bkt AS bkt \
@@ -1075,7 +1162,8 @@ fn peg_series_sql(args: &OhlcvArgs, in_xlm: bool, table: &str, conds: &[String])
 /// plausible wrong row on a public endpoint with nothing failing anywhere.
 /// The alias count must equal `Candle`'s field count, and the ORDER must match
 /// the struct's field order.
-const OUTER_ALIASES: &str = "ts, o, h, l, c, vb, vqu, vw, tc, meth, drv, src, qual";
+const OUTER_ALIASES: &str =
+    "ts, o, h, l, c, vb, vqu, vw, tc, meth, drv, pftc, pfvw, cdiv, src, qual";
 
 /// Task 0267's two provenance columns as the candle path emits them: NULL.
 ///
@@ -1085,6 +1173,26 @@ const OUTER_ALIASES: &str = "ts, o, h, l, c, vb, vqu, vw, tc, meth, drv, src, qu
 /// positional RowBinary counts columns, not names.
 const PROVENANCE_NULL_TAIL: &str =
     "CAST(NULL AS Nullable(String)) AS src, CAST(NULL AS Nullable(String)) AS qual";
+
+/// Task 0286's three columns as the SYNTHESIZED USDC series emits them: NULL.
+///
+/// That series is built from `usd_rate` observations, not from stored candles,
+/// so it counts no fills. `0` would be the wrong sentinel — on the candle path
+/// `pf_trade_count = 0` is the positive statement "this bucket traded and
+/// nothing in it formed a price", which is not what a synthesized bucket is.
+const PF_NULL_TAIL: &str = "CAST(NULL AS Nullable(UInt64)) AS pftc, \
+     CAST(NULL AS Nullable(String)) AS pfvw, \
+     CAST(NULL AS Nullable(UInt8)) AS cdiv";
+
+/// `close_divergent` as every query emits it: NULL, filled in Rust.
+///
+/// The flag compares two values that are already projected — `c` and `pfvw` —
+/// and both query shapes plus the peg series would otherwise each have to carry
+/// the comparison a second time, over expressions that are already several
+/// lines long. [`mark_close_divergence`] computes it once over the decoded rows
+/// instead. The column is still EMITTED here, because positional RowBinary
+/// counts columns rather than names.
+const CLOSE_DIVERGENT_PLACEHOLDER: &str = "CAST(NULL AS Nullable(UInt8)) AS cdiv";
 
 pub async fn ohlcv_peg_series(
     ch: &Client,
@@ -1450,44 +1558,27 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
     // silently drop the recent candles a chart actually wants. `ts` is ISO-8601
     // (`%Y-%m-%dT%H:%i:%SZ`), so lexicographic `ts ASC` == chronological order.
     let (projection, aggregates) = match args.denomination {
-        Denomination::Usd(ref refs) => {
-            let usdc = refs.usdc;
-            let floor = PRECISION_FLOOR;
-            // The whole classification, extracted so its arm ORDER is testable
-            // without a ClickHouse — see [`usd_method_expr`].
-            let meth_arm = usd_method_expr(usdc, &refs.pivots, args.granularity);
-            (
-                // Per-row scaling — see the ordering note above. `valid` gates
-                // both the arithmetic and the classification, so a row that
-                // cannot be priced contributes to volume and trade_count but
-                // never to a price or a method.
-                format!(
-                    "timestamp, volume_base, volume_quote_usd, trade_count, quote_asset_id, \
-                     (close >= {floor} AND close_usd >= {floor} \
-                       AND (quote_asset_id = {usdc} OR close_usd != close)) AS valid, \
-                     toFloat64(close_usd) / nullIf(toFloat64(close), 0) AS rate, \
-                     toDecimal128OrNull(toString(toFloat64(open) * rate), 14) AS o_x, \
-                     toDecimal128OrNull(toString(toFloat64(high) * rate), 14) AS h_x, \
-                     toDecimal128OrNull(toString(toFloat64(low)  * rate), 14) AS l_x, \
-                     close_usd AS c_x, \
-                     toDecimal128OrNull(toString(toFloat64(vwap) * rate), 14) AS w_x, \
-                     {meth_arm}"
-                ),
-                // `countIf(valid) = 0` is what produces §5's price-less bucket:
-                // NULL across every price field, while the volume columns below
-                // still aggregate over all rows.
-                // `c` is EXACT (`close_usd` as stored) while `h`/`l` are derived
-                // through `toFloat64`, so the two are on different scales and can
-                // cross — task 0229. `least`/`greatest` pull the derived extremes
-                // back over the exact close; see the CLOSE_EXACT note above.
-                usd_aggregates(),
-            )
-        }
+        Denomination::Usd(ref refs) => (
+            // Per-row scaling — see the ordering note above. `valid` gates
+            // both the arithmetic and the classification, so a row that
+            // cannot be priced contributes to volume and trade_count but
+            // never to a price or a method.
+            usd_projection(refs, args.granularity),
+            // `countIf(valid) = 0` is what produces §5's price-less bucket:
+            // NULL across every price field, while the volume columns below
+            // still aggregate over all rows.
+            // `c` is EXACT (`close_usd` as stored) while `h`/`l` are derived
+            // through `toFloat64`, so the two are on different scales and can
+            // cross — task 0229. `least`/`greatest` pull the derived extremes
+            // back over the exact close; see the CLOSE_EXACT note above.
+            usd_aggregates(),
+        ),
         // As stored: no conversion, so nothing is derived and there is no USD
         // rate to attribute. Both provenance fields are NULL rather than
         // guessed — see Denomination::QuoteLeg.
         Denomination::QuoteLeg(_) => (
-            "timestamp, open, high, low, close, volume_base, volume_quote_usd, vwap, trade_count"
+            "timestamp, open, high, low, close, volume_base, volume_quote_usd, vwap, \
+             trade_count, pf_trade_count, pf_volume, pf_price_volume"
                 .to_string(),
             // ⚠️ `vw` is clamped into `[min(low), max(high)]` here too — task 0229's
             // review, finding 1. This arm applies no rate, so `o`/`h`/`l`/`c` are
@@ -1559,6 +1650,49 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
         q = q.bind(e);
     }
     q.fetch_all::<Candle>().await
+}
+
+/// How far a bucket's `close` may sit from its price-forming mean before the
+/// response says so: one percent.
+///
+/// Not a quality threshold and not tuned — it is a round number that separates
+/// "the last fill is the bucket" from "the last fill is one corner of it". The
+/// flag reports the comparison; what to do about it is the caller's.
+const CLOSE_DIVERGENCE_THRESHOLD: f64 = 0.01;
+
+/// `|close / pf_vwap - 1| > 1%`, or `None` when there is nothing to compare.
+///
+/// ⚠️ **`None` is not `Some(false)`.** A missing operand means no comparison was
+/// made; `false` would claim the two agree. The same distinction the price
+/// fields carry — a bucket without a price publishes `null`, never `0`.
+///
+/// `f64` is deliberate here where the price fields are decimal strings: this
+/// answers a one-percent yes/no, and a ratio's double precision is ~15
+/// significant digits against a threshold that needs two. The values themselves
+/// are never re-rendered from this.
+fn close_divergence(close: Option<&str>, pf_vwap: Option<&str>) -> Option<bool> {
+    let close: f64 = close?.parse().ok()?;
+    let mean: f64 = pf_vwap?.parse().ok()?;
+    if mean == 0.0 || !mean.is_finite() || !close.is_finite() {
+        return None;
+    }
+    Some((close / mean - 1.0).abs() > CLOSE_DIVERGENCE_THRESHOLD)
+}
+
+/// Fill [`Candle::close_divergent`] over a decoded series.
+///
+/// Both queries project the column as a typed NULL (positional RowBinary counts
+/// columns, so it has to exist) and this is where it gets its value. Computing
+/// it here rather than in SQL keeps ONE copy of the rule: the USD arm, the
+/// quote-leg arm and the synthesized peg series would each have needed their
+/// own, over expressions that are already several lines long — and the peg
+/// series has no `pf_vwap` at all, so its answer falls out of the `None` rule
+/// for free.
+pub(crate) fn mark_close_divergence(candles: &mut [Candle]) {
+    for candle in candles.iter_mut() {
+        candle.close_divergent =
+            close_divergence(candle.close.as_deref(), candle.pf_vwap.as_deref());
+    }
 }
 
 #[cfg(test)]
@@ -2268,10 +2402,17 @@ mod tests {
         let aliases: Vec<&str> = OUTER_ALIASES.split(", ").collect();
         assert_eq!(
             aliases.len(),
-            13,
+            16,
             "one alias per `Candle` field, in the struct's order: {OUTER_ALIASES}"
         );
-        assert_eq!(&aliases[11..], &["src", "qual"], "{OUTER_ALIASES}");
+        // Task 0286's three fields sit BEFORE the provenance pair, which keeps
+        // `src`/`qual` last and every preceding position fixed.
+        assert_eq!(
+            &aliases[11..14],
+            &["pftc", "pfvw", "cdiv"],
+            "{OUTER_ALIASES}"
+        );
+        assert_eq!(&aliases[14..], &["src", "qual"], "{OUTER_ALIASES}");
 
         assert_eq!(
             PROVENANCE_NULL_TAIL,
@@ -2317,5 +2458,210 @@ mod tests {
             src_at < qual_at,
             "`source` precedes `quality` in `Candle`, so it must precede it here"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 0286 — the price-forming gate on the read surface.
+    // -----------------------------------------------------------------------
+
+    fn usd_refs() -> UsdRefs {
+        UsdRefs {
+            usdc: 2,
+            pivots: vec![1],
+        }
+    }
+
+    /// A candle's prices come only from the rows that held a price-forming
+    /// fill. In USD mode that is one more conjunct on `valid`, which already
+    /// gates every price expression; nothing else in that arm has to change.
+    #[test]
+    fn the_usd_arm_admits_only_rows_that_formed_a_price() {
+        let projection = usd_projection(&usd_refs(), Granularity::H1);
+        let valid = projection
+            .split(") AS valid")
+            .next()
+            .expect("the projection defines `valid`");
+        assert!(
+            valid.contains("pf_trade_count > 0"),
+            "`valid` must exclude a row whose bucket formed no price: {valid}"
+        );
+        // The pf columns the aggregates weigh have to reach the outer SELECT.
+        for col in ["pf_trade_count", "pf_volume", "pfpv_x"] {
+            assert!(
+                projection.contains(col),
+                "the inner projection must carry `{col}`: {projection}"
+            );
+        }
+    }
+
+    /// The quote-leg arm applies no rate and so has no `valid` to lean on: each
+    /// price aggregate carries the gate itself, and each is wrapped against
+    /// F6c — a `-If` aggregate over zero matching rows returns the type's
+    /// DEFAULT (0), not NULL, so an unwrapped `minIf` would publish a `low` of
+    /// zero on a bucket of nothing but dust.
+    #[test]
+    fn the_quote_leg_arm_gates_every_price_aggregate_and_wraps_it_against_the_zero_default() {
+        let agg = quote_leg_aggregates();
+        for gated in [
+            "argMaxIf(open, volume_base, pf_trade_count > 0)",
+            "maxIf(high, pf_trade_count > 0)",
+            "minIf(low, pf_trade_count > 0)",
+            "argMaxIf(close, volume_base, pf_trade_count > 0)",
+        ] {
+            assert!(agg.contains(gated), "missing `{gated}` in: {agg}");
+        }
+        for bare in [
+            "argMax(open, volume_base)",
+            "max(high)",
+            "min(low)",
+            "argMax(close, volume_base)",
+        ] {
+            assert!(
+                !agg.contains(bare),
+                "`{bare}` takes its price from dust too: {agg}"
+            );
+        }
+        // One wrapper per price field: open, high, low, close, vwap.
+        assert_eq!(
+            agg.matches("if(countIf(pf_trade_count > 0) = 0, NULL,")
+                .count(),
+            5,
+            "every price field must go NULL on a bucket with no price-forming \
+             fill, rather than take a `-If` aggregate's zero default: {agg}"
+        );
+    }
+
+    /// The bucket still reports the trading that happened. Volume and count are
+    /// summed over EVERY row, dust included — only the prices are filtered, and
+    /// a gate that leaked into the volume aggregates would turn a dust-only
+    /// bucket into "did not trade".
+    #[test]
+    fn a_bucket_with_no_price_forming_fill_keeps_its_volume_and_its_counts() {
+        for (name, agg) in [
+            ("Denomination::Usd", usd_aggregates()),
+            ("Denomination::QuoteLeg", quote_leg_aggregates()),
+        ] {
+            for ungated in [
+                "sum(volume_base)",
+                "sum(volume_quote_usd)",
+                "sum(trade_count)",
+                "sum(pf_trade_count)",
+            ] {
+                assert!(
+                    agg.contains(ungated),
+                    "{name} must aggregate `{ungated}` over the whole bucket: {agg}"
+                );
+            }
+        }
+    }
+
+    /// `pf_vwap` is the price-forming volume-weighted mean, and it is published
+    /// inside the band the caller sees — the same self-consistency rule `vwap`
+    /// carries. It is NULL rather than zero when the bucket has no
+    /// price-forming volume to weigh: a zero here would be read as a price.
+    #[test]
+    fn the_price_forming_vwap_is_clamped_into_the_published_band_and_never_zero() {
+        for (name, agg) in [
+            ("Denomination::Usd", usd_aggregates()),
+            ("Denomination::QuoteLeg", quote_leg_aggregates()),
+        ] {
+            let pfvw = agg
+                .split(" AS pfvw")
+                .next()
+                .and_then(|head| head.rsplit(" AS pftc, ").next())
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                pfvw.contains("least(greatest("),
+                "{name}'s pf_vwap must be clamped into [low, high]: {pfvw}"
+            );
+            assert!(
+                pfvw.contains("nullIf("),
+                "{name}'s pf_vwap must be NULL, not 0, with no price-forming \
+                 volume behind it: {pfvw}"
+            );
+        }
+    }
+
+    /// The synthesized USDC series has no stored candle behind it, so it counts
+    /// no fills. NULL, not `0` — `0` is what a bucket of pure dust reports, and
+    /// the two are different statements.
+    #[test]
+    fn the_peg_series_reports_no_price_forming_fields() {
+        let sql = peg_sql();
+        assert!(
+            sql.contains(PF_NULL_TAIL),
+            "the peg series must publish all three price-forming fields as \
+             typed NULLs: {sql}"
+        );
+        let aliases = aliases_of(&sql);
+        for want in ["pftc", "pfvw", "cdiv"] {
+            assert!(aliases.contains(&want), "peg series must project {want}");
+        }
+    }
+
+    /// The divergence flag compares the bucket's close against the mean of the
+    /// fills that formed it. It is computed in Rust rather than in SQL because
+    /// both operands are already on the wire, and both query shapes plus the
+    /// peg series would otherwise have to carry the same expression a fourth,
+    /// fifth and sixth time.
+    #[test]
+    fn close_divergence_needs_both_operands_and_fires_only_past_one_percent() {
+        assert_eq!(close_divergence(Some("1.0"), Some("1.0")), Some(false));
+        // Half a percent either way is agreement; two percent is not.
+        //
+        // ⚠️ The threshold ITSELF is deliberately not asserted. `1.01 / 1.0 - 1`
+        // is `0.010000000000000009` in `f64`, so "exactly one percent" is not a
+        // value this comparison can be handed — a test pinning that boundary
+        // would be measuring the float representation of the literals rather
+        // than the rule, and the rule is a flag on a chart, not a limit.
+        assert_eq!(close_divergence(Some("1.005"), Some("1.0")), Some(false));
+        assert_eq!(close_divergence(Some("0.995"), Some("1.0")), Some(false));
+        assert_eq!(close_divergence(Some("1.02"), Some("1.0")), Some(true));
+        assert_eq!(close_divergence(Some("0.98"), Some("1.0")), Some(true));
+        // Either operand missing: no comparison was made, so there is nothing
+        // to report. A `false` here would claim agreement nobody checked.
+        assert_eq!(close_divergence(None, Some("1.0")), None);
+        assert_eq!(close_divergence(Some("1.0"), None), None);
+        assert_eq!(close_divergence(None, None), None);
+        // A zero or unparseable mean divides nothing.
+        assert_eq!(close_divergence(Some("1.0"), Some("0")), None);
+        assert_eq!(close_divergence(Some("1.0"), Some("")), None);
+    }
+
+    /// The flag is applied to the rows the handler is about to serialize, so a
+    /// series passes through one call rather than per-candle bookkeeping.
+    #[test]
+    fn marking_a_series_fills_the_flag_on_every_candle_that_has_both_operands() {
+        let mut series = vec![
+            candle_with(Some("1.15"), Some("1.0")),
+            candle_with(Some("1.0"), Some("1.0")),
+            candle_with(None, None),
+        ];
+        mark_close_divergence(&mut series);
+        assert_eq!(series[0].close_divergent, Some(true));
+        assert_eq!(series[1].close_divergent, Some(false));
+        assert_eq!(series[2].close_divergent, None);
+    }
+
+    fn candle_with(close: Option<&str>, pf_vwap: Option<&str>) -> Candle {
+        Candle {
+            timestamp: "2026-03-01T10:00:00Z".to_string(),
+            open: None,
+            high: None,
+            low: None,
+            close: close.map(str::to_string),
+            volume_base: "0".to_string(),
+            volume_quote_usd: "0".to_string(),
+            vwap: None,
+            trade_count: 0,
+            method: None,
+            derived: None,
+            pf_trade_count: Some(1),
+            pf_vwap: pf_vwap.map(str::to_string),
+            close_divergent: None,
+            source: None,
+            quality: None,
+        }
     }
 }

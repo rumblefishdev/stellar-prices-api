@@ -50,9 +50,13 @@ pub(super) const SCHEMAS: &[(&str, &str)] = &[
     ("BatchResponse", "Response of `POST /prices/batch`."),
     (
         "Candle",
-        "One OHLCV candle, expressed in `base_currency`.\n\nThe price fields — `open`, \
-         `high`, `low`, `close` and `vwap` — are `null`, not omitted, on a bucket that traded \
-         but has no USD value: either the conversion has not caught up with the newest \
+        "One OHLCV candle, expressed in `base_currency`.\n\nThe prices come only from the \
+         bucket's own price-forming trades: `open` and `close` are the first and last of \
+         them, `high` and `low` their extremes. Nothing is carried over from a neighbouring \
+         bucket, so a period that traded only in amounts too small to carry a price has no \
+         price at all — see `pf_trade_count`.\n\nThe price fields — `open`, `high`, `low`, \
+         `close`, `vwap` and `pf_vwap` — are `null`, not omitted, on such a bucket and on one \
+         that has no USD value: either the conversion has not caught up with the newest \
          buckets yet, or the bucket traded only against a quote asset with no USD reference. \
          `volume_base`, `volume_quote_usd` and `trade_count` are always present, so such a \
          bucket still shows its activity.",
@@ -294,8 +298,21 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "Candle",
         "close",
-        "Closing price of the bucket, in `base_currency`; `null` when the bucket has no \
-         price. Exact in USD mode — the other price fields are scaled, see `derived`.",
+        "Closing price of the bucket, in `base_currency`: the LAST price-forming trade of \
+         this bucket, never one carried over from an earlier one. `null` when the bucket has \
+         no price — see `pf_trade_count`. Exact in USD mode — the other price fields are \
+         scaled, see `derived`.",
+    ),
+    (
+        "Candle",
+        "close_divergent",
+        "Whether `close` sits more than 1% away from `pf_vwap`. The close is a SINGLE trade \
+         — the last one that formed a price — while `pf_vwap` is the whole bucket's \
+         price-forming mean, so a wide gap marks a thin or one-sided bucket rather than an \
+         error: the close is still what it last traded at, and a poor summary of what it is \
+         worth. Prefer `pf_vwap` when ranking or valuing, and `close` when charting the last \
+         price.\n\n`null` when either value is `null` — nothing was compared, which is not \
+         the same as the two agreeing.",
     ),
     (
         "Candle",
@@ -310,13 +327,14 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "Candle",
         "high",
-        "Highest price in the bucket, in `base_currency`; `null` when the bucket has no \
-         price.",
+        "Highest price among this bucket's price-forming trades, in `base_currency`; `null` \
+         when the bucket has no price — see `pf_trade_count`.",
     ),
     (
         "Candle",
         "low",
-        "Lowest price in the bucket, in `base_currency`; `null` when the bucket has no price.",
+        "Lowest price among this bucket's price-forming trades, in `base_currency`; `null` \
+         when the bucket has no price — see `pf_trade_count`.",
     ),
     (
         "Candle",
@@ -357,8 +375,33 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "Candle",
         "open",
-        "Opening price of the bucket, in `base_currency`; `null` when the bucket has no \
-         price.",
+        "Opening price of the bucket, in `base_currency`: the FIRST price-forming trade of \
+         this bucket. `null` when the bucket has no price — see `pf_trade_count`.",
+    ),
+    (
+        "Candle",
+        "pf_trade_count",
+        "How many of the bucket's trades formed its price.\n\nA trade's price is the ratio \
+         of the two integer amounts exchanged, so a trade of a few of the smallest \
+         representable units prints an exact small fraction — 1/17, 5/34 — that is \
+         arithmetically correct and can sit hundreds of percent off the market. Those trades \
+         are not price-forming, and `open`, `high`, `low` and `close` are taken only from \
+         the ones that are.\n\n`0` is a real answer and the one worth acting on: the bucket \
+         traded, its `volume_base` and `trade_count` are reported, and it has NO price — \
+         every price field is `null` rather than carrying a dust print. Always at most \
+         `trade_count`; `null` only on the synthesized USDC self-series \
+         (`GET /assets/USDC:<issuer>/ohlcv`), which is built from rate observations and has \
+         no trades to count.",
+    ),
+    (
+        "Candle",
+        "pf_vwap",
+        "Volume-weighted average price of the bucket's price-forming trades, in \
+         `base_currency` — `vwap` with the dust left out, and the value `close_divergent` \
+         compares `close` against.\n\nDenominated exactly like `close` and bounded by the \
+         published `low` and `high`, so the response stays self-consistent. `null` when the \
+         bucket has no price-forming volume, and on the synthesized USDC self-series. Never \
+         `0`.",
     ),
     (
         "Candle",
@@ -423,8 +466,9 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "Candle",
         "vwap",
-        "Volume-weighted average price of the bucket, in `base_currency`; `null` when the \
-         bucket has no price.",
+        "Volume-weighted average price of the bucket, in `base_currency`, over every trade \
+         it holds — including the ones too small to form a price. `pf_vwap` is the same mean \
+         with those left out. `null` when the bucket has no price.",
     ),
     (
         "ErrorEnvelope",

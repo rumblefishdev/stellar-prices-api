@@ -423,6 +423,46 @@ pub struct Candle {
     /// `None` when the price fields are absent, and for `base_currency=XLM`,
     /// where nothing is converted and so nothing is derived.
     pub derived: Option<bool>,
+    /// How many of the bucket's trades formed its price (task 0286).
+    ///
+    /// A fill's price is the ratio of two integer stroop amounts, so a fill of a
+    /// few stroops prints an exact small fraction — 1/17, 5/34 — that can sit
+    /// hundreds of percent off the market while being arithmetically correct.
+    /// Such a fill is **not price-forming**, and `open`/`high`/`low`/`close`
+    /// are taken only from the ones that are.
+    ///
+    /// `0` is a real answer and the one worth acting on: the bucket traded, its
+    /// volume and `trade_count` are reported, and it has **no price** — every
+    /// price field is `null` rather than carrying a dust print forward.
+    ///
+    /// Summed over every stored row merged into the bucket, dust rows included,
+    /// so it is always `<= trade_count`. `None` only on the synthesized USDC
+    /// self-series, which has no stored candle behind it to count fills from.
+    pub pf_trade_count: Option<u64>,
+    /// Volume-weighted mean of the bucket's **price-forming** fills, in
+    /// `base_currency` — [`Candle::vwap`] with the dust taken out.
+    ///
+    /// Denominated exactly like [`Candle::close`] (in USD mode, scaled by the
+    /// same per-bucket rate) and clamped into `[low, high]` for the same reason
+    /// `vwap` is: a mean of prices inside a band belongs inside that band, and
+    /// the response has to be self-consistent with the values it publishes.
+    ///
+    /// `null` when the bucket has no price-forming volume to weigh, and on the
+    /// synthesized USDC self-series. Never `0` — a zero here would be read as a
+    /// price.
+    pub pf_vwap: Option<String>,
+    /// Whether the bucket's [`Candle::close`] sits more than 1% away from its
+    /// [`Candle::pf_vwap`] — `|close / pf_vwap - 1| > 0.01`.
+    ///
+    /// The close is ONE fill (the last price-forming one) while `pf_vwap` is
+    /// the whole bucket's price-forming mean, so a wide gap is a thin or
+    /// one-sided bucket: the close is still the right answer to "what did it
+    /// last trade at", and a poor answer to "what is it worth". A chart can
+    /// render the flag; a ranking should probably prefer `pf_vwap`.
+    ///
+    /// `null` when either operand is `null` — nothing was compared, which is
+    /// not the same statement as "they agree".
+    pub close_divergent: Option<bool>,
     /// The outside USD series a `method = 'external'` rate was imported from —
     /// `chainlink` or `bitstamp` (task 0267, task 0265's composed history).
     ///

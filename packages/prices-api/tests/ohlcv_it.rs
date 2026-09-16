@@ -349,6 +349,13 @@ async fn ohlcv_unpriced_bucket_is_returned_with_price_fields_absent() {
     // Activity that does not depend on the USD rate is still reported.
     approx(&c["volume_base"], 20.0);
     assert_eq!(c["trade_count"], 3);
+    // Task 0286: this bucket DID form prices — all three of its trades did.
+    // "Has no USD rate yet" and "held nothing that could set a price" are two
+    // different absences, and they are distinguishable on the wire.
+    assert_eq!(
+        c["pf_trade_count"], 3,
+        "an unpriced bucket is not a dust bucket: {c}"
+    );
 
     teardown(db).await;
 }
@@ -2424,6 +2431,265 @@ async fn ohlcv_usdc_leg_labels_par_external_and_oracle_by_signature_and_epoch() 
                 c["method"], "peg",
                 "0268 retired this label from the candle path; it survives only \
                  on USDC's own series: {c}"
+            );
+        }
+    }
+
+    teardown(db).await;
+}
+
+// ---------------------------------------------------------------------------
+// Task 0286 — a candle's prices come only from the price-forming trades of its
+// own bucket, and `pf_trade_count` is how a stored row says whether it had any.
+// ---------------------------------------------------------------------------
+
+/// Seed one FOO/USDC bucket per case the price-forming gate has to get right.
+///
+/// The three pf columns are written EXPLICITLY here. Left out, they take their
+/// migration DEFAULTs (`pf_trade_count = trade_count`, `pf_volume =
+/// volume_base`, `pf_price_volume = volume_quote`), which is the pre-0286
+/// meaning "every fill formed price" — the exact value that would make these
+/// tests assert nothing.
+///
+///   09:00  one source, two dust fills only — a 1/17 print on 3.4 stroops
+///   10:00  two sources; the DUST one carries the larger volume
+///   11:00  one source, price-forming, whose close sits 15% off its own
+///          price-forming vwap
+async fn seed_price_forming(db: &str, admin: &Client) {
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ('2026-03-01 09:00:00', 3, 2, 'sdex', 0.05882352941176, 0.05882352941176, \
+              0.05882352941176, 0.05882352941176, 0.0000034, 0.0000002, 0.0000002, \
+              0.05882352941176, 0.05882352941176, 2, 1, 0, 0, 0), \
+             ('2026-03-01 10:00:00', 3, 2, 'sdex', 1.0, 1.2, 0.9, 1.1, 10, 11, 11, 1.1, 1.1, \
+              4, 1, 4, 10, 11), \
+             ('2026-03-01 10:00:00', 3, 2, 'soroswap', 99.0, 99.0, 99.0, 99.0, 1000, 5, 5, \
+              99.0, 99.0, 2, 1, 0, 0, 0), \
+             ('2026-03-01 11:00:00', 3, 2, 'sdex', 1.0, 1.3, 0.9, 1.15, 100, 100, 100, 1.15, \
+              1.0, 8, 1, 8, 100, 100)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// A bucket whose every fill was dust has no price at all — and still reports
+/// the trading that happened. Carrying a price forward from a neighbouring
+/// bucket, or publishing the 1/17 print, are the two wrong answers.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_a_dust_only_bucket_has_no_price_and_keeps_its_volume() {
+    let db = "it_ohlcv_dust_only_0286";
+    let client = setup(db).await;
+    seed_price_forming(db, &Client::default().with_url(ch_url()).with_database(db)).await;
+
+    let uri = format!(
+        "/v1/assets/FOO:{}/ohlcv?granularity=1h&start=2026-03-01T09:00:00Z\
+         &end=2026-03-01T09:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "the bucket must survive, not be dropped");
+
+    let c = &data[0];
+    for field in ["open", "high", "low", "close", "vwap", "method", "derived"] {
+        assert!(
+            c[field].is_null(),
+            "{field} must be absent, got {}",
+            c[field]
+        );
+    }
+    approx(&c["volume_base"], 0.0000034);
+    assert_eq!(c["trade_count"], 2, "the dust fills still traded");
+    assert_eq!(
+        c["pf_trade_count"], 0,
+        "the bucket reports that nothing in it formed a price: {c}"
+    );
+
+    teardown(db).await;
+}
+
+/// The merge across sources ranks by volume, and a dust source can out-volume a
+/// real one. Volume is not evidence that a price is usable: the price-forming
+/// count is.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_a_dust_only_source_with_the_larger_volume_does_not_supply_the_prices() {
+    let db = "it_ohlcv_dust_source_0286";
+    let client = setup(db).await;
+    seed_price_forming(db, &Client::default().with_url(ch_url()).with_database(db)).await;
+
+    let uri = format!(
+        "/v1/assets/FOO:{}/ohlcv?granularity=1h&start=2026-03-01T10:00:00Z\
+         &end=2026-03-01T10:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1);
+    let c = &data[0];
+
+    approx(&c["close"], 1.1); // the sdex leg, on a hundredth of the volume
+    approx(&c["open"], 1.0);
+    approx(&c["high"], 1.2); // NOT 99.0
+    approx(&c["low"], 0.9);
+    approx(&c["vwap"], 1.1);
+    // Volume and count are the whole bucket's, dust included — only prices are
+    // filtered.
+    approx(&c["volume_base"], 1010.0);
+    assert_eq!(c["trade_count"], 6);
+    assert_eq!(c["pf_trade_count"], 4);
+
+    teardown(db).await;
+}
+
+/// The three fields task 0286 adds to the wire, on a bucket where the close and
+/// the price-forming vwap genuinely disagree.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_publishes_the_price_forming_count_vwap_and_divergence() {
+    let db = "it_ohlcv_pf_wire_0286";
+    let client = setup(db).await;
+    seed_price_forming(db, &Client::default().with_url(ch_url()).with_database(db)).await;
+
+    let uri = format!(
+        "/v1/assets/FOO:{}/ohlcv?granularity=1h&start=2026-03-01T10:00:00Z\
+         &end=2026-03-01T11:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 2, "body={json}");
+
+    // 10:00 — pf_price_volume 11 over pf_volume 10 = 1.1, which IS the close.
+    let c0 = &data[0];
+    assert_eq!(c0["pf_trade_count"], 4);
+    approx(&c0["pf_vwap"], 1.1);
+    assert_eq!(c0["close_divergent"], false, "1.1 against 1.1: {c0}");
+
+    // 11:00 — pf_price_volume 100 over pf_volume 100 = 1.0 against a close of
+    // 1.15: 15% apart, well past the 1% flag.
+    let c1 = &data[1];
+    assert_eq!(c1["pf_trade_count"], 8);
+    approx(&c1["pf_vwap"], 1.0);
+    assert_eq!(c1["close_divergent"], true, "1.15 against 1.00: {c1}");
+
+    teardown(db).await;
+}
+
+/// The quote-leg arm (`base_currency=XLM`) applies no rate and aggregates the
+/// stored decimals directly, so it needs its own gate — and its own proof.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_in_xlm_takes_no_price_from_a_dust_only_source() {
+    let db = "it_ohlcv_xlm_dust_0286";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (4, 'BAR', 'credit', '{i}', '')",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ('2026-03-02 10:00:00', 4, 1, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 1000, 250, 2.5, \
+              10.0, 7, 1, 7, 100, 1000), \
+             ('2026-03-02 10:00:00', 4, 1, 'soroswap', 900.0, 900.0, 900.0, 900.0, 5000, 3, 1, \
+              225.0, 900.0, 1, 1, 0, 0, 0), \
+             ('2026-03-02 11:00:00', 4, 1, 'sdex', 7.0, 7.0, 7.0, 7.0, 3000, 2, 1, 1.75, 7.0, \
+              1, 1, 0, 0, 0)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/BAR:{}/ohlcv?granularity=1h&start=2026-03-02T10:00:00Z\
+         &end=2026-03-02T11:00:00Z&base_currency=XLM",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 2, "body={json}");
+
+    let c0 = &data[0];
+    approx(&c0["close"], 10.0); // NOT 900.0, which carries 50x the volume
+    approx(&c0["high"], 12.0);
+    approx(&c0["low"], 9.0);
+    approx(&c0["vwap"], 10.0);
+    approx(&c0["pf_vwap"], 10.0); // 1000 / 100
+    approx(&c0["volume_base"], 5100.0);
+    assert_eq!(c0["pf_trade_count"], 7);
+
+    // 11:00 is dust-only: no price at all, and no provenance to invent.
+    let c1 = &data[1];
+    for field in ["open", "high", "low", "close", "vwap", "pf_vwap"] {
+        assert!(
+            c1[field].is_null(),
+            "{field} must be absent on a dust-only quote-leg bucket, got {}",
+            c1[field]
+        );
+    }
+    assert_eq!(c1["pf_trade_count"], 0);
+    assert!(c1["close_divergent"].is_null(), "no close, no divergence");
+    approx(&c1["volume_base"], 3000.0);
+    assert_eq!(c1["trade_count"], 1);
+
+    teardown(db).await;
+}
+
+/// The synthesized USDC self-series has no stored candle behind it, so it has
+/// no price-forming fills to count. All three fields are `null` there — not
+/// `0`, which would claim a bucket of dust.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_the_usdc_peg_series_reports_no_price_forming_fields() {
+    let db = "it_ohlcv_peg_pf_0286";
+    let client = setup(db).await;
+    seed_peg_rate(db, &Client::default().with_url(ch_url()).with_database(db)).await;
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2026-02-10T10:00:00Z\
+         &end=2026-02-10T11:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert!(
+        !data.is_empty(),
+        "the peg series must return buckets: {json}"
+    );
+    for c in data {
+        for field in ["pf_trade_count", "pf_vwap", "close_divergent"] {
+            // `Value::Index` yields Null for a MISSING key too, so the field is
+            // looked up rather than indexed: the assertion has to distinguish
+            // "published as null" from "not published at all".
+            let v = c
+                .get(field)
+                .unwrap_or_else(|| panic!("{field} must be on the wire: {c}"));
+            assert!(
+                v.is_null(),
+                "{field} must be null on the synthesized series, got {v}"
             );
         }
     }

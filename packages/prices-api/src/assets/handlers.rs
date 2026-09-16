@@ -647,7 +647,7 @@ pub async fn get_ohlcv(
                 .eq_ignore_ascii_case(&usdc_identifier().to_canonical())
     });
 
-    let data = if is_peg_asset {
+    let mut data = if is_peg_asset {
         // Both references anchor the series: USDC is the rate's identity, XLM is
         // the market the buckets come from (and, in XLM mode, the denominator).
         let (Some(usdc), Some(xlm)) = (peg_usdc, peg_xlm) else {
@@ -677,6 +677,13 @@ pub async fn get_ohlcv(
             Err(e) => return errors::db_error(&e, "ohlcv lookup"),
         }
     };
+
+    // Task 0286: `close_divergent` compares two columns the query has already
+    // projected, so it is filled over the decoded rows rather than spelled a
+    // third time in SQL. Both paths pass through here, including the
+    // synthesized peg series, whose `pf_vwap` is null and whose flag therefore
+    // stays null.
+    queries_ch::mark_close_divergence(&mut data);
 
     // backfill_note: only for timeframe=all, with data, while SDEX still running.
     let note = if timeframe.is_all() && !data.is_empty() && sdex_backfill_running(state.ch()).await
