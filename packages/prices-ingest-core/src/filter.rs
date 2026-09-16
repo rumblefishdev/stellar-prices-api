@@ -8,6 +8,9 @@ use crate::canonical::AssetIdentity;
 pub struct RawTrade {
     pub ledger_sequence: u32,
     pub closed_at: i64,
+    /// Position of this fill's transaction in `tx_processing`, the ledger's
+    /// apply order — the same index Horizon's TOID uses (task 0286 D1).
+    pub transaction_index: u16,
     pub operation_index: u16,
     pub claim_index: u16,
     pub asset_sold: AssetIdentity,
@@ -22,7 +25,11 @@ pub fn extract_trades(lcm: &LedgerCloseMeta) -> Vec<RawTrade> {
     let (sequence, closed_at) = ledger_header(lcm);
     let tx_processing = tx_processing_entries(lcm);
 
-    for tx_ref in tx_processing {
+    // `tx_processing` is in APPLY order, and that position is the missing term
+    // of the fill key: `operation_index` restarts at 0 in every transaction, so
+    // two fills of one ledger were previously ordered as if their operations
+    // shared a numbering (task 0286 D1).
+    for (tx_idx, tx_ref) in tx_processing.iter().enumerate() {
         let result = &tx_ref.result.result.result;
         let ops = match result {
             TransactionResultResult::TxSuccess(ops)
@@ -46,9 +53,14 @@ pub fn extract_trades(lcm: &LedgerCloseMeta) -> Vec<RawTrade> {
             };
 
             for (claim_idx, claim) in claims.iter().enumerate() {
-                if let Some(trade) =
-                    claim_to_raw_trade(claim, sequence, closed_at, op_idx as u16, claim_idx as u16)
-                {
+                if let Some(trade) = claim_to_raw_trade(
+                    claim,
+                    sequence,
+                    closed_at,
+                    tx_idx as u16,
+                    op_idx as u16,
+                    claim_idx as u16,
+                ) {
                     trades.push(trade);
                 }
             }
@@ -76,6 +88,7 @@ fn claim_to_raw_trade(
     claim: &ClaimAtom,
     ledger_sequence: u32,
     closed_at: i64,
+    transaction_index: u16,
     operation_index: u16,
     claim_index: u16,
 ) -> Option<RawTrade> {
@@ -113,6 +126,7 @@ fn claim_to_raw_trade(
     Some(RawTrade {
         ledger_sequence,
         closed_at,
+        transaction_index,
         operation_index,
         claim_index,
         asset_sold,

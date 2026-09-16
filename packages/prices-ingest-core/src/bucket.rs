@@ -18,8 +18,8 @@ pub struct OhlcvCandle {
     pub vwap: Decimal,
     pub trade_count: u32,
     pub version: u64,
-    open_lex: (u32, u16, u16),
-    close_lex: (u32, u16, u16),
+    open_lex: (u32, u16, u16, u16),
+    close_lex: (u32, u16, u16, u16),
 }
 
 type BucketKey = (u32, u32, u32); // (minute_start, asset_id, quote_asset_id)
@@ -45,6 +45,11 @@ impl CandleAccumulator {
         let minute_start = (tick.closed_at as u32 / 60) * 60;
         let key = (minute_start, tick.base_id, tick.quote_id);
         let lex = tick.lex_key();
+        // ⚠️ Task 0286 F4: read from the NAMED fields, never positionally from
+        // `lex`. The fill key is now four elements wide, so `lex.1` is the
+        // TRANSACTION index — a positional read here would silently redefine
+        // `version` and make every new row incomparable, under
+        // ReplacingMergeTree, with every row already in price_ohlcv_1m.
         let version = tick.ledger_sequence as u64 * 1000 + tick.operation_index as u64;
 
         let candle = self.candles.entry(key).or_insert_with(|| OhlcvCandle {
@@ -141,9 +146,32 @@ mod tests {
         vol_quote: i64,
         closed_at: i64,
     ) -> TradeTick {
+        tx_tick(
+            ledger, 0, op, claim, base, quote, price, vol_base, vol_quote, closed_at,
+        )
+    }
+
+    /// [`tick`] with an explicit transaction index — the term that distinguishes
+    /// two fills of one ledger that share an operation index (task 0286 D1).
+    /// Every fill built here is price-forming; the dust cases live in the
+    /// price-forming tests below.
+    #[allow(clippy::too_many_arguments)]
+    fn tx_tick(
+        ledger: u32,
+        tx: u16,
+        op: u16,
+        claim: u16,
+        base: u32,
+        quote: u32,
+        price: i64,
+        vol_base: i64,
+        vol_quote: i64,
+        closed_at: i64,
+    ) -> TradeTick {
         TradeTick {
             ledger_sequence: ledger,
             closed_at,
+            transaction_index: tx,
             operation_index: op,
             claim_index: claim,
             base_id: base,
@@ -151,7 +179,47 @@ mod tests {
             price: Decimal::from(price),
             volume_base: Decimal::from(vol_base),
             volume_quote: Decimal::from(vol_quote),
+            price_forming: true,
         }
+    }
+
+    /// Task 0286 F4 — the trap that widening the fill key sets. `version` is
+    /// `ledger_sequence * 1000 + operation_index` and must STAY that: it is the
+    /// ReplacingMergeTree discriminator every row already written to
+    /// `price_ohlcv_1m` was scored with, so redefining it silently makes new
+    /// rows incomparable with old ones. A `merge` that read the key tuple
+    /// POSITIONALLY would now be taking the transaction index as its second
+    /// term and would compute 100_007 here instead of 100_005.
+    #[test]
+    fn version_stays_ledger_times_1000_plus_operation_index() {
+        let mut acc = CandleAccumulator::new();
+        acc.merge(&tx_tick(100, 7, 3, 0, 1, 2, 10, 1, 10, T_M0_A));
+        acc.merge(&tx_tick(100, 0, 5, 0, 1, 2, 20, 1, 20, T_M0_B));
+        let c = &acc.flush_all()[0];
+        assert_eq!(
+            c.version, 100_005,
+            "version = max(ledger * 1000 + operation_index), never the tx index"
+        );
+    }
+
+    /// Task 0286 D1, the 2026-04-02 shape from the analysis: a path payment in
+    /// the FIRST transaction consumes several offers (claim 3 is its last fill),
+    /// and a manage-offer in the SECOND transaction fills once (claim 0). Both
+    /// operations are at index 0 because `operation_index` restarts per
+    /// transaction, so a key without the transaction index ranks claim 3 above
+    /// claim 0 and closes the minute on the wrong fill.
+    #[test]
+    fn close_is_the_last_fill_in_transaction_apply_order() {
+        let mut acc = CandleAccumulator::new();
+        acc.merge(&tx_tick(100, 0, 0, 3, 1, 2, 10, 1, 10, T_M0_A));
+        acc.merge(&tx_tick(100, 1, 0, 0, 1, 2, 20, 1, 20, T_M0_A));
+        let c = &acc.flush_all()[0];
+        assert_eq!(c.open, 10.into(), "open = the path payment's first fill");
+        assert_eq!(
+            c.close,
+            20.into(),
+            "close = the manage-offer fill: its transaction applied second"
+        );
     }
 
     #[test]

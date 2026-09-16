@@ -30,6 +30,8 @@ fn candle(asset: u32, quote: u32, closed_at: i64, ledger: u32) -> Vec<OhlcvCandl
     acc.merge(&TradeTick {
         ledger_sequence: ledger,
         closed_at,
+        // Task 0286: a single ordinary fill in the ledger's first transaction.
+        transaction_index: 0,
         operation_index: 0,
         claim_index: 0,
         base_id: asset,
@@ -37,6 +39,7 @@ fn candle(asset: u32, quote: u32, closed_at: i64, ledger: u32) -> Vec<OhlcvCandl
         price: Decimal::from(10),
         volume_base: Decimal::from(1),
         volume_quote: Decimal::from(10),
+        price_forming: true,
     });
     acc.flush_all()
 }

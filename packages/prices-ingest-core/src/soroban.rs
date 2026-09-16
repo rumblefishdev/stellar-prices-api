@@ -27,6 +27,7 @@ use xdr_parser::types::EventSource;
 // arm from `reflector_key_to_identity`, so this module must not resolve that
 // identity in non-test code. The tests import it directly to assert the drop.
 use crate::canonical::{AssetIdentity, AssetRegistry, USDC_ISSUER, canonicalise};
+use crate::price::price_forming_i128;
 use crate::tick::TradeTick;
 use crate::writer::OracleSample;
 
@@ -310,7 +311,15 @@ pub fn process_ledger(
             }
         }
 
-        classify_amm_groups(amm_groups, reg, assets, ledger_seq, closed_at, &mut out);
+        classify_amm_groups(
+            amm_groups,
+            tx_index as u16,
+            reg,
+            assets,
+            ledger_seq,
+            closed_at,
+            &mut out,
+        );
     }
 
     out
@@ -332,6 +341,11 @@ pub fn process_ledger(
 pub struct RawSorobanEvent {
     pub contract_id: String,
     pub transaction_id: String,
+    /// Position of this event's transaction in the ledger's apply order (task
+    /// 0286 D1). The live path takes it from `process_ledger`'s enumeration;
+    /// the events-backfill path joins BE's `default.transactions.application_order`
+    /// and falls back to 0 (counted and warned) when it cannot resolve one.
+    pub transaction_index: u16,
     pub ledger_sequence: u32,
     pub event_index: u32,
     pub topics: Value,
@@ -398,7 +412,18 @@ pub fn process_soroban_event_rows(
                 .push(row);
         }
 
-        classify_amm_groups(amm_groups, reg, assets, ledger_seq, closed_at, out);
+        // Every event of a transaction carries the same apply order; the group
+        // is contiguous by construction, so the first row's value is the group's.
+        let transaction_index = events[tx_start].transaction_index;
+        classify_amm_groups(
+            amm_groups,
+            transaction_index,
+            reg,
+            assets,
+            ledger_seq,
+            closed_at,
+            out,
+        );
         tx_start = tx_end;
     }
 }
@@ -416,6 +441,7 @@ pub fn process_soroban_event_rows(
 /// unit-testable without a full XDR `LedgerCloseMeta` AMM fixture (none exist).
 fn classify_amm_groups(
     amm_groups: HashMap<String, Vec<SorobanEventRow>>,
+    transaction_index: u16,
     reg: &Registries,
     assets: &mut AssetRegistry,
     ledger_seq: u32,
@@ -457,7 +483,8 @@ fn classify_amm_groups(
         match dispatch(&rows, &reg.venue, &reg.phoenix, &reg.soroswap) {
             Ok(trades) => {
                 for t in trades {
-                    if let Some(tick) = amm_trade_to_tick(&t, closed_at, assets) {
+                    if let Some(tick) = amm_trade_to_tick(&t, transaction_index, closed_at, assets)
+                    {
                         out.amm_ticks.push((source, tick));
                     }
                 }
@@ -614,6 +641,7 @@ fn resolve_amm_token(contract_addr: &str, assets: &AssetRegistry) -> AssetIdenti
 /// Convert a venue `TradeRow` into a `TradeTick` for the candle accumulator.
 fn amm_trade_to_tick(
     trade: &extractors_core::TradeRow,
+    transaction_index: u16,
     closed_at: i64,
     assets: &mut AssetRegistry,
 ) -> Option<TradeTick> {
@@ -623,6 +651,12 @@ fn amm_trade_to_tick(
     let sold = resolve_amm_token(&trade.token_in, assets);
     let bought = resolve_amm_token(&trade.token_out, assets);
     let pair = canonicalise(&sold, &bought, assets);
+
+    // Classified on the RAW i128 amounts, in each token's own decimals, BEFORE
+    // the scaling below (task 0286, ADR 0287 §1): `AMM_AMOUNT_SCALE` turns them
+    // into a Decimal, and after that the integer unit the rounding bound reasons
+    // about is gone — every fill would look equally precise.
+    let price_forming = price_forming_i128(trade.amount_in, trade.amount_out);
 
     let amount_in = Decimal::try_from_i128_with_scale(trade.amount_in, AMM_AMOUNT_SCALE).ok()?;
     let amount_out = Decimal::try_from_i128_with_scale(trade.amount_out, AMM_AMOUNT_SCALE).ok()?;
@@ -639,6 +673,7 @@ fn amm_trade_to_tick(
     Some(TradeTick {
         ledger_sequence: trade.ledger_sequence as u32,
         closed_at,
+        transaction_index,
         operation_index: (trade.first_event_index & 0xFFFF) as u16,
         claim_index: 0,
         base_id: pair.base_id,
@@ -646,6 +681,7 @@ fn amm_trade_to_tick(
         price,
         volume_base,
         volume_quote,
+        price_forming,
     })
 }
 
@@ -918,7 +954,7 @@ mod tests {
         let empty = Registries::new();
         let mut assets = AssetRegistry::from_existing(vec![]);
         let mut out = LedgerSoroban::default();
-        classify_amm_groups(group(), &empty, &mut assets, SEQ, CLOSED_AT, &mut out);
+        classify_amm_groups(group(), 0, &empty, &mut assets, SEQ, CLOSED_AT, &mut out);
         assert!(out.amm_ticks.is_empty(), "unseeded pool must not price");
         assert_eq!(
             out.unresolved.len(),
@@ -937,7 +973,7 @@ mod tests {
             .register_with_wasm(XLM_USDC_POOL.to_string(), 0, common_xyk_wasm_hash());
         let mut assets = AssetRegistry::from_existing(vec![]);
         let mut out = LedgerSoroban::default();
-        classify_amm_groups(group(), &seeded, &mut assets, SEQ, CLOSED_AT, &mut out);
+        classify_amm_groups(group(), 0, &seeded, &mut assets, SEQ, CLOSED_AT, &mut out);
         assert!(
             out.unresolved.is_empty(),
             "seeded pool must not fall to unresolved"
@@ -984,7 +1020,7 @@ mod tests {
 
         let mut assets = AssetRegistry::from_existing(vec![]);
         let mut out = LedgerSoroban::default();
-        classify_amm_groups(groups, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
+        classify_amm_groups(groups, 0, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
 
         assert!(
             out.amm_ticks.is_empty(),
@@ -1051,7 +1087,7 @@ mod tests {
 
         let mut assets = AssetRegistry::from_existing(vec![]);
         let mut out = LedgerSoroban::default();
-        classify_amm_groups(groups, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
+        classify_amm_groups(groups, 0, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
 
         assert_eq!(
             out.amm_ticks.len(),
@@ -1118,7 +1154,7 @@ mod tests {
 
         let mut assets = AssetRegistry::from_existing(vec![]);
         let mut out = LedgerSoroban::default();
-        classify_amm_groups(groups, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
+        classify_amm_groups(groups, 0, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
 
         assert!(
             out.amm_ticks.is_empty(),
@@ -1181,7 +1217,7 @@ mod tests {
         let reg = Registries::new(); // neither contract registered
         let mut assets = AssetRegistry::from_existing(vec![]);
         let mut out = LedgerSoroban::default();
-        classify_amm_groups(groups, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
+        classify_amm_groups(groups, 0, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
 
         // Router swap must NOT double-count and must NOT be flagged.
         assert!(out.amm_ticks.is_empty(), "router swap must not price");
@@ -1225,6 +1261,7 @@ mod tests {
         let swap = RawSorobanEvent {
             contract_id: POOL.to_string(),
             transaction_id: "tx".to_string(),
+            transaction_index: 0,
             ledger_sequence: SEQ,
             event_index: 5,
             topics: json!([
@@ -1275,6 +1312,7 @@ mod tests {
         let oracle = RawSorobanEvent {
             contract_id: "CBKGPWGKSKZF52CFHMTRR23TBWTPMRDIYZ4O2P5VS65BMHYH4DXMCJZC".to_string(),
             transaction_id: "tx-oracle".to_string(),
+            transaction_index: 0,
             ledger_sequence: SEQ,
             event_index: 0,
             topics: json!([
@@ -1286,6 +1324,7 @@ mod tests {
         let factory = RawSorobanEvent {
             contract_id: "CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK".to_string(),
             transaction_id: "tx-factory".to_string(),
+            transaction_index: 0,
             ledger_sequence: SEQ,
             event_index: 1,
             topics: json!([
@@ -1323,5 +1362,67 @@ mod tests {
             out.amm_ticks.is_empty() && out.unresolved.is_empty(),
             "an oracle + factory batch produces no AMM tick and no unresolved gap"
         );
+    }
+
+    /// Task 0286 / ADR 0287 §1 — an AMM fill is classified on the RAW i128
+    /// amounts the swap event carries, in each token's own decimals, BEFORE
+    /// `AMM_AMOUNT_SCALE` turns them into `Decimal`s. Once scaled they are
+    /// fractions and every fill looks equally precise, so the bound has to be
+    /// evaluated on the way in or not at all.
+    #[test]
+    fn amm_ticks_are_classified_on_the_raw_amounts_before_scaling() {
+        const POOL: &str = "CDBBBNMCWRMWEIFHUD5BXBCRTW6QM33ZEXIOBGKKQNDSH3WEF7WVBGMI";
+        const T0: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const T1: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+        const CLOSED_AT: i64 = 1_700_000_000;
+
+        fn trade(amount_in: i128, amount_out: i128) -> extractors_core::TradeRow {
+            extractors_core::TradeRow {
+                venue: Venue::Soroswap,
+                contract_id: POOL.to_string(),
+                transaction_id: "tx".to_string(),
+                ledger_sequence: 100,
+                // 0x1_0005: the low sixteen bits are the operation index the
+                // tick keeps; the high bits are masked off.
+                first_event_index: 0x1_0005,
+                token_in: T0.to_string(),
+                token_out: T1.to_string(),
+                amount_in,
+                amount_out,
+                fee: None,
+                trader: None,
+            }
+        }
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+
+        let ordinary = amm_trade_to_tick(&trade(1_000_000, 914_145), 4, CLOSED_AT, &mut assets)
+            .expect("an ordinary swap prices");
+        assert!(
+            ordinary.price_forming,
+            "a million units against ~914k clears the bound by orders of magnitude"
+        );
+
+        let dust = amm_trade_to_tick(&trade(34, 5), 4, CLOSED_AT, &mut assets)
+            .expect("a dust swap still produces a tick");
+        assert!(
+            !dust.price_forming,
+            "34 units against 5 prints the exact fraction 5/34 and must not price"
+        );
+        assert_eq!(
+            dust.volume_base + dust.volume_quote,
+            Decimal::try_from_i128_with_scale(39, AMM_AMOUNT_SCALE).unwrap(),
+            "the dust fill keeps its volumes: it is a real trade"
+        );
+
+        // The apply order is a PARAMETER — `TradeRow` has no such field, and
+        // adding one would change a type shared with the extractor crates.
+        assert_eq!(dust.transaction_index, 4);
+        assert_eq!(
+            dust.operation_index, 5,
+            "operation_index stays the masked first_event_index"
+        );
+        assert_eq!(dust.claim_index, 0);
+        assert_eq!(dust.lex_key(), (100, 4, 5, 0));
     }
 }

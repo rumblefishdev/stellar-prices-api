@@ -26,7 +26,7 @@ use crate::error::EventsBackfillError;
 /// `contract_id` is mapped back to a `C…` strkey via [`resolve_contract_ids`].
 ///
 /// Field order MUST match the `SELECT` column order below — the `Row` derive
-/// binds positionally.
+/// binds positionally. `EVENT_ROW_COLUMNS` below pins the two together.
 #[derive(Debug, Row, Deserialize)]
 pub struct EventRow {
     pub contract_id: i64,
@@ -37,7 +37,34 @@ pub struct EventRow {
     pub closed_at: i64,
     pub topics_xdr: String,
     pub data_xdr: String,
+    /// The transaction's position in its ledger's apply order, from BE's
+    /// `default.transactions` (task 0286 D1). 0 when the join found nothing —
+    /// read it together with `apply_order_found`, never on its own.
+    pub application_order: i16,
+    /// 1 when the apply order above came from a real joined row, 0 when the
+    /// transaction could not be resolved. A LEFT join yields the column's type
+    /// DEFAULT, not NULL, for an unmatched row, so a bare 0 in
+    /// `application_order` is ambiguous without this marker.
+    pub apply_order_found: u8,
 }
+
+/// [`EventRow`]'s fields, in order, as the chunk read must alias them. The
+/// `Row` derive binds by POSITION: a SELECT that projects the same columns in a
+/// different order decodes silently wrong values rather than erroring, so the
+/// two are pinned to this list by a unit test (task 0286). Test-only: it is a
+/// contract with the `SELECT` in `chunk_sql`, asserted, never read at runtime.
+#[cfg(test)]
+pub(crate) const EVENT_ROW_COLUMNS: [&str; 9] = [
+    "contract_id",
+    "transaction_id",
+    "ledger_sequence",
+    "event_index",
+    "closed_at",
+    "topics_xdr",
+    "data_xdr",
+    "application_order",
+    "apply_order_found",
+];
 
 /// Resolve AMM pool `C…` strkeys to BE's Int64 `soroban_contracts.id` surrogates.
 ///
@@ -80,9 +107,10 @@ pub async fn resolve_contract_ids(
 }
 
 /// Open a **streaming** cursor over all events emitted by the given AMM contracts
-/// in `[start, end]`, ordered by `(ledger_sequence, transaction_id, event_index)`
-/// so the run can group them by ledger then transaction with per-tx event order
-/// preserved. Rows are pulled one at a time (`cursor.next()`), so peak memory is
+/// in `[start, end]`, ordered by `(ledger_sequence, application_order,
+/// transaction_id, event_index)` so the run can group them by ledger then
+/// transaction with per-tx event order preserved, in the real APPLY order
+/// (task 0286 D1 — `event_index` alone restarts in every transaction). Rows are pulled one at a time (`cursor.next()`), so peak memory is
 /// one ledger's events — not the whole chunk (which, filtered to AMM pools, still
 /// includes Phoenix's 8 events/swap plus reserves/transfers and can be millions
 /// of rows on a dense range).
@@ -104,13 +132,23 @@ pub fn stream_chunk(
     start: u32,
     end: u32,
 ) -> Result<RowCursor<EventRow>, EventsBackfillError> {
+    Ok(client
+        .query(&chunk_sql(contract_ids, start, end))
+        .fetch::<EventRow>()?)
+}
+
+/// The chunk read, as text. Extracted from [`stream_chunk`] so its shape is
+/// assertable without a ClickHouse: this query carries three properties that
+/// are invisible until production breaks on them — the memory bound, the fill
+/// order, and the positional alignment with [`EventRow`] (task 0286).
+pub(crate) fn chunk_sql(contract_ids: &[i64], start: u32, end: u32) -> String {
     let in_list = contract_ids
         .iter()
         .map(i64::to_string)
         .collect::<Vec<_>>()
         .join(",");
 
-    let sql = format!(
+    format!(
         "SELECT \
             e.contract_id AS contract_id, \
             e.transaction_id AS transaction_id, \
@@ -118,7 +156,9 @@ pub fn stream_chunk(
             e.event_index AS event_index, \
             ifNull(l.closed_at, 0) AS closed_at, \
             e.topics_xdr AS topics_xdr, \
-            e.data_xdr AS data_xdr \
+            e.data_xdr AS data_xdr, \
+            t.application_order AS application_order, \
+            t.found AS apply_order_found \
          FROM default.soroban_events e \
          LEFT JOIN ( \
             SELECT sequence, toInt64(min(toUnixTimestamp(closed_at))) AS closed_at \
@@ -126,12 +166,122 @@ pub fn stream_chunk(
             WHERE sequence BETWEEN {start} AND {end} \
             GROUP BY sequence \
          ) l ON l.sequence = e.ledger_sequence \
+         LEFT JOIN ( \
+            SELECT id, application_order, toUInt8(1) AS found \
+            FROM default.transactions FINAL \
+            WHERE ledger_sequence BETWEEN {start} AND {end} \
+              AND id IN ( \
+                 SELECT DISTINCT transaction_id \
+                 FROM default.soroban_events \
+                 WHERE ledger_sequence BETWEEN {start} AND {end} \
+                   AND contract_id IN ({in_list}) \
+              ) \
+         ) t ON t.id = e.transaction_id \
          WHERE e.ledger_sequence BETWEEN {start} AND {end} \
            AND e.contract_id IN ({in_list}) \
-         ORDER BY e.ledger_sequence, e.transaction_id, e.event_index"
-    );
+         ORDER BY e.ledger_sequence, application_order, e.transaction_id, e.event_index"
+    )
+}
 
-    Ok(client.query(&sql).fetch::<EventRow>()?)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sql() -> String {
+        chunk_sql(&[11, 22], 1000, 2000)
+    }
+
+    /// Task 0286 D1. BE's `default.transactions` holds the apply order this
+    /// read has to carry; `default.soroban_events` does not. Without the join
+    /// every AMM fill of a ledger looks like it came from transaction 0 and the
+    /// candle closes on whichever event happened to have the highest index.
+    #[test]
+    fn chunk_sql_joins_the_transactions_apply_order() {
+        let sql = sql();
+        assert!(
+            sql.contains("LEFT JOIN") && sql.contains("default.transactions FINAL"),
+            "the apply order comes from default.transactions, FINAL (it is a ReplacingMergeTree)"
+        );
+        assert!(
+            !sql.contains("INNER JOIN"),
+            "an unmatched transaction must degrade, never drop the event"
+        );
+    }
+
+    /// Task 0286 T-jiv-05. The memory limit is per query, and this file may not
+    /// use `SETTINGS` (readonly, code 164), so the ONLY bound is what the join
+    /// is allowed to read: the chunk's ledgers on both sides, and only the
+    /// transactions that actually emitted one of the chunk's AMM events.
+    #[test]
+    fn the_apply_order_join_is_bounded_on_both_sides() {
+        let sql = sql();
+        let join = sql
+            .split("default.transactions FINAL")
+            .nth(1)
+            .expect("transactions subquery");
+        let join = join.split(") t ON").next().unwrap_or(join);
+        assert!(
+            join.contains("ledger_sequence BETWEEN 1000 AND 2000"),
+            "the build side must be pruned by the transactions table's leading sort key"
+        );
+        assert!(
+            join.contains("default.soroban_events") && join.contains("contract_id IN (11,22)"),
+            "and restricted to transactions that emitted one of this chunk's AMM events"
+        );
+        assert!(
+            sql.contains("e.ledger_sequence BETWEEN 1000 AND 2000"),
+            "the probe side stays bounded too"
+        );
+    }
+
+    /// No `SETTINGS` anywhere — see the note at the top of this file. A
+    /// per-query setting on a `readonly=1` POST is rejected with code 164, and
+    /// the read is long enough that the client always POSTs.
+    #[test]
+    fn chunk_sql_carries_no_settings_clause() {
+        assert!(!sql().contains("SETTINGS"));
+    }
+
+    /// The `Row` derive binds POSITIONALLY: `EventRow`'s field order and this
+    /// SELECT's alias order are one contract, and a mismatch decodes garbage
+    /// rather than erroring. [`EVENT_ROW_COLUMNS`] is what pins them together.
+    #[test]
+    fn chunk_sql_projects_event_row_columns_in_field_order() {
+        let sql = sql();
+        let select = sql.split(" FROM default.soroban_events").next().unwrap();
+        let aliases: Vec<&str> = select
+            .split(" AS ")
+            .skip(1)
+            .map(|part| part.split([',', ' ']).find(|t| !t.is_empty()).unwrap())
+            .collect();
+        assert_eq!(aliases, EVENT_ROW_COLUMNS.to_vec());
+    }
+
+    /// The candle's fill order, in the read that feeds it. Grouping in
+    /// `run.rs` and `soroban.rs` also requires a transaction's events to stay
+    /// contiguous, which sorting by apply order before the transaction id keeps.
+    #[test]
+    fn chunk_sql_orders_by_ledger_then_apply_order_then_transaction() {
+        let sql = sql();
+        let order_by = sql.rsplit("ORDER BY").next().expect("ORDER BY");
+        let positions: Vec<usize> = [
+            "e.ledger_sequence",
+            "application_order",
+            "e.transaction_id",
+            "e.event_index",
+        ]
+        .iter()
+        .map(|needle| {
+            order_by
+                .find(needle)
+                .unwrap_or_else(|| panic!("ORDER BY is missing {needle}: {order_by}"))
+        })
+        .collect();
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "ORDER BY must be ledger, apply order, transaction, event index: {order_by}"
+        );
+    }
 }
 
 /// Advisory registry-completeness probe (dry-run only). Counts events and distinct

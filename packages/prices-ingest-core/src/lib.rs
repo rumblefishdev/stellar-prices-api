@@ -40,7 +40,9 @@ pub use canonical::{AssetIdentity, AssetRegistry, CanonicalPair, canonicalise};
 pub use decode::{decode_object, ledger_sequence};
 pub use error::IngestError;
 pub use filter::{RawTrade, extract_trades};
-pub use price::{compute_price, stroops_to_decimal};
+pub use price::{
+    compute_price, price_forming_i64, price_forming_i128, rounding_bound_holds, stroops_to_decimal,
+};
 pub use registry_io::PoolRegistryRow;
 pub use retry::{DEFAULT_BACKOFF_MS, retry_with_backoff};
 pub use safe_log::safe_response_token;
