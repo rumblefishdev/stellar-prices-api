@@ -63,6 +63,21 @@ history:
       ⚠️ Two decisions must BOTH be settled before this closes: what happens
       to the ledger scan, and the liveness-alarm question parked here from
       [[0223]]. Closing one without the other leaves the hole 0223 found.
+  - date: 2026-09-16
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Fix written and verified locally; NOT deployed. `ensure_seed` captures
+      `AssetRegistry::watermark()` before interning the seed and writes through
+      `write_new_assets`, whose `since >= watermark()` short-circuit makes a
+      steady-state run write nothing at all. Branch
+      `fix/0256_asset-discovery-ledger-scan-never-runs`, commit `111a4fb`,
+      pushed to origin; no PR opened, deliberately. Evidence under "Fix shipped
+      to the branch" below — the load-bearing item is the NEGATIVE control,
+      because every assertion `seed_it.rs` already had uses `FINAL` and so
+      passes with the defect present.
+      ⚠️ Scope unchanged: this stops the amplification only. The ledger-scan
+      decision and the [[0223]] liveness question are both still open.
 ---
 
 # The ledger scan is dead code in production
@@ -248,6 +263,72 @@ ledger scan is ever switched on. Deleting it costs nothing that
   pick a sensible starting ledger, and confirm `discovery_state` advances.
 - Either way the WARN must stop being a permanent steady state — a worker whose
   main stage is skipped every hour should alarm, not log.
+
+## Fix shipped to the branch — verification (2026-09-16)
+
+Branch `fix/0256_asset-discovery-ledger-scan-never-runs`, commit `111a4fb`,
+pushed (remote SHA matches local HEAD). No PR opened yet.
+
+### The change
+
+`asset-discovery/src/lib.rs`, `ensure_seed` — three lines:
+
+```rust
+ let mut registry = AssetRegistry::from_existing(existing);
++let durable = registry.watermark();
+ for identity in identities {
+     registry.get_or_assign(identity);
+ }
+-writer.write_assets(&registry).await?;
++writer.write_new_assets(&registry, durable).await?;
+```
+
+Capturing the watermark BEFORE interning the seed is the whole trick: in steady
+state every seed identity already exists, `get_or_assign` returns its existing
+id, nothing lands at or above the watermark, and `write_new_assets` takes its
+`since >= registry.watermark()` fast path and issues no INSERT at all. An empty
+table still seeds correctly, because the watermark is then 1.
+
+🔑 The guard already existed in this file — in the other half.
+`discover_window` writes only when the scan changed the registry, with a comment
+naming this exact failure: "a full RMT re-INSERT each hour would pile up parts
+and inflate the next FINAL load". It sits in the scan path, which has never run
+on production. [[0132]] removed the same amplification from `ledger-processor`
+and left this caller behind; `write_assets`' own doc blesses "the
+discovery/oracle workers" on the rationale that "a single full write per run is
+cheap" — false for a worker scheduled hourly rather than one-shot.
+
+### Evidence
+
+| check | result |
+|---|---|
+| `cargo test --workspace` (what CI runs) | rc=0, 96 passed, 0 failed |
+| `cargo clippy -p asset-discovery --all-targets` | rc=0, zero warnings from this crate |
+| IT `seed_it` vs local ClickHouse | passed |
+| **IT negative control** | fails at `seed_it.rs:75` on the new assertion, `left: 40, right: 20` |
+| restore after the negative control | byte-identical to backup, IT green again |
+| formatting | `cargo fmt --check` rc=0; committed bytes identical to the bytes tested |
+
+⚠️ **The negative control is the load-bearing evidence, not the green run.**
+Every assertion `seed_it.rs` already had uses `FINAL`, which collapses a full
+re-emit either way — so the existing test passes with the defect present and
+could never have caught it. The new assertion reads the raw, un-merged
+`count()`. With `write_assets` restored it fails at **left: 40, right: 20**:
+two copies of the 20-asset seed, the production 1×–4× shape at test scale.
+
+Per [[0275]] CI does not run these, which is why the results are recorded here.
+
+⚠️ The repo's pre-push hook runs `nx affected` and covers only the TypeScript
+projects — it did NOT exercise this crate. CI also lints an explicit crate
+allow-list that does not include `asset-discovery` (`ci.yml:170-182`), so this
+crate has no clippy coverage in CI at all.
+
+### Still unproven
+
+That this alone ends the oracle's OOMs. `Max Memory Used` is a per-container
+high-water mark, so it must be read on a COLD container after deploy with the
+registry sitting at 1×. That same number sizes [[0226]]: if ~209k rows clear
+256 MB comfortably, 0226 is an efficiency task rather than an outage fix.
 
 ## Acceptance Criteria
 
