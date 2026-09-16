@@ -2,7 +2,7 @@
 id: "0256"
 title: "asset-discovery's ledger scan has never run on production — the worker re-seeds hourly and scans nothing"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0210", "0054", "0218", "0223", "0226", "0241"]
 tags: [layer-backend, priority-high, effort-small, milestone-M2, ingest, defect]
@@ -49,6 +49,20 @@ history:
       the 4× read. The cheapest fix for the oracle OOM and for 84% of the ops
       channel's traffic is therefore a config decision HERE, not work in the
       oracle. The priority was already high; this is the reason.
+  - date: 2026-09-16
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated. Sequencing decided with the operator: this goes BEFORE [[0226]]
+      (raised to priority-high the same day), because it removes the hourly
+      amplification that actually reaches the oracle's 256 MB ceiling, it is a
+      config decision rather than a change to shared code, and it produces the
+      one measurement 0226 is missing — `Max Memory Used` on a cold container
+      reading a 1× registry. [[0241]]'s alarm damping waits on the outcome and
+      may prove unnecessary.
+      ⚠️ Two decisions must BOTH be settled before this closes: what happens
+      to the ledger scan, and the liveness-alarm question parked here from
+      [[0223]]. Closing one without the other leaves the hole 0223 found.
 ---
 
 # The ledger scan is dead code in production
