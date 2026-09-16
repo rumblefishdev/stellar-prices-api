@@ -51,8 +51,18 @@
 -- correct here (there is genuinely no priced value to carry forward), but it
 -- means a 0 in these tables still cannot be read as "worth nothing". Task 0151
 -- owns that representational problem.
+--
+-- Task 0286: every INSERT below names its fifteen target columns explicitly.
+-- The candle tables now carry EIGHTEEN (pf_trade_count, pf_volume,
+-- pf_price_volume — ADR 0287), and a positional `INSERT … SELECT` of fewer
+-- columns than the target has fails with Code 20 the moment the widening lands.
+-- The three pf columns are deliberately NOT projected here: they take their
+-- table DEFAULTs (the pre-0286 meaning — every fill price-forming) until task
+-- 0286's rollup generator projects the real aggregates.
 
 INSERT INTO prices.price_ohlcv_15m
+    (timestamp, asset_id, quote_asset_id, source, open, high, low, close,
+     volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version)
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 15 MINUTE) AS timestamp,
     asset_id, quote_asset_id, source,
@@ -71,6 +81,8 @@ FROM prices.price_ohlcv_1m AS t FINAL
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
 INSERT INTO prices.price_ohlcv_1h
+    (timestamp, asset_id, quote_asset_id, source, open, high, low, close,
+     volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version)
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
     asset_id, quote_asset_id, source,
@@ -89,6 +101,8 @@ FROM prices.price_ohlcv_15m AS t FINAL
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
 INSERT INTO prices.price_ohlcv_4h
+    (timestamp, asset_id, quote_asset_id, source, open, high, low, close,
+     volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version)
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
     asset_id, quote_asset_id, source,
@@ -107,6 +121,8 @@ FROM prices.price_ohlcv_1h AS t FINAL
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
 INSERT INTO prices.price_ohlcv_1d
+    (timestamp, asset_id, quote_asset_id, source, open, high, low, close,
+     volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version)
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
     asset_id, quote_asset_id, source,
@@ -125,6 +141,8 @@ FROM prices.price_ohlcv_4h AS t FINAL
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
 INSERT INTO prices.price_ohlcv_1w
+    (timestamp, asset_id, quote_asset_id, source, open, high, low, close,
+     volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version)
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 1 WEEK) AS timestamp,
     asset_id, quote_asset_id, source,
@@ -143,6 +161,8 @@ FROM prices.price_ohlcv_1d AS t FINAL
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
 INSERT INTO prices.price_ohlcv_1M
+    (timestamp, asset_id, quote_asset_id, source, open, high, low, close,
+     volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version)
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 1 MONTH) AS timestamp,
     asset_id, quote_asset_id, source,

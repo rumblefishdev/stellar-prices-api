@@ -20,9 +20,14 @@
 -- ## Column-type contract (load-bearing)
 -- The tables the SDEX/soroban backfill writer touches — `assets`,
 -- `price_ohlcv_1m`, `backfill_sdex_ledgers` — MUST keep these exact column
--- names and types: the writer uses positional clickhouse::Row inserts
--- (packages/sdex-backfill/src/sink.rs). Do not reorder or retype without
--- updating the Row structs.
+-- names and types. The ingest writer lives in
+-- packages/prices-ingest-core/src/writer.rs and is NAME-routed, not positional
+-- (task 0286): the clickhouse crate emits `INSERT INTO t(<struct field names>)
+-- FORMAT RowBinary`, so a column MISSING from the Row struct does not error —
+-- it silently takes this file's column DEFAULT. That is why
+-- prices_clickhouse::CANDLE_COLUMNS pins the DDL below and the writer's field
+-- names to one another, with a unit test on each side. Do not add, reorder or
+-- retype a candle column without updating CANDLE_COLUMNS and the Row structs.
 --
 -- ## Engine assignment
 --   - OHLCV fact tables       → ReplacingMergeTree(version), monthly partitions
@@ -98,6 +103,27 @@ SETTINGS index_granularity = 8192;
 -- ('sdex','phoenix','soroswap','aquarius'). version = ledger_seq × 1000 +
 -- intra-ledger order; ReplacingMergeTree(version) collapses duplicate PKs.
 -- §3.2.
+--
+-- Price semantics (task 0286, ADR 0287): open/high/low/close come ONLY from the
+-- bucket's PRICE-FORMING fills — open is the first such fill and close the last,
+-- in fill order; high/low are their extremes. A bucket with none has no price
+-- (all four zero) but keeps its volumes and trade_count. pf_trade_count,
+-- pf_volume and pf_price_volume are that price-forming subset's count, base
+-- volume and Σ price × base volume. Their DEFAULT expressions give a pre-0286
+-- row its OLD meaning (every fill was price-forming); only a re-ingest changes
+-- that (0286 phase 3).
+--
+-- DEPLOY ORDER for 0286 (task §4.9 — this order, not any other):
+--   1. this schema,
+--   2. enrichment worker + the coarse sweep + prices-api,
+--   3. the rollup MV re-CREATE,
+--   4. ingest LAST (ledger-processor, backfill binaries).
+-- Reason: a pre-0286 MV takes min(low) over a dust-only minute and turns the new
+-- zero low into a zero low for the whole coarse bucket, and pre-0286 enrichment
+-- re-inserts a candle row WITHOUT the pf columns, so they fall back to the
+-- DEFAULT expressions above and a dust-only minute starts reporting itself as
+-- fully price-forming. Both are silent. Shipping ingest last means nothing
+-- writes a zero-priced row until everything downstream understands one.
 ----------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1m (
@@ -115,7 +141,10 @@ CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1m (
     close_usd        Decimal(38, 14) DEFAULT 0,
     vwap             Decimal(38, 14),
     trade_count      UInt32        DEFAULT 0,
-    version          UInt64
+    version          UInt64,
+    pf_trade_count   UInt32          DEFAULT trade_count,
+    pf_volume        Decimal(38, 14) DEFAULT volume_base,
+    pf_price_volume  Decimal(38, 14) DEFAULT volume_quote
 )
 ENGINE = ReplacingMergeTree(version)
 PARTITION BY toYYYYMM(timestamp)
@@ -145,6 +174,47 @@ ALTER TABLE prices.price_ohlcv_4h  ADD COLUMN IF NOT EXISTS close_usd Decimal(38
 ALTER TABLE prices.price_ohlcv_1d  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
 ALTER TABLE prices.price_ohlcv_1w  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
 ALTER TABLE prices.price_ohlcv_1M  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
+
+-- Price-forming aggregates (task 0286, ADR 0287). Added to the base CREATE
+-- above so fresh AS-copies inherit them; these idempotent ALTERs add them to
+-- databases created before 0286, where the AS-copies do NOT inherit a post-hoc
+-- base-table ALTER — so apply per table, exactly like close_usd above. They run
+-- AFTER the close_usd block on purpose: a pre-0061 database must get close_usd
+-- into its mid-table position first.
+--
+-- The DEFAULT expressions are what make this migration safe on a live database.
+-- ClickHouse computes a DEFAULT over other columns on READ for parts written
+-- before the ALTER, so every existing candle keeps reporting the pre-0286
+-- meaning (every fill was price-forming) instead of reading zero. Nothing is
+-- rewritten and no history is re-rolled in phase 1 (task 0286 §4.9).
+ALTER TABLE prices.price_ohlcv_1m
+    ADD COLUMN IF NOT EXISTS pf_trade_count UInt32 DEFAULT trade_count AFTER version,
+    ADD COLUMN IF NOT EXISTS pf_volume Decimal(38, 14) DEFAULT volume_base AFTER pf_trade_count,
+    ADD COLUMN IF NOT EXISTS pf_price_volume Decimal(38, 14) DEFAULT volume_quote AFTER pf_volume;
+ALTER TABLE prices.price_ohlcv_15m
+    ADD COLUMN IF NOT EXISTS pf_trade_count UInt32 DEFAULT trade_count AFTER version,
+    ADD COLUMN IF NOT EXISTS pf_volume Decimal(38, 14) DEFAULT volume_base AFTER pf_trade_count,
+    ADD COLUMN IF NOT EXISTS pf_price_volume Decimal(38, 14) DEFAULT volume_quote AFTER pf_volume;
+ALTER TABLE prices.price_ohlcv_1h
+    ADD COLUMN IF NOT EXISTS pf_trade_count UInt32 DEFAULT trade_count AFTER version,
+    ADD COLUMN IF NOT EXISTS pf_volume Decimal(38, 14) DEFAULT volume_base AFTER pf_trade_count,
+    ADD COLUMN IF NOT EXISTS pf_price_volume Decimal(38, 14) DEFAULT volume_quote AFTER pf_volume;
+ALTER TABLE prices.price_ohlcv_4h
+    ADD COLUMN IF NOT EXISTS pf_trade_count UInt32 DEFAULT trade_count AFTER version,
+    ADD COLUMN IF NOT EXISTS pf_volume Decimal(38, 14) DEFAULT volume_base AFTER pf_trade_count,
+    ADD COLUMN IF NOT EXISTS pf_price_volume Decimal(38, 14) DEFAULT volume_quote AFTER pf_volume;
+ALTER TABLE prices.price_ohlcv_1d
+    ADD COLUMN IF NOT EXISTS pf_trade_count UInt32 DEFAULT trade_count AFTER version,
+    ADD COLUMN IF NOT EXISTS pf_volume Decimal(38, 14) DEFAULT volume_base AFTER pf_trade_count,
+    ADD COLUMN IF NOT EXISTS pf_price_volume Decimal(38, 14) DEFAULT volume_quote AFTER pf_volume;
+ALTER TABLE prices.price_ohlcv_1w
+    ADD COLUMN IF NOT EXISTS pf_trade_count UInt32 DEFAULT trade_count AFTER version,
+    ADD COLUMN IF NOT EXISTS pf_volume Decimal(38, 14) DEFAULT volume_base AFTER pf_trade_count,
+    ADD COLUMN IF NOT EXISTS pf_price_volume Decimal(38, 14) DEFAULT volume_quote AFTER pf_volume;
+ALTER TABLE prices.price_ohlcv_1M
+    ADD COLUMN IF NOT EXISTS pf_trade_count UInt32 DEFAULT trade_count AFTER version,
+    ADD COLUMN IF NOT EXISTS pf_volume Decimal(38, 14) DEFAULT volume_base AFTER pf_trade_count,
+    ADD COLUMN IF NOT EXISTS pf_price_volume Decimal(38, 14) DEFAULT volume_quote AFTER pf_volume;
 
 ----------------------------------------------------------------------
 -- Current per-asset state (§3.3). One row per asset. Written by the Current

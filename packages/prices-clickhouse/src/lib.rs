@@ -30,6 +30,45 @@ pub mod mtls;
 /// Table schema embedded at compile time (DATABASE + all `prices.*` tables).
 pub const INIT_SQL: &str = include_str!("../schema/init.sql");
 
+/// The canonical candle column list, in DDL order, for every `price_ohlcv_*`
+/// table (task 0286 / ADR 0287). The first fifteen are the pre-0286 shape; the
+/// last three are the price-forming aggregates ADR 0287 §1 introduces.
+///
+/// This exists because the ingest writer is **name-routed**, not positional:
+/// `clickhouse` 0.13 emits `INSERT INTO t(<struct field names>) FORMAT
+/// RowBinary`, so a candle column the row struct omits silently takes its
+/// column DEFAULT instead of erroring. On the pf columns that failure mode is
+/// invisible and wrong — `pf_trade_count DEFAULT trade_count` would report a
+/// dust-only minute as fully price-forming. So the DDL here and the field names
+/// of `OhlcvRow` in `packages/prices-ingest-core/src/writer.rs` are both pinned
+/// to this list by unit tests; change one and the other fails.
+pub const CANDLE_COLUMNS: [&str; 18] = [
+    "timestamp",
+    "asset_id",
+    "quote_asset_id",
+    "source",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume_base",
+    "volume_quote",
+    "volume_quote_usd",
+    "close_usd",
+    "vwap",
+    "trade_count",
+    "version",
+    "pf_trade_count",
+    "pf_volume",
+    "pf_price_volume",
+];
+
+/// Every `price_ohlcv_*` grain suffix, in rollup order. The `CREATE … AS` copies
+/// do NOT inherit a post-hoc base-table `ALTER`, so every migration in
+/// `init.sql` has to be applied per table — this is the list it iterates, and
+/// the list the DDL-contract tests iterate.
+pub const CANDLE_GRAINS: [&str; 7] = ["1m", "15m", "1h", "4h", "1d", "1w", "1M"];
+
 /// Production refreshable-MV rollup chain. Applied separately from `INIT_SQL`
 /// (needs ClickHouse ≥ 23.12); not part of the default init flow.
 pub const ROLLUPS_SQL: &str = include_str!("../schema/rollups.sql");
@@ -385,8 +424,130 @@ mod tests {
         // (+1 = 34: task 0267's idempotent `ALTER TABLE prices.usd_rate ADD
         // COLUMN IF NOT EXISTS quality`, the same shape as the current_prices
         // ALTERs already counted above.)
+        // (+7 = 41: task 0286's per-table pf ALTERs — pf_trade_count, pf_volume
+        // and pf_price_volume added as three clauses of one ALTER per OHLCV
+        // grain, because the `CREATE … AS` copies do not inherit them.)
         let stmts = split_statements(INIT_SQL);
-        assert_eq!(stmts.len(), 34, "got {}", stmts.len());
+        assert_eq!(stmts.len(), 41, "got {}", stmts.len());
+    }
+
+    /// The single `CREATE TABLE … IF NOT EXISTS <table> (` statement of `sql`.
+    fn create_statement(sql: &str, table: &str) -> String {
+        let needle = format!("CREATE TABLE IF NOT EXISTS {table} (");
+        split_statements(sql)
+            .into_iter()
+            .find(|s| s.contains(&needle))
+            .unwrap_or_else(|| panic!("no CREATE TABLE for {table}"))
+    }
+
+    /// Column names of a `CREATE TABLE` body, in DDL order: everything between
+    /// the opening `(` line and the closing `)` line, first identifier per line.
+    fn create_column_names(stmt: &str) -> Vec<String> {
+        stmt.lines()
+            .skip_while(|l| !l.trim_end().ends_with('('))
+            .skip(1)
+            .take_while(|l| !l.trim_start().starts_with(')'))
+            .filter_map(|l| l.split_whitespace().next())
+            .map(|t| t.trim_end_matches(',').to_string())
+            .collect()
+    }
+
+    /// Task 0286: the fresh `_1m` CREATE and [`CANDLE_COLUMNS`] are one contract.
+    /// The writer routes its INSERT by name against this DDL, so a column that
+    /// exists in only one of the two is a silent DEFAULT, not an error (F5/F6b).
+    #[test]
+    fn init_sql_1m_create_lists_every_candle_column_in_order() {
+        let stmt = create_statement(INIT_SQL, "prices.price_ohlcv_1m");
+        let cols = create_column_names(&stmt);
+        assert_eq!(
+            cols,
+            CANDLE_COLUMNS.to_vec(),
+            "the _1m CREATE must list exactly CANDLE_COLUMNS, in order"
+        );
+    }
+
+    /// Task 0286: a `CREATE … AS` copy does not inherit a post-hoc base-table
+    /// ALTER, so each of the seven grains needs its own idempotent ALTER — 21
+    /// assertions, the same shape as the `close_usd` block above them.
+    #[test]
+    fn every_candle_table_gains_the_three_pf_columns() {
+        let stmts = split_statements(INIT_SQL);
+        for grain in CANDLE_GRAINS {
+            let table = format!("prices.price_ohlcv_{grain}");
+            let alters: Vec<&String> = stmts
+                .iter()
+                .filter(|s| {
+                    // Tokenised, not `starts_with`: the pf ALTERs put their
+                    // clauses on continuation lines, so the table name is
+                    // followed by a newline rather than a space.
+                    let head: Vec<&str> = s.split_whitespace().take(3).collect();
+                    head == ["ALTER", "TABLE", table.as_str()]
+                })
+                .collect();
+            for col in ["pf_trade_count", "pf_volume", "pf_price_volume"] {
+                let needle = format!("ADD COLUMN IF NOT EXISTS {col} ");
+                assert!(
+                    alters.iter().any(|s| s.contains(&needle)),
+                    "{table} has no idempotent ALTER adding {col}"
+                );
+            }
+        }
+    }
+
+    /// Task 0286: a pre-0061 database must still get `close_usd` in its
+    /// mid-table position first. The pf ALTERs append `AFTER version`, so they
+    /// must run after — otherwise `AFTER volume_quote_usd` lands `close_usd`
+    /// between columns the pf ALTERs have already appended past.
+    #[test]
+    fn pf_alters_come_after_the_close_usd_alters() {
+        let stmts = split_statements(INIT_SQL);
+        let last_close_usd = stmts
+            .iter()
+            .rposition(|s| s.contains("ADD COLUMN IF NOT EXISTS close_usd"))
+            .expect("close_usd ALTERs");
+        let first_pf = stmts
+            .iter()
+            .position(|s| s.contains("ADD COLUMN IF NOT EXISTS pf_trade_count"))
+            .expect("pf ALTERs");
+        assert!(
+            first_pf > last_close_usd,
+            "pf ALTERs at {first_pf} must come after the last close_usd ALTER at {last_close_usd}"
+        );
+    }
+
+    /// Task 0286: widening the candle tables to eighteen columns turns a
+    /// positional `INSERT … SELECT <15 columns>` into a Code 20 failure (F6d).
+    /// The two MAINTAINED pre-rolls therefore name their columns; the three pf
+    /// ones take their table DEFAULTs until S2's generator projects them.
+    #[test]
+    fn maintained_prerolls_insert_by_explicit_column_list() {
+        let want: Vec<String> = CANDLE_COLUMNS[..15].iter().map(|c| c.to_string()).collect();
+        let mut checked = 0;
+        for (name, sql) in [
+            ("preroll.sql", PREROLL_SQL),
+            ("preroll-live-gap.sql", PREROLL_LIVE_GAP_SQL),
+        ] {
+            let mut per_file = 0;
+            for stmt in split_statements(sql) {
+                if !stmt.starts_with("INSERT INTO prices.price_ohlcv_") {
+                    continue;
+                }
+                let head = stmt.split("SELECT").next().expect("INSERT head");
+                let open = head
+                    .find('(')
+                    .unwrap_or_else(|| panic!("{name}: INSERT with no column list: {head}"));
+                let close = head.rfind(')').expect("closing paren");
+                let got: Vec<String> = head[open + 1..close]
+                    .split(',')
+                    .map(|c| c.trim().to_string())
+                    .collect();
+                assert_eq!(got, want, "{name}: column list of `{head}`");
+                per_file += 1;
+            }
+            assert_eq!(per_file, 6, "{name}: expected six candle INSERTs");
+            checked += per_file;
+        }
+        assert_eq!(checked, 12);
     }
 
     #[test]
