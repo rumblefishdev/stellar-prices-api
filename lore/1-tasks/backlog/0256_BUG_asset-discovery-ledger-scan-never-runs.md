@@ -105,9 +105,39 @@ two.
 
 🔑 **This reframes the task.** It is written as a missing feature ("the scan
 never runs"). The measured defect points the other way: the *seeding* half runs
-too much. The guess recorded in Context — that the registry arrives via
-`ledger-processor` — was confirmed today, so this worker's seeding is redundant
-as well as costly.
+too much.
+
+### The registry is written by `ledger-processor` — Context's guess, now confirmed
+
+Context calls it "most likely `prices-ledger-processor`". It is, on two
+independent lines of evidence.
+
+**Measured.** Over 24 h, `wrote asset rows` appears in exactly two log groups:
+
+| worker | rows per run | call |
+|---|---|---|
+| `ledger-processor` | **1–21** (newly-interned assets only) | `write_new_assets` |
+| `asset-discovery` | **209,196** (the entire registry) | `write_assets` |
+| `enrichment`, `supply`, `coarse-sweep` | none | — |
+
+**Documented.** `prices-ingest-core/src/writer.rs` already says so on
+`write_asset_metadata`: identity columns in `prices.assets` are *"written by the
+ledger processor — a delta of newly-interned assets per run via
+`write_new_assets`"*. The delta path is the designed one; `write_assets` is the
+exception, and `write_new_assets`' own doc note records that `ledger-processor`
+avoids the full form deliberately because of Hetzner egress ([[0132]]).
+
+🔑 **So asset-discovery contributes no new assets at all.** It reads the
+registry, de-duplicates it in memory (which is why the number it *writes* stays
+209,196 even when the read returned 627,588 — three un-merged copies), and
+writes that clean copy back as a **new part**. It does not replace the
+duplicates it just read; it adds to them. Pure churn on a table another worker
+already maintains correctly.
+
+⚠️ This settles the *seeding* half of the first Implementation bullet
+independently of the scan decision: the seed is redundant whether or not the
+ledger scan is ever switched on. Deleting it costs nothing that
+`ledger-processor` is not already doing.
 
 ## Implementation
 
