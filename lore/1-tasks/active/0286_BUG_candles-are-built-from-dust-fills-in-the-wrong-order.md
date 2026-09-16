@@ -63,6 +63,24 @@ history:
       pool fills keep their execution ratio with the 0.1 % bound, the
       reserve-based price is dropped. Phase 2 shrinks to offer prices and
       the transaction index.
+  - date: "2026-09-16"
+    status: active
+    who: akot
+    note: >
+      Redefined by Adam (ADR 0287 third amendment): a candle is built only
+      from the price-forming trades of its own bucket. open/close are the
+      first and last price-forming fills in fill order, never a window mean
+      and never carried from an earlier bucket; a bucket without one has no
+      price on the wire. The settle pass, price_ohlcv_settle, close_median
+      and the window columns are dropped; the rollups take open/close from
+      the child tier; pf_vwap becomes the quality field; D1 (transaction
+      index) moves into phase 1 because "last fill" depends on it. A first
+      implementation on the branch (four GSD slices, eight commits) was
+      reverted the same day at Adam's request — it had built the windowed
+      close and the settle machinery; its review findings that still apply
+      (name-routed writers, the positional version trap in the fill key, the
+      DEFAULT-expression migration, the i128 bound form, the backfill marker
+      step in phase 3) are folded in below. Phases and criteria rewritten.
 ---
 
 # Candles are built from dust fills in the wrong order
@@ -79,126 +97,143 @@ daily candles ~26 % low on 2023-03-11). The order key
 fill is also the wrong one on 54/60 sampled days. Full analysis:
 `docs/ohlcv-outlier-prints-analysis.md`; decisions and measurements: [[0278]].
 
-This task implements 0278's decisions D1–D8 and D10 as one change in three
+This task implements ADR 0287 (as amended 2026-09-16) as one change in three
 phases, and re-ingests the history in place so old and new candles mean the
-same thing.
+same thing. The rule it implements: **a candle's prices come only from the
+price-forming trades of its own bucket** — `open`/`close` are the first and
+last such fills in fill order, `high`/`low` their extremes; a bucket with none
+has no price.
 
-## What changes (0278's decisions, in implementation order)
+## What changes (ADR 0287 §1–§8, in implementation order)
 
-### Phase 1 — price-forming fills, windowed close, one method per tier
+### Phase 1 — price-forming fills, fill order, one definition per tier
 
-- **D3/D4 in ingest** (`bucket.rs`, `tick.rs`, and `soroban.rs` — AMM
-  ticks enter through `amm_trade_to_tick`, not `tick.rs`, and the bound must
-  be evaluated on the raw `i128` amounts in each token's own decimals, not
-  after `AMM_AMOUNT_SCALE`): a fill is *price-forming* iff its price does
-  not come from its own rounded amounts, or its rounding bound
-  `1/amount_sold + 1/amount_bought ≤ 0.001` holds. Until phase 2 every fill is
-  ratio-priced, so the bound applies to all. Every fill still counts in
-  `volume_*`, `vwap` and `trade_count`. The ingest keeps **no state** across
-  minutes or backfill chunks: a minute with no price-forming fill is written
-  with `pf_trade_count = 0` and price fields 0; carry-forward of
-  `open`/`close` is the read surface's job, and `high`/`low` are never
-  carried (ADR 0287 §6).
-- **New 1m columns** (`init.sql`): `pf_trade_count`, `pf_volume` (Σ vᵢ),
-  `pf_price_volume` (Σ pᵢ·vᵢ) over price-forming fills, with pᵢ the fill's
-  price. ⚠️ Close must be computed from these, never from
-  `volume_quote / volume_base` — that ratio *is* the amount-derived price
-  (0278 refinement 1). Every tier also gains `close_median`,
-  `open_window_fills` and `close_window_fills` (ADR §4, §7). All writers of `price_ohlcv_1m` are
-  positional (`OhlcvRow` in `writer.rs`, the backfill sink): they change in
-  the same commit as the schema.
-- **D5/D6/D7 — one definition on every tier**:
-  - `close` = `Σ pf_price_volume / Σ pf_volume` over whole minutes, **anchored
-    at the last minute of the bucket with `pf_trade_count > 0`**, extended
-    backwards until `Σ pf_trade_count ≥ 3`, never more than 60 minutes before
-    the anchor and never before the bucket start; fewer if that is all the
-    window reaches. `open` mirrored from the first price-forming minute. On
-    the 1m tier `open = close` = the minute's own price-forming VWAP (ADR §2).
-  - `high`/`low` = extremes of price-forming fills; rollups use
-    `maxIf(high, pf_trade_count > 0)` / `minIf(low, …)` (ADR §3).
-  - `close_median` on every tier (1m: weighted median of price-forming fill
-    prices, in the ingest; coarse: weighted median of the window's minute
-    VWAPs); the read surface flags `|close / close_median − 1| > 1 %`.
-  - **Settle pass** (new, enrichment-worker, beside the coarse sweep; ADR
-    §4): for every coarse tier, once a bucket has closed, compute its
-    `open`/`close` windows, `open_window_fills`, `close_window_fills` and
-    `close_median` from the bucket's 1m rows and write them to a new table
-    `prices.price_ohlcv_settle` (key: tier, asset_id, quote_asset_id,
-    source, timestamp; `ReplacingMergeTree(settled_at)`; plus
-    `tail_version` = Σ `version` of the 1m rows the windows read). Re-settle
-    only when `tail_version` changes; **never write when the bucket's 1m rows
-    are gone**, so 1m retention ([[0200]]) cannot degrade a settled close.
-    Thin pairs make the pass scan the whole bucket's 1m once, at settle time.
-  - Rollups (`rollups.sql`) **do not read 1m**: they take open/close and the
-    window columns from `price_ohlcv_settle` by key, and high/low/volumes
-    from the child tier with `maxIf`/`minIf` on `pf_trade_count > 0`. **No
-    settle row** (bucket still open, not yet settled, or history whose 1m
-    never existed): fall back to the child tier's
-    `argMaxIf(close, timestamp, pf_trade_count > 0)` /
-    `argMinIf(open, …)` with `close_window_fills = 0`; the next refresh after
-    the settle pass replaces it.
-  - **Coarse `close_usd`** = `close × argMaxIf(close_usd / close, timestamp,
-    close_usd > 0)` over the children — the latest priced child's *rate*, not
-    its product (ADR §5). No priced child → 0, the worker's coarse pass
-    prices it. This replaces the `argMaxIf(close_usd, …)` carry [[0146]] is
-    about to land: coordinate so the six MVs are re-created once, with both.
-  - The re-CREATE runs under 0146's checklist (0095 invariants, per-MV
-    freshness). [[0142]] (drift detection) and [[0137]] (freshness alarm) are
-    already live, so nothing else gates the DROP window.
-- **D8 — ADR 0287** (accepted 2026-09-15): `close` and `open` change meaning
-  on the wire (window VWAP, not last/first print); `high`/`low` are extremes
-  of price-forming fills. The implementation must match it; a deviation
-  found while building goes back into the ADR, not silently into the code.
-- **Enrichment candidate predicate** (`ch_enrich.rs:488`, `CANDIDATE_PRED`,
-  and every statement and gauge built on it; ADR §6): becomes
-  `(volume_quote_usd = 0 OR (close_usd = 0 AND close > 0)) AND volume_quote > 0`.
-  Without it every dust-only minute (`close = 0`) is re-selected and
-  rewritten on every pass, and the "enriched 0 rows despite a non-empty
-  backlog" warning fires permanently. In scope here, not in the pivot's
-  two-reference change.
-- Run the settle pass over the existing history where 1m exists, then
-  pre-roll the coarse tiers (`preroll*.sql`) joining the settle table.
+- **Price-forming fills in the ingest** (`bucket.rs`, `tick.rs`, `soroban.rs`
+  — AMM ticks enter through `amm_trade_to_tick`, and the bound is evaluated
+  on the raw `i128` amounts in each token's own decimals, not after
+  `AMM_AMOUNT_SCALE`): a fill is *price-forming* iff its price does not come
+  from its own rounded amounts, or `1/a + 1/b ≤ 0.001` holds. Evaluate it in
+  integer arithmetic as `a > 1000 ∧ b > 1000 ∧ (a − 1000)(b − 1000) ≥ 10⁶`,
+  where a product overflowing u128 means the bound holds; the literal form
+  `1000(a + b) ≤ ab` with "overflow ⇒ holds" misclassifies 10³⁸ against 5.
+  Until phase 2 every fill is ratio-priced, so the bound applies to all.
+  Every fill still counts in `volume_*`, `vwap` and `trade_count`.
+- **Fill order (D1) in the same phase**: `lex_key =
+  (ledger, transaction_index, operation_index, claim_index)`;
+  `transaction_index` is the position in `tx_processing` (classic,
+  `filter.rs`), the transaction's apply index in `process_ledger` (Soroban
+  live, `soroban.rs`), and BE's `default.transactions.application_order`
+  joined on `id = transaction_id` in `events-backfill` (LEFT join, FINAL,
+  bounded to the chunk; unreadable or missing → WARN once and fall back to
+  today's `(transaction_id, event_index)` order). `event_index` is per
+  transaction (xdr-parser `types.rs`), so it stays the tiebreak inside one.
+  ⚠️ `version = ledger·1000 + operation_index` is unchanged (coarse
+  `sum(version)` must stay comparable with existing rows) — give the fill's
+  ledger and operation **named fields** before the key widens, or the
+  transaction index silently becomes the version's second term.
+- **The 1m candle**: `open` = first price-forming fill, `close` = last, in
+  `lex_key` order; `high`/`low` = their extremes; `pf_trade_count`,
+  `pf_volume` (Σ `volume_base` of price-forming fills), `pf_price_volume`
+  (Σ price × `volume_base`). No price-forming fill → price fields 0,
+  `pf_*` 0, the row still written with its volume and count. The ingest
+  keeps no price state across minutes or chunks. Sort the minute's fills by
+  `lex_key` before every sum so nothing depends on arrival order; use
+  checked/saturating Decimal arithmetic (rust_decimal panics on overflow),
+  clamped to the column's domain.
+- **Schema** (`init.sql`): `pf_trade_count`, `pf_volume`, `pf_price_volume`
+  on **all seven** tables, appended after `version` via idempotent
+  `ALTER TABLE … ADD COLUMN IF NOT EXISTS` (the `AS`-copies do not inherit a
+  post-hoc ALTER — same pattern as `close_usd`), with DEFAULT expressions
+  `trade_count` / `volume_base` / `volume_quote` so pre-existing rows keep
+  the old "every fill forms price" meaning until phase 3. ⚠️ The Rust writer
+  is **name-routed** (clickhouse 0.13 inserts by field name), not positional
+  as `init.sql` claims: a struct that omits a column silently takes its
+  DEFAULT, and `pf_trade_count DEFAULT trade_count` then declares a dust-only
+  row price-forming. Every writer changes in the same commit and a test pins
+  the writer's field names to the canonical column list. The pre-roll
+  scripts insert positionally and fail loudly instead (fix the two
+  maintained ones; mark `preroll-incremental.sql` / `preroll-amm-reprice.sql`
+  historical).
+- **Rollups** (`rollups.sql`, one generator shared with `preroll*.sql`):
+  `argMinIf(open, t.timestamp, t.pf_trade_count > 0)`,
+  `argMaxIf(close, …)`, `maxIf(high, …)`, `minIf(low, …)`; `pf_*` summed;
+  `vwap` and `close_usd` computed in Float64 and converted without throwing
+  (Decimal division silently overflows past ~1.7e10 on 26.3.10.60);
+  **coarse `close_usd`** = `close × argMaxIf(close_usd / close, timestamp,
+  close_usd > 0)` — the latest priced child's *rate* (ADR §5), which
+  supersedes [[0146]]'s `argMaxIf(close_usd, …)`: re-create the six MVs
+  once, with both, under 0146's checklist ([[0142]] and [[0137]] are live).
+  Keep `t.`-qualification inside every aggregate (`ILLEGAL_AGGREGATION`
+  otherwise) and the drift detector's constraints on the file.
+- **Enrichment** (`ch_enrich.rs`; ADR §6): `CANDIDATE_PRED` becomes
+  `(volume_quote_usd = 0 OR (close_usd = 0 AND close > 0)) AND volume_quote > 0`
+  — and, because the oracle/peg/external/pivot statements carry their own
+  literals, each of them excludes a `close = 0` row once its volume is
+  priced (`peg_sql`'s term `p.`-qualified). The pivot's XLM/USDC reference
+  adds `pf_trade_count > 0`. **Every re-inserting statement carries all
+  candle columns** (the pivot has four nesting levels), pinned by a unit
+  test per statement. In scope here, not in the pivot's two-reference change.
+- **Read surface** (`/ohlcv`): prices merge only from rows with
+  `pf_trade_count > 0` (explicit NULL when no row matches — `maxIf` over
+  nothing returns 0, not NULL); a bucket with Σ `pf_trade_count = 0` returns
+  `open`/`high`/`low`/`close`/`vwap` absent, volume and `trade_count`
+  present (ADR 0011 §5); new fields `pf_trade_count` and `pf_vwap`
+  (additive, before `source`/`quality` so the positional RowBinary tail
+  stays put) and a divergence flag `|close / pf_vwap − 1| > 1 %`; the USDC
+  peg series emits null for them. No carry-forward anywhere.
+- **Docs**: `docs/database-schema/database-schema-overview.md`, the OpenAPI
+  descriptions of `open`/`close`/`high`/`low`/`vwap` and the general
+  overview's dust-print prose (task 0116's "filter on the client") describe
+  the ADR 0287 definitions and the new fields.
+- **Deploy order** (write it into the schema comment and a runbook): schema
+  → enrichment + coarse sweep + API → MV re-CREATE → ingest **last**. The
+  old MVs would turn a dust-only minute into `low = 0`, and old enrichment
+  would re-insert rows without the pf columns.
 
-### Phase 2 — offer price for order-book fills, transaction index
+### Phase 2 — offer price for order-book fills
 
 - **D2** (`filter.rs`, `price.rs`): order-book fill price = the resting
-  offer's `price.N/D` from the offer's ledger-entry change (the execution
-  price; Horizon does the same). Requires reading the offer entries from
-  `LedgerEntryChanges` in `LedgerCloseMeta`. **Pool fills keep the amount
-  ratio** — it is their execution price — and the 0.1 % bound excludes pool
-  dust (ADR §1; reserve-based pricing rejected, see the ADR's alternatives).
-- **D3** flips to its final form: order-book fills always form price; pool
-  fills and any fill whose offer change cannot be read take the bound.
-- **D1** (`filter.rs:25`, `tick.rs`, `soroban.rs:642`): `transaction_index`
-  from `tx_processing`'s apply order in the key
-  `(ledger, transaction_index, operation_index, claim_index)`. Soroban
-  extractors sort by transaction hash today; check whether `event_index` is
-  per transaction or per ledger before choosing the fix there.
+  offer's `price.n/d` from that operation's `LedgerEntryChanges` (the `State`
+  pre-image of the `OfferEntry` with the claim's `offer_id`, `Updated` as
+  the second choice; `offer_id` is ledger-unique). Uniform across
+  `TransactionMeta` V0…V4 (`operations[i].changes`). Orientation as
+  `compute_price`: non-inverted `n/d`, inverted `d/n`; guard `n ≤ 0 ∨ d ≤ 0`.
+  Horizon does the same (`findTradeSellPrice`).
+- **D3** in its final form: offer-priced fills always form price; pool fills
+  and any order-book fill whose offer entry cannot be found take the bound.
+  Pool reserves are never used (ADR amendment 2).
 
 ### Phase 3 — history, in place (D10)
 
-- Re-ingest the whole chain (~64 M ledgers, ~16 days, ~4 TB per [[0088]]'s
-  rates) with the phase-2 ingest, **overwriting the existing tables**. Because
-  `price_ohlcv_1m` is `ReplacingMergeTree(version)` with a deterministic
-  `version = ledger·1000 + op`, a re-ingested row ties with the old one, so:
-  per monthly partition `FREEZE` → `DROP PARTITION` → re-ingest → volumes
-  reconciled against the snapshot → next. Then pre-roll the coarse tiers.
-  "Reconciled" means: SDEX volumes equal to the stroop; AMM sources may come
-  back **larger** where [[0282]]'s replaced-instead-of-summed writes lost
-  trades, and that delta is accounted for per source and per month. The
-  Soroban AMM history entered through its own path (events, pool registry
-  seeded first — [[0088]]); phase 3 covers it with the same D1–D3 rules or
-  says why not.
-- Preconditions: phases 1–2 live and measured on new data; cleanup off for the
-  whole run ([[0200]]); disk budgeted for the snapshots; [[0282]] settled,
-  because the re-ingest writes with the same `version` semantics.
-- **Cost not in the ledger estimate:** re-ingested rows carry `close_usd = 0`,
-  so the enrichment worker re-prices the entire history afterwards (for
-  scale: 0268's campaign re-priced 9.94 M candles in ~24 min; 0228's, never
-  run, was estimated at ~190 M candles and ~4 h 40 m; this is all of them). That same fact makes [[0228]]'s reset-mode campaign
-  (Appendix C) **unnecessary**: the refill happens inside the re-enrichment;
-  only its after-check (`post_run_0228_it`) still runs, on the repaired
-  XLM/USDC reference.
+- Re-ingest the whole chain (~64 M ledgers; 0088's rates give ~5.7 TB and
+  ~18 days at home bandwidth) with the phase-2 ingest, **overwriting the
+  existing tables**. Old rows outrank a re-ingested row on `version`
+  (enrichment bumped them by +1 per pass), so per monthly partition:
+  `FREEZE` 1m and the coarse partitions it overlaps → clear that month's
+  `backfill_sdex_ledgers` completion markers (else the resume set skips
+  every ledger and the run is a silent no-op) → `DROP PARTITION` 1m →
+  re-ingest → volumes reconciled against the snapshot → `DROP` the
+  overlapping coarse partitions and pre-roll them from the new 1m → next
+  month; the 1w tier last, because weeks straddle months. "Reconciled"
+  means: SDEX volumes equal to the stroop except the documented backfill
+  partition-boundary minutes and the live era, which may come back larger
+  where [[0282]] lost trades; AMM sources ≥ with the delta accounted for per
+  source and month. The Soroban AMM history enters through
+  `events-backfill` (pool registry seeded first — [[0088]]), with the same
+  D1–D3 rules; BE's `default.transactions` coverage of the range is a
+  precondition, the fallback share recorded.
+- Preconditions: phases 1–2 live and measured on new data; cleanup off for
+  the whole run ([[0200]]); disk budgeted for the snapshots; [[0282]]
+  settled, because the re-ingest writes with the same `version` semantics
+  and a later dust-only write of a minute now replaces a priced one.
+- **Cost not in the ledger estimate:** re-ingested rows carry
+  `close_usd = 0`, so the enrichment worker re-prices the entire history
+  afterwards (0268's campaign re-priced 9.94 M candles in ~24 min; 0228's,
+  never run, was estimated at ~190 M candles and ~4 h 40 m; this is all of
+  them). That same fact makes [[0228]]'s reset-mode campaign (Appendix C)
+  **unnecessary**: the refill happens inside the re-enrichment; only its
+  after-check (`post_run_0228_it`) still runs, on the repaired XLM/USDC
+  reference.
 
 ## Out of scope
 
@@ -213,88 +248,110 @@ same thing.
 
 Phase 1:
 - [ ] A minute holding two 17-stroop fills at 1/17 next to nothing else has
-      `vwap = 1/17`, `pf_trade_count = 0` and price fields 0; the same
-      minute beside two ordinary fills has `close` from the ordinary fills
-      only and `low` untouched by the dust (unit test in `bucket.rs`, red on
-      `develop`).
-- [ ] The read surface shows a `pf_trade_count = 0` candle with `open`/`close`
-      carried from the last price-forming candle and `high`/`low` not
-      carried (test on the read path).
+      `vwap = 1/17`, `trade_count = 2`, `pf_trade_count = 0` and price fields
+      0; the same minute beside two ordinary fills has `open`/`close` = the
+      first/last ordinary fill, `low` untouched by the dust, and reads back
+      from ClickHouse with `pf_trade_count = 2`, not the DEFAULT (unit test in
+      `bucket.rs` + `#[ignore]` round trip, both red on `develop`).
+- [ ] The bound holds exactly at 1/2000 + 1/2000, fails just above, and
+      `(10³⁸, 5)` is not price-forming; a Soroban fill is classified on its
+      raw `i128` units before scaling (unit tests).
+- [ ] Key `(ledger, transaction_index, operation_index, claim_index)` on
+      every path; the 2026-04-02 ledger (path payment with a high claim
+      index first, manage-offer second) picks the manage-offer fill as
+      `close`; `version` is unchanged by the widened key (unit tests, the
+      version one red before the key widens); the events-backfill query
+      carries the `application_order` join and its fallback (unit test on
+      the SQL, fallback path exercised).
+- [ ] The same fills in any arrival order give an identical candle, and
+      `low ≤ open, close ≤ high` holds on every tier by construction — pinned
+      on the 1m tier by a property test and on all six rollup statements by
+      an `#[ignore]` test on 26.3.10.60, including a 1M month that does not
+      start on a Monday.
+- [ ] A 1m minute with `pf_trade_count = 0` contributes to no
+      `argMin`/`argMax`/`max`/`min` of its parent; a coarse bucket whose last
+      minute is dust-only closes at the last price-forming child's `close`
+      and gets `close_usd = close × the latest priced child's rate`, not the
+      child's `close_usd` (`#[ignore]` tests on 26.3.10.60 reproducing
+      2026-04-02).
+- [ ] After `INIT_SQL` on a database holding old-shape rows, every candle
+      table carries the three pf columns after `version`, an old row reads
+      `pf_trade_count = trade_count`, and re-applying is a no-op; the Rust
+      writer's field names equal the canonical column list (tests).
 - [ ] A dust-only minute (`close = 0`, `volume_quote > 0`) gets
       `volume_quote_usd` priced and is **not** re-selected by the next
-      enrichment pass (`#[ignore]` test on 26.3.10.60, red on `develop`).
-- [ ] The 1m row carries `pf_trade_count`, `pf_volume`, `pf_price_volume`,
-      and close on every tier equals `Σ pf_price_volume / Σ pf_volume` over
-      the D5 window — pinned by a unit test on all six rollup statements and
-      by an `#[ignore]` test on 26.3.10.60 reproducing 2026-04-02 (dust in the
-      last minute, close from the window).
-- [ ] `low ≤ open, close ≤ high` holds on every tier by construction (test).
-- [ ] Before the window constant is hard-coded: k = 1 vs k = 3 measured on
-      XLM/USDC against Bitstamp's daily close (the R- note's query, the
-      pivot's reference pair, trending — yXLM was pegged), recorded here.
-- [ ] A coarse bucket whose last minute holds one dust fill and whose 1m tail
-      holds priced minutes gets `close_usd = close × the latest child's rate`,
-      not the child's `close_usd` (`#[ignore]` test on 26.3.10.60).
-- [ ] Settle pass: a closed bucket gets exactly one settle row computed from
-      its 1m windows; deleting the bucket's 1m rows afterwards and
-      re-running the pass and the MV leaves `close` unchanged; a late 1m
-      write inside the window re-settles it (`#[ignore]` tests).
-- [ ] A coarse bucket with no settle row falls back to the child's close with
-      `close_window_fills = 0`, and the first MV refresh after its settle row
-      appears replaces it (test); a 1m minute with `pf_trade_count = 0`
-      contributes to no `max`/`min`/`argMax` of its parent (test).
-- [ ] `close_median` present on every tier and equal to the windowed weighted
-      median on a fixture (test).
+      enrichment pass on any tier; the pf columns survive oracle / peg /
+      external / pivot / reset rewrites; the pivot ignores a dust-only
+      XLM/USDC minute (`#[ignore]` tests on 26.3.10.60, red on `develop`).
+- [ ] `/ohlcv` returns a `pf_trade_count = 0` bucket with the price fields
+      absent and volume present, never carried; a multi-source bucket whose
+      dust-only source has the larger volume does not supply the prices;
+      `pf_trade_count`, `pf_vwap` and the divergence flag are on the wire
+      and null on the USDC peg series (unit + `#[ignore]` tests).
 - [ ] `docs/database-schema/database-schema-overview.md`, the OpenAPI
-      description of `open`/`close`/`high`/`low`, and the general overview
-      describe the ADR 0287 definitions, `pf_trade_count`, `close_median` and
-      `close_window_fills`.
-- [x] ADR accepted for the new meaning of `open`/`close`/`high`/`low` —
-      ADR 0287, 2026-09-15, before this task started.
+      description of `open`/`close`/`high`/`low`/`vwap`, and the general
+      overview describe the ADR 0287 definitions, `pf_trade_count` and
+      `pf_vwap`; the deploy order is recorded in the repo.
+- [x] ADR accepted for the meaning of `open`/`close`/`high`/`low` —
+      ADR 0287, 2026-09-15, amended 2026-09-16 (first/last price-forming
+      fill, no carry-forward, no settle pass).
 - [ ] Six MVs re-created with APPEND + `sum(version)` + aligned windows
-      verified, per-MV freshness recovered ([[0146]]'s checklist).
+      verified, per-MV freshness recovered ([[0146]]'s checklist), the
+      rollout run in the deploy order above with the ingest last.
 - [ ] Measured on the first week of new data: residual high/low bias vs
-      Bitstamp on XLM, share of minutes with `pf_trade_count = 0`, share of
-      buckets whose window hit the 60-minute cap. Recorded here.
+      Bitstamp on XLM, share of minutes with `pf_trade_count = 0` by source
+      (a Soroban token with 0–3 decimals may never form price under the
+      raw-unit bound — record any such asset), share of candles the
+      divergence flag marks. Recorded here.
 
 Phase 2:
-- [ ] An order-book fill of 17 stroops against an offer at 0.0794 prices at
-      the offer's `N/D` and forms price; a 34-stroop pool fill (5/34) does
-      not form price and still counts in volume (unit tests).
-- [ ] Key `(ledger, transaction_index, operation_index, claim_index)`; the
-      2026-04-02 ledger (path payment first, manage-offer second) picks the
-      manage-offer fill as last (unit test).
-- [ ] Soroban extractors ordered by apply order, with `event_index`'s scope
-      recorded here.
+- [ ] An order-book fill of 17 stroops against an offer at 0.0794
+      (`Price { n: 397, d: 5000 }`) prices at 397/5000 (oriented) and forms
+      price; a 34-stroop pool fill (5/34) does not form price and still
+      counts in volume; the lookup works across `TransactionMeta` V0…V4,
+      prefers `State` over `Updated`, and a missing entry or `d ≤ 0` falls
+      back to the ratio + bound (unit tests on XDR fixtures).
 
 Phase 3:
 - [ ] Every monthly partition of `price_ohlcv_1m` re-ingested; per partition
       and per source `sum(volume_base)`, `sum(volume_quote)`,
       `sum(trade_count)` reconciled against the FREEZE snapshot — equal for
-      SDEX, ≥ with the delta explained by [[0282]] for AMM sources;
-      differences otherwise only in OHLC.
-- [ ] Coarse tiers pre-rolled; XLM/USDC 1d closes on the seven dust days of
-      the analysis are within 5 % of Bitstamp; the count of XLM-quoted
-      candles priced from a quantised XLM/USDC close (0278's before-figure:
-      22 760 / 143 577 / 85 699 / 30 064 / 10 938 on 15m / 1h / 4h / 1d / 1w)
-      is zero after the re-ingest and pre-roll.
+      SDEX (boundary minutes and the live era documented), ≥ with the delta
+      explained by [[0282]] for AMM sources; differences otherwise only in
+      OHLC.
+- [ ] Coarse tiers pre-rolled from the new 1m; XLM/USDC 1d closes on the
+      seven dust days of the analysis are within 5 % of Bitstamp (the "last
+      price-forming fill" close was not measured on the 1 181-day set —
+      this is where it is); the count of XLM-quoted candles priced from a
+      quantised XLM/USDC close (0278's before-figure: 22 760 / 143 577 /
+      85 699 / 30 064 / 10 938 on 15m / 1h / 4h / 1d / 1w) is zero after the
+      re-ingest and pre-roll.
 - [ ] The whole history re-enriched (`close_usd > 0` wherever a reference
       exists) and `post_run_0228_it` green on the repaired reference; 0228's
       reset-mode campaign recorded as superseded, not run.
 
 ## Notes
 
-- Measured basis for every parameter (k = 3, the 0.1 % bound, the offer price
-  being on-market): 0278's `notes/R-measurements-2026-09-15.md`. The 60-minute
-  cap is a policy choice, unmeasurable on thin pairs.
+- Measured basis for the filter (the 0.1 % bound, the offer price being
+  on-market): 0278's `notes/R-measurements-2026-09-15.md` §4. The 2026-09-15
+  measurements of k (window size) no longer apply — there is no window.
 - The phase-1 unit test for the `vwap` trap only "comes alive" in phase 2
   (before D2 dust is never price-forming), but write it in phase 1 so the
   rollup arithmetic is pinned from the start.
 - [[0282]] (candle writes replaced instead of summed across a reconcile run)
-  touches the same `version` semantics phase 3 depends on; settle it first.
-- 2026-09-15 specification review (see ADR 0287's second history entry)
-  found the record short of the mechanics in five places — coarse
-  `close_usd`, the missing 1m tail, the carry-forward mechanism, the window
-  anchor, `open = close` on 1m — plus wording drift (column name, pool price
-  before/after, 0142/0137 state). All resolved above; no 0278 decision was
-  reversed.
+  touches the same `version` semantics phase 3 depends on, and under the new
+  definition a later dust-only write of a minute replaces a priced one
+  outright — settle it before the ingest is deployed.
+- Known consequence, not a defect: a Soroban token with 0–3 decimals needs
+  > 1 000 raw units on both legs to form price, i.e. 10 whole tokens per
+  fill for a 2-decimal token; such an asset gets volume and no price until
+  a decimals-aware bound is decided. Watch it in the first-week measurement.
+- Reference material from the reverted first implementation (2026-09-16):
+  branch `backup/0286-gsd-implementation-2026-09-16` and the gitignored
+  `.planning/BRIEF-0286.md` (facts verified against the code and ClickHouse
+  26.3.10.60). Its rollup/settle machinery is obsolete; its ingest, schema
+  and enrichment findings are folded into phase 1 above.
+- 2026-09-15 specification review (ADR 0287's second history entry) and the
+  2026-09-16 redefinition (third entry): three 0278 decisions reversed —
+  D4 (carry-forward), D5/D6 (windowed VWAP close), D8's shape. D1–D3, D7,
+  D10 stand.
