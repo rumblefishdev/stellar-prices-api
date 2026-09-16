@@ -19,6 +19,9 @@ links:
   - "../../../packages/prices-clickhouse/schema/init.sql"
   - "../../../packages/prices-clickhouse/schema/rollups.sql"
   - "../../../packages/enrichment-worker/src/ch_enrich.rs"
+  - "../../../packages/prices-clickhouse/src/rollup_sql.rs"
+  - "../../../docs/runbooks/0286-candle-definitions-rollout.md"
+  - "../../../docs/runbooks/0286-reingest-history.md"
 history:
   - date: "2026-09-15"
     status: backlog
@@ -81,6 +84,26 @@ history:
       (name-routed writers, the positional version trap in the fill key, the
       DEFAULT-expression migration, the i128 bound form, the backfill marker
       step in phase 3) are folded in below. Phases and criteria rewritten.
+  - date: "2026-09-16"
+    status: active
+    who: akot
+    note: >
+      Phases 1 and 2 implemented on the branch as four GSD slices, 15
+      commits 5cc01b5..844a3a1: pf columns on all seven tables with DEFAULT
+      migration; price-forming bound + transaction index on every ingest
+      path; 1m candle from first/last price-forming fill; one Rust generator
+      for rollups.sql/preroll*.sql with pf-gated six MVs, 1M rolled from 1d
+      (mv_ohlcv_1d_to_1M), rate-form close_usd; enrichment carrying all 18
+      columns with the new predicates; /ohlcv pf-gated with pf_trade_count,
+      pf_vwap, close_divergent; offer price for order-book fills; runbooks
+      for the rollout and the phase-3 re-ingest. Workspace 1047 tests green
+      (+~120 new), 160 #[ignore] tests green on local 26.3.10.60. Local
+      end-to-end check on the real 2026-04-02 ledgers: XLM/USDC 1d close
+      0.16310 = Horizon's last order-book fill (was 5/34), 0 OHLC-order
+      violations on every tier, 100 % of order-book fills offer-priced. One
+      post-verification fix: a price that rounds to 0 at 14 dp forms no
+      price. Operator steps (MV re-CREATE, rollout order, first-week
+      measurement, phase 3) remain open.
 ---
 
 # Candles are built from dust fills in the wrong order
@@ -247,51 +270,60 @@ has no price.
 ## Acceptance Criteria
 
 Phase 1:
-- [ ] A minute holding two 17-stroop fills at 1/17 next to nothing else has
+- [x] A minute holding two 17-stroop fills at 1/17 next to nothing else has
       `vwap = 1/17`, `trade_count = 2`, `pf_trade_count = 0` and price fields
       0; the same minute beside two ordinary fills has `open`/`close` = the
       first/last ordinary fill, `low` untouched by the dust, and reads back
       from ClickHouse with `pf_trade_count = 2`, not the DEFAULT (unit test in
       `bucket.rs` + `#[ignore]` round trip, both red on `develop`).
-- [ ] The bound holds exactly at 1/2000 + 1/2000, fails just above, and
+      → `bucket.rs` unit tests + `candle_write_it` (43215eb, 280c77e).
+- [x] The bound holds exactly at 1/2000 + 1/2000, fails just above, and
       `(10³⁸, 5)` is not price-forming; a Soroban fill is classified on its
       raw `i128` units before scaling (unit tests).
-- [ ] Key `(ledger, transaction_index, operation_index, claim_index)` on
+      → `price.rs` tests incl. the i128 form and the Soroban raw-unit case (42cf7fa).
+- [x] Key `(ledger, transaction_index, operation_index, claim_index)` on
       every path; the 2026-04-02 ledger (path payment with a high claim
       index first, manage-offer second) picks the manage-offer fill as
       `close`; `version` is unchanged by the widened key (unit tests, the
       version one red before the key widens); the events-backfill query
       carries the `application_order` join and its fallback (unit test on
       the SQL, fallback path exercised).
-- [ ] The same fills in any arrival order give an identical candle, and
+      → `filter.rs`/`soroban.rs`/events-backfill tests; the 2026-04-02 shape pinned in `a_path_payment_sweep_closes_before_a_later_manage_offer` (42cf7fa, 7a9b348); version test red before the key widened.
+- [x] The same fills in any arrival order give an identical candle, and
       `low ≤ open, close ≤ high` holds on every tier by construction — pinned
       on the 1m tier by a property test and on all six rollup statements by
       an `#[ignore]` test on 26.3.10.60, including a 1M month that does not
       start on a Monday.
-- [ ] A 1m minute with `pf_trade_count = 0` contributes to no
+      → `arrival_order_does_not_change_the_candle` (1m) + `rollup_pf_it` on 26.3.10.60 incl. an April 1M month (5d4ad5e).
+- [x] A 1m minute with `pf_trade_count = 0` contributes to no
       `argMin`/`argMax`/`max`/`min` of its parent; a coarse bucket whose last
       minute is dust-only closes at the last price-forming child's `close`
       and gets `close_usd = close × the latest priced child's rate`, not the
       child's `close_usd` (`#[ignore]` tests on 26.3.10.60 reproducing
       2026-04-02).
-- [ ] After `INIT_SQL` on a database holding old-shape rows, every candle
+      → `rollup_pf_it`, `rollup_chain_it`, `preroll_close_usd_guard_it` (rate form vs carried product distinguished by fixture) (5d4ad5e, 84efe8c).
+- [x] After `INIT_SQL` on a database holding old-shape rows, every candle
       table carries the three pf columns after `version`, an old row reads
       `pf_trade_count = trade_count`, and re-applying is a no-op; the Rust
       writer's field names equal the canonical column list (tests).
-- [ ] A dust-only minute (`close = 0`, `volume_quote > 0`) gets
+      → `candle_migration_it` pins column order and a legacy 1d row; `CANDLE_COLUMNS` == writer field names test (93c4e35, 280c77e).
+- [x] A dust-only minute (`close = 0`, `volume_quote > 0`) gets
       `volume_quote_usd` priced and is **not** re-selected by the next
       enrichment pass on any tier; the pf columns survive oracle / peg /
       external / pivot / reset rewrites; the pivot ignores a dust-only
       XLM/USDC minute (`#[ignore]` tests on 26.3.10.60, red on `develop`).
-- [ ] `/ohlcv` returns a `pf_trade_count = 0` bucket with the price fields
+      → `ch_enrich_it` (51 tests): candidate predicate, pf survival through oracle/peg/external/pivot/reset, pivot reference (0cefa0f, 84efe8c).
+- [x] `/ohlcv` returns a `pf_trade_count = 0` bucket with the price fields
       absent and volume present, never carried; a multi-source bucket whose
       dust-only source has the larger volume does not supply the prices;
       `pf_trade_count`, `pf_vwap` and the divergence flag are on the wire
       and null on the USDC peg series (unit + `#[ignore]` tests).
-- [ ] `docs/database-schema/database-schema-overview.md`, the OpenAPI
+      → `queries_ch.rs` unit tests + `ohlcv_it` (5 new); confirmed on the local API against real 2026-04-02 data (8ddc2fa).
+- [x] `docs/database-schema/database-schema-overview.md`, the OpenAPI
       description of `open`/`close`/`high`/`low`/`vwap`, and the general
       overview describe the ADR 0287 definitions, `pf_trade_count` and
       `pf_vwap`; the deploy order is recorded in the repo.
+      → 1f267ae; deploy order in `init.sql` and `docs/runbooks/0286-candle-definitions-rollout.md` (5375279).
 - [x] ADR accepted for the meaning of `open`/`close`/`high`/`low` —
       ADR 0287, 2026-09-15, amended 2026-09-16 (first/last price-forming
       fill, no carry-forward, no settle pass).
@@ -305,12 +337,13 @@ Phase 1:
       divergence flag marks. Recorded here.
 
 Phase 2:
-- [ ] An order-book fill of 17 stroops against an offer at 0.0794
+- [x] An order-book fill of 17 stroops against an offer at 0.0794
       (`Price { n: 397, d: 5000 }`) prices at 397/5000 (oriented) and forms
       price; a 34-stroop pool fill (5/34) does not form price and still
       counts in volume; the lookup works across `TransactionMeta` V0…V4,
       prefers `State` over `Updated`, and a missing entry or `d ≤ 0` falls
       back to the ratio + bound (unit tests on XDR fixtures).
+      → `filter.rs` XDR fixture tests (18, first in the repo): meta V0…V4 + LedgerCloseMeta V0/V1/V2, State over Updated, ClaimAtom V0, two claims in one operation, all five claim carriers, op-count mismatch, `d ≤ 0`, negative amount (6005f58, 7a9b348).
 
 Phase 3:
 - [ ] Every monthly partition of `price_ohlcv_1m` re-ingested; per partition
@@ -329,6 +362,116 @@ Phase 3:
 - [ ] The whole history re-enriched (`close_usd > 0` wherever a reference
       exists) and `post_run_0228_it` green on the repaired reference; 0228's
       reset-mode campaign recorded as superseded, not run.
+
+## Implementation Notes
+
+Branch `fix/0286_candles-are-built-from-dust-fills-in-the-wrong-order`,
+15 commits `5cc01b5..844a3a1` (2026-09-16), one commit per GSD plan task:
+
+- **S1 ingest + schema** (`93c4e35`, `42cf7fa`, `43215eb`, `280c77e`):
+  `CANDLE_COLUMNS` (18 names) + `CANDLE_GRAINS` in `prices-clickhouse`;
+  idempotent `ADD COLUMN IF NOT EXISTS … DEFAULT` on all seven tables;
+  `price_forming_i64` / i128 bound; `transaction_index` on classic, Soroban
+  live and events-backfill (bounded LEFT join on `application_order`
+  collapsed to one row per id, counted fallback); 1m candle sorted by
+  `lex_key` with saturating decimals clamped to `Decimal(38,14)`.
+- **S2 rollups + enrichment** (`5d4ad5e`, `0cefa0f`, `5375279`, `84efe8c`):
+  `prices-clickhouse/src/rollup_sql.rs` renders `rollups.sql`,
+  `preroll.sql`, `preroll-live-gap.sql` (file == generator pinned);
+  `argMinIf/argMaxIf/maxIf/minIf` on `t.pf_trade_count > 0`, pf sums,
+  Float64 `vwap`/`close_usd` with the rate form; `mv_ohlcv_1d_to_1M`
+  (400-day window over 1d); `CANDIDATE_PRED` and every writing statement's
+  own literal per ADR §6; `insert_columns()` on all five re-inserts.
+  `preroll-incremental.sql` / `preroll-amm-reprice.sql` marked historical.
+- **S3 read surface + docs** (`8ddc2fa`, `1f267ae`): pf gate in both arms
+  with explicit NULL wrappers; `pf_trade_count`, `pf_vwap`,
+  `close_divergent` before `source`/`quality`; `close_divergent` computed in
+  Rust; OpenAPI `FIELDS`; schema overview, general overview.
+- **S4 offer price + phase-3 runbook** (`6005f58`, `5c26272`, `7a9b348`):
+  `PriceSource { Offer{n,d} | AmountRatio }` on `RawTrade`, per-operation
+  offer map from `operations[i].changes`; `OfferLookupCounts` logged per
+  partition/run; `decode_probe` reports the offer-priced share;
+  `docs/runbooks/0286-reingest-history.md`.
+- **Post-verification** (`844a3a1`): `price_survives_column_scale` — a
+  price rounding to 0 at 14 dp forms no price (ratio, offer and AMM arms).
+
+Verification (2026-09-16, local 26.3.10.60 only): `cargo test --workspace`
+1047 / 0; 12 `#[ignore]` suites 160 / 0; real backfill of ledgers
+61926675..61942890 (2026-04-02): XLM/USDC 1d open/high/vwap identical to
+Horizon, close 0.16310 = Horizon's last order-book fill, low 0.1604 vs
+Horizon's 0.1471 (the 5/34 dust, now excluded); 1d close = last
+price-forming 1m close on all 14 393 pairs; 10.5 % of SDEX minutes have
+`pf_trade_count = 0`. Report kept in the gitignored
+`.planning/VERIFY-0286-local.md`.
+
+## Design Decisions
+
+### From Plan
+
+1. **Candle = first/last price-forming fill of its own bucket** (ADR 0287
+   third amendment); no carry-forward, no settle pass.
+2. **1M rolls from 1d**, not 1w — a week straddling a month must not carry
+   the next month's trades into the 1M close.
+3. **Coarse `close_usd` = close × latest priced child's rate**, superseding
+   [[0146]]'s carried product; both land in one MV re-CREATE.
+4. **Deploy order** schema → enrichment + API → MV re-CREATE → ingest last.
+
+### Emerged
+
+5. **`vwap` is an explicit zero, never NULL** in the rollups — the column is
+   not Nullable; `ifNull(toDecimal128OrZero(toString(...)), 0)`.
+6. **Read-path `vwap` is recomputed over price-forming rows and clamped
+   into `[low, high]`**, so it can differ from the stored `vwap` of a
+   bucket that also holds dust (documented in `queries_ch.rs`).
+7. **`pf_vwap` is `nullIf(…, 0)`** — a zero would be clamped up to `low`
+   and invent a price. The 1 % divergence flag is computed in Rust.
+8. **A sub-resolution price forms no price** (`844a3a1`): a fill of
+   3.3e10 base for 0.0001622 quote passes the bound but rounds to 0 at
+   14 dp; without the rule it produced `pf_trade_count = 1` with all
+   prices 0 — a shape the ADR excludes. Found by the local end-to-end run.
+9. **Offer-priced fill with a non-positive amount is not price-forming**
+   (review finding, `7a9b348`).
+10. **The rollup generator validates `db` as a bare identifier and takes
+    typed bounds** (`Bound::{Param, Timestamp}`), rendering byte-identical
+    SQL to the shipped files.
+11. **A candle is selectable once per tier by the enrichment** — a
+    dust-only row, once its volume is priced, is never re-admitted; the
+    peg-before-external ordering (pre-0286) applies to every row
+    (rollout runbook §9).
+12. **`--mode combined` is banned during the phase-3 re-ingest** — it would
+    race `events-backfill` at an equal `version` (phase-3 runbook).
+13. **`views.sql` / `current.sql` keep no pf gate** (out of scope) —
+    `/ohlcv` can now refuse a price that `price_usd_series` and
+    `current_prices` still publish.
+
+## Issues Encountered
+
+- **Name-routed writer** (clickhouse 0.13): a struct omitting a column
+  silently takes its DEFAULT, and `pf_trade_count DEFAULT trade_count`
+  would declare a dust-only row price-forming — the writer test pins the
+  18 names.
+- **Decimal division overflows silently** past ~1.7e10 on 26.3.10.60; the
+  rollups compute `vwap`/`close_usd` in Float64 and convert with
+  `toDecimal128OrZero`.
+- **`argMaxIf`/`maxIf` over zero rows return 0, not NULL** — every read-path
+  aggregate carries an explicit `countIf = 0 → NULL` wrapper.
+- **Events-backfill join fan-out** (S1 review CR): the `application_order`
+  join collapsed to one row per transaction id.
+- **The local `prices` DB held stale MV bodies** from the reverted first
+  implementation; the six local MVs were dropped and re-created.
+- **Rounding**: `Decimal::round_dp` is half-to-even, the writer's own rule;
+  the sub-resolution test first assumed half-up.
+- **Environment-only reds**: `post_run_0228_it`, `post_run_0268_it`
+  (production after-checks), `execution_bound_error_it` (needs Caddy),
+  `endpoints_it::backfill_status_maps_both_streams` (time-rotted fixture
+  dated 2026-06-15 against the 7-day rule) — none touched by this task.
+
+**Broken/modified tests:** `rollup_drift_it` mutated `argMax(close_usd, …)`
+which no longer exists; it now narrows the rate predicate. The "last child
+is dust" fixtures in `rollup_pf_it` / `preroll_close_usd_guard_it` were
+changed so the rate form and the carried product give different answers.
+`ohlcv_it`'s alias-tail guard follows the new positional tail. All
+intentional.
 
 ## Notes
 
