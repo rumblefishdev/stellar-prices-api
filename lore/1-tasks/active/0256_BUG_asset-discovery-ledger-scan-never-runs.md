@@ -4,7 +4,7 @@ title: "asset-discovery's ledger scan has never run on production — the worker
 type: BUG
 status: active
 related_adr: []
-related_tasks: ["0210", "0054", "0218", "0223", "0226", "0241"]
+related_tasks: ["0210", "0054", "0218", "0223", "0226", "0241", "0140"]
 tags: [layer-backend, priority-high, effort-small, milestone-M2, ingest, defect]
 milestone: 2
 links:
@@ -253,9 +253,14 @@ ledger scan is ever switched on. Deleting it costs nothing that
 
 ## Implementation
 
-- ⚠️ Whichever way the scan decision goes, the hourly full re-seed must stop —
-  it is load-bearing for [[0226]] and [[0241]]. Deleting the stage settles it;
-  keeping the scan does not, unless the seed switches to `write_new_assets`.
+- ✅ The hourly full re-seed is **fixed** as of 2026-09-16 (PR #319): `ensure_seed`
+  now writes only newly interned assets.
+- ⛔ But [[0140]] documented this defect on 2026-08-03 and located it at
+  `discover_window`'s `write_assets`, which is **still unguarded**
+  (`lib.rs:255`). It is dormant only because the scan never runs. **Enabling the
+  scan would reintroduce the hourly full re-emit**, so 0140's guard is a
+  precondition for that option, not a follow-up. 0140 also found a second live
+  instance in `oracle-worker`.
 - Decide whether the scan is still wanted at all. If `ledger-processor` already
   covers asset discovery, this stage may be redundant and the honest fix is to
   delete it rather than start it.
