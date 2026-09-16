@@ -122,9 +122,42 @@ resolve** — [[0210]] finished its 52 rows. And new soroban contracts keep
 arriving via `ledger-processor`, so deleting the scan would not starve the
 symbol stage.
 
-⚠️ One thing the logs cannot separate: that `NOT IN` excludes both "has a
-symbol" and "gave up at `MAX_SYMBOL_ATTEMPTS`". Whether all 52 actually resolved
-needs a query on `prices.asset_symbol` (`symbol = '' AND attempts >= MAX`).
+#### Settled: there are no give-ups, and no ClickHouse query is needed
+
+That `NOT IN` excludes both "has a symbol" and "gave up at
+`MAX_SYMBOL_ATTEMPTS`", so `considered: 0` looked ambiguous. The run logs
+separate them. Across the **full 29-day retention** exactly five runs carried
+symbol work:
+
+| run (UTC) | considered | resolved | absent | skipped |
+|---|---|---|---|---|
+| 2026-09-02 09:54:40 | 25 | 25 | 0 | 0 |
+| 2026-09-02 10:17:23 | 25 | 25 | 0 | 0 |
+| 2026-09-02 10:19:14 | 2 | 2 | 0 | 0 |
+| 2026-09-02 17:17:21 | 1 | 1 | 0 | 0 |
+| 2026-09-07 16:17:20 | 1 | 1 | 0 | 0 |
+
+🔑 **`absent` is 0 in every run.** `attempts` increments only on a negative
+answer, so no contract has ever accumulated one, and none can be parked at
+`MAX_SYMBOL_ATTEMPTS` (= 3). `considered: 0` therefore means, unambiguously,
+**every contract has a symbol**. The `prices.asset_symbol` query this section
+previously called for is not needed.
+
+25 is `MAX_CONTRACTS_PER_RUN` (`symbols.rs:47`), so the first two runs are full
+batches: 25 + 25 + 2 = **52**, exactly the population [[0210]] recorded. The
+remaining two runs are **54** in total.
+
+🔑 **Those last two are live evidence for this task's open decision.** Both
+contracts arrived *after* the ledger scan was already dead — so they reached
+`prices.assets` through `ledger-processor` — and the symbol stage resolved each
+within the hour. **Deleting the scan would not starve the symbol stage**, and
+that is now observed twice on production rather than inferred from the call
+order in `main.rs`. Nothing new has arrived since 2026-09-07, which is why all
+168 runs in the last 7 days report zero.
+
+⚠️ Retention bounds this at 2026-08-18, but `prices.asset_symbol` was created
+by [[0210]]'s deploy on 2026-09-01/02, so the window covers the table's entire
+history.
 
 ## 🔴 Measured consequence — this is why the oracle OOMs (2026-09-16)
 
