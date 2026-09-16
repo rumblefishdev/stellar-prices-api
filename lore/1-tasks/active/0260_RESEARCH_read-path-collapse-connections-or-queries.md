@@ -309,3 +309,24 @@ Deliberately **not** filed as its own task: the change is one `Instant` on a pat
 somebody will touch anyway, and [[0249]] already owns the api-handler's
 observability gaps. Fold it in there rather than adding an 86th backlog item.
 
+## Acceptance Criteria
+
+- [ ] The failure mode is named: connection ceiling, query saturation, or
+      something else — with evidence, not inference from response times
+- [ ] The uncontended miss budget is broken down into network / query /
+      connection setup
+- [ ] It is stated whether the ceiling is ours alone or shared with
+      soroban-block-explorer ([[0047]])
+- [ ] A remediation is recommended **against the identified cause**, explicitly
+      confirming or ruling out each of 0121's three assumed levers
+- [ ] Recovery mechanism explained, or recorded as unexplained
+- [ ] If the cause is structural, ADR 0007's sidecar-ClickHouse fallback is
+      revisited on the record
+
+## Notes
+
+- Reproducing the collapse deliberately is a **potentially destructive test of
+  shared infrastructure**. If it is repeated, agree an abort signal and an
+  observer who can see the box first — neither existed on 2026-09-03.
+- A cheaper first step: a ramp between 65 req/s (clean during that run's setup
+  phase) and 100 req/s (collapse) locates the knee without sitting on it.
