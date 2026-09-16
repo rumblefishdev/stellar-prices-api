@@ -30,6 +30,17 @@ async fn seed_populates_assets_idempotently() {
         .await
         .expect("truncate assets");
 
+    // Hold off background merges for the duration of this test. The raw-count
+    // assertion at the end only bites while the duplicate part is still
+    // separate: ReplacingMergeTree collapses two small parts within seconds, and
+    // a merge landing first would make a re-emitting regression look clean.
+    writer
+        .client()
+        .query("SYSTEM STOP MERGES prices.assets")
+        .execute()
+        .await
+        .expect("stop merges");
+
     let seed = asset_discovery::seed_identities().expect("parse seed");
 
     // First run seeds the table.
@@ -63,9 +74,9 @@ async fn seed_populates_assets_idempotently() {
     // The assertion above passes even if the second run re-emitted the whole
     // registry, because FINAL collapses it either way — so it cannot catch a
     // regression. This one can: a steady-state run must write NO rows at all,
-    // so the raw, un-merged count still has to equal the seed. A full re-emit
-    // here is what piled a fresh ~209k-row part into `prices.assets` every hour
-    // and drove the oracle into Runtime.OutOfMemory (task 0256).
+    // so with merges stopped the raw count still has to equal the seed. A full
+    // re-emit here is what piled a fresh ~209k-row part into `prices.assets`
+    // every hour and drove the oracle into Runtime.OutOfMemory (task 0256).
     let raw: u64 = writer
         .client()
         .query("SELECT count() FROM prices.assets")
@@ -77,4 +88,11 @@ async fn seed_populates_assets_idempotently() {
         seed.len(),
         "a re-run must write no rows — un-merged count must still equal the seed"
     );
+
+    writer
+        .client()
+        .query("SYSTEM START MERGES prices.assets")
+        .execute()
+        .await
+        .expect("restart merges");
 }
