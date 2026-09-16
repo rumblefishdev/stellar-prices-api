@@ -459,3 +459,7 @@ Three related traps, all recorded from the same incident:
 _Golden rule: give the live processor and each backfill **disjoint,
 minute-aligned ledger ranges** per shared `source`. ClickHouse guarantees
 no duplicates; only you can guarantee no undercounted seam._
+
+The boundary-minute residual and the disjoint-range rule are what bound the
+reconciliation of the task-0286 phase-3 re-ingest:
+[`0286-reingest-history.md`](0286-reingest-history.md).

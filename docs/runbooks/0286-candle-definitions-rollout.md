@@ -331,4 +331,6 @@ and a rollout is not the place to tighten a threshold.
   — what a coarse tier looks like when it silently stops rolling up.
 - `packages/prices-clickhouse/schema/rollups.sql`, `schema/preroll.sql`,
   `schema/init.sql` — the generated statements and the deploy-order comment.
+- [`0286-reingest-history.md`](0286-reingest-history.md) — phase 3: rebuilding
+  the history this rollout deliberately leaves alone (section 9).
 - ADR 0287 §2–§6; lore task 0286 phase 1.

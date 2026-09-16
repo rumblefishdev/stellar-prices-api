@@ -144,3 +144,7 @@ processor runs. Repriced candles are therefore byte-identical to what live would
 have written from the original ledger (same `asset_id`s, SAC collapse, canonical
 orientation, decimals, RMT `version`). This is the reusable "reprice from BE
 events" path for any future extractor gap.
+
+Task 0286 phase 3 re-ingests the whole chain through this same path for the AMM
+sources, one month at a time and with BE's `application_order` carrying fill
+order: [`0286-reingest-history.md`](0286-reingest-history.md).

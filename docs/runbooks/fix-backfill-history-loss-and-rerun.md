@@ -468,3 +468,7 @@ The rollup SQL is `packages/prices-clickhouse/schema/preroll.sql` (historical,
 full-range) vs `schema/rollups.sql` (live, 2-hour window). Retention lives in
 `packages/cleanup-worker/` (rule `prices-{env}-cleanup`). A diagnostic that proves
 the extractor itself is correct is `packages/prices-ingest-core/examples/decode_probe.rs`.
+
+Step 3's marker reset is the precedent for the PER-MONTH marker clearing in
+[`0286-reingest-history.md`](0286-reingest-history.md) — which must not
+`TRUNCATE`, because there every other month's markers are still the resume set.
