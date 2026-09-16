@@ -4,7 +4,7 @@ title: "The oracle Lambda OOMs on ~2% of invocations and has done for weeks — 
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0231", "0214", "0056", "0227"]
+related_tasks: ["0231", "0214", "0056", "0227", "0256", "0226"]
 tags: ["priority-medium", "effort-small", "oracle", "observability", "infra", "milestone-M2"]
 milestone: 2
 links:
@@ -21,6 +21,26 @@ history:
       ~294 since at least 2026-08-10, with Error Type Runtime.OutOfMemory and
       Max Memory Used 256 MB against a Memory Size of 256 MB. Each failure pages
       twice, which is the 12-messages-a-day the operator saw.
+  - date: 2026-09-16
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Re-measured from `AWS/Lambda Errors` back to 2026-07-08 and from the
+      oracle's logs grouped by log stream. Four things this task did not have.
+      (1) ONSET, closing AC 5 without paginating alarm history: 07-08→07-13 are
+      clean, the first errors are **2026-07-14**, and the ~2% baseline
+      establishes from 07-27 (not checked before 07-08).
+      (2) THE CAUSE IS [[0256]], not the oracle — asset-discovery re-seeds the
+      whole registry hourly, `prices.assets` is a `ReplacingMergeTree`, and the
+      oracle reads it without `FINAL`, so the load walks 1×→4× and both sampled
+      OOMs hit at 4×.
+      (3) SHARE OF THE CHANNEL: 110 of 131 SNS messages over 15 days — **84%**.
+      (4) THE COST IS WORSE than "trained everyone to ignore the channel": AWS
+      Chatbot collapses the repeats into ONE thread whose parent shows only
+      `Latest Update: ✅ … is in OK state`, so 55 firings read as a single green
+      check in the channel. Not ignored — invisible.
+      ⚠️ Implementation item 2 (damping the 1/1 shape) may become unnecessary
+      once 0256 is settled; do not widen the alarm before testing that.
 ---
 
 # The oracle Lambda OOMs on ~2% of invocations, every day, and nobody acted
@@ -89,6 +109,36 @@ that sat in ALARM for 24 days while nobody acted, and the lesson was written as
 earlier: an alarm so noisy that a genuine page is indistinguishable from the
 daily churn. The operator's own reading of the channel on 2026-08-28 — that
 alarms had stopped after 14:31 — is downstream of this.
+
+## Re-measured — 2026-09-16
+
+**Onset.** Daily `Errors` from 2026-07-08: zero on 07-08…07-13, then `07-14: 2`,
+`07-15: 2`, `07-17: 2`, singles to 07-23, and from **07-27** the familiar 3–7/day
+baseline. Totals since 07-08: **665 errors across 59 of 71 days**. This closes
+AC 5 from metrics (15-month retention) rather than from alarm history (14 days).
+Not checked before 07-08, which is when the Slack integration began.
+
+**The cause is upstream — [[0256]].** Grouped by log stream, the registry size
+the oracle loads is not constant: it steps 208,857 → 417,714 → 626,601 →
+835,477 on the `:17` boundary and falls back to ~209k when ClickHouse merges.
+Exact multiples of one 209k registry. `asset-discovery` re-inserts the whole
+registry every hour, and the oracle reads `prices.assets` without `FINAL`. Both
+OOMs sampled on 2026-09-12 (14:17:39, 18:22:39) fired immediately after the 4×
+read. Full chain in [[0256]].
+
+**Noise share.** `AWS/SNS NumberOfMessagesPublished` on
+`prices-production-ops-alarms`: **687 messages since 2026-07-08**. In the last
+15 days this alarm produced 55 `OK→ALARM` and 55 `ALARM→OK` transitions — **110
+of the 131** messages on the topic, or **84%**. The 1:2 ratio is exact: every
+single OOM costs two messages.
+
+**🔑 The channel does not look noisy — it looks quiet.** AWS Chatbot posts each
+repeat as a *thread reply* and rewrites the parent to `Latest Update: ✅ … is in
+OK state`. An alarm that fired 55 times presents in the channel as one green
+check with an `N replies` line. This is the inverse of [[0214]]'s finding: there
+the alarm fired and was scrolled past; here it fires constantly and is never
+rendered at all. Separately, Chatbot truncates `AlarmDescription` at ~250
+characters, so [[0223]]'s liveness sentence — appended last — is cut mid-word.
 
 ## Implementation
 
