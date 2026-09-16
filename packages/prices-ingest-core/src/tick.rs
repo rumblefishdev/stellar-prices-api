@@ -1,8 +1,8 @@
 use rust_decimal::Decimal;
 
 use crate::canonical::{AssetRegistry, CanonicalPair, canonicalise};
-use crate::filter::RawTrade;
-use crate::price::{compute_price, price_forming_i64};
+use crate::filter::{PriceSource, RawTrade};
+use crate::price::{compute_price, offer_price, price_forming_i64};
 
 #[derive(Debug, Clone)]
 pub struct TradeTick {
@@ -43,7 +43,23 @@ impl TradeTick {
 
 pub fn raw_trade_to_tick(trade: &RawTrade, registry: &mut AssetRegistry) -> TradeTick {
     let pair = canonicalise(&trade.asset_sold, &trade.asset_bought, registry);
-    let price = compute_price(trade.amount_sold, trade.amount_bought, pair.inverted);
+
+    // The one place a fill's price is decided (ADR 0287 §1). An order-book fill
+    // crossed a resting offer, and that offer's own n/d is the price the trade
+    // happened at — exact at any fill size, so it always forms price. A pool
+    // fill, and an order-book fill whose offer entry could not be read, has only
+    // its own two rounded amounts, and there the 0.1 % bound decides.
+    let from_offer = match trade.price_source {
+        PriceSource::Offer { n, d } => offer_price(n, d, pair.inverted),
+        PriceSource::AmountRatio => None,
+    };
+    let (price, price_forming) = match from_offer {
+        Some(price) => (price, true),
+        None => (
+            compute_price(trade.amount_sold, trade.amount_bought, pair.inverted),
+            price_forming_i64(trade.amount_sold, trade.amount_bought),
+        ),
+    };
 
     let (volume_base, volume_quote) = canonical_volumes(trade, &pair);
 
@@ -58,12 +74,7 @@ pub fn raw_trade_to_tick(trade: &RawTrade, registry: &mut AssetRegistry) -> Trad
         price,
         volume_base,
         volume_quote,
-        // Until the resting offer's price lands (task 0286 phase 2, the S4
-        // seam) EVERY classic fill is priced from its own rounded amounts, so
-        // the bound is the only thing deciding. Once an order-book fill takes
-        // the offer's own N/D it is price-forming by construction and this call
-        // narrows to pool fills and unreadable offers.
-        price_forming: price_forming_i64(trade.amount_sold, trade.amount_bought),
+        price_forming,
     }
 }
 
@@ -105,6 +116,7 @@ mod tests {
             amount_sold,
             asset_bought: usdc(),
             amount_bought,
+            price_source: PriceSource::AmountRatio,
         }
     }
 

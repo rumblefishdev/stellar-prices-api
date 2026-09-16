@@ -21,8 +21,8 @@
 
 use clickhouse::Client;
 use prices_ingest_core::{
-    AssetIdentity, AssetRegistry, CandleAccumulator, OhlcvCandle, OhlcvWriter, RawTrade,
-    raw_trade_to_tick,
+    AssetIdentity, AssetRegistry, CandleAccumulator, OhlcvCandle, OhlcvWriter, PriceSource,
+    RawTrade, raw_trade_to_tick,
 };
 
 const USDC_ISSUER_ADDR: &str = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
@@ -55,6 +55,7 @@ fn fill(tx: u16, xlm_stroops: i64, usdc_stroops: i64) -> RawTrade {
             issuer: USDC_ISSUER_ADDR.to_string(),
         },
         amount_bought: usdc_stroops,
+        price_source: PriceSource::AmountRatio,
     }
 }
 

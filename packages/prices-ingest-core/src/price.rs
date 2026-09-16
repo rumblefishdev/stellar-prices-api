@@ -15,6 +15,32 @@ pub fn compute_price(amount_sold: i64, amount_bought: i64, inverted: bool) -> De
     }
 }
 
+/// The price of a fill that crossed a RESTING OFFER: the offer's own
+/// `price.n/d` (ADR 0287 §1, decision D2).
+///
+/// This price is not computed from the fill's rounded amounts at all — it is
+/// the ratio the maker published, at full `i32` precision, and the two stroop
+/// amounts are merely what the taker happened to consume of it. That is why an
+/// offer-priced fill never faces the rounding bound: a 17-stroop fill against
+/// an offer at 397/5000 traded at 0.0794, not at the 1/17 its own amounts
+/// print.
+///
+/// Orientation follows [`compute_price`]. The offer sells A and buys B, and
+/// `n/d` is "price of A in terms of B" — the same direction as a claim's
+/// `bought / sold`. So a non-inverted pair takes `n/d` and an inverted one
+/// `d/n`.
+///
+/// `None` means the entry cannot price anything and the caller must fall back
+/// to the amount ratio plus the bound: `n` and `d` are `i32`s read from a
+/// ledger entry, and nothing in the XDR forbids a zero or negative one.
+pub fn offer_price(n: i32, d: i32, inverted: bool) -> Option<Decimal> {
+    if n <= 0 || d <= 0 {
+        return None;
+    }
+    let (numerator, denominator) = if inverted { (d, n) } else { (n, d) };
+    Decimal::from(numerator).checked_div(Decimal::from(denominator))
+}
+
 /// The rounding bound of ADR 0287 §1, on the two RAW integer amounts a ratio
 /// price is computed from: `1/a + 1/b <= 0.001`.
 ///

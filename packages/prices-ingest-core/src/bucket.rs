@@ -553,6 +553,7 @@ mod tests {
                     issuer: USDC_ISSUER_ADDR.to_string(),
                 },
                 amount_bought: bought,
+                price_source: crate::filter::PriceSource::AmountRatio,
             },
             registry,
         )
