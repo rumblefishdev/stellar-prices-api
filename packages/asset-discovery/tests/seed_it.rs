@@ -59,4 +59,22 @@ async fn seed_populates_assets_idempotently() {
         seed.len(),
         "ReplacingMergeTree FINAL must collapse re-runs to one row per asset"
     );
+
+    // The assertion above passes even if the second run re-emitted the whole
+    // registry, because FINAL collapses it either way — so it cannot catch a
+    // regression. This one can: a steady-state run must write NO rows at all,
+    // so the raw, un-merged count still has to equal the seed. A full re-emit
+    // here is what piled a fresh ~209k-row part into `prices.assets` every hour
+    // and drove the oracle into Runtime.OutOfMemory (task 0256).
+    let raw: u64 = writer
+        .client()
+        .query("SELECT count() FROM prices.assets")
+        .fetch_one()
+        .await
+        .expect("count assets without FINAL");
+    assert_eq!(
+        raw as usize,
+        seed.len(),
+        "a re-run must write no rows — un-merged count must still equal the seed"
+    );
 }

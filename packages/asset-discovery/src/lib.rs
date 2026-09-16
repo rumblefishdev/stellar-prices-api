@@ -90,18 +90,33 @@ pub fn seed_identities() -> Result<Vec<AssetIdentity>, DiscoveryError> {
 ///
 /// Loads the existing registry first so surrogate ids are reused — a re-run, or
 /// a run after the live ledger processor has already interned an asset, neither
-/// reassigns ids nor duplicates rows (ReplacingMergeTree collapses on the sort
-/// key). Returns the total asset count in the registry after the write.
+/// reassigns ids nor duplicates rows. Returns the total asset count in the
+/// registry, whether or not this run had anything to write.
+///
+/// Writes **only what this run interned**, via [`OhlcvWriter::write_new_assets`].
+/// It previously re-emitted the whole registry through `write_assets`, and
+/// because this worker is scheduled hourly rather than one-shot, that piled a
+/// fresh ~209k-row part into `prices.assets` every hour. `ReplacingMergeTree`
+/// collapses duplicates only **on merge**, so between merges a reader without
+/// `FINAL` sees 1×–4× the registry — which is what drove
+/// `prices-production-oracle` into `Runtime.OutOfMemory` at its 256 MB ceiling
+/// (task 0256). [`discover_window`] already guards against exactly this; the
+/// guard was simply missing on the seed path. Task 0132 removed the same
+/// amplification from the live ledger processor.
 pub async fn ensure_seed(
     writer: &OhlcvWriter,
     identities: &[AssetIdentity],
 ) -> Result<usize, DiscoveryError> {
     let existing = writer.load_assets().await?;
     let mut registry = AssetRegistry::from_existing(existing);
+    // Everything already durable in `prices.assets` sits below this id.
+    let durable = registry.watermark();
     for identity in identities {
         registry.get_or_assign(identity);
     }
-    writer.write_assets(&registry).await?;
+    // Steady state: the seed is already present, nothing lands at or above the
+    // watermark, and this writes NOTHING — no INSERT, no new part.
+    writer.write_new_assets(&registry, durable).await?;
     Ok(registry.assets().count())
 }
 
