@@ -44,8 +44,8 @@ pub use filter::{
     offer_lookup_counts,
 };
 pub use price::{
-    compute_price, offer_price, price_forming_i64, price_forming_i128, rounding_bound_holds,
-    stroops_to_decimal,
+    CANDLE_PRICE_SCALE, compute_price, offer_price, price_forming_i64, price_forming_i128,
+    price_survives_column_scale, rounding_bound_holds, stroops_to_decimal,
 };
 pub use registry_io::PoolRegistryRow;
 pub use retry::{DEFAULT_BACKOFF_MS, retry_with_backoff};

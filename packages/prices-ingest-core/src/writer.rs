@@ -19,6 +19,7 @@ use tracing::info;
 use crate::bucket::OhlcvCandle;
 use crate::canonical::{AssetIdentity, AssetRegistry};
 use crate::error::IngestError;
+use crate::price::CANDLE_PRICE_SCALE;
 use crate::registry_io::PoolRegistryRow;
 use crate::soroban::Registries;
 
@@ -33,8 +34,11 @@ pub const ORACLE_EPOCH_FLOOR: u32 = 1_577_836_800; // 2020-01-01T00:00:00Z
 /// amounts/prices are i128-derived and can exceed the 38-digit budget, and an
 /// out-of-range value should clamp, not abort the whole run.
 pub fn decimal_to_i128(d: Decimal) -> i128 {
-    let d = d.round_dp(14);
-    let factor = 10i128.pow(14 - d.scale());
+    // The same rounding `price::price_survives_column_scale` asks its question
+    // with: a price this turns into 0 must never have been price-forming
+    // (task 0286, VERIFY-0286-local discrepancy 4).
+    let d = d.round_dp(CANDLE_PRICE_SCALE);
+    let factor = 10i128.pow(CANDLE_PRICE_SCALE - d.scale());
     d.mantissa().saturating_mul(factor)
 }
 

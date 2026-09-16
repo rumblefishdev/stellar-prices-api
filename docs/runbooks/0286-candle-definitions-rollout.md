@@ -7,8 +7,11 @@ fleet without producing a coarse estate that means two different things at once.
 price-forming trades of its own bucket. A DUST-ONLY minute — volume, but not one
 fill whose price means anything — is written `open = high = low = close = 0` with
 `pf_trade_count = 0`, and contributes to no coarse `open`/`high`/`low`/`close`.
-Coarse `close_usd` becomes the bucket's own close re-priced by the latest priced
-child's rate. The month rolls from the **day**, under a renamed MV
+A fill is also NOT price-forming when its price underflows the
+`Decimal(38, 14)` price columns and would store as 0, however large its two
+amounts are — so `pf_trade_count > 0` always comes with a non-zero price.
+Coarse `close_usd` becomes the bucket's own close re-priced by the latest
+priced child's rate. The month rolls from the **day**, under a renamed MV
 `mv_ohlcv_1d_to_1M`.
 
 **Applies to:** `prices.price_ohlcv_{1m,15m,1h,4h,1d,1w,1M}` and the six

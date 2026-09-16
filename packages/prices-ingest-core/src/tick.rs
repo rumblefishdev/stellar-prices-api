@@ -2,7 +2,7 @@ use rust_decimal::Decimal;
 
 use crate::canonical::{AssetRegistry, CanonicalPair, canonicalise};
 use crate::filter::{PriceSource, RawTrade};
-use crate::price::{compute_price, offer_price, price_forming_i64};
+use crate::price::{compute_price, offer_price, price_forming_i64, price_survives_column_scale};
 
 #[derive(Debug, Clone)]
 pub struct TradeTick {
@@ -21,8 +21,9 @@ pub struct TradeTick {
     pub volume_base: Decimal,
     pub volume_quote: Decimal,
     /// May this fill's price set open/high/low/close (ADR 0287 §1)? A fill that
-    /// fails the rounding bound still counts in `volume_*`, `vwap` and
-    /// `trade_count` — it just never prices the candle.
+    /// fails the rounding bound — or whose price underflows the candle's
+    /// `Decimal(38, 14)` price columns and would store as 0 — still counts in
+    /// `volume_*`, `vwap` and `trade_count`; it just never prices the candle.
     pub price_forming: bool,
 }
 
@@ -85,7 +86,7 @@ pub fn raw_trade_to_tick_with_source(
         }
         _ => None,
     };
-    let (price, price_forming, priced_from) = match from_offer {
+    let (price, priced, priced_from) = match from_offer {
         Some(price) => (price, true, PricedFrom::Offer),
         None => (
             compute_price(trade.amount_sold, trade.amount_bought, pair.inverted),
@@ -93,6 +94,13 @@ pub fn raw_trade_to_tick_with_source(
             PricedFrom::AmountRatio,
         ),
     };
+    // Whatever priced it, a fill that cannot PRINT a price does not form one
+    // (task 0286, VERIFY-0286-local discrepancy 4). Applied to both arms on
+    // purpose: an i32 `n/d` cannot reach the column's 1e-14 floor, so today the
+    // rule only ever binds on a ratio price, but the invariant it protects —
+    // `pf_trade_count > 0` implies a non-zero price — belongs to the candle,
+    // not to one of the two pricing rules.
+    let price_forming = priced && price_survives_column_scale(price);
 
     let (volume_base, volume_quote) = canonical_volumes(trade, &pair);
 
@@ -177,6 +185,43 @@ mod tests {
 
         let ordinary = raw_trade_to_tick(&trade(50_000_000, 10_000_000), &mut registry);
         assert!(ordinary.price_forming, "5 XLM against 1 USDC forms price");
+    }
+
+    /// Task 0286, VERIFY-0286-local discrepancy 4. The rounding bound passes a
+    /// fill whose two legs are both enormous, and says nothing about where the
+    /// quotient lands: 33 387 840 110.63 base units for 0.0001622 quote prices
+    /// at ~4.86e-15, under the `Decimal(38, 14)` resolution, and stores as 0.
+    /// Such a fill is NOT price-forming — otherwise its minute is written
+    /// `pf_trade_count = 1` with `open = high = low = close = 0`, the shape ADR
+    /// 0287 rules out. Its volumes are untouched: it is still a real trade.
+    #[test]
+    fn a_fill_whose_price_underflows_the_price_column_is_not_price_forming() {
+        const BASE_STROOPS: i64 = 333_878_401_106_300_000;
+        const QUOTE_STROOPS: i64 = 1_622;
+
+        let mut registry = AssetRegistry::from_existing(vec![]);
+        let tick = raw_trade_to_tick(&trade(BASE_STROOPS, QUOTE_STROOPS), &mut registry);
+        assert!(
+            crate::price::price_forming_i64(BASE_STROOPS, QUOTE_STROOPS),
+            "the bound itself passes this fill — the fixture proves nothing otherwise"
+        );
+        assert!(
+            !tick.price_forming,
+            "a price that stores as 0 cannot open, close, cap or floor a candle"
+        );
+        assert_eq!(
+            tick.price,
+            compute_price(BASE_STROOPS, QUOTE_STROOPS, false),
+            "the price is still computed, unchanged"
+        );
+        assert_eq!(
+            tick.volume_base,
+            crate::price::stroops_to_decimal(BASE_STROOPS)
+        );
+        assert_eq!(
+            tick.volume_quote,
+            crate::price::stroops_to_decimal(QUOTE_STROOPS)
+        );
     }
 
     /// An offer price is exact at any fill SIZE, but the amounts still have to

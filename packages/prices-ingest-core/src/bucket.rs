@@ -660,6 +660,52 @@ mod tests {
         assert_eq!(c.pf_trade_count, 2);
     }
 
+    /// Task 0286, VERIFY-0286-local discrepancy 4 — the one row shape ADR 0287
+    /// rules out, found on real data: asset 2643 vs native, 2026-04-02 06:39,
+    /// a single fill of 33 387 840 110.63 base units for 0.0001622 quote. Both
+    /// legs clear the rounding bound by ten orders of magnitude, so the minute
+    /// used to be written `pf_trade_count = 1` — while the price itself,
+    /// ~4.86e-15, is under the `Decimal(38, 14)` resolution and stores as 0.
+    /// The pre-roll then carried that zero into every coarse tier and `/ohlcv`
+    /// published `0` where the ADR asks for `null`. A bucket has a
+    /// price-forming fill AND a price, or neither.
+    #[test]
+    fn a_fill_whose_price_underflows_the_price_column_prices_nothing() {
+        const BASE_STROOPS: i64 = 333_878_401_106_300_000; // 33 387 840 110.63 XLM
+        const QUOTE_STROOPS: i64 = 1_622; // 0.0001622 USDC
+        assert!(
+            crate::price::price_forming_i64(BASE_STROOPS, QUOTE_STROOPS),
+            "the rounding bound passes this fill — the fixture proves nothing otherwise"
+        );
+
+        let mut registry = AssetRegistry::from_existing(vec![]);
+        let mut acc = CandleAccumulator::new();
+        acc.merge(&fill(&mut registry, 0, BASE_STROOPS, QUOTE_STROOPS, T_M0_A));
+
+        let out = acc.flush_all();
+        assert_eq!(out.len(), 1, "the row is still emitted");
+        let c = &out[0];
+        assert_eq!(
+            c.pf_trade_count, 0,
+            "a fill that cannot print a price does not form one"
+        );
+        assert_eq!(
+            (c.open, c.high, c.low, c.close),
+            (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, Decimal::ZERO),
+            "no price-forming fill means no price at all"
+        );
+        assert_eq!(c.pf_volume, Decimal::ZERO);
+        assert_eq!(c.pf_price_volume, Decimal::ZERO);
+
+        assert_eq!(c.trade_count, 1, "it is still a trade");
+        assert_eq!(
+            c.volume_base,
+            Decimal::new(BASE_STROOPS, 7),
+            "and still counts in volume"
+        );
+        assert_eq!(c.volume_quote, Decimal::new(QUOTE_STROOPS, 7));
+    }
+
     /// EVERY field of the candle is computed from the minute's fills in their
     /// own sorted order, never in arrival order — the prices, the pf sums AND
     /// the two volume sums with the vwap derived from them. It matters because

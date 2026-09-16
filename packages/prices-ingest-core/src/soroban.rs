@@ -27,7 +27,7 @@ use xdr_parser::types::EventSource;
 // arm from `reflector_key_to_identity`, so this module must not resolve that
 // identity in non-test code. The tests import it directly to assert the drop.
 use crate::canonical::{AssetIdentity, AssetRegistry, USDC_ISSUER, canonicalise};
-use crate::price::price_forming_i128;
+use crate::price::{price_forming_i128, price_survives_column_scale};
 use crate::tick::TradeTick;
 use crate::writer::OracleSample;
 
@@ -672,7 +672,7 @@ fn amm_trade_to_tick(
     // the scaling below (task 0286, ADR 0287 §1): `AMM_AMOUNT_SCALE` turns them
     // into a Decimal, and after that the integer unit the rounding bound reasons
     // about is gone — every fill would look equally precise.
-    let price_forming = price_forming_i128(trade.amount_in, trade.amount_out);
+    let bound_holds = price_forming_i128(trade.amount_in, trade.amount_out);
 
     let amount_in = Decimal::try_from_i128_with_scale(trade.amount_in, AMM_AMOUNT_SCALE).ok()?;
     let amount_out = Decimal::try_from_i128_with_scale(trade.amount_out, AMM_AMOUNT_SCALE).ok()?;
@@ -685,6 +685,13 @@ fn amm_trade_to_tick(
     } else {
         (amount_out / amount_in, amount_in, amount_out)
     };
+
+    // The bound clears a fill whose two legs are both enormous and says nothing
+    // about where their quotient lands. A quotient under the candle's
+    // `Decimal(38, 14)` resolution stores as 0, and a fill that cannot print a
+    // price does not form one (task 0286, VERIFY-0286-local discrepancy 4) —
+    // the same rule the classic path applies in `tick.rs`.
+    let price_forming = bound_holds && price_survives_column_scale(price);
 
     Some(TradeTick {
         ledger_sequence: trade.ledger_sequence as u32,
@@ -1377,6 +1384,62 @@ mod tests {
         assert!(
             out.amm_ticks.is_empty() && out.unresolved.is_empty(),
             "an oracle + factory batch produces no AMM tick and no unresolved gap"
+        );
+    }
+
+    /// Task 0286, VERIFY-0286-local discrepancy 4 — an AMM swap of two huge
+    /// legs clears the rounding bound and can still quote a price under the
+    /// candle's `Decimal(38, 14)` resolution, which stores as 0. The AMM path
+    /// applies the same rule as the classic one: no printable price, no price
+    /// forming — and the volumes are kept, because the swap happened.
+    #[test]
+    fn an_amm_price_under_the_column_resolution_forms_no_price() {
+        const POOL: &str = "CDBBBNMCWRMWEIFHUD5BXBCRTW6QM33ZEXIOBGKKQNDSH3WEF7WVBGMI";
+        const T0: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const T1: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+        // 1 622 units in for 3.34e17 out — the pair canonicalises inverted, so
+        // this is the 2026-04-02 row's shape at AMM scale: a quotient of
+        // ~4.86e-15 in the candle's own orientation.
+        const AMOUNT_IN: i128 = 1_622;
+        const AMOUNT_OUT: i128 = 333_878_401_106_300_000;
+
+        assert!(
+            price_forming_i128(AMOUNT_IN, AMOUNT_OUT),
+            "the bound passes both legs — the fixture proves nothing otherwise"
+        );
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let tick = amm_trade_to_tick(
+            &extractors_core::TradeRow {
+                venue: Venue::Soroswap,
+                contract_id: POOL.to_string(),
+                transaction_id: "tx".to_string(),
+                ledger_sequence: 100,
+                first_event_index: 0,
+                token_in: T0.to_string(),
+                token_out: T1.to_string(),
+                amount_in: AMOUNT_IN,
+                amount_out: AMOUNT_OUT,
+                fee: None,
+                trader: None,
+            },
+            0,
+            1_700_000_000,
+            &mut assets,
+        )
+        .expect("the swap still produces a tick");
+
+        assert!(
+            !crate::price::price_survives_column_scale(tick.price),
+            "the fixture's quotient really is below 1e-14"
+        );
+        assert!(
+            !tick.price_forming,
+            "a price that stores as 0 cannot price a candle"
+        );
+        assert!(
+            tick.volume_base > Decimal::ZERO && tick.volume_quote > Decimal::ZERO,
+            "the swap keeps its volumes"
         );
     }
 

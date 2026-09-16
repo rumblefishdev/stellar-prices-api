@@ -41,6 +41,31 @@ pub fn offer_price(n: i32, d: i32, inverted: bool) -> Option<Decimal> {
     Decimal::from(numerator).checked_div(Decimal::from(denominator))
 }
 
+/// The scale of every candle price column: `Decimal(38, 14)`, so 14 digits
+/// after the point. `writer::decimal_to_i128` rounds to exactly this before
+/// handing ClickHouse the mantissa.
+pub const CANDLE_PRICE_SCALE: u32 = 14;
+
+/// Does this price survive the trip into a `Decimal(38, 14)` column, or does it
+/// round away to nothing (task 0286, VERIFY-0286-local discrepancy 4)?
+///
+/// The rounding bound below reasons about the AMOUNTS a ratio price divides; it
+/// says nothing about where the quotient lands. A fill of 33 387 840 110.63
+/// base units for 0.0001622 quote clears the bound on both legs by ten orders
+/// of magnitude and still prices at ~4.86e-15 — below the column's 1e-14
+/// resolution, so it stores as 0. Calling such a fill price-forming writes the
+/// one row shape ADR 0287 forbids: `pf_trade_count = 1` with
+/// `open = high = low = close = 0`, which the pre-roll carries into every
+/// coarse tier and `/ohlcv` then publishes as `0` instead of `null`. Under the
+/// ADR a bucket either has a price-forming fill AND a price, or neither.
+///
+/// Rounded with the writer's own rule — `Decimal::round_dp`, half to even — so
+/// the verdict cannot drift from what `writer::decimal_to_i128` actually
+/// stores.
+pub fn price_survives_column_scale(price: Decimal) -> bool {
+    !price.round_dp(CANDLE_PRICE_SCALE).is_zero()
+}
+
 /// The rounding bound of ADR 0287 §1, on the two RAW integer amounts a ratio
 /// price is computed from: `1/a + 1/b <= 0.001`.
 ///
@@ -143,6 +168,53 @@ mod tests {
             "a huge amount against 5 units is dust: 1/5 is 200x the budget"
         );
         assert!(!rounding_bound_holds(5, huge));
+    }
+
+    /// Task 0286, VERIFY-0286-local discrepancy 4: a price below the column's
+    /// 1e-14 resolution stores as 0, and a fill that cannot print a price
+    /// cannot form one. The boundary is the writer's rounding, not truncation.
+    #[test]
+    fn a_price_under_the_column_resolution_is_not_representable() {
+        assert!(price_survives_column_scale(Decimal::new(1, 14)), "1e-14");
+        assert!(
+            price_survives_column_scale(Decimal::new(6, 15)),
+            "6e-15 rounds up to 1e-14, exactly as the writer rounds it"
+        );
+        assert!(
+            !price_survives_column_scale(Decimal::new(5, 15)),
+            "5e-15 is the midpoint and `round_dp` takes the EVEN neighbour: zero"
+        );
+        assert!(
+            !price_survives_column_scale(Decimal::new(49, 16)),
+            "4.9e-15 rounds to zero"
+        );
+        assert!(
+            !price_survives_column_scale(Decimal::ZERO),
+            "no price at all is no price"
+        );
+        assert!(
+            price_survives_column_scale(Decimal::new(-1, 14)),
+            "the rule is about magnitude; a negative price is a bug elsewhere"
+        );
+    }
+
+    /// The real row behind the rule: asset 2643 vs native, 2026-04-02 06:39 —
+    /// 33 387 840 110.63 base units for 0.0001622 quote. The bound holds on
+    /// both legs and the quotient still underflows the price column.
+    #[test]
+    fn the_bound_holding_does_not_mean_the_quotient_is_representable() {
+        const BASE_STROOPS: i64 = 333_878_401_106_300_000;
+        const QUOTE_STROOPS: i64 = 1_622;
+        assert!(
+            price_forming_i64(BASE_STROOPS, QUOTE_STROOPS),
+            "both legs are far above the rounding bound"
+        );
+        let price = compute_price(BASE_STROOPS, QUOTE_STROOPS, false);
+        assert!(price > Decimal::ZERO, "the ratio itself is positive");
+        assert!(
+            !price_survives_column_scale(price),
+            "~4.86e-15 is below the Decimal(38, 14) resolution"
+        );
     }
 
     /// Classic fills are i64 stroops. Zero amounts are already dropped upstream
