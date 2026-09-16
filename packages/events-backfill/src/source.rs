@@ -183,6 +183,84 @@ pub(crate) fn chunk_sql(contract_ids: &[i64], start: u32, end: u32) -> String {
     )
 }
 
+/// Advisory registry-completeness probe (dry-run only). Counts events and distinct
+/// contracts in `[start, end]` that emitted a swap/trade-shaped event but are NOT
+/// in the resolved registry id set — i.e. AMM activity the reprice would miss
+/// because the pool is absent from `prices.pool_registry` (its events are never
+/// even fetched by [`read_chunk`], so it produces no candle AND no
+/// `unresolved_pools` record).
+///
+/// Heuristic: matches the common sym-`swap` / sym-`trade` signatures and the
+/// Soroswap-pair envelope (`String("SoroswapPair")`, whose `signature` is NULL).
+/// It may include non-AMM `swap`/`trade` emitters and misses the rare NULL-sig
+/// Phoenix micro-event shape, so it is a *verify-this* prompt, not a hard error.
+/// Returns `(distinct_contracts, events)`.
+pub async fn count_unregistered_amm_emitters(
+    client: &Client,
+    contract_ids: &[i64],
+    start: u32,
+    end: u32,
+    chunk_size: u32,
+) -> Result<(u64, u64), EventsBackfillError> {
+    let not_in = if contract_ids.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "AND e.contract_id NOT IN ({}) ",
+            contract_ids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    #[derive(Row, Deserialize)]
+    struct EmitterRow {
+        contract_id: i64,
+        events: u64,
+    }
+
+    // Walk the range in the SAME chunks as the reprice. As one query over the
+    // full range this read `topics_xdr` (a large JSON column) for EVERY event in
+    // range — the `NOT IN` and the `LIKE` leave nothing for the index to prune,
+    // unlike the main loop, which filters to registry contracts. On a 12.9M-ledger
+    // range that exceeded ch-prod-01's 5.59 GiB per-query memory quota
+    // (MEMORY_LIMIT_EXCEEDED while reading `topics_xdr`). The memory limit is
+    // per-query, so chunking is what bounds it — capping `max_threads` is not an
+    // option here (see the `readonly=1` note at the top of this file).
+    //
+    // `uniqExact` over the whole range is replaced by a per-chunk `GROUP BY`
+    // whose distinct contracts are unioned client-side — the set of AMM-shaped
+    // emitters is small, so this stays exact without server-side state.
+    let mut seen: HashSet<i64> = HashSet::new();
+    let mut events_total: u64 = 0;
+    let mut chunk_start = start;
+    // `execute` rejects 0 before we get here; clamp anyway so this pub fn can
+    // never underflow into a panic on a direct call.
+    let step = chunk_size.max(1);
+    loop {
+        let chunk_end = chunk_start.saturating_add(step - 1).min(end);
+        let sql = format!(
+            "SELECT e.contract_id AS contract_id, count() AS events \
+             FROM default.soroban_events e \
+             WHERE e.ledger_sequence BETWEEN {chunk_start} AND {chunk_end} \
+               AND (e.signature IN ('swap', 'trade') OR e.topics_xdr LIKE '%SoroswapPair%') \
+               {not_in}\
+             GROUP BY e.contract_id"
+        );
+        for row in client.query(&sql).fetch_all::<EmitterRow>().await? {
+            seen.insert(row.contract_id);
+            events_total += row.events;
+        }
+        if chunk_end >= end {
+            break;
+        }
+        chunk_start = chunk_end + 1;
+    }
+
+    Ok((seen.len() as u64, events_total))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,82 +360,4 @@ mod tests {
             "ORDER BY must be ledger, apply order, transaction, event index: {order_by}"
         );
     }
-}
-
-/// Advisory registry-completeness probe (dry-run only). Counts events and distinct
-/// contracts in `[start, end]` that emitted a swap/trade-shaped event but are NOT
-/// in the resolved registry id set — i.e. AMM activity the reprice would miss
-/// because the pool is absent from `prices.pool_registry` (its events are never
-/// even fetched by [`read_chunk`], so it produces no candle AND no
-/// `unresolved_pools` record).
-///
-/// Heuristic: matches the common sym-`swap` / sym-`trade` signatures and the
-/// Soroswap-pair envelope (`String("SoroswapPair")`, whose `signature` is NULL).
-/// It may include non-AMM `swap`/`trade` emitters and misses the rare NULL-sig
-/// Phoenix micro-event shape, so it is a *verify-this* prompt, not a hard error.
-/// Returns `(distinct_contracts, events)`.
-pub async fn count_unregistered_amm_emitters(
-    client: &Client,
-    contract_ids: &[i64],
-    start: u32,
-    end: u32,
-    chunk_size: u32,
-) -> Result<(u64, u64), EventsBackfillError> {
-    let not_in = if contract_ids.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "AND e.contract_id NOT IN ({}) ",
-            contract_ids
-                .iter()
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join(",")
-        )
-    };
-    #[derive(Row, Deserialize)]
-    struct EmitterRow {
-        contract_id: i64,
-        events: u64,
-    }
-
-    // Walk the range in the SAME chunks as the reprice. As one query over the
-    // full range this read `topics_xdr` (a large JSON column) for EVERY event in
-    // range — the `NOT IN` and the `LIKE` leave nothing for the index to prune,
-    // unlike the main loop, which filters to registry contracts. On a 12.9M-ledger
-    // range that exceeded ch-prod-01's 5.59 GiB per-query memory quota
-    // (MEMORY_LIMIT_EXCEEDED while reading `topics_xdr`). The memory limit is
-    // per-query, so chunking is what bounds it — capping `max_threads` is not an
-    // option here (see the `readonly=1` note at the top of this file).
-    //
-    // `uniqExact` over the whole range is replaced by a per-chunk `GROUP BY`
-    // whose distinct contracts are unioned client-side — the set of AMM-shaped
-    // emitters is small, so this stays exact without server-side state.
-    let mut seen: HashSet<i64> = HashSet::new();
-    let mut events_total: u64 = 0;
-    let mut chunk_start = start;
-    // `execute` rejects 0 before we get here; clamp anyway so this pub fn can
-    // never underflow into a panic on a direct call.
-    let step = chunk_size.max(1);
-    loop {
-        let chunk_end = chunk_start.saturating_add(step - 1).min(end);
-        let sql = format!(
-            "SELECT e.contract_id AS contract_id, count() AS events \
-             FROM default.soroban_events e \
-             WHERE e.ledger_sequence BETWEEN {chunk_start} AND {chunk_end} \
-               AND (e.signature IN ('swap', 'trade') OR e.topics_xdr LIKE '%SoroswapPair%') \
-               {not_in}\
-             GROUP BY e.contract_id"
-        );
-        for row in client.query(&sql).fetch_all::<EmitterRow>().await? {
-            seen.insert(row.contract_id);
-            events_total += row.events;
-        }
-        if chunk_end >= end {
-            break;
-        }
-        chunk_start = chunk_end + 1;
-    }
-
-    Ok((seen.len() as u64, events_total))
 }

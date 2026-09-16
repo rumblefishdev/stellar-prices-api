@@ -150,8 +150,32 @@ impl OhlcvWriter {
     }
 
     /// Write a batch of candles for one `source` into `prices.price_ohlcv_1m`.
+    ///
+    /// DEPLOY ORDER (task 0286 §4.9): schema first, then the enrichment worker
+    /// plus the coarse sweep plus prices-api, then the rollup MV re-CREATE, and
+    /// this — the ingest — LAST. A pre-0286 MV takes `min(low)` over a
+    /// dust-only minute and propagates the new zero low into the whole coarse
+    /// bucket; pre-0286 enrichment re-inserts a row without the pf columns, so
+    /// they silently fall back to their column DEFAULTs. Nothing should write a
+    /// zero-priced candle until everything downstream understands one.
     pub async fn write_candles(
         &self,
+        candles: &[OhlcvCandle],
+        source: &str,
+    ) -> Result<(), IngestError> {
+        self.write_candles_into("prices.price_ohlcv_1m", candles, source)
+            .await
+    }
+
+    /// [`write_candles`](Self::write_candles) against an explicit table. The
+    /// production table name is hardcoded one level up, which is why no ingest
+    /// test could own a scratch database; this seam exists so the round-trip
+    /// test can (task 0286). Not part of the supported API — the only caller
+    /// outside this crate's tests should be `write_candles`.
+    #[doc(hidden)]
+    pub async fn write_candles_into(
+        &self,
+        table: &str,
         candles: &[OhlcvCandle],
         source: &str,
     ) -> Result<(), IngestError> {
@@ -159,32 +183,10 @@ impl OhlcvWriter {
             return Ok(());
         }
 
-        let mut insert = self.client.insert("prices.price_ohlcv_1m")?;
+        let mut insert = self.client.insert(table)?;
 
         for candle in candles {
-            insert
-                .write(&OhlcvRow {
-                    timestamp: candle.minute_start,
-                    asset_id: candle.asset_id,
-                    quote_asset_id: candle.quote_asset_id,
-                    source: source.to_string(),
-                    open: decimal_to_i128(candle.open),
-                    high: decimal_to_i128(candle.high),
-                    low: decimal_to_i128(candle.low),
-                    close: decimal_to_i128(candle.close),
-                    volume_base: decimal_to_i128(candle.volume_base),
-                    volume_quote: decimal_to_i128(candle.volume_quote),
-                    // DEFAULT 0 — the 0026 enrichment Lambda fills this
-                    // (volume_quote_usd = oracle_price * volume_quote).
-                    volume_quote_usd: 0,
-                    // DEFAULT 0 — the enrichment pass fills this (task 0061,
-                    // close_usd = oracle_price * close), same as volume_quote_usd.
-                    close_usd: 0,
-                    vwap: decimal_to_i128(candle.vwap),
-                    trade_count: candle.trade_count,
-                    version: candle.version,
-                })
-                .await?;
+            insert.write(&candle_row(candle, source)).await?;
         }
         insert.end().await?;
         Ok(())
@@ -581,6 +583,41 @@ pub struct UsdRateStats {
     pub newest: Vec<(String, u32)>,
 }
 
+/// Build the row for one candle. Extracted from
+/// [`OhlcvWriter::write_candles_into`] so the field-by-field mapping is
+/// unit-testable without a ClickHouse (task 0286): the clickhouse crate routes
+/// this INSERT by field NAME, so a mis-mapped or missing column is a silent
+/// wrong value, never an error.
+fn candle_row(candle: &OhlcvCandle, source: &str) -> OhlcvRow {
+    OhlcvRow {
+        timestamp: candle.minute_start,
+        asset_id: candle.asset_id,
+        quote_asset_id: candle.quote_asset_id,
+        source: source.to_string(),
+        open: decimal_to_i128(candle.open),
+        high: decimal_to_i128(candle.high),
+        low: decimal_to_i128(candle.low),
+        close: decimal_to_i128(candle.close),
+        volume_base: decimal_to_i128(candle.volume_base),
+        volume_quote: decimal_to_i128(candle.volume_quote),
+        // DEFAULT 0 — the 0026 enrichment Lambda fills this
+        // (volume_quote_usd = oracle_price * volume_quote).
+        volume_quote_usd: 0,
+        // DEFAULT 0 — the enrichment pass fills this (task 0061,
+        // close_usd = oracle_price * close), same as volume_quote_usd.
+        close_usd: 0,
+        vwap: decimal_to_i128(candle.vwap),
+        trade_count: candle.trade_count,
+        version: candle.version,
+        // Named, not defaulted: a column the struct omits takes its DDL
+        // DEFAULT (pf_trade_count DEFAULT trade_count), which would report a
+        // dust-only minute as fully price-forming (task 0286 F6b).
+        pf_trade_count: candle.pf_trade_count,
+        pf_volume: decimal_to_i128(candle.pf_volume),
+        pf_price_volume: decimal_to_i128(candle.pf_price_volume),
+    }
+}
+
 #[derive(Debug, Serialize, clickhouse::Row)]
 struct OhlcvRow {
     timestamp: u32,
@@ -598,6 +635,9 @@ struct OhlcvRow {
     vwap: i128,
     trade_count: u32,
     version: u64,
+    pf_trade_count: u32,
+    pf_volume: i128,
+    pf_price_volume: i128,
 }
 
 #[derive(Debug, Serialize, clickhouse::Row)]
@@ -682,4 +722,64 @@ struct OracleRow {
     oracle_name: String,
     price_usd: i128,
     raw_data: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clickhouse::Row;
+
+    /// Task 0286 F5/F6b. `clickhouse` 0.13 emits
+    /// `INSERT INTO t(<struct field names>) FORMAT RowBinary`, so a candle
+    /// column this struct does not name is NOT an error — the server fills it
+    /// from the column DEFAULT. On the pf columns that is catastrophic and
+    /// invisible: `pf_trade_count DEFAULT trade_count` would report a dust-only
+    /// minute as fully price-forming. The DDL side of this contract is pinned
+    /// in `prices-clickhouse`; this is the writer side.
+    #[test]
+    fn the_row_struct_names_every_candle_column() {
+        assert_eq!(
+            OhlcvRow::COLUMN_NAMES.to_vec(),
+            prices_clickhouse::CANDLE_COLUMNS.to_vec()
+        );
+    }
+
+    /// Each pf column comes from its OWN candle field. The three values here are
+    /// deliberately distinct, and distinct from `trade_count` / `volume_base` /
+    /// `volume_quote`, so a swapped or defaulted mapping fails instead of
+    /// coincidentally matching the column DEFAULT expressions.
+    #[test]
+    fn the_row_builder_maps_each_pf_column_from_its_own_field() {
+        let candle = OhlcvCandle {
+            minute_start: 1_700_000_000,
+            asset_id: 1,
+            quote_asset_id: 2,
+            open: Decimal::from(3),
+            high: Decimal::from(4),
+            low: Decimal::from(2),
+            close: Decimal::from(3),
+            volume_base: Decimal::from(40),
+            volume_quote: Decimal::from(120),
+            vwap: Decimal::from(3),
+            trade_count: 9,
+            version: 100_000,
+            pf_trade_count: 5,
+            pf_volume: Decimal::from(30),
+            pf_price_volume: Decimal::from(90),
+        };
+        let row = candle_row(&candle, "sdex");
+        assert_eq!(row.pf_trade_count, 5, "not trade_count (9)");
+        assert_eq!(
+            row.pf_volume,
+            decimal_to_i128(Decimal::from(30)),
+            "not volume_base (40)"
+        );
+        assert_eq!(
+            row.pf_price_volume,
+            decimal_to_i128(Decimal::from(90)),
+            "not volume_quote (120)"
+        );
+        assert_eq!(row.trade_count, 9);
+        assert_eq!(row.volume_base, decimal_to_i128(Decimal::from(40)));
+    }
 }
