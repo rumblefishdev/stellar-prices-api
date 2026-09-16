@@ -550,6 +550,38 @@ mod tests {
         assert_eq!(checked, 12);
     }
 
+    /// Task 0286 WR-06. The widening that lands in this slice breaks the two
+    /// HISTORICAL pre-rolls: their ~110 bare positional
+    /// `INSERT INTO prices.price_ohlcv_* SELECT` statements project fifteen
+    /// columns into eighteen-column tables and fail with Code 20. Their bodies
+    /// belong to task 0286's rollup generator (S2), but the SCHEMA that breaks
+    /// them ships now, and `docs/runbooks/preroll-incremental-presoroban.md`
+    /// still points an operator at one of them — so the warning has to be in
+    /// the file from the same commit as the widening.
+    #[test]
+    fn historical_prerolls_warn_that_0286_superseded_them() {
+        for (name, sql) in [
+            ("preroll-incremental.sql", PREROLL_INCREMENTAL_SQL),
+            ("preroll-amm-reprice.sql", PREROLL_AMM_REPRICE_SQL),
+        ] {
+            // Header, not a footnote: it must be readable before the operator
+            // has scrolled to the first statement.
+            let header: String = sql.lines().take(12).collect::<Vec<_>>().join("\n");
+            assert!(
+                header.contains("HISTORICAL"),
+                "{name} must be marked HISTORICAL in its header"
+            );
+            assert!(
+                header.contains("0286"),
+                "{name}'s header must name the task that superseded it"
+            );
+            assert!(
+                header.contains("DO NOT RUN"),
+                "{name}'s header must tell the operator not to run it"
+            );
+        }
+    }
+
     #[test]
     fn rollups_and_preroll_each_have_six_statements() {
         assert_eq!(split_statements(ROLLUPS_SQL).len(), 6);

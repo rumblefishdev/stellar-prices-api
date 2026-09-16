@@ -1,15 +1,18 @@
 use std::collections::HashMap;
 
 use rust_decimal::Decimal;
+use tracing::warn;
 
 use crate::tick::TradeTick;
 
 /// The largest value a `Decimal(38, 14)` column can hold: 38 significant digits
 /// with 14 after the point, so the integer part must stay below 10^24.
 ///
-/// Saturation targets THIS, not `Decimal::MAX` (~7.9e28). A value between the
-/// two would convert to an i128 mantissa of more than 38 digits and wrap on the
-/// way into ClickHouse — a silently wrong number instead of a clamped one.
+/// Saturation targets THIS, not `Decimal::MAX` (~7.9e28) and not `i128::MAX`
+/// (~1.7e38, where `decimal_to_i128` saturates). A value between the column
+/// domain and either of those converts to a mantissa of more than 38 digits,
+/// which ClickHouse accepts and reads back out of precision — a silently wrong
+/// number instead of a clamped one.
 const COLUMN_DOMAIN_MAX_INTEGER: i128 = 10i128.pow(24) - 1;
 
 #[derive(Debug, Clone)]
@@ -34,46 +37,43 @@ pub struct OhlcvCandle {
     pub pf_price_volume: Decimal,
 }
 
-/// One price-forming fill of an open bucket, kept until the bucket is flushed.
-///
-/// The key parts are NAMED fields rather than a tuple on purpose (task 0286
-/// F4): `version` is `ledger_sequence * 1000 + operation_index`, and a later
-/// refactor that read a tuple positionally would silently take the transaction
-/// index as the second term and make every new row incomparable, under
-/// ReplacingMergeTree, with every row already written.
+/// One fill of an open bucket, kept until the bucket is flushed. EVERY fill is
+/// kept, not just the price-forming ones: the volume sums are computed from
+/// this list too, in its sorted order, so no column of the candle depends on
+/// the order ingest happened to see the fills in.
 #[derive(Debug, Clone)]
-struct PriceFormingFill {
-    ledger_sequence: u32,
-    transaction_index: u16,
-    operation_index: u16,
-    claim_index: u16,
+struct Fill {
+    /// `TradeTick::lex_key()` verbatim — the ONE definition of fill order in
+    /// this crate. Copied rather than re-listed so the candle's order and the
+    /// tick's documented order cannot drift apart (task 0286 WR-03).
+    ///
+    /// ⚠️ Deliberately NOT the source of `version`: that is computed in
+    /// [`CandleAccumulator::merge`] from the tick's NAMED `ledger_sequence` and
+    /// `operation_index` fields, because this tuple's second element is the
+    /// TRANSACTION index (task 0286 F4).
+    key: (u32, u16, u16, u16),
     price: Decimal,
     volume_base: Decimal,
+    volume_quote: Decimal,
+    price_forming: bool,
 }
 
-impl PriceFormingFill {
-    /// A TOTAL order over the minute's price-forming fills: the fill key first,
-    /// then price and volume. The tie-break is not decoration — an AMM tick's
+impl Fill {
+    /// A TOTAL order over the minute's fills: the fill key first, then price and
+    /// both volumes. The tie-break is not decoration — an AMM tick's
     /// `operation_index` is a masked event index and its `claim_index` is always
-    /// 0, so two swaps of one transaction can collide on the key outright. With
-    /// a partial order the sums below would depend on arrival order, and ingest
-    /// sees fills in whatever order chunking and grouping produced.
-    fn sort_key(&self) -> (u32, u16, u16, u16, Decimal, Decimal) {
-        (
-            self.ledger_sequence,
-            self.transaction_index,
-            self.operation_index,
-            self.claim_index,
-            self.price,
-            self.volume_base,
-        )
+    /// 0, so two swaps of one transaction can collide on the key outright. What
+    /// remains tied is two fills identical in every summed field, and swapping
+    /// those cannot change any sum.
+    fn sort_key(&self) -> ((u32, u16, u16, u16), Decimal, Decimal, Decimal) {
+        (self.key, self.price, self.volume_base, self.volume_quote)
     }
 }
 
-/// An in-progress minute: the row so far, plus the fills that may price it.
+/// An in-progress minute: the row so far, plus every fill that lands in it.
 struct OpenBucket {
     candle: OhlcvCandle,
-    fills: Vec<PriceFormingFill>,
+    fills: Vec<Fill>,
 }
 
 type BucketKey = (u32, u32, u32); // (minute_start, asset_id, quote_asset_id)
@@ -95,11 +95,12 @@ impl CandleAccumulator {
         }
     }
 
-    /// Fold one fill into its minute. Prices are NOT touched here — they are
-    /// computed at flush from the bucket's price-forming fills (see
-    /// [`finalise`]), because "the first and last price-forming fill in fill
-    /// order" is not a property any single fill can update incrementally once
-    /// fills arrive out of order.
+    /// Fold one fill into its minute. Nothing but `trade_count` and `version` is
+    /// computed here — every price and every sum is derived at flush from the
+    /// bucket's fills in sorted order (see [`finalise`]), because neither "the
+    /// first and last price-forming fill in fill order" nor a reproducible sum
+    /// is a property a single fill can update incrementally when fills arrive
+    /// out of order.
     ///
     /// No state crosses minutes or chunks: a bucket knows only its own fills,
     /// so nothing is carried forward from a previous candle (ADR 0287).
@@ -107,11 +108,10 @@ impl CandleAccumulator {
         let minute_start = (tick.closed_at as u32 / 60) * 60;
         let key = (minute_start, tick.base_id, tick.quote_id);
         // ⚠️ Task 0286 F4: read from the NAMED fields, never positionally from
-        // `TradeTick::lex_key`. That tuple is now four elements wide, so its
-        // second element is the TRANSACTION index — a positional read here
-        // would silently redefine `version` and make every new row
-        // incomparable, under ReplacingMergeTree, with every row already in
-        // price_ohlcv_1m.
+        // `TradeTick::lex_key`. That tuple is four elements wide, so its second
+        // element is the TRANSACTION index — a positional read here would
+        // silently redefine `version` and make every new row incomparable,
+        // under ReplacingMergeTree, with every row already in price_ohlcv_1m.
         let version = tick.ledger_sequence as u64 * 1000 + tick.operation_index as u64;
 
         let bucket = self.buckets.entry(key).or_insert_with(|| OpenBucket {
@@ -137,25 +137,20 @@ impl CandleAccumulator {
             fills: Vec::new(),
         });
 
-        // EVERY fill counts here, dust included: it is a real trade and its
-        // volume is real. Only the price is withheld.
-        bucket.candle.volume_base += tick.volume_base;
-        bucket.candle.volume_quote += tick.volume_quote;
+        // EVERY fill is recorded, dust included: it is a real trade and its
+        // volume is real. Only the PRICE is withheld from a non-price-forming
+        // one, by the `price_forming` flag this carries into `finalise`.
         bucket.candle.trade_count += 1;
         if bucket.candle.version < version {
             bucket.candle.version = version;
         }
-
-        if tick.price_forming {
-            bucket.fills.push(PriceFormingFill {
-                ledger_sequence: tick.ledger_sequence,
-                transaction_index: tick.transaction_index,
-                operation_index: tick.operation_index,
-                claim_index: tick.claim_index,
-                price: tick.price,
-                volume_base: tick.volume_base,
-            });
-        }
+        bucket.fills.push(Fill {
+            key: tick.lex_key(),
+            price: tick.price,
+            volume_base: tick.volume_base,
+            volume_quote: tick.volume_quote,
+            price_forming: tick.price_forming,
+        });
     }
 
     pub fn flush_older_than(&mut self, current_minute: u32) -> Vec<OhlcvCandle> {
@@ -191,41 +186,83 @@ impl CandleAccumulator {
 /// bucket; pre-0286 enrichment re-inserts a row without the pf columns, so they
 /// fall back to their DEFAULTs and a dust-only minute reports itself as fully
 /// price-forming. Both failures are silent.
+///
+/// ⚠️ A SECOND write of the same minute now carries more weight than it used
+/// to. `price_ohlcv_1m` is `ReplacingMergeTree(version)` and a re-written
+/// minute wins on the later ledger's version, so if the TAIL of that minute
+/// holds only dust the replacement row is `open = high = low = close = 0,
+/// pf_trade_count = 0` and it ERASES a correctly priced row. Three paths reach
+/// that shape: a minute straddling `sdex-backfill`'s 64k-ledger partition
+/// boundary (F14), a reconcile run re-emitting a partial minute, and an
+/// `events-backfill` re-run. Task 0282's one-write-per-minute-bucket fix is
+/// therefore a DEPLOY PRECONDITION for this code, not merely a related bug.
 fn finalise(bucket: &mut OpenBucket) -> OhlcvCandle {
-    // vwap is Σ quote / Σ base over ALL fills, unchanged by this task: it is a
-    // volume statistic, not a price print, and excluding dust from it would
-    // make it disagree with the volumes beside it.
-    if !bucket.candle.volume_base.is_zero() {
-        bucket.candle.vwap = bucket.candle.volume_quote / bucket.candle.volume_base;
-    }
-
-    // Sorted before anything is computed, so neither the corners nor the sums
-    // can depend on the order ingest happened to see the fills in.
+    // Sorted before anything is computed, so no column — price, pf sum or
+    // volume — can depend on the order ingest happened to see the fills in.
     bucket.fills.sort_by_key(|f| f.sort_key());
 
-    let Some(first) = bucket.fills.first() else {
-        // No price-forming fill: no price. The row is still emitted.
-        return bucket.candle.clone();
+    let mut clamp = Clamp::default();
+
+    // Volumes, trade_count and vwap count EVERY fill: they are volume
+    // statistics, not price prints, and excluding dust from them would make
+    // them disagree with the trade count beside them.
+    let mut volume_base = Decimal::ZERO;
+    let mut volume_quote = Decimal::ZERO;
+    for f in &bucket.fills {
+        volume_base = clamp.add(volume_base, f.volume_base);
+        volume_quote = clamp.add(volume_quote, f.volume_quote);
+    }
+    bucket.candle.volume_base = volume_base;
+    bucket.candle.volume_quote = volume_quote;
+    bucket.candle.vwap = if volume_base.is_zero() {
+        Decimal::ZERO
+    } else {
+        clamp.div(volume_quote, volume_base)
     };
 
-    let mut high = first.price;
-    let mut low = first.price;
-    let mut pf_volume = Decimal::ZERO;
-    let mut pf_price_volume = Decimal::ZERO;
-    for f in &bucket.fills {
-        high = high.max(f.price);
-        low = low.min(f.price);
-        pf_volume = saturating_add(pf_volume, f.volume_base);
-        pf_price_volume = saturating_add(pf_price_volume, saturating_mul(f.price, f.volume_base));
+    let mut priced = bucket.fills.iter().filter(|f| f.price_forming).peekable();
+    if let Some(first) = priced.peek().copied() {
+        let mut high = first.price;
+        let mut low = first.price;
+        let mut last = first;
+        let mut pf_trade_count: u32 = 0;
+        let mut pf_volume = Decimal::ZERO;
+        let mut pf_price_volume = Decimal::ZERO;
+        for f in priced {
+            high = high.max(f.price);
+            low = low.min(f.price);
+            pf_trade_count += 1;
+            pf_volume = clamp.add(pf_volume, f.volume_base);
+            let notional = clamp.mul(f.price, f.volume_base);
+            pf_price_volume = clamp.add(pf_price_volume, notional);
+            last = f;
+        }
+        bucket.candle.open = clamp.value(first.price);
+        bucket.candle.close = clamp.value(last.price);
+        bucket.candle.high = clamp.value(high);
+        bucket.candle.low = clamp.value(low);
+        bucket.candle.pf_trade_count = pf_trade_count;
+        bucket.candle.pf_volume = pf_volume;
+        bucket.candle.pf_price_volume = pf_price_volume;
+    }
+    // No price-forming fill: the prices stay zero. The row is still emitted.
+
+    if clamp.fired {
+        // Never silent. A clamped value is indistinguishable from a real one
+        // downstream — S3's pf_vwap and its divergence flag would be computed
+        // from a fabricated number — so say which candle it happened to
+        // (task 0286 WR-05).
+        warn!(
+            minute_start = bucket.candle.minute_start,
+            asset_id = bucket.candle.asset_id,
+            quote_asset_id = bucket.candle.quote_asset_id,
+            trade_count = bucket.candle.trade_count,
+            "candle value saturated at the Decimal(38, 14) column domain — a \
+             price or volume of this minute exceeds what the column can hold, \
+             and the written value is clamped, not measured"
+        );
     }
 
-    bucket.candle.open = first.price;
-    bucket.candle.close = bucket.fills.last().expect("non-empty").price;
-    bucket.candle.high = high;
-    bucket.candle.low = low;
-    bucket.candle.pf_trade_count = bucket.fills.len() as u32;
-    bucket.candle.pf_volume = pf_volume;
-    bucket.candle.pf_price_volume = pf_price_volume;
     bucket.candle.clone()
 }
 
@@ -234,40 +271,65 @@ fn column_domain_max() -> Decimal {
     Decimal::from_i128_with_scale(COLUMN_DOMAIN_MAX_INTEGER, 0)
 }
 
-/// Clamp into the column's domain. Symmetric, though a negative sum should be
-/// unreachable — a price or a volume that went negative is a bug elsewhere, and
-/// clamping it is still better than handing ClickHouse a value it will reject
-/// or silently wrap.
-fn clamp_to_column(value: Decimal) -> Decimal {
-    let max = column_domain_max();
-    value.clamp(-max, max)
+/// Decimal arithmetic that saturates into the column domain instead of
+/// panicking, and REMEMBERS whether it had to (task 0286 T-jiv-04, WR-05).
+///
+/// A `rust_decimal` overflow panics, and a panic here would abort a whole
+/// ingest run over one hostile amount. Clamping instead is the right trade —
+/// but a clamp that leaves no trace turns a fabricated number into an
+/// indistinguishable one, so `fired` is what the caller logs.
+#[derive(Default)]
+struct Clamp {
+    fired: bool,
 }
 
-/// `a + b`, never panicking: a Decimal overflow here would abort a whole ingest
-/// run over one hostile amount (T-jiv-04).
-fn saturating_add(a: Decimal, b: Decimal) -> Decimal {
-    match a.checked_add(b) {
-        Some(sum) => clamp_to_column(sum),
-        None => {
-            if b.is_sign_negative() {
-                -column_domain_max()
-            } else {
-                column_domain_max()
-            }
+impl Clamp {
+    /// Clamp into the column's domain. Symmetric, though a negative value
+    /// should be unreachable — a price or volume that went negative is a bug
+    /// elsewhere, and clamping it still beats handing ClickHouse a value it
+    /// will reject or silently wrap.
+    fn value(&mut self, value: Decimal) -> Decimal {
+        let max = column_domain_max();
+        if value > max {
+            self.fired = true;
+            return max;
+        }
+        if value < -max {
+            self.fired = true;
+            return -max;
+        }
+        value
+    }
+
+    fn saturated(&mut self, negative: bool) -> Decimal {
+        self.fired = true;
+        if negative {
+            -column_domain_max()
+        } else {
+            column_domain_max()
         }
     }
-}
 
-/// `a * b`, never panicking. See [`saturating_add`].
-fn saturating_mul(a: Decimal, b: Decimal) -> Decimal {
-    match a.checked_mul(b) {
-        Some(product) => clamp_to_column(product),
-        None => {
-            if a.is_sign_negative() != b.is_sign_negative() {
-                -column_domain_max()
-            } else {
-                column_domain_max()
-            }
+    fn add(&mut self, a: Decimal, b: Decimal) -> Decimal {
+        match a.checked_add(b) {
+            Some(sum) => self.value(sum),
+            None => self.saturated(b.is_sign_negative()),
+        }
+    }
+
+    fn mul(&mut self, a: Decimal, b: Decimal) -> Decimal {
+        match a.checked_mul(b) {
+            Some(product) => self.value(product),
+            None => self.saturated(a.is_sign_negative() != b.is_sign_negative()),
+        }
+    }
+
+    /// Caller guarantees a non-zero divisor; `checked_div` still covers the
+    /// overflow case, which a huge quote volume over a dust base volume reaches.
+    fn div(&mut self, a: Decimal, b: Decimal) -> Decimal {
+        match a.checked_div(b) {
+            Some(quotient) => self.value(quotient),
+            None => self.saturated(a.is_sign_negative() != b.is_sign_negative()),
         }
     }
 }
@@ -597,12 +659,15 @@ mod tests {
         assert_eq!(c.pf_trade_count, 2);
     }
 
-    /// The pf sums are summed in the fills' own sorted order, never in arrival
-    /// order. It matters because these products need more significant digits
-    /// than a `Decimal` carries, so each addition rounds — and a sum of rounded
-    /// terms depends on the order they are added in. Ingest sees a ledger's
-    /// fills in whatever order the chunking and grouping produced, so a candle
-    /// that depended on it would not be reproducible.
+    /// EVERY field of the candle is computed from the minute's fills in their
+    /// own sorted order, never in arrival order — the prices, the pf sums AND
+    /// the two volume sums with the vwap derived from them. It matters because
+    /// a `Decimal` sum rounds once the terms span more significant digits than
+    /// it carries, and a sum of rounded terms depends on the order they were
+    /// added in. Ingest sees a ledger's fills in whatever order the chunking
+    /// and grouping produced, and phase 3 reconciles `sum(volume_base)` to the
+    /// stroop against a FREEZE snapshot — neither survives a candle that
+    /// depends on arrival order (task 0286 WR-04).
     #[test]
     fn arrival_order_does_not_change_the_candle() {
         let amounts = [
@@ -611,8 +676,19 @@ mod tests {
             (3, 110_000_000_000_017, 130_000_000_000_019),
         ];
 
-        let mut reference: Option<(Decimal, Decimal, Decimal, Decimal, u32, Decimal, Decimal)> =
-            None;
+        type Snapshot = (
+            Decimal, // open
+            Decimal, // high
+            Decimal, // low
+            Decimal, // close
+            u32,     // pf_trade_count
+            Decimal, // pf_volume
+            Decimal, // pf_price_volume
+            Decimal, // volume_base
+            Decimal, // volume_quote
+            Decimal, // vwap
+        );
+        let mut reference: Option<Snapshot> = None;
         for rotation in 0..amounts.len() {
             let mut registry = AssetRegistry::from_existing(vec![]);
             let mut acc = CandleAccumulator::new();
@@ -621,7 +697,7 @@ mod tests {
                 acc.merge(&ordinary(&mut registry, tx, sold, bought));
             }
             let c = &acc.flush_all()[0];
-            let got = (
+            let got: Snapshot = (
                 c.open,
                 c.high,
                 c.low,
@@ -629,6 +705,9 @@ mod tests {
                 c.pf_trade_count,
                 c.pf_volume,
                 c.pf_price_volume,
+                c.volume_base,
+                c.volume_quote,
+                c.vwap,
             );
             match &reference {
                 None => reference = Some(got),
@@ -637,15 +716,36 @@ mod tests {
         }
     }
 
-    /// T-jiv-04: a hostile or merely enormous fill must not abort an ingest run,
-    /// and must not leave a value the `Decimal(38, 14)` column cannot store.
-    /// Saturating at the COLUMN's domain (integer part below 10^24) rather than
-    /// at `Decimal::MAX` is what keeps `decimal_to_i128` from wrapping on the
-    /// way out.
+    /// T-jiv-04 / WR-01: a hostile or merely enormous fill must not abort an
+    /// ingest run, and must not leave ANY value the `Decimal(38, 14)` columns
+    /// cannot store.
+    ///
+    /// The fixture is the shape that actually reaches this: a Soroban AMM fill
+    /// whose raw i128 amounts PASS the rounding bound (both above 1000, product
+    /// of the shifted factors far above 10^6) yet whose quotient is enormous —
+    /// 1001 units in against 7.9e28 out. After `AMM_AMOUNT_SCALE` the price is
+    /// ~7.9e25, well past the 10^24 an integer part may reach, and so is the
+    /// vwap derived from the same two volumes. Clamping the pf sums alone would
+    /// leave `open`/`high`/`low`/`close`/`vwap` to be saturated by
+    /// `decimal_to_i128` at `i128::MAX` instead — a number ClickHouse accepts
+    /// and reads back out of precision, which is the silent wrap the clamp
+    /// exists to prevent.
     #[test]
-    fn an_oversized_fill_saturates_inside_the_column_domain() {
+    fn an_oversized_fill_saturates_every_column_into_its_domain() {
+        // The amounts really are price-forming — this is not an unreachable
+        // fixture smuggled past the classifier.
+        const RAW_IN: i128 = 1001;
+        const RAW_OUT: i128 = 79_000_000_000_000_000_000_000_000_000;
+        assert!(
+            crate::price::price_forming_i128(RAW_IN, RAW_OUT),
+            "the fixture must pass the bound, or it proves nothing"
+        );
+
+        let amount_in = Decimal::try_from_i128_with_scale(RAW_IN, 7).unwrap();
+        let amount_out = Decimal::try_from_i128_with_scale(RAW_OUT, 7).unwrap();
+        let price = amount_out / amount_in;
+
         let mut acc = CandleAccumulator::new();
-        let huge = Decimal::from_i128_with_scale(10i128.pow(14), 0);
         acc.merge(&TradeTick {
             ledger_sequence: 100,
             closed_at: T_M0_A,
@@ -654,22 +754,40 @@ mod tests {
             claim_index: 0,
             base_id: 1,
             quote_id: 2,
-            price: huge,
-            volume_base: huge,
-            volume_quote: huge,
+            price,
+            volume_base: amount_in,
+            volume_quote: amount_out,
             price_forming: true,
         });
 
         let c = &acc.flush_all()[0];
         let domain_max = Decimal::from_i128_with_scale(10i128.pow(24) - 1, 0);
-        assert!(
-            c.pf_price_volume <= domain_max,
-            "10^14 x 10^14 must clamp into the column domain, got {}",
-            c.pf_price_volume
-        );
-        assert!(c.pf_price_volume > Decimal::ZERO);
-        // And the clamped value survives the conversion the writer performs.
-        let mantissa = crate::writer::decimal_to_i128(c.pf_price_volume);
-        assert!(mantissa > 0, "the i128 mantissa must not wrap");
+        for (what, value) in [
+            ("open", c.open),
+            ("high", c.high),
+            ("low", c.low),
+            ("close", c.close),
+            ("volume_base", c.volume_base),
+            ("volume_quote", c.volume_quote),
+            ("vwap", c.vwap),
+            ("pf_volume", c.pf_volume),
+            ("pf_price_volume", c.pf_price_volume),
+        ] {
+            assert!(
+                value <= domain_max,
+                "{what} left the Decimal(38, 14) domain: {value}"
+            );
+            // And the clamped value survives the conversion the writer performs
+            // without wrapping the i128 mantissa.
+            assert!(
+                crate::writer::decimal_to_i128(value) >= 0,
+                "{what} wrapped in decimal_to_i128"
+            );
+        }
+        // The corners genuinely needed clamping — otherwise the loop above is
+        // asserting nothing.
+        assert_eq!(c.close, domain_max, "close saturated at the column max");
+        assert_eq!(c.vwap, domain_max, "vwap saturated at the column max");
+        assert!(c.pf_volume > Decimal::ZERO);
     }
 }

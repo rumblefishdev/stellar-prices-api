@@ -368,8 +368,16 @@ pub struct RawSorobanEvent {
 /// path is unchanged. Appends AMM ticks and unresolved-pool records to `out`.
 ///
 /// `events` MUST all belong to `ledger_seq` and be pre-ordered by
-/// `(transaction_id, event_index)` — the run layer's `ORDER BY` guarantees this,
-/// so factory events register a pool before that pool's swaps within the window.
+/// `(transaction_index, transaction_id, event_index)` — the run layer's
+/// `ORDER BY` guarantees this (task 0286 put the transaction's apply order
+/// ahead of its id), so a transaction's events stay CONTIGUOUS and factory
+/// events register a pool before that pool's swaps within the window.
+///
+/// Second precondition, introduced with that ordering: every event of one
+/// transaction carries the SAME `transaction_index`. It holds because the
+/// producer reads the apply order per transaction, but if a mixed
+/// resolved/fallback pair ever reached one `transaction_id` the whole group
+/// would silently take the first row's value — so it is asserted in debug.
 pub fn process_soroban_event_rows(
     ledger_seq: u32,
     closed_at: i64,
@@ -413,8 +421,16 @@ pub fn process_soroban_event_rows(
         }
 
         // Every event of a transaction carries the same apply order; the group
-        // is contiguous by construction, so the first row's value is the group's.
+        // is contiguous by construction, so the first row's value is the
+        // group's. Asserted rather than assumed: a mixed group would silently
+        // order half a transaction's fills wrong (task 0286 WR-09).
         let transaction_index = events[tx_start].transaction_index;
+        debug_assert!(
+            events[tx_start..tx_end]
+                .iter()
+                .all(|e| e.transaction_index == transaction_index),
+            "events of transaction {tx_id} disagree on transaction_index"
+        );
         classify_amm_groups(
             amm_groups,
             transaction_index,
@@ -1424,5 +1440,89 @@ mod tests {
         );
         assert_eq!(dust.claim_index, 0);
         assert_eq!(dust.lex_key(), (100, 4, 5, 0));
+    }
+
+    // ---- task 0286 WR-09: the apply order the seam reads off a group --------
+
+    const SEAM_POOL: &str = "CDBBBNMCWRMWEIFHUD5BXBCRTW6QM33ZEXIOBGKKQNDSH3WEF7WVBGMI";
+    const SEAM_T0: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+    const SEAM_T1: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+    const SEAM_SEQ: u32 = 50_688_800;
+    const SEAM_CLOSED_AT: i64 = 1_700_000_000;
+
+    /// A SoroswapPair swap in the typed-JSON shape BE persists.
+    fn seam_swap(tx_id: &str, transaction_index: u16, event_index: u32) -> RawSorobanEvent {
+        RawSorobanEvent {
+            contract_id: SEAM_POOL.to_string(),
+            transaction_id: tx_id.to_string(),
+            transaction_index,
+            ledger_sequence: SEAM_SEQ,
+            event_index,
+            topics: json!([
+                {"type":"string","value":"SoroswapPair"},
+                {"type":"sym","value":"swap"}
+            ]),
+            data: json!({"type":"map","value":[
+                {"key":{"type":"sym","value":"amount_0_in"},"value":{"type":"i128","value":"1000000"}},
+                {"key":{"type":"sym","value":"amount_0_out"},"value":{"type":"i128","value":"0"}},
+                {"key":{"type":"sym","value":"amount_1_in"},"value":{"type":"i128","value":"0"}},
+                {"key":{"type":"sym","value":"amount_1_out"},"value":{"type":"i128","value":"914145"}}
+            ]}),
+        }
+    }
+
+    fn seam_registries() -> Registries {
+        let mut reg = Registries::new();
+        reg.venue.insert(SEAM_POOL.to_string(), Venue::Soroswap);
+        reg.soroswap.register(
+            SEAM_POOL.to_string(),
+            SEAM_T0.to_string(),
+            SEAM_T1.to_string(),
+        );
+        reg
+    }
+
+    /// The events-backfill seam carries BE's apply order onto the tick, so a
+    /// repriced candle orders its fills exactly like the live path does.
+    #[test]
+    fn the_seam_carries_the_groups_apply_order_onto_its_ticks() {
+        let mut reg = seam_registries();
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        process_soroban_event_rows(
+            SEAM_SEQ,
+            SEAM_CLOSED_AT,
+            &[seam_swap("tx-a", 7, 0)],
+            &mut reg,
+            &mut assets,
+            &mut out,
+        );
+        assert_eq!(out.amm_ticks.len(), 1);
+        assert_eq!(
+            out.amm_ticks[0].1.transaction_index, 7,
+            "the tick takes the group's apply order, not 0"
+        );
+    }
+
+    /// Task 0286 WR-09. The seam reads ONE `transaction_index` off the first
+    /// event of each contiguous group, so a group whose rows disagree would
+    /// silently order half a transaction's fills wrong. Debug builds refuse.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "disagree on transaction_index")]
+    fn a_group_disagreeing_on_its_apply_order_is_refused_in_debug() {
+        let mut reg = seam_registries();
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        process_soroban_event_rows(
+            SEAM_SEQ,
+            SEAM_CLOSED_AT,
+            // One transaction id, two apply orders — a mixed resolved/fallback
+            // pair is the only way this reaches production.
+            &[seam_swap("tx-a", 7, 0), seam_swap("tx-a", 0, 1)],
+            &mut reg,
+            &mut assets,
+            &mut out,
+        );
     }
 }

@@ -171,7 +171,10 @@ impl OhlcvWriter {
     /// production table name is hardcoded one level up, which is why no ingest
     /// test could own a scratch database; this seam exists so the round-trip
     /// test can (task 0286). Not part of the supported API — the only caller
-    /// outside this crate's tests should be `write_candles`.
+    /// outside this crate's tests should be `write_candles`. The table name is
+    /// validated as a plain (optionally `db.`-qualified) identifier before use,
+    /// so the seam cannot become an injection path into whatever the writer's
+    /// credentials reach.
     #[doc(hidden)]
     pub async fn write_candles_into(
         &self,
@@ -179,6 +182,7 @@ impl OhlcvWriter {
         candles: &[OhlcvCandle],
         source: &str,
     ) -> Result<(), IngestError> {
+        validate_table(table)?;
         if candles.is_empty() {
             return Ok(());
         }
@@ -583,6 +587,40 @@ pub struct UsdRateStats {
     pub newest: Vec<(String, u32)>,
 }
 
+/// Reject anything but a plain table identifier, optionally `db.`-qualified.
+///
+/// [`OhlcvWriter::write_candles_into`] interpolates its argument straight into
+/// the INSERT target, so without this it is an identifier-injection path into
+/// whatever the writer's credentials can reach — and the writer's credentials
+/// are production's (task 0286 WR-10). The seam exists so an integration test
+/// can own a scratch database; a scratch database name is an identifier, so
+/// nothing legitimate is lost by refusing everything else.
+fn validate_table(table: &str) -> Result<(), IngestError> {
+    fn is_identifier(part: &str) -> bool {
+        let mut chars = part.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+            _ => return false,
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    let ok = match table.split_once('.') {
+        Some((db, name)) => is_identifier(db) && is_identifier(name),
+        None => is_identifier(table),
+    };
+    if ok {
+        Ok(())
+    } else {
+        // The name itself is an identifier the caller supplied, not row data,
+        // so echoing it is leak-safe and is the only way to debug the refusal.
+        Err(IngestError::Precondition(format!(
+            "refusing to write candles into {table:?}: expected a plain table \
+             identifier, optionally qualified by one database name"
+        )))
+    }
+}
+
 /// Build the row for one candle. Extracted from
 /// [`OhlcvWriter::write_candles_into`] so the field-by-field mapping is
 /// unit-testable without a ClickHouse (task 0286): the clickhouse crate routes
@@ -742,6 +780,41 @@ mod tests {
             OhlcvRow::COLUMN_NAMES.to_vec(),
             prices_clickhouse::CANDLE_COLUMNS.to_vec()
         );
+    }
+
+    /// WR-10. `write_candles_into` interpolates a caller-supplied table name
+    /// into the INSERT target, so it is an identifier-injection path into
+    /// whatever the writer's credentials can reach. It exists for the
+    /// round-trip test's scratch database and must accept nothing else: a bare
+    /// identifier, or one `db.` prefix, both ASCII identifier characters only.
+    #[test]
+    fn only_a_plain_table_identifier_is_accepted_as_a_write_target() {
+        for ok in [
+            "price_ohlcv_1m",
+            "prices.price_ohlcv_1m",
+            "it_candle_write.price_ohlcv_1m",
+            "_x._y9",
+        ] {
+            assert!(validate_table(ok).is_ok(), "{ok} should be accepted");
+        }
+        for bad in [
+            "",
+            "prices.",
+            ".price_ohlcv_1m",
+            "a.b.c",
+            "9prices.t",
+            "prices.price_ohlcv_1m; DROP TABLE prices.assets",
+            "prices.price_ohlcv_1m SELECT",
+            "`prices`.`t`",
+            "prices.t--",
+            "prices .t",
+            "prices.t\u{00e9}",
+        ] {
+            assert!(
+                validate_table(bad).is_err(),
+                "{bad:?} should be rejected as a write target"
+            );
+        }
     }
 
     /// Each pf column comes from its OWN candle field. The three values here are

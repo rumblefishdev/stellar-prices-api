@@ -1,3 +1,13 @@
+-- ⚠️ HISTORICAL — SUPERSEDED BY TASK 0286. DO NOT RUN.
+--
+-- Every `INSERT INTO prices.price_ohlcv_* SELECT` below is POSITIONAL and
+-- projects the pre-0286 fifteen columns. The candle tables now carry eighteen
+-- (pf_trade_count, pf_volume, pf_price_volume — ADR 0287), so each of these
+-- statements fails with Code 20 (NUMBER_OF_COLUMNS_DOESNT_MATCH). That is
+-- deliberate: it fails loudly rather than writing candles whose price columns
+-- mean something this file predates. The bodies are left untouched as the
+-- record of what was run; task 0286's rollup generator owns their replacement.
+--
 -- prices coarse PRE-ROLL — INCREMENTAL, NON-TRUNCATING, range-bounded to the
 -- pre-Soroban SDEX tail `[genesis, activation)`.
 --

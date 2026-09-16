@@ -62,27 +62,28 @@ fn legacy_1m_create(db: &str) -> String {
     )
 }
 
-/// The one legacy row. The three source values are DISTINCT (4 / 10 / 12) so a
-/// DEFAULT wired to the wrong column fails instead of coincidentally matching.
-fn insert_legacy_row(db: &str) -> String {
+/// One legacy row. The three source values are DISTINCT so a DEFAULT wired to
+/// the wrong column fails instead of coincidentally matching, and the 1m and
+/// coarse rows use different triples so neither can be read for the other.
+fn insert_legacy_row(db: &str, table: &str, trade_count: u32, base: u32, quote: u32) -> String {
     format!(
-        "INSERT INTO {db}.price_ohlcv_1m \
+        "INSERT INTO {db}.{table} \
          (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
           volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
          VALUES (toDateTime(1700000000), 1, 2, 'sdex', 1.0, 1.5, 0.9, 1.1, \
-                 10, 12, 0, 0, 1.2, 4, 100000)"
+                 {base}, {quote}, 0, 0, 1.2, {trade_count}, 100000)"
     )
 }
 
-async fn pf_row(client: &Client, db: &str) -> (u32, f64, f64) {
+async fn pf_row(client: &Client, db: &str, table: &str) -> (u32, f64, f64) {
     client
         .query(&format!(
             "SELECT pf_trade_count, toFloat64(pf_volume), toFloat64(pf_price_volume) \
-             FROM {db}.price_ohlcv_1m FINAL"
+             FROM {db}.{table} FINAL"
         ))
         .fetch_one()
         .await
-        .expect("read pf columns")
+        .unwrap_or_else(|e| panic!("read pf columns from {table}: {e}"))
 }
 
 #[tokio::test]
@@ -109,10 +110,28 @@ async fn pf_columns_migrate_every_candle_table_and_preserve_old_rows() {
         .await
         .expect("create legacy _1m");
     admin
-        .query(&insert_legacy_row(db))
+        .query(&insert_legacy_row(db, "price_ohlcv_1m", 4, 10, 12))
         .execute()
         .await
-        .expect("insert legacy row");
+        .expect("insert legacy 1m row");
+
+    // And a pre-0286 COARSE table with a row in it. The coarse tables are what
+    // the rollup MVs and the read surface actually hit, so "an old 1d row keeps
+    // its meaning through the DEFAULTs" — the claim the phase-1 deploy order
+    // rests on — has to be proved there, not only on _1m. Created as an `AS`
+    // copy of the legacy base, exactly as a pre-0286 database's would have been.
+    admin
+        .query(&format!(
+            "CREATE TABLE {db}.price_ohlcv_1d AS {db}.price_ohlcv_1m"
+        ))
+        .execute()
+        .await
+        .expect("create legacy _1d");
+    admin
+        .query(&insert_legacy_row(db, "price_ohlcv_1d", 6, 20, 26))
+        .execute()
+        .await
+        .expect("insert legacy 1d row");
 
     // Apply the shipped schema over it — the migration under test. The coarse
     // tables are created here, as `AS` copies of the LEGACY base table, which is
@@ -126,9 +145,14 @@ async fn pf_columns_migrate_every_candle_table_and_preserve_old_rows() {
     // trade_count (4), pf_volume reads volume_base (10) and pf_price_volume
     // reads volume_quote (12) — Σ price × base volume for a single-price bucket.
     assert_eq!(
-        pf_row(&admin, db).await,
+        pf_row(&admin, db, "price_ohlcv_1m").await,
         (4, 10.0, 12.0),
         "a pre-0286 part must read its pf columns from the DEFAULT expressions"
+    );
+    assert_eq!(
+        pf_row(&admin, db, "price_ohlcv_1d").await,
+        (6, 20.0, 26.0),
+        "and so must a pre-0286 row in a COARSE table — that is what the MVs read"
     );
 
     // All seven grains carry all three columns, with the DEFAULT expressions
@@ -151,6 +175,27 @@ async fn pf_columns_migrate_every_candle_table_and_preserve_old_rows() {
                 .unwrap_or_else(|| panic!("{table} is missing column {col}"));
             assert_eq!(got, want_default, "{table}.{col} DEFAULT expression");
         }
+
+        // ... and in the right PLACE. `CANDLE_COLUMNS` is the canonical column
+        // order, the writer is name-routed against it, and S2's rollup
+        // generator renders explicit column lists from it — an ALTER that
+        // dropped its `AFTER` clause would still pass every assertion above
+        // while leaving the physical order disagreeing with the const.
+        let positions: Vec<(String, u64)> = admin
+            .query(&format!(
+                "SELECT name, position FROM system.columns \
+                 WHERE database = '{db}' AND table = '{table}' ORDER BY position"
+            ))
+            .fetch_all::<(String, u64)>()
+            .await
+            .unwrap_or_else(|e| panic!("{table} column positions: {e}"));
+        let names: Vec<&str> = positions.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            prices_clickhouse::CANDLE_COLUMNS.to_vec(),
+            "{table}: physical column order must equal CANDLE_COLUMNS \
+             (the pf columns go immediately after version)"
+        );
     }
 
     // Idempotent: re-applying errors nowhere (IF NOT EXISTS on every clause)
@@ -159,9 +204,14 @@ async fn pf_columns_migrate_every_candle_table_and_preserve_old_rows() {
         .await
         .expect("re-apply init schema");
     assert_eq!(
-        pf_row(&admin, db).await,
+        pf_row(&admin, db, "price_ohlcv_1m").await,
         (4, 10.0, 12.0),
         "re-applying INIT_SQL must not change a migrated row"
+    );
+    assert_eq!(
+        pf_row(&admin, db, "price_ohlcv_1d").await,
+        (6, 20.0, 26.0),
+        "nor a migrated coarse row"
     );
 
     admin

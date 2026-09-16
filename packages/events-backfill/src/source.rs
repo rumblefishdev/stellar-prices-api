@@ -115,10 +115,18 @@ pub async fn resolve_contract_ids(
 /// includes Phoenix's 8 events/swap plus reserves/transfers and can be millions
 /// of rows on a dense range).
 ///
-/// Both source tables are ReplacingMergeTree; the join collapses `ledgers`
-/// duplicates via `GROUP BY sequence`, and `soroban_events` duplicates (identical
+/// All three source tables are ReplacingMergeTree; both joins collapse their
+/// build side to one row per key via `GROUP BY` (`sequence` for `ledgers`, `id`
+/// for `transactions`), and `soroban_events` duplicates (identical
 /// `(contract_id, ledger, tx, event_index)` rows) are removed adjacently in the
 /// run loop — together deduping the RMT doubling without a full-table `FINAL`.
+///
+/// The `GROUP BY id` is load-bearing, not tidiness: `default.transactions` is
+/// keyed `(ledger_sequence, application_order, id)`, so `FINAL` collapses only
+/// rows that already agree on `application_order`. A LEFT JOIN on a build side
+/// with two rows for one `id` MULTIPLIES the probe row, and every AMM event of
+/// that transaction would be repriced twice — double volume, double trade
+/// count, silently (task 0286 CR-01).
 ///
 /// The join is a **LEFT** join with `ifNull(closed_at, 0)`: an event whose ledger
 /// is absent from `default.ledgers` still comes back (with `closed_at = 0`) so the
@@ -157,8 +165,8 @@ pub(crate) fn chunk_sql(contract_ids: &[i64], start: u32, end: u32) -> String {
             ifNull(l.closed_at, 0) AS closed_at, \
             e.topics_xdr AS topics_xdr, \
             e.data_xdr AS data_xdr, \
-            t.application_order AS application_order, \
-            t.found AS apply_order_found \
+            ifNull(t.application_order, 0) AS application_order, \
+            ifNull(t.found, 0) AS apply_order_found \
          FROM default.soroban_events e \
          LEFT JOIN ( \
             SELECT sequence, toInt64(min(toUnixTimestamp(closed_at))) AS closed_at \
@@ -167,7 +175,9 @@ pub(crate) fn chunk_sql(contract_ids: &[i64], start: u32, end: u32) -> String {
             GROUP BY sequence \
          ) l ON l.sequence = e.ledger_sequence \
          LEFT JOIN ( \
-            SELECT id, application_order, toUInt8(1) AS found \
+            SELECT id, \
+                   argMin(application_order, ledger_sequence) AS application_order, \
+                   toUInt8(1) AS found \
             FROM default.transactions FINAL \
             WHERE ledger_sequence BETWEEN {start} AND {end} \
               AND id IN ( \
@@ -176,6 +186,7 @@ pub(crate) fn chunk_sql(contract_ids: &[i64], start: u32, end: u32) -> String {
                  WHERE ledger_sequence BETWEEN {start} AND {end} \
                    AND contract_id IN ({in_list}) \
               ) \
+            GROUP BY id \
          ) t ON t.id = e.transaction_id \
          WHERE e.ledger_sequence BETWEEN {start} AND {end} \
            AND e.contract_id IN ({in_list}) \
@@ -333,6 +344,54 @@ mod tests {
             .map(|part| part.split([',', ' ']).find(|t| !t.is_empty()).unwrap())
             .collect();
         assert_eq!(aliases, EVENT_ROW_COLUMNS.to_vec());
+    }
+
+    /// CR-01, and the reason the sibling `ledgers` join is a `GROUP BY`
+    /// aggregate rather than a bare SELECT: a LEFT JOIN whose build side has
+    /// more than one row per key MULTIPLIES the probe row.
+    ///
+    /// `default.transactions` is a ReplacingMergeTree whose sort key is
+    /// `(ledger_sequence, application_order, id)`, so `FINAL` collapses only
+    /// rows that already AGREE on `application_order` — two rows for one `id`
+    /// with different apply orders both survive. Every AMM event of that
+    /// transaction would then be emitted twice, reach the extraction seam
+    /// twice, and be dispatched into two ticks: double `volume_base`, double
+    /// `volume_quote`, double `trade_count`, silently. That is the same
+    /// failure class task 0282 is fighting.
+    #[test]
+    fn the_apply_order_join_yields_one_row_per_transaction() {
+        let sql = sql();
+        let join = sql
+            .split("default.transactions FINAL")
+            .nth(1)
+            .expect("transactions subquery");
+        let join = join.split(") t ON").next().unwrap_or(join);
+        assert!(
+            join.contains("GROUP BY id") || join.contains("LIMIT 1 BY id"),
+            "the transactions build side must be collapsed to one row per id, \
+             or the join fans out and double-counts AMM volume: {join}"
+        );
+    }
+
+    /// WR-02. `EventRow` binds POSITIONALLY, and `join_use_nulls = 1` is a
+    /// profile setting this file cannot override (it may not emit `SETTINGS` —
+    /// readonly, code 164). Under it an unmatched LEFT JOIN column becomes
+    /// `Nullable(...)`, RowBinary prefixes a null byte, and every field from
+    /// `application_order` onward decodes as garbage. The pre-existing
+    /// `ifNull(l.closed_at, 0)` is the record of someone hitting this already.
+    #[test]
+    fn the_joined_columns_are_null_framed_like_their_sibling() {
+        let sql = sql();
+        for projection in [
+            "ifNull(l.closed_at, 0) AS closed_at",
+            "ifNull(t.application_order, 0) AS application_order",
+            "ifNull(t.found, 0) AS apply_order_found",
+        ] {
+            assert!(
+                sql.contains(projection),
+                "every joined column must be null-framed: missing `{projection}`"
+            );
+        }
     }
 
     /// The candle's fill order, in the read that feeds it. Grouping in
