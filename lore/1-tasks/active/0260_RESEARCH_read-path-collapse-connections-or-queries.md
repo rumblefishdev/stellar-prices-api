@@ -84,6 +84,27 @@ history:
       `pool_max_idle_per_host(2)` justified for "serial writes" plus HTTP/1.1
       only. That explains connection churn, not refusal — the refusal came from
       the far side and still needs `max_connections` and the server log.
+  - date: 2026-09-16
+    status: active
+    who: stkrolikiewicz
+    note: >
+      🔴 CORRECTION to the findings recorded earlier today. The connection-pool
+      mechanism candidate is DISPROVED, not merely hedged. It rested on the read
+      path being concurrent within a container, and it is not: Lambda serves one
+      request per execution environment, and no endpoint fans out —
+      `current_prices_batch` issues a single awaited query and a repo-wide search
+      for join_all / try_join_all / FuturesUnordered / buffer_unordered in
+      `prices-api/src/` returns nothing. One container needs one connection; the
+      pool holds two. The framing "sized for writers, inherited by readers"
+      implied a mismatch that does not exist and would have sent the next reader
+      down a false trail.
+      Kept as a positive finding instead: the read path is serial per container,
+      so ClickHouse saw tens of connections at 26 concurrent executions rather
+      than hundreds. Whatever refused them, it was not our client exhausting
+      sockets — which raises the value of the server-side numbers.
+      Also corrected: a timer around the ClickHouse call would NOT have answered
+      AC 2, which asks for a network/query/connection split. Recorded as a note
+      against [[0249]] rather than spawned as a separate task.
 ---
 
 # Read path collapse at 100 req/s of misses — connections or queries?
@@ -194,25 +215,36 @@ deployed 12:52 UTC, archived "verified on production" 12:59 UTC. So a **future**
 occurrence would carry ClickHouse's own code and message — which is what makes a
 controlled re-test worth more than any further forensics on this one.
 
-### AC 3, our half — the client pool is ours, and it is sized for writers
+### AC 3, our half — the client side is NOT the ceiling (candidate disproved)
 
 `main.rs:70` → `client_from_lambda_env` (`mtls.rs:346`) → `client_with_mtls`
-(`mtls.rs:252`). The api-handler's read path therefore runs on:
+(`mtls.rs:252`), so the read path runs on `.pool_max_idle_per_host(2)`
+(`mtls.rs:304`), `.pool_idle_timeout(8s)` and `.enable_http1()` only — no
+HTTP/2 — with an `Arc`-backed client shared per warm container (`state.rs:10`).
 
-- `.pool_max_idle_per_host(2)` (`mtls.rs:304`), justified in its own comment with
-  *"two pooled connections per host is plenty for **serial writes**"* — reasoning
-  written for low-concurrency workers, inherited by the read path;
-- `.enable_http1()` only (`mtls.rs:292`) — **no HTTP/2**, so no multiplexing: N
-  concurrent requests need N sockets;
-- `.pool_idle_timeout(8s)`;
-- the client is `Arc`-backed and shared per warm container (`state.rs:10`).
+🔴 **An earlier pass today recorded this as a mechanism candidate. It is
+disproved.** That reading rested on a pool justified for "serial writes" being
+inherited by a *concurrent* read path. The read path is not concurrent:
 
-⚠️ **Stated carefully, because it is easy to overclaim:** `pool_max_idle_per_host`
-is **not** a concurrency cap. Exceeding it does not refuse a request — the extra
-connection is created and then dropped instead of being pooled. So this explains
-**connection churn** (a fresh mTLS handshake on most misses at 100 rps), not the
-immediate refusal. The refusal came from the far side. This is a strong mechanism
-candidate, not the finding.
+- **Lambda serves one request per execution environment.** Concurrency comes from
+  more containers, each with its own client and its own pool — never from
+  parallel requests inside one container.
+- **No endpoint fans out to ClickHouse.** `current_prices_batch` takes every id
+  in a single awaited query (`batch/handlers.rs:72`), and a repo-wide search for
+  `join_all` / `try_join_all` / `FuturesUnordered` / `buffer_unordered` across
+  `prices-api/src/` returns nothing.
+
+So one container needs **one** connection at a time while the pool holds two —
+double the requirement, not half of it. The comment's "plenty for serial writes"
+is equally true of serial reads, and a warm container reuses its pooled socket
+inside the 8 s idle window, so there is no per-request handshake either.
+
+🔑 Worth keeping as a finding in its own right: **the read path is serial per
+container**, so at 26 concurrent executions ClickHouse saw on the order of *tens*
+of connections, not hundreds. Whatever refused them, it was not our client
+running out of sockets — which makes the server-side numbers more important, not
+less.
+
 
 ### AC 2 — not obtainable as the task assumed
 
@@ -262,33 +294,18 @@ session:
 - whether the ceiling was reached **jointly** with soroban-block-explorer, which
   is the other half of AC 3 and [[0047]]'s question.
 
-### Future work this surfaced (not yet filed)
+### Future work this surfaced
 
-1. **The read path has no timing instrumentation.** A single `Instant` around the
-   ClickHouse call, logged on both arms, would have answered AC 2 from the logs.
-   The same gap will defeat the next investigation.
-2. **The mTLS client pool is sized for serial writes and used by the read path.**
-   Whether `pool_max_idle_per_host(2)` plus HTTP/1.1-only is right for a
-   request-per-invocation API is a design question, independent of this incident.
+**The read path has no timing instrumentation.** `db_error` (`errors.rs:97`) logs
+the error and context only, and X-Ray carries no subsegment for the ClickHouse
+call.
 
-## Acceptance Criteria
+⚠️ Correcting an overstatement made earlier today: a timer would **not** have
+answered AC 2, which asks for a split across network, query and connection setup.
+A single `Instant` yields the total and nothing more. It would still have been
+worth having, and the next investigation will hit the same wall.
 
-- [ ] The failure mode is named: connection ceiling, query saturation, or
-      something else — with evidence, not inference from response times
-- [ ] The uncontended miss budget is broken down into network / query /
-      connection setup
-- [ ] It is stated whether the ceiling is ours alone or shared with
-      soroban-block-explorer ([[0047]])
-- [ ] A remediation is recommended **against the identified cause**, explicitly
-      confirming or ruling out each of 0121's three assumed levers
-- [ ] Recovery mechanism explained, or recorded as unexplained
-- [ ] If the cause is structural, ADR 0007's sidecar-ClickHouse fallback is
-      revisited on the record
+Deliberately **not** filed as its own task: the change is one `Instant` on a path
+somebody will touch anyway, and [[0249]] already owns the api-handler's
+observability gaps. Fold it in there rather than adding an 86th backlog item.
 
-## Notes
-
-- Reproducing the collapse deliberately is a **potentially destructive test of
-  shared infrastructure**. If it is repeated, agree an abort signal and an
-  observer who can see the box first — neither existed on 2026-09-03.
-- A cheaper first step: a ramp between 65 req/s (clean during that run's setup
-  phase) and 100 req/s (collapse) locates the knee without sitting on it.
