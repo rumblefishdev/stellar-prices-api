@@ -266,8 +266,9 @@ ledger scan is ever switched on. Deleting it costs nothing that
 
 ## Fix shipped to the branch — verification (2026-09-16)
 
-Branch `fix/0256_asset-discovery-ledger-scan-never-runs`, commit `111a4fb`,
-pushed (remote SHA matches local HEAD). No PR opened yet.
+Branch `fix/0256_asset-discovery-ledger-scan-never-runs`, two commits: `111a4fb`
+(the fix) and `0893445` (test determinism, from the review below). Opened as
+PR #319 against `develop`.
 
 ### The change
 
@@ -305,7 +306,7 @@ cheap" — false for a worker scheduled hourly rather than one-shot.
 | `cargo test --workspace` (what CI runs) | rc=0, 96 passed, 0 failed |
 | `cargo clippy -p asset-discovery --all-targets` | rc=0, zero warnings from this crate |
 | IT `seed_it` vs local ClickHouse | passed |
-| **IT negative control** | fails at `seed_it.rs:75` on the new assertion, `left: 40, right: 20` |
+| **IT negative control** | fails on the new assertion, `left: 40, right: 20`, repeatably over two consecutive runs |
 | restore after the negative control | byte-identical to backup, IT green again |
 | formatting | `cargo fmt --check` rc=0; committed bytes identical to the bytes tested |
 
@@ -322,6 +323,30 @@ Per [[0275]] CI does not run these, which is why the results are recorded here.
 projects — it did NOT exercise this crate. CI also lints an explicit crate
 allow-list that does not include `asset-discovery` (`ci.yml:170-182`), so this
 crate has no clippy coverage in CI at all.
+
+### Accepted cost — existing rows lose their hourly `sac_address` refresh
+
+Found while reviewing the branch, and taken deliberately rather than missed.
+
+`write_asset_rows` recomputes `sac_address = registry.sac_address_of(identity)`
+for every row it writes. The old full re-emit therefore rewrote all ~209k rows
+every hour with a freshly derived SAC address and a new `updated_at`, so any
+correction to that derivation propagated across the whole table within the hour.
+With `write_new_assets` only newly interned assets are written, so a later fix to
+SAC derivation — or to the mainnet-only network scoping flagged on
+`AssetRegistry::from_existing` — will no longer self-heal through this worker.
+Pre-existing rows would keep a stale `sac_address` indefinitely and nothing else
+backfills them.
+
+Why it is accepted: `AssetRegistry::assets_since` already states the assumption
+this rests on — an asset's `sac_address` is a deterministic function of its
+identity, so a newly-written row needs no later correction — and
+`ledger-processor` has behaved exactly this way since [[0132]]. Keeping an hourly
+209k-row re-emit purely as an accidental repair mechanism is the defect this task
+exists to remove.
+
+⚠️ The consequence to remember: if SAC derivation ever changes, it now needs a
+deliberate one-shot backfill. No hourly process is quietly fixing it any more.
 
 ### Still unproven
 
