@@ -3656,3 +3656,287 @@ async fn the_pivot_reset_is_value_idempotent_across_runs() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Task 0286 / ADR 0287 §6 — enrichment under the price-forming definition.
+//
+// A dust-only minute is a candle with volume and NO price: every fill in it was
+// too small for its price to mean anything, so the ingest writes
+// `open = high = low = close = 0` and `pf_trade_count = 0`. Enrichment has to
+// price its VOLUME (the trades happened) without ever claiming a USD close for
+// a price it does not have — and, having done so once, it must stop selecting
+// the row, or the backlog never empties and the "enriched 0 rows despite a
+// non-empty backlog" warning latches forever (task 0214's shape).
+// ---------------------------------------------------------------------------
+
+/// A dust-only minute alongside an ordinary one, both FOO/USDC with an oracle
+/// price in window. `trade_count` and `pf_trade_count` differ on BOTH rows, so a
+/// re-insert that drops the pf columns is visible: `pf_trade_count DEFAULT
+/// trade_count` would silently restore them to `trade_count`.
+async fn seed_dust_and_priced(client: &Client, db: &str, ts: u32) {
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ({ts}, 10, 2, 'sdex', 5,5,5,5, 1, 5, 0, 0, 5, 5, 1, 2, 1, 5), \
+             ({ts}, 11, 2, 'sdex', 0,0,0,0, 1, 5, 0, 0, 5, 5, 1, 0, 0, 0)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+async fn pf_of(client: &Client, db: &str, asset: u32, quote: u32, ts: u32) -> (u32, u32) {
+    client
+        .query(&format!(
+            "SELECT trade_count, pf_trade_count FROM {db}.price_ohlcv_1m FINAL \
+             WHERE asset_id = ? AND quote_asset_id = ? AND timestamp = ?"
+        ))
+        .bind(asset)
+        .bind(quote)
+        .bind(ts)
+        .fetch_one::<(u32, u32)>()
+        .await
+        .unwrap()
+}
+
+async fn candidates_left(client: &Client, db: &str) -> u64 {
+    client
+        .query(&format!(
+            "SELECT count() FROM {db}.price_ohlcv_1m FINAL WHERE {pred}",
+            pred = enrichment_worker::ch_enrich::CANDIDATE_PRED
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap()
+}
+
+/// The dust-only minute is priced ONCE and then left alone.
+///
+/// RED on the pre-0286 predicate. `close_usd = 0` was the candidate term, and a
+/// candle with `close = 0` can only ever be priced at `0 × rate = 0` — so it
+/// matched again on every pass, forever, and every pass after the first
+/// enriched nothing while reporting a non-empty backlog. The new term
+/// `(close_usd = 0 AND close > 0)` asks the question that can actually be
+/// answered: is there a PRICE here that has not been valued yet.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_dust_only_minute_is_priced_once_and_is_never_reselected() {
+    let db = "it_enrich_dust_once";
+    let client = setup_scratch(db).await;
+    let ts = 1_700_000_000u32;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES ({ts}, 2, 'reflector', 1.0012, '{{}}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    seed_dust_and_priced(&client, db, ts).await;
+
+    let first = ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+    assert!(
+        first.rows_enriched > 0,
+        "the first pass must price both rows' volume"
+    );
+
+    // The dust row's VOLUME is valued — the trades happened — while its USD
+    // close stays 0, because it has no price to value.
+    let (vqusd, cusd): (f64, f64) = client
+        .query(&format!(
+            "SELECT toFloat64(volume_quote_usd), toFloat64(close_usd) \
+             FROM {db}.price_ohlcv_1m FINAL WHERE asset_id = 11 AND timestamp = ?"
+        ))
+        .bind(ts)
+        .fetch_one::<(f64, f64)>()
+        .await
+        .unwrap();
+    assert!(vqusd > 0.0, "the dust minute's volume must be priced");
+    assert_eq!(cusd, 0.0, "a candle with no price gets no USD close");
+
+    assert_eq!(
+        candidates_left(&client, db).await,
+        0,
+        "nothing may remain selectable: a row that can never change is not a \
+         candidate, and counting it as one latches the backlog warning"
+    );
+
+    let second = ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+    assert_eq!(second.candidates_before, 0, "second pass sees no backlog");
+    assert_eq!(second.rows_enriched, 0);
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Every re-inserting statement carries the three price-forming columns.
+///
+/// RED on the pre-0286 15-column INSERT list. ClickHouse fills a column a NAMED
+/// list omits from its DEFAULT, and `pf_trade_count DEFAULT trade_count` then
+/// reports a dust-only minute as fully price-forming — silently, on the first
+/// enrichment pass after the rollout (BRIEF F6b). This is the live hazard the
+/// deploy order exists for.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn pf_columns_survive_every_enrichment_rewrite() {
+    let db = "it_enrich_pf_survive";
+    let client = setup_scratch(db).await;
+    let recent = 1_700_000_000u32;
+    let deep = 1_600_000_000u32;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES ({recent}, 2, 'reflector', 1.0012, '{{}}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // One row per tier: oracle (recent FOO/USDC), peg (deep FOO/USDC), pivot
+    // source (deep XLM/USDC) and pivot subject (deep FOO/XLM). Every one carries
+    // `trade_count = 5, pf_trade_count = 2`, so a DEFAULT fallback shows up as a
+    // pf count of 5.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ({recent}, 10, 2, 'sdex', 5,5,5,5, 1, 5, 0, 0, 5, 5, 1, 2, 1, 5), \
+             ({deep}, 10, 2, 'sdex', 4,4,4,4, 1, 4, 0, 0, 4, 5, 1, 2, 1, 4), \
+             ({deep}, 1, 2, 'sdex', 0.30,0.30,0.30,0.30, 1000, 300, 0, 0, 0.30, 5, 1, 2, 500, 150), \
+             ({deep}, 10, 1, 'phoenix', 13.3333,13.3333,13.3333,13.3333, 3, 40, 0, 0, 13.3333, 5, 1, 2, 2, 27)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    seed_external_rate(&client, db, DEEP_DAY_START, 1.0).await;
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    for (asset, quote, ts, tier) in [
+        (10u32, 2u32, recent, "oracle"),
+        (10, 2, deep, "peg"),
+        (1, 2, deep, "pivot reference"),
+        (10, 1, deep, "pivot"),
+    ] {
+        let (tc, pf) = pf_of(&client, db, asset, quote, ts).await;
+        assert_eq!(tc, 5, "{tier}: trade_count must survive");
+        assert_eq!(
+            pf, 2,
+            "{tier}: pf_trade_count took its DEFAULT (= trade_count) — the \
+             re-insert dropped the column and every dust-only minute this pass \
+             touches now claims to be fully price-forming"
+        );
+        assert!(
+            close_usd(&client, db, asset, quote, ts).await > 0.0,
+            "{tier}: the fixture must actually exercise this tier"
+        );
+    }
+
+    // And the reset path, which rewrites already-written values rather than
+    // zeros — it zeroes the XLM-quoted leg and the pivot refills it in the same
+    // draining run, so the row goes through TWO more re-inserts.
+    let mut reset_cfg = cfg(db);
+    reset_cfg.one_shot = true;
+    reset_cfg.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 1,
+        not_before: deep,
+        not_after: None,
+        require_external_rate: false,
+        require_pivot_usdc_rate: false,
+    });
+    ChEnrichmentPass::new(reset_cfg).run().await.unwrap();
+
+    for (asset, quote, ts) in [(10u32, 1u32, deep), (10, 2, recent), (10, 2, deep)] {
+        let (tc, pf) = pf_of(&client, db, asset, quote, ts).await;
+        assert_eq!(tc, 5, "reset: trade_count must survive");
+        assert_eq!(pf, 2, "reset: pf_trade_count must survive");
+    }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// The pivot's XLM/USDC reference ignores dust (BRIEF F9).
+///
+/// The reference is a volume-weighted close over the reference market's rows,
+/// with no price filter of any kind — so a dust-only row with `close = 0` and a
+/// thousand units of volume drags the reference toward zero, and a bucket made
+/// only of dust produces a reference of exactly 0 which `IS NOT NULL` happily
+/// admits. Both are silent: the pivot then writes `close × 0 = 0` and the row
+/// looks un-enriched rather than wrong.
+///
+/// RED on the pre-0286 subquery, twice: the mixed bucket averages 0.30 with 0 to
+/// 0.15, and the later all-dust bucket wins the ASOF and yields no rate at all.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_pivot_ignores_a_dust_only_reference_minute() {
+    let db = "it_enrich_pivot_dust_ref";
+    let client = setup_scratch(db).await;
+    let early = 1_600_000_000u32;
+    let late = early + 600;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    // XLM/USDC reference market:
+    //  - `early`: one priced row (0.30) beside an equal-volume DUST row. An
+    //    unfiltered volume-weighted close reads 0.15.
+    //  - `late`:  nothing but dust. An unfiltered reference reads 0, and being
+    //    the newest bucket it wins the ASOF outright.
+    // FOO/XLM at `late` is the subject.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ({early}, 1, 2, 'sdex', 0.30,0.30,0.30,0.30, 1000, 300, 0, 0, 0.30, 5, 1, 2, 1000, 300), \
+             ({early}, 1, 2, 'phoenix', 0,0,0,0, 1000, 1, 0, 0, 0.001, 3, 1, 0, 0, 0), \
+             ({late}, 1, 2, 'phoenix', 0,0,0,0, 1000, 1, 0, 0, 0.001, 3, 1, 0, 0, 0), \
+             ({late}, 10, 1, 'phoenix', 13.3333,13.3333,13.3333,13.3333, 3, 40, 0, 0, 13.3333, 5, 1, 2, 3, 40)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    seed_external_rate(&client, db, DEEP_DAY_START, 1.0).await;
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let priced = close_usd(&client, db, 10, 1, late).await;
+    assert!(
+        (priced - 4.0).abs() < 1e-4,
+        "the reference must be the priced row's 0.30 (13.3333 x 0.30 = 4.0), \
+         got {priced}: 2.0 means the dust row halved the volume-weighted close, \
+         and 0.0 means the all-dust bucket supplied a reference of zero"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
