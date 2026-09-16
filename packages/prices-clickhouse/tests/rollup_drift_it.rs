@@ -121,9 +121,11 @@ async fn a_freshly_applied_chain_reports_no_drift() {
 /// already holds the MV, the apply says success anyway, and the drift check is
 /// what makes that visible.
 ///
-/// The edit used is the real one task 0146 needs — replacing the unguarded
-/// `argMax(close_usd, …)` with the `argMaxIf(…, close_usd > 0)` guard from task
-/// 0145 — so this doubles as evidence for why 0142 blocks it.
+/// The edit used is a real one: narrowing the `close_usd` rate's predicate,
+/// which is the kind of one-token correction task 0286 made to every MV body at
+/// once — so this doubles as evidence for why 0142 blocks such a change from
+/// landing by re-apply. (It was task 0146's `argMax → argMaxIf` until 0286
+/// replaced the carried product with a rate; the point is unchanged.)
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
 async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops() {
@@ -135,8 +137,8 @@ async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops
         .expect("the MV exists after setup");
 
     let edited = prices_clickhouse::ROLLUPS_SQL.replace(
-        "argMax(close_usd, t.timestamp)            AS close_usd",
-        "argMaxIf(close_usd, t.timestamp, close_usd > 0) AS close_usd",
+        "t.close_usd > 0 AND t.close > 0",
+        "t.close_usd > 0 AND t.close > 0 AND t.pf_trade_count > 0",
     );
     assert_ne!(
         edited,
@@ -145,7 +147,9 @@ async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops
          rollups.sql this test goes blind and must be updated, not deleted"
     );
     assert_eq!(
-        edited.matches("argMaxIf(close_usd").count(),
+        edited
+            .matches("t.close_usd > 0 AND t.close > 0 AND t.pf_trade_count > 0")
+            .count(),
         6,
         "the edit must reach every MV in the chain"
     );
@@ -163,9 +167,13 @@ async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops
         "IF NOT EXISTS must have swallowed the edit — if this ever fails, the \
          rollup MVs became re-appliable and task 0142's premise has changed"
     );
-    assert!(
-        !after.contains("argMaxIf"),
-        "the live definition must still hold the OLD projection"
+    // The live body still carries the four price gates and no fifth one: the
+    // edit added a `pf_trade_count > 0` term to the close_usd rate, and it did
+    // not land.
+    assert_eq!(
+        after.matches("pf_trade_count > 0").count(),
+        4,
+        "the live definition must still hold the OLD projection, got: {after}"
     );
 
     // The check compares the file to the target, so the edited file is the
@@ -191,12 +199,13 @@ async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops
         let d = &differences[0];
         assert_eq!(d.field, DriftField::Body);
         assert!(
-            d.declared.contains("argMaxIf(close_usd"),
+            d.declared.contains("pf_trade_count > 0"),
             "{}: the declared side must carry the edit",
             report.name
         );
         assert!(
-            !d.live.contains("argMaxIf(close_usd"),
+            d.declared.matches("pf_trade_count > 0").count()
+                > d.live.matches("pf_trade_count > 0").count(),
             "{}: the live side must still carry the old projection",
             report.name
         );

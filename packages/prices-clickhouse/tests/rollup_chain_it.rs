@@ -96,7 +96,12 @@ const CHAIN: &[(&str, &str)] = &[
     ("mv_ohlcv_1h_to_4h", "price_ohlcv_4h"),
     ("mv_ohlcv_4h_to_1d", "price_ohlcv_1d"),
     ("mv_ohlcv_1d_to_1w", "price_ohlcv_1w"),
-    ("mv_ohlcv_1w_to_1M", "price_ohlcv_1M"),
+    // Task 0286 / BRIEF F10: the month rolls from the DAY, not the week —
+    // a week belongs wholly to the month it STARTS in, so a week-fed month
+    // took its close and extremes from whichever month owned the straddling
+    // week. `price_ohlcv_1d` is refreshed two entries above, so the
+    // front-to-back drive still reads what the previous level wrote.
+    ("mv_ohlcv_1d_to_1M", "price_ohlcv_1M"),
 ];
 
 /// Trigger an immediate refresh of one MV and block until its target reflects

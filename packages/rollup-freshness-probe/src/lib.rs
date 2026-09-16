@@ -212,10 +212,14 @@ pub const ROLLUP_TIERS: &[RollupTier] = &[
     RollupTier {
         table: "price_ohlcv_1M",
         bucket_seconds: 31 * 86_400,
-        // mv_ohlcv_1w_to_1M REFRESH EVERY 1 DAY
+        // mv_ohlcv_1d_to_1M REFRESH EVERY 1 DAY
         mv_refresh_seconds: 86_400,
-        // A month's 1M bucket does not exist until a week actually STARTS inside
-        // that month, which can be up to 6 days in.
+        // Task 0286 / BRIEF F10: the month rolls from the DAY now, so its 1M
+        // bucket exists as soon as a DAY starts in the month — the slack this
+        // justified (a week had to START inside the month, up to 6 days in) no
+        // longer applies. The NUMBER is kept anyway: a wider bound can only
+        // delay an alarm, never fire a false one, and a rollout is not the
+        // place to tighten a threshold. Tightening it is a deliberate follow-up.
         alignment_slack_seconds: 6 * 86_400,
         lag_bound_seconds: 45 * 86_400,
     },

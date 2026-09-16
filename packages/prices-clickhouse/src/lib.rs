@@ -21,6 +21,13 @@ pub mod observability;
 /// cluster; this makes that divergence visible without touching any object.
 pub mod drift;
 
+/// The single source of the coarse rollup SQL (task 0286 / ADR 0287 §2–§5):
+/// the six refreshable MVs of `schema/rollups.sql` and the two maintained
+/// pre-roll scripts are all rendered from one generator, so a tier cannot be
+/// pf-gated in one file and ungated in another. Unit tests below assert each
+/// shipped file equals its rendering, whitespace-normalised.
+pub mod rollup_sql;
+
 /// mTLS transport for the remote Hetzner CH endpoint (Caddy:443). Gated behind
 /// the `aws-mtls` feature so the plaintext local-dev / init-CLI path does not
 /// pull the rustls / hyper-util / reqwest stack. Ported from BE (task 0052).
@@ -516,12 +523,14 @@ mod tests {
     }
 
     /// Task 0286: widening the candle tables to eighteen columns turns a
-    /// positional `INSERT … SELECT <15 columns>` into a Code 20 failure (F6d).
-    /// The two MAINTAINED pre-rolls therefore name their columns; the three pf
-    /// ones take their table DEFAULTs until S2's generator projects them.
+    /// positional `INSERT … SELECT <15 columns>` into a Code 20 failure (F6d),
+    /// so the two MAINTAINED pre-rolls name their columns. Since S2 they name
+    /// all EIGHTEEN: a named list that omits one is NOT an error — ClickHouse
+    /// fills it from its DEFAULT, and `pf_trade_count DEFAULT trade_count`
+    /// would declare a dust-only bucket fully price-forming (F6b).
     #[test]
     fn maintained_prerolls_insert_by_explicit_column_list() {
-        let want: Vec<String> = CANDLE_COLUMNS[..15].iter().map(|c| c.to_string()).collect();
+        let want: Vec<String> = CANDLE_COLUMNS.iter().map(|c| c.to_string()).collect();
         let mut checked = 0;
         for (name, sql) in [
             ("preroll.sql", PREROLL_SQL),
@@ -770,13 +779,22 @@ mod tests {
                     .count();
             }
 
-            // Non-vacuity: the file must still be projecting close_usd at all.
-            // Without this, deleting every close_usd projection would "pass".
+            // Task 0286: the two MAINTAINED pre-rolls no longer carry the 0145
+            // guard at all — the generator's rate form supersedes it (`close ×
+            // the latest priced child's close_usd / close`), which is a
+            // STRONGER contract: it carries the priced value forward AND keeps
+            // `close_usd` on the same bucket as `close`. So the non-vacuity
+            // check accepts either spelling. Without it, a file that stopped
+            // projecting close_usd altogether would still "pass".
+            let rate_form = stmts
+                .iter()
+                .map(|s| s.matches("toFloat64(close) * argMaxIf(").count())
+                .sum::<usize>();
             assert!(
-                guarded > 0,
-                "{name}: no guarded close_usd projection found — either the file \
-                 stopped projecting close_usd, or the guard expression was reworded \
-                 and this test has gone blind"
+                guarded + rate_form > 0,
+                "{name}: no close_usd projection found in either form — either \
+                 the file stopped projecting close_usd, or both expressions were \
+                 reworded and this test has gone blind"
             );
         }
     }
@@ -841,15 +859,19 @@ mod tests {
         );
     }
 
-    /// The 121 sites are the whole point: 6 + 14 + 6 + 95, matching scope
-    /// correction C1 in task 0144. A count regression here means a pre-roll
-    /// projection was added without the guard, or one was silently dropped.
+    /// The 0144 audit counted 121 guarded sites: 6 + 14 + 6 + 95. Task 0286
+    /// moved the twelve MAINTAINED ones (preroll.sql and preroll-live-gap.sql)
+    /// to the rate form, which supersedes the 0145 guard rather than sitting
+    /// beside it — so those two files are now 0 and the legacy total is 109.
+    /// A count regression here still means a projection was added without a
+    /// guard, or one was silently dropped; the two HISTORICAL files keep their
+    /// counts because their bodies are untouched by design.
     #[test]
     fn preroll_guarded_close_usd_site_counts_match_the_0144_audit() {
         let expected = [
-            ("preroll.sql", 6usize),
+            ("preroll.sql", 0usize),
             ("preroll-incremental.sql", 14),
-            ("preroll-live-gap.sql", 6),
+            ("preroll-live-gap.sql", 0),
             ("preroll-amm-reprice.sql", 95),
         ];
 
@@ -869,7 +891,142 @@ mod tests {
             assert_eq!(got, want, "{name}: guarded close_usd site count");
             total += got;
         }
-        assert_eq!(total, 121, "total guarded pre-roll sites (task 0144 C1)");
+        assert_eq!(
+            total, 109,
+            "total guarded pre-roll sites — 121 in the 0144 audit, less the \
+             twelve maintained ones task 0286 moved to the rate form"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Task 0286 / ADR 0287 §2–§5 — the three generated SQL files.
+    //
+    // `rollup_sql.rs` is the source; these files are its output, kept in the
+    // repo because an operator pastes them and `drift.rs` compares them to the
+    // live definitions. The comparison is whitespace-normalised (the files are
+    // laid out for reading; the generator is not), and the failure message
+    // prints the rendering — which is how the files are regenerated.
+    // ------------------------------------------------------------------
+
+    /// Statements of a shipped file, comments stripped and whitespace collapsed.
+    fn normalised(sql: &str) -> Vec<String> {
+        split_statements(sql).iter().map(|s| squash(s)).collect()
+    }
+
+    /// Compare a shipped file to a generator rendering, statement by statement.
+    fn assert_generated(name: &str, file: &str, rendered: Vec<String>) {
+        let shipped = normalised(file);
+        assert_eq!(
+            shipped.len(),
+            rendered.len(),
+            "{name}: expected {} statements, got {}",
+            rendered.len(),
+            shipped.len()
+        );
+        for (i, (got, want)) in shipped.iter().zip(rendered.iter()).enumerate() {
+            let want = squash(want);
+            assert_eq!(
+                *got, want,
+                "{name}: statement {i} is not the generator's output.\n\
+                 Regenerate the file from `rollup_sql.rs`. Expected:\n{want}"
+            );
+        }
+    }
+
+    #[test]
+    fn rollups_sql_is_exactly_the_generators_six_mv_ddls() {
+        assert_generated(
+            "rollups.sql",
+            ROLLUPS_SQL,
+            rollup_sql::TIERS
+                .iter()
+                .map(|t| rollup_sql::mv_ddl(t, PROD_DATABASE))
+                .collect(),
+        );
+    }
+
+    #[test]
+    fn preroll_sql_is_exactly_the_generators_full_range_inserts() {
+        assert_generated(
+            "preroll.sql",
+            PREROLL_SQL,
+            rollup_sql::TIERS
+                .iter()
+                .map(|t| {
+                    rollup_sql::rollup_insert(t, PROD_DATABASE, &rollup_sql::Bounds::Full, None)
+                })
+                .collect(),
+        );
+    }
+
+    /// The live-gap pre-roll's range is a pair of ClickHouse BOUND PARAMETERS,
+    /// not interpolated operator text — the generator only ever sees the
+    /// placeholder (ASVS V5).
+    #[test]
+    fn preroll_live_gap_sql_is_exactly_the_generators_bounded_inserts() {
+        assert_generated(
+            "preroll-live-gap.sql",
+            PREROLL_LIVE_GAP_SQL,
+            rollup_sql::TIERS
+                .iter()
+                .map(|t| {
+                    rollup_sql::rollup_insert(
+                        t,
+                        PROD_DATABASE,
+                        &rollup_sql::Bounds::Range {
+                            from: "{start_ts:DateTime}",
+                            to: "{end_ts:DateTime}",
+                        },
+                        Some("max_threads = 4"),
+                    )
+                })
+                .collect(),
+        );
+    }
+
+    /// The drift detector's constraints on the FILE (BRIEF F10), which no
+    /// amount of generator correctness enforces: `apply_sql` splits on `;`, so
+    /// a `;` inside a comment or a top-level `WITH` would break statement
+    /// splitting, and a header that names an MV makes
+    /// `rollup_drift_it`'s statement lookups match the comment block instead of
+    /// the statement.
+    #[test]
+    fn rollups_sql_respects_the_drift_detectors_file_constraints() {
+        let stmts = split_statements(ROLLUPS_SQL);
+        assert_eq!(stmts.len(), 6);
+        for stmt in &stmts {
+            assert!(
+                stmt.starts_with("CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_"),
+                "unexpected statement head: {}",
+                &stmt[..80.min(stmt.len())]
+            );
+            assert!(stmt.contains("\nTO prices.price_ohlcv_"));
+            assert!(stmt.contains(" AS\nSELECT"));
+            assert!(!stmt.contains("WITH "), "no top-level WITH: {stmt}");
+            assert!(!stmt.contains("DROP"), "no DROP in the apply path: {stmt}");
+        }
+
+        // `apply_sql` strips `--` comments before splitting, but
+        // `rollup_drift_it.rs` and the freshness probe look a statement up with
+        // a RAW `split(';')` over the whole file — so a `;` in the header would
+        // become its own chunk, and an MV named in the header would make those
+        // lookups match the comment block instead of the statement.
+        let header = ROLLUPS_SQL
+            .split("CREATE MATERIALIZED VIEW")
+            .next()
+            .expect("header");
+        for tier in rollup_sql::TIERS {
+            assert!(
+                !header.contains(tier.mv),
+                "the header must not name {} — the per-statement lookups in \
+                 rollup_drift_it.rs would match the comment block",
+                tier.mv
+            );
+        }
+        assert!(
+            !header.contains(';'),
+            "no `;` in the header — a raw split would make it its own chunk"
+        );
     }
 
     /// The live-spot view must forward every column `mv_current_prices` writes

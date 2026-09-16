@@ -8,6 +8,13 @@
 -- mean something this file predates. The bodies are left untouched as the
 -- record of what was run; task 0286's rollup generator owns their replacement.
 --
+-- They also roll the MONTH FROM THE WEEK, which task 0286 changed to the day
+-- (BRIEF F10) — so even made to compile they would write a month whose close
+-- and extremes can come from the next month's trades. The two MAINTAINED
+-- pre-rolls are `preroll.sql` and `preroll-live-gap.sql`, both rendered from
+-- `src/rollup_sql.rs`; the rollout that superseded this file is
+-- `docs/runbooks/0286-candle-definitions-rollout.md`.
+--
 -- prices coarse PRE-ROLL — INCREMENTAL, NON-TRUNCATING, scoped to the
 -- Soroban-era AMM sources corrected by the events-sourced reprice (task 0097).
 --

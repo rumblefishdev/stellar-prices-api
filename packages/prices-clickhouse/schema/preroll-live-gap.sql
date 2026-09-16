@@ -1,5 +1,12 @@
 -- prices coarse PRE-ROLL — LIVE-ERA GAP, ALL SOURCES, INCREMENTAL.
 --
+-- ⚠️ GENERATED. Every statement below is rendered by
+-- `src/rollup_sql.rs::rollup_insert(tier, "prices", &Bounds::Range { from:
+-- "{start_ts:DateTime}", to: "{end_ts:DateTime}" }, Some("max_threads = 4"))`,
+-- and a unit test in `src/lib.rs` asserts this file equals that rendering
+-- whitespace-normalised. It is the same SELECT the six MVs in `rollups.sql`
+-- carry. Edit the generator, re-render, commit both.
+--
 -- WHY THIS EXISTS
 --   The six `mv_ohlcv_*` rollup MVs are DROPPED on production (task 0090 — in
 --   replace mode they overwrote pre-rolled coarse history). Nothing else rolls
@@ -38,6 +45,19 @@
 --   * **Not month-chunked.** The window sits inside one monthly partition, which
 --     is the granularity 0097 had to chunk down to anyway. `max_threads` is
 --     still capped.
+--   * **0097 is HISTORICAL** since task 0286 and must not be run at all — it
+--     carries the pre-0286 candle definition. This file is one of the two the
+--     generator maintains.
+--
+-- WHAT A COARSE CANDLE MEANS (task 0286 / ADR 0287 §2–§5). A candle's prices
+--   come only from the PRICE-FORMING trades of its own bucket, so all four
+--   price aggregates are gated on `t.pf_trade_count > 0`: a DUST-ONLY child —
+--   every fill too small for its price to mean anything, written by the ingest
+--   with `open = high = low = close = 0` — contributes to none of them. A
+--   bucket with no price-forming child has no price at all and keeps its
+--   volume; `vwap` still weights every fill, dust included. The MONTH rolls
+--   from the DAY (BRIEF F10), so its stage below reads `price_ohlcv_1d`, not
+--   the week.
 --
 -- BUCKET ALIGNMENT — the subtle part, and the one that can destroy data.
 --   Each level aligns its lower bound to ITS OWN bucket via
@@ -47,7 +67,8 @@
 --   one it replaces, it would WIN and silently delete the earlier part of the
 --   bucket. Concretely: rolling `1w` from 2026-07-09 would rebuild the week
 --   beginning 2026-07-06 out of 07-09-onward data only, destroying 07-06→07-08.
---   Never hand a raw `start_ts` to the wide levels.
+--   Never hand a raw `start_ts` to the wide levels. The generator does the
+--   alignment, so no call site can forget it (task 0286, S2 v1 review WR-01/02).
 --
 -- FINAL IS MANDATORY. The target levels are not TRUNCATEd — they hold rows from
 --   the earlier pre-roll — so a non-FINAL read sums duplicates and
@@ -59,10 +80,10 @@
 --   (same key, same value, same version) which RMT collapses. Safe to repeat.
 --
 -- Correctness (task 0059): the bucket key is aliased `AS timestamp` and SHADOWS
---   the source `timestamp`; argMin/argMax MUST reference the qualified
+--   the source `timestamp`; argMinIf/argMaxIf MUST reference the qualified
 --   `t.timestamp` (FROM ... AS t) or open/close/close_usd tie-break to an
---   arbitrary row. Column order matches the target table (INSERT ... SELECT maps
---   by position).
+--   arbitrary row. Every INSERT names all eighteen target columns, so nothing
+--   is decided by position and no column silently takes its DEFAULT.
 --
 -- Version (task 0095): projects sum(version), matching the APPEND rollup MVs
 --   (rollups.sql) so the coarse tables carry ONE monotonic version scheme — a
@@ -70,6 +91,23 @@
 --   wins under RMT. This also strengthens the note above ("later ledgers =>
 --   higher version => fuller row wins"): with sum() a fuller bucket wins on
 --   version count, not just on the max ledger it happens to contain.
+--
+-- close_usd is a RATE, re-priced by the bucket's own close (task 0286, ADR 0287
+--   §5): `close × argMaxIf(close_usd / close, t.timestamp, close_usd > 0 AND
+--   close > 0)`. This SUPERSEDES task 0145's `argMaxIf(close_usd, …)` and, with
+--   it, the consequence 0145 accepted — that `close` and `close_usd` could come
+--   from DIFFERENT sub-buckets. They are same-bucket again by construction. The
+--   reason 0145 existed is unchanged and still handled: `close_usd` is baked by
+--   a separate, LAGGING enrichment pass onto a non-nullable
+--   `Decimal(38,14) DEFAULT 0` column, so an UNGUARDED argMax would hand the
+--   coarse bucket the un-enriched sentinel 0 whenever its newest sub-bucket was
+--   not yet priced. With NOTHING priced underneath, the rate is 0 and so is
+--   close_usd — correct, but still not readable as "worth nothing" (task 0151).
+--
+-- Both derived Decimals go through `ifNull(toDecimal128OrZero(toString(…), 14),
+--   0)`: Decimal division silently overflows past a ~1.7e10 dividend on
+--   26.3.10.60, and `vwap`'s fallback is an EXPLICIT zero because init.sql
+--   declares that column NOT Nullable.
 --
 -- =====================================================================
 -- PARAMS
@@ -84,6 +122,9 @@
 --                        self-healing on the next run (later ledgers => higher
 --                        version => the fuller row wins). For the 2026-07-17 run:
 --                          --param_end_ts='2026-07-17 13:00:00'
+--
+--   The two are ClickHouse BOUND PARAMETERS, never text spliced into the SQL —
+--   the generator renders the placeholder, and the server does the binding.
 --
 --   clickhouse-client --param_start_ts='2026-07-09 00:00:00' \
 --                     --param_end_ts='2026-07-17 13:00:00' \
@@ -111,52 +152,30 @@
 -- =====================================================================
 -- STAGE 1 — 15m <- 1m
 -- =====================================================================
---
--- close_usd is GUARDED — `argMaxIf(close_usd, t.timestamp, close_usd > 0)`,
--- never a bare argMax (task 0145, from the BE 0199 report via 0144).
---
---   `close_usd` is baked by a separate, LAGGING enrichment pass onto a
---   non-nullable `Decimal(38,14) DEFAULT 0` column (init.sql), so "not yet
---   enriched" and "no USD price exists" are the SAME value: zero. An unguarded
---   argMax therefore hands the coarse bucket that zero whenever its NEWEST
---   sub-bucket happens to be un-enriched — discarding every priced sub-bucket
---   underneath it. At pre-roll scale, over spans where enrichment is by
---   definition incomplete at pre-roll time, that manufactures a whole estate of
---   zeroed coarse rows, which then age out of the MV re-aggregation windows
---   where only the 0114 sweep can still reach them (task 0148).
---
--- CONSEQUENCE, deliberately accepted: `close` and `close_usd` may now come from
--- DIFFERENT sub-buckets. The two columns are no longer guaranteed same-row, so
--- do NOT assume `close_usd ~= close * rate_at(close's own bucket)` when reading
--- these tables. An approximately-right USD close beats a fabricated zero, but
--- the decoupling is silent and will bite a reader who has not been told.
---
--- NOT fixed by this guard: if EVERY sub-bucket in the range is un-enriched,
--- argMaxIf matches no rows and returns the Decimal default — 0 again. That is
--- correct here (there is genuinely no priced value to carry forward), but it
--- means a 0 in these tables still cannot be read as "worth nothing". Task 0151
--- owns that representational problem.
---
--- Task 0286: every INSERT below names its fifteen target columns explicitly.
--- The candle tables now carry EIGHTEEN (pf_trade_count, pf_volume,
--- pf_price_volume — ADR 0287), and a positional `INSERT … SELECT` of fewer
--- columns than the target has fails with Code 20 the moment the widening lands.
--- The three pf columns are deliberately NOT projected here: they take their
--- table DEFAULTs (the pre-0286 meaning — every fill price-forming) until task
--- 0286's rollup generator projects the real aggregates.
 
 INSERT INTO prices.price_ohlcv_15m
-    (timestamp, asset_id, quote_asset_id, source, open, high, low, close,
-     volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version)
-SELECT toStartOfInterval(t.timestamp, INTERVAL 15 MINUTE) AS timestamp,
-       asset_id, quote_asset_id, source,
-       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
-       argMax(close, t.timestamp) AS close,
-       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
-       sum(volume_quote_usd) AS volume_quote_usd,
-       argMaxIf(close_usd, t.timestamp, close_usd > 0) AS close_usd,
-       volume_quote / nullIf(volume_base, 0) AS vwap,
-       sum(trade_count) AS trade_count, sum(version) AS version
+    (timestamp, asset_id, quote_asset_id, source,
+     open, high, low, close,
+     volume_base, volume_quote, volume_quote_usd, close_usd,
+     vwap, trade_count, version, pf_trade_count,
+     pf_volume, pf_price_volume)
+SELECT
+    toStartOfInterval(t.timestamp, INTERVAL 15 MINUTE) AS timestamp,
+    asset_id, quote_asset_id, source,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0) AS high,
+    minIf(t.low, t.pf_trade_count > 0) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    sum(t.volume_base) AS volume_base,
+    sum(t.volume_quote) AS volume_quote,
+    sum(t.volume_quote_usd) AS volume_quote_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd > 0 AND t.close > 0)), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
+    sum(t.trade_count) AS trade_count,
+    sum(t.version) AS version,
+    sum(t.pf_trade_count) AS pf_trade_count,
+    sum(t.pf_volume) AS pf_volume,
+    sum(t.pf_price_volume) AS pf_price_volume
 FROM prices.price_ohlcv_1m AS t FINAL
 WHERE t.timestamp >= toStartOfInterval({start_ts:DateTime}, INTERVAL 15 MINUTE)
   AND t.timestamp < {end_ts:DateTime}
@@ -171,17 +190,28 @@ SETTINGS max_threads = 4;
 -- =====================================================================
 
 INSERT INTO prices.price_ohlcv_1h
-    (timestamp, asset_id, quote_asset_id, source, open, high, low, close,
-     volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version)
-SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
-       asset_id, quote_asset_id, source,
-       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
-       argMax(close, t.timestamp) AS close,
-       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
-       sum(volume_quote_usd) AS volume_quote_usd,
-       argMaxIf(close_usd, t.timestamp, close_usd > 0) AS close_usd,
-       volume_quote / nullIf(volume_base, 0) AS vwap,
-       sum(trade_count) AS trade_count, sum(version) AS version
+    (timestamp, asset_id, quote_asset_id, source,
+     open, high, low, close,
+     volume_base, volume_quote, volume_quote_usd, close_usd,
+     vwap, trade_count, version, pf_trade_count,
+     pf_volume, pf_price_volume)
+SELECT
+    toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+    asset_id, quote_asset_id, source,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0) AS high,
+    minIf(t.low, t.pf_trade_count > 0) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    sum(t.volume_base) AS volume_base,
+    sum(t.volume_quote) AS volume_quote,
+    sum(t.volume_quote_usd) AS volume_quote_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd > 0 AND t.close > 0)), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
+    sum(t.trade_count) AS trade_count,
+    sum(t.version) AS version,
+    sum(t.pf_trade_count) AS pf_trade_count,
+    sum(t.pf_volume) AS pf_volume,
+    sum(t.pf_price_volume) AS pf_price_volume
 FROM prices.price_ohlcv_15m AS t FINAL
 WHERE t.timestamp >= toStartOfInterval({start_ts:DateTime}, INTERVAL 1 HOUR)
   AND t.timestamp < {end_ts:DateTime}
@@ -189,17 +219,28 @@ GROUP BY timestamp, asset_id, quote_asset_id, source
 SETTINGS max_threads = 4;
 
 INSERT INTO prices.price_ohlcv_4h
-    (timestamp, asset_id, quote_asset_id, source, open, high, low, close,
-     volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version)
-SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
-       asset_id, quote_asset_id, source,
-       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
-       argMax(close, t.timestamp) AS close,
-       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
-       sum(volume_quote_usd) AS volume_quote_usd,
-       argMaxIf(close_usd, t.timestamp, close_usd > 0) AS close_usd,
-       volume_quote / nullIf(volume_base, 0) AS vwap,
-       sum(trade_count) AS trade_count, sum(version) AS version
+    (timestamp, asset_id, quote_asset_id, source,
+     open, high, low, close,
+     volume_base, volume_quote, volume_quote_usd, close_usd,
+     vwap, trade_count, version, pf_trade_count,
+     pf_volume, pf_price_volume)
+SELECT
+    toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+    asset_id, quote_asset_id, source,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0) AS high,
+    minIf(t.low, t.pf_trade_count > 0) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    sum(t.volume_base) AS volume_base,
+    sum(t.volume_quote) AS volume_quote,
+    sum(t.volume_quote_usd) AS volume_quote_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd > 0 AND t.close > 0)), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
+    sum(t.trade_count) AS trade_count,
+    sum(t.version) AS version,
+    sum(t.pf_trade_count) AS pf_trade_count,
+    sum(t.pf_volume) AS pf_volume,
+    sum(t.pf_price_volume) AS pf_price_volume
 FROM prices.price_ohlcv_1h AS t FINAL
 WHERE t.timestamp >= toStartOfInterval({start_ts:DateTime}, INTERVAL 4 HOUR)
   AND t.timestamp < {end_ts:DateTime}
@@ -207,17 +248,28 @@ GROUP BY timestamp, asset_id, quote_asset_id, source
 SETTINGS max_threads = 4;
 
 INSERT INTO prices.price_ohlcv_1d
-    (timestamp, asset_id, quote_asset_id, source, open, high, low, close,
-     volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version)
-SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
-       asset_id, quote_asset_id, source,
-       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
-       argMax(close, t.timestamp) AS close,
-       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
-       sum(volume_quote_usd) AS volume_quote_usd,
-       argMaxIf(close_usd, t.timestamp, close_usd > 0) AS close_usd,
-       volume_quote / nullIf(volume_base, 0) AS vwap,
-       sum(trade_count) AS trade_count, sum(version) AS version
+    (timestamp, asset_id, quote_asset_id, source,
+     open, high, low, close,
+     volume_base, volume_quote, volume_quote_usd, close_usd,
+     vwap, trade_count, version, pf_trade_count,
+     pf_volume, pf_price_volume)
+SELECT
+    toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+    asset_id, quote_asset_id, source,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0) AS high,
+    minIf(t.low, t.pf_trade_count > 0) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    sum(t.volume_base) AS volume_base,
+    sum(t.volume_quote) AS volume_quote,
+    sum(t.volume_quote_usd) AS volume_quote_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd > 0 AND t.close > 0)), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
+    sum(t.trade_count) AS trade_count,
+    sum(t.version) AS version,
+    sum(t.pf_trade_count) AS pf_trade_count,
+    sum(t.pf_volume) AS pf_volume,
+    sum(t.pf_price_volume) AS pf_price_volume
 FROM prices.price_ohlcv_4h AS t FINAL
 WHERE t.timestamp >= toStartOfInterval({start_ts:DateTime}, INTERVAL 1 DAY)
   AND t.timestamp < {end_ts:DateTime}
@@ -228,41 +280,67 @@ SETTINGS max_threads = 4;
 -- the straddling week is rebuilt COMPLETE. Rebuilding it partial would win on
 -- version and delete the earlier days of that week.
 INSERT INTO prices.price_ohlcv_1w
-    (timestamp, asset_id, quote_asset_id, source, open, high, low, close,
-     volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version)
-SELECT toStartOfInterval(t.timestamp, INTERVAL 1 WEEK) AS timestamp,
-       asset_id, quote_asset_id, source,
-       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
-       argMax(close, t.timestamp) AS close,
-       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
-       sum(volume_quote_usd) AS volume_quote_usd,
-       argMaxIf(close_usd, t.timestamp, close_usd > 0) AS close_usd,
-       volume_quote / nullIf(volume_base, 0) AS vwap,
-       sum(trade_count) AS trade_count, sum(version) AS version
+    (timestamp, asset_id, quote_asset_id, source,
+     open, high, low, close,
+     volume_base, volume_quote, volume_quote_usd, close_usd,
+     vwap, trade_count, version, pf_trade_count,
+     pf_volume, pf_price_volume)
+SELECT
+    toStartOfInterval(t.timestamp, INTERVAL 1 WEEK) AS timestamp,
+    asset_id, quote_asset_id, source,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0) AS high,
+    minIf(t.low, t.pf_trade_count > 0) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    sum(t.volume_base) AS volume_base,
+    sum(t.volume_quote) AS volume_quote,
+    sum(t.volume_quote_usd) AS volume_quote_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd > 0 AND t.close > 0)), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
+    sum(t.trade_count) AS trade_count,
+    sum(t.version) AS version,
+    sum(t.pf_trade_count) AS pf_trade_count,
+    sum(t.pf_volume) AS pf_volume,
+    sum(t.pf_price_volume) AS pf_price_volume
 FROM prices.price_ohlcv_1d AS t FINAL
 WHERE t.timestamp >= toStartOfInterval({start_ts:DateTime}, INTERVAL 1 WEEK)
   AND t.timestamp < {end_ts:DateTime}
 GROUP BY timestamp, asset_id, quote_asset_id, source
 SETTINGS max_threads = 4;
 
--- 1M: same reasoning, rolled back to the start of the month.
+-- 1M: same reasoning, rolled back to the start of the month — and it reads the
+-- DAY, not the week (task 0286 / BRIEF F10): a week belongs wholly to the month
+-- it STARTS in, so a week-fed month took its close and extremes from whichever
+-- month owned the straddling week.
 INSERT INTO prices.price_ohlcv_1M
-    (timestamp, asset_id, quote_asset_id, source, open, high, low, close,
-     volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version)
-SELECT toStartOfInterval(t.timestamp, INTERVAL 1 MONTH) AS timestamp,
-       asset_id, quote_asset_id, source,
-       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
-       argMax(close, t.timestamp) AS close,
-       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
-       sum(volume_quote_usd) AS volume_quote_usd,
-       argMaxIf(close_usd, t.timestamp, close_usd > 0) AS close_usd,
-       volume_quote / nullIf(volume_base, 0) AS vwap,
-       sum(trade_count) AS trade_count, sum(version) AS version
-FROM prices.price_ohlcv_1w AS t FINAL
+    (timestamp, asset_id, quote_asset_id, source,
+     open, high, low, close,
+     volume_base, volume_quote, volume_quote_usd, close_usd,
+     vwap, trade_count, version, pf_trade_count,
+     pf_volume, pf_price_volume)
+SELECT
+    toStartOfInterval(t.timestamp, INTERVAL 1 MONTH) AS timestamp,
+    asset_id, quote_asset_id, source,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0) AS high,
+    minIf(t.low, t.pf_trade_count > 0) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    sum(t.volume_base) AS volume_base,
+    sum(t.volume_quote) AS volume_quote,
+    sum(t.volume_quote_usd) AS volume_quote_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd > 0 AND t.close > 0)), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
+    sum(t.trade_count) AS trade_count,
+    sum(t.version) AS version,
+    sum(t.pf_trade_count) AS pf_trade_count,
+    sum(t.pf_volume) AS pf_volume,
+    sum(t.pf_price_volume) AS pf_price_volume
+FROM prices.price_ohlcv_1d AS t FINAL
 WHERE t.timestamp >= toStartOfInterval({start_ts:DateTime}, INTERVAL 1 MONTH)
   AND t.timestamp < {end_ts:DateTime}
 GROUP BY timestamp, asset_id, quote_asset_id, source
-SETTINGS max_threads = 4;
+SETTINGS max_threads = 4
+;
 
 -- =====================================================================
 -- VERIFY
@@ -292,9 +370,21 @@ SETTINGS max_threads = 4;
 --    Below `1m` => buckets lost. Above => double-counting (a FINAL was dropped).
 --    NOTE: 1w/1M legitimately read HIGHER — their lower bound is rolled back to
 --    the week/month start, so they include data from before start_ts.
+--    Volumes and trade counts are conserved regardless of the price-forming
+--    gate (task 0286): the gate decides which children supply PRICES, never
+--    which are summed.
 --
 -- 3. The earlier week/month were not truncated by a partial rebuild:
 --      SELECT timestamp, sum(trade_count) FROM prices.price_ohlcv_1w FINAL
 --      WHERE timestamp >= '2026-06-01' GROUP BY timestamp ORDER BY timestamp;
 --    The week containing start_ts must still carry its FULL trade count, not
 --    just the post-start_ts slice.
+--
+-- 4. The price-forming columns actually landed, rather than taking their
+--    DEFAULTs (task 0286 / BRIEF F6b — `pf_trade_count DEFAULT trade_count`
+--    makes the failure invisible):
+--      SELECT countIf(pf_trade_count != trade_count) AS differs, count() AS rows
+--      FROM prices.price_ohlcv_15m FINAL
+--      WHERE timestamp >= '<start_ts>' AND timestamp < '<end_ts>';
+--    `differs = 0` over a window that contains any dust means the projection
+--    was dropped and every bucket is claiming to be fully price-forming.

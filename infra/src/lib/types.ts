@@ -496,8 +496,12 @@ export const ROLLUP_HEALTHY_PEAK_SECONDS: Readonly<Record<string, number>> = {
   price_ohlcv_4h: 4 * 60 * 60 + 60 * 60, // + mv_ohlcv_1h_to_4h  EVERY 1 HOUR
   price_ohlcv_1d: 86_400 + 4 * 60 * 60, // + mv_ohlcv_4h_to_1d  EVERY 4 HOUR
   price_ohlcv_1w: 7 * 86_400 + 86_400, // + mv_ohlcv_1d_to_1w  EVERY 1 DAY
-  // + mv_ohlcv_1w_to_1M EVERY 1 DAY, + 6 d alignment slack: a month's bucket
-  // does not exist until a week actually STARTS inside that month.
+  // + mv_ohlcv_1d_to_1M EVERY 1 DAY, + 6 d alignment slack. The month rolls
+  // from the DAY since task 0286 (BRIEF F10), so its bucket now exists as
+  // soon as a DAY starts in the month and the 6 d slack is wider than it
+  // needs to be. Kept: a wider bound is the conservative direction (it can
+  // only delay an alarm, never fire a false one), and tightening it is a
+  // deliberate follow-up rather than part of the 0286 rollout.
   price_ohlcv_1M: 31 * 86_400 + 86_400 + 6 * 86_400,
 };
 
