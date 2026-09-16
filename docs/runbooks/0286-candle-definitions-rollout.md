@@ -301,6 +301,18 @@ Code 20 against the eighteen-column tables — by design. The two MAINTAINED
 pre-rolls are `preroll.sql` and `preroll-live-gap.sql`, both generated from
 `src/rollup_sql.rs`.
 
+**Known gap, by design:** a DUST-ONLY candle (`close = 0`) is selectable by
+the enrichment for its `volume_quote_usd` exactly ONCE — whichever tier reaches
+it first prices the volume, and the widened candidate term
+(`close_usd = 0 AND (close > 0 OR volume_quote_usd = 0)`) then excludes it
+everywhere. A later, better-evidence tier — an external `usd_rate` series
+backfilled over a bucket the peg already priced at a flat $1.00 — does not
+overwrite it. That is the write-once `volume_quote_usd` rule this rollout
+relies on to terminate (section 7), and it applies to EVERY row, not only dust
+ones: the peg-before-external ordering predates task 0286. The way back for a
+mispriced row is `reset_sql` (`repair-coarse-usd-values.md`), which zeroes both
+USD columns and re-admits the row.
+
 **Follow-up, deliberately not done here:** the 1M freshness slack. Both
 `packages/rollup-freshness-probe/src/lib.rs` and `infra/src/lib/types.ts` carry
 6 days of alignment slack for `price_ohlcv_1M`, justified by a week having to

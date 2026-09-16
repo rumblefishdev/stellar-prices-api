@@ -198,10 +198,18 @@ async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops
         );
         let d = &differences[0];
         assert_eq!(d.field, DriftField::Body);
+        // The mutation, in the SERVER-normalised spelling both sides are
+        // fingerprinted in (`formatQuery` parenthesises each conjunct). Assert
+        // on the MUTATION, not on `pf_trade_count > 0`: every declared body
+        // carries that substring four times — the four price gates — whether
+        // or not the edit reached it, so the bare form holds unconditionally
+        // and cannot tell the declared side from the live one.
         assert!(
-            d.declared.contains("pf_trade_count > 0"),
-            "{}: the declared side must carry the edit",
-            report.name
+            d.declared
+                .contains("(t.close_usd > 0) AND (t.close > 0) AND (t.pf_trade_count > 0)"),
+            "{}: the declared side must carry the edit, not the live body: {}",
+            report.name,
+            d.declared
         );
         assert!(
             d.declared.matches("pf_trade_count > 0").count()

@@ -940,7 +940,7 @@ mod tests {
             ROLLUPS_SQL,
             rollup_sql::TIERS
                 .iter()
-                .map(|t| rollup_sql::mv_ddl(t, PROD_DATABASE))
+                .map(|t| rollup_sql::mv_ddl(t, PROD_DATABASE).expect("a checked rendering"))
                 .collect(),
         );
     }
@@ -954,6 +954,7 @@ mod tests {
                 .iter()
                 .map(|t| {
                     rollup_sql::rollup_insert(t, PROD_DATABASE, &rollup_sql::Bounds::Full, None)
+                        .expect("a checked rendering")
                 })
                 .collect(),
         );
@@ -974,11 +975,12 @@ mod tests {
                         t,
                         PROD_DATABASE,
                         &rollup_sql::Bounds::Range {
-                            from: "{start_ts:DateTime}",
-                            to: "{end_ts:DateTime}",
+                            from: rollup_sql::Bound::Param("start_ts"),
+                            to: rollup_sql::Bound::Param("end_ts"),
                         },
                         Some("max_threads = 4"),
                     )
+                    .expect("a checked rendering")
                 })
                 .collect(),
         );

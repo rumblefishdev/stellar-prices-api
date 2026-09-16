@@ -1027,9 +1027,10 @@ impl ChEnrichmentPass {
     /// Count candles still at `volume_quote_usd = 0` (with non-zero
     /// `volume_quote`) at or below the watermark — the population the
     /// `EnrichmentRowsRemainingAtVolumeZero` metric (spec §5) is named for.
-    /// Distinct from [`Self::count_candidates`], which counts rows missing
-    /// *either* USD column (`volume_quote_usd = 0 OR close_usd = 0`): the
-    /// `close_usd`-only remainder must not inflate a "volume zero" gauge.
+    /// Distinct from [`Self::count_candidates`], which counts every row
+    /// [`CANDIDATE_PRED`] admits — a missing `volume_quote_usd`, or a PRICED
+    /// row (`close > 0`) missing its `close_usd`: the `close_usd`-only
+    /// remainder must not inflate a "volume zero" gauge.
     ///
     /// Returns two figures from a single `FINAL` scan: `total` (the whole
     /// backlog, for the dashboard/forensic metric) and `recent` (only candles
@@ -1530,12 +1531,15 @@ impl ChEnrichmentPass {
     /// Decimal(38,14)` product inside the column's precision.
     ///
     /// `volume_quote_usd` is write-once (`if(volume_quote_usd > 0, …)`), matching
-    /// the peg/pivot statements: the widened candidate filter
-    /// (`volume_quote_usd = 0 OR close_usd = 0`) re-admits rows enriched before
-    /// `close_usd` existed (`volume_quote_usd > 0`, `close_usd = 0`) so their
-    /// `close_usd` gets backfilled, but their already-set (depeg-aware)
+    /// the peg/pivot statements: the candidate filter ([`CANDIDATE_PRED`])
+    /// re-admits a PRICED row enriched before `close_usd` existed
+    /// (`volume_quote_usd > 0`, `close_usd = 0`, `close > 0`) so its
+    /// `close_usd` gets backfilled, but its already-set (depeg-aware)
     /// `volume_quote_usd` must not be silently rewritten from a different ASOF
     /// match. `close_usd` is unconditional — it is the column this pass owns.
+    /// A DUST-ONLY row (`close = 0`) is not re-admitted for `close_usd` at all:
+    /// its `close_usd` can only ever be 0, which is why the term is
+    /// `close_usd = 0 AND close > 0` and not the pre-0286 `close_usd = 0`.
     async fn enrich_batch(&self, watermark: u32) -> Result<(), ChEnrichError> {
         let sql = oracle_sql(
             &self.cfg.database,
@@ -4437,8 +4441,9 @@ mod tests {
                 "{name}: {sql}"
             );
             assert_eq!(
-                sql.matches("AND close_usd = 0 \\").count(),
-                0,
+                sql.matches("close_usd = 0 ").count(),
+                sql.matches("close_usd = 0 AND (close > 0 OR volume_quote_usd = 0)")
+                    .count(),
                 "{name}: an un-widened close_usd term survived: {sql}"
             );
         }

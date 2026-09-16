@@ -50,11 +50,22 @@
 //! `AS timestamp`, and a bare `timestamp` inside `argMaxIf` resolves to the
 //! CONSTANT bucket alias instead of the row's own time (task 0059's trap).
 //!
-//! **Interpolation (ASVS V5).** Only crate-controlled `&'static str`s (the
-//! [`Tier`] fields, `CANDLE_COLUMNS`) and caller-supplied SQL *expressions*
-//! reach the rendered text. Operator input never does: the pre-roll ranges stay
-//! ClickHouse bound parameters (`{start_ts:DateTime}`), which is a literal
-//! passed through `Bounds::Range`, not a value spliced into SQL.
+//! **Interpolation (ASVS V5).** These renderers are `pub`, and this workspace
+//! already has operator-driven binaries (`coarse-repair`, the pre-roll runners),
+//! so the rule cannot live in prose: every interpolation point that is not a
+//! crate-controlled `&'static str` (the [`Tier`] fields, `CANDLE_COLUMNS`) is
+//! CHECKED, and a rendering that would splice unchecked text returns
+//! [`RollupSqlError`] instead of a `String`.
+//!
+//! - `db` must be a bare SQL identifier (`^[A-Za-z_][A-Za-z0-9_]*$`).
+//! - A [`Bounds::Range`] side is a [`Bound`], not free text: either a
+//!   ClickHouse bound PARAMETER by name — `{start_ts:DateTime}`, where the
+//!   value never enters the SQL at all, which is what the two maintained
+//!   pre-roll scripts use — or a literal `YYYY-MM-DD HH:MM:SS` instant, which
+//!   is validated character by character and rendered inside `toDateTime(…)`.
+//!
+//! A CLI `--database` or `--from` threaded into these functions therefore
+//! cannot reach a `CREATE MATERIALIZED VIEW`; it fails the call.
 
 use crate::CANDLE_COLUMNS;
 
@@ -146,15 +157,84 @@ pub const TIERS: [Tier; 6] = [
     },
 ];
 
+/// Why a rendering refused to produce SQL. Every variant is an interpolation
+/// point that failed its check, never a formatting failure.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RollupSqlError {
+    /// `db` is not a bare SQL identifier.
+    #[error("database qualifier must be a bare SQL identifier, got `{0}`")]
+    Database(String),
+    /// A [`Bound::Param`] name is not a bare SQL identifier, so it could carry
+    /// SQL out of the `{name:DateTime}` placeholder.
+    #[error("bound-parameter name must be a bare SQL identifier, got `{0}`")]
+    BoundParam(String),
+    /// A [`Bound::Timestamp`] is not exactly `YYYY-MM-DD HH:MM:SS`.
+    #[error("bound must be a `YYYY-MM-DD HH:MM:SS` instant, got `{0}`")]
+    BoundTimestamp(String),
+}
+
+/// One side of a [`Bounds::Range`] — a checked instant, never free SQL text.
+#[derive(Debug, Clone, Copy)]
+pub enum Bound<'a> {
+    /// A ClickHouse bound PARAMETER, by name: renders `{name:DateTime}`, and
+    /// the value is sent out of band — it never enters the statement text.
+    /// This is what `schema/preroll-live-gap.sql` carries.
+    Param(&'a str),
+    /// A literal UTC instant, `YYYY-MM-DD HH:MM:SS`, rendered inside
+    /// `toDateTime(…)`. Validated character by character: the only characters
+    /// that survive are digits and the five separators, so nothing can close
+    /// the quote.
+    Timestamp(&'a str),
+}
+
+impl Bound<'_> {
+    /// The checked SQL expression for this side.
+    fn render(&self) -> Result<String, RollupSqlError> {
+        match self {
+            Bound::Param(name) if is_identifier(name) => Ok(format!("{{{name}:DateTime}}")),
+            Bound::Param(name) => Err(RollupSqlError::BoundParam((*name).to_string())),
+            Bound::Timestamp(ts) if is_timestamp(ts) => Ok(format!("toDateTime('{ts}', 'UTC')")),
+            Bound::Timestamp(ts) => Err(RollupSqlError::BoundTimestamp((*ts).to_string())),
+        }
+    }
+}
+
+/// `^[A-Za-z_][A-Za-z0-9_]*$` — a bare SQL identifier, which needs no quoting
+/// and cannot end the token it is spliced into.
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Exactly `YYYY-MM-DD HH:MM:SS`. Shape only — ClickHouse rejects an impossible
+/// date itself; what matters here is that no other character can appear.
+fn is_timestamp(s: &str) -> bool {
+    s.len() == 19
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 => b == b'-',
+            10 => b == b' ',
+            13 | 16 => b == b':',
+            _ => b.is_ascii_digit(),
+        })
+}
+
+/// The database qualifier, checked.
+fn qualifier(db: &str) -> Result<&str, RollupSqlError> {
+    if is_identifier(db) {
+        Ok(db)
+    } else {
+        Err(RollupSqlError::Database(db.to_string()))
+    }
+}
+
 /// The range a rollup statement covers.
 #[derive(Debug, Clone, Copy)]
 pub enum Bounds<'a> {
     /// The MV's own bounded live window, `now() - tier.window`.
     Window,
-    /// An explicit half-open range. Both sides are raw SQL expressions — the
-    /// pre-roll passes ClickHouse bound-parameter placeholders, never operator
-    /// text.
-    Range { from: &'a str, to: &'a str },
+    /// An explicit half-open range, `[from, to)`.
+    Range { from: Bound<'a>, to: Bound<'a> },
     /// Everything. Renders no `WHERE` at all.
     Full,
 }
@@ -173,33 +253,41 @@ pub fn tier_by_name(name: &str) -> Option<&'static Tier> {
 /// `sum(version)` against nothing and silently truncates the bucket (task 0095;
 /// the S2 v1 review's WR-01/02 is that `Range` needs this just as much as
 /// `Window` does, and gets it here rather than at every call site).
-fn lower_bound(tier: &Tier, bounds: &Bounds<'_>) -> Option<String> {
-    match bounds {
+fn lower_bound(tier: &Tier, bounds: &Bounds<'_>) -> Result<Option<String>, RollupSqlError> {
+    Ok(match bounds {
         Bounds::Window => Some(format!(
             "toStartOfInterval(now() - {}, {})",
             tier.window, tier.interval
         )),
-        Bounds::Range { from, .. } => Some(format!("toStartOfInterval({from}, {})", tier.interval)),
+        Bounds::Range { from, .. } => Some(format!(
+            "toStartOfInterval({}, {})",
+            from.render()?,
+            tier.interval
+        )),
         Bounds::Full => None,
-    }
+    })
 }
 
 /// The coarse rollup SELECT for one tier — the body of its MV and of every
 /// bounded re-roll. See the module docs for what each projection means.
-pub fn rollup_select(tier: &Tier, db: &str, bounds: &Bounds<'_>) -> String {
+pub fn rollup_select(tier: &Tier, db: &str, bounds: &Bounds<'_>) -> Result<String, RollupSqlError> {
     let Tier {
         child, interval, ..
     } = *tier;
+    let db = qualifier(db)?;
 
-    let where_clause = match (lower_bound(tier, bounds), bounds) {
+    let where_clause = match (lower_bound(tier, bounds)?, bounds) {
         (Some(lb), Bounds::Range { to, .. }) => {
-            format!("\nWHERE t.timestamp >= {lb}\n  AND t.timestamp < {to}")
+            format!(
+                "\nWHERE t.timestamp >= {lb}\n  AND t.timestamp < {}",
+                to.render()?
+            )
         }
         (Some(lb), _) => format!("\nWHERE t.timestamp >= {lb}"),
         (None, _) => String::new(),
     };
 
-    format!(
+    Ok(format!(
         "SELECT
     toStartOfInterval(t.timestamp, {interval}) AS timestamp,
     asset_id, quote_asset_id, source,
@@ -221,19 +309,20 @@ pub fn rollup_select(tier: &Tier, db: &str, bounds: &Bounds<'_>) -> String {
     sum(t.pf_price_volume) AS pf_price_volume
 FROM {db}.{child} AS t FINAL{where_clause}
 GROUP BY timestamp, asset_id, quote_asset_id, source"
-    )
+    ))
 }
 
 /// The tier's refreshable `APPEND` MV, exactly as `schema/rollups.sql` ships it.
-pub fn mv_ddl(tier: &Tier, db: &str) -> String {
-    format!(
+pub fn mv_ddl(tier: &Tier, db: &str) -> Result<String, RollupSqlError> {
+    let body = rollup_select(tier, db, &Bounds::Window)?;
+    let db = qualifier(db)?;
+    Ok(format!(
         "CREATE MATERIALIZED VIEW IF NOT EXISTS {db}.{mv}\nREFRESH {refresh} APPEND\nTO \
          {db}.{target} AS\n{body}",
         mv = tier.mv,
         refresh = tier.refresh,
         target = tier.target,
-        body = rollup_select(tier, db, &Bounds::Window),
-    )
+    ))
 }
 
 /// The same aggregation as a plain `INSERT … SELECT` over `bounds` — what the
@@ -245,7 +334,14 @@ pub fn mv_ddl(tier: &Tier, db: &str) -> String {
 /// fills it from its DEFAULT, and for the three task-0286 columns that DEFAULT
 /// is the pre-0286 "every fill forms price" value (F6b) — a dust-only bucket
 /// would come back declaring itself fully price-forming.
-pub fn rollup_insert(tier: &Tier, db: &str, bounds: &Bounds<'_>, settings: Option<&str>) -> String {
+pub fn rollup_insert(
+    tier: &Tier,
+    db: &str,
+    bounds: &Bounds<'_>,
+    settings: Option<&str>,
+) -> Result<String, RollupSqlError> {
+    let body = rollup_select(tier, db, bounds)?;
+    let db = qualifier(db)?;
     let columns = CANDLE_COLUMNS
         .chunks(4)
         .map(|c| c.join(", "))
@@ -255,11 +351,10 @@ pub fn rollup_insert(tier: &Tier, db: &str, bounds: &Bounds<'_>, settings: Optio
         Some(s) => format!("\nSETTINGS {s}"),
         None => String::new(),
     };
-    format!(
+    Ok(format!(
         "INSERT INTO {db}.{target}\n    ({columns})\n{body}{tail}",
         target = tier.target,
-        body = rollup_select(tier, db, bounds),
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -270,10 +365,13 @@ mod tests {
     fn every_rendering() -> Vec<(String, String)> {
         let mut out = Vec::new();
         for tier in TIERS {
-            out.push((format!("mv {}", tier.name), mv_ddl(&tier, "prices")));
+            out.push((
+                format!("mv {}", tier.name),
+                mv_ddl(&tier, "prices").expect("a checked rendering"),
+            ));
             out.push((
                 format!("preroll {}", tier.name),
-                rollup_insert(&tier, "prices", &Bounds::Full, None),
+                rollup_insert(&tier, "prices", &Bounds::Full, None).expect("a checked rendering"),
             ));
             out.push((
                 format!("live-gap {}", tier.name),
@@ -281,11 +379,12 @@ mod tests {
                     &tier,
                     "prices",
                     &Bounds::Range {
-                        from: "{start_ts:DateTime}",
-                        to: "{end_ts:DateTime}",
+                        from: Bound::Param("start_ts"),
+                        to: Bound::Param("end_ts"),
                     },
                     Some("max_threads = 4"),
-                ),
+                )
+                .expect("a checked rendering"),
             ));
         }
         out
@@ -504,7 +603,7 @@ mod tests {
     fn both_bounded_forms_align_the_lower_bound_to_the_tiers_bucket() {
         let month = tier_by_name("1M").expect("the month");
 
-        let window = rollup_select(month, "prices", &Bounds::Window);
+        let window = rollup_select(month, "prices", &Bounds::Window).expect("a checked rendering");
         assert!(
             window.contains(
                 "WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 400 DAY, INTERVAL 1 MONTH)"
@@ -516,10 +615,11 @@ mod tests {
             month,
             "prices",
             &Bounds::Range {
-                from: "{start_ts:DateTime}",
-                to: "{end_ts:DateTime}",
+                from: Bound::Param("start_ts"),
+                to: Bound::Param("end_ts"),
             },
-        );
+        )
+        .expect("a checked rendering");
         assert!(
             range.contains(
                 "WHERE t.timestamp >= toStartOfInterval({start_ts:DateTime}, INTERVAL 1 MONTH)"
@@ -533,7 +633,9 @@ mod tests {
         );
 
         assert!(
-            !rollup_select(month, "prices", &Bounds::Full).contains("WHERE"),
+            !rollup_select(month, "prices", &Bounds::Full)
+                .expect("a checked rendering")
+                .contains("WHERE"),
             "the full-range form must carry no WHERE"
         );
     }
@@ -548,6 +650,7 @@ mod tests {
         let fifteen = tier_by_name("15m").expect("the 15m tier");
         assert!(
             mv_ddl(fifteen, "prices")
+                .expect("a checked rendering")
                 .contains("toStartOfInterval(t.timestamp, INTERVAL 15 MINUTE) AS timestamp"),
             "the 15m MV body must keep the literal the drift tests edit"
         );
@@ -559,7 +662,7 @@ mod tests {
     #[test]
     fn the_mv_ddl_declares_an_append_refreshable_view_with_a_target() {
         for tier in TIERS {
-            let ddl = mv_ddl(&tier, "prices");
+            let ddl = mv_ddl(&tier, "prices").expect("a checked rendering");
             assert!(
                 ddl.starts_with(&format!(
                     "CREATE MATERIALIZED VIEW IF NOT EXISTS prices.{}",
@@ -591,7 +694,7 @@ mod tests {
     #[test]
     fn the_insert_names_every_candle_column_in_ddl_order() {
         let tier = tier_by_name("15m").expect("the 15m tier");
-        let sql = rollup_insert(tier, "prices", &Bounds::Full, None);
+        let sql = rollup_insert(tier, "prices", &Bounds::Full, None).expect("a checked rendering");
 
         let head = sql.split("SELECT").next().expect("INSERT head");
         let open = head.find('(').expect("column list");
@@ -606,6 +709,7 @@ mod tests {
         assert!(!sql.contains("SETTINGS"), "no settings unless asked for");
         assert!(
             rollup_insert(tier, "prices", &Bounds::Full, Some("max_threads = 4"))
+                .expect("a checked rendering")
                 .ends_with("\nSETTINGS max_threads = 4")
         );
     }
@@ -615,8 +719,89 @@ mod tests {
     #[test]
     fn the_database_qualifier_is_rendered_everywhere() {
         let tier = tier_by_name("1d").expect("the 1d tier");
-        let ddl = mv_ddl(tier, "scratch_42");
+        let ddl = mv_ddl(tier, "scratch_42").expect("a checked rendering");
         assert!(!ddl.contains("prices."), "left a prices. qualifier: {ddl}");
         assert_eq!(ddl.matches("scratch_42.").count(), 3);
+    }
+
+    /// T-kpi-01 (ASVS V5). These renderers are `pub` in a workspace that has
+    /// operator-driven binaries, so the qualifier is CHECKED, not documented:
+    /// a `--database` threaded in here fails the call instead of reaching a
+    /// `CREATE MATERIALIZED VIEW`.
+    #[test]
+    fn a_database_qualifier_that_is_not_an_identifier_is_rejected() {
+        let tier = tier_by_name("1d").expect("the 1d tier");
+        let bad = "prices; DROP TABLE prices.price_ohlcv_1d --";
+
+        assert_eq!(
+            mv_ddl(tier, bad),
+            Err(RollupSqlError::Database(bad.to_string()))
+        );
+        assert_eq!(
+            rollup_select(tier, bad, &Bounds::Window),
+            Err(RollupSqlError::Database(bad.to_string()))
+        );
+        assert_eq!(
+            rollup_insert(tier, bad, &Bounds::Full, None),
+            Err(RollupSqlError::Database(bad.to_string()))
+        );
+
+        // A leading digit, a dot-qualified name and an empty string are all
+        // identifiers a caller might assume work; none of them is bare.
+        for bad in ["1prices", "prices.db", "", "pri ces", "\"prices\""] {
+            assert!(mv_ddl(tier, bad).is_err(), "accepted `{bad}`");
+        }
+        assert!(mv_ddl(tier, "scratch_42").is_ok());
+        assert!(mv_ddl(tier, "_prices").is_ok());
+    }
+
+    /// A range side is a [`Bound`], so operator text has no way in: a parameter
+    /// NAME must be a bare identifier (the value stays out of band), and a
+    /// literal instant must be exactly `YYYY-MM-DD HH:MM:SS`.
+    #[test]
+    fn a_range_bound_that_is_not_a_placeholder_or_timestamp_is_rejected() {
+        let tier = tier_by_name("1d").expect("the 1d tier");
+        let render = |from, to| rollup_select(tier, "prices", &Bounds::Range { from, to });
+
+        let injected = "start_ts:DateTime} UNION ALL SELECT * FROM prices.secrets --";
+        assert_eq!(
+            render(Bound::Param(injected), Bound::Param("end_ts")),
+            Err(RollupSqlError::BoundParam(injected.to_string()))
+        );
+        // The upper bound is rendered separately and is checked just the same.
+        assert_eq!(
+            render(Bound::Param("start_ts"), Bound::Param(injected)),
+            Err(RollupSqlError::BoundParam(injected.to_string()))
+        );
+
+        let quoted = "2026-01-01 00:00:00' OR '1'='1";
+        assert_eq!(
+            render(Bound::Timestamp(quoted), Bound::Param("end_ts")),
+            Err(RollupSqlError::BoundTimestamp(quoted.to_string()))
+        );
+        for bad in ["2026-01-01", "2026-01-01T00:00:00", "", "2026-1-1 0:0:0"] {
+            assert!(
+                render(Bound::Timestamp(bad), Bound::Param("end_ts")).is_err(),
+                "accepted `{bad}`"
+            );
+        }
+
+        // And the two accepted shapes render, quoted where they must be.
+        let literal = render(
+            Bound::Timestamp("2026-01-01 00:00:00"),
+            Bound::Timestamp("2026-02-01 00:00:00"),
+        )
+        .expect("a well-formed instant renders");
+        assert!(
+            literal.contains(
+                "WHERE t.timestamp >= toStartOfInterval(toDateTime('2026-01-01 00:00:00', 'UTC'), \
+                 INTERVAL 1 DAY)"
+            ),
+            "{literal}"
+        );
+        assert!(
+            literal.contains("AND t.timestamp < toDateTime('2026-02-01 00:00:00', 'UTC')"),
+            "{literal}"
+        );
     }
 }
