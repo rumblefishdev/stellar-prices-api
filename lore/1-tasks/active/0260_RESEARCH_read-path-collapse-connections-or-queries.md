@@ -2,7 +2,7 @@
 id: "0260"
 title: 'Read path collapsed at 100 req/s of cache misses — connection ceiling or query performance?'
 type: RESEARCH
-status: backlog
+status: active
 related_adr: ['0007']
 related_tasks: ['0121', '0047', '0122']
 tags:
@@ -40,6 +40,26 @@ history:
       `deferred` / `phase-post-deploy`, its own history drops it to priority-low
       as explicitly not a blocker, and it gates ADR 0007 rather than any
       acceptance criterion.
+  - date: 2026-09-16
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated, and chosen over the 500/1000 req/s runs deliberately. Those are
+      the other half of acceptance criterion 5, but regime 3 at 100 req/s already
+      took the production read path down for 19-47 minutes; the ClickHouse box is
+      shared with soroban-block-explorer and was NOT quiet today; and raising the
+      rate before this task names the ceiling would buy a larger outage to learn
+      what forensics can establish for free.
+      ⏳ TIME-BOXED BY RETENTION — the evidence is Lambda logs from 2026-09-03
+      and the log groups keep 30 days, so it expires around 2026-10-03, in 17
+      days. 8,878 events sit in the 06:30-06:40 UTC window and the metrics are
+      complete (15-month retention).
+      🔑 First finding already in hand, before any analysis: `Throttles` = 0
+      across 06:00-08:00 UTC on `prices-production-api-handler`. Lambda
+      concurrency throttling is ruled out as the ceiling.
+      ⚠️ The ClickHouse half (`max_connections`, `max_concurrent_queries`, the
+      server log) still needs operator access through CHQ and is not reachable
+      from this session.
 ---
 
 # Read path collapse at 100 req/s of misses — connections or queries?
