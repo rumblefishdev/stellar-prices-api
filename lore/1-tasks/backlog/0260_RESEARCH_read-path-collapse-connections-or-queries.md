@@ -14,7 +14,9 @@ tags:
     performance,
     clickhouse,
     incident,
+    milestone-M3,
   ]
+milestone: 3
 links:
   - '../../../docs/prices-api-load-test-100rps.md'
 history:
@@ -25,6 +27,19 @@ history:
       Spawned from [[0121]]'s regime 3, which took the production read path down
       on 2026-09-03. The load test can report the failure but cannot diagnose
       it — that needs access to the prod account and to the ClickHouse box.
+  - date: 2026-09-16
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Tagged to milestone 3 — both halves of the convention, the `milestone-M3`
+      tag and the `milestone` field. This task carries acceptance criterion 5,
+      the load-test report (p95 <100ms at 100 req/s), but had neither, so it was
+      invisible to every M3-scoped view. That is how a Tranche 3 gap came to be
+      written up as having no owner at all.
+      ⚠️ [[0047]] was weighed alongside it and deliberately NOT tagged: it is
+      `deferred` / `phase-post-deploy`, its own history drops it to priority-low
+      as explicitly not a blocker, and it gates ADR 0007 rather than any
+      acceptance criterion.
 ---
 
 # Read path collapse at 100 req/s of misses — connections or queries?
