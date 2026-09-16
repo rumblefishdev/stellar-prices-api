@@ -5,7 +5,7 @@ type: BUG
 status: backlog
 related_adr: []
 related_tasks: ["0223", "0222", "0167", "0112", "0132", "0256", "0241"]
-tags: [layer-infra, priority-low, effort-medium, oracle, lambda, memory, observability, ops]
+tags: [layer-infra, priority-high, effort-medium, oracle, lambda, memory, observability, ops]
 milestone: 2
 links:
   - "../../../packages/prices-ingest-core/src/writer.rs"
@@ -64,6 +64,23 @@ history:
       caching the map across invocations — is dead, because the peak happens
       during the load itself. A deduplicating read is a fourth option this task
       does not list.
+  - date: 2026-09-16
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Priority raised **low → high**. Not because this task grew — today its
+      premise shrank ~3× — but because it sits in the chain that produces 84%
+      of the ops channel's traffic ([[0241]]), and `priority-low` is what left
+      it unowned for 21 days while that noise trained everyone past the
+      channel.
+      ⚠️ Sequencing is an OPEN question, not decided here. [[0256]] plausibly
+      removes the hourly amplification that actually reaches the 256 MB
+      ceiling, it is a config decision rather than a change to shared code, and
+      it would produce the one measurement this task still lacks —
+      `Max Memory Used` on a cold container reading a 1× registry. Until that
+      number exists the size of the problem this task solves is unknown, and
+      narrowing `load_assets()` touches callers this task already warns about
+      (ledger-processor, the backfills).
 ---
 
 # The oracle worker reads the entire asset registry on every run
