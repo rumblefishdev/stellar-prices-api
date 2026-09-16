@@ -76,6 +76,56 @@ The 52 soroban assets and the ~207k registry evidently arrive by another path
 (most likely `prices-ledger-processor`), which is why the gap went unnoticed:
 the registry looks healthy.
 
+## Never switched on — since 2026-06-25, not since 2026-09-02
+
+The first history entry bounds this at "every run since at least 07:17 UTC" on
+2026-09-02. The true answer is the worker's own birthday. `asset-discovery`
+shipped on **2026-06-25** in three commits (`feat(lore-0054)`: crate foundation,
+then the increment that introduced `INITIAL_DISCOVERY_LEDGER`, then the CDK
+wiring) — and the CDK wiring deliberately left the variable unset. The comment
+is still there, `eventbridge-stack.ts:290`:
+
+> NB: `INITIAL_DISCOVERY_LEDGER` is intentionally NOT set here — the binary
+> seeds gracefully without it and only scans once a `prices.discovery_state`
+> cursor exists. **Operator activates the ledger scan as a deploy-prep step**
+> (seed the cursor or set the env), so synth is not gated on an operator value.
+
+🔑 **The scan was never broken. It was designed off, behind a manual
+activation step nobody performed.** That is a different defect from the one this
+task's title implies, and it changes who has to act: there is no bug to find in
+the scan path, only a decision deferred at deploy time and then forgotten.
+**83 days** as of 2026-09-16.
+
+`git log -S "INITIAL_DISCOVERY_LEDGER" -- infra/` returns exactly one commit —
+the one that wrote that comment. The variable has never been set in any
+environment.
+
+⚠️ Production can only corroborate as far as retention allows: the earliest
+`seeding only` WARN in `/aws/lambda/prices-production-asset-discovery` is
+**2026-08-18 10:17 UTC**, which is the 30-day log boundary, not an onset. The
+2026-06-25 date comes from the repository, not from CloudWatch.
+
+### The symbol stage does NOT depend on the scan
+
+Relevant because this task's first decision is whether to delete the stage.
+`main.rs` runs the symbol stage **first and unconditionally** — before the seed
+and before the scan branch — so it is not downstream of the dead code.
+
+Measured over 7 days, all pages summed: **168 runs, 0 with
+`symbols_considered > 0`, 0 `symbol stage failed`.** Zero failures matters,
+because on `Err` the run-complete log reports all four `symbols_*` fields as `0`
+via `unwrap_or(0)` — so without that check the zeros would be ambiguous.
+
+`load_unresolved_contracts` (`symbols.rs:356`) selects contract rows not already
+in `prices.asset_symbol`, so `considered: 0` means **nothing is left to
+resolve** — [[0210]] finished its 52 rows. And new soroban contracts keep
+arriving via `ledger-processor`, so deleting the scan would not starve the
+symbol stage.
+
+⚠️ One thing the logs cannot separate: that `NOT IN` excludes both "has a
+symbol" and "gave up at `MAX_SYMBOL_ATTEMPTS`". Whether all 52 actually resolved
+needs a query on `prices.asset_symbol` (`symbol = '' AND attempts >= MAX`).
+
 ## 🔴 Measured consequence — this is why the oracle OOMs (2026-09-16)
 
 The seeding half is not harmlessly idle. It is the most expensive writer in the
