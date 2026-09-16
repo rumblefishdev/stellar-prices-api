@@ -6,7 +6,7 @@ use tracing::{info, warn};
 
 use prices_ingest_core::{
     AssetRegistry, CandleAccumulator, OhlcvCandle, Registries, UnresolvedPoolSwap, extract_trades,
-    ledger_sequence, process_ledger, raw_trade_to_tick,
+    ledger_sequence, offer_lookup_counts, process_ledger, raw_trade_to_tick,
 };
 
 use crate::error::BackfillError;
@@ -124,6 +124,12 @@ pub async fn index_partition(
     );
 
     let wall_start = Instant::now();
+    // Task 0286 phase 2 (S4): the share of order-book fills priced from the
+    // offer they crossed rather than from their own amounts. An era whose metas
+    // carry no `State` pre-image falls back wholesale and reproduces the dust
+    // pricing 0286 exists to fix — invisible to every volume and trade-count
+    // reconciliation, because only OHLC is wrong.
+    let offer_lookups_before = offer_lookup_counts();
     let mut stats = PartitionStats::default();
     let mut sdex = CandleAccumulator::new();
     // One accumulator per AMM venue source (phoenix / soroswap / aquarius).
@@ -226,6 +232,7 @@ pub async fn index_partition(
     sink.write_completed_ledgers(&ledgers_in_partition).await?;
 
     stats.wall_clock = wall_start.elapsed();
+    let offer_lookups = offer_lookup_counts().since(offer_lookups_before);
     info!(
         partition = partition.start,
         indexed = stats.indexed,
@@ -235,6 +242,9 @@ pub async fn index_partition(
         oracle_rows = stats.oracle_rows,
         candles = stats.candles_written,
         bytes = stats.total_bytes,
+        order_book_fills = offer_lookups.order_book_fills,
+        offer_lookup_misses = offer_lookups.offer_lookup_misses,
+        pool_fills = offer_lookups.pool_fills,
         wall_secs = format!("{:.1}", stats.wall_clock.as_secs_f64()),
         "partition indexing complete"
     );

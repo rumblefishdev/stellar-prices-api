@@ -39,7 +39,10 @@ pub use bucket::{CandleAccumulator, OhlcvCandle};
 pub use canonical::{AssetIdentity, AssetRegistry, CanonicalPair, canonicalise};
 pub use decode::{decode_object, ledger_sequence};
 pub use error::IngestError;
-pub use filter::{PriceSource, RawTrade, extract_trades};
+pub use filter::{
+    OfferLookupCounts, PriceSource, RawTrade, extract_trades, extract_trades_with_counts,
+    offer_lookup_counts,
+};
 pub use price::{
     compute_price, offer_price, price_forming_i64, price_forming_i128, rounding_bound_holds,
     stroops_to_decimal,
@@ -51,5 +54,5 @@ pub use soroban::{
     LedgerSoroban, RawSorobanEvent, Registries, UnresolvedPoolSwap, process_ledger,
     process_soroban_event_rows, reflector_key_to_identity,
 };
-pub use tick::{TradeTick, raw_trade_to_tick};
+pub use tick::{PricedFrom, TradeTick, raw_trade_to_tick, raw_trade_to_tick_with_source};
 pub use writer::{AssetMetadata, OhlcvWriter, OracleSample, UnresolvedPool};

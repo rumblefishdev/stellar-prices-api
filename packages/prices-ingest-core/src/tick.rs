@@ -41,7 +41,31 @@ impl TradeTick {
     }
 }
 
+/// Which of ADR 0287 §1's two price definitions actually produced a tick's
+/// `price`.
+///
+/// [`crate::filter::PriceSource`] records what the ledger entries OFFERED; this
+/// records what the pricing rule USED. The two differ whenever the offer entry
+/// turns out to be unusable (a degenerate `n/d`, a non-positive amount), so any
+/// measurement of "how many fills were offer-priced" must read this one or it
+/// drifts from the ingest (task 0286, S4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PricedFrom {
+    /// The resting offer's own `price.n/d`.
+    Offer,
+    /// The fill's own two amounts, subject to the 0.1 % rounding bound.
+    AmountRatio,
+}
+
 pub fn raw_trade_to_tick(trade: &RawTrade, registry: &mut AssetRegistry) -> TradeTick {
+    raw_trade_to_tick_with_source(trade, registry).0
+}
+
+/// [`raw_trade_to_tick`], and which definition priced it.
+pub fn raw_trade_to_tick_with_source(
+    trade: &RawTrade,
+    registry: &mut AssetRegistry,
+) -> (TradeTick, PricedFrom) {
     let pair = canonicalise(&trade.asset_sold, &trade.asset_bought, registry);
 
     // The one place a fill's price is decided (ADR 0287 §1). An order-book fill
@@ -49,21 +73,30 @@ pub fn raw_trade_to_tick(trade: &RawTrade, registry: &mut AssetRegistry) -> Trad
     // happened at — exact at any fill size, so it always forms price. A pool
     // fill, and an order-book fill whose offer entry could not be read, has only
     // its own two rounded amounts, and there the 0.1 % bound decides.
+    //
+    // The offer arm carries the SAME non-positive precondition as
+    // `price_forming_i64`: an offer price is exact at any fill size, but a claim
+    // whose amount is negative is not a fill at all, and pricing it from the
+    // offer would let it set open/high/low/close and contribute a negative
+    // `volume_base` to `pf_volume`.
     let from_offer = match trade.price_source {
-        PriceSource::Offer { n, d } => offer_price(n, d, pair.inverted),
-        PriceSource::AmountRatio => None,
+        PriceSource::Offer { n, d } if trade.amount_sold > 0 && trade.amount_bought > 0 => {
+            offer_price(n, d, pair.inverted)
+        }
+        _ => None,
     };
-    let (price, price_forming) = match from_offer {
-        Some(price) => (price, true),
+    let (price, price_forming, priced_from) = match from_offer {
+        Some(price) => (price, true, PricedFrom::Offer),
         None => (
             compute_price(trade.amount_sold, trade.amount_bought, pair.inverted),
             price_forming_i64(trade.amount_sold, trade.amount_bought),
+            PricedFrom::AmountRatio,
         ),
     };
 
     let (volume_base, volume_quote) = canonical_volumes(trade, &pair);
 
-    TradeTick {
+    let tick = TradeTick {
         ledger_sequence: trade.ledger_sequence,
         closed_at: trade.closed_at,
         transaction_index: trade.transaction_index,
@@ -75,7 +108,8 @@ pub fn raw_trade_to_tick(trade: &RawTrade, registry: &mut AssetRegistry) -> Trad
         volume_base,
         volume_quote,
         price_forming,
-    }
+    };
+    (tick, priced_from)
 }
 
 fn canonical_volumes(trade: &RawTrade, pair: &CanonicalPair) -> (Decimal, Decimal) {
@@ -143,6 +177,68 @@ mod tests {
 
         let ordinary = raw_trade_to_tick(&trade(50_000_000, 10_000_000), &mut registry);
         assert!(ordinary.price_forming, "5 XLM against 1 USDC forms price");
+    }
+
+    /// An offer price is exact at any fill SIZE, but the amounts still have to
+    /// BE a fill. `price_forming_i64` rejects a non-positive amount because no
+    /// valid claim carries one; honouring an offer price there would make such a
+    /// fill set open/high/low/close and push a NEGATIVE `volume_base` into
+    /// `pf_volume` — two negatives that divide back into a plausible `pf_vwap`.
+    /// The offer arm is subject to the same precondition as the ratio arm.
+    #[test]
+    fn an_offer_price_does_not_rescue_a_non_positive_amount() {
+        let mut registry = AssetRegistry::from_existing(vec![]);
+
+        let mut negative = trade(-50_000_000, 10_000_000);
+        negative.price_source = PriceSource::Offer { n: 397, d: 5_000 };
+        let tick = raw_trade_to_tick(&negative, &mut registry);
+        assert!(
+            !tick.price_forming,
+            "a claim with a negative amount is not a fill, whatever offer it names"
+        );
+        assert_eq!(
+            tick.price,
+            compute_price(-50_000_000, 10_000_000, false),
+            "it falls back to the amount ratio, exactly as an unusable offer does"
+        );
+
+        let mut ordinary = trade(50_000_000, 10_000_000);
+        ordinary.price_source = PriceSource::Offer { n: 397, d: 5_000 };
+        let priced = raw_trade_to_tick(&ordinary, &mut registry);
+        assert!(
+            priced.price_forming,
+            "the offer path is otherwise untouched"
+        );
+        assert_eq!(priced.price, Decimal::from(397) / Decimal::from(5_000));
+    }
+
+    /// The measurement the phase-3 go/no-go reads must count what the ingest
+    /// DID, not what the filter FOUND: a `RawTrade` may name an offer the tick
+    /// then refuses (a degenerate `n/d`, a non-positive amount). The tick
+    /// reports the definition that actually priced it, so no consumer can drift
+    /// from the pricing rule.
+    #[test]
+    fn the_tick_reports_which_definition_priced_it() {
+        let mut registry = AssetRegistry::from_existing(vec![]);
+
+        let mut offered = trade(50_000_000, 10_000_000);
+        offered.price_source = PriceSource::Offer { n: 397, d: 5_000 };
+        let (tick, source) = raw_trade_to_tick_with_source(&offered, &mut registry);
+        assert_eq!(source, PricedFrom::Offer);
+        assert_eq!(tick.price, Decimal::from(397) / Decimal::from(5_000));
+
+        let mut degenerate = trade(50_000_000, 10_000_000);
+        degenerate.price_source = PriceSource::Offer { n: 397, d: 0 };
+        assert_eq!(
+            raw_trade_to_tick_with_source(&degenerate, &mut registry).1,
+            PricedFrom::AmountRatio,
+            "an offer entry that cannot price anything did not price this fill"
+        );
+
+        assert_eq!(
+            raw_trade_to_tick_with_source(&trade(17, 1), &mut registry).1,
+            PricedFrom::AmountRatio,
+        );
     }
 
     /// The transaction's apply order travels from the ledger through the raw

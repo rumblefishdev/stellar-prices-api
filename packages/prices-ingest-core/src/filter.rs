@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::Once;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use stellar_xdr::{
     ClaimAtom, LedgerCloseMeta, LedgerEntryChange, LedgerEntryData, OperationResult,
@@ -48,8 +49,80 @@ pub struct RawTrade {
     pub price_source: PriceSource,
 }
 
+/// How many fills the offer lookup priced, missed, or never applied to.
+///
+/// The SHARE of order-book fills that fall back is the number that says whether
+/// an era's metas carry the `State` pre-images at all: a protocol era falling
+/// back wholesale reproduces the very dust pricing 0286 exists to fix, and no
+/// volume or trade-count reconciliation can see it — the mispricing lives only
+/// in OHLC. A once-per-process warn line cannot answer that; a count can
+/// (task 0286, S4).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OfferLookupCounts {
+    /// Fills that crossed a resting offer, i.e. claims carrying an `offer_id`.
+    pub order_book_fills: u64,
+    /// Of those, the ones whose offer entry could not be read: priced from the
+    /// amount ratio, and therefore subject to the rounding bound.
+    pub offer_lookup_misses: u64,
+    /// Liquidity-pool fills, which have no offer to look up at all — the share
+    /// of fills that can never be offer-priced, and must not be confused with a
+    /// miss.
+    pub pool_fills: u64,
+}
+
+impl OfferLookupCounts {
+    /// What happened between an earlier snapshot and this one — the tally a
+    /// chunk summary reports.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            order_book_fills: self
+                .order_book_fills
+                .saturating_sub(earlier.order_book_fills),
+            offer_lookup_misses: self
+                .offer_lookup_misses
+                .saturating_sub(earlier.offer_lookup_misses),
+            pool_fills: self.pool_fills.saturating_sub(earlier.pool_fills),
+        }
+    }
+
+    fn note(&mut self, is_order_book: bool, price_source: PriceSource) {
+        match (is_order_book, price_source) {
+            (false, _) => self.pool_fills += 1,
+            (true, PriceSource::Offer { .. }) => self.order_book_fills += 1,
+            (true, PriceSource::AmountRatio) => {
+                self.order_book_fills += 1;
+                self.offer_lookup_misses += 1;
+            }
+        }
+    }
+}
+
+static ORDER_BOOK_FILLS: AtomicU64 = AtomicU64::new(0);
+static OFFER_LOOKUP_MISSES: AtomicU64 = AtomicU64::new(0);
+static POOL_FILLS: AtomicU64 = AtomicU64::new(0);
+
+/// The process-wide totals since start-up. Snapshot one at the start of a chunk
+/// and [`OfferLookupCounts::since`] gives that chunk's own share.
+pub fn offer_lookup_counts() -> OfferLookupCounts {
+    OfferLookupCounts {
+        order_book_fills: ORDER_BOOK_FILLS.load(Ordering::Relaxed),
+        offer_lookup_misses: OFFER_LOOKUP_MISSES.load(Ordering::Relaxed),
+        pool_fills: POOL_FILLS.load(Ordering::Relaxed),
+    }
+}
+
 pub fn extract_trades(lcm: &LedgerCloseMeta) -> Vec<RawTrade> {
+    extract_trades_with_counts(lcm).0
+}
+
+/// [`extract_trades`], with this ledger's own offer-lookup tally.
+///
+/// The same tally is added to the process-wide counters ([`offer_lookup_counts`])
+/// whichever entry point is used, so a caller that does not care still feeds the
+/// chunk summary.
+pub fn extract_trades_with_counts(lcm: &LedgerCloseMeta) -> (Vec<RawTrade>, OfferLookupCounts) {
     let mut trades = Vec::new();
+    let mut counts = OfferLookupCounts::default();
 
     let (sequence, closed_at) = ledger_header(lcm);
     let tx_processing = tx_processing_entries(lcm);
@@ -88,6 +161,7 @@ pub fn extract_trades(lcm: &LedgerCloseMeta) -> Vec<RawTrade> {
 
             for (claim_idx, claim) in claims.iter().enumerate() {
                 let price_source = price_source_for(claim, offers.as_deref(), op_idx, sequence);
+                let is_order_book = claim_offer_id(claim).is_some();
                 if let Some(trade) = claim_to_raw_trade(
                     claim,
                     sequence,
@@ -97,13 +171,21 @@ pub fn extract_trades(lcm: &LedgerCloseMeta) -> Vec<RawTrade> {
                     claim_idx as u16,
                     price_source,
                 ) {
+                    // Counted per EMITTED fill, so the tally and the candle see
+                    // the same population: a zero-amount claim is dropped above
+                    // and belongs in neither.
+                    counts.note(is_order_book, price_source);
                     trades.push(trade);
                 }
             }
         }
     }
 
-    trades
+    ORDER_BOOK_FILLS.fetch_add(counts.order_book_fills, Ordering::Relaxed);
+    OFFER_LOOKUP_MISSES.fetch_add(counts.offer_lookup_misses, Ordering::Relaxed);
+    POOL_FILLS.fetch_add(counts.pool_fills, Ordering::Relaxed);
+
+    (trades, counts)
 }
 
 fn extract_claims(tr: &OperationResultTr) -> &[ClaimAtom] {
@@ -195,7 +277,8 @@ fn price_source_for(
         None => {
             // Measurable rather than guessed: the share of order-book fills
             // that fall back is what says whether the offer lookup is worth
-            // what it costs (task 0286, S4).
+            // what it costs (task 0286, S4). The share is counted in
+            // `OfferLookupCounts`; this line only names the first one.
             OFFER_LOOKUP_MISS_WARNED.call_once(|| {
                 tracing::warn!(
                     ledger_sequence,
@@ -318,9 +401,9 @@ fn ledger_header(lcm: &LedgerCloseMeta) -> (u32, i64) {
     }
 }
 
-/// Warned once per process each: a permanent signal that a share of fills is
-/// priced from amounts rather than from the offer they crossed, without a log
-/// line per fill.
+/// Warned once per process each: the first occurrence is worth a line with its
+/// ledger and offer id in it. The RATE is carried by [`offer_lookup_counts`] —
+/// the warn says it happens, the counter says how often.
 static OFFER_LOOKUP_MISS_WARNED: Once = Once::new();
 static META_OPERATION_MISMATCH_WARNED: Once = Once::new();
 
@@ -363,19 +446,22 @@ fn tx_processing_entries(lcm: &LedgerCloseMeta) -> Vec<TxProcessingRef<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bucket::CandleAccumulator;
     use crate::canonical::AssetRegistry;
     use crate::price::{compute_price, stroops_to_decimal};
     use crate::tick::{TradeTick, raw_trade_to_tick};
     use rust_decimal::Decimal;
     use stellar_xdr::{
         AccountId, AlphaNum4, Asset, AssetCode4, ClaimLiquidityAtom, ClaimOfferAtom,
-        LedgerCloseMetaV1, LedgerCloseMetaV2, LedgerEntry, LedgerEntryChange, LedgerEntryChanges,
-        LedgerEntryData, LedgerHeader, LedgerHeaderHistoryEntry, LedgerKey, LedgerKeyOffer,
-        ManageOfferSuccessResult, ManageSellOfferResult, OfferEntry, OperationMeta,
-        OperationMetaV2, Price, PublicKey, StellarValue, TimePoint, TransactionMeta,
-        TransactionMetaV1, TransactionMetaV2, TransactionMetaV3, TransactionMetaV4,
-        TransactionResult, TransactionResultMeta, TransactionResultMetaV1, TransactionResultPair,
-        Uint256,
+        ClaimOfferAtomV0, LedgerCloseMetaV1, LedgerCloseMetaV2, LedgerEntry, LedgerEntryChange,
+        LedgerEntryChanges, LedgerEntryData, LedgerHeader, LedgerHeaderHistoryEntry, LedgerKey,
+        LedgerKeyOffer, ManageBuyOfferResult, ManageOfferSuccessResult, ManageSellOfferResult,
+        OfferEntry, OperationMeta, OperationMetaV2, PathPaymentStrictReceiveResult,
+        PathPaymentStrictReceiveResultSuccess, PathPaymentStrictSendResult,
+        PathPaymentStrictSendResultSuccess, Price, PublicKey, StellarValue, TimePoint,
+        TransactionMeta, TransactionMetaV1, TransactionMetaV2, TransactionMetaV3,
+        TransactionMetaV4, TransactionResult, TransactionResultMeta, TransactionResultMetaV1,
+        TransactionResultPair, Uint256,
     };
 
     const LEDGER: u32 = 100;
@@ -413,6 +499,20 @@ mod tests {
 
     fn order_book_claim(offer_id: i64, amount_sold: i64, amount_bought: i64) -> ClaimAtom {
         ClaimAtom::OrderBook(ClaimOfferAtom {
+            offer_id,
+            asset_sold: sold_asset(),
+            amount_sold,
+            asset_bought: bought_asset(),
+            amount_bought,
+            ..Default::default()
+        })
+    }
+
+    /// The pre-Protocol-18 claim: the same fill, on a different struct
+    /// (`seller_ed25519` rather than `seller_id`) — and the variant the majority
+    /// of the ~64 M ledgers phase 3 re-ingests decodes to.
+    fn v0_claim(offer_id: i64, amount_sold: i64, amount_bought: i64) -> ClaimAtom {
+        ClaimAtom::V0(ClaimOfferAtomV0 {
             offer_id,
             asset_sold: sold_asset(),
             amount_sold,
@@ -533,17 +633,68 @@ mod tests {
         }
     }
 
+    /// The five operation results that carry claims (`extract_claims`). A path
+    /// payment is the one whose changes legitimately hold offers from SEVERAL
+    /// markets, and it is the shape of the 2026-04-02 ledger in the analysis.
+    #[derive(Clone, Copy, Debug)]
+    enum Carrier {
+        ManageSellOffer,
+        ManageBuyOffer,
+        CreatePassiveSellOffer,
+        PathPaymentStrictReceive,
+        PathPaymentStrictSend,
+    }
+
+    const EVERY_CLAIM_CARRIER: [Carrier; 5] = [
+        Carrier::ManageSellOffer,
+        Carrier::ManageBuyOffer,
+        Carrier::CreatePassiveSellOffer,
+        Carrier::PathPaymentStrictReceive,
+        Carrier::PathPaymentStrictSend,
+    ];
+
+    fn op_result(carrier: Carrier, claims: Vec<ClaimAtom>) -> OperationResult {
+        let claimed = || ManageOfferSuccessResult {
+            offers_claimed: claims.clone().try_into().expect("claims fit VecM"),
+            ..Default::default()
+        };
+        let offers = || claims.clone().try_into().expect("claims fit VecM");
+        OperationResult::OpInner(match carrier {
+            Carrier::ManageSellOffer => {
+                OperationResultTr::ManageSellOffer(ManageSellOfferResult::Success(claimed()))
+            }
+            Carrier::ManageBuyOffer => {
+                OperationResultTr::ManageBuyOffer(ManageBuyOfferResult::Success(claimed()))
+            }
+            Carrier::CreatePassiveSellOffer => {
+                OperationResultTr::CreatePassiveSellOffer(ManageSellOfferResult::Success(claimed()))
+            }
+            Carrier::PathPaymentStrictReceive => OperationResultTr::PathPaymentStrictReceive(
+                PathPaymentStrictReceiveResult::Success(PathPaymentStrictReceiveResultSuccess {
+                    offers: offers(),
+                    ..Default::default()
+                }),
+            ),
+            Carrier::PathPaymentStrictSend => OperationResultTr::PathPaymentStrictSend(
+                PathPaymentStrictSendResult::Success(PathPaymentStrictSendResultSuccess {
+                    offers: offers(),
+                    ..Default::default()
+                }),
+            ),
+        })
+    }
+
     fn result_pair(ops: Vec<Vec<ClaimAtom>>) -> TransactionResultPair {
-        let op_results: Vec<OperationResult> = ops
-            .into_iter()
-            .map(|claims| {
-                OperationResult::OpInner(OperationResultTr::ManageSellOffer(
-                    ManageSellOfferResult::Success(ManageOfferSuccessResult {
-                        offers_claimed: claims.try_into().expect("claims fit VecM"),
-                        ..Default::default()
-                    }),
-                ))
-            })
+        result_pair_with(&vec![Carrier::ManageSellOffer; ops.len()], ops)
+    }
+
+    /// One carrier per operation, so a transaction can mix a path payment with a
+    /// manage-offer the way a real ledger does.
+    fn result_pair_with(carriers: &[Carrier], ops: Vec<Vec<ClaimAtom>>) -> TransactionResultPair {
+        let op_results: Vec<OperationResult> = carriers
+            .iter()
+            .zip(ops)
+            .map(|(carrier, claims)| op_result(*carrier, claims))
             .collect();
         TransactionResultPair {
             result: TransactionResult {
@@ -557,8 +708,16 @@ mod tests {
     }
 
     fn transaction(ops: Vec<Vec<ClaimAtom>>, meta: TransactionMeta) -> TransactionResultMeta {
+        transaction_with(&vec![Carrier::ManageSellOffer; ops.len()], ops, meta)
+    }
+
+    fn transaction_with(
+        carriers: &[Carrier],
+        ops: Vec<Vec<ClaimAtom>>,
+        meta: TransactionMeta,
+    ) -> TransactionResultMeta {
         TransactionResultMeta {
-            result: result_pair(ops),
+            result: result_pair_with(carriers, ops),
             tx_apply_processing: meta,
             ..Default::default()
         }
@@ -863,6 +1022,194 @@ mod tests {
             assert_eq!(tick.price, compute_price(17, 1, false));
             assert!(!tick.price_forming);
         }
+    }
+
+    /// `ClaimAtom::V0` is what every pre-Protocol-18 result decodes to — the
+    /// majority of the history phase 3 re-ingests — and its `offer_id` sits on a
+    /// DIFFERENT struct. If that arm ever stops yielding an id, the whole
+    /// pre-2021 SDEX history silently reverts to ratio + bound pricing, which is
+    /// the defect 0286 exists to fix, and no volume check can see it.
+    #[test]
+    fn a_pre_protocol_18_claim_is_priced_by_its_offer_too() {
+        for claim in [order_book_claim(OFFER_ID, 17, 1), v0_claim(OFFER_ID, 17, 1)] {
+            let ticks = one_fill(
+                MetaVersion::V0,
+                claim,
+                vec![offer_change(ChangeKind::State, OFFER_ID, OFFER_N, OFFER_D)],
+            );
+            assert_eq!(ticks[0].price, offer_price_decimal());
+            assert!(ticks[0].price_forming);
+        }
+    }
+
+    /// The production shape: ONE operation sweeping several resting offers. The
+    /// map built for that operation then holds many entries, and each claim must
+    /// take the offer its own `offer_id` names — a lookup that took "the offer in
+    /// this operation" would price every fill of a book sweep from some other
+    /// maker's offer and never say so.
+    #[test]
+    fn two_claims_in_one_operation_each_take_their_own_offer() {
+        let ticks = ticks(&ledger(vec![transaction(
+            vec![vec![
+                order_book_claim(OFFER_ID, 17, 1),
+                order_book_claim(OFFER_ID + 1, 17, 1),
+            ]],
+            meta(
+                MetaVersion::V1,
+                vec![changes(vec![
+                    offer_change(ChangeKind::State, OFFER_ID, OFFER_N, OFFER_D),
+                    offer_change(ChangeKind::State, OFFER_ID + 1, 1, 4),
+                ])],
+            ),
+        )]));
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(
+            ticks[0].price,
+            offer_price_decimal(),
+            "claim 0 takes 397/5000"
+        );
+        assert_eq!(
+            ticks[1].price,
+            Decimal::from(1) / Decimal::from(4),
+            "claim 1 takes its OWN offer, 1/4"
+        );
+    }
+
+    /// All five claim carriers reach the lookup, not just the manage-sell-offer
+    /// every other fixture uses. A regression that loses one carrier's claims
+    /// loses every fill of that operation type.
+    #[test]
+    fn every_claim_carrier_reaches_the_offer_lookup() {
+        for carrier in EVERY_CLAIM_CARRIER {
+            let ticks = ticks(&ledger(vec![transaction_with(
+                &[carrier],
+                vec![vec![order_book_claim(OFFER_ID, 17, 1)]],
+                meta(
+                    MetaVersion::V1,
+                    vec![changes(vec![offer_change(
+                        ChangeKind::State,
+                        OFFER_ID,
+                        OFFER_N,
+                        OFFER_D,
+                    )])],
+                ),
+            )]));
+            assert_eq!(ticks.len(), 1, "{carrier:?} must yield its claim");
+            assert_eq!(ticks[0].price, offer_price_decimal(), "{carrier:?}");
+            assert!(ticks[0].price_forming, "{carrier:?}");
+        }
+    }
+
+    /// The 2026-04-02 ledger of the analysis, through the real carriers: a path
+    /// payment in the FIRST transaction sweeps two offers (its last fill is claim
+    /// 1), a manage-offer in the SECOND fills once (claim 0). Both operations are
+    /// at index 0 — only the transaction index ranks them — so a key without it
+    /// closes the minute on the path payment's fill instead of the manage-offer's.
+    #[test]
+    fn a_path_payment_sweep_closes_before_a_later_manage_offer() {
+        let lcm = ledger(vec![
+            transaction_with(
+                &[Carrier::PathPaymentStrictReceive],
+                vec![vec![
+                    order_book_claim(OFFER_ID, 17, 1),
+                    order_book_claim(OFFER_ID + 1, 17, 1),
+                ]],
+                meta(
+                    MetaVersion::V1,
+                    vec![changes(vec![
+                        offer_change(ChangeKind::State, OFFER_ID, OFFER_N, OFFER_D),
+                        offer_change(ChangeKind::State, OFFER_ID + 1, 1, 8),
+                    ])],
+                ),
+            ),
+            transaction_with(
+                &[Carrier::ManageSellOffer],
+                vec![vec![order_book_claim(OFFER_ID + 2, 17, 1)]],
+                meta(
+                    MetaVersion::V1,
+                    vec![changes(vec![offer_change(
+                        ChangeKind::State,
+                        OFFER_ID + 2,
+                        1,
+                        4,
+                    )])],
+                ),
+            ),
+        ]);
+        let ticks = ticks(&lcm);
+        let keys: Vec<_> = ticks.iter().map(|t| t.lex_key()).collect();
+        assert_eq!(
+            keys,
+            vec![(LEDGER, 0, 0, 0), (LEDGER, 0, 0, 1), (LEDGER, 1, 0, 0)]
+        );
+
+        let mut acc = CandleAccumulator::new();
+        for tick in &ticks {
+            acc.merge(tick);
+        }
+        let candle = &acc.flush_all()[0];
+        assert_eq!(
+            candle.open,
+            offer_price_decimal(),
+            "open = the path payment's first fill"
+        );
+        assert_eq!(
+            candle.close,
+            Decimal::from(1) / Decimal::from(4),
+            "close = the manage-offer fill: its transaction applied second"
+        );
+    }
+
+    // ---- WR-05: the fallback share is counted, not warned about once -------
+
+    /// A single `Once` warn line says nothing about the SHARE of fills that fell
+    /// back — and a protocol era whose metas carry no `State` pre-image falls
+    /// back wholesale while every volume and trade-count reconciliation passes.
+    /// One ledger with one of each kind: found, missed, never applicable.
+    #[test]
+    fn the_offer_lookup_counts_what_it_priced_missed_and_never_applied_to() {
+        let lcm = ledger(vec![transaction(
+            vec![vec![
+                order_book_claim(OFFER_ID, 17, 1),
+                order_book_claim(OFFER_ID + 9, 17, 1),
+                pool_claim(34, 5),
+            ]],
+            meta(
+                MetaVersion::V1,
+                vec![changes(vec![offer_change(
+                    ChangeKind::State,
+                    OFFER_ID,
+                    OFFER_N,
+                    OFFER_D,
+                )])],
+            ),
+        )]);
+        let (trades, counts) = extract_trades_with_counts(&lcm);
+        assert_eq!(trades.len(), 3);
+        assert_eq!(
+            counts,
+            OfferLookupCounts {
+                order_book_fills: 2,
+                offer_lookup_misses: 1,
+                pool_fills: 1,
+            }
+        );
+    }
+
+    /// The same tally accumulates process-wide, which is what a chunk summary
+    /// reports without a log line per fill.
+    #[test]
+    fn the_process_wide_counters_accumulate_across_ledgers() {
+        let before = offer_lookup_counts();
+        let _ = extract_trades(&ledger(vec![transaction(
+            vec![vec![order_book_claim(OFFER_ID, 17, 1), pool_claim(34, 5)]],
+            meta(MetaVersion::V1, vec![changes(vec![])]),
+        )]));
+        // `>=`: other tests in this binary share the process-wide counters.
+        let delta = offer_lookup_counts().since(before);
+        assert!(delta.order_book_fills >= 1, "{delta:?}");
+        assert!(delta.offer_lookup_misses >= 1, "{delta:?}");
+        assert!(delta.pool_fills >= 1, "{delta:?}");
     }
 
     /// The fill key of task 0286 D1 still comes from the ledger, not from the

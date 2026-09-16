@@ -1,8 +1,8 @@
 use prices_ingest_core::bucket::CandleAccumulator;
 use prices_ingest_core::canonical::AssetRegistry;
 use prices_ingest_core::decode::decode_object;
-use prices_ingest_core::filter::{PriceSource, extract_trades};
-use prices_ingest_core::tick::raw_trade_to_tick;
+use prices_ingest_core::filter::{OfferLookupCounts, extract_trades_with_counts};
+use prices_ingest_core::tick::{PricedFrom, raw_trade_to_tick_with_source};
 use std::{env, fs};
 use stellar_xdr::LedgerCloseMeta;
 
@@ -18,9 +18,16 @@ fn main() {
     // Task 0286 phase 2: how many fills were priced by the offer they crossed
     // rather than by their own two amounts, and how many of the rest the 0.1 %
     // bound admits. This is the measurement that says what the offer lookup
-    // buys on real ledgers.
+    // buys on real ledgers — and whether a whole protocol era falls back.
+    //
+    // `offer_priced` counts the DECISION, not the intent: a fill whose offer
+    // entry was found but turned out unusable (degenerate n/d, non-positive
+    // amount) fell back to the ratio and belongs with the fallbacks. The share
+    // is taken over ORDER-BOOK fills, because a pool fill can never be
+    // offer-priced and would otherwise dilute the number the era is judged on.
     let mut offer_priced = 0usize;
     let mut price_forming = 0usize;
+    let mut counts = OfferLookupCounts::default();
     println!("file={path} ledgers_in_file={}", lcms.len());
     for lcm in &lcms {
         let (seq, variant, txn) = match lcm {
@@ -40,13 +47,16 @@ fn main() {
                 v.tx_processing.len(),
             ),
         };
-        let trades = extract_trades(lcm);
+        let (trades, ledger_counts) = extract_trades_with_counts(lcm);
         total_trades += trades.len();
+        counts.order_book_fills += ledger_counts.order_book_fills;
+        counts.offer_lookup_misses += ledger_counts.offer_lookup_misses;
+        counts.pool_fills += ledger_counts.pool_fills;
         for t in &trades {
-            if matches!(t.price_source, PriceSource::Offer { .. }) {
+            let (tick, priced_from) = raw_trade_to_tick_with_source(t, &mut registry);
+            if priced_from == PricedFrom::Offer {
                 offer_priced += 1;
             }
-            let tick = raw_trade_to_tick(t, &mut registry);
             if tick.price_forming {
                 price_forming += 1;
             }
@@ -62,9 +72,21 @@ fn main() {
         "=> total_trades={total_trades} candles_produced={}",
         candles.len()
     );
+    let order_book = counts.order_book_fills as usize;
+    // Found an offer, could not use it. The residual the share would otherwise
+    // hide behind "offer-priced".
+    let unusable = order_book
+        .saturating_sub(counts.offer_lookup_misses as usize)
+        .saturating_sub(offer_priced);
     println!(
-        "   offer_priced={offer_priced} ({}) price_forming={price_forming} ({})",
-        share(offer_priced, total_trades),
+        "   order_book_fills={order_book} offer_priced={offer_priced} ({} of order-book fills) \
+         offer_lookup_misses={} offer_unusable={unusable} pool_fills={}",
+        share(offer_priced, order_book),
+        counts.offer_lookup_misses,
+        counts.pool_fills
+    );
+    println!(
+        "   price_forming={price_forming} ({} of all fills)",
         share(price_forming, total_trades)
     );
     for c in candles.iter().take(3) {

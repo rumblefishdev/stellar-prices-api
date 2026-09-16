@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use prices_ingest_core::{
     AssetRegistry, CandleAccumulator, OracleSample, Registries, decode_object, extract_trades,
-    ledger_sequence, process_ledger, raw_trade_to_tick,
+    ledger_sequence, offer_lookup_counts, process_ledger, raw_trade_to_tick,
 };
 use tokio::sync::Mutex;
 use tracing::info;
@@ -120,6 +120,7 @@ where
         let start = self.cursor.read().await?;
         let mut current = start;
         let mut persisted = 0u64;
+        let offer_lookups_before = offer_lookup_counts();
 
         // Accumulate across the whole contiguous run, flush once at the end.
         let mut sdex = CandleAccumulator::new();
@@ -222,11 +223,18 @@ where
         self.sink.write_oracle(&oracle).await?;
         self.cursor.write(current).await?;
 
+        // Task 0286 phase 2 (S4): how many order-book fills this run priced from
+        // the offer they crossed, and how many fell back to their own amounts.
+        // The rate, not a once-per-process warn line.
+        let offer_lookups = offer_lookup_counts().since(offer_lookups_before);
         info!(
             start,
             end = current,
             persisted,
             rows = rows_emitted,
+            order_book_fills = offer_lookups.order_book_fills,
+            offer_lookup_misses = offer_lookups.offer_lookup_misses,
+            pool_fills = offer_lookups.pool_fills,
             "reconcile run complete"
         );
 
