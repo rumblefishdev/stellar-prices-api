@@ -15,6 +15,7 @@ the API surface, or the cost / budget framing.
 
 | Date       | Sections touched                                                                                                                                                          | Driver                                                                                                                                                                                                                                                                                    | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-09-16 | §3.2, §4.2 (`GET /ohlcv`)                                                                                                                                                 | [Task 0286](../lore/1-tasks/active/0286_BUG_candles-are-built-from-dust-fills-in-the-wrong-order.md) · [ADR 0287](../lore/2-adrs/0287_candle-prices-come-from-price-forming-fills-and-a-windowed-close.md)                                                                                | **A candle's prices come only from the price-forming trades of its own bucket** — `open`/`close` the first and last of them, `high`/`low` their extremes, nothing carried from a neighbouring bucket. A fill's price is the ratio of two integer stroop amounts, so a few-stroop fill prints an exact small fraction that is arithmetically right and can sit hundreds of percent off the market; such fills no longer set a price. The task-0116 guidance to filter dust **on the client** is replaced by the rule and by three new `/ohlcv` fields — `pf_trade_count` (`0` means the bucket has no price and every price field is `null`), `pf_vwap` (the price-forming mean) and `close_divergent` (`close` more than 1% from it). Added the three `pf_*` columns to the §3.2 DDL and re-cut the rollup sketch to the shipped generator's pf-gated form, with the month rolled from the day.                                                                                                                                                                                                                                                                                                                            |
 | 2026-09-02 | §5.7 (new)                                                                                                                                                                | [Task 0248](../lore/1-tasks/active/0248_DOCS_blend-is-named-in-the-rfp-but-is-not-a-price-source.md)                                                                                                                                                                                      | **Venue coverage recorded against the RFP's named markets.** The RFP's Price Aggregation bullet names four markets (Soroswap, Aquarius, SDEX, Blend); we ingest three of them plus Phoenix, which it does not name. New §5.7 states the count plainly and records why **Blend cannot be a price source**: it is a lending protocol with no swap, and a price is a property of a trade. The decisive point is that Blend pool creators choose an _oracle_ to price collateral, which places Blend downstream of a service like this one — a consumer of price data, not a producer. Its 80/20 BLND:USDC backstop AMM is the only part that trades and its volume is **unmeasured**, stated rather than implied. No extractor, no `Venue` arm, no registry seeding: pricing BLND from the backstop pool would be a feature of its own. Deliberately **not** generalised into a rule about lending protocols.                                                                                                                                                                                                                                                                                                                 |
 | 2026-05-20 | §0, §1.1, §1.2, §2.1, §2.3, §3, §4.5, §5.2–§5.4, §5.6, §6, §7, §8, §9, §10, §11 (all-table refresh)                                                                       | [ADR 0007](../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0045](../lore/1-tasks/archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/README.md) · [Task 0049](../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md) | **Live data sink flipped from Prices-owned RDS PostgreSQL to BE's shared Hetzner ClickHouse cluster** (separate `prices` database). All live OHLCV / current-prices / oracle / asset registry / backfill-progress data now lives in ClickHouse, written over HTTPS-mTLS to Caddy:443 by Lambdas running outside any VPC. The S3 → Lambda path gains an SNS topic between the bucket and both tenants' processors (one-time BE CDK change). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`); rollups become a CH materialised-view chain, **eliminating the OHLCV Rollup Lambda**. Prices-api VPC, NAT Gateway, and RDS line items removed; mTLS cert lifecycle added (per-env certs, 1-year manual rotation, CA-rotation revocation). Cost lines: $12/mo RDS removed; ~$1-2/env/mo Hetzner CH cost-share added (basis: [task 0046](../lore/1-tasks/archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md) empirical ~0.45 GB/yr, 14.8× compression). Local backfill sections (Stream 1 ADR 0001, Stream 2 ADR 0005) preserved — only their cloud-push targets shift RDS → CH. |
 | 2026-05-15 | §2.3, §5.3, §5.6 Stream 1 (two-stream design table, architecture diagram, processing-rate sub-table, schema-coupling note), §9 (Tranche 1 work), §10, §11.1, §11.2, §11.4 | [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) · [Task 0029](../lore/1-tasks/active/0029_DOCS_update-design-doc-stream-1-adr-0001.md)                                                                                                                         | Stream 1 (Soroban AMM) backfill reconciled with ADR 0001: source moved from BE's PG `soroban_events` to a **local ClickHouse** instance populated upfront by BE's `backfill-runner --target=clickhouse`; deployment shape moved from ECS Fargate to a local Rust CLI (`soroban-amm-backfill`) on the operator's workstation, ScVal decoding via `stellar-xdr` crate, one-shot completion push to cloud RDS. Stream 1 Fargate cost line removed; backfill total now ~$30. BE coupling reframed as a transient prep-step tool invocation (not runtime DB read); §11.1 `soroban_events` row removed and its development-savings counterpart added to §11.2. Closes out the design-doc sweep started in [Task 0013](../lore/1-tasks/archive/0013_DOCS_update-design-doc-to-match-be-reality.md).                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -300,8 +301,15 @@ CREATE TABLE prices.price_ohlcv_1m (
                                          -- (volume_quote / volume_base);
                                          -- see §5.5 layering for cross-source weighting
     trade_count      UInt32 DEFAULT 0,
-    version          UInt64             -- monotonic per-row version for ReplacingMergeTree
+    version          UInt64,            -- monotonic per-row version for ReplacingMergeTree
                                          -- (ledger sequence × 1000 + intra-ledger order)
+    -- ADR 0287: how much of the bucket formed its price. A fill of a few
+    -- stroops prints an exact small fraction that can sit hundreds of percent
+    -- off the market, so open/high/low/close come only from the fills whose
+    -- own rounding cannot move their price by more than 0.1%.
+    pf_trade_count   UInt32          DEFAULT trade_count,  -- 0 = no price
+    pf_volume        Decimal(38, 14) DEFAULT volume_base,
+    pf_price_volume  Decimal(38, 14) DEFAULT volume_quote
 )
 ENGINE = ReplacingMergeTree(version)
 PARTITION BY toYYYYMM(timestamp)
@@ -317,29 +325,40 @@ CREATE TABLE prices.price_ohlcv_1w  AS prices.price_ohlcv_1m;
 CREATE TABLE prices.price_ohlcv_1M  AS prices.price_ohlcv_1m;
 ```
 
-**Rollup MV chain** (sketch — one MV per step; full DDL lives in
-`docs/database-schema/clickhouse-prod-schema.sql` once landed):
+**Rollup MV chain** (sketch — one MV per step; the shipped DDL is rendered by
+`packages/prices-clickhouse/src/rollup_sql.rs` into `schema/rollups.sql`, and
+[the database-schema overview §3.2](database-schema/database-schema-overview.md)
+carries the full form):
 
 ```sql
 CREATE MATERIALIZED VIEW prices.mv_ohlcv_1m_to_15m
+REFRESH EVERY 1 MINUTE APPEND
 TO prices.price_ohlcv_15m AS
 SELECT
-    toStartOfInterval(timestamp, INTERVAL 15 MINUTE) AS timestamp,
+    toStartOfInterval(t.timestamp, INTERVAL 15 MINUTE) AS timestamp,
     asset_id,
     quote_asset_id,
     source,
-    argMin(open,  timestamp) AS open,
-    max(high)                 AS high,
-    min(low)                  AS low,
-    argMax(close, timestamp)  AS close,
-    sum(volume_base)          AS volume_base,
-    sum(volume_quote_usd)     AS volume_quote_usd,
-    sum(volume_quote_usd) / nullIf(sum(volume_base), 0) AS vwap,
-    sum(trade_count)          AS trade_count,
-    max(version)              AS version
-FROM prices.price_ohlcv_1m
+    -- Every price aggregate is conditional: a coarse candle's prices come from
+    -- its price-forming children only, so a dust-only child reaches none of
+    -- them (ADR 0287). A bucket with no such child gets no price.
+    argMinIf(t.open,  t.timestamp, t.pf_trade_count > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0)                  AS high,
+    minIf(t.low,  t.pf_trade_count > 0)                  AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    sum(t.volume_base)      AS volume_base,   -- volume and counts cover EVERY
+    sum(t.volume_quote_usd) AS volume_quote_usd,  -- child, dust included
+    sum(t.volume_quote) / nullIf(sum(t.volume_base), 0) AS vwap,
+    sum(t.trade_count)     AS trade_count,
+    sum(t.version)         AS version,
+    sum(t.pf_trade_count)  AS pf_trade_count,
+    sum(t.pf_volume)       AS pf_volume,
+    sum(t.pf_price_volume) AS pf_price_volume
+FROM prices.price_ohlcv_1m AS t FINAL
 GROUP BY timestamp, asset_id, quote_asset_id, source;
--- ... repeat for 15m→1h, 1h→4h, 4h→1d, 1d→1w, 1w→1M.
+-- ... repeat for 15m→1h, 1h→4h, 4h→1d, 1d→1w — and 1d→1M, because a week
+-- straddling a month would otherwise hand the month's close and extremes to
+-- whichever month owned that week.
 ```
 
 **Why per-granularity tables + MV chain (ADR 0007 §3.4):**
@@ -636,45 +655,77 @@ date, the response includes a `backfill_note` field indicating how far back data
       "volume_base": "125000.00",
       "volume_quote_usd": "125037.50",
       "vwap": "1.0003",
-      "trade_count": 47
+      "trade_count": 47,
+      "pf_trade_count": 45,
+      "pf_vwap": "1.0003",
+      "close_divergent": false
     }
   ]
 }
 ```
 
-**⚠️ Dust prints — a present price that is not a market price (task 0116).**
+**Where a candle's prices come from (ADR 0287, task 0286).**
 
-A bucket whose entire volume is one or two **stroops** (`1e-7`, the smallest
-amount Stellar can represent) in a single trade sets `close` from an order too
-small to carry price information. Someone sells a millionth of a token for two
-XLM, and the implied unit price is millions of dollars. The arithmetic is
-correct and the trade really happened — the input is meaningless, and it costs a
-fraction of a cent to mint one.
+A candle's prices come only from the **price-forming trades of its own bucket**:
 
-Measured on production `price_ohlcv_1h`:
+- `open` — the first price-forming trade of the bucket,
+- `close` — the last one,
+- `high` / `low` — the extremes among them,
+- `pf_vwap` — their volume-weighted mean.
+
+Nothing is averaged across buckets and nothing is carried over from a
+neighbouring one. A bucket that held no price-forming trade therefore has **no
+price at all**: `open`, `high`, `low`, `close`, `vwap` and `pf_vwap` come back
+`null`, while `volume_base`, `volume_quote_usd` and `trade_count` are still
+present — it traded, and saying otherwise would turn "nothing here could set a
+price" into "did not trade".
+
+**Why a trade may not form a price.** A fill's price is the ratio of the two
+integer amounts exchanged, both in **stroops** (`1e-7`, the smallest amount
+Stellar can represent). A fill of a few stroops therefore prints an exact small
+fraction — `1/17`, `5/34` — that is arithmetically correct and can sit hundreds
+of percent off the market. Someone sells a millionth of a token for two XLM and
+the implied unit price is millions of dollars; it costs a fraction of a cent to
+mint one. A fill counts as price-forming only when the rounding of its own
+amounts cannot move its price by more than 0.1%.
+
+Measured on production `price_ohlcv_1h` **before** this rule:
 
 | month                     | one-stroop buckets over $1,000 | worst `close`                 |
 | ------------------------- | ------------------------------ | ----------------------------- |
 | 202502 (repaired history) | **85.0%**                      | $29,606,748 on ~$3 of volume  |
 | 202608 (live-written)     | 22.3%                          | $3,517,649 on $0.35 of volume |
 
-The effect decays cleanly with trade size: buckets carrying at least one whole
-token exceed $1,000 just **0.11%** (202502) and **0.008%** (202608) of the time.
+**What the response tells you about it.** Two fields describe the bucket's
+price quality directly, so a consumer no longer has to infer it from size:
 
-`volume_base` and `trade_count` are on every candle, so a consumer can identify
-these without extra fields: `trade_count == 1` together with a `volume_base` of
-`0.0000001`-`0.0000009` is a single smallest-possible order.
+| field             | meaning                                                                                                                                           |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pf_trade_count`  | How many of the bucket's trades formed its price. Always `<= trade_count`. **`0` means the bucket has no price** and every price field is `null`. |
+| `pf_vwap`         | The volume-weighted mean of those trades — `vwap` with the dust left out, denominated like `close` and bounded by the published `low`/`high`.     |
+| `close_divergent` | `true` when `close` is more than 1% away from `pf_vwap`.                                                                                          |
 
-> **Do not filter on size alone.** Of the dust buckets that can be checked
-> against a non-dust reference price for the same pair, **a third are priced
-> correctly** — one stroop of a genuinely expensive asset is a real order at the
-> right price. A bare size threshold therefore misclassifies precisely the
-> assets worth the most. Use it to suppress an outlier you already doubt, not as
-> a standalone quality verdict.
+`vwap` still weights **every** trade in the bucket, dust included, because a
+volume-weighted mean is a volume question; `pf_vwap` is the price-quality one.
+Where the two disagree, prefer `pf_vwap` for ranking and valuation.
 
-`volume_quote_usd` is **not** affected: these buckets carry a few dollars at
-most, so volume aggregates are undistorted. Only the price fields need the
-filter.
+`close_divergent` is not an error flag. The close is a single trade — the last
+one that formed a price — while `pf_vwap` is the whole bucket's mean, so a wide
+gap marks a thin or one-sided bucket: the close remains the right answer to
+"what did it last trade at" and a poor answer to "what is it worth". Both
+fields are `null` on the synthesized USDC self-series, which is built from rate
+observations and has no trades to count.
+
+`volume_quote_usd` is **not** affected by dust: those buckets carry a few
+dollars at most, so volume aggregates were never distorted. Only the price
+fields needed the rule.
+
+> **Historical caveat.** Rows written before this change carry
+> `pf_trade_count = trade_count` — the old assertion that every fill formed a
+> price. Candles from that era therefore still publish a dust close and report
+> no divergence. The history is re-ingested under the new definition in a later
+> phase of task 0286; until then, `pf_trade_count` is authoritative only for
+> buckets the current ingest wrote.
 
 Separately, 93% of dust buckets belong to assets with **no** non-dust trading
 anywhere in the month — there is no reference price to check them against, and

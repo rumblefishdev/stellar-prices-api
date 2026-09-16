@@ -446,15 +446,13 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "Candle",
         "volume_base",
-        "Volume in units of the asset — the base side of each trade. With `trade_count` \
-         this is what identifies a dust print: a bucket whose entire volume is one trade \
-         of the smallest amount Stellar can represent (0.0000001) takes its close from an \
-         order far too small to be a market price, and such closes reach millions of \
-         dollars on a few dollars of volume. Exclude those buckets before charting or \
-         ranking prices. Volume itself is unaffected — they carry almost none. Size alone \
-         is not a quality verdict, though: a smallest-unit trade of a genuinely expensive \
-         asset is a real order at the right price, so use this to suppress a price you \
-         already have reason to doubt rather than as a blanket filter.",
+        "Volume in units of the asset — the base side of each trade, over EVERY trade in \
+         the bucket including the ones too small to form a price. It is therefore a \
+         complete activity figure and not a price-quality signal: `pf_trade_count` is the \
+         one to read for that, and a bucket that traded only in such amounts reports its \
+         volume here with no price at all.\n\nVolume is undistorted by those trades — \
+         they carry almost none — which is why it stays unfiltered where the price fields \
+         do not.",
     ),
     (
         "Candle",
