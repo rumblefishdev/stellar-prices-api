@@ -22,6 +22,14 @@ history:
       and were checked by hand (longest 467). A later edit there fails in
       CloudFormation, mid-deploy, not at synth — the exact failure the guard
       exists to prevent.
+  - date: 2026-09-16
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Noted an adjacent guard/coverage mismatch in the lore framework itself —
+      see "Adjacent observation" below. Deliberately parked here as a note
+      rather than given an id, and explicitly OUTSIDE this task's acceptance
+      criteria: different system, not a CDK stack.
 ---
 
 # The alarm-description length guard must cover every stack that builds alarms
@@ -50,3 +58,34 @@ after the deploy has started.
       at synth.
 - [ ] A deliberately over-long `-errors` description fails synth with the
       guard's own message, recorded in this task.
+
+## Adjacent observation — the lore validator has the same shape of defect
+
+⚠️ **Not in scope for this task. Not an acceptance criterion.** Parked here
+because it is the same failure pattern — a guard whose schema does not match the
+artifacts it is supposed to check — and because it is small enough that minting
+an id for it would cost more than the fix.
+
+Found 2026-09-16 while validating the [[0226]] / [[0241]] / [[0256]] edits:
+`lore-framework_validate` reports
+
+```
+history.0.date: Expected string, received date
+```
+
+on **every** history entry of every task it checks, including entries written
+months ago and untouched since. Measured across `lore/1-tasks/`:
+
+| form | task files |
+|---|---|
+| `- date: 2026-09-16` (unquoted → YAML parses it as a date) | **342** |
+| `- date: "2026-09-16"` (quoted → string) | 39 |
+
+And `lore/1-tasks/_template.md:11` specifies the **unquoted** form, so the
+template the repo tells you to copy produces files the validator rejects.
+
+🔑 The consequence is that the validator cannot currently be used as a gate:
+it fails on ~90% of the corpus, so a real error would be indistinguishable from
+the background noise. Whoever picks this up has to decide which side is wrong —
+accepting a YAML date in the schema is one edit; requantifying 342 files and the
+template is the other. Nobody owns this today.
