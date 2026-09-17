@@ -740,7 +740,16 @@ const VWAP_RAW: &str = "toDecimal128OrNull(toString( \
 /// a floor is needed and roughly where the noise lives, not that 100 ticks is
 /// the uniquely right line. Rows below it are treated as unpriced (§5): the
 /// bucket returns, without price fields.
-const PRECISION_FLOOR: &str = "toDecimal128('0.000000000001', 14)";
+///
+/// ⚠️ The SAME line the coarse rollups gate on (`rollup_sql::PRICE_FORMING_CHILD`)
+/// and the ingest refuses to form a price at (`price_survives_column_scale`) —
+/// which is why the value lives in `prices-clickhouse`, the one crate all three
+/// see (review WR-03). It used to be this arm's line only: the rollups gated at
+/// `close > 0`, so a 1m child with `close = 1.86e-12, low = 9e-14` gave its
+/// `low` to `minIf` and the parent — whose own `close` cleared this floor —
+/// published `low = 0.00000000000009`. 24 `1d` rows on the verification
+/// database carried that shape.
+const PRECISION_FLOOR: &str = prices_clickhouse::PRICE_FLOOR_SQL;
 
 /// The price-forming mean in USD mode, before clamping — task 0286.
 ///
@@ -2600,6 +2609,18 @@ mod tests {
         assert!(
             PF_ROWS.contains(PRECISION_FLOOR),
             "the two arms must floor prices at the same value: {PF_ROWS}"
+        );
+        // Review WR-03: and so must the coarse rollups, or the read path
+        // refuses a price the tier below it already baked into a `low`.
+        assert_eq!(
+            PRECISION_FLOOR,
+            prices_clickhouse::PRICE_FLOOR_SQL,
+            "one floor for the ingest, the rollups and the read path"
+        );
+        assert!(
+            prices_clickhouse::rollup_sql::PRICE_FORMING_CHILD.contains(PRECISION_FLOOR),
+            "the coarse gate must draw the same line: {}",
+            prices_clickhouse::rollup_sql::PRICE_FORMING_CHILD
         );
         assert!(
             PF_ROWS.starts_with("pf_trade_count > 0 AND close >= "),

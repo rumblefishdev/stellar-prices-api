@@ -1443,6 +1443,57 @@ mod tests {
         );
     }
 
+    /// Review WR-03: the AMM arm draws the same line as the classic one. A
+    /// quotient AT `1e-12` forms a price; one just below it does not. Both
+    /// fixtures clear the rounding bound on the raw amounts by orders of
+    /// magnitude, so the floor is what decides.
+    #[test]
+    fn the_amm_arm_draws_the_line_at_the_precision_floor() {
+        const POOL: &str = "CDBBBNMCWRMWEIFHUD5BXBCRTW6QM33ZEXIOBGKKQNDSH3WEF7WVBGMI";
+        const T0: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const T1: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+        // This pair canonicalises INVERTED, so the candle's price is
+        // amount_in / amount_out (see the fixture above).
+        const AMOUNT_OUT: i128 = 2_000_000_000_000_000;
+
+        fn trade(amount_in: i128, amount_out: i128) -> extractors_core::TradeRow {
+            extractors_core::TradeRow {
+                venue: Venue::Soroswap,
+                contract_id: POOL.to_string(),
+                transaction_id: "tx".to_string(),
+                ledger_sequence: 100,
+                first_event_index: 0,
+                token_in: T0.to_string(),
+                token_out: T1.to_string(),
+                amount_in,
+                amount_out,
+                fee: None,
+                trader: None,
+            }
+        }
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+
+        assert!(price_forming_i128(2_000, AMOUNT_OUT));
+        let at_floor = amm_trade_to_tick(&trade(2_000, AMOUNT_OUT), 0, 1_700_000_000, &mut assets)
+            .expect("the swap prices");
+        assert_eq!(at_floor.price, Decimal::new(1, 12), "the fixture is 1e-12");
+        assert!(at_floor.price_forming, "the floor itself is a price");
+
+        assert!(price_forming_i128(1_980, AMOUNT_OUT));
+        let under = amm_trade_to_tick(&trade(1_980, AMOUNT_OUT), 0, 1_700_000_000, &mut assets)
+            .expect("the swap still produces a tick");
+        assert_eq!(under.price, Decimal::new(99, 14), "the fixture is 9.9e-13");
+        assert!(
+            !under.price_forming,
+            "under the floor a stored price is quantisation noise, not a swap price"
+        );
+        assert!(
+            under.volume_base > Decimal::ZERO && under.volume_quote > Decimal::ZERO,
+            "the swap keeps its volumes"
+        );
+    }
+
     /// Task 0286 / ADR 0287 §1 — an AMM fill is classified on the RAW i128
     /// amounts the swap event carries, in each token's own decimals, BEFORE
     /// `AMM_AMOUNT_SCALE` turns them into `Decimal`s. Once scaled they are

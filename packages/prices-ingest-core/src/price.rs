@@ -46,8 +46,9 @@ pub fn offer_price(n: i32, d: i32, inverted: bool) -> Option<Decimal> {
 /// handing ClickHouse the mantissa.
 pub const CANDLE_PRICE_SCALE: u32 = 14;
 
-/// Does this price survive the trip into a `Decimal(38, 14)` column, or does it
-/// round away to nothing (task 0286, VERIFY-0286-local discrepancy 4)?
+/// Is this price a number a `Decimal(38, 14)` column can carry as a
+/// MEASUREMENT — neither noise at the bottom of the column nor past its top
+/// (task 0286, VERIFY-0286-local discrepancy 4; review WR-03)?
 ///
 /// The rounding bound below reasons about the AMOUNTS a ratio price divides; it
 /// says nothing about where the quotient lands. A fill of 33 387 840 110.63
@@ -63,6 +64,15 @@ pub const CANDLE_PRICE_SCALE: u32 = 14;
 /// the verdict cannot drift from what `writer::decimal_to_i128` actually
 /// stores.
 ///
+/// ## The floor is [`candle_price_floor`], not one tick (review WR-03)
+///
+/// Storable is not the same as meaningful. A price of a few ticks is
+/// quantisation noise, and the read path has always refused it — so the ingest
+/// drawing its line at "does not round to 0" while `/ohlcv` and the rollups
+/// drew theirs at `1e-12` let a 1m child with `close = 1.86e-12, low = 9e-14`
+/// feed its `low` into `minIf` and be published on a coarse row whose own close
+/// cleared the floor. ONE line, everywhere: `prices_clickhouse::PRICE_FLOOR_*`.
+///
 /// ## The other end of the column (review A WR-01 / D F2)
 ///
 /// The same argument runs upward. `Decimal(38, 14)` holds 38 significant
@@ -72,9 +82,25 @@ pub const CANDLE_PRICE_SCALE: u32 = 14;
 /// AMM path: 1 001 raw units in against 7.9e28 out clears the rounding bound
 /// on both legs and prices at ~7.9e25. Such a fill counts in volume and in
 /// `trade_count` like any other; it just prices nothing.
+///
+/// ⚠️ The upper bound is [`candle_price_column_max`] = `10^24 - 1`, while the
+/// column actually holds up to `10^24 - 1e-14` (review IN-02). Prices in the
+/// open interval `(10^24 - 1, 10^24)` are therefore storable and classified as
+/// non-price-forming. Unreachable in practice — there is no market at 1e24 —
+/// and the whole-integer bound is the one `bucket.rs`'s volume clamp shares.
 pub fn price_survives_column_scale(price: Decimal) -> bool {
-    let rounded = price.round_dp(CANDLE_PRICE_SCALE);
-    !rounded.is_zero() && rounded.abs() <= candle_price_column_max()
+    let rounded = price.round_dp(CANDLE_PRICE_SCALE).abs();
+    rounded >= candle_price_floor() && rounded <= candle_price_column_max()
+}
+
+/// The smallest price that means anything: `prices_clickhouse::PRICE_FLOOR_LITERAL`
+/// = `1e-12`, 100 ticks of the `Decimal(38, 14)` price columns.
+///
+/// Built from parts rather than parsed so it is cheap on the hot path;
+/// `the_ingest_floor_is_the_sql_floor` pins it to the shared literal the SQL
+/// gates use, so the two cannot drift.
+pub fn candle_price_floor() -> Decimal {
+    Decimal::from_i128_with_scale(1, 12)
 }
 
 /// The largest value a `Decimal(38, 14)` candle column can hold: 38 significant
@@ -197,31 +223,54 @@ mod tests {
         assert!(!rounding_bound_holds(5, huge));
     }
 
-    /// Task 0286, VERIFY-0286-local discrepancy 4: a price below the column's
-    /// 1e-14 resolution stores as 0, and a fill that cannot print a price
-    /// cannot form one. The boundary is the writer's rounding, not truncation.
+    /// Review WR-03: ONE floor, `1e-12`, the same line the read path and the
+    /// rollups draw. A price below it is quantisation noise wearing a number —
+    /// a handful of `Decimal(38, 14)` ticks — so it does not form a price here
+    /// either, and no coarse tier can inherit it as a `low`.
     #[test]
-    fn a_price_under_the_column_resolution_is_not_representable() {
-        assert!(price_survives_column_scale(Decimal::new(1, 14)), "1e-14");
+    fn a_price_under_the_precision_floor_is_not_price_forming() {
         assert!(
-            price_survives_column_scale(Decimal::new(6, 15)),
-            "6e-15 rounds up to 1e-14, exactly as the writer rounds it"
+            price_survives_column_scale(candle_price_floor()),
+            "1e-12 is the floor itself and forms price"
+        );
+        assert!(
+            !price_survives_column_scale(Decimal::new(99, 14)),
+            "9.9e-13 is below the floor: ~99 ticks of quantisation noise"
+        );
+        assert!(
+            !price_survives_column_scale(Decimal::new(1, 14)),
+            "1e-14 is one tick — storable, and not a measurement of anything"
         );
         assert!(
             !price_survives_column_scale(Decimal::new(5, 15)),
-            "5e-15 is the midpoint and `round_dp` takes the EVEN neighbour: zero"
-        );
-        assert!(
-            !price_survives_column_scale(Decimal::new(49, 16)),
-            "4.9e-15 rounds to zero"
+            "below the column resolution, so it never even stored"
         );
         assert!(
             !price_survives_column_scale(Decimal::ZERO),
             "no price at all is no price"
         );
         assert!(
-            price_survives_column_scale(Decimal::new(-1, 14)),
+            price_survives_column_scale(-candle_price_floor()),
             "the rule is about magnitude; a negative price is a bug elsewhere"
+        );
+        assert!(
+            !price_survives_column_scale(Decimal::new(-99, 14)),
+            "and magnitude is all it is about: -9.9e-13 is still under the floor"
+        );
+    }
+
+    /// The floor is one number for the whole system: the ingest's `Decimal` and
+    /// the SQL literal the rollups and `/ohlcv` gate on are the same value.
+    #[test]
+    fn the_ingest_floor_is_the_sql_floor() {
+        use std::str::FromStr;
+        assert_eq!(
+            candle_price_floor(),
+            Decimal::from_str(prices_clickhouse::PRICE_FLOOR_LITERAL).unwrap()
+        );
+        assert!(
+            prices_clickhouse::PRICE_FLOOR_SQL.contains(prices_clickhouse::PRICE_FLOOR_LITERAL),
+            "the SQL fragment must carry the literal it claims to"
         );
     }
 

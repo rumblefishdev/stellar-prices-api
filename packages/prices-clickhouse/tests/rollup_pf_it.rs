@@ -108,6 +108,27 @@ impl Minute {
         }
     }
 
+    /// Review WR-03: a 1m child whose whole price band sits UNDER the precision
+    /// floor — a handful of `Decimal(38, 14)` ticks, which is quantisation noise
+    /// rather than a measurement. It passed a `close > 0` gate, so `minIf` gave
+    /// its `low` to every coarse tier while the read path, which has always
+    /// floored at `1e-12`, refused the same number. 73 such rows on the local
+    /// verification database.
+    const fn sub_floor(ts: &'static str) -> Self {
+        Self {
+            ts,
+            open: "0.00000000000091",
+            high: "0.00000000000091",
+            low: "0.00000000000009",
+            close: "0.00000000000091",
+            volume_base: "1000",
+            volume_quote: "0.00000000091",
+            close_usd: "0",
+            trade_count: 19,
+            pf_trade_count: 19,
+        }
+    }
+
     /// A DUST-ONLY minute: fills happened and count in volume, but not one of
     /// them formed a price, so the candle has none (ADR 0287 §3).
     const fn dust(ts: &'static str) -> Self {
@@ -521,6 +542,69 @@ async fn vwap_and_close_usd_survive_the_decimal_overflow_threshold() {
             0.0,
             &format!("{table}: vwap with no base volume"),
         );
+    }
+
+    teardown(&admin, db).await;
+}
+
+/// Review WR-03: the coarse gate and the read path draw the SAME line, `1e-12`.
+///
+/// RED with the `t.close > 0` gate this replaces: the sub-floor child passes it,
+/// `minIf` takes its `low = 9e-14` on every tier, and the coarse row publishes
+/// that low beside a close of 1.1 — a price the read path would have refused had
+/// it been asked about the child directly.
+///
+/// ⚠️ What this gate does NOT close, and cannot: a LEGACY child whose `close`
+/// clears the floor while its `low` does not (21 such `1m` rows locally, feeding
+/// 24 `1d` rows). The gate is asked about `close`, and that close is a real
+/// price. Post-0286 the shape is unwritable — `low` is the minimum over
+/// price-forming fills and every one of those now clears the floor
+/// (`price::price_survives_column_scale`) — so it dies with the phase-3
+/// re-ingest, not here.
+#[tokio::test]
+#[ignore = "requires the local ClickHouse 26.3.10.60"]
+async fn a_child_priced_under_the_precision_floor_reaches_no_price_aggregate() {
+    let db = "it_rollup_pf_sub_floor";
+    let admin = setup(db).await;
+
+    admin
+        .query(&insert_minutes(
+            db,
+            &[
+                Minute::priced("2026-04-02 00:00:00", "1.0", "1.5", "0.9", "1.1", "0"),
+                Minute::sub_floor("2026-04-02 00:01:00"),
+            ],
+        ))
+        .execute()
+        .await
+        .expect("insert minutes");
+
+    preroll(&admin, db).await;
+
+    for table in COARSE {
+        let [open, high, low, close, _, _] = candle(&admin, db, table, "").await;
+        approx(open, 1.0, &format!("{table}: open"));
+        approx(high, 1.5, &format!("{table}: high"));
+        approx(
+            low,
+            0.9,
+            &format!("{table}: low — 9e-14 is quantisation noise, not this bucket's low"),
+        );
+        approx(
+            close,
+            1.1,
+            &format!(
+                "{table}: close — the sub-floor row landed LAST and must not close the bucket"
+            ),
+        );
+
+        // Its volume is real and still counted; only its "price" is refused.
+        let trade_count = scalar(
+            &admin,
+            &format!("SELECT toFloat64(sum(trade_count)) FROM {db}.{table} FINAL"),
+        )
+        .await;
+        approx(trade_count, 21.0, &format!("{table}: trade_count"));
     }
 
     teardown(&admin, db).await;

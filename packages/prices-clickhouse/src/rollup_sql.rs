@@ -17,7 +17,7 @@
 //!
 //! - `open`/`close` are the first/last child that HAS a price-forming fill, and
 //!   `high`/`low` their extremes (`argMinIf`/`argMaxIf`/`maxIf`/`minIf` on
-//!   [`PRICE_FORMING_CHILD`] — `pf_trade_count > 0 AND close > 0`, because on a
+//!   [`PRICE_FORMING_CHILD`] — `pf_trade_count > 0 AND close >= 1e-12`, because on a
 //!   pre-0286 row the first term is a DEFAULT and says nothing). A dust-only
 //!   child — every fill too small for its price to mean anything, so
 //!   `open = high = low = close = 0` — can no longer become a coarse `low` of 0
@@ -284,11 +284,26 @@ fn lower_bound(tier: &Tier, bounds: &Bounds<'_>) -> Result<Option<String>, Rollu
 /// per tier in the local verification database — and stays there until phase 3
 /// re-ingests the history.
 ///
-/// `close > 0` closes it, and costs nothing on a post-0286 row, where
+/// A floor on `close` closes it, and costs nothing on a post-0286 row, where
 /// `pf_trade_count > 0` already implies a printable price. The four price
 /// columns are written together, so gating them all on `close` is the same
 /// question asked once rather than four nearly-identical questions.
-pub const PRICE_FORMING_CHILD: &str = "t.pf_trade_count > 0 AND t.close > 0";
+///
+/// ⚠️ The floor is [`crate::PRICE_FLOOR_SQL`] (`1e-12`), NOT `> 0` (review
+/// WR-03). `/ohlcv` has always refused a price under that line as quantisation
+/// noise, and the coarse gate used to sit at `> 0`, so a 1m child with
+/// `close = 1.86e-12, low = 9e-14` passed here, gave the parent its `low` via
+/// `minIf`, and was then published — the coarse row's own `close` cleared the
+/// read path's floor, so nothing downstream looked at the `low` again. 24 `1d`
+/// rows on the verification database carried exactly that shape. One line, in
+/// all three languages: here, in `queries_ch.rs` and in
+/// `price::price_survives_column_scale`.
+///
+/// The literal is spelled out rather than built from `PRICE_FLOOR_SQL`, because
+/// a `const` cannot be concatenated from another; `the_price_gate_uses_the_shared_floor`
+/// pins them together.
+pub const PRICE_FORMING_CHILD: &str =
+    "t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)";
 
 /// The coarse rollup SELECT for one tier — the body of its MV and of every
 /// bounded re-roll. See the module docs for what each projection means.
@@ -498,6 +513,20 @@ mod tests {
         }
     }
 
+    /// Review WR-03: the coarse gate and the read path's gate are ONE line.
+    #[test]
+    fn the_price_gate_uses_the_shared_floor() {
+        assert!(
+            PRICE_FORMING_CHILD.contains(crate::PRICE_FLOOR_SQL),
+            "the coarse gate must carry `{}`, got `{PRICE_FORMING_CHILD}`",
+            crate::PRICE_FLOOR_SQL
+        );
+        assert!(
+            PRICE_FORMING_CHILD.contains("t.close >="),
+            "a floor, not a `> 0` presence check"
+        );
+    }
+
     /// The price gate, in the exact spelling every downstream reader greps for.
     /// Each of the four price aggregates must be conditional on the child having
     /// a price-forming fill, and each must appear exactly once per statement.
@@ -505,10 +534,10 @@ mod tests {
     fn every_price_aggregate_is_gated_on_a_price_forming_child() {
         for (what, sql) in every_rendering() {
             for needle in [
-                "argMinIf(t.open, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS open",
-                "maxIf(t.high, t.pf_trade_count > 0 AND t.close > 0) AS high",
-                "minIf(t.low, t.pf_trade_count > 0 AND t.close > 0) AS low",
-                "argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS close",
+                "argMinIf(t.open, t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS open",
+                "maxIf(t.high, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS high",
+                "minIf(t.low, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS low",
+                "argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS close",
                 "sum(t.pf_trade_count) AS pf_trade_count",
                 "sum(t.pf_volume) AS pf_volume",
                 "sum(t.pf_price_volume) AS pf_price_volume",
@@ -532,6 +561,9 @@ mod tests {
                 // `pf_trade_count` DEFAULTs to `trade_count` there.
                 "maxIf(t.high, t.pf_trade_count > 0)",
                 "minIf(t.low, t.pf_trade_count > 0)",
+                // The `> 0` floor: true on a child whose close is a handful of
+                // `Decimal(38, 14)` ticks, i.e. quantisation noise (WR-03).
+                "t.pf_trade_count > 0 AND t.close > 0",
             ] {
                 assert!(
                     !sql.contains(forbidden),

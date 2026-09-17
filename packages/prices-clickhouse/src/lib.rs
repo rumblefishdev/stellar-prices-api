@@ -70,6 +70,35 @@ pub const CANDLE_COLUMNS: [&str; 18] = [
     "pf_price_volume",
 ];
 
+/// The smallest price this system treats as a price, as a decimal literal
+/// (task 0286, review WR-03).
+///
+/// Candle price columns are `Decimal(38, 14)`, so one tick is `1e-14` and this
+/// floor is 100 of them — a value at the threshold still carries ~2 significant
+/// digits. Below it, a stored price is quantisation noise: a row measured on
+/// prod carries `close = 5e-14` beside `close_usd = 4e-14`, five ticks over
+/// four, whose ratio (1.25) looks perfectly ordinary. No check on a derived
+/// value can reject that; the inputs are what is wrong.
+///
+/// ⚠️ The exact figure is a judgement — the measurement establishes that a floor
+/// is needed and roughly where the noise lives, not that 100 ticks is the
+/// uniquely right line. What is NOT a judgement is that it must be ONE line:
+/// the rollups used to gate coarse prices at `close > 0` while `/ohlcv` refused
+/// anything under this floor, and 24 `1d` rows on the verification database
+/// published `low = 9e-14` beside a floor-clearing close as a result.
+///
+/// Lives here because `prices-clickhouse` is the one crate the ingest
+/// (`prices-ingest-core`), the read path (`prices-api`) and the enrichment
+/// worker all depend on.
+pub const PRICE_FLOOR_LITERAL: &str = "0.000000000001";
+
+/// [`PRICE_FLOOR_LITERAL`] as the SQL expression every gate compares against.
+///
+/// The explicit `toDecimal128(…, 14)` is not decoration: compared against a
+/// `Decimal(38, 14)` column, a bare float literal would make ClickHouse pick a
+/// float comparison and re-introduce the rounding the floor exists to exclude.
+pub const PRICE_FLOOR_SQL: &str = "toDecimal128('0.000000000001', 14)";
+
 /// Every `price_ohlcv_*` grain suffix, in rollup order. The `CREATE … AS` copies
 /// do NOT inherit a post-hoc base-table `ALTER`, so every migration in
 /// `init.sql` has to be applied per table — this is the list it iterates, and

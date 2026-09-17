@@ -224,6 +224,61 @@ mod tests {
         );
     }
 
+    /// Review WR-03: the ingest's floor is the read path's floor. A ratio price
+    /// AT `1e-12` forms a price; one just below it does not, however clean its
+    /// two legs are. Both fixtures clear the rounding bound by orders of
+    /// magnitude — the bound is not what is deciding here.
+    #[test]
+    fn the_ratio_arm_draws_the_line_at_the_precision_floor() {
+        let mut registry = AssetRegistry::from_existing(vec![]);
+
+        // 2e15 stroops sold for 2 000 bought: 1e-12 exactly.
+        let at_floor = raw_trade_to_tick(&trade(2_000_000_000_000_000, 2_000), &mut registry);
+        assert_eq!(at_floor.price, Decimal::new(1, 12), "the fixture is 1e-12");
+        assert!(
+            crate::price::price_forming_i64(2_000_000_000_000_000, 2_000),
+            "the bound passes it, or the floor is not what the test measures"
+        );
+        assert!(at_floor.price_forming, "the floor itself is a price");
+
+        // The same sold leg for 1 980 bought: 9.9e-13, one hundredth under.
+        let under = raw_trade_to_tick(&trade(2_000_000_000_000_000, 1_980), &mut registry);
+        assert_eq!(under.price, Decimal::new(99, 14), "the fixture is 9.9e-13");
+        assert!(
+            crate::price::price_forming_i64(2_000_000_000_000_000, 1_980),
+            "the bound passes this one too"
+        );
+        assert!(
+            !under.price_forming,
+            "under the floor a stored price is quantisation noise, not a trade"
+        );
+        assert_eq!(
+            under.volume_base,
+            crate::price::stroops_to_decimal(2_000_000_000_000_000),
+            "and it is still a real trade"
+        );
+    }
+
+    /// The offer arm meets the same floor, and can never fall foul of it: `n`
+    /// and `d` are `i32`s, so the smallest offer price expressible at all is
+    /// `1 / i32::MAX` ~= 4.7e-10, three orders of magnitude ABOVE the floor.
+    /// Pinned so the claim in `raw_trade_to_tick`'s comment — that the rule only
+    /// ever binds on a ratio price — stays true if the floor moves.
+    #[test]
+    fn the_offer_arm_cannot_price_under_the_floor() {
+        let mut registry = AssetRegistry::from_existing(vec![]);
+
+        let mut smallest = trade(50_000_000, 10_000_000);
+        smallest.price_source = PriceSource::Offer { n: 1, d: i32::MAX };
+        let tick = raw_trade_to_tick(&smallest, &mut registry);
+        assert_eq!(tick.price, Decimal::from(1) / Decimal::from(i32::MAX));
+        assert!(
+            tick.price > crate::price::candle_price_floor(),
+            "the smallest offer price an i32 pair can express is above the floor"
+        );
+        assert!(tick.price_forming);
+    }
+
     /// An offer price is exact at any fill SIZE, but the amounts still have to
     /// BE a fill. `price_forming_i64` rejects a non-positive amount because no
     /// valid claim carries one; honouring an offer price there would make such a
