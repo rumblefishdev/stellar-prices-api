@@ -64,6 +64,21 @@ history:
       readings and are un-ticked here. Also recorded: a fourth fix option
       (ledger in the sort key), a cost analysis that removes cost from the
       decision, and that PR #313 already carries a fix awaiting review.
+  - date: 2026-09-17
+    status: active
+    who: okarcz
+    note: >
+      PR #313 review items closed, NOT merged, NOT deployed. The Protocol 28
+      hold is over ([[0277]] closed clean). Merged develop in again (54 behind,
+      clean), and added tests/reconcile_drain.rs — the multi-run test the review
+      asked for: steady state one ledger per doorbell, a backlog drain at
+      budgets 32 and 16, and a minute denser than the budget. Reverting to the
+      old flush-everything code fails the first two; disabling the escape hatch
+      fails the third. Corrected the false idempotency docstring, the WARN text,
+      and a stale maxIterations 16 comment. Workspace 974 pass / 0 fail, CI
+      green on b3559af. Decided NOT to add a LedgersHeldBack metric: held-back
+      ledgers are not lost, so it has no alarm threshold and does not close the
+      observability criterion.
 ---
 
 # Aquarius live ingestion drops about half of every day's trades
@@ -352,7 +367,60 @@ invocations in durable state, or move `1m` to a summing engine so concurrent
 partial writes add. The last changes the table contract and needs its own
 decision.
 
-### ⏳ PR #313 already carries a fix — open, unreviewed
+### ⏳ PR #313 carries the fix — review items closed, NOT merged, NOT deployed
+
+**State 2026-09-17:** head `b3559af`, `develop` merged in, all four CI checks
+green. Nothing merged and nothing deployed — both wait on the operator.
+
+What changed since the review:
+
+- ✅ **Escape hatch alarmed** (`a2de661`) — `ForcedPartialFlushes` metric and
+  `prices-{env}-ledger-processor-forced-partial-flush` alarm. `maxIterations`
+  raised **16 → 32** in `infra/envs/production.json`.
+- ✅ **Multi-run test added** (`b3559af`) — `tests/reconcile_drain.rs`
+  re-stamps one fixture ledger into a longer chain served from memory, then
+  drives `run()` repeatedly. Pins four properties: each complete minute is
+  written **exactly once**, with its **whole** trade count; the cursor parks on
+  a **minute boundary** after every run; the drain **terminates**, holding back
+  only the open minute. Covers steady state (one ledger per doorbell), a
+  backlog after an outage (budgets 32 and 16), and a minute denser than the
+  budget.
+  - Proven to bite: with the old flush-everything code put back, the
+    steady-state and backlog tests **fail**; with the escape hatch disabled,
+    the dense-minute test **fails**.
+  - ⚠️ **They self-skip in CI**, like `reconcile_e2e.rs` — the template is a
+    gitignored fixture. They protect local runs only. Running them in CI needs
+    either one committed fixture (a few MB) or a ledger-with-trades builder.
+- ✅ **Docstring corrected** — it no longer claims re-processing is idempotent
+  by `version` collapse (see §"`operation_index` is not stable"). It now states
+  the property the design rests on: **the cursor always parks on a minute
+  boundary**, so no outage splits a minute.
+- ✅ WARN text no longer has source indentation baked in; a comment still
+  quoting `maxIterations: 16` now says 32.
+- ⛔ **`LedgersHeldBack` metric — decided NOT to add** (2026-09-17). Held-back
+  ledgers are not lost, just written a minute later; nearly every run holds
+  back 1-12, so the metric has no alarm threshold. A stopped feed already
+  fires `rollup-freshness-1m`. It would also add a `PutMetricData` call to
+  nearly every run (~15k/day) for no signal. See the observability criterion
+  below for where the real gap is.
+
+### 🔜 Before merging / deploying #313
+
+1. **Merge order with [[0286]]'s PR #320.** Both change
+   `packages/prices-ledger-processor/src/reconcile.rs`,
+   `packages/prices-ingest-core/src/lib.rs` and `infra/src/lib/types.ts`, and
+   #320 lists "0282 deployed" as a precondition. So **#313 merges first and
+   #320 rebases onto it** — to be agreed with its owner.
+2. **Deploy order: ObservabilityStack FIRST, then ComputeStack.** The alarm
+   watches a metric only the new binary emits, and `notBreaching` reads no-data
+   as OK, so landing the alarm early is harmless. The reverse leaves a window
+   where the escape hatch can fire unseen.
+3. **Expect the first run after deploy to write one minute from its tail
+   only.** The old code left the cursor mid-minute. Self-heals from the next
+   minute — do not read it as the fix failing.
+4. **Verify** with the raw-vs-stored comparison over one full day (criterion 2).
+
+### 🗄️ Pre-review notes, 2026-09-15 — kept for the reasoning
 
 `fix/0282_reconcile-flushes-partial-minutes`, "end a reconcile run on a whole
 minute" (588+/24-, 6 files), open and mergeable with **no review**. It holds
@@ -363,7 +431,8 @@ behaves like a warm one.
 
 ⚠️ **Three things to check before it ships:**
 
-1. 🔴 **Do not deploy it across the Protocol 28 crossing.** [[0277]] still owes a
+1. ✅ *(cleared 2026-09-17 — [[0277]] crossed clean and is closed)*
+   🔴 **Do not deploy it across the Protocol 28 crossing.** [[0277]] still owes a
    before/after frontier measurement at the 2026-09-16 17:00 UTC activation.
    Changing the reconcile loop in the same window makes an ingestion hiccup
    un-attributable. Sequence them.
@@ -474,7 +543,7 @@ rewriting them, and it gates the repair decision for **98% of the estate**
 
 | work | depends on | can start |
 | --- | --- | --- |
-| Live fix (PR #313) | [[0277]]'s Protocol 28 crossing finishing first | after 2026-09-16 |
+| Live fix (PR #313) | ~~[[0277]]'s Protocol 28 crossing~~ ✅ done; merge before [[0286]]'s #320 | **now** — operator's merge + deploy |
 | **SDEX quantification** | **nothing** | **now** — see [notes/R-sdex-loss-measurement-design.md](notes/R-sdex-loss-measurement-design.md) |
 | [[0285]] classification | nothing | now |
 | Repair scope decision | SDEX number + 0285 classification | after both |
@@ -524,7 +593,12 @@ just re-corrupts. That constraint is real; it simply does not apply to
       live fix — run it in parallel.
 - [ ] A decision is recorded on repairing the historical estate, with a range.
 - [ ] Live-path drops become observable — a dropped swap leaves a trace
-      somewhere, rather than nothing at all.
+      somewhere, rather than nothing at all. ◐ **Half covered by #313:** the one
+      path that still loses data after the fix — a forced partial flush — is
+      alarmed (`ForcedPartialFlushes`). ⏳ **Still silent:** a swap from a pool
+      the live path cannot resolve. Only the backfill writes
+      `prices.unresolved_pools`, so live leaves no trace at all. Close to
+      [[0285]]; fold it in there or spawn it — not decided.
 - [ ] Phoenix's parallel shortfall is measured and either folded in or spawned.
 
 ## Notes
@@ -534,8 +608,8 @@ just re-corrupts. That constraint is real; it simply does not apply to
   move aquarius by +27% in its window. 0101 is sequenced behind this decision.
 - The reprice tool is **not** implicated and needs no change — its correctness
   is what made this measurable.
-- ⏳ **PR #313 is open and unreviewed** — the fix exists, nothing is deployed.
-  See §"PR #313 already carries a fix".
+- ⏳ **PR #313 is ready, not merged, not deployed** (2026-09-17, CI green on
+  `b3559af`). See §"PR #313 carries the fix".
 - ⚠️ **This task's TITLE still says "and SDEX is affected too"**, which was
   retracted on 2026-09-14. It is what the board renders, so it is worth
   correcting deliberately rather than silently.
