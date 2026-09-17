@@ -4,7 +4,7 @@ title: "The oracle worker loads all 620,615 assets into memory to write 2 rows, 
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0223", "0222", "0167", "0112", "0132", "0256", "0241"]
+related_tasks: ["0223", "0222", "0167", "0112", "0132", "0256", "0241", "0140"]
 tags: [layer-infra, priority-high, effort-medium, oracle, lambda, memory, observability, ops]
 milestone: 2
 links:
@@ -81,6 +81,13 @@ history:
       number exists the size of the problem this task solves is unknown, and
       narrowing `load_assets()` touches callers this task already warns about
       (ledger-processor, the backfills).
+  - date: 2026-09-17
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Cross-linked the oracle's own full-registry write (`lib.rs:569`) — owned
+      by [[0140]], but it sits in the same pass this task rewrites, so the two
+      changes have to be made with each other in view. No scope moved.
 ---
 
 # The oracle worker reads the entire asset registry on every run
@@ -203,6 +210,35 @@ call, 2026-08-26: do not spend headroom to hide a design problem.
 - ⚠️ Whatever ships, the verification is **`Max Memory Used` on real
   invocations**, not a local benchmark. The whole point is behaviour at 620k rows
   and that number is production's.
+
+### The same pass also WRITES the whole registry — `lib.rs:569`, owned by [[0140]]
+
+This task is about the oracle *reading* 209k rows to find two ids. Forty lines
+below the load, the same function can *write* all 209k back:
+
+```rust
+if registry.assets().count() > known_before {
+    writer.write_assets(&registry).await?;   // the whole registry, not the new ids
+}
+```
+
+The guard keeps it silent: it fires only when the pass mints a new `asset_id`,
+and XLM and USDC have had theirs for months ([[0140]]'s AC 4 audit found no
+occurrence in 24 h of logs). But the shape is the one [[0256]] just removed from
+`asset-discovery` — **adding a third tracked symbol would, on its first pass,
+insert one full copy of the registry**, which is exactly the 1×→2× step that
+walked the oracle into its own ceiling.
+
+[[0140]] owns the fix (`write_new_assets` with a watermark, as in
+`ensure_seed`). It is recorded here because the two changes collide:
+
+- **option 1 or 2 above removes `AssetRegistry` from this pass**, and then this
+  call has nothing to write from — it must be replaced in the same change, not
+  left for 0140 to find gone;
+- if [[0140]] lands first, this task inherits a `write_new_assets` call whose
+  watermark comes from the very load it is about to delete.
+
+Whichever task moves first takes this line with it and says so in the other.
 
 ## ⚠️ Deploy hazard — this is the expensive part, not the change
 
