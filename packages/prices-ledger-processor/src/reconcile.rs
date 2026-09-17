@@ -59,7 +59,7 @@
 //! old code left the cursor mid-minute, so that one minute is written from its
 //! tail only. It self-heals from the next minute on.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
 
 use prices_ingest_core::{
@@ -256,6 +256,7 @@ where
         // tally above: a held-back ledger is re-read by every run until its
         // minute closes.
         let mut ledger_unregistered: Vec<(u32, &'static str, u32)> = Vec::new();
+        let mut ledger_unregistered_contracts: Vec<(u32, String)> = Vec::new();
 
         for _ in 0..max_iterations {
             let next = current + 1;
@@ -294,6 +295,11 @@ where
                     sob.unregistered_pool_events
                         .iter()
                         .map(|(source, n)| (minute, *source, *n)),
+                );
+                ledger_unregistered_contracts.extend(
+                    sob.unregistered_pool_contracts
+                        .iter()
+                        .map(|c| (minute, c.clone())),
                 );
                 obj_max = obj_max.max(seq);
             }
@@ -552,8 +558,14 @@ where
             *unregistered_pool_events.entry(source).or_insert(0) += *n as u64;
         }
         if !unregistered_pool_events.is_empty() {
+            let contracts: BTreeSet<&str> = ledger_unregistered_contracts
+                .iter()
+                .filter(|(minute, _)| *minute < flush_boundary)
+                .map(|(_, c)| c.as_str())
+                .collect();
             tracing::warn!(
                 ?unregistered_pool_events,
+                ?contracts,
                 "dropped trades from pools missing from prices.pool_registry (task 0291)"
             );
         }

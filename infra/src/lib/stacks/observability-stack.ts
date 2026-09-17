@@ -1219,7 +1219,7 @@ export class ObservabilityStack extends cdk.Stack {
       {
         alarmName: `prices-${config.envName}-ledger-processor-unregistered-pool`,
         alarmDescription:
-          'The ledger-processor dropped AMM trades from a contract that looks like an Aquarius, Soroswap or Phoenix pool but is missing from prices.pool_registry (task 0291). Those trades produce no candle. The processor now persists pools it learns from factory events, so this means a pool arrived by a path it never saw: a new factory or factory event shape, or a factory event processed before the 0291 deploy. The WARN "pool events from a contract missing from pool_registry" names the contract. Fix: run events-backfill --discover-pools over the range holding its factory event (docs/runbooks/seed-pool-registry.md), then reprice the dropped minutes.',
+          'The ledger-processor dropped AMM trades from a contract that looks like an Aquarius, Soroswap or Phoenix pool but is missing from prices.pool_registry (task 0291). Those trades produce no candle. The processor now persists pools it learns from factory events, so this means a pool arrived by a path it never saw: a new factory or factory event shape, or a factory event processed before the 0291 deploy. The WARN "dropped trades from pools missing from prices.pool_registry" lists the contracts. Fix: run events-backfill --discover-pools over the range holding its factory event (docs/runbooks/seed-pool-registry.md), then reprice the dropped minutes.',
         metric: new cloudwatch.Metric({
           namespace: 'Prices/Ingest',
           metricName: 'UnregisteredPoolEvents',

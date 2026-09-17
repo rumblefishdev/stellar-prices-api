@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use stellar_xdr::{LedgerCloseMeta, TransactionMeta};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use extractors_core::{SorobanEventRow, TaggedValue, Venue, VenueRegistry};
 use ledger_processor::dispatch::dispatch;
@@ -170,6 +170,11 @@ pub struct LedgerSoroban {
     /// This one can — a non-zero value means a pool we could price is missing
     /// from `prices.pool_registry`.
     pub unregistered_pool_events: Vec<(&'static str, u32)>,
+    /// The contracts behind `unregistered_pool_events`, one entry per contract
+    /// per transaction. The caller logs them: this decoder runs again for every
+    /// re-read ledger and in callers that never read the count, so it only
+    /// logs at debug level.
+    pub unregistered_pool_contracts: Vec<String>,
 }
 
 fn collect_tx_metas(lcm: &LedgerCloseMeta) -> Vec<&TransactionMeta> {
@@ -507,12 +512,13 @@ fn classify_amm_groups(
                     }
                 }
                 if !by_venue.is_empty() {
-                    warn!(
+                    debug!(
                         contract_id,
                         ?by_venue,
                         "pool events from a contract missing from pool_registry"
                     );
                     out.unregistered_pool_events.extend(by_venue);
+                    out.unregistered_pool_contracts.push(contract_id.clone());
                 }
                 // Unknown contract. Most are not AMM pools and are correctly
                 // ignored — but if this one emitted a pool-level `swap`, its
@@ -1146,6 +1152,11 @@ mod tests {
             counted,
             vec![("aquarius", 2), ("phoenix", 1), ("soroswap", 1)]
         );
+        let mut contracts = out.unregistered_pool_contracts.clone();
+        contracts.sort();
+        let mut expected = vec![AQUA, PAIR, XLM_USDC_POOL];
+        expected.sort();
+        assert_eq!(contracts, expected);
         assert!(out.amm_ticks.is_empty());
     }
 
