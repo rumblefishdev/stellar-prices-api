@@ -105,6 +105,34 @@ history:
       Also corrected: a timer around the ClickHouse call would NOT have answered
       AC 2, which asks for a network/query/connection split. Recorded as a note
       against [[0249]] rather than spawned as a separate task.
+  - date: 2026-09-17
+    status: active
+    who: stkrolikiewicz
+    note: >
+      CAUSE NAMED from the ClickHouse box itself (read-only over ssh; the access
+      existed all along). It is neither connections nor query cost: the
+      `prices_reader` user carries an hourly QUOTA of 10,000 queries
+      (`prices_read`, defined in sbe's `users.d/quotas.xml`). The server logged
+      exactly 28,853 code-201 refusals — the same number as the gateway 5XX —
+      first at 06:34:10, last at 06:57:54, and the message itself names the
+      recovery: "Interval will end at 07:00:00". AC 1, 3, 4, 5 and 6 close; AC 2
+      stays open, reframed. Four statements from 2026-09-16 are WITHDRAWN and
+      marked in place: "no query round trip happened", the 80–130 ms "floor",
+      "degradation preceded the errors", and "needs the box / not reachable".
+  - date: 2026-09-17
+    status: active
+    who: stkrolikiewicz
+    note: >
+      QUOTA FIXED ON THE BOX, 12:13 UTC. sbe task 0561 / PR #462 (merged,
+      develop 07210e28) set `queries` and `execution_time` of `prices_read`
+      to unlimited and kept read_rows 50 B / read_bytes 1 TiB / result_rows
+      10 B as the resource guards; deployed by an in-place overwrite of the
+      bind-mounted quotas.xml, no restart. `system.quota_limits` now shows
+      max_queries NULL, max_execution_time NULL for prices_read. The
+      remaining wall for the M3 runs is read_bytes at ~700 k queries/h — the
+      1000 req/s × 5 min run (300 k) fits with ~2× margin. AC 2's controlled
+      re-run is unblocked on the ClickHouse side; the gateway-5XX alarm
+      ([[0249]]) and the stage throttle check remain prerequisites.
 ---
 
 # Read path collapse at 100 req/s of misses — connections or queries?
@@ -161,7 +189,155 @@ double the Tranche 3 one.
   AWS→Hetzner hop (~80–130 ms per §6), the query itself, or connection setup.
 - Determine what recovered the system, since nothing was done on our side.
 
+## ✅ Quota fixed — 2026-09-17 12:13 UTC
+
+sbe task 0561, PR #462 (merged, develop `07210e28`), deployed the same day by
+an in-place overwrite of the bind-mounted `quotas.xml` (inode kept, ClickHouse
+hot-reloaded, no restart). `system.quota_limits` for `prices_read`:
+
+| | max_queries | max_execution_time | max_read_rows | max_read_bytes | max_result_rows |
+|---|---|---|---|---|---|
+| before | 10,000 | 1000 | 50 B | 1 TiB | 10 B |
+| after | **NULL** | **NULL** | 50 B | 1 TiB | 10 B |
+
+The byte/row guards stay by design — they are what keeps this tenant from
+draining the shared box, and the reason `prices_reader` was not moved to
+sbe's `unlimited` quota. Next wall for a load run is `read_bytes` at roughly
+700 k queries/h; the largest M3 run (1000 req/s × 5 min = 300 k) fits with
+~2× margin. Every other quota on the box was byte-identical before and after.
+
+## 🔑 Cause named — 2026-09-17, from the ClickHouse box
+
+Read-only, over the operator path the runbooks already use. Raw readings:
+[notes/R-clickhouse-box-readings-2026-09-17.md](notes/R-clickhouse-box-readings-2026-09-17.md).
+
+### AC 1 — it is a per-user hourly query QUOTA, not connections and not query cost
+
+```
+Code: 201. DB::Exception: Quota for user `prices_reader` for 3600s has been
+exceeded: queries = 10001/10000. Interval will end at 2026-09-03 07:00:00.
+```
+
+| | ClickHouse `query_log` | what this task already had |
+|---|---|---|
+| refusals | **28,853** × code 201 | **28,853** gateway 5XX |
+| first | 06:34:10 | 06:34:10.799 |
+| last | 06:57:54 | tail "until ~06:58" |
+| back to normal | 07:00:00 — the quota interval rolls over | "recovered unattended" |
+
+The server admitted exactly 10,000 `prices_reader` queries in the hour
+(3,124 at 06:32, 5,489 at 06:33, the rest at 06:34) and refused every one after
+that before it started. It explains each oddity of the day at once:
+
+- **failures were fast** — a quota refusal happens before execution;
+- **the whole read path fell**, `/price` and `/v1/assets` alike — one DB user;
+- **a single request with nothing behind it failed** — the budget is per clock
+  hour, not per unit of load;
+- **it healed itself** — at the top of the hour. The outage lasts until the next
+  `:00`, so up to 59 minutes depending on when the budget runs out.
+
+ClickHouse was idle throughout: at 5,489 queries in a minute its median stayed
+**7–8 ms**, against limits of `max_connections` 4096 and
+`max_concurrent_queries` 1000. Caddy's logs were not read — ClickHouse itself
+logged the refusals and the count matches to the unit.
+
+### Where the quota comes from
+
+`soroban-block-explorer/crates/db-clickhouse/users.d/quotas.xml:126`, quota
+`prices_read`, commented `mirrors api_throttle`, added 2026-06-23 (sbe
+`lore-0314`). sbe's own API user hit the template it mirrors — `api_reader` shows
+code 201 on seven days in June — and on 2026-07-01 sbe moved `api_reader` to
+`unlimited`. **`api_throttle` now applies to nobody; we run a copy of the
+template its authors abandoned.** Their comment in the same file: *"read_rows /
+read_bytes are the real resource guards"*.
+
+### AC 3 — ours alone
+
+The quota is keyed by user name. Every other tenant ran normally through the
+window (~300 queries/min baseline, unchanged). Not a joint ceiling; [[0047]]'s
+question is answered "no" for this incident.
+
+### AC 4 — remediation, and 0121's three levers
+
+**Fix the quota, in sbe's repo, deployed to the shared box.** Raising `queries`
+alone moves the wall rather than removing it — the same quota carries three more
+hourly caps, and the 10,000 admitted queries measured what each one costs
+(9 ms, 17.5 k rows, ~1.5 MiB per query):
+
+| cap | value / h | trips at about |
+|---|---|---|
+| `queries` | 10,000 | 10 k queries — tripped 2026-09-03 |
+| `execution_time` | 1000 s | **~110 k** queries |
+| `read_bytes` | 1 TiB | ~700 k queries |
+| `read_rows` | 50 B | ~2.8 M queries |
+
+Against that, the misses a 5-minute run can send: 100 req/s → 30 k, 500 → 150 k,
+1000 → 300 k. So 30 k is zero margin for the first run and `execution_time`
+stops the second. **Recommended: drop the `queries` cap and raise
+`execution_time`, keep `read_rows` / `read_bytes`** — sbe's own resolution. If a
+number must stay: ≥ 500 k queries and ≥ 5000 s, at which point it guards nothing.
+
+[[0121]]'s levers, each ruled out **as a fix**: a higher TTL ([[0122]]),
+provisioned concurrency and a producer-side hot column all lower the miss rate
+or the latency. None touches an hourly count. They stay valid as latency work.
+
+Today's exposure: the worst organic hour in 14 days is 909 queries, ~11× under
+the cap. But 10,000/h is **2.8 misses/s sustained** — any burst of misses beyond
+that blacks out the read path until the next `:00`, and nothing pages:
+handler-returned 500s are not Lambda `Errors`, and there is no gateway-5XX alarm
+([[0249]]).
+
+### AC 5 — recovery explained
+
+The non-randomized 3600 s interval rolled over at 07:00:00. The "tail of 2–4 per
+minute until ~06:58" was organic traffic still being refused, not a decay.
+
+### AC 6 — not structural
+
+A configuration value, not an architecture limit. ADR 0007's sidecar fallback is
+not triggered by this incident.
+
+### AC 2 — still open, but the question changed
+
+The 170–240 ms uncontended miss is **not** a network floor. Under load the full
+Lambda→ClickHouse→Lambda path ran at 10–20 ms `Duration` with 7–8 ms inside
+ClickHouse, so the warm round trip is a few milliseconds. The overview's own
+line agrees ("single-digit-ms p50 SELECTs … once the connection is warm"): its
+80–130 ms is what a *cold* connection costs. The split worth measuring is now
+cold start / TLS setup versus everything else — and only a controlled re-run
+under sustained load shows whether p95 < 100 ms holds on misses.
+
+### What a re-run still needs — beyond the quota
+
+- a gateway-5XX alarm first ([[0249]]) — 26 minutes of outage paged nobody;
+- the stage throttle: the overview states 200 req/s per method stage-wide, which
+  would stop the 500 and 1000 req/s runs at the gateway — to verify in `infra/`;
+- an observer on `system.quotas_usage` and an agreed abort signal; starting a few
+  minutes before `:00` caps the cost of a mistake at minutes;
+- a way to defeat the cache at 500/1000 req/s: production lists ~3.5 k assets and
+  a full-miss pool must be ≫ RATE × TTL — not designed yet.
+
+### 🔴 Withdrawn from the 2026-09-16 findings below
+
+1. *"No query round trip happened at all … at or before connection
+   establishment."* A round trip happened; ClickHouse answered with a refusal in
+   milliseconds. `bad response: ` with an empty body was an HTTP response all
+   along.
+2. *The 80–130 ms hop as a floor.* It is a cold-connection cost (AC 2 above).
+3. *"Degradation preceded the errors by two minutes."* 06:32–06:33 were ~8,600
+   healthy queries on the warm path; low `Duration` was the system working.
+4. *"Needs the box / not reachable from this session."* The key and the
+   `sorban-prod` host entry were on this machine; what was missing was asking.
+
+What stands: query saturation ruled out; throttling, function failure and
+reserved concurrency ruled out; the client pool is not the ceiling; and
+[[0281]] ate the evidence — the discarded body said "Quota … exceeded" in
+words, and cost fourteen days.
+
 ## 🔬 Findings — 2026-09-16, from CloudWatch, X-Ray and the source
+
+> ⚠️ **Partly superseded on 2026-09-17** — see "Withdrawn" above. Kept as written
+> so the correction is traceable; withdrawn statements are marked in place.
 
 All read-only. Nothing was re-run against production.
 
@@ -181,6 +357,10 @@ the obvious reading:
 previous cost as they cleared. The AWS→Hetzner hop alone is 80–130 ms (§6 of the
 load-test report), so a 26 ms end-to-end failure means **no query round trip
 happened at all**. The failure is at or before connection establishment.
+
+> 🔴 **WITHDRAWN 2026-09-17.** A round trip happened and ClickHouse refused in
+> milliseconds (quota, code 201). The 80–130 ms is a cold-connection cost, not a
+> floor. "Not query cost" stands; the inference about connections does not.
 
 This closes the half of AC 1 that can be closed from outside the box: it is not
 query cost. Naming the positive mechanism still needs the server side — see
@@ -275,6 +455,8 @@ the failure to whenever the hit rate drops. That is a number bought, not a fix.
 - 🔑 **Degradation preceded the errors by two minutes**: 06:33 and 06:34 show
   `Duration` already collapsed to 20 ms and 13 ms with **zero** 5XX. Something was
   already failing to do work before anything was reported.
+  🔴 **WITHDRAWN 2026-09-17** — those two minutes were ~8,600 healthy queries on
+  the warm path, spending the hourly quota. Nothing was failing yet.
 - The burst is 06:35–06:39 (5,173 / 5,999 / 5,999 / 5,995 / 5,146 per minute),
   then 500 at 06:40, then a **tail of 2–4 per minute until ~06:58** while
   `Duration` returns to 40–65 ms.
@@ -283,6 +465,8 @@ The tail is the interesting part: it is not a clean recovery at one instant but 
 decay. Still unexplained, and still nobody acted on it.
 
 ### What still needs the box
+
+> ✅ **Done 2026-09-17** — see "Cause named" at the top. The access existed.
 
 Everything below is operator/CHQ territory and was not reachable from this
 session:
@@ -311,17 +495,21 @@ observability gaps. Fold it in there rather than adding an 86th backlog item.
 
 ## Acceptance Criteria
 
-- [ ] The failure mode is named: connection ceiling, query saturation, or
+- [x] The failure mode is named: connection ceiling, query saturation, or
       something else — with evidence, not inference from response times
+      — *something else: the `prices_reader` hourly query quota, 28,853 × code 201*
 - [ ] The uncontended miss budget is broken down into network / query /
-      connection setup
-- [ ] It is stated whether the ceiling is ours alone or shared with
-      soroban-block-explorer ([[0047]])
-- [ ] A remediation is recommended **against the identified cause**, explicitly
+      connection setup — *open, reframed: cold-connection cost vs the rest;
+      needs a controlled re-run — the quota is fixed as of 2026-09-17 12:13
+      UTC (sbe 0561), so the ClickHouse side no longer blocks it*
+- [x] It is stated whether the ceiling is ours alone or shared with
+      soroban-block-explorer ([[0047]]) — *ours alone, the quota is per user*
+- [x] A remediation is recommended **against the identified cause**, explicitly
       confirming or ruling out each of 0121's three assumed levers
-- [ ] Recovery mechanism explained, or recorded as unexplained
-- [ ] If the cause is structural, ADR 0007's sidecar-ClickHouse fallback is
-      revisited on the record
+- [x] Recovery mechanism explained, or recorded as unexplained
+      — *the quota interval rolled over at 07:00:00*
+- [x] If the cause is structural, ADR 0007's sidecar-ClickHouse fallback is
+      revisited on the record — *not structural; not triggered*
 
 ## Notes
 

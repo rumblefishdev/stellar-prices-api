@@ -2,9 +2,10 @@
 id: "0151"
 title: "ADR: close_usd's zero-as-missing sentinel is what makes the whole 0144 bug class expressible"
 type: DOCS
-status: backlog
-related_adr: []
-related_tasks: ["0144", "0135", "0146", "0147", "0148", "0149", "0138", "0154", "0111"]
+status: active
+assignee: akot
+related_adr: ["0287"]
+related_tasks: ["0144", "0135", "0146", "0147", "0148", "0149", "0138", "0154", "0111", "0286", "0167"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "schema", "adr", "data-correctness"]
 links:
@@ -63,6 +64,19 @@ history:
       two gating unknowns this decision shrank, 0167 hits **time-resolution**
       only (settled there, on peg assets where the choice is numerically cheap
       and the vocabulary carries to 0154) and does **not** hit projection cost.
+  - date: "2026-09-17"
+    status: active
+    who: akot
+    note: >
+      Activated; taken by akot. Written against [[0286]] / ADR 0287 as the
+      baseline, which widens the question: a bucket with no price-forming
+      fill now stores `close = 0`, so `close_usd = 0` gains a FOURTH meaning
+      (no price to convert - permanent and correct) and `close = 0` is itself
+      a sentinel. 0286 also adds guardrails this ADR must enumerate: the
+      enrichment candidate predicate `close_usd = 0 AND close > 0`, the rate
+      predicate `close_usd > 0 AND close > 0` in all six MVs, and `/ohlcv`'s
+      price-absent contract beside `price_usd_series`, which has no pf gate.
+      [[0146]] in the table below is closed as superseded by 0286.
 ---
 
 # ADR — `close_usd` zero-as-missing

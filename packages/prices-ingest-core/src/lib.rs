@@ -37,7 +37,7 @@ pub mod writer;
 
 pub use bucket::{CandleAccumulator, OhlcvCandle};
 pub use canonical::{AssetIdentity, AssetRegistry, CanonicalPair, canonicalise};
-pub use decode::{decode_object, ledger_sequence};
+pub use decode::{decode_object, ledger_close_time, ledger_sequence};
 pub use error::IngestError;
 pub use filter::{
     OfferLookupCounts, PriceSource, RawTrade, extract_trades, extract_trades_with_counts,

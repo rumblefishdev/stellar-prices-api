@@ -64,9 +64,69 @@ history:
       readings and are un-ticked here. Also recorded: a fourth fix option
       (ledger in the sort key), a cost analysis that removes cost from the
       decision, and that PR #313 already carries a fix awaiting review.
+  - date: 2026-09-17
+    status: active
+    who: okarcz
+    note: >
+      PR #313 review items closed, NOT merged, NOT deployed. The Protocol 28
+      hold is over ([[0277]] closed clean). Merged develop in again (54 behind,
+      clean), and added tests/reconcile_drain.rs — the multi-run test the review
+      asked for: steady state one ledger per doorbell, a backlog drain at
+      budgets 32 and 16, and a minute denser than the budget. Reverting to the
+      old flush-everything code fails the first two; disabling the escape hatch
+      fails the third. Corrected the false idempotency docstring, the WARN text,
+      and a stale maxIterations 16 comment. Workspace 974 pass / 0 fail, CI
+      green on b3559af. Decided NOT to add a LedgersHeldBack metric: held-back
+      ledgers are not lost, so it has no alarm threshold and does not close the
+      observability criterion.
+  - date: 2026-09-17
+    status: active
+    who: okarcz
+    note: >
+      DEPLOYED. PR #313 squash-merged as 2cb5b2b (11:55 UTC). Observability
+      then Compute deployed from develop; ledger-processor LastModified
+      12:04:20 UTC, CodeSha256 S4GeMQqr…Amh8=, MAX_ITERATIONS 32. First
+      minutes behave as designed: runs hold back 2..12 ledgers, then one run
+      writes the whole minute. Errors 0, DLQ 0, no ForcedPartialFlushes,
+      frontier 68 s behind. Avg duration ~205 → ~776 ms, log volume ~2.3x —
+      both inside the cost analysis. Criterion 2 (a full day at ~0% loss) is
+      owed: measure 2026-09-18 on 2026-09-19. Pre-fix baseline 51.8-63.6%.
 ---
 
 # Aquarius live ingestion drops about half of every day's trades
+
+## 📊 STATUS — 2026-09-17 ~12:15 UTC · FIX DEPLOYED, full-day check owed
+
+**The live fix is in production.** PR #313 was merged as `2cb5b2b` and deployed
+at **12:04:20 UTC** (Observability, then Compute). In the first minutes it
+behaves as designed: each run holds back the unfinished minute, then one run
+writes it whole. No errors, no DLQ, no forced partial flushes. Details in
+§"DEPLOY RUNBOOK — PR #313".
+
+| # | work | state |
+| --- | --- | --- |
+| 1 | Mechanism identified | ✅ |
+| 2 | Live fix deployed | ✅ 2026-09-17 12:04 UTC |
+| 3 | **Live fix verified: a full day at ~0% loss** | ⏳ **measure 2026-09-18 on 2026-09-19** (pre-fix baseline 51.8-63.6%/day) |
+| 4 | SDEX loss quantified | ⏳ not started — design ready, can start now |
+| 5 | Live-path drops observable | ◐ forced flush alarmed; unresolved-pool swaps still silent |
+| 6 | Repair decision | ⏳ after 3 + 4 + [[0285]] — repair itself is [[0286]] phase 3 |
+| 7 | Phoenix shortfall | ⏳ not started |
+
+**Next:**
+
+1. **2026-09-19:** run step 8 of the runbook for 2026-09-18.
+2. **In parallel, now:** SDEX measurement
+   ([notes/R-sdex-loss-measurement-design.md](notes/R-sdex-loss-measurement-design.md))
+   and [[0285]].
+3. [[0286]]'s PR #320 can now rebase onto `develop`. Its owner was told #313 goes
+   first. Also passed on: #320's offer-lookup counters over-count after #313
+   (held-back ledgers are re-read), 0285 must precede its phase 3, and one
+   phase-3 criterion must expect *higher* live-era volumes.
+
+⚠️ **For whoever reads the candles:** the first minute after 12:04 UTC was
+written from its tail only (the old code left the cursor mid-minute). Expected
+and one-off.
 
 ## Summary
 
@@ -352,7 +412,67 @@ invocations in durable state, or move `1m` to a summing engine so concurrent
 partial writes add. The last changes the table contract and needs its own
 decision.
 
-### ⏳ PR #313 already carries a fix — open, unreviewed
+### ✅ PR #313 carries the fix — MERGED and DEPLOYED 2026-09-17
+
+**State 2026-09-17:** head `cc5c9b8` (CI green) squash-merged as `2cb5b2b` at
+11:55 UTC, deployed 12:04 UTC. See §"DEPLOY RUNBOOK — PR #313" for the
+verification record.
+
+What changed since the review:
+
+- ✅ **Escape hatch alarmed** (`a2de661`) — `ForcedPartialFlushes` metric and
+  `prices-{env}-ledger-processor-forced-partial-flush` alarm. `maxIterations`
+  raised **16 → 32** in `infra/envs/production.json`.
+- ✅ **Multi-run test added** (`b3559af`) — `tests/reconcile_drain.rs`
+  re-stamps one fixture ledger into a longer chain served from memory, then
+  drives `run()` repeatedly. Pins four properties: each complete minute is
+  written **exactly once**, with its **whole** trade count; the cursor parks on
+  a **minute boundary** after every run; the drain **terminates**, holding back
+  only the open minute. Covers steady state (one ledger per doorbell), a
+  backlog after an outage (budgets 32 and 16), and a minute denser than the
+  budget.
+  - Proven to bite: with the old flush-everything code put back, the
+    steady-state and backlog tests **fail**; with the escape hatch disabled,
+    the dense-minute test **fails**.
+  - ⚠️ **They self-skip in CI**, like `reconcile_e2e.rs` — the template is a
+    gitignored fixture. They protect local runs only. Running them in CI needs
+    either one committed fixture (a few MB) or a ledger-with-trades builder.
+- ✅ **Docstring corrected** — it no longer claims re-processing is idempotent
+  by `version` collapse (see §"`operation_index` is not stable"). It now states
+  the property the design rests on: **the cursor always parks on a minute
+  boundary**, so no outage splits a minute.
+- ✅ WARN text no longer has source indentation baked in; a comment still
+  quoting `maxIterations: 16` now says 32.
+- ✅ **Second review, three boundary gaps fixed** (`cc5c9b8`, 2026-09-17):
+  a CLI (`run_terminal`) run crossing a minute dropped its last minute; with
+  multi-ledger S3 objects a minute straddling the cursor could be written and
+  then re-written partial (not reachable at one ledger per object); an object
+  with no ledgers fired the forced-partial-flush alarm. Each new end-to-end
+  test fails on the previous commit. Workspace 980 pass / 0 fail.
+- ⛔ **`LedgersHeldBack` metric — decided NOT to add** (2026-09-17). Held-back
+  ledgers are not lost, just written a minute later; nearly every run holds
+  back 1-12, so the metric has no alarm threshold. A stopped feed already
+  fires `rollup-freshness-1m`. It would also add a `PutMetricData` call to
+  nearly every run (~15k/day) for no signal. See the observability criterion
+  below for where the real gap is.
+
+### ✅ Before merging / deploying #313 — all done 2026-09-17
+
+1. ✅ **Merge order with [[0286]]'s PR #320** (agreed with its owner). Both change
+   `packages/prices-ledger-processor/src/reconcile.rs`,
+   `packages/prices-ingest-core/src/lib.rs` and `infra/src/lib/types.ts`, and
+   #320 lists "0282 deployed" as a precondition. So **#313 merges first and
+   #320 rebases onto it** — to be agreed with its owner.
+2. **Deploy order: ObservabilityStack FIRST, then ComputeStack.** The alarm
+   watches a metric only the new binary emits, and `notBreaching` reads no-data
+   as OK, so landing the alarm early is harmless. The reverse leaves a window
+   where the escape hatch can fire unseen.
+3. **Expect the first run after deploy to write one minute from its tail
+   only.** The old code left the cursor mid-minute. Self-heals from the next
+   minute — do not read it as the fix failing.
+4. **Verify** with the raw-vs-stored comparison over one full day (criterion 2).
+
+### 🗄️ Pre-review notes, 2026-09-15 — kept for the reasoning
 
 `fix/0282_reconcile-flushes-partial-minutes`, "end a reconcile run on a whole
 minute" (588+/24-, 6 files), open and mergeable with **no review**. It holds
@@ -363,7 +483,8 @@ behaves like a warm one.
 
 ⚠️ **Three things to check before it ships:**
 
-1. 🔴 **Do not deploy it across the Protocol 28 crossing.** [[0277]] still owes a
+1. ✅ *(cleared 2026-09-17 — [[0277]] crossed clean and is closed)*
+   🔴 **Do not deploy it across the Protocol 28 crossing.** [[0277]] still owes a
    before/after frontier measurement at the 2026-09-16 17:00 UTC activation.
    Changing the reconcile loop in the same window makes an ingestion hiccup
    un-attributable. Sequence them.
@@ -474,7 +595,7 @@ rewriting them, and it gates the repair decision for **98% of the estate**
 
 | work | depends on | can start |
 | --- | --- | --- |
-| Live fix (PR #313) | [[0277]]'s Protocol 28 crossing finishing first | after 2026-09-16 |
+| Live fix (PR #313) | ~~[[0277]]'s Protocol 28 crossing~~ ✅ | ✅ **deployed 2026-09-17**; verify 2026-09-19 |
 | **SDEX quantification** | **nothing** | **now** — see [notes/R-sdex-loss-measurement-design.md](notes/R-sdex-loss-measurement-design.md) |
 | [[0285]] classification | nothing | now |
 | Repair scope decision | SDEX number + 0285 classification | after both |
@@ -504,7 +625,9 @@ just re-corrupts. That constraint is real; it simply does not apply to
 - [x] **The mechanism is identified** — per-bucket RMT write contention, and
       the pool-set vs sample question is answered: **neither**. See §ROOT CAUSE.
 - [ ] The live path is fixed and verified by the same raw-vs-stored comparison
-      running at ~0% loss for a full day.
+      running at ~0% loss for a full day. ◐ **Fixed and deployed 2026-09-17
+      12:04 UTC; the full-day measurement (2026-09-18) is owed on 2026-09-19.**
+      Pre-fix baseline: 63.6% / 60.1% / 51.8% lost on 09-15 / 09-16 / 09-17.
 - [x] ⛔ **The "~10% → ~50% growth" question is answered by DISSOLVING it** —
       re-measured 2026-09-15, there was no growth. Every live-processed day is
       ~45-55%; the July ~10% days were written by an accumulating path, and the
@@ -524,7 +647,12 @@ just re-corrupts. That constraint is real; it simply does not apply to
       live fix — run it in parallel.
 - [ ] A decision is recorded on repairing the historical estate, with a range.
 - [ ] Live-path drops become observable — a dropped swap leaves a trace
-      somewhere, rather than nothing at all.
+      somewhere, rather than nothing at all. ◐ **Half covered by #313:** the one
+      path that still loses data after the fix — a forced partial flush — is
+      alarmed (`ForcedPartialFlushes`). ⏳ **Still silent:** a swap from a pool
+      the live path cannot resolve. Only the backfill writes
+      `prices.unresolved_pools`, so live leaves no trace at all. Close to
+      [[0285]]; fold it in there or spawn it — not decided.
 - [ ] Phoenix's parallel shortfall is measured and either folded in or spawned.
 
 ## Notes
@@ -534,8 +662,207 @@ just re-corrupts. That constraint is real; it simply does not apply to
   move aquarius by +27% in its window. 0101 is sequenced behind this decision.
 - The reprice tool is **not** implicated and needs no change — its correctness
   is what made this measurable.
-- ⏳ **PR #313 is open and unreviewed** — the fix exists, nothing is deployed.
-  See §"PR #313 already carries a fix".
+- ✅ **PR #313 merged (`2cb5b2b`) and deployed 2026-09-17 12:04 UTC.** The
+  full-day verification is owed on 2026-09-19. See §"DEPLOY RUNBOOK — PR #313".
 - ⚠️ **This task's TITLE still says "and SDEX is affected too"**, which was
   retracted on 2026-09-14. It is what the board renders, so it is worth
   correcting deliberately rather than silently.
+
+# 📕 DEPLOY RUNBOOK — PR #313
+
+## ✅ DEPLOYED 2026-09-17 — steps 0-7 done, step 8 owed on 2026-09-19
+
+| | |
+| --- | --- |
+| merged | `2cb5b2b` (#313 squash), 11:55:44 UTC, no co-author trailer |
+| diffs | both exactly as expected below (Observability re-diffed read-only from merged `develop`: 1 resource added, nothing removed, no alarm property other than description text) |
+| Observability | deployed ~12:03 UTC; `prices-production-ledger-processor-forced-partial-flush` exists, `OK`, `Prices/Ingest ForcedPartialFlushes`, 1 action |
+| Compute | stack `UPDATE_COMPLETE` 12:04:08 UTC; no changeset left pending (CDK's "waiting in review" line is its normal wording) |
+| running binary | `LastModified` 2026-09-17T12:04:20Z, `arm64`, `MAX_ITERATIONS` 32, **`CodeSha256` `S4GeMQqrNMklu7U41khD8FVLC/EkSdgKRVVX7TFAmh8=`** |
+
+**Step 7, first ~5 minutes:**
+
+- Logs show exactly the designed pattern: runs hold back 2, 3 … 12 ledgers
+  (*"run is entirely inside one open minute"*), then one run writes the whole
+  minute — 12:08:05, ledgers 64,472,209..64,472,220, 96 rows, `held_back` 1 —
+  and the count restarts. No *"iteration budget exhausted"* WARN.
+- Cursor 64,472,232 at 12:09:06 UTC, moving once a minute.
+- Frontier 12:09 UTC: sdex / aquarius **68 s** behind (designed ≤ ~80 s).
+  Soroswap 248 s and phoenix 7,508 s are quiet venues, not a stall.
+- `Errors` 0, DLQ 0, `ForcedPartialFlushes` no datapoints.
+- **Cost signals, as predicted:** average duration ~205 ms → **~776 ms**
+  (max 2.2 s vs a 60 s timeout; the pre-deploy half-hour already peaked at
+  1.3 s). Log ingestion ~181 KB → **~419 KB per 5 min (~2.3x)**, mostly the
+  pre-existing *"skipping claim with zero amount"* WARN now repeated on every
+  re-read. At ~45 MB/day before, that is roughly +60 MB/day — about +$1/month.
+  Worth demoting that WARN to DEBUG some day; not urgent.
+
+⏳ **Step 8 is owed:** measure 2026-09-18 (the first full UTC day) on
+2026-09-19.
+
+---
+
+Written 2026-09-17. The operator merges and deploys; the read-only checks can be
+run by anyone with `soroban-readonly` and `dev_read`. Generic procedure:
+[`docs/runbooks/deploy-ledger-processor.md`](../../../../docs/runbooks/deploy-ledger-processor.md).
+This section carries only what is specific to #313.
+
+**Order is fixed: merge → build → diff both → Observability → Compute →
+verify.** The alarm watches a metric only the new binary emits and reads
+no-data as OK, so landing it first is harmless. The reverse leaves a window in
+which the escape hatch can fire unseen.
+
+## Step 0 — [GitHub, or local machine with `gh`] merge #313
+
+```bash
+gh pr merge 313 --squash
+```
+
+Squash, like #314. Check the squash message carries no AI co-author trailer.
+Tell [[0286]]'s owner it is in, so #320 can rebase.
+
+## Step 1 — [local machine, repo root] preflight
+
+```bash
+export AWS_PROFILE=soroban-admin
+export AWS_REGION=eu-central-1
+git checkout develop && git pull --ff-only
+git log --oneline -1                  # expect the #313 squash commit
+npm run xdr:verify-protocol-gap       # expect: current (pinned 28 | mainnet 28)
+```
+
+## Step 2 — [local machine, repo root] build the bootstrap
+
+🔴 Skipping this deploys the OLD binary with a green result.
+
+```bash
+cargo lambda build -p prices-ledger-processor --release --arm64 --features lambda
+ls -l target/lambda/prices-ledger-processor/bootstrap   # mtime = seconds ago
+file target/lambda/prices-ledger-processor/bootstrap    # ELF 64-bit ... ARM aarch64
+```
+
+## Step 3 — [local machine, `infra/`] diff BOTH stacks by name
+
+```bash
+cd infra
+npx nx build infra
+npx cdk --app "node dist/bin/production.js" diff Prices-production-Observability --method=template --strict
+npx cdk --app "node dist/bin/production.js" diff Prices-production-Compute --method=template --strict
+```
+
+**Expected — previewed 2026-09-17 from the PR branch with `soroban-readonly`:**
+
+| stack | expected changes | anything else → |
+| --- | --- | --- |
+| Observability | `[+]` `LedgerProcessorForcedPartialFlushAlarm`; `[~]` `OverviewDashboard`; `DashboardAlarmCount` 53 → 54; many `[~]` `AlarmDescription` that only turn `?` into `—` / `≥` / `§` / `→` / `×` | **stop** |
+| Compute | `[~]` `LedgerProcessorFunction` only: `Code.S3Key` and `Environment.Variables.MAX_ITERATIONS` 16 → 32 | **stop** |
+
+The `?` → `—` edits are cosmetic: an earlier deploy was synthesised from a
+shell with a different locale (same as [[0277]]). No other Lambda in the
+Compute stack showed a change, so the local `target/lambda/*` for them matched
+production at preview time — re-check that it still does.
+
+## Step 4 — [local machine, `infra/`] deploy Observability FIRST
+
+```bash
+make deploy-production-observability
+```
+
+Then check (read-only): `prices-production-ledger-processor-forced-partial-flush`
+exists and is `OK` or `INSUFFICIENT_DATA`.
+
+## Step 5 — [local machine, `infra/`] deploy Compute
+
+```bash
+make deploy-production-compute     # NOT make deploy-production (all stacks)
+```
+
+## Step 6 — [local machine or read-only] prove the running binary changed
+
+```bash
+aws lambda get-function-configuration \
+  --function-name prices-production-ledger-processor \
+  --query '[LastModified,Architectures[0],CodeSha256,Environment.Variables.MAX_ITERATIONS]' --output text
+```
+
+`LastModified` seconds ago, `arm64`, `MAX_ITERATIONS` = `32`. **Record the
+`CodeSha256` here.**
+
+## Step 7 — [read-only, first ~30 min] the new loop is behaving
+
+- **Logs** (`/aws/lambda/prices-production-ledger-processor`): most runs log
+  *"run is entirely inside one open minute — holding back, cursor unmoved"*;
+  about one run a minute logs *"reconcile run complete"* with `held_back` ≥ 0.
+  No *"iteration budget exhausted"* WARN.
+- **Cursor** (`prices.ingest_cursor FINAL`) moves roughly once a minute and
+  stays at the tip.
+- **Frontier** — `behind_sec` for sdex/aquarius/soroswap ≤ ~80 s (was ~50 s).
+  That is the designed latency, not a stall. `rollup-freshness-1m` fires only
+  at 900 s.
+- **DLQ** `prices-ingest-dlq-production` = 0, Lambda `Errors` = 0,
+  `Prices/Ingest ForcedPartialFlushes` has no datapoints.
+- ⚠️ **The first minute after the deploy is written from its tail only** — the
+  old code left the cursor mid-minute. Expected; self-heals from the next
+  minute. Do not read it as the fix failing.
+
+## Step 8 — [prod CH, `dev_read`] the acceptance measurement, one full day
+
+Run on the day AFTER the first full UTC day on the new binary. Target: `pct_lost`
+≈ 0 (criterion 2). Adjust `d_from` / `d_to`.
+
+**Baseline before the fix** (measured 2026-09-17 ~11:30 UTC, the last row is
+a partial day):
+
+| day | raw | stored | lost | % lost |
+| --- | --- | --- | --- | --- |
+| 2026-09-15 | 30,680 | 11,177 | 19,503 | **63.6** |
+| 2026-09-16 | 21,183 | 8,453 | 12,730 | **60.1** |
+| 2026-09-17 | 6,988 | 3,369 | 3,619 | **51.8** |
+
+```sql
+WITH
+  toDate('2026-09-15') AS d_from,
+  toDate('2026-09-17') AS d_to,
+  pools AS (
+    SELECT c.id AS cid
+    FROM default.soroban_contracts AS c
+    WHERE c.contract_id IN (SELECT contract_id FROM prices.pool_registry FINAL WHERE venue = 'aquarius')
+  ),
+  days AS (
+    SELECT sequence AS seq, toDate(closed_at) AS day
+    FROM default.ledgers
+    WHERE toDate(closed_at) BETWEEN d_from AND d_to
+  ),
+  raw AS (
+    SELECT d.day, count() AS raw_trades
+    FROM default.soroban_events AS e
+    INNER JOIN days AS d ON d.seq = e.ledger_sequence
+    WHERE e.signature = 'trade'
+      AND e.contract_id IN (SELECT cid FROM pools)
+      AND e.ledger_sequence BETWEEN (SELECT min(seq) FROM days) AND (SELECT max(seq) FROM days)
+    GROUP BY d.day
+  ),
+  stored AS (
+    SELECT toDate(timestamp) AS day, sum(trade_count) AS stored_trades
+    FROM prices.price_ohlcv_1m FINAL
+    WHERE source = 'aquarius' AND toDate(timestamp) BETWEEN d_from AND d_to
+    GROUP BY day
+  )
+SELECT r.day, r.raw_trades, s.stored_trades,
+       r.raw_trades - s.stored_trades AS lost,
+       round(100 * (r.raw_trades - s.stored_trades) / r.raw_trades, 1) AS pct_lost
+FROM raw AS r
+LEFT JOIN stored AS s ON s.day = r.day
+ORDER BY r.day
+FORMAT PrettyCompact
+```
+
+`raw` counts `trade` events only from contracts in `prices.pool_registry`,
+which [[0285]] shows does not match what actually trades. So a small residual
+(either sign) after the fix is a registry question, not this defect.
+
+## Rollback
+
+Check out the commit before the #313 squash, rerun steps 2, 3 and 5.
+Redeploying Compute also restores `MAX_ITERATIONS=16`. The Observability alarm
+can stay — without the new binary it simply never receives data.
