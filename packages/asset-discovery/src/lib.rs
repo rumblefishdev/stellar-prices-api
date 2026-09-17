@@ -100,9 +100,16 @@ pub fn seed_identities() -> Result<Vec<AssetIdentity>, DiscoveryError> {
 /// collapses duplicates only **on merge**, so between merges a reader without
 /// `FINAL` sees 1×–4× the registry — which is what drove
 /// `prices-production-oracle` into `Runtime.OutOfMemory` at its 256 MB ceiling
-/// (task 0256). [`discover_window`] already guards against exactly this; the
-/// guard was simply missing on the seed path. Task 0132 removed the same
-/// amplification from the live ledger processor.
+/// (task 0256). Task 0132 removed the same amplification from the live ledger
+/// processor.
+///
+/// ⚠️ [`discover_window`] is **not** protected against this. Its `write_assets`
+/// call is gated only on `scanned > 0`, so it re-emits the whole registry after
+/// every window that scanned anything, new assets or not. It is quiet on
+/// production solely because the ledger scan has never been switched on. The
+/// guard in that function covers `write_pool_registry`, not the asset write —
+/// enabling the scan without fixing that call brings the hourly re-emit back
+/// (tasks 0140, 0256).
 pub async fn ensure_seed(
     writer: &OhlcvWriter,
     identities: &[AssetIdentity],
