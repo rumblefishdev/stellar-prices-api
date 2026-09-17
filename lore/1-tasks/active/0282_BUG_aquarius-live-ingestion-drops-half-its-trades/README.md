@@ -369,8 +369,8 @@ decision.
 
 ### ⏳ PR #313 carries the fix — review items closed, NOT merged, NOT deployed
 
-**State 2026-09-17:** head `b3559af`, `develop` merged in, all four CI checks
-green. Nothing merged and nothing deployed — both wait on the operator.
+**State 2026-09-17:** head `cc5c9b8`, `develop` merged in, all four CI checks
+green on it. Nothing merged and nothing deployed — both wait on the operator.
 
 What changed since the review:
 
@@ -397,6 +397,12 @@ What changed since the review:
   boundary**, so no outage splits a minute.
 - ✅ WARN text no longer has source indentation baked in; a comment still
   quoting `maxIterations: 16` now says 32.
+- ✅ **Second review, three boundary gaps fixed** (`cc5c9b8`, 2026-09-17):
+  a CLI (`run_terminal`) run crossing a minute dropped its last minute; with
+  multi-ledger S3 objects a minute straddling the cursor could be written and
+  then re-written partial (not reachable at one ledger per object); an object
+  with no ledgers fired the forced-partial-flush alarm. Each new end-to-end
+  test fails on the previous commit. Workspace 980 pass / 0 fail.
 - ⛔ **`LedgersHeldBack` metric — decided NOT to add** (2026-09-17). Held-back
   ledgers are not lost, just written a minute later; nearly every run holds
   back 1-12, so the metric has no alarm threshold. A stopped feed already
@@ -609,7 +615,7 @@ just re-corrupts. That constraint is real; it simply does not apply to
 - The reprice tool is **not** implicated and needs no change — its correctness
   is what made this measurable.
 - ⏳ **PR #313 is ready, not merged, not deployed** (2026-09-17, CI green on
-  `b3559af`). See §"PR #313 carries the fix".
+  `cc5c9b8`). See §"PR #313 carries the fix".
 - ⚠️ **This task's TITLE still says "and SDEX is affected too"**, which was
   retracted on 2026-09-14. It is what the board renders, so it is worth
   correcting deliberately rather than silently.
