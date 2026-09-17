@@ -2439,6 +2439,65 @@ fn external_reset() -> UsdResetSpec {
     }
 }
 
+/// The par signature `close_usd = close` means "still priced at the $1 peg" —
+/// for a candle that HAS a price. A dust-only candle (task 0286: `close = 0`,
+/// `pf_trade_count = 0`) satisfies it as `0 = 0` on every run, before and after
+/// any refill, because `close_usd` can only ever be `rate × 0`. So the campaign
+/// re-opened it each time it ran, bumped its version, and never saw its pending
+/// count reach zero. There is no USD close here to repair.
+///
+/// RED without `close > 0` beside the signature: `rows_reset = 2` and the dust
+/// row comes back at `version = 3` (reset + refill).
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_external_reset_never_reopens_a_candle_that_has_no_price() {
+    let db = "it_enrich_0268_dust_only";
+    let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
+    let client = setup_0268(db, covered, uncovered).await;
+    seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
+    seed_hourly_marker(&client, db).await;
+    // The dust-only minute, on the COVERED day, its volume already priced.
+    let dust = covered + 60;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ({dust}, 10, 2,'sdex', 0,0,0,0, 1, 0.05, 0.05, 0, 0.05, 3, 1, 0, 0, 0)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(external_reset());
+    let stats = ChEnrichmentPass::new(c).run().await.unwrap();
+
+    assert_eq!(
+        stats.rows_reset, 1,
+        "only the covered candle that HAS a price carries the peg signature"
+    );
+    let version: u64 = client
+        .query(&format!(
+            "SELECT toUInt64(version) FROM {db}.price_ohlcv_1m FINAL WHERE timestamp = {dust}"
+        ))
+        .fetch_one()
+        .await
+        .unwrap();
+    assert_eq!(
+        version, 1,
+        "the dust-only candle must not have been rewritten"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
 /// 🔑 **THE 157-CANDLE REGRESSION.** Task 0182's reset epoch sat 19 hours before
 /// its reference market's first candle. 157 candles were zeroed, nothing could
 /// refill them, and they were left publishing `close_usd = 0` — which ~130

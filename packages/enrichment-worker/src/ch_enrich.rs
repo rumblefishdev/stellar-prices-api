@@ -398,8 +398,10 @@ pub struct UsdResetSpec {
     /// all-time guard applied to a bounded operation.
     pub not_after: Option<u32>,
     /// When true (task 0268), the candidate set is additionally
-    /// `close_usd = close` — the peg tier's EXACT signature, so nothing the
-    /// oracle or external tier priced is re-opened — **and** a `usd_rate` row
+    /// `close_usd = close AND close > 0` — the peg tier's EXACT signature on a
+    /// candle that HAS a price (a dust-only candle is `0 = 0` forever, task
+    /// 0286), so nothing the oracle or external tier priced is re-opened —
+    /// **and** a `usd_rate` row
     /// with `method = 'external'` must exist for the bucket's UTC day.
     ///
     /// ## Why a predicate and not an epoch
@@ -520,9 +522,13 @@ pub fn reset_pending_pred(db: &str, tbl: &str, spec: &UsdResetSpec) -> String {
     if let Some(na) = spec.not_after {
         pred.push_str(&format!(" AND timestamp < toDateTime({na})"));
     }
+    // `close > 0` beside the par signature (task 0286): a dust-only candle is
+    // `close = 0`, so `close_usd = close` holds for it as `0 = 0` before and
+    // after every refill — it would be re-opened on every run and the pending
+    // count would never drain. It has no USD close to repair.
     if spec.require_external_rate {
         pred.push_str(&format!(
-            " AND close_usd = close AND {}",
+            " AND close_usd = close AND close > 0 AND {}",
             external_rate_day_pred(db)
         ));
     }
@@ -2472,7 +2478,7 @@ fn reset_sql(db: &str, tbl: &str, spec: &UsdResetSpec, window: &str) -> String {
     }
     if spec.require_external_rate {
         bounds.push_str(&format!(
-            " AND p.close_usd = p.close AND {}",
+            " AND p.close_usd = p.close AND p.close > 0 AND {}",
             external_rate_day_pred(db)
         ));
     }
@@ -3025,6 +3031,25 @@ mod tests {
             "the pending predicate has no table alias to qualify: {pred}"
         );
         assert!(!pred.contains("p.close_usd"), "{pred}");
+    }
+
+    /// Task 0286: `close_usd = close` is also true of a candle with NO price
+    /// (`0 = 0`), before and after every refill, so on its own it re-opens every
+    /// dust-only candle on every run. The signature is about a price that was
+    /// pegged; it needs a price. Both sites, each in its own qualification.
+    #[test]
+    fn the_par_signature_needs_a_price_to_have_been_pegged() {
+        let spec = usdc_external_reset();
+        let pred = reset_pending_pred("prices", "price_ohlcv_1d", &spec);
+        assert!(
+            pred.contains(" AND close_usd = close AND close > 0 AND"),
+            "the pending predicate must not count a dust-only candle: {pred}"
+        );
+        let sql = reset_sql("prices", "price_ohlcv_1d", &spec, "");
+        assert!(
+            sql.contains(" AND p.close_usd = p.close AND p.close > 0 AND"),
+            "the reset must not re-open a dust-only candle: {sql}"
+        );
     }
 
     /// D-04: the reset's candidate set carries the peg tier's EXACT signature, so
