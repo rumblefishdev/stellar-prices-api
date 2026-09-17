@@ -174,6 +174,14 @@ PR #322, two commits:
 - `infra`: alarm `prices-<env>-ledger-processor-unregistered-pool`
   (`Sum >= 1` / 5 min, NOT_BREACHING, description 645 chars).
 - Docs: `seed-pool-registry.md` (new section), schema overview §3.6 + App. A.
+- Review follow-up (`b2541ef`): the decoder's per-contract line is now
+  `debug!` — live re-reads held-back ledgers, and `sdex-backfill` /
+  `asset-discovery` share the decoder, so a WARN there floods. The contract IDs
+  travel in `LedgerSoroban::unregistered_pool_contracts`; the reconcile WARN
+  `dropped trades from pools missing from prices.pool_registry` lists them
+  (written minutes only), and the alarm description names that WARN.
+- `4c13123`: prettier on `close-usd-zero-guardrails.md` (0151's doc reached
+  `develop` unformatted and failed CI's format check on every branch).
 
 Verification: workspace **1,115 passed, 0 failed**; negative controls — all 3
 persistence tests fail with the write removed, the counting test fails when the
@@ -229,31 +237,99 @@ a no-op `write_pool_rows` — the trait grew a method. No assertion changed.
 
 # 📕 DEPLOY RUNBOOK
 
-Order matters: steps 1–3 before step 4.
+Order matters: the registry is seeded (steps 3–4) **before** the deploy
+(step 6), so the deploy's cold start loads the new rows. Steps 3–4 run from the
+local machine over `ssh`; the password travels on stdin, never in `argv`, and
+is never typed.
 
-1. **[local machine, repo root, after #322 merges]** Build static:
-   `cargo build --release -p events-backfill --target x86_64-unknown-linux-musl`
-   and copy `target/x86_64-unknown-linux-musl/release/events-backfill` to the
-   prod CH host as `~/events-backfill`.
-2. **[prod CH host, tmux, as CH `default`]** Dry run:
+0. **[GitHub]** PR #322 CI green (Rust + TypeScript), then merge it into
+   `develop`.
+1. **[local machine, repo root]** Sync and build the host binary. Run all
+   together:
    ```bash
-   read -rs CH_PW
-   CLICKHOUSE_PASSWORD="$CH_PW" ~/events-backfill --discover-pools \
-     --start 63000000 --end <TIP> --clickhouse-url http://localhost:8123 --dry-run
+   git switch develop && git pull --ff-only
+   cargo build --release -p events-backfill --target x86_64-unknown-linux-musl
+   file target/x86_64-unknown-linux-musl/release/events-backfill
    ```
-   Expect `to_write=42 per_venue={"aquarius": 27, "phoenix": 1, "soroswap": 14}`
-   (more if pools were created since), every line `change="new"`. Any
+   ✅ Checkpoint: `file` says `static-pie linked` (a `gnu` build does not run
+   on the host).
+2. **[local machine, repo root]** Copy it up. Run this command:
+   ```bash
+   scp -i ~/.ssh/sorban-prod_ed25519 target/x86_64-unknown-linux-musl/release/events-backfill deploy@168.119.73.161:~/events-backfill
+   ```
+3. **[local machine → prod CH host]** Dry run. Run the first command on its
+   own, check the length, then run the second:
+   ```bash
+   CH_PW=$(aws secretsmanager get-secret-value --profile soroban-explorer \
+     --secret-id soroban/production/operator/env --query SecretString --output text \
+     | sed -n 's/^CLICKHOUSE_PASSWORD=//p' | tr -d "\"'"); echo "${#CH_PW}"
+   ```
+   ✅ Checkpoint: prints `44`. Then:
+   ```bash
+   printf '%s\n' "$CH_PW" | ssh -T -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 '
+     read -r CH_PW
+     TIP=$(docker exec -i app-clickhouse-1 clickhouse-client -q "SELECT max(ledger_sequence) FROM default.soroban_events")
+     echo "tip=$TIP"
+     CLICKHOUSE_PASSWORD="$CH_PW" ~/events-backfill --discover-pools \
+       --start 63000000 --end "$TIP" --clickhouse-url http://localhost:8123 --dry-run'
+   ```
+   ✅ Checkpoint: `to_write=42 per_venue={"aquarius": 27, "phoenix": 1,
+   "soroswap": 14}` (more if pools were created since 2026-09-17), every pool
+   line `change="new"`, then `DRY RUN — nothing written`. ⛔ Any
    `change="changed"` → stop.
-3. **[same host]** Drop `--dry-run` → `written=42`. Re-run the dry run →
-   `to_write=0`. Check:
-   `SELECT venue, count() FROM prices.pool_registry FINAL GROUP BY venue` →
-   aquarius 515, phoenix 20, soroswap 235.
-4. **[local machine]** Deploy the ledger-processor (Compute) and the
-   Observability stack. The Compute deploy's cold start loads the 42 rows.
-5. **[after deploy]** Logs show no `pool events from a contract missing from
-   pool_registry`; the alarm `prices-production-ledger-processor-unregistered-pool`
-   stays OK; on the next pool creation the log shows `persisted AMM pools
-   learned from factory events` and the row appears in the table.
-6. **[first full day after deploy]** AC 4: Aquarius raw vs stored, alongside
-   [[0282]]'s measurement.
+4. **[local machine → prod CH host]** Write, then prove it. Same command as
+   step 3 **without `--dry-run`** → `discover-pools: done written=42`. Then
+   run step 3 again unchanged → ✅ `to_write=0`. Then run this command:
+   ```bash
+   ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+     "docker exec -i app-clickhouse-1 clickhouse-client -q 'SELECT venue, count() FROM prices.pool_registry FINAL GROUP BY venue ORDER BY venue'"
+   ```
+   ✅ Checkpoint: aquarius 515, phoenix 20, soroswap 235 (plus any pools
+   created since). Then `unset CH_PW`.
+5. **[local machine, repo root, on `develop` at the merge]** Build **every**
+   Lambda asset — the Compute deploy ships whatever is in `target/lambda/`,
+   not just the processor. Run all together:
+   ```bash
+   for c in $(tools/scripts/lambda-assets.sh); do
+     cargo lambda build --release --arm64 --features lambda -p "$c" || break
+   done
+   strings target/lambda/prices-ledger-processor/bootstrap | grep -c 'dropped trades from pools missing'
+   ```
+   ✅ Checkpoint: the loop finishes without error and the count is **≥ 1**
+   (0 = stale processor binary, stop).
+6. **[local machine, repo root]** Deploy. Run separately, answer the CDK
+   prompts, and read each diff: Compute should change only Lambda code,
+   Observability should add only the `…-unregistered-pool` alarm.
+   ```bash
+   export AWS_PROFILE=soroban-admin AWS_REGION=eu-central-1
+   make -C infra diff-production
+   ```
+   then
+   ```bash
+   make -C infra deploy-production-compute
+   ```
+   then
+   ```bash
+   make -C infra deploy-production-observability
+   ```
+7. **[local machine, ~15 min after step 6]** Check the processor is healthy and
+   silent. Run all together:
+   ```bash
+   aws logs filter-log-events --log-group-name /aws/lambda/prices-production-ledger-processor \
+     --start-time $(( ($(date +%s) - 900) * 1000 )) \
+     --filter-pattern '"dropped trades from pools missing"' --query 'length(events)'
+   aws cloudwatch describe-alarms --alarm-names prices-production-ledger-processor-unregistered-pool \
+     --query 'MetricAlarms[0].StateValue'
+   ```
+   ✅ Checkpoint: `0` and `"OK"` (or `"INSUFFICIENT_DATA"` — the metric is
+   only emitted when non-zero). If the WARN appears, its `contracts` field names
+   the pools; re-run step 3 over the range holding their factory events.
+8. **[whenever the next pool is created]** AC 2 prod check: the log shows
+   `persisted AMM pools learned from factory events` and the pool's
+   `contract_id` appears in `prices.pool_registry`.
+9. **[2026-09-19, first full day after deploy]** AC 4: Aquarius raw vs stored,
+   alongside [[0282]]'s measurement. Then close the task.
 
+**Final test** (local machine → prod CH host): run step 3 unchanged. The
+registry covers the live era when it prints `to_write=0`; together with step 7's
+`0` / `"OK"`, the durable fix is live.
