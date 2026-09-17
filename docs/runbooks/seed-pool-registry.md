@@ -131,11 +131,86 @@ API returned a contract of an unexpected type — investigate before seeding it.
   see task 0080. They land only once that task confirms the extractor handles
   them.
 - **Ongoing coverage.** This seeds _pre-existing_ pools. Pools created after
-  go-live are picked up by the live processor's own factory-event stream and
-  persisted by the asset-discovery worker (task 0069). Re-run this seeder any
-  time to reconcile against the API's current set.
+  go-live are learned by the live processor from factory events and, since task
+  0291, written back to `prices.pool_registry` (new rows only). ⚠️ Before 0291
+  nothing persisted them: the asset-discovery worker was meant to (task 0069),
+  but its ledger scan has never run on production (task 0256), so the table
+  stopped growing on 2026-07-06. To fill a gap, prefer
+  [the factory-event route below](#discover-missing-pools-from-factory-events-task-0291),
+  which writes only the missing rows.
 - **Not a substitute for the historical OHLCV backfill.** For historical AMM
   price _candles_, use the 0053 backfill; this only seeds the registry (live
   pricing).
 - **Secret hygiene.** The key is read from `SOROSWAP_API_KEY` and only sent in the
   `Authorization` header — never logged. Keep `.env.local` local and uncommitted.
+
+---
+
+## Discover missing pools from factory events (task 0291)
+
+`events-backfill --discover-pools` reads the AMM factory events in a ledger
+range from BE's `default.soroban_events` (Aquarius `add_pool`, Phoenix `create`,
+Soroswap `new_pair`), runs them through the same `learn_factory` the live
+processor uses, and writes **only the pools `prices.pool_registry` does not
+already hold**. No API key, no rewrite of existing rows, no candles. A re-run
+writes nothing.
+
+Use it:
+
+- **once, for task 0291**, to add the pools created after the history backfill
+  ended (2026-07-06) that the live processor forgot on its cold starts. Run it
+  **before** deploying the 0291 ledger-processor: the tool does not depend on
+  that deploy, and the deploy's cold start then loads the new rows;
+- **before any reprice that `DROP`s a partition** ([task 0286 phase 3](0286-reingest-history.md)):
+  a dry run over the month that reports `to_write=0` shows the registry covers
+  it; anything else means the drop would delete candles the reprice cannot put
+  back;
+- **when `prices-production-ledger-processor-unregistered-pool` fires**, over
+  the range holding the pool's factory event.
+
+**Run identity** is the same as the reprice
+([events-sourced-amm-reprice.md](events-sourced-amm-reprice.md), precondition
+2): on the Hetzner host, as ClickHouse `default`, against `localhost:8123`. The
+host needs a static build, because its glibc is older than a local toolchain's:
+
+```bash
+# Local machine, repo root:
+cargo build --release -p events-backfill --target x86_64-unknown-linux-musl
+scp target/x86_64-unknown-linux-musl/release/events-backfill <prod-host>:~/events-backfill
+```
+
+**Keep the range tight.** The read parses `topics_xdr` for the string-topic
+factories (Phoenix and Soroswap leave `signature` NULL), 2-4 s per 320k-ledger
+chunk on the shared box. As of 2026-09-17 every missing pool was created after
+ledger 63,000,000 (checked per venue over the whole Soroban era), so the
+catch-up only needs `63000000` to the tip.
+
+```bash
+# On the prod host, under tmux:
+read -rs CH_PW
+CLICKHOUSE_PASSWORD="$CH_PW" ~/events-backfill --discover-pools \
+  --start 63000000 --end <TIP> \
+  --clickhouse-url http://localhost:8123 --dry-run
+```
+
+Expected on 2026-09-17 (grows if pools are created meanwhile): one
+`pool not in prices.pool_registry` line per pool, every one `change="new"`,
+then `to_write=42 per_venue={"aquarius": 27, "phoenix": 1, "soroswap": 14}`.
+A `change="changed"` line means an existing row would be rewritten — stop and
+investigate before the write.
+
+Then drop `--dry-run` to write, and run the dry run once more: it must report
+`to_write=0`.
+
+### Verify
+
+```sql
+SELECT venue, count() FROM prices.pool_registry FINAL GROUP BY venue ORDER BY venue;
+-- 2026-09-17 before: aquarius 488, phoenix 19, soroswap 221
+-- expected after:    aquarius 515, phoenix 20, soroswap 235
+```
+
+The live processor reads the table only at cold start, so a warm container
+keeps pricing without the new rows until its next one. Any code or
+configuration deploy of the function forces it, which is why the task-0291
+order is discover first, deploy second.
