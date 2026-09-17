@@ -51,7 +51,9 @@
 --
 -- WHAT A COARSE CANDLE MEANS (task 0286 / ADR 0287 §2–§5). A candle's prices
 --   come only from the PRICE-FORMING trades of its own bucket, so all four
---   price aggregates are gated on `t.pf_trade_count > 0`: a DUST-ONLY child —
+--   price aggregates are gated on `t.pf_trade_count > 0 AND t.close > 0` — the
+--   second term because a PRE-0286 row reads `pf_trade_count` from its DEFAULT
+--   (`trade_count`) and can carry a stored price of 0: a DUST-ONLY child —
 --   every fill too small for its price to mean anything, written by the ingest
 --   with `open = high = low = close = 0` — contributes to none of them. A
 --   bucket with no price-forming child has no price at all and keeps its
@@ -162,10 +164,10 @@ INSERT INTO prices.price_ohlcv_15m
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 15 MINUTE) AS timestamp,
     asset_id, quote_asset_id, source,
-    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0) AS open,
-    maxIf(t.high, t.pf_trade_count > 0) AS high,
-    minIf(t.low, t.pf_trade_count > 0) AS low,
-    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close > 0) AS high,
+    minIf(t.low, t.pf_trade_count > 0 AND t.close > 0) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS close,
     sum(t.volume_base) AS volume_base,
     sum(t.volume_quote) AS volume_quote,
     sum(t.volume_quote_usd) AS volume_quote_usd,
@@ -198,10 +200,10 @@ INSERT INTO prices.price_ohlcv_1h
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
     asset_id, quote_asset_id, source,
-    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0) AS open,
-    maxIf(t.high, t.pf_trade_count > 0) AS high,
-    minIf(t.low, t.pf_trade_count > 0) AS low,
-    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close > 0) AS high,
+    minIf(t.low, t.pf_trade_count > 0 AND t.close > 0) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS close,
     sum(t.volume_base) AS volume_base,
     sum(t.volume_quote) AS volume_quote,
     sum(t.volume_quote_usd) AS volume_quote_usd,
@@ -227,10 +229,10 @@ INSERT INTO prices.price_ohlcv_4h
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
     asset_id, quote_asset_id, source,
-    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0) AS open,
-    maxIf(t.high, t.pf_trade_count > 0) AS high,
-    minIf(t.low, t.pf_trade_count > 0) AS low,
-    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close > 0) AS high,
+    minIf(t.low, t.pf_trade_count > 0 AND t.close > 0) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS close,
     sum(t.volume_base) AS volume_base,
     sum(t.volume_quote) AS volume_quote,
     sum(t.volume_quote_usd) AS volume_quote_usd,
@@ -256,10 +258,10 @@ INSERT INTO prices.price_ohlcv_1d
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
     asset_id, quote_asset_id, source,
-    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0) AS open,
-    maxIf(t.high, t.pf_trade_count > 0) AS high,
-    minIf(t.low, t.pf_trade_count > 0) AS low,
-    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close > 0) AS high,
+    minIf(t.low, t.pf_trade_count > 0 AND t.close > 0) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS close,
     sum(t.volume_base) AS volume_base,
     sum(t.volume_quote) AS volume_quote,
     sum(t.volume_quote_usd) AS volume_quote_usd,
@@ -288,10 +290,10 @@ INSERT INTO prices.price_ohlcv_1w
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 1 WEEK) AS timestamp,
     asset_id, quote_asset_id, source,
-    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0) AS open,
-    maxIf(t.high, t.pf_trade_count > 0) AS high,
-    minIf(t.low, t.pf_trade_count > 0) AS low,
-    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close > 0) AS high,
+    minIf(t.low, t.pf_trade_count > 0 AND t.close > 0) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS close,
     sum(t.volume_base) AS volume_base,
     sum(t.volume_quote) AS volume_quote,
     sum(t.volume_quote_usd) AS volume_quote_usd,
@@ -321,10 +323,10 @@ INSERT INTO prices.price_ohlcv_1M
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 1 MONTH) AS timestamp,
     asset_id, quote_asset_id, source,
-    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0) AS open,
-    maxIf(t.high, t.pf_trade_count > 0) AS high,
-    minIf(t.low, t.pf_trade_count > 0) AS low,
-    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close > 0) AS high,
+    minIf(t.low, t.pf_trade_count > 0 AND t.close > 0) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS close,
     sum(t.volume_base) AS volume_base,
     sum(t.volume_quote) AS volume_quote,
     sum(t.volume_quote_usd) AS volume_quote_usd,

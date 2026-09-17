@@ -17,9 +17,11 @@
 //!
 //! - `open`/`close` are the first/last child that HAS a price-forming fill, and
 //!   `high`/`low` their extremes (`argMinIf`/`argMaxIf`/`maxIf`/`minIf` on
-//!   `t.pf_trade_count > 0`). A dust-only child — every fill too small for its
-//!   price to mean anything, so `open = high = low = close = 0` — can no longer
-//!   become a coarse `low` of 0 or a coarse `close` of 0.
+//!   [`PRICE_FORMING_CHILD`] — `pf_trade_count > 0 AND close > 0`, because on a
+//!   pre-0286 row the first term is a DEFAULT and says nothing). A dust-only
+//!   child — every fill too small for its price to mean anything, so
+//!   `open = high = low = close = 0` — can no longer become a coarse `low` of 0
+//!   or a coarse `close` of 0.
 //! - A bucket whose children are ALL dust-only has no price at all: every
 //!   conditional aggregate matches no row and returns the type default 0 (F6c),
 //!   which is the same "no price" encoding the 1m tier writes.
@@ -268,6 +270,26 @@ fn lower_bound(tier: &Tier, bounds: &Bounds<'_>) -> Result<Option<String>, Rollu
     })
 }
 
+/// The price gate of every coarse aggregate, spelled ONCE (task 0286 S5,
+/// review B WR-01/WR-02, C1).
+///
+/// ⚠️ `pf_trade_count > 0` alone is not a price gate. It is exactly right for a
+/// row the post-0286 ingest wrote — such a row has a price iff it had a
+/// price-forming fill — and it is worth nothing on every row written before,
+/// because the migration gives those `pf_trade_count DEFAULT trade_count`. A
+/// legacy candle whose price underflowed `Decimal(38, 14)` and stored as `0`
+/// therefore reads `pf_trade_count = 2, close = 0` and passes the one-term
+/// gate: it becomes the parent's `low` (0), and whenever it lands last its
+/// `close` (0) as well, on every tier. That row shape is on disk today — one
+/// per tier in the local verification database — and stays there until phase 3
+/// re-ingests the history.
+///
+/// `close > 0` closes it, and costs nothing on a post-0286 row, where
+/// `pf_trade_count > 0` already implies a printable price. The four price
+/// columns are written together, so gating them all on `close` is the same
+/// question asked once rather than four nearly-identical questions.
+pub const PRICE_FORMING_CHILD: &str = "t.pf_trade_count > 0 AND t.close > 0";
+
 /// The coarse rollup SELECT for one tier — the body of its MV and of every
 /// bounded re-roll. See the module docs for what each projection means.
 pub fn rollup_select(tier: &Tier, db: &str, bounds: &Bounds<'_>) -> Result<String, RollupSqlError> {
@@ -291,10 +313,10 @@ pub fn rollup_select(tier: &Tier, db: &str, bounds: &Bounds<'_>) -> Result<Strin
         "SELECT
     toStartOfInterval(t.timestamp, {interval}) AS timestamp,
     asset_id, quote_asset_id, source,
-    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0) AS open,
-    maxIf(t.high, t.pf_trade_count > 0) AS high,
-    minIf(t.low, t.pf_trade_count > 0) AS low,
-    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    argMinIf(t.open, t.timestamp, {PRICE_FORMING_CHILD}) AS open,
+    maxIf(t.high, {PRICE_FORMING_CHILD}) AS high,
+    minIf(t.low, {PRICE_FORMING_CHILD}) AS low,
+    argMaxIf(t.close, t.timestamp, {PRICE_FORMING_CHILD}) AS close,
     sum(t.volume_base) AS volume_base,
     sum(t.volume_quote) AS volume_quote,
     sum(t.volume_quote_usd) AS volume_quote_usd,
@@ -483,10 +505,10 @@ mod tests {
     fn every_price_aggregate_is_gated_on_a_price_forming_child() {
         for (what, sql) in every_rendering() {
             for needle in [
-                "argMinIf(t.open, t.timestamp, t.pf_trade_count > 0) AS open",
-                "maxIf(t.high, t.pf_trade_count > 0) AS high",
-                "minIf(t.low, t.pf_trade_count > 0) AS low",
-                "argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close",
+                "argMinIf(t.open, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS open",
+                "maxIf(t.high, t.pf_trade_count > 0 AND t.close > 0) AS high",
+                "minIf(t.low, t.pf_trade_count > 0 AND t.close > 0) AS low",
+                "argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS close",
                 "sum(t.pf_trade_count) AS pf_trade_count",
                 "sum(t.pf_volume) AS pf_volume",
                 "sum(t.pf_price_volume) AS pf_price_volume",
@@ -506,6 +528,10 @@ mod tests {
                 "max(high)",
                 "min(low)",
                 "argMax(t.close, t.timestamp) AS close",
+                // The one-term gate: true on every legacy row, because
+                // `pf_trade_count` DEFAULTs to `trade_count` there.
+                "maxIf(t.high, t.pf_trade_count > 0)",
+                "minIf(t.low, t.pf_trade_count > 0)",
             ] {
                 assert!(
                     !sql.contains(forbidden),

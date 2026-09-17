@@ -573,10 +573,14 @@ SELECT
     -- close. A bucket with no price-forming child matches nothing, and each
     -- conditional aggregate returns the type default 0 — the same "no price"
     -- encoding the 1m tier writes.
-    argMinIf(t.open,  t.timestamp, t.pf_trade_count > 0) AS open,
-    maxIf(t.high, t.pf_trade_count > 0)                  AS high,
-    minIf(t.low,  t.pf_trade_count > 0)                  AS low,
-    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    -- ⚠️ BOTH terms: a row written before task 0286 reads pf_trade_count from
+    -- its DEFAULT (trade_count), so it can claim to be price-forming with a
+    -- stored price of 0. `close > 0` is what keeps such a row out until the
+    -- phase-3 re-ingest replaces it.
+    argMinIf(t.open,  t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close > 0)                  AS high,
+    minIf(t.low,  t.pf_trade_count > 0 AND t.close > 0)                  AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS close,
     sum(t.volume_base)      AS volume_base,      -- volume and counts are summed
     sum(t.volume_quote)     AS volume_quote,     -- over EVERY child, dust
     sum(t.volume_quote_usd) AS volume_quote_usd, -- included: it traded

@@ -3878,6 +3878,64 @@ async fn pf_columns_survive_every_enrichment_rewrite() {
         .unwrap();
 }
 
+/// Review B WR-01, the same reference against the LEGACY row shape: until phase
+/// 3 every pre-0286 row reads `pf_trade_count` from its `DEFAULT trade_count`,
+/// so a candle whose price underflowed `Decimal(38, 14)` and stored as `0`
+/// reports itself fully price-forming. `pf_trade_count > 0` lets it in; only
+/// `close > 0 AND volume_base > 0` — what `views.sql` and the reset's day set
+/// already say — keeps it out.
+///
+/// RED before that term, twice over, exactly as the dust case: the mixed bucket
+/// averages 0.30 with 0 to 0.15, and the later all-legacy bucket wins the ASOF
+/// with a reference of 0.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_pivot_ignores_a_legacy_reference_minute_that_claims_a_price_it_has_not_got() {
+    let db = "it_enrich_pivot_legacy_ref";
+    let client = setup_scratch(db).await;
+    let early = 1_600_000_000u32;
+    let late = early + 600;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    // Identical to the dust case except for the contaminating rows: these carry
+    // `pf_trade_count = trade_count = 3`, the migration's DEFAULT, with no price.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ({early}, 1, 2, 'sdex', 0.30,0.30,0.30,0.30, 1000, 300, 0, 0, 0.30, 5, 1, 2, 1000, 300), \
+             ({early}, 1, 2, 'phoenix', 0,0,0,0, 1000, 1, 0, 0, 0.001, 3, 1, 3, 1000, 1), \
+             ({late}, 1, 2, 'phoenix', 0,0,0,0, 1000, 1, 0, 0, 0.001, 3, 1, 3, 1000, 1), \
+             ({late}, 10, 1, 'phoenix', 13.3333,13.3333,13.3333,13.3333, 3, 40, 0, 0, 13.3333, 5, 1, 2, 3, 40)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    seed_external_rate(&client, db, DEEP_DAY_START, 1.0).await;
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let priced = close_usd(&client, db, 10, 1, late).await;
+    assert!(
+        (priced - 4.0).abs() < 1e-4,
+        "the reference must be the priced row's 0.30 (13.3333 x 0.30 = 4.0), \
+         got {priced}: 2.0 means a legacy zero-price row halved the \
+         volume-weighted close, and 0.0 means it supplied the reference outright"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
 /// The pivot's XLM/USDC reference ignores dust (BRIEF F9).
 ///
 /// The reference is a volume-weighted close over the reference market's rows,

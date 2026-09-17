@@ -751,21 +751,37 @@ const PF_VWAP_USD_RAW: &str = "nullIf(toDecimal128OrNull(toString( \
                      sumIf(toFloat64(pfpv_x), valid) \
                      / nullIf(sumIf(toFloat64(pf_volume), valid), 0)), 14), 0)";
 
-/// The quote-leg arm's price-forming gate, spelled once. Unlike the USD arm
-/// there is no `valid` to hang it on: that expression exists to say "this row
-/// can be converted to USD", and this arm converts nothing.
-const PF_ROWS: &str = "pf_trade_count > 0";
+/// The quote-leg arm's price gate, spelled once. Unlike the USD arm there is no
+/// `valid` to hang it on: that expression exists to say "this row can be
+/// converted to USD", and this arm converts nothing.
+///
+/// ⚠️ BOTH terms (task 0286 S5, review C1). `pf_trade_count > 0` is a true
+/// price gate only on a row the post-0286 ingest wrote. Every older row reads
+/// `pf_trade_count` from its `DEFAULT trade_count`, so a candle whose price
+/// underflowed `Decimal(38, 14)` and stored as `0` claims to be price-forming
+/// and has no price — and this arm published it as `"0"`. The floor is
+/// [`PRECISION_FLOOR`], the same line the USD arm's `valid` draws, so the two
+/// arms cannot disagree about which rows may supply a price; the literal is
+/// repeated here only because one `const` cannot be built from another, and
+/// `the_quote_leg_gate_carries_the_same_precision_floor_the_usd_arm_has` pins
+/// them together.
+///
+/// Gating on `close` alone covers all four price columns: the ingest writes
+/// them together, so a row with a printable `close` has printable extremes.
+const PF_ROWS: &str = "pf_trade_count > 0 AND close >= toDecimal128('0.000000000001', 14)";
 
-/// The quote-leg arm's published extremes — gated, so a dust row's high can
-/// never become the bucket's.
-const QL_HIGH: &str = "maxIf(high, pf_trade_count > 0)";
-const QL_LOW: &str = "minIf(low, pf_trade_count > 0)";
+/// The quote-leg arm's published extremes — gated, so neither a dust row's
+/// high nor a legacy zero-price row's low can become the bucket's.
+const QL_HIGH: &str =
+    "maxIf(high, pf_trade_count > 0 AND close >= toDecimal128('0.000000000001', 14))";
+const QL_LOW: &str =
+    "minIf(low, pf_trade_count > 0 AND close >= toDecimal128('0.000000000001', 14))";
 
 /// The quote-leg arm's price-forming mean, in the stored denomination. Same
 /// zero rule as [`PF_VWAP_USD_RAW`].
 const PF_VWAP_QL_RAW: &str = "nullIf(toDecimal128OrNull(toString( \
-                 sumIf(toFloat64(pf_price_volume), pf_trade_count > 0) \
-                 / nullIf(sumIf(toFloat64(pf_volume), pf_trade_count > 0), 0)), 14), 0)";
+                 sumIf(toFloat64(pf_price_volume), pf_trade_count > 0 AND close >= toDecimal128('0.000000000001', 14)) \
+                 / nullIf(sumIf(toFloat64(pf_volume), pf_trade_count > 0 AND close >= toDecimal128('0.000000000001', 14)), 0)), 14), 0)";
 
 /// Synthesize a USD series for a **peg asset** — one that is only ever stored as
 /// a quote leg, never as a base (ADR 0011 §6).
@@ -906,9 +922,11 @@ fn quote_leg_aggregates() -> String {
     // `vwap` column is a dust price like its close, so letting it into the
     // weighted mean would put back on the wire exactly what the gate on
     // `o`/`h`/`l`/`c` takes off.
-    let vwap_raw = "toDecimal128OrNull(toString( \
-                 sumIf(toFloat64(vwap) * toFloat64(volume_base), pf_trade_count > 0) \
-                 / nullIf(sumIf(toFloat64(volume_base), pf_trade_count > 0), 0)), 14)";
+    let vwap_raw = format!(
+        "toDecimal128OrNull(toString( \
+                 sumIf(toFloat64(vwap) * toFloat64(volume_base), {PF_ROWS}) \
+                 / nullIf(sumIf(toFloat64(volume_base), {PF_ROWS}), 0)), 14)"
+    );
     // ⚠️ Every price aggregate below is a `-If` and every one of them is
     // WRAPPED. Over zero matching rows `maxIf`/`minIf`/`argMaxIf` return the
     // type's DEFAULT — `0` — rather than NULL (verified on 26.3.10.60), so an
@@ -2503,18 +2521,23 @@ mod tests {
     fn the_quote_leg_arm_gates_every_price_aggregate_and_wraps_it_against_the_zero_default() {
         let agg = quote_leg_aggregates();
         for gated in [
-            "argMaxIf(open, volume_base, pf_trade_count > 0)",
-            "maxIf(high, pf_trade_count > 0)",
-            "minIf(low, pf_trade_count > 0)",
-            "argMaxIf(close, volume_base, pf_trade_count > 0)",
+            format!("argMaxIf(open, volume_base, {PF_ROWS})"),
+            format!("maxIf(high, {PF_ROWS})"),
+            format!("minIf(low, {PF_ROWS})"),
+            format!("argMaxIf(close, volume_base, {PF_ROWS})"),
         ] {
-            assert!(agg.contains(gated), "missing `{gated}` in: {agg}");
+            assert!(agg.contains(&gated), "missing `{gated}` in: {agg}");
         }
         for bare in [
             "argMax(open, volume_base)",
             "max(high)",
             "min(low)",
             "argMax(close, volume_base)",
+            // The one-term gate: `pf_trade_count` is a DEFAULT on every row
+            // written before task 0286, so on its own it admits a stored
+            // price of zero.
+            "maxIf(high, pf_trade_count > 0)",
+            "minIf(low, pf_trade_count > 0)",
         ] {
             assert!(
                 !agg.contains(bare),
@@ -2523,11 +2546,46 @@ mod tests {
         }
         // One wrapper per price field: open, high, low, close, vwap.
         assert_eq!(
-            agg.matches("if(countIf(pf_trade_count > 0) = 0, NULL,")
+            agg.matches(&format!("if(countIf({PF_ROWS}) = 0, NULL,"))
                 .count(),
             5,
             "every price field must go NULL on a bucket with no price-forming \
              fill, rather than take a `-If` aggregate's zero default: {agg}"
+        );
+    }
+
+    /// Review C1 (BLOCKER). The USD arm's `valid` carries a PRECISION FLOOR
+    /// beside `pf_trade_count > 0`; the quote-leg arm carried the pf term
+    /// alone. Every row written before task 0286 reads `pf_trade_count` from
+    /// its `DEFAULT trade_count`, so a legacy candle whose price underflowed
+    /// `Decimal(38, 14)` and stored as `0` passed every gate and was published
+    /// as `open = high = low = close = "0"` — a price, asserted, on a public
+    /// endpoint. One such row per tier is in the local verification database.
+    ///
+    /// Worse under a merge: its `volume_base` wins both `argMaxIf`s and its
+    /// zero wins `minIf(low, ...)`, so a bucket with a perfectly good second
+    /// venue publishes `open = low = close = 0` beside a real `high`.
+    #[test]
+    fn the_quote_leg_gate_carries_the_same_precision_floor_the_usd_arm_has() {
+        assert!(
+            PF_ROWS.contains(PRECISION_FLOOR),
+            "the two arms must floor prices at the same value: {PF_ROWS}"
+        );
+        assert!(
+            PF_ROWS.starts_with("pf_trade_count > 0 AND close >= "),
+            "both terms, in the spelling the reviewers' trigger reads: {PF_ROWS}"
+        );
+
+        let agg = quote_leg_aggregates();
+        assert_eq!(
+            agg.matches(PRECISION_FLOOR).count(),
+            agg.matches(PF_ROWS).count(),
+            "every floor in the quote-leg arm must come from the shared gate: {agg}"
+        );
+        assert!(
+            agg.matches(PF_ROWS).count() >= 9,
+            "four price aggregates, five wrappers and the pf_vwap sums all \
+             share the gate: {agg}"
         );
     }
 

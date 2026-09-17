@@ -628,6 +628,18 @@ fn external_rate_day_pred(db: &str) -> String {
 /// then trading later the same day", and the post-check still covers it. Only
 /// one of those errors is recoverable, so the bias is toward that one — the
 /// same bias [`external_rate_day_pred`] documents for the rate.
+/// What makes a row of the XLM/USDC reference market usable as a reference,
+/// spelled ONCE (task 0286 S5, review B WR-01).
+///
+/// The same question is asked in three places — this module's reference
+/// subquery, [`pivot_reference_day_pred`]'s day set, and `views.sql`'s
+/// `usd_reference` / `price_usd_series` — and the three must not drift: the
+/// day set decides which days a reset may refill, and the subquery decides
+/// what the refill is worth. A row whose stored `close` is 0 has no price to
+/// contribute, however much volume it carries, and `volume_base > 0` is what
+/// keeps it out of a volume-weighted mean's denominator.
+const PRICED_REFERENCE_ROW: &str = "close > 0 AND volume_base > 0";
+
 fn pivot_reference_day_pred(db: &str, tbl: &str, spec: &UsdResetSpec) -> String {
     format!(
         "toDate(timestamp, 'UTC') IN (SELECT toDate(timestamp, 'UTC') FROM {db}.{tbl} FINAL \
@@ -635,7 +647,7 @@ fn pivot_reference_day_pred(db: &str, tbl: &str, spec: &UsdResetSpec) -> String 
            AND quote_asset_id IN (SELECT asset_id FROM {db}.assets FINAL \
                                   WHERE asset_code = 'USDC' AND issuer_address = '{USDC_ISSUER}' \
                                     AND contract_address = '') \
-           AND close > 0 AND volume_base > 0)",
+           AND {PRICED_REFERENCE_ROW})",
         q = spec.quote_asset_id,
     )
 }
@@ -2662,7 +2674,7 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> St
                          sum(toFloat64(close) * toFloat64(volume_base)) / nullIf(sum(toFloat64(volume_base)), 0) AS usd \
                      FROM {db}.{tbl} FINAL \
                      WHERE asset_id = {ref_id} AND quote_asset_id = {usdc_id} \
-                       AND pf_trade_count > 0 \
+                       AND {PRICED_REFERENCE_ROW} AND pf_trade_count > 0 \
                        AND timestamp <= toDateTime(?) \
                      GROUP BY timestamp \
                      ORDER BY timestamp \
@@ -4462,6 +4474,39 @@ mod tests {
         assert!(
             reference.contains("AND pf_trade_count > 0"),
             "the reference must weight only price-forming rows: {reference}"
+        );
+    }
+
+    /// Review B WR-01. `pf_trade_count > 0` alone is the WEAKEST of the three
+    /// implementations of this one reference: `views.sql` and
+    /// [`pivot_reference_day_pred`] both say `close > 0 AND volume_base > 0`,
+    /// and until phase 3 every legacy row reads `pf_trade_count` from its
+    /// DEFAULT. A row with `close = 0` and 33 billion units of volume then
+    /// contributes `0 x volume` to the numerator and its whole volume to the
+    /// denominator — the reference is dragged toward zero, passes
+    /// `r.usd IS NOT NULL`, and under-prices every XLM-quoted candle in the
+    /// bucket. Meanwhile the day-set predicate excludes that same day, so the
+    /// two halves of the reset path disagree about what is refillable.
+    #[test]
+    fn the_pivot_reference_says_what_the_day_set_and_the_views_say() {
+        let sql = pivot_sql("prices", "price_ohlcv_1m", 5, 3, "");
+        let reference = &sql[sql.find("AS ref_asset_id").expect("the reference subquery")..];
+        assert!(
+            reference.contains(PRICED_REFERENCE_ROW),
+            "the reference must exclude a row that cannot print its price: {reference}"
+        );
+
+        let spec = UsdResetSpec {
+            quote_asset_id: 7,
+            not_before: 0,
+            not_after: None,
+            require_external_rate: false,
+            require_pivot_usdc_rate: false,
+        };
+        assert!(
+            pivot_reference_day_pred("prices", "price_ohlcv_1m", &spec)
+                .contains(PRICED_REFERENCE_ROW),
+            "the day-set predicate and the reference subquery must be the same question"
         );
     }
 

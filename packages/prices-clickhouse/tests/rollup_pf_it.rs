@@ -86,6 +86,28 @@ impl Minute {
         }
     }
 
+    /// The LEGACY shape task 0286's migration leaves behind (review B WR-01 /
+    /// WR-02, C1): a pre-0286 row whose price underflowed `Decimal(38, 14)` and
+    /// stored as `0`, reading `pf_trade_count` from its `DEFAULT trade_count`.
+    /// It claims to be price-forming and has no price — the whole reason the
+    /// coarse gate cannot be `pf_trade_count > 0` alone. The real row: local
+    /// `price_ohlcv_1m`, 2026-04-02 06:39, asset 2643 / native / sdex,
+    /// `volume_base = 33 387 840 110.63`.
+    const fn legacy_unrepresentable(ts: &'static str) -> Self {
+        Self {
+            ts,
+            open: "0",
+            high: "0",
+            low: "0",
+            close: "0",
+            volume_base: "33387840110.63",
+            volume_quote: "0.0001622",
+            close_usd: "0",
+            trade_count: 1,
+            pf_trade_count: 1,
+        }
+    }
+
     /// A DUST-ONLY minute: fills happened and count in volume, but not one of
     /// them formed a price, so the candle has none (ADR 0287 §3).
     const fn dust(ts: &'static str) -> Self {
@@ -499,6 +521,66 @@ async fn vwap_and_close_usd_survive_the_decimal_overflow_threshold() {
             0.0,
             &format!("{table}: vwap with no base volume"),
         );
+    }
+
+    teardown(&admin, db).await;
+}
+
+/// Review B WR-01 / WR-02 and C1, on the rollup side: a LEGACY row —
+/// `pf_trade_count > 0` from the migration's DEFAULT, `close = 0` because its
+/// price underflowed the column — must reach no price aggregate either.
+///
+/// RED before the `AND t.close > 0` term: `minIf(t.low, t.pf_trade_count > 0)`
+/// takes the legacy zero on every tier, and because the row's `volume_base`
+/// dwarfs the healthy minute's it is the loudest possible zero — a real bucket
+/// with a real price publishing `low = 0`.
+#[tokio::test]
+#[ignore = "requires the local ClickHouse 26.3.10.60"]
+async fn a_legacy_row_that_claims_a_price_it_cannot_print_reaches_no_price_aggregate() {
+    let db = "it_rollup_pf_legacy_zero";
+    let admin = setup(db).await;
+
+    admin
+        .query(&insert_minutes(
+            db,
+            &[
+                Minute::priced("2026-04-02 00:00:00", "1.0", "1.5", "0.9", "1.1", "0"),
+                Minute::legacy_unrepresentable("2026-04-02 00:01:00"),
+            ],
+        ))
+        .execute()
+        .await
+        .expect("insert minutes");
+
+    preroll(&admin, db).await;
+
+    for table in COARSE {
+        let [open, high, low, close, _, _] = candle(&admin, db, table, "").await;
+        approx(open, 1.0, &format!("{table}: open"));
+        approx(high, 1.5, &format!("{table}: high"));
+        approx(low, 0.9, &format!("{table}: low"));
+        approx(
+            close,
+            1.1,
+            &format!("{table}: close — the legacy row landed LAST and must not close the bucket"),
+        );
+
+        // Its volume is real and still counted; only its "price" is refused.
+        let vbase = scalar(
+            &admin,
+            &format!("SELECT toFloat64(sum(volume_base)) FROM {db}.{table} FINAL"),
+        )
+        .await;
+        assert!(
+            (vbase / 33_387_840_120.63 - 1.0).abs() < 1e-9,
+            "{table}: volume_base — the legacy row's volume is real and stays: {vbase}"
+        );
+        let trade_count = scalar(
+            &admin,
+            &format!("SELECT toFloat64(sum(trade_count)) FROM {db}.{table} FINAL"),
+        )
+        .await;
+        approx(trade_count, 3.0, &format!("{table}: trade_count"));
     }
 
     teardown(&admin, db).await;

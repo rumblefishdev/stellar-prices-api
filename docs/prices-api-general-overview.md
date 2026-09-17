@@ -342,10 +342,14 @@ SELECT
     -- Every price aggregate is conditional: a coarse candle's prices come from
     -- its price-forming children only, so a dust-only child reaches none of
     -- them (ADR 0287). A bucket with no such child gets no price.
-    argMinIf(t.open,  t.timestamp, t.pf_trade_count > 0) AS open,
-    maxIf(t.high, t.pf_trade_count > 0)                  AS high,
-    minIf(t.low,  t.pf_trade_count > 0)                  AS low,
-    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0) AS close,
+    -- ⚠️ BOTH terms: a row written before task 0286 reads pf_trade_count from
+    -- its DEFAULT (trade_count), so it can claim to be price-forming with a
+    -- stored price of 0. `close > 0` is what keeps such a row out until the
+    -- phase-3 re-ingest replaces it.
+    argMinIf(t.open,  t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close > 0)                  AS high,
+    minIf(t.low,  t.pf_trade_count > 0 AND t.close > 0)                  AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close > 0) AS close,
     sum(t.volume_base)      AS volume_base,   -- volume and counts cover EVERY
     sum(t.volume_quote_usd) AS volume_quote_usd,  -- child, dust included
     sum(t.volume_quote) / nullIf(sum(t.volume_base), 0) AS vwap,

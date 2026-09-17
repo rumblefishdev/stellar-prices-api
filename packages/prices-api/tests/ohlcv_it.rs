@@ -2657,6 +2657,79 @@ async fn ohlcv_in_xlm_takes_no_price_from_a_dust_only_source() {
     teardown(db).await;
 }
 
+/// Review C1 (BLOCKER), on the wire. A LEGACY row — `pf_trade_count` from the
+/// migration's `DEFAULT trade_count`, `close = 0` because its price underflowed
+/// `Decimal(38, 14)` — passed the quote-leg arm's one-term gate and was
+/// published as a price of `"0"`. The USD arm was immune all along: its `valid`
+/// carries a precision floor.
+///
+/// The fixture is the real row shape (local `price_ohlcv_1m`, 2026-04-02 06:39,
+/// `volume_base = 39 791 362 431.76`), merged with a healthy venue — which is
+/// where it does the most damage: its volume wins both `argMaxIf`s and its zero
+/// wins `minIf(low, ...)`, so the bucket published `open = low = close = 0`
+/// beside a real `high`.
+///
+/// RED before the floor: `close` and `low` come back `"0"`.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_in_xlm_takes_no_price_from_a_legacy_row_that_cannot_print_one() {
+    let db = "it_ohlcv_xlm_legacy_zero_0286";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (4, 'BAR', 'credit', '{i}', '')",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ('2026-03-04 10:00:00', 4, 1, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 1000, 250, 2.5, \
+              10.0, 7, 1, 7, 100, 1000), \
+             ('2026-03-04 10:00:00', 4, 1, 'soroswap', 0, 0, 0, 0, 39791362431.76, 0.0001622, \
+              0, 0, 0.0000000000000041, 2, 1, 2, 39791362431.76, 0.0001622)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/BAR:{}/ohlcv?granularity=1h&start=2026-03-04T10:00:00Z\
+         &end=2026-03-04T10:00:00Z&base_currency=XLM",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "body={json}");
+    let c = &data[0];
+
+    approx(&c["open"], 10.0);
+    approx(&c["high"], 12.0);
+    approx(&c["low"], 9.0); // NOT 0, which the legacy row's stored low is
+    approx(&c["close"], 10.0); // NOT 0, on 400 million times the volume
+    approx(&c["pf_vwap"], 10.0); // 1000 / 100, not ~4e-15
+
+    // Its volume and its trades are real and still counted — only its claim to
+    // a price is refused.
+    approx(&c["volume_base"], 39_791_362_531.76);
+    assert_eq!(c["trade_count"], 9);
+    assert_eq!(
+        c["pf_trade_count"], 9,
+        "the pf counts are reported as stored, DEFAULTs and all: {c}"
+    );
+
+    teardown(db).await;
+}
+
 /// The synthesized USDC self-series has no stored candle behind it, so it has
 /// no price-forming fills to count. All three fields are `null` there — not
 /// `0`, which would claim a bucket of dust.
