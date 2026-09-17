@@ -2,7 +2,7 @@
 id: "0260"
 title: 'Read path collapsed at 100 req/s of cache misses — connection ceiling or query performance?'
 type: RESEARCH
-status: active
+status: completed
 related_adr: ['0007']
 related_tasks: ['0121', '0047', '0122']
 tags:
@@ -140,6 +140,16 @@ history:
       (client→gateway). AC 2 closed with the decomposition. All six criteria
       now ticked; the task stays active only for run 2 (ramp to 1000 from a
       client inside eu-central-1) and the report.
+  - date: 2026-09-17
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Closed. Question answered: the 2026-09-03 collapse was neither
+      connections nor query cost but a 10,000 queries/hour ClickHouse quota
+      on prices_reader (28,853 code-201 refusals), fixed on the box 12:13 UTC
+      via sbe 0561 / PR #462. All six criteria met; run 1 at 100 req/s of
+      misses held (0 errors, gateway p95 74 ms). Run 2 and the report spawned
+      as [[0293]]. Four statements from 09-16 withdrawn and marked in place.
   - date: 2026-09-17
     status: active
     who: stkrolikiewicz
@@ -632,6 +642,47 @@ observability gaps. Fold it in there rather than adding an 86th backlog item.
       — *the quota interval rolled over at 07:00:00*
 - [x] If the cause is structural, ADR 0007's sidecar-ClickHouse fallback is
       revisited on the record — *not structural; not triggered*
+
+## Closing — 2026-09-17
+
+### Design Decisions
+
+#### Emerged
+
+1. **Closed on six criteria without run 2.** The research question is
+   answered with evidence from the box; the ramp to 1000 is a test with an
+   agreed window and its own preconditions, not research. Spawned as [[0293]].
+2. **The quota fix was made in sbe's repo and applied in place**, not through
+   their Ansible role: the operator's local env was from July and the role
+   re-renders `.env` (with `no_log`). One file, same inode, hot reload, no
+   restart. Recorded in sbe 0561.
+3. **Yesterday's findings were kept and marked, not rewritten.** Withdrawn
+   statements carry a dated marker in place so the correction is traceable.
+
+### Issues Encountered
+
+- **[[0281]] destroyed the direct evidence** for eight days — 28,853 empty
+  error bodies whose text said "Quota … exceeded". Fixed before this task
+  ran, which is why run 1 would have been diagnosable in minutes.
+- **AWS CLI prints CloudWatch timestamps in local time** (+02:00); the first
+  morning measurement sliced them as UTC and put every OOM 2 h before its
+  alarm. Caught by arithmetic, fixed by parsing the offset.
+- **Three guard failures on 2026-09-16**, the third destructive (this file's
+  Acceptance Criteria and Notes deleted by a rewrite-to-EOF and restored from
+  git). Root cause: a check and a destructive action in one breath, with the
+  check advisory. Every edit since ends its guard with `exit`.
+- **The access was there all along** — `sorban-prod` in `~/.ssh/config`; what
+  the 09-16 "not reachable" meant was "not asked for".
+
+### Future Work
+
+- [[0293]] — run 2 (ramp to 1000 from inside eu-central-1) and the report.
+- [[0249]] — gateway-5XX alarm; 26 minutes paged nobody.
+- [[0047]] — the shared-box ceiling, live once run 2 reaches the knee.
+- sbe: task 0250 assumes quotas are not enforced on the Caddy path; the box's
+  own log says they are (every code 201 since May). Reported to Karol
+  2026-09-17; theirs to decide.
+- sbe: `system.*_log` on the box has no TTL (text_log 76 GiB). Reported.
 
 ## Notes
 
