@@ -34,6 +34,28 @@ and the month's rebuild.
 | 4   | **The 0142 / 0137 alarms are known-green.** `prices-production-mv-drift` OK, `MvDriftCritical` 0, the rollup freshness alarm OK.                                                                                                                                   | CloudWatch                                                                         |
 | 5   | **Disk headroom for the FREEZE snapshots** (hardlinks under `shadow/`, cheap but non-zero).                                                                                                                                                                        | `ssh … 'df -h /var/lib/docker'`                                                    |
 
+### 1a. Second writes of a minute — a HARD GATE, not a caveat
+
+`price_ohlcv_1m` is a `ReplacingMergeTree(version)`: a second write of the same
+`(asset, quote, source, minute)` REPLACES the first on the higher version, it
+does not merge with it. Before ADR 0287 that cost a minute half its volume.
+Under ADR 0287, if the fills of the second write are all dust the replacement
+row is `open = high = low = close = 0, pf_trade_count = 0` — a correctly priced
+minute is ERASED, it drops out of every coarse `argMin`/`argMax`/`max`/`min`,
+and `/ohlcv` publishes `null` where the market traded. Nothing alarms.
+
+| Path                                                               | Status                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sdex-backfill`'s 64k-ledger partition boundary                    | **Closed.** The candle accumulators live for the whole run (`packages/sdex-backfill/src/ingest.rs`, `RunAccumulators`): only closed minutes are written as ledgers advance, and the open one is drained once, after the last partition.                    |
+| `events-backfill`'s chunk boundary                                 | Already closed — the open minute has always been carried across chunks.                                                                                                                                                                                    |
+| A reconcile run boundary in the live ledger-processor (task 0282)  | **OPEN. This is precondition 1 and it blocks the ingest deploy.** Every minute bucket that spans a reconcile run is re-written partially, daily, on production.                                                                                            |
+| A crash between `write_candles` and `write_completed_ledgers`      | **OPEN, accepted.** The resume markers cover ledgers whose minute may still be open, so a crash there leaves the boundary minute short rather than wrong. Recovery: clear that partition's `backfill_sdex_ledgers` markers and re-run it before moving on. |
+| An operator re-running a range that a previous run already covered | **OPEN, operator-controlled.** Never re-run a sub-range on top of existing rows; `DROP PARTITION` first (the phase-3 procedure) so the minutes are rebuilt whole.                                                                                          |
+
+Do NOT deploy the ingest binaries while any OPEN path above is live on the
+target. The ingest is the last step of §2 precisely so this gate has somewhere
+to stop the rollout without leaving the estate half-migrated.
+
 ## 2. Order, and why it is not negotiable
 
 ```

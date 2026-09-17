@@ -8,7 +8,10 @@ use tracing::{info, warn};
 use prices_ingest_core::{AssetRegistry, Registries, UnresolvedPool, UnresolvedPoolSwap};
 
 use crate::error::BackfillError;
-use crate::ingest::{ExtractMode, PartitionStats, index_partition, peek_ledger_minute};
+use crate::ingest::{
+    ExtractMode, PartitionEnd, PartitionStats, RunAccumulators, flush_open_minutes,
+    index_partition, peek_ledger_minute,
+};
 use crate::partition::{Partition, partitions_for_range};
 use crate::progress::{Observed, Phase, progress_updates};
 use crate::sink::{Sink, merge_max, merge_min};
@@ -127,6 +130,13 @@ pub async fn execute(
     // partition straddles the split (decision 7).
     let mut checked_alignment = false;
 
+    // Run-level candle state (task 0286 S5, review A BL-01): the minute open at
+    // a partition boundary is CARRIED into the next partition instead of being
+    // written twice — the second write would replace the first under
+    // `ReplacingMergeTree`, and a dust-only second half erases a priced minute.
+    // Same shape as `events-backfill`, which keeps its open minute across chunks.
+    let mut accs = RunAccumulators::new();
+
     let existing_assets = sink.load_assets().await?;
     let mut registry = AssetRegistry::from_existing(existing_assets);
     // Venue / pool registries. Preloaded from the persisted `pool_registry`
@@ -160,6 +170,14 @@ pub async fn execute(
             };
 
         if current_complete {
+            // Only the last partition of the run may drain the open minute:
+            // every earlier boundary carries it into the partition that holds
+            // its remaining fills.
+            let partition_end = if i + 1 == todo.len() {
+                PartitionEnd::Drain
+            } else {
+                PartitionEnd::Carry
+            };
             let mut stats = index_partition(
                 partition,
                 temp_dir,
@@ -170,6 +188,8 @@ pub async fn execute(
                 &mut registry,
                 &mut reg,
                 mode,
+                &mut accs,
+                partition_end,
             )
             .await?;
 
@@ -274,6 +294,11 @@ pub async fn execute(
             false
         };
     }
+
+    // The last partition drains itself; this covers the run whose last
+    // partition was skipped (S3-incomplete) and therefore never reached
+    // `PartitionEnd::Drain`. A no-op when nothing is open.
+    flush_open_minutes(&mut accs, sink, &mut totals).await?;
 
     sink.write_assets(&registry).await?;
     // Persist the discovered pool registry as a durable artifact (decision #4)
