@@ -45,7 +45,7 @@
 //! GETs, zstd decompression and extraction work. That is the price of keeping no
 //! accumulator state between invocations, which is what makes a cold start
 //! behave like a warm one. It scales with ledgers-per-minute, the same factor
-//! that drives the `forced_progress` escape hatch below.
+//! that drives the budget-exhausted escape hatch in `run_end` below.
 //!
 //! 🔑 **The cursor always parks on a minute boundary** (outside the escape
 //! hatch). It is only ever written as the last ledger of a COMPLETE minute, so
@@ -302,7 +302,7 @@ where
         // ledgers are re-read next run and their minute is written once, whole.
         // Re-reading is what keeps this crash-safe: no accumulator state has to
         // survive between invocations, so a cold start behaves like a warm one.
-        let (open_minute, complete_end) = run_boundary(&ledger_minutes);
+        let (open_minute, split) = run_boundary(&ledger_minutes);
 
         // FIX 2 — forced progress. Holding back is only safe while a LATER run
         // can reach the next minute. If this run filled its whole iteration
@@ -323,15 +323,21 @@ where
         // that is the deliberate trade: a candle that may be undercounted beats a
         // pipeline that has silently stopped. It is logged at WARN because it
         // means `maxIterations` is now too small for the chain's block rate.
-        let forced = forced_progress(
-            complete_end,
+        let end = run_end(
+            split,
             persisted,
             max_iterations,
             ledger_minutes.len(),
             terminal,
         );
-        if forced {
-            tracing::warn!(
+        // Only the budget case re-creates the task-0282 loss, so only it is
+        // reported as a forced partial flush. A terminal run flushing its last
+        // minute is the designed behaviour of a one-shot caller, and an object
+        // with no ledgers has nothing to flush at all — counting either would
+        // fire an alarm whose advice (raise `maxIterations`) is wrong for them.
+        let forced = end == RunEnd::FlushAll(FlushAllReason::BudgetExhausted);
+        match end {
+            RunEnd::FlushAll(FlushAllReason::BudgetExhausted) => tracing::warn!(
                 start,
                 max_iterations,
                 ledgers = ledger_minutes.len(),
@@ -339,7 +345,12 @@ where
                 "iteration budget exhausted inside ONE minute — flushing a PARTIAL minute \
                  to keep the cursor moving; raise ledgerProcessor.maxIterations above \
                  the ledgers-per-minute rate (task 0282)"
-            );
+            ),
+            RunEnd::FlushAll(FlushAllReason::NoLedgersDecoded) => info!(
+                start,
+                persisted, "objects decoded to no ledgers — advancing past them, nothing to flush"
+            ),
+            _ => {}
         }
 
         // Write newly-interned assets FIRST — the candles below reference their
@@ -362,13 +373,18 @@ where
             .map(|(s, _, _)| *s)
             .max()
             .unwrap_or(current);
-        let advance_to = if forced {
-            Some(highest_decoded)
-        } else {
-            complete_end
+        // `(cursor to write, flush minutes strictly older than this)`.
+        let advance_to = match end {
+            RunEnd::Split {
+                cursor,
+                flush_before,
+            } => Some((cursor, flush_before)),
+            // Everything decoded is flushed, so the cursor may pass all of it.
+            RunEnd::FlushAll(_) => Some((highest_decoded, u32::MAX)),
+            RunEnd::Hold => None,
         };
 
-        let Some(current) = advance_to else {
+        let Some((current, flush_boundary)) = advance_to else {
             // Every ledger in this run belongs to the minute still being filled.
             // Write no CANDLES and leave the cursor where it was: the next run
             // re-reads these ledgers and completes the minute in one write.
@@ -400,10 +416,6 @@ where
         // ledger DECODED), where the predicate is false by construction and the
         // field was always 0 on the path that matters.
         let held_back = held_back_count(&ledger_minutes, current);
-
-        // A forced run flushes EVERYTHING (see the escape hatch above); a normal
-        // run flushes only minutes it saw the end of.
-        let flush_boundary = if forced { u32::MAX } else { open_minute };
 
         // Flush + write candles/oracle, then advance the cursor LAST (barrier).
         let mut rows_emitted = 0u64;
@@ -469,37 +481,63 @@ where
     }
 }
 
-/// Whether the run must flush a partial minute to keep the cursor moving.
-///
-/// True only when the run found no complete minute AND had already spent its
-/// whole iteration budget — i.e. a later run would fetch exactly the same
-/// ledgers and hold back exactly the same way, forever. See the WARN-logged
-/// block in [`Reconciler::run`] for why a possibly-undercounted candle is the
-/// better side of that trade.
-fn forced_progress(
-    complete_end: Option<u64>,
+/// How a run ends: where the cursor goes, and which minutes are written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunEnd {
+    /// The normal case: park the cursor at `cursor` and write only minutes
+    /// strictly older than `flush_before` — exactly the minutes whose ledgers
+    /// all sit at or below `cursor`. See [`run_boundary`].
+    Split { cursor: u64, flush_before: u32 },
+    /// Nothing can be written safely yet: leave the cursor where it was.
+    Hold,
+    /// Write every minute decoded and move the cursor past all of it.
+    FlushAll(FlushAllReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlushAllReason {
+    /// A one-shot caller (`bin/cli.rs`) exits when the run returns, so nobody
+    /// would ever re-read a held-back minute. By design, not an escape hatch.
+    Terminal,
+    /// The whole iteration budget went inside one minute: a later run would
+    /// fetch the same ledgers and hold back identically, forever. The ONLY
+    /// reason that re-creates the task-0282 loss, so the only one alarmed.
+    BudgetExhausted,
+    /// Objects were consumed but decoded to no ledgers, leaving nothing to
+    /// bound a minute with. Nothing partial is written.
+    NoLedgersDecoded,
+}
+
+/// Decide how a run ends. See the WARN-logged block in [`Reconciler::run`] for
+/// why a possibly-undercounted candle beats a stalled pipeline.
+fn run_end(
+    split: Option<(u64, u32)>,
     persisted: u64,
     max_iterations: usize,
     decoded_ledgers: usize,
     terminal: bool,
-) -> bool {
-    if complete_end.is_some() {
-        return false;
-    }
-    // A one-shot caller has no next run to re-read anything.
+) -> RunEnd {
+    // Checked FIRST: a one-shot caller must flush its last minute even when an
+    // earlier minute is complete — otherwise that minute is silently dropped
+    // and the cursor rewound behind it as the process exits.
     if terminal {
-        return true;
+        return RunEnd::FlushAll(FlushAllReason::Terminal);
     }
-    // Budget spent inside one minute: a later run would fetch the same ledgers
-    // and hold back identically, forever.
+    if let Some((cursor, flush_before)) = split {
+        return RunEnd::Split {
+            cursor,
+            flush_before,
+        };
+    }
     if persisted as usize >= max_iterations {
-        return true;
+        return RunEnd::FlushAll(FlushAllReason::BudgetExhausted);
     }
-    // An object that decoded to NO ledgers leaves nothing to bound a minute
-    // with, so `run_boundary` returns `(0, None)` and the run would hold back
-    // zero ledgers forever while the cursor sat still. Pre-0282 this case
-    // advanced past the object; keep doing that.
-    persisted > 0 && decoded_ledgers == 0
+    // Pre-0282 an empty object advanced the cursor past itself; keep doing
+    // that, or the run would hold back zero ledgers forever.
+    if persisted > 0 && decoded_ledgers == 0 {
+        return RunEnd::FlushAll(FlushAllReason::NoLedgersDecoded);
+    }
+    RunEnd::Hold
 }
 
 /// Ledgers decoded by this run that sit ABOVE the cursor it will write, and so
@@ -515,35 +553,68 @@ fn held_back_count(ledger_minutes: &[(u64, u32, bool)], cursor_end: u64) -> usiz
         .count()
 }
 
-/// Split a run's decoded ledgers at the last whole-minute boundary.
+/// Split a run's decoded ledgers at the last clean whole-minute boundary.
 ///
-/// Returns `(open_minute, last_ledger_of_the_last_complete_minute)`. The open
-/// minute is the newest one the run touched — the run cannot know whether it saw
-/// all of it, because the next ledger of that minute may simply not be on S3
-/// yet. Everything strictly older than it is complete and safe to write.
+/// Returns `(open_minute, Some((cursor, flush_before)))`, or `None` in the
+/// second slot when no safe split exists. The open minute is the newest one the
+/// run touched — the run cannot know whether it saw all of it, because the next
+/// ledger of that minute may simply not be on S3 yet.
 ///
-/// `None` for the second element means every ledger in the run belongs to the
-/// open minute, so the run has nothing it can safely write. See the task-0282
-/// block in [`Reconciler::run`] for why writing it anyway loses data.
-fn run_boundary(ledger_minutes: &[(u64, u32, bool)]) -> (u32, Option<u64>) {
+/// A candidate cursor `c` is safe only when it cleanly divides the minutes:
+///
+/// - `c` ends an S3 object — `ledger_s3_key` assumes one ledger per object and
+///   the next key is derived from the cursor, so an interior ledger would
+///   produce a key that does not exist and the run would gap-stop forever;
+/// - every minute at or below `c` is older than the open minute; and
+/// - no ledger ABOVE `c` shares a minute with a ledger at or below it.
+///
+/// The last condition is what keeps the write and the cursor in agreement. The
+/// run writes minutes up to `flush_before` and the next run re-reads everything
+/// above `c`; if a minute had ledgers on both sides, it would be written now
+/// from all of them and re-written next run from only the upper part — with a
+/// higher `version`, so ReplacingMergeTree keeps the partial row. With one
+/// ledger per object it always holds; it matters only for multi-ledger objects.
+///
+/// See the task-0282 block in [`Reconciler::run`] for why writing an open
+/// minute loses data.
+fn run_boundary(ledger_minutes: &[(u64, u32, bool)]) -> (u32, Option<(u64, u32)>) {
     let open_minute = ledger_minutes.iter().map(|(_, m, _)| *m).max().unwrap_or(0);
-    let complete_end = ledger_minutes
+    let split = ledger_minutes
         .iter()
-        // `obj_end` only: the cursor must land on an object boundary, because
-        // `ledger_s3_key` assumes one ledger per object and the next key is
-        // derived from the cursor. An interior ledger would produce a key that
-        // does not exist and the run would gap-stop forever.
-        .filter(|(_, m, obj_end)| *m < open_minute && *obj_end)
-        .map(|(s, _, _)| *s)
-        .max();
-    (open_minute, complete_end)
+        .filter(|(_, _, obj_end)| *obj_end)
+        .filter_map(|(c, _, _)| {
+            let below = ledger_minutes
+                .iter()
+                .filter(|(s, _, _)| s <= c)
+                .map(|(_, m, _)| *m)
+                .max()?;
+            let above = ledger_minutes
+                .iter()
+                .filter(|(s, _, _)| s > c)
+                .map(|(_, m, _)| *m)
+                .min();
+            let clean = below < open_minute && above.is_none_or(|a| below < a);
+            // Minutes are whole multiples of 60, so `< below + 1` is `<= below`.
+            clean.then_some((*c, below + 1))
+        })
+        .max_by_key(|(c, _)| *c);
+    (open_minute, split)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::run_boundary;
+    use super::{FlushAllReason, RunEnd, held_back_count, run_boundary, run_end};
 
-    use super::{forced_progress, held_back_count};
+    /// The cursor half of `run_boundary`'s split, for tests that only care
+    /// where the run parks.
+    fn cursor(ledgers: &[(u64, u32, bool)]) -> Option<u64> {
+        run_boundary(ledgers).1.map(|(c, _)| c)
+    }
+
+    /// Whether `run_end` flushes everything for the given reason.
+    fn flushes_all(end: RunEnd, reason: FlushAllReason) -> bool {
+        end == RunEnd::FlushAll(reason)
+    }
 
     /// Finding 5: an object that decodes to NO ledgers used to leave
     /// `run_boundary` at `(0, None)`, so the run "held back" zero ledgers and
@@ -551,12 +622,28 @@ mod tests {
     #[test]
     fn an_object_that_decodes_to_no_ledgers_still_advances() {
         assert!(
-            forced_progress(None, 1, 16, 0, false),
+            flushes_all(
+                run_end(None, 1, 16, 0, false),
+                FlushAllReason::NoLedgersDecoded
+            ),
             "nothing decoded but an object was consumed: advance, do not hold"
         );
-        assert!(
-            !forced_progress(None, 0, 16, 0, false),
+        assert_eq!(
+            run_end(None, 0, 16, 0, false),
+            RunEnd::Hold,
             "no object consumed either — that is the ordinary idle run"
+        );
+    }
+
+    /// Review of PR #313, 2026-09-17, finding 3: an empty object used to be
+    /// reported as a forced PARTIAL flush — WARN, metric, and an alarm telling
+    /// the operator to raise `maxIterations`. Nothing partial is written there,
+    /// so it must be a distinct reason from the one that is alarmed.
+    #[test]
+    fn an_empty_object_is_not_reported_as_a_partial_flush() {
+        assert_ne!(
+            run_end(None, 1, 16, 0, false),
+            RunEnd::FlushAll(FlushAllReason::BudgetExhausted)
         );
     }
 
@@ -564,10 +651,20 @@ mod tests {
     /// so there is no next run to re-read held-back ledgers. It flushes.
     #[test]
     fn a_terminal_run_always_flushes() {
-        assert!(forced_progress(None, 1, 16, 3, true));
+        assert!(flushes_all(
+            run_end(None, 1, 16, 3, true),
+            FlushAllReason::Terminal
+        ));
+        // Review of PR #313, 2026-09-17, finding 1. This used to assert the
+        // OPPOSITE — "a complete minute needs no forcing, terminal or not" —
+        // which pinned the bug: the terminal run parked at the complete minute
+        // and exited, so its last minute was never written by anyone.
         assert!(
-            !forced_progress(Some(101), 1, 16, 3, true),
-            "a complete minute needs no forcing, terminal or not"
+            flushes_all(
+                run_end(Some((101, 61)), 1, 16, 3, true),
+                FlushAllReason::Terminal
+            ),
+            "a terminal run flushes its last minute even when an earlier one is complete"
         );
     }
 
@@ -588,7 +685,60 @@ mod tests {
 
         // Same minutes, but now the object ends at 101: that IS a legal landing.
         let split = [(100, 60, false), (101, 60, true), (102, 120, true)];
-        assert_eq!(run_boundary(&split).1, Some(101));
+        assert_eq!(run_boundary(&split).1, Some((101, 61)));
+    }
+
+    /// Review of PR #313, 2026-09-17, finding 2. Object A = [100], object B =
+    /// [101, 102, 103]. The only object end below the open minute is 100, but
+    /// 101 shares minute 60 with it. The old code parked at 100 and still wrote
+    /// minute 60 (and 120) — then the next run re-read 101 and wrote minute 60
+    /// again from 101 alone, with a higher `version`, replacing the whole
+    /// candle with a slice. That is the task-0282 loss.
+    ///
+    /// Merely writing less (minutes before 60) would not do either: the cursor
+    /// would still pass ledger 100, whose minute-60 trades nobody would write.
+    /// The only safe answer is no split at all.
+    #[test]
+    fn a_minute_straddling_the_cursor_is_never_a_split() {
+        let ledgers = [
+            (100, 60, true),
+            (101, 60, false),
+            (102, 120, false),
+            (103, 180, true),
+        ];
+        assert_eq!(run_boundary(&ledgers), (180, None));
+
+        // Once a later minute arrives, 103 is a clean split and minute 60 is
+        // written once, whole, from both 100 and 101.
+        let later = [
+            (100, 60, true),
+            (101, 60, false),
+            (102, 120, false),
+            (103, 180, true),
+            (104, 240, true),
+        ];
+        assert_eq!(run_boundary(&later), (240, Some((103, 181))));
+    }
+
+    /// The split writes exactly the minutes whose ledgers all sit at or below
+    /// the cursor — no more (a straddled minute) and no fewer (a stranded one).
+    #[test]
+    fn the_split_writes_exactly_the_minutes_below_the_cursor() {
+        let ledgers = [
+            (100, 60, true),
+            (101, 120, true),
+            (102, 120, true),
+            (103, 180, true),
+        ];
+        let (_, split) = run_boundary(&ledgers);
+        let (c, flush_before) = split.unwrap();
+        for (s, m, _) in ledgers {
+            assert_eq!(
+                m < flush_before,
+                s <= c,
+                "ledger {s} (minute {m}): written iff at or below the cursor"
+            );
+        }
     }
 
     /// Regression, code review of PR #313 finding 1: `held_back` was computed
@@ -624,23 +774,33 @@ mod tests {
     #[test]
     fn a_budget_exhausted_inside_one_minute_forces_progress() {
         assert!(
-            forced_progress(None, 16, 16, 16, false),
+            flushes_all(
+                run_end(None, 16, 16, 16, false),
+                FlushAllReason::BudgetExhausted
+            ),
             "budget spent, no complete minute: must flush and advance or deadlock"
         );
     }
 
     #[test]
     fn forced_progress_does_not_fire_while_the_run_can_still_grow() {
-        assert!(
-            !forced_progress(None, 3, 16, 3, false),
+        assert_eq!(
+            run_end(None, 3, 16, 3, false),
+            RunEnd::Hold,
             "under budget — the next run fetches more and the minute will close"
         );
-        assert!(
-            !forced_progress(Some(101), 16, 16, 16, false),
+        let split = RunEnd::Split {
+            cursor: 101,
+            flush_before: 61,
+        };
+        assert_eq!(
+            run_end(Some((101, 61)), 16, 16, 16, false),
+            split,
             "a complete minute exists, so there is nothing to force"
         );
-        assert!(
-            !forced_progress(Some(101), 3, 16, 3, false),
+        assert_eq!(
+            run_end(Some((101, 61)), 3, 16, 3, false),
+            split,
             "the ordinary healthy run"
         );
     }
@@ -650,7 +810,10 @@ mod tests {
     /// the first invocation without the escape hatch.
     #[test]
     fn the_smallest_legal_iteration_budget_does_not_deadlock() {
-        assert!(forced_progress(None, 1, 1, 1, false));
+        assert!(flushes_all(
+            run_end(None, 1, 1, 1, false),
+            FlushAllReason::BudgetExhausted
+        ));
     }
 
     /// The ordinary case: a run straddles a minute boundary, so the earlier
@@ -667,7 +830,7 @@ mod tests {
         assert_eq!(open, 120, "the newest minute touched is the open one");
         assert_eq!(
             end,
-            Some(101),
+            Some((101, 61)),
             "the cursor stops at the last ledger of minute 60, so 102-103 are re-read"
         );
     }
@@ -688,9 +851,9 @@ mod tests {
     /// exactly the behaviour that stops the 15%-retention case.
     #[test]
     fn a_single_ledger_run_holds_back_until_the_minute_turns() {
-        assert_eq!(run_boundary(&[(100, 60, true)]).1, None);
+        assert_eq!(cursor(&[(100, 60, true)]), None);
         assert_eq!(
-            run_boundary(&[(100, 60, true), (101, 120, true)]).1,
+            cursor(&[(100, 60, true), (101, 120, true)]),
             Some(100),
             "once the minute turns, the completed minute is released"
         );
@@ -703,7 +866,7 @@ mod tests {
         let forward = run_boundary(&[(100, 60, true), (101, 120, true), (102, 120, true)]);
         let shuffled = run_boundary(&[(102, 120, true), (100, 60, true), (101, 120, true)]);
         assert_eq!(forward, shuffled);
-        assert_eq!(forward.1, Some(100));
+        assert_eq!(forward.1, Some((100, 61)));
     }
 
     /// A minute with no ledgers at all (an idle stretch) must not strand the
@@ -712,7 +875,7 @@ mod tests {
     fn a_gap_in_minutes_still_releases_the_older_one() {
         let (open, end) = run_boundary(&[(100, 60, true), (101, 60, true), (102, 300, true)]);
         assert_eq!(open, 300);
-        assert_eq!(end, Some(101));
+        assert_eq!(end, Some((101, 61)));
     }
 
     #[test]

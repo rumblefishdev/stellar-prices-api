@@ -83,14 +83,27 @@ fn header_mut(lcm: &mut LedgerCloseMeta) -> &mut LedgerHeader {
 /// The template re-stamped as `seq`, closing at `close_time`, encoded exactly as
 /// Galexie writes it: a one-ledger `LedgerCloseMetaBatch`, zstd-compressed.
 fn fabricate(template: &LedgerCloseMeta, seq: u64, close_time: u64) -> Vec<u8> {
-    let mut lcm = template.clone();
-    let header = header_mut(&mut lcm);
-    header.ledger_seq = seq as u32;
-    header.scp_value.close_time = TimePoint(close_time);
+    fabricate_object(template, &[(seq, close_time)])
+}
+
+/// One object holding every `(seq, close_time)` given, in order — the
+/// multi-ledger shape `ledgers_per_file > 1` would produce. An empty slice
+/// yields an object that decodes to no ledgers at all.
+fn fabricate_object(template: &LedgerCloseMeta, ledgers: &[(u64, u64)]) -> Vec<u8> {
+    let lcms: Vec<LedgerCloseMeta> = ledgers
+        .iter()
+        .map(|(seq, close_time)| {
+            let mut lcm = template.clone();
+            let header = header_mut(&mut lcm);
+            header.ledger_seq = *seq as u32;
+            header.scp_value.close_time = TimePoint(*close_time);
+            lcm
+        })
+        .collect();
     let batch = LedgerCloseMetaBatch {
-        start_sequence: seq as u32,
-        end_sequence: seq as u32,
-        ledger_close_metas: vec![lcm].try_into().expect("one ledger fits"),
+        start_sequence: ledgers.first().map_or(0, |(s, _)| *s as u32),
+        end_sequence: ledgers.last().map_or(0, |(s, _)| *s as u32),
+        ledger_close_metas: lcms.try_into().expect("ledgers fit"),
     };
     let xdr = batch.to_xdr(Limits::none()).expect("encode batch");
     zstd::encode_all(&xdr[..], 0).expect("compress batch")
@@ -405,4 +418,104 @@ async fn a_minute_denser_than_the_budget_still_drains_and_is_flagged() {
         end > FIRST + 100,
         "the drain must reach the tip region, not stall early (cursor {end})"
     );
+}
+
+/// Review of PR #313, 2026-09-17, finding 1: a one-shot CLI run that crosses a
+/// minute boundary used to park at the complete minute and exit, so its final
+/// minute was written by nobody. It must flush everything it decoded.
+#[tokio::test]
+async fn a_terminal_run_across_minutes_writes_every_minute_whole() {
+    skip_if_no_fixtures!();
+    let template = template();
+    let per_ledger = per_ledger_totals(&template).await;
+
+    // Three minutes' worth, so the run has complete minutes AND an open one.
+    let chain = chain(30, 5_500);
+    let dir = tempdir().unwrap();
+    let (reconciler, fetcher, sink) = harness(dir.path()).await;
+    for (seq, close) in &chain {
+        fetcher.publish(*seq, fabricate(&template, *seq, *close));
+    }
+
+    let stats = reconciler.run_terminal(32).await.unwrap();
+    assert_eq!(stats.end_cursor, chain.last().unwrap().0);
+    assert!(!stats.forced_partial_flush, "a terminal flush is by design");
+
+    let mut ledgers_in_minute: BTreeMap<u32, u64> = BTreeMap::new();
+    for (_, close) in &chain {
+        *ledgers_in_minute.entry(minute_of(*close)).or_insert(0) += 1;
+    }
+    let mut per_minute: BTreeMap<(String, u32), u64> = BTreeMap::new();
+    for w in sink.writes() {
+        *per_minute.entry((w.source, w.minute)).or_insert(0) += w.trade_count as u64;
+    }
+    for (minute, n) in &ledgers_in_minute {
+        for (source, per) in &per_ledger {
+            assert_eq!(
+                per_minute.get(&(source.clone(), *minute)).copied(),
+                Some(per * n),
+                "{source} minute {minute} — the LAST minute included"
+            );
+        }
+    }
+}
+
+/// Review of PR #313, 2026-09-17, finding 3: an object that decodes to no
+/// ledgers must still be stepped past, but it writes nothing partial and must
+/// not raise `ForcedPartialFlushes`.
+#[tokio::test]
+async fn an_empty_object_advances_without_a_partial_flush_report() {
+    skip_if_no_fixtures!();
+    let template = template();
+    let dir = tempdir().unwrap();
+    let (reconciler, fetcher, sink) = harness(dir.path()).await;
+    fetcher.publish(FIRST, fabricate_object(&template, &[]));
+
+    let stats = reconciler.run(32).await.unwrap();
+    assert_eq!(stats.end_cursor, FIRST, "stepped past the empty object");
+    assert!(
+        !stats.forced_partial_flush,
+        "nothing partial was written — the alarm must stay quiet"
+    );
+    assert!(sink.writes().is_empty());
+}
+
+/// Review of PR #313, 2026-09-17, finding 2, end to end, with multi-ledger
+/// objects. Object A = [FIRST] and object B = [FIRST+1..=FIRST+3], where
+/// FIRST and FIRST+1 share a minute. No clean split exists until a later
+/// object arrives; then every minute is written exactly once, whole.
+#[tokio::test]
+async fn a_minute_split_across_objects_is_written_once_and_whole() {
+    skip_if_no_fixtures!();
+    let template = template();
+    let per_ledger = per_ledger_totals(&template).await;
+
+    let chain: Vec<(u64, u64)> = vec![
+        (FIRST, BASE_MINUTE),
+        (FIRST + 1, BASE_MINUTE + 30),
+        (FIRST + 2, BASE_MINUTE + 60),
+        (FIRST + 3, BASE_MINUTE + 120),
+        (FIRST + 4, BASE_MINUTE + 180),
+    ];
+    let dir = tempdir().unwrap();
+    let (reconciler, fetcher, sink) = harness(dir.path()).await;
+    fetcher.publish(FIRST, fabricate_object(&template, &chain[0..1]));
+    fetcher.publish(FIRST + 1, fabricate_object(&template, &chain[1..4]));
+
+    let held = reconciler.run(32).await.unwrap();
+    assert_eq!(
+        held.end_cursor,
+        FIRST - 1,
+        "parking at FIRST would split its minute with FIRST+1 — hold instead"
+    );
+    assert!(
+        sink.writes().is_empty(),
+        "nothing can be written safely yet"
+    );
+
+    fetcher.publish(FIRST + 4, fabricate_object(&template, &chain[4..5]));
+    let released = reconciler.run(32).await.unwrap();
+    assert_eq!(released.end_cursor, FIRST + 3);
+
+    assert_each_minute_written_once_and_whole(&sink, &chain, &per_ledger);
 }
