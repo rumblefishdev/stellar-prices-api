@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use prices_ingest_core::{AssetRegistry, OhlcvCandle, OracleSample, Registries};
+use prices_ingest_core::{AssetRegistry, OhlcvCandle, OracleSample, PoolRegistryRow, Registries};
 use prices_ledger_processor::{
     cursor::{Cursor, StubFileCursor},
     object_fetcher::LocalDiskFetcher,
@@ -91,6 +91,10 @@ impl CandleSink for FailFirstAssetSink {
         }
         let n = registry.assets_since(since).count() as u64;
         self.assets_written.fetch_add(n, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn write_pool_rows(&self, _rows: &[PoolRegistryRow]) -> Result<(), SinkError> {
         Ok(())
     }
 }

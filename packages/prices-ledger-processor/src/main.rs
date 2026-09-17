@@ -78,8 +78,10 @@ async fn main() -> Result<(), Error> {
     //   rewinding to INITIAL_CURSOR every cold start (the freeze this task fixes).
     // - load_registry: existing asset surrogate ids from `prices.assets`.
     // - load_pool_registry: discovered AMM pool classification from
-    //   `prices.pool_registry` (task 0078). The processor only READS this table —
-    //   it never applies schema — so the table MUST already exist (created by
+    //   `prices.pool_registry` (task 0078). The processor writes back only the
+    //   pools it learns from factory events (task 0291; `prices_writer` holds
+    //   INSERT on `prices.*`), and never applies schema — so the table MUST
+    //   already exist (created by
     //   init.sql, applied out-of-band; task 0076). Present-but-empty (registry not
     //   yet seeded by the 0053 backfill) is fine: AMM swaps for pre-existing pools
     //   stay unresolved but SDEX is unaffected. ABSENT is NOT fine: the read errors
@@ -209,6 +211,7 @@ async fn handler(
                     held_back = stats.ledgers_held_back,
                     forced_partial_flush = stats.forced_partial_flush,
                     rows = stats.rows_emitted,
+                    pools_persisted = stats.pools_persisted,
                     "doorbell processed"
                 );
 
@@ -226,6 +229,11 @@ async fn handler(
                 // along on the same PutMetricData so an alarm can see it.
                 m.extend(metrics::forced_partial_flush_metrics(
                     stats.forced_partial_flush,
+                ));
+                // Task 0291 — trades dropped because their pool is missing from
+                // `prices.pool_registry`. Silent otherwise: the run succeeds.
+                m.extend(metrics::unregistered_pool_event_metrics(
+                    stats.unregistered_pool_events.values().sum(),
                 ));
                 if let Err(e) = metrics::publish(&cw, &env_name, &m).await {
                     warn!(error = %e, "cloudwatch metric publish failed (non-fatal)");

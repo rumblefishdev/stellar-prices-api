@@ -140,12 +140,20 @@ impl OhlcvWriter {
     /// Shared by the SDEX backfill's end-of-run persist and the periodic
     /// asset-discovery worker's pool-registry maintenance (task 0069).
     pub async fn write_pool_registry(&self, reg: &Registries) -> Result<(), IngestError> {
-        let rows = reg.to_pool_rows();
+        self.write_pool_rows(&reg.to_pool_rows()).await
+    }
+
+    /// Persist the given `prices.pool_registry` rows — the live processor's
+    /// write path, which passes only the pools a run newly learned (task 0291,
+    /// see [`Registries::pool_rows_unpersisted`]). Same table and row shape as
+    /// [`write_pool_registry`](Self::write_pool_registry). A no-op (no INSERT)
+    /// on an empty slice, so an idle reconcile makes no round-trip.
+    pub async fn write_pool_rows(&self, rows: &[PoolRegistryRow]) -> Result<(), IngestError> {
         if rows.is_empty() {
             return Ok(());
         }
         let mut insert = self.client.insert("prices.pool_registry")?;
-        for row in &rows {
+        for row in rows {
             insert.write(row).await?;
         }
         insert.end().await?;

@@ -51,8 +51,8 @@ pub use registry_io::PoolRegistryRow;
 pub use retry::{DEFAULT_BACKOFF_MS, retry_with_backoff};
 pub use safe_log::safe_response_token;
 pub use soroban::{
-    LedgerSoroban, RawSorobanEvent, Registries, UnresolvedPoolSwap, process_ledger,
-    process_soroban_event_rows, reflector_key_to_identity,
+    LedgerSoroban, RawSorobanEvent, Registries, UnresolvedPoolSwap, learn_factory_event,
+    process_ledger, process_soroban_event_rows, reflector_key_to_identity,
 };
 pub use tick::{PricedFrom, TradeTick, raw_trade_to_tick, raw_trade_to_tick_with_source};
 pub use writer::{AssetMetadata, OhlcvWriter, OracleSample, UnresolvedPool};

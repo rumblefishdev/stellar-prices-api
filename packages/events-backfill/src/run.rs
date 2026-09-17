@@ -152,6 +152,12 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     writer.preflight().await?;
     info!("pre-flight: ClickHouse reachable");
 
+    // Registry-only mode (task 0291): runs before the empty-registry check
+    // below, because discovering pools into an empty registry is legitimate.
+    if cli.discover_pools {
+        return crate::discover::execute(cli, &writer).await;
+    }
+
     // Preload — identical to the live/backfill cold start so repriced candles
     // reuse existing surrogate `asset_id`s and resolve every seeded pool.
     let existing_assets = writer.load_assets().await?;
