@@ -2,7 +2,7 @@
 id: "0291"
 title: "pool_registry has not learned a pool since 2026-07-06 — live forgets newer pools on every cold start and drops their trades"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0285", "0286", "0282", "0078", "0101"]
 tags: [layer-indexing, priority-high, effort-small, amm, aquarius, soroswap, ingestion, data-correctness, clickhouse]
@@ -18,6 +18,12 @@ history:
       data ends 2026-07-06; the live processor only reads it. 22 Aquarius pools
       (34,684 trades) and 10 Soroswap pools created since are missing. Blocks
       0286 phase 3 for the live-era AMM months (its precondition 9).
+  - date: 2026-09-17
+    status: active
+    who: okarcz
+    note: >
+      Activated. Blocks 0286 phase 3 for AMM months from 2026-07; start with
+      the one-off seed, then live persistence, then observability.
 ---
 
 # `pool_registry` is stale since the backfill ended
