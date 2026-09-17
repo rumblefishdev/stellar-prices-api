@@ -3,17 +3,13 @@ use std::collections::HashMap;
 use rust_decimal::Decimal;
 use tracing::warn;
 
+use crate::price::price_survives_column_scale;
 use crate::tick::TradeTick;
 
-/// The largest value a `Decimal(38, 14)` column can hold: 38 significant digits
-/// with 14 after the point, so the integer part must stay below 10^24.
-///
-/// Saturation targets THIS, not `Decimal::MAX` (~7.9e28) and not `i128::MAX`
-/// (~1.7e38, where `decimal_to_i128` saturates). A value between the column
-/// domain and either of those converts to a mantissa of more than 38 digits,
-/// which ClickHouse accepts and reads back out of precision — a silently wrong
-/// number instead of a clamped one.
-const COLUMN_DOMAIN_MAX_INTEGER: i128 = 10i128.pow(24) - 1;
+/// The largest value a `Decimal(38, 14)` column can hold — see
+/// [`crate::price::CANDLE_COLUMN_MAX_INTEGER`], which owns the constant so the
+/// volume clamp here and the price rule in `price.rs` cannot drift apart.
+use crate::price::CANDLE_COLUMN_MAX_INTEGER as COLUMN_DOMAIN_MAX_INTEGER;
 
 #[derive(Debug, Clone)]
 pub struct OhlcvCandle {
@@ -220,7 +216,18 @@ fn finalise(bucket: &mut OpenBucket) -> OhlcvCandle {
         clamp.div(volume_quote, volume_base)
     };
 
-    let mut priced = bucket.fills.iter().filter(|f| f.price_forming).peekable();
+    // ⚠️ `price_survives_column_scale` again, and not only because `tick.rs`
+    // and `soroban.rs` already apply it: the flag is an INPUT this function
+    // does not own, and a price it cannot print is a price it must not
+    // publish. Clamping one into the column instead — what this code did until
+    // review A WR-01 / D F2 — writes `open = high = low = close = 10^24 - 1`
+    // with `pf_trade_count = 1`, a number nobody traded at, which every coarse
+    // tier and `/ohlcv` then republish as a price.
+    let mut priced = bucket
+        .fills
+        .iter()
+        .filter(|f| f.price_forming && price_survives_column_scale(f.price))
+        .peekable();
     if let Some(first) = priced.peek().copied() {
         let mut high = first.price;
         let mut low = first.price;
@@ -772,11 +779,16 @@ mod tests {
     /// of the shifted factors far above 10^6) yet whose quotient is enormous —
     /// 1001 units in against 7.9e28 out. After `AMM_AMOUNT_SCALE` the price is
     /// ~7.9e25, well past the 10^24 an integer part may reach, and so is the
-    /// vwap derived from the same two volumes. Clamping the pf sums alone would
-    /// leave `open`/`high`/`low`/`close`/`vwap` to be saturated by
-    /// `decimal_to_i128` at `i128::MAX` instead — a number ClickHouse accepts
-    /// and reads back out of precision, which is the silent wrap the clamp
-    /// exists to prevent.
+    /// vwap derived from the same two volumes. Clamping the volume sums alone
+    /// would leave `vwap` to be saturated by `decimal_to_i128` at `i128::MAX`
+    /// instead — a number ClickHouse accepts and reads back out of precision,
+    /// which is the silent wrap the clamp exists to prevent.
+    ///
+    /// ⚠️ Its PRICE, by contrast, is no longer clamped into the candle: review
+    /// A WR-01 / D F2 — see
+    /// `a_price_too_large_for_the_column_forms_no_price`. The volumes are
+    /// measurements and saturate; a price that cannot be printed is not a
+    /// measurement of anything.
     #[test]
     fn an_oversized_fill_saturates_every_column_into_its_domain() {
         // The amounts really are price-forming — this is not an unreachable
@@ -831,10 +843,101 @@ mod tests {
                 "{what} wrapped in decimal_to_i128"
             );
         }
-        // The corners genuinely needed clamping — otherwise the loop above is
-        // asserting nothing.
-        assert_eq!(c.close, domain_max, "close saturated at the column max");
+        // The corner that genuinely needed clamping — otherwise the loop above
+        // is asserting nothing.
         assert_eq!(c.vwap, domain_max, "vwap saturated at the column max");
-        assert!(c.pf_volume > Decimal::ZERO);
+    }
+
+    /// Review A WR-01 / D F2, the mirror of `844a3a1`'s underflow rule: a fill
+    /// whose price cannot be PRINTED cannot FORM one.
+    ///
+    /// The overflow end used to say the opposite. A price above the
+    /// `Decimal(38, 14)` domain was clamped to `10^24 - 1` and the fill stayed
+    /// price-forming, so the candle went out as
+    /// `open = high = low = close = 999999999999999999999999` with
+    /// `pf_trade_count = 1` — a number nobody traded at, which the coarse
+    /// aggregates and `/ohlcv` then publish as a price. Only a WARN line said
+    /// so.
+    ///
+    /// Everything about the fill that IS a measurement survives: its volumes,
+    /// its `trade_count` and the `vwap` derived from them (saturated, because a
+    /// volume is measured even when it does not fit).
+    #[test]
+    fn a_price_too_large_for_the_column_forms_no_price() {
+        // Same fixture as the saturation test: 1001 raw units in against
+        // 7.9e28 out, both legs clear of the rounding bound.
+        const RAW_IN: i128 = 1001;
+        const RAW_OUT: i128 = 79_000_000_000_000_000_000_000_000_000;
+        let amount_in = Decimal::try_from_i128_with_scale(RAW_IN, 7).unwrap();
+        let amount_out = Decimal::try_from_i128_with_scale(RAW_OUT, 7).unwrap();
+        let price = amount_out / amount_in;
+        assert!(
+            price > Decimal::from_i128_with_scale(10i128.pow(24) - 1, 0),
+            "the fixture must exceed the column domain, or it proves nothing"
+        );
+
+        let mut acc = CandleAccumulator::new();
+        acc.merge(&TradeTick {
+            ledger_sequence: 100,
+            closed_at: T_M0_A,
+            transaction_index: 0,
+            operation_index: 0,
+            claim_index: 0,
+            base_id: 1,
+            quote_id: 2,
+            price,
+            volume_base: amount_in,
+            volume_quote: amount_out,
+            // As a tick built before this rule existed would have it — the
+            // bucket must refuse the price on its own merits, not trust a flag.
+            price_forming: true,
+        });
+
+        let c = &acc.flush_all()[0];
+        for (what, value) in [
+            ("open", c.open),
+            ("high", c.high),
+            ("low", c.low),
+            ("close", c.close),
+            ("pf_volume", c.pf_volume),
+            ("pf_price_volume", c.pf_price_volume),
+        ] {
+            assert_eq!(
+                value,
+                Decimal::ZERO,
+                "{what}: a price that cannot be printed must not be published"
+            );
+        }
+        assert_eq!(c.pf_trade_count, 0, "the fill formed no price");
+        assert_eq!(c.trade_count, 1, "it still traded");
+        assert!(c.volume_base > Decimal::ZERO, "its volume is real");
+        assert!(c.volume_quote > Decimal::ZERO);
+    }
+
+    /// The same rule at the underflow end, inside the bucket. `tick.rs` and
+    /// `soroban.rs` already refuse such a fill at construction; `finalise` must
+    /// not depend on that, because the flag is an input it does not own.
+    #[test]
+    fn a_price_under_the_column_resolution_forms_no_price_either() {
+        let mut acc = CandleAccumulator::new();
+        acc.merge(&TradeTick {
+            ledger_sequence: 100,
+            closed_at: T_M0_A,
+            transaction_index: 0,
+            operation_index: 0,
+            claim_index: 0,
+            base_id: 1,
+            quote_id: 2,
+            price: Decimal::new(486, 17), // ~4.86e-15, the 2026-04-02 06:39 row
+            volume_base: Decimal::new(3_338_784_011_063, 2),
+            volume_quote: Decimal::new(1_622, 7),
+            price_forming: true,
+        });
+
+        let c = &acc.flush_all()[0];
+        assert_eq!(c.close, Decimal::ZERO);
+        assert_eq!(c.pf_trade_count, 0);
+        assert_eq!(c.trade_count, 1);
+        assert!(c.volume_base > Decimal::ZERO);
     }
 }

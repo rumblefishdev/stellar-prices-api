@@ -62,9 +62,36 @@ pub const CANDLE_PRICE_SCALE: u32 = 14;
 /// Rounded with the writer's own rule — `Decimal::round_dp`, half to even — so
 /// the verdict cannot drift from what `writer::decimal_to_i128` actually
 /// stores.
+///
+/// ## The other end of the column (review A WR-01 / D F2)
+///
+/// The same argument runs upward. `Decimal(38, 14)` holds 38 significant
+/// digits with 14 after the point, so the integer part must stay below
+/// `10^24`; a larger price is CLAMPED into the column by `bucket::finalise`,
+/// and a clamped price is a number nobody traded at. Reachable through the
+/// AMM path: 1 001 raw units in against 7.9e28 out clears the rounding bound
+/// on both legs and prices at ~7.9e25. Such a fill counts in volume and in
+/// `trade_count` like any other; it just prices nothing.
 pub fn price_survives_column_scale(price: Decimal) -> bool {
-    !price.round_dp(CANDLE_PRICE_SCALE).is_zero()
+    let rounded = price.round_dp(CANDLE_PRICE_SCALE);
+    !rounded.is_zero() && rounded.abs() <= candle_price_column_max()
 }
+
+/// The largest value a `Decimal(38, 14)` candle column can hold: 38 significant
+/// digits, 14 of them after the point, so the integer part stays below `10^24`.
+///
+/// Saturation targets THIS, not `Decimal::MAX` (~7.9e28) and not `i128::MAX`
+/// (~1.7e38, where `writer::decimal_to_i128` saturates). A value between the
+/// column domain and either of those converts to a mantissa of more than 38
+/// digits, which ClickHouse accepts and reads back out of precision — a
+/// silently wrong number instead of a clamped one.
+pub fn candle_price_column_max() -> Decimal {
+    Decimal::from_i128_with_scale(CANDLE_COLUMN_MAX_INTEGER, 0)
+}
+
+/// The integer part of [`candle_price_column_max`], shared with `bucket.rs`'s
+/// volume clamp so the two cannot drift.
+pub const CANDLE_COLUMN_MAX_INTEGER: i128 = 10i128.pow(24) - 1;
 
 /// The rounding bound of ADR 0287 §1, on the two RAW integer amounts a ratio
 /// price is computed from: `1/a + 1/b <= 0.001`.
@@ -195,6 +222,41 @@ mod tests {
         assert!(
             price_survives_column_scale(Decimal::new(-1, 14)),
             "the rule is about magnitude; a negative price is a bug elsewhere"
+        );
+    }
+
+    /// Review A WR-01 / D F2, the mirror of the underflow rule: a price above
+    /// the column's `10^24` domain would be CLAMPED on the way in, and a
+    /// clamped price is a number nobody traded at. The trigger is the repo's
+    /// own AMM fixture: 1 001 raw units in against 7.9e28 out, both legs well
+    /// clear of the rounding bound.
+    #[test]
+    fn a_price_over_the_column_domain_is_not_representable_either() {
+        let max = candle_price_column_max();
+        assert!(
+            price_survives_column_scale(max),
+            "the domain max itself fits"
+        );
+        assert!(
+            !price_survives_column_scale(max + Decimal::ONE),
+            "one above the domain would be clamped, not stored"
+        );
+        assert!(
+            !price_survives_column_scale(-(max + Decimal::ONE)),
+            "the rule is about magnitude"
+        );
+
+        const RAW_IN: i128 = 1001;
+        const RAW_OUT: i128 = 79_000_000_000_000_000_000_000_000_000;
+        assert!(
+            price_forming_i128(RAW_IN, RAW_OUT),
+            "the fixture must pass the bound, or it proves nothing"
+        );
+        let price = Decimal::try_from_i128_with_scale(RAW_OUT, 7).unwrap()
+            / Decimal::try_from_i128_with_scale(RAW_IN, 7).unwrap();
+        assert!(
+            !price_survives_column_scale(price),
+            "~7.9e25 is past the Decimal(38, 14) integer domain"
         );
     }
 
