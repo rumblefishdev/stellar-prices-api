@@ -2455,6 +2455,14 @@ async fn ohlcv_usdc_leg_labels_par_external_and_oracle_by_signature_and_epoch() 
 ///   10:00  two sources; the DUST one carries the larger volume
 ///   11:00  one source, price-forming, whose close sits 15% off its own
 ///          price-forming vwap
+/// ⚠️ The 10:00 soroswap row's stored `vwap` (1.0) deliberately DISAGREES with
+/// its `open`/`high`/`low`/`close` (99.0), and its volumes are what say so:
+/// 990 base for 990 quote. That is the dust shape ADR 0287 describes — the
+/// per-fill prints are unusable, the amount-derived ratio is not — and it is
+/// what lets `vwap` be checked as a real Σ quote / Σ base (review IN-04). With
+/// the two agreeing, the merge landed outside the price-forming band and the
+/// assertion could only ever read the clamp's edge, which any merge ≥ `high`
+/// satisfies.
 async fn seed_price_forming(db: &str, admin: &Client) {
     admin
         .query(&format!(
@@ -2467,8 +2475,8 @@ async fn seed_price_forming(db: &str, admin: &Client) {
               0.05882352941176, 0.05882352941176, 2, 1, 0, 0, 0), \
              ('2026-03-01 10:00:00', 3, 2, 'sdex', 1.0, 1.2, 0.9, 1.1, 10, 11, 11, 1.1, 1.1, \
               4, 1, 4, 10, 11), \
-             ('2026-03-01 10:00:00', 3, 2, 'soroswap', 99.0, 99.0, 99.0, 99.0, 1000, 5, 5, \
-              99.0, 99.0, 2, 1, 0, 0, 0), \
+             ('2026-03-01 10:00:00', 3, 2, 'soroswap', 99.0, 99.0, 99.0, 99.0, 990, 990, 990, \
+              99.0, 1.0, 2, 1, 0, 0, 0), \
              ('2026-03-01 11:00:00', 3, 2, 'sdex', 1.0, 1.3, 0.9, 1.15, 100, 100, 100, 1.15, \
               1.0, 8, 1, 8, 100, 100)"
         ))
@@ -2543,16 +2551,16 @@ async fn ohlcv_a_dust_only_source_with_the_larger_volume_does_not_supply_the_pri
     approx(&c["low"], 0.9);
     // ⚠️ `vwap` is the one field that DOES weigh the dust leg (ADR 0287 §7,
     // review C2): it is Σ quote / Σ base over every fill, and the dust source
-    // carries a hundred times the base volume at a far higher mean. The
-    // all-trades mean is ~98, outside the price-forming band, so the published
-    // value is the band's edge — the clamp `least(greatest(vwap, low), high)`
-    // that keeps the response self-consistent. `pf_vwap` is where the
-    // price-forming mean lives.
-    approx(&c["vwap"], 1.2);
+    // carries ninety-nine times the base volume. (1.1 × 10 + 1.0 × 990) / 1000
+    // = 1.001 — strictly INSIDE the price-forming band [0.9, 1.2], so the
+    // number asserted here is the merge itself and not the clamp's edge
+    // (review IN-04). `pf_vwap`, 1.1, is the price-forming mean, and the gap
+    // between the two is exactly what publishing both is for.
+    approx(&c["vwap"], 1.001);
     approx(&c["pf_vwap"], 1.1);
     // Volume and count are the whole bucket's, dust included — only prices are
     // filtered.
-    approx(&c["volume_base"], 1010.0);
+    approx(&c["volume_base"], 1000.0);
     assert_eq!(c["trade_count"], 6);
     assert_eq!(c["pf_trade_count"], 4);
 
@@ -2620,8 +2628,8 @@ async fn ohlcv_in_xlm_takes_no_price_from_a_dust_only_source() {
               version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
              ('2026-03-02 10:00:00', 4, 1, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 1000, 250, 2.5, \
               10.0, 7, 1, 7, 100, 1000), \
-             ('2026-03-02 10:00:00', 4, 1, 'soroswap', 900.0, 900.0, 900.0, 900.0, 5000, 3, 1, \
-              225.0, 900.0, 1, 1, 0, 0, 0), \
+             ('2026-03-02 10:00:00', 4, 1, 'soroswap', 900.0, 900.0, 900.0, 900.0, 5000, \
+              55100, 1, 225.0, 11.02, 1, 1, 0, 0, 0), \
              ('2026-03-02 11:00:00', 4, 1, 'sdex', 7.0, 7.0, 7.0, 7.0, 3000, 2, 1, 1.75, 7.0, \
               1, 1, 0, 0, 0)"
         ))
@@ -2643,12 +2651,13 @@ async fn ohlcv_in_xlm_takes_no_price_from_a_dust_only_source() {
     approx(&c0["close"], 10.0); // NOT 900.0, which carries 50x the volume
     approx(&c0["high"], 12.0);
     approx(&c0["low"], 9.0);
-    // Same as the USD arm: the merged `vwap` weighs the dust leg too, lands
-    // outside the price-forming band, and is clamped to its edge — here the
-    // LOWER one. Σ quote / Σ base = (1000 + 3) / (100 + 5000) = 0.197 (review
-    // WR-04: read off the volume columns, not rebuilt from the dust leg's
-    // stored `vwap` of 900, which its own volumes do not support).
-    approx(&c0["vwap"], 9.0);
+    // Same as the USD arm: the merged `vwap` weighs the dust leg too. Read off
+    // the volume columns (review WR-04), Σ quote / Σ base = (1000 + 55 100) /
+    // (100 + 5000) = 11.0 — strictly INSIDE the price-forming band [9, 12], so
+    // this asserts the merge and not the clamp's edge (review IN-04). The dust
+    // leg's o/h/l/c of 900 are its unusable per-fill prints; its volumes say
+    // 11.02, and `high` stays 12 either way.
+    approx(&c0["vwap"], 11.0);
     approx(&c0["pf_vwap"], 10.0); // 1000 / 100
     approx(&c0["volume_base"], 5100.0);
     assert_eq!(c0["pf_trade_count"], 7);
