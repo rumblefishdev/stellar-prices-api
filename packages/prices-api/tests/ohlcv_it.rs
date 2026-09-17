@@ -2644,8 +2644,11 @@ async fn ohlcv_in_xlm_takes_no_price_from_a_dust_only_source() {
     approx(&c0["high"], 12.0);
     approx(&c0["low"], 9.0);
     // Same as the USD arm: the merged `vwap` weighs the dust leg too, lands
-    // outside the price-forming band, and is clamped to its edge.
-    approx(&c0["vwap"], 12.0);
+    // outside the price-forming band, and is clamped to its edge — here the
+    // LOWER one. Σ quote / Σ base = (1000 + 3) / (100 + 5000) = 0.197 (review
+    // WR-04: read off the volume columns, not rebuilt from the dust leg's
+    // stored `vwap` of 900, which its own volumes do not support).
+    approx(&c0["vwap"], 9.0);
     approx(&c0["pf_vwap"], 10.0); // 1000 / 100
     approx(&c0["volume_base"], 5100.0);
     assert_eq!(c0["pf_trade_count"], 7);

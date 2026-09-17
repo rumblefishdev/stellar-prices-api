@@ -945,14 +945,22 @@ fn usd_projection(refs: &UsdRefs, granularity: Granularity) -> String {
 
 /// The `Denomination::QuoteLeg` aggregate list. Same extraction, same reason.
 fn quote_leg_aggregates() -> String {
-    // The merged vwap, over EVERY row (ADR 0287 §7, review C2). A row's `vwap`
-    // column is Σ quote / Σ base over its own fills, so weighting it by that
-    // row's base volume and dividing by the total is the bucket's Σ quote / Σ
-    // base — the amount-derived mean, dust and all. That is the one number here
-    // that is meant to include the trades `o`/`h`/`l`/`c` exclude; `pf_vwap`,
+    // The merged vwap, over EVERY row (ADR 0287 §7, review C2): Σ `volume_quote`
+    // / Σ `volume_base`, the ADR's sentence spelled out. That is the one number
+    // here meant to include the trades `o`/`h`/`l`/`c` exclude; `pf_vwap`,
     // beside it, is the price-forming mean.
+    //
+    // ⚠️ Both columns are IN the row, so the numerator is summed rather than
+    // rebuilt as Σ (`vwap` × `volume_base`) (review WR-04). The old form asked
+    // a `Decimal(38, 14)` column that is itself a quotient to reconstruct the
+    // quote volume, which rounded a second time on every source — and, worse,
+    // read `0` from any row whose stored `vwap` overflowed the Decimal domain
+    // in the rollups (`ifNull(toDecimal128OrZero(...), 0)` there). Such a row
+    // contributed zero quote against its full base volume and dragged the whole
+    // bucket's mean toward zero, where the band below then clamped it up to
+    // `low`.
     let vwap_raw = "toDecimal128OrNull(toString( \
-                 sum(toFloat64(vwap) * toFloat64(volume_base)) \
+                 sum(toFloat64(volume_quote)) \
                  / nullIf(sum(toFloat64(volume_base)), 0)), 14)";
     // ⚠️ Every price aggregate below is a `-If` and every one of them is
     // WRAPPED. Over zero matching rows `maxIf`/`minIf`/`argMaxIf` return the
@@ -1622,13 +1630,19 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
         // rate to attribute. Both provenance fields are NULL rather than
         // guessed — see Denomination::QuoteLeg.
         Denomination::QuoteLeg(_) => (
-            "timestamp, open, high, low, close, volume_base, volume_quote_usd, vwap, \
-             trade_count, pf_trade_count, pf_volume, pf_price_volume"
+            // ⚠️ `volume_quote`, not `vwap` (review WR-04): the merged vwap is
+            // Σ quote / Σ base, so the quote volume is read straight off the
+            // row instead of being reconstructed from a rounded quotient.
+            "timestamp, open, high, low, close, volume_base, volume_quote, \
+             volume_quote_usd, trade_count, pf_trade_count, pf_volume, \
+             pf_price_volume"
                 .to_string(),
             // ⚠️ `vw` is clamped into `[min(low), max(high)]` here too — task 0229's
             // review, finding 1. This arm applies no rate, so `o`/`h`/`l`/`c` are
             // the stored decimals and cannot cross; the merged vwap still can,
-            // because it is a float weighted mean and `(x*v)/v != x`.
+            // because it is Σ quote / Σ base over EVERY row while the band comes
+            // from the price-forming ones only — a mean of all trades cannot
+            // always sit inside the range of some of them.
             //
             // 🔴 A single-source bucket reads CLEAN and that is a false negative
             // — measured 0 violations in 200,000. With TWO sources at equal
@@ -2698,15 +2712,22 @@ mod tests {
             "a bucket with no price-forming fill still publishes no vwap: {usd}"
         );
 
+        // Review WR-04: the quote leg has both columns in the row, so it sums
+        // the QUOTE volume rather than rebuilding it from the rounded `vwap`
+        // column — which is itself a quotient, and is `0` on a row whose stored
+        // vwap overflowed the Decimal domain in the rollups.
         let ql = quote_leg_aggregates();
         assert!(
-            ql.contains("sum(toFloat64(vwap) * toFloat64(volume_base))"),
-            "the quote-leg merge weights every row: {ql}"
+            ql.contains("sum(toFloat64(volume_quote)) / nullIf(sum(toFloat64(volume_base)), 0)"),
+            "the quote-leg merge is ADR 0287 §7's own sentence, sum quote over \
+             sum base, over every row: {ql}"
         );
         assert!(
-            !ql.contains(&format!(
-                "sumIf(toFloat64(vwap) * toFloat64(volume_base), {PF_ROWS})"
-            )),
+            !ql.contains("toFloat64(vwap)"),
+            "the numerator must not be rebuilt from the rounded vwap column: {ql}"
+        );
+        assert!(
+            !ql.contains(&format!("sumIf(toFloat64(volume_quote), {PF_ROWS})")),
             "the price-forming gate must be off the vwap sums: {ql}"
         );
         // C3: the zero sentinel is gone. Its denominator used to be
