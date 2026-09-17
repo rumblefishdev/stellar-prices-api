@@ -2,7 +2,8 @@
 id: "0285"
 title: "prices.pool_registry does not match what is actually trading — 72 of 178 swap-emitting contracts are unregistered, and they carry 96.7% of the swap events"
 type: RESEARCH
-status: backlog
+status: active
+assignee: okarcz
 related_adr: []
 related_tasks: ["0282", "0101", "0096", "0097", "0099", "0080"]
 tags: [layer-indexing, priority-medium, effort-medium, amm, soroswap, phoenix, ingestion, data-correctness, clickhouse]
@@ -23,6 +24,15 @@ history:
       classified, and the two plausible readings (pools we never index vs
       routers/aggregators reusing the event name) have opposite fixes — one is
       missing data, the other would be double-counting.
+  - date: 2026-09-17
+    status: active
+    who: okarcz
+    note: >
+      Activated while 0282's live fix waits for its full-day check and 0286
+      waits for its phase 1-2 rollout. 0286's phase-3 runbook now names this
+      task as a precondition for the AMM side of the live-era months, so the
+      reverse question (does live write candles for unregistered pools?) is
+      the one that gates the most.
 ---
 
 # The pool registry does not describe what is actually trading
