@@ -266,6 +266,100 @@ the fill level.
 - Close candidates computed per day from `price_ohlcv_1m FINAL`,
   `source = 'sdex'`, XLM/USDC.
 
+## 10. Addendum 2026-09-15 — Horizon, and the pivot reference
+
+Added while preparing 0278 for discussion. Section 6's measurements stand;
+this section adds what Horizon does, and what the numbers in section 6 say
+about the pivot reference specifically.
+
+### 10.1 How Horizon builds `/trade_aggregations`
+
+Read from `stellar/stellar-horizon` `main` at `84553bb`:
+`internal/ingest/processors/trades_processor.go` (fill price, rounding
+slippage) and `internal/db2/history/trade_aggregation.go` (buckets).
+
+| Stage                 | Horizon                                                                                                                                                                                                                                                                       | Us (section 1)                           |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| Order-book fill price | the **resting offer's** `price.N/D`, read from the offer's ledger-entry change (`findTradeSellPrice`) — no quantisation                                                                                                                                                       | `amount_bought / amount_sold`            |
+| Pool fill price       | `amount_bought / amount_sold`                                                                                                                                                                                                                                                 | same                                     |
+| Dust filter           | pool fills only: `rounding_slippage` in bps against the pool formula, computed at ingest; `--rounding-slippage-filter` (default **1000 bps = 10 %**) excludes a fill from the aggregation **entirely** — price, volume and count. Order-book fills carry NULL and always pass | none                                     |
+| Order                 | `history_operation_id` = TOID (ledger, **transaction index**, operation index) + `order` within the operation                                                                                                                                                                 | `(ledger, operation_index, claim_index)` |
+| Buckets               | 1m precomputed (`history_trades_60000`); 5m…1w aggregated on read: `first`/`last` for open/close, `max_price`/`min_price` on exact rationals, `avg` = Σcounter / Σbase                                                                                                        | 1m in ingest, rollups in ClickHouse      |
+
+Measured on the public Horizon, XLM/USDC, 1d, the two dust days that
+Horizon still holds fills for:
+
+|            | 2026-02-09 ours | 2026-02-09 Horizon   | 2026-04-02 ours      | 2026-04-02 Horizon   |
+| ---------- | --------------- | -------------------- | -------------------- | -------------------- |
+| close      | **0.1** (1/10)  | 0.1595574            | **0.1470588** (5/34) | 0.1631032            |
+| low        | —               | **0.1000000** (1/10) | —                    | **0.1470588** (5/34) |
+| high       | —               | **0.1666667** (1/6)  | —                    | 0.1710470            |
+| avg (VWAP) | 0.15980         | 0.1598011            | 0.16451              | 0.1645076            |
+
+(Bitstamp close 2026-02-09: 0.1595. "Ours" has only the columns measured
+in section 2.)
+
+- **Close agrees on both days.** 2026-02-09's 1/10 fill deviated ~37 % from
+  the pool formula and fell to the filter; 2026-04-02's 5/34 passed the 10 %
+  filter but the correct order shows it was not the last fill.
+- **High and low still carry dust** — 5/34 and 1/10 in low, 1/6 in high.
+  5/34 is a pool fill that passed the filter; the other two were not traced.
+  A 10 % slippage threshold is too loose for extremes: it lets through exactly
+  the fills whose error is largest relative to the microstructure noise floor
+  (section 2: ~0.15–0.2 %).
+- **VWAP matches ours to five digits**, confirming volume and vwap are sound.
+- Not verified: whether SDF runs the public Horizon with the default 1000.
+  The 2026-02-09 result is consistent with it.
+
+What carries over: the transaction index is sufficient for ordering (2026-04-02
+would be correct with that alone); the resting offer's price removes
+quantisation from order-book fills at the root instead of filtering after the
+fact; the threshold must be far below 10 % — section 6's 0.1 % is the right
+order of magnitude.
+
+### 10.2 The pivot reference: which VWAP
+
+Section 6's close-definition table, re-read as candidate references for the
+pivot tier (1d buckets, 1 181 days of XLM/USDC, vs Bitstamp close):
+
+| Reference                                                    | Data needed | Median error | Worst day    | Days > 5 % |
+| ------------------------------------------------------------ | ----------- | ------------ | ------------ | ---------- |
+| today: volume-weighted close                                 | same table  | 0.15 %       | **280 %**    | 5          |
+| A. VWAP of the whole bucket (`Σvolume_quote / Σvolume_base`) | same table  | ~1 %         | not measured | **97–158** |
+| B. VWAP of the last traded hour                              | `_1h`       | 0.25 %       | 6.5 %        | 3          |
+| C. VWAP of the last traded minute                            | `_1m`       | 0.15 %       | 4.5 %        | 0          |
+| D. last fill unless > 2 % from the 15-min VWAP               | `_15m`      | 0.15 %       | 5.8 %        | 1          |
+
+The caveat in section 6 applies with force here: **a bucket VWAP is the
+average price of the period, not the price at its end.** On 1m/15m/1h the
+difference is inside the noise; on 1d and coarser it is drift. 2023-03-11:
+day VWAP 0.0838 against Bitstamp's close 0.0794 — variant A would put the
+reference **5.5 % high** on the day it currently sits 26 % low. Better, not
+right. Weekly and monthly were not measured; the drift argument says they are
+worse than daily.
+
+C needs 1m, which the cleanup worker dropped for 2025-02 → 2026-02 (section
+7). D depends on `_15m`, whose history is under question ([[0200]]). B exists
+for the whole history and is one join away from the pivot statement.
+
+One rule that covers every grain: **reference = VWAP of the last traded hour
+of XLM/USDC before the bucket end.** For 1m and 15m that is the bucket's own
+VWAP (variant A); for 1h it is exactly A; for 4h, 1d, 1w and 1M it is B.
+
+### 10.3 Two references, not one
+
+`pivot_sql` applies one reference to two columns with different estimands:
+
+| Column                                  | Correct reference                                                                                                                        |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `close_usd = close × ref`               | the XLM rate **at the bucket end** — the XLM/USDC close, once that close is dust-immune (section 6, layers 1–2); until then, 10.2's rule |
+| `volume_quote_usd = volume_quote × ref` | the **average** XLM rate over the bucket, volume-weighted — variant A, by definition                                                     |
+
+So "pivot from the bucket VWAP" (layer 4 as written) is the right answer for
+USD volume, and a stop-gap for USD close while the close itself is a single
+print. Once layer 1 lands, the close is the correct reference for `close_usd`
+again — same instant, same estimand.
+
 ## Sources
 
 - [CME Group — Understanding Equity Index Daily & Final Settlement](https://www.cmegroup.com/education/courses/introduction-to-equity-index-products/understanding-equity-index-daily-and-final-settlement)

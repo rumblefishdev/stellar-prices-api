@@ -28,6 +28,7 @@ lambda = [
     "dep:lambda_runtime",
     "dep:aws-config",
     "dep:aws-sdk-cloudwatch",
+    "dep:aws-sdk-sns",
 ]
 
 [dependencies]
@@ -41,3 +42,4 @@ thiserror = { workspace = true }
 lambda_runtime = { workspace = true, optional = true }
 aws-config = { workspace = true, optional = true }
 aws-sdk-cloudwatch = { workspace = true, optional = true }
+aws-sdk-sns = { workspace = true, optional = true }

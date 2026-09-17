@@ -13,6 +13,11 @@
 //! Manager fetch and CloudWatch publish are gated behind the `lambda` /
 //! `aws-mtls` features.
 
+/// Second, unrelated job riding this Lambda's `rate(1 day)` schedule: the daily
+/// re-read of alarms stuck off OK (task 0214). It shares nothing with the cert
+/// probe but the trigger — see the module's own docs for why it lives here.
+pub mod alarm_digest;
+
 /// CloudWatch namespace for the cert-expiry metrics. Must match the
 /// `cloudwatch:namespace` condition on the Lambda role's `PutMetricData` grant
 /// and the alarm wiring in `infra/`.

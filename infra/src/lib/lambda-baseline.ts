@@ -159,6 +159,57 @@ export const SCHEDULE_DISABLED_WORKERS: readonly ScheduledWorker[] = [
 ];
 
 /**
+ * Scheduled workers that deliberately have NO liveness alarm
+ * (`-no-invocations`) and no duration alarm — keyed by name, valued by the
+ * reason, because the reason is what the `-errors` alarm's description has to
+ * say out loud (task 0223).
+ *
+ * WHY THE REASON IS DATA, NOT A COMMENT
+ * -------------------------------------
+ * An `-errors` alarm is CONDITIONAL: `AWS/Lambda` publishes nothing for a
+ * period with zero invocations, and `treatMissingData: NOT_BREACHING` renders
+ * that as OK. So a dead worker reads green here. For every other worker that
+ * is honest, because a `-no-invocations` sibling on the same alarm strip goes
+ * red instead. For the workers listed here nothing does — and the previous
+ * comment justified that with "their -errors alarm is the coverage today",
+ * which is circular. Keeping the reason next to the name means
+ * {@link createWorkerLambda} appends it to the alarm's description, so the gap
+ * is visible where an operator reads it, and adding a name here without a
+ * reason does not type-check.
+ *
+ * ObservabilityStack asserts every SCHEDULED_WORKER is in exactly one of
+ * this map and its `workerHealth` list, so a tenth worker must be placed
+ * deliberately.
+ */
+export const WORKERS_WITHOUT_HEALTH_ALARMS: Readonly<
+  Partial<Record<ScheduledWorker, string>>
+> = {
+  cleanup:
+    'its EventBridge rule is disabled on purpose (task 0200), so zero invocations is the intended state and a liveness alarm would fire forever',
+  'asset-discovery':
+    "deliberately deferred to task 0256, which is deciding whether the worker's scan stage survives at all — alarming the liveness of a stage that may be removed is not coverage",
+};
+
+/**
+ * The sentence every `-errors` alarm carries so that its OK is unambiguous
+ * to an operator who did not write it (task 0223 AC 2). Two shapes: the
+ * conditional-by-design one names the liveness sibling; the exempt one names
+ * the reason there is none.
+ */
+export function withLivenessNote(
+  envName: string,
+  lambdaName: ScheduledWorker,
+  description: string,
+): string {
+  const reason = WORKERS_WITHOUT_HEALTH_ALARMS[lambdaName];
+  const note =
+    reason === undefined
+      ? `OK here means no failing invocation was observed in the last period; a worker that does not run at all publishes nothing and ALSO reads OK. Liveness is prices-${envName}-${lambdaName}-no-invocations, on the same alarm strip (task 0223).`
+      : `⚠ OK here also means nothing ran: this worker has NO liveness alarm — ${reason} (task 0223).`;
+  return `${description} ${note}`;
+}
+
+/**
  * Creates an IAM role for a prices-api Lambda with the baseline
  * permissions applied (CloudWatch Logs + mTLS secrets + SSM read).
  *
@@ -369,7 +420,11 @@ export function createWorkerLambda(
 
   const errorAlarm = new cloudwatch.Alarm(scope, `${idPrefix}ErrorAlarm`, {
     alarmName: workerErrorAlarmName(env, name),
-    alarmDescription,
+    alarmDescription: withLivenessNote(
+      env,
+      name as ScheduledWorker,
+      alarmDescription,
+    ),
     metric: fn.metricErrors({ period: alarmPeriod, statistic: 'Sum' }),
     threshold: 1,
     evaluationPeriods: 1,

@@ -5,7 +5,7 @@ type: FEATURE
 status: blocked
 assignee: okarcz
 related_adr: []
-related_tasks: ["0271", "0099", "0097", "0096", "0065", "0108", "0117", "0127", "0128", "0264", "0176", "0088"]
+related_tasks: ["0282", "0285", "0271", "0099", "0097", "0096", "0065", "0108", "0117", "0127", "0128", "0264", "0176", "0088"]
 tags: [layer-indexing, priority-medium, effort-medium, milestone-M2, amm, phoenix, soroswap, backfill, clickhouse]
 milestone: 2
 links:
@@ -123,6 +123,18 @@ history:
       Live contention is gone (tip is two months past the window). Flagged for
       settlement before any delete: the 0267/0268 USDC corrections akot rolled
       out 09-10/11 cover this same July range.
+  - date: 2026-09-15
+    status: blocked
+    who: okarcz
+    note: >
+      Linked [[0285]]. Sizing [[0282]]'s damage for soroswap and phoenix showed
+      prices.pool_registry does not describe what is actually trading: over this
+      task's own live era 178 contracts emit `swap` and only 106 are registered,
+      the unregistered ones carrying 96.7% of the events. This task uses that
+      registry as its pool set and states its acceptance criteria in counts
+      drawn from it, so a write run should wait until 0285 has at least
+      classified the two dominant unregistered groups. That is a SECOND reason
+      to hold, independent of the 0282 sequencing already recorded.
 ---
 
 # Reprice the live-era AMM gap

@@ -62,6 +62,10 @@ aws-sdk-s3 = "1"
 # API the console drives. Used by prices-api's portal only.
 aws-sdk-apigateway = "1"
 aws-sdk-cloudwatch = "1"
+# Reads alarm state (DescribeAlarms) for the daily stuck-alarm digest, task 0214.
+# Publishing that digest needs SNS: a metric+meta-alarm would latch the same way
+# the 28-day enrichment latch did, so the digest has to be a fresh message.
+aws-sdk-sns = "1"
 aws_lambda_events = { version = "0.16", default-features = false, features = ["sqs"] }
 tempfile = "3"
 

@@ -4,7 +4,7 @@ title: "asset-discovery re-emits the whole asset registry every hour — 0132's 
 type: PERF
 status: backlog
 related_adr: []
-related_tasks: ["0210", "0132", "0133", "0067"]
+related_tasks: ["0210", "0132", "0133", "0067", "0256", "0226", "0241"]
 tags: ["priority-medium", "effort-small", "cost", "write-amplification", "clickhouse"]
 links: []
 history:
@@ -18,6 +18,22 @@ history:
       by the deploy — so not a regression, but the same full-registry re-emit
       0132 fixed in the ledger processor, present in `asset-discovery` and
       never addressed.
+  - date: 2026-09-16
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      🔴 SOURCE CORRECTED — and this task survives [[0256]]'s fix rather than
+      being closed by it. It locates the hourly re-emit at `discover_window`'s
+      `write_assets`, but that branch has NEVER executed on production: the
+      ledger scan has not run since the worker shipped on 2026-06-25. The hourly
+      ~204k rows came from `ensure_seed` — the call site this task explicitly
+      exempts as "a full write is correct there".
+      ⚠️ Implemented as written, this task would NOT have fixed production: the
+      guard would have landed in dead code while the re-emit continued. Fixed in
+      [[0256]] instead (PR #319, deployed 2026-09-16 12:44 UTC). What remains
+      here is recorded below — AC 3 and AC 5 untouched, `discover_window:255`
+      still unguarded, and the AC 4 audit found a second live instance in
+      `oracle-worker`.
 ---
 
 # `asset-discovery` re-emits the full asset registry every hour
@@ -115,6 +131,78 @@ and skip the write when nothing changed, or write only newly-assigned assets as
 - Audit the remaining writers found alongside this one for the same pattern:
   `oracle-worker`, `sdex-backfill`, `events-backfill`, `prices-ingest-core`.
 - Measure before/after from `system.part_log` on the same query as above.
+
+## 🔴 Re-scoped 2026-09-16 — the source was the seed path, not the scan
+
+### Where this task's diagnosis was wrong
+
+The Summary quotes `discover_window`'s unguarded `write_assets` and treats it as
+the hourly re-emit. It is not, and could not have been: that branch sits behind
+`if scanned > 0`, and **the ledger scan has never run on production**.
+`INITIAL_DISCOVERY_LEDGER` was deliberately left unset when the worker shipped on
+2026-06-25 and `prices.discovery_state` holds no cursor, so every run takes the
+"seeding only" path — 83 days as of today. Full evidence in [[0256]].
+
+The ~204k rows an hour therefore came from `ensure_seed`, the call site listed
+under Implementation as one to leave alone.
+
+⚠️ **Implemented as written, this task would not have fixed production.** The
+guard would have gone into code that never executes.
+
+### What was fixed, and where
+
+[[0256]], PR #319, deployed 2026-09-16 12:44 UTC. `ensure_seed` captures
+`AssetRegistry::watermark()` before interning the seed and writes through
+`write_new_assets`, whose `since >= watermark()` short-circuit makes a
+steady-state run issue no INSERT at all — the same remedy [[0132]] applied to
+the ledger processor.
+
+🔑 New information this task did not have: the staircase measured here
+(623,154 / 207,741 / 415,495 on 2026-09-02) is what drives
+`prices-production-oracle` into `Runtime.OutOfMemory` at its 256 MB ceiling. Both
+OOMs sampled on 2026-09-12 landed immediately after a 4× read, and that alarm
+accounts for ~84% of the ops channel's traffic. See [[0241]] and [[0226]].
+
+### AC 4 audit — done 2026-09-16, five call sites
+
+| caller | shape | verdict |
+|---|---|---|
+| `asset-discovery` `ensure_seed` (`lib.rs:119`) | `write_new_assets` + watermark | **fixed** in 0256 |
+| `asset-discovery` `discover_window` (`lib.rs:255`) | unguarded full `write_assets` | **still defective, dormant** |
+| `oracle-worker` (`lib.rs:569`) | full `write_assets` behind `count() > known_before` | **same defect, rarely triggered** |
+| `sdex-backfill` (`sink.rs:109`, `run.rs:278`) | one-shot CLI | correct per `write_assets` docs |
+| `events-backfill` (`run.rs:123`) | one-shot CLI | correct per `write_assets` docs |
+
+🔑 `oracle-worker` is a **second live instance**: it writes the whole registry
+to persist a handful of newly minted ids. Its guard keeps it quiet (no
+occurrences in 24 h of logs), but the shape is wrong and `write_new_assets` with
+a watermark is the fitting remedy, exactly as in the ledger processor.
+
+### ⛔ This task is now a precondition for [[0256]]'s scan decision
+
+`discover_window:255` is untouched. It does not fire only because the scan is
+dead. **Switching the ledger scan on — one of the two decisions [[0256]] must
+settle — would reintroduce the hourly full re-emit that was just removed.**
+
+So that decision is no longer binary:
+
+- **delete the scan** → this call site goes with it, and most of what remains
+  here disappears; the task drops to the comment fix plus the oracle instance;
+- **enable the scan** → the guard described here is a **precondition**, not a
+  performance nicety, and this task should be raised to `priority-high` and done
+  first.
+
+Priority is deliberately left at `medium` until that decision is made.
+
+### What this task still owns
+
+- **AC 3** — the misplaced comment at `lib.rs:256-262` still sits under the
+  unguarded call while describing the guard protecting `write_pool_registry`
+  below it. Untouched. This task called it "half the value"; it is still unpaid.
+- **AC 5** — `system.part_log` has not been re-measured on production. The
+  13:17 UTC log check after today's deploy is a proxy, not this measurement, and
+  needs ClickHouse access.
+- **`oracle-worker`** — the second instance found by the AC 4 audit.
 
 ## Acceptance Criteria
 

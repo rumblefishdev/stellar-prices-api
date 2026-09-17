@@ -9,9 +9,10 @@ related_tasks: ["0080", "0101", "0100", "0097", "0203"]
 tags: [priority-high, effort-medium, milestone-M3, amm, aquarius, ingestion, data-correctness, data-loss, clickhouse]
 milestone: 3
 links:
-  - "../../../packages/prices-ledger-processor/src"
-  - "../../../packages/aquarius-extractor/src"
-  - "../../../packages/events-backfill/src/run.rs"
+  - "../../../../packages/prices-ledger-processor/src"
+  - "../../../../packages/aquarius-extractor/src"
+  - "../../../../packages/events-backfill/src/run.rs"
+  - "notes/R-sdex-loss-measurement-design.md"
 history:
   - date: 2026-09-14
     status: backlog
@@ -35,6 +36,19 @@ history:
       write run would rewrite aquarius rows this defect is still producing, and
       its acceptance criteria use aquarius as an untouched control. First move is
       the pool-set vs sample question, which decides the mechanism.
+  - date: 2026-09-15
+    status: active
+    who: okarcz
+    note: >
+      Converted to a directory and added
+      notes/R-sdex-loss-measurement-design.md — the instrument for the one
+      outstanding measurement, which re-derives truth from the ledger archive
+      locally instead of racing an RMT merge. 🔑 Corrected the sequencing: that
+      measurement does NOT depend on the live fix and should run in PARALLEL
+      with it, because it gates the repair decision for 98% of the estate.
+      Verified the window is uncontaminated — both backfill_progress streams end
+      2026-07-06, before the live era. Also spawned [[0285]] after the same
+      sizing work showed pool_registry does not describe what actually trades.
   - date: 2026-09-15
     status: active
     who: okarcz
@@ -451,6 +465,25 @@ has been discarding half a venue for months. Any fix should close that too.
 
 ## Implementation
 
+### 🔑 Sequencing — and the one thing that does NOT have to wait
+
+⛔ **CORRECTED 2026-09-15.** The SDEX measurement was first sequenced behind the
+live fix. That was wrong. It measures candles **already written**, nothing is
+rewriting them, and it gates the repair decision for **98% of the estate**
+(16.6 M of the 17.0 M live-era candles are SDEX). **Start it in parallel.**
+
+| work | depends on | can start |
+| --- | --- | --- |
+| Live fix (PR #313) | [[0277]]'s Protocol 28 crossing finishing first | after 2026-09-16 |
+| **SDEX quantification** | **nothing** | **now** — see [notes/R-sdex-loss-measurement-design.md](notes/R-sdex-loss-measurement-design.md) |
+| [[0285]] classification | nothing | now |
+| Repair scope decision | SDEX number + 0285 classification | after both |
+| AMM repair ([[0101]] folded in) | live fix deployed + verified | after the fix |
+
+⚠️ **The repair itself must wait for the fix** — repairing while the leak runs
+just re-corrupts. That constraint is real; it simply does not apply to
+*measuring*.
+
 - Identify the mechanism before changing anything. The discriminator that works
   is **raw `soroban_events` counts vs stored `trade_count`**, per day and then
   per pool; the per-pool split is what will separate "a class of pool" from
@@ -483,7 +516,12 @@ has been discarding half a venue for months. Any fix should close that too.
       never removed. SDEX remains plausible on the mechanism and **unmeasured**.
       See §RETRACTED.
 - [ ] SDEX's loss is **quantified**, with an instrument that does not depend on
-      catching duplicates before the merge.
+      catching duplicates before the merge. 📐 **Design drafted** —
+      [notes/R-sdex-loss-measurement-design.md](notes/R-sdex-loss-measurement-design.md):
+      re-derive truth from the ledger archive into a LOCAL ClickHouse and diff
+      against prod, over archive partitions 993 and 1000 (~13% of the live era).
+      Decision rule is recorded there **before** the run. Not blocked by the
+      live fix — run it in parallel.
 - [ ] A decision is recorded on repairing the historical estate, with a range.
 - [ ] Live-path drops become observable — a dropped swap leaves a trace
       somewhere, rather than nothing at all.
