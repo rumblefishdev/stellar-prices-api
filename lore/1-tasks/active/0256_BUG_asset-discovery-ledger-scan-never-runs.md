@@ -353,12 +353,27 @@ exists to remove.
 ⚠️ The consequence to remember: if SAC derivation ever changes, it now needs a
 deliberate one-shot backfill. No hourly process is quietly fixing it any more.
 
-### Still unproven
+### Still unproven → proven 2026-09-17
 
-That this alone ends the oracle's OOMs. `Max Memory Used` is a per-container
-high-water mark, so it must be read on a COLD container after deploy with the
-registry sitting at 1×. That same number sizes [[0226]]: if ~209k rows clear
-256 MB comfortably, 0226 is an efficiency task rather than an outage fix.
+~~That this alone ends the oracle's OOMs.~~ Read on cold containers over the
+full day after the deploy, registry at 1× throughout:
+
+| | before the fix (2026-09-15 00:00 → 09-16 12:42 UTC) | after (24 h, → 2026-09-17 12:47 UTC) |
+|---|---|---|
+| `wrote asset rows` by asset-discovery | 37 of 37 runs, ~209 k rows each | **0 of 24 runs** |
+| `existing_assets` seen by the oracle | 209 k → 418 k → 627 k → **836 k**, merging back every ~4 h | **209,208 → 209,292**, one copy |
+| oracle `Max Memory Used`, hourly peak | 210–**256 MB** (the limit) | **148–191 MB** on every new container |
+| OOM / `signal: killed` lines | 5 in ~37 h | **0** |
+| `AWS/Lambda Errors` | 2–5 a day, every day since at least 09-10 (1.0–1.7 %) | **0 on 289 invocations** |
+| `prices-production-oracle-errors` | 18 firings 09-12 → 09-16, each 3–5 min | none since 09-16 07:23 UTC (29 h) |
+
+Every one of the five OOMs fell in an hour where the oracle read ~836 k rows —
+four un-merged copies. Since the fix it has never read more than one. The one
+post-deploy 250 MB reading is a container born before the deploy carrying its
+old high-water mark; it was gone by 12:47 UTC. Ten cold containers since all
+start at **148 MB** and peak at 191 MB — 58–75 % of the 256 MB limit.
+
+[[0241]] is closed on this. [[0226]] is an efficiency task, not an outage fix.
 
 ## Acceptance Criteria
 
