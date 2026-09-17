@@ -79,6 +79,18 @@ history:
       green on b3559af. Decided NOT to add a LedgersHeldBack metric: held-back
       ledgers are not lost, so it has no alarm threshold and does not close the
       observability criterion.
+  - date: 2026-09-17
+    status: active
+    who: okarcz
+    note: >
+      DEPLOYED. PR #313 squash-merged as 2cb5b2b (11:55 UTC). Observability
+      then Compute deployed from develop; ledger-processor LastModified
+      12:04:20 UTC, CodeSha256 S4GeMQqr…Amh8=, MAX_ITERATIONS 32. First
+      minutes behave as designed: runs hold back 2..12 ledgers, then one run
+      writes the whole minute. Errors 0, DLQ 0, no ForcedPartialFlushes,
+      frontier 68 s behind. Avg duration ~205 → ~776 ms, log volume ~2.3x —
+      both inside the cost analysis. Criterion 2 (a full day at ~0% loss) is
+      owed: measure 2026-09-18 on 2026-09-19. Pre-fix baseline 51.8-63.6%.
 ---
 
 # Aquarius live ingestion drops about half of every day's trades
@@ -621,6 +633,38 @@ just re-corrupts. That constraint is real; it simply does not apply to
   correcting deliberately rather than silently.
 
 # 📕 DEPLOY RUNBOOK — PR #313
+
+## ✅ DEPLOYED 2026-09-17 — steps 0-7 done, step 8 owed on 2026-09-19
+
+| | |
+| --- | --- |
+| merged | `2cb5b2b` (#313 squash), 11:55:44 UTC, no co-author trailer |
+| diffs | both exactly as expected below (Observability re-diffed read-only from merged `develop`: 1 resource added, nothing removed, no alarm property other than description text) |
+| Observability | deployed ~12:03 UTC; `prices-production-ledger-processor-forced-partial-flush` exists, `OK`, `Prices/Ingest ForcedPartialFlushes`, 1 action |
+| Compute | stack `UPDATE_COMPLETE` 12:04:08 UTC; no changeset left pending (CDK's "waiting in review" line is its normal wording) |
+| running binary | `LastModified` 2026-09-17T12:04:20Z, `arm64`, `MAX_ITERATIONS` 32, **`CodeSha256` `S4GeMQqrNMklu7U41khD8FVLC/EkSdgKRVVX7TFAmh8=`** |
+
+**Step 7, first ~5 minutes:**
+
+- Logs show exactly the designed pattern: runs hold back 2, 3 … 12 ledgers
+  (*"run is entirely inside one open minute"*), then one run writes the whole
+  minute — 12:08:05, ledgers 64,472,209..64,472,220, 96 rows, `held_back` 1 —
+  and the count restarts. No *"iteration budget exhausted"* WARN.
+- Cursor 64,472,232 at 12:09:06 UTC, moving once a minute.
+- Frontier 12:09 UTC: sdex / aquarius **68 s** behind (designed ≤ ~80 s).
+  Soroswap 248 s and phoenix 7,508 s are quiet venues, not a stall.
+- `Errors` 0, DLQ 0, `ForcedPartialFlushes` no datapoints.
+- **Cost signals, as predicted:** average duration ~205 ms → **~776 ms**
+  (max 2.2 s vs a 60 s timeout; the pre-deploy half-hour already peaked at
+  1.3 s). Log ingestion ~181 KB → **~419 KB per 5 min (~2.3x)**, mostly the
+  pre-existing *"skipping claim with zero amount"* WARN now repeated on every
+  re-read. At ~45 MB/day before, that is roughly +60 MB/day — about +$1/month.
+  Worth demoting that WARN to DEBUG some day; not urgent.
+
+⏳ **Step 8 is owed:** measure 2026-09-18 (the first full UTC day) on
+2026-09-19.
+
+---
 
 Written 2026-09-17. The operator merges and deploys; the read-only checks can be
 run by anyone with `soroban-readonly` and `dev_read`. Generic procedure:
