@@ -590,6 +590,28 @@ fn external_rate_day_pred(db: &str) -> String {
     )
 }
 
+/// What makes a row of the XLM/USDC reference market usable as a reference,
+/// spelled ONCE (task 0286 S5, review B WR-01).
+///
+/// This fragment is asked in three places — this module's reference subquery,
+/// [`pivot_reference_day_pred`]'s day set, and `views.sql`'s `usd_reference` /
+/// `price_usd_series`. A row whose stored `close` is 0 has no price to
+/// contribute, however much volume it carries, and `volume_base > 0` is what
+/// keeps it out of a volume-weighted mean's denominator.
+///
+/// ⚠️ It is a SHARED TERM, not the whole of any of the three (review IN-01).
+/// The pivot's reference subquery is `{PRICED_REFERENCE_ROW} AND
+/// pf_trade_count > 0`; the day set below is the fragment ALONE. The day set is
+/// therefore strictly wider, and the divergence runs in the recoverable
+/// direction: a day whose only reference minute is a dust-only one is admitted,
+/// the row is re-opened, and the refill then finds nothing — a stale value a
+/// later run can still fix, which is the same bias
+/// [`pivot_reference_day_pred`] documents for its own day/window mismatch.
+/// Adding `pf_trade_count > 0` to the day set would narrow it correctly; it is
+/// not done here because the term is a DEFAULT on every pre-0286 row, so until
+/// phase 3 re-ingests the history it would narrow on a column that says nothing.
+const PRICED_REFERENCE_ROW: &str = "close > 0 AND volume_base > 0";
+
 /// **"A usable reference candle exists for this bucket's UTC day"** — the
 /// pivot-leg mode's second day-set (task 0228, review round 2, finding 3),
 /// spliced into the same three sites as [`external_rate_day_pred`] and for the
@@ -609,10 +631,13 @@ fn external_rate_day_pred(db: &str) -> String {
 ///
 /// Uncorrelated `IN (SELECT …)` over the SAME table the pivot reads, at the same
 /// grain, so it is legal in the bare `WHERE` of the month enumeration like its
-/// sibling. "Usable" is what the pivot's reference subquery can turn into a
-/// non-NULL vwap: `close > 0 AND volume_base > 0`. Canonical USDC is resolved by
-/// identity inside the fragment rather than plumbed in as an id, so the three
-/// sites need no reference lookup before rendering.
+/// sibling. "Usable" here is [`PRICED_REFERENCE_ROW`] — `close > 0 AND
+/// volume_base > 0` — which is the shared TERM of the pivot's reference
+/// subquery, not the whole of it (the subquery also asks
+/// `pf_trade_count > 0`); that const's own doc says why the day set is
+/// deliberately the wider of the two. Canonical USDC is resolved by identity
+/// inside the fragment rather than plumbed in as an id, so the three sites need
+/// no reference lookup before rendering.
 ///
 /// ## Where the DAY under- and over-reaches, and why that is acceptable
 ///
@@ -628,18 +653,6 @@ fn external_rate_day_pred(db: &str) -> String {
 /// then trading later the same day", and the post-check still covers it. Only
 /// one of those errors is recoverable, so the bias is toward that one — the
 /// same bias [`external_rate_day_pred`] documents for the rate.
-/// What makes a row of the XLM/USDC reference market usable as a reference,
-/// spelled ONCE (task 0286 S5, review B WR-01).
-///
-/// The same question is asked in three places — this module's reference
-/// subquery, [`pivot_reference_day_pred`]'s day set, and `views.sql`'s
-/// `usd_reference` / `price_usd_series` — and the three must not drift: the
-/// day set decides which days a reset may refill, and the subquery decides
-/// what the refill is worth. A row whose stored `close` is 0 has no price to
-/// contribute, however much volume it carries, and `volume_base > 0` is what
-/// keeps it out of a volume-weighted mean's denominator.
-const PRICED_REFERENCE_ROW: &str = "close > 0 AND volume_base > 0";
-
 fn pivot_reference_day_pred(db: &str, tbl: &str, spec: &UsdResetSpec) -> String {
     format!(
         "toDate(timestamp, 'UTC') IN (SELECT toDate(timestamp, 'UTC') FROM {db}.{tbl} FINAL \
@@ -4487,8 +4500,14 @@ mod tests {
     /// `r.usd IS NOT NULL`, and under-prices every XLM-quoted candle in the
     /// bucket. Meanwhile the day-set predicate excludes that same day, so the
     /// two halves of the reset path disagree about what is refillable.
+    ///
+    /// ⚠️ What this asserts is that both CARRY the shared fragment — not that
+    /// they are equal, which they are not (review IN-01): the reference subquery
+    /// adds `pf_trade_count > 0` and the day set does not. The name says
+    /// "carries", and [`PRICED_REFERENCE_ROW`]'s doc says why the day set is the
+    /// wider of the two.
     #[test]
-    fn the_pivot_reference_says_what_the_day_set_and_the_views_say() {
+    fn the_pivot_reference_and_the_day_set_both_carry_the_priced_reference_term() {
         let sql = pivot_sql("prices", "price_ohlcv_1m", 5, 3, "");
         let reference = &sql[sql.find("AS ref_asset_id").expect("the reference subquery")..];
         assert!(
@@ -4503,10 +4522,17 @@ mod tests {
             require_external_rate: false,
             require_pivot_usdc_rate: false,
         };
+        let day_set = pivot_reference_day_pred("prices", "price_ohlcv_1m", &spec);
         assert!(
-            pivot_reference_day_pred("prices", "price_ohlcv_1m", &spec)
-                .contains(PRICED_REFERENCE_ROW),
-            "the day-set predicate and the reference subquery must be the same question"
+            day_set.contains(PRICED_REFERENCE_ROW),
+            "the day-set predicate must carry the same fragment: {day_set}"
+        );
+        // The asymmetry, pinned so it cannot become accidental: the day set is
+        // the fragment alone, and is therefore the wider of the two.
+        assert!(
+            !day_set.contains("pf_trade_count"),
+            "the day set is the fragment ALONE — narrowing it on a column that \
+             is a DEFAULT on every pre-0286 row is a phase-3 change: {day_set}"
         );
     }
 
