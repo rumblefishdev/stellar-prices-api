@@ -412,6 +412,31 @@ columns anyway and 7b refills them from scratch. Record it as superseded on the
 task — running it in addition would be a second full pass over the estate for no
 new rows.
 
+**7e. The USDT-peg after-check (task 0212).** `price_ohlcv_1m` went into this
+run holding 1 564 045 USDT-quoted rows valued at `close × $1` (2018-05-15 →
+2026-08-13) — about 7.4× the real rate; tasks 0172 and 0182 repaired the writer
+and the coarse tiers and never touched `1m`. This run replaces every one of
+those rows and 7b re-prices them, so 0212 needs no repair of its own — **but
+only if the USDT pivot actually writes** (it never had until task 0215; confirm
+`CAST(111 AS UInt32) AS ref_asset_id` statements in `system.query_log` during
+7b, not only XLM's `CAST(4 …)`). Otherwise the rows end at zero instead of
+wrong, which is the trade 0172 made on 2026-08-13.
+
+Measure it on `1m`, not on the tiers the pre-roll just wrote:
+
+```sql
+-- 111 = the canonical USDT on prod (task 0209). Its real rate is ~0.14.
+SELECT
+    countIf(close_usd / close <  0.5) AS pivot_written,
+    countIf(close_usd / close >= 0.9) AS peg_written,
+    min(timestamp) AS oldest_priced, max(timestamp) AS newest_priced
+FROM prices.price_ohlcv_1m FINAL
+WHERE quote_asset_id = 111 AND close > 0 AND close_usd > 0;
+```
+
+Expected: `peg_written = 0`, `pivot_written > 0` over the same span. Run it once
+more on `price_ohlcv_1h` to confirm the pre-roll carried no peg value up.
+
 ---
 
 ## 8. Acceptance
@@ -439,6 +464,8 @@ The phase-3 criteria of lore task 0286, in the order they can be checked:
    15m / 1h / 4h / 1d / 1w. After the re-ingest and pre-roll it is **zero**.
 5. **The whole history re-enriched** — `close_usd > 0` wherever a reference
    exists — and `post_run_0228_it` green.
+6. **No USDT-quoted `1m` row carries the $1 peg** (step 7e): `peg_written = 0`
+   and `pivot_written > 0` on `1m`, and on one coarse tier. This closes task 0212.
 
 ---
 

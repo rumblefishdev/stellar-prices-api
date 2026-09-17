@@ -362,6 +362,11 @@ Phase 3:
 - [ ] The whole history re-enriched (`close_usd > 0` wherever a reference
       exists) and `post_run_0228_it` green on the repaired reference; 0228's
       reset-mode campaign recorded as superseded, not run.
+- [ ] No USDT-quoted `price_ohlcv_1m` row carries the $1 peg after the
+      re-enrichment ([[0212]]'s query: `peg_written = 0`, `pivot_written > 0`,
+      measured on 1m and on one coarse tier) — the re-ingest replaces the
+      1.56 M rows 0172/0182 never reached, so 0212 closes here (re-ingest
+      runbook §7e).
 
 ## Implementation Notes
 
@@ -443,6 +448,19 @@ price-forming 1m close on all 14 393 pairs; 10.5 % of SDEX minutes have
 13. **`views.sql` / `current.sql` keep no pf gate** (out of scope) —
     `/ohlcv` can now refuse a price that `price_usd_series` and
     `current_prices` still publish.
+14. **The coarse `close_usd` rate is held to the precision floor on BOTH legs**
+    (`rollup_sql::RATE_BEARING_CHILD`, found by [[0151]]'s audit, 2026-09-17).
+    The gate was `close_usd > 0 AND close > 0`; the prod row
+    `close = 5e-14, close_usd = 4e-14` that `PRICE_FLOOR_SQL`'s own doc quotes
+    passed it, and as the latest "priced" child re-priced a healthy parent
+    close by 0.8 on every tier above. Now `>= 1e-12` on both, the line
+    `/ohlcv`'s `convertible` already draws. Changes all six MV bodies — lands
+    in the same re-CREATE.
+15. **The 0268 par signature needs a price**: `close_usd = close AND close > 0`
+    at both sites. A dust-only candle is `0 = 0` before and after every
+    refill, so the campaign re-opened it on every run and its pending count
+    never drained. Its volume stays as the tier that priced it left it — dust
+    volume, deliberately not worth a second signature.
 
 ## Issues Encountered
 
