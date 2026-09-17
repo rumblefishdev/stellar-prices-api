@@ -709,9 +709,21 @@ const LOW_PUBLISHED: &str = "if(isNull(minIf(l_x, valid)), NULL, least(minIf(l_x
 /// A volume-weighted mean of prices within a bucket must lie within that
 /// bucket's range, so clamping is a restatement of what vwap *is* rather than a
 /// correction applied to it.
+///
+/// ⚠️ Gated on `convertible`, NOT on `valid` (ADR 0287 §7, review C2). `vwap`
+/// is Σ quote / Σ base over EVERY fill the bucket holds, dust included — that
+/// ratio is the amount-derived number the ADR keeps out of the prices, and it
+/// is published beside `pf_vwap` precisely so a reader can compare the two.
+/// The only rows it cannot weigh are the ones with no rate to convert them
+/// with, which is what `convertible` says; `valid` would additionally drop
+/// every row that formed no price, i.e. exactly the trades this mean is
+/// supposed to include. The band is still the price-forming one, so on a
+/// bucket whose dust leg carries most of the volume the clamp will move the
+/// published value to `low` or `high` — a mean of all trades cannot always sit
+/// inside the range of some of them.
 const VWAP_RAW: &str = "toDecimal128OrNull(toString( \
-                     sumIf(toFloat64(w_x) * toFloat64(volume_base), valid) \
-                     / nullIf(sumIf(toFloat64(volume_base), valid), 0)), 14)";
+                     sumIf(toFloat64(w_x) * toFloat64(volume_base), convertible) \
+                     / nullIf(sumIf(toFloat64(volume_base), convertible), 0)), 14)";
 
 /// Smallest `close` / `close_usd` a USD rate may be derived from — a
 /// **precision precondition**, not a plausibility band.
@@ -899,12 +911,18 @@ fn usd_projection(refs: &UsdRefs, granularity: Granularity) -> String {
     // aggregate over every row. A `WHERE` here would delete a dust-only
     // bucket's activity along with its price, which is task 0286's wrong
     // answer, not its fix.
+    //
+    // ⚠️ Two predicates, and the difference is one term. `convertible` says
+    // "this row has a USD rate worth applying"; `valid` adds "and it formed a
+    // price". The prices take `valid`; `vwap` takes `convertible`, because ADR
+    // 0287 §7 weighs every fill (review C2). Spelling `valid` in terms of
+    // `convertible` is what keeps them one decision rather than two.
     format!(
         "timestamp, volume_base, volume_quote_usd, trade_count, quote_asset_id, \
          pf_trade_count, pf_volume, \
          (close >= {floor} AND close_usd >= {floor} \
-           AND pf_trade_count > 0 \
-           AND (quote_asset_id = {usdc} OR close_usd != close)) AS valid, \
+           AND (quote_asset_id = {usdc} OR close_usd != close)) AS convertible, \
+         (convertible AND pf_trade_count > 0) AS valid, \
          toFloat64(close_usd) / nullIf(toFloat64(close), 0) AS rate, \
          toDecimal128OrNull(toString(toFloat64(open) * rate), 14) AS o_x, \
          toDecimal128OrNull(toString(toFloat64(high) * rate), 14) AS h_x, \
@@ -918,15 +936,15 @@ fn usd_projection(refs: &UsdRefs, granularity: Granularity) -> String {
 
 /// The `Denomination::QuoteLeg` aggregate list. Same extraction, same reason.
 fn quote_leg_aggregates() -> String {
-    // The merged vwap, over the price-forming rows only. A dust-only ROW's
-    // `vwap` column is a dust price like its close, so letting it into the
-    // weighted mean would put back on the wire exactly what the gate on
-    // `o`/`h`/`l`/`c` takes off.
-    let vwap_raw = format!(
-        "toDecimal128OrNull(toString( \
-                 sumIf(toFloat64(vwap) * toFloat64(volume_base), {PF_ROWS}) \
-                 / nullIf(sumIf(toFloat64(volume_base), {PF_ROWS}), 0)), 14)"
-    );
+    // The merged vwap, over EVERY row (ADR 0287 §7, review C2). A row's `vwap`
+    // column is Σ quote / Σ base over its own fills, so weighting it by that
+    // row's base volume and dividing by the total is the bucket's Σ quote / Σ
+    // base — the amount-derived mean, dust and all. That is the one number here
+    // that is meant to include the trades `o`/`h`/`l`/`c` exclude; `pf_vwap`,
+    // beside it, is the price-forming mean.
+    let vwap_raw = "toDecimal128OrNull(toString( \
+                 sum(toFloat64(vwap) * toFloat64(volume_base)) \
+                 / nullIf(sum(toFloat64(volume_base)), 0)), 14)";
     // ⚠️ Every price aggregate below is a `-If` and every one of them is
     // WRAPPED. Over zero matching rows `maxIf`/`minIf`/`argMaxIf` return the
     // type's DEFAULT — `0` — rather than NULL (verified on 26.3.10.60), so an
@@ -939,8 +957,8 @@ fn quote_leg_aggregates() -> String {
              if(countIf({PF_ROWS}) = 0, NULL, toString(argMaxIf(close, volume_base, {PF_ROWS}))) AS c, \
              toString(sum(volume_base)) AS vb, \
              toString(sum(volume_quote_usd)) AS vqu, \
-             if(countIf({PF_ROWS}) = 0, NULL, toString(if(isNull({vwap_raw}), toDecimal128(0, 14), \
-                 least(greatest({vwap_raw}, {QL_LOW}), {QL_HIGH})))) AS vw, \
+             if(countIf({PF_ROWS}) = 0 OR isNull({vwap_raw}), NULL, \
+                 toString(least(greatest({vwap_raw}, {QL_LOW}), {QL_HIGH}))) AS vw, \
              toUInt64(sum(trade_count)) AS tc, \
              CAST(NULL AS Nullable(String)) AS meth, \
              CAST(NULL AS Nullable(UInt8)) AS drv, \
@@ -1610,10 +1628,13 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
             // the whole point of this aggregate, so a one-row probe tests the
             // path that does not exist in production.
             //
-            // The `isNull` arm preserves the pre-existing zero sentinel: no
-            // volume means no weighted mean, and that must stay `0` rather than
-            // being clamped up to `low`, which would assert a vwap the bucket
-            // does not have.
+            // ⚠️ The zero sentinel the `isNull` arm used to carry is GONE
+            // (review C3). It was written when the denominator was
+            // `sum(volume_base)` over the whole bucket, where "no volume" did
+            // mean "nothing to average"; once the sum was gated it became
+            // reachable on a bucket that HAS prices, and published `vwap = "0"`
+            // outside the band the same row publishes. NULL is what the USD arm
+            // answers and what ADR 0011 §5 means by absent.
             //
             // ⚠️ The price columns MUST be Nullable to match `Candle`'s
             // `Option<String>` fields. RowBinary is positional and carries no
@@ -2544,13 +2565,22 @@ mod tests {
                 "`{bare}` takes its price from dust too: {agg}"
             );
         }
-        // One wrapper per price field: open, high, low, close, vwap.
+        // One wrapper per price field: open, high, low, close.
         assert_eq!(
             agg.matches(&format!("if(countIf({PF_ROWS}) = 0, NULL,"))
                 .count(),
-            5,
+            4,
             "every price field must go NULL on a bucket with no price-forming \
              fill, rather than take a `-If` aggregate's zero default: {agg}"
+        );
+        // `vwap` is the fifth, and its wrapper carries one term more: the mean
+        // itself is over every row (ADR 0287 §7), so it can be NULL — no
+        // volume at all — on a bucket that does have price-forming rows.
+        assert_eq!(
+            agg.matches(&format!("if(countIf({PF_ROWS}) = 0 OR isNull("))
+                .count(),
+            1,
+            "the vwap wrapper must go NULL both ways: {agg}"
         );
     }
 
@@ -2611,6 +2641,74 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// ADR 0287 §7 and review C2 / C3 / D F5: `vwap` is Σ quote / Σ base over
+    /// ALL the bucket's fills, dust included, and it is the one field that is
+    /// NOT about price formation — that ratio *is* the amount-derived number
+    /// the ADR filters out of `open`/`high`/`low`/`close`, published on purpose
+    /// beside `pf_vwap`, which is the price-forming mean.
+    ///
+    /// The merge had drifted to price-forming rows only, so on a multi-source
+    /// bucket a dust-only source's volume was dropped from the mean entirely —
+    /// while the published OpenAPI text said "over every trade it holds,
+    /// including the ones too small to form a price". One of the two had to
+    /// move, and it is the code.
+    ///
+    /// What stays gated: the bucket still reports NO vwap when nothing in it
+    /// formed a price (there is no band to publish it in), and the value is
+    /// still clamped into `[low, high]`.
+    #[test]
+    fn the_merged_vwap_weights_every_row_including_the_ones_that_formed_no_price() {
+        let usd = usd_aggregates();
+        assert!(
+            VWAP_RAW.contains("sumIf(toFloat64(w_x) * toFloat64(volume_base), convertible)"),
+            "the USD merge weights every row it can convert, not only the \
+             price-forming ones: {VWAP_RAW}"
+        );
+        assert!(
+            !VWAP_RAW.contains("valid"),
+            "`valid` carries `pf_trade_count > 0`, which is what this undoes: {VWAP_RAW}"
+        );
+        assert!(
+            usd.contains(&format!(
+                "if(countIf(valid) = 0 OR isNull({VWAP_RAW}), NULL,"
+            )),
+            "a bucket with no price-forming fill still publishes no vwap: {usd}"
+        );
+
+        let ql = quote_leg_aggregates();
+        assert!(
+            ql.contains("sum(toFloat64(vwap) * toFloat64(volume_base))"),
+            "the quote-leg merge weights every row: {ql}"
+        );
+        assert!(
+            !ql.contains(&format!(
+                "sumIf(toFloat64(vwap) * toFloat64(volume_base), {PF_ROWS})"
+            )),
+            "the price-forming gate must be off the vwap sums: {ql}"
+        );
+        // C3: the zero sentinel is gone. Its denominator used to be
+        // `sum(volume_base)` over the whole bucket, where "no volume" really
+        // did mean "no mean to publish"; gated, it became reachable on a
+        // bucket that HAS prices — publishing `vwap = "0"` outside the band the
+        // same row publishes. NULL is what the USD arm says, and what ADR 0011
+        // §5 says: the field is absent, not zero.
+        assert!(
+            !ql.contains("toDecimal128(0, 14)"),
+            "no zero sentinel: a vwap that cannot be computed is NULL: {ql}"
+        );
+
+        let projection = usd_projection(&usd_refs(), Granularity::H1);
+        assert!(
+            projection.contains(") AS convertible,"),
+            "the USD projection must name the convertible-to-USD predicate: {projection}"
+        );
+        assert!(
+            projection.contains("(convertible AND pf_trade_count > 0) AS valid"),
+            "`valid` is `convertible` plus the price-forming term, so the two \
+             cannot drift: {projection}"
+        );
     }
 
     /// `pf_vwap` is the price-forming volume-weighted mean, and it is published

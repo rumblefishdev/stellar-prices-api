@@ -2541,7 +2541,15 @@ async fn ohlcv_a_dust_only_source_with_the_larger_volume_does_not_supply_the_pri
     approx(&c["open"], 1.0);
     approx(&c["high"], 1.2); // NOT 99.0
     approx(&c["low"], 0.9);
-    approx(&c["vwap"], 1.1);
+    // ⚠️ `vwap` is the one field that DOES weigh the dust leg (ADR 0287 §7,
+    // review C2): it is Σ quote / Σ base over every fill, and the dust source
+    // carries a hundred times the base volume at a far higher mean. The
+    // all-trades mean is ~98, outside the price-forming band, so the published
+    // value is the band's edge — the clamp `least(greatest(vwap, low), high)`
+    // that keeps the response self-consistent. `pf_vwap` is where the
+    // price-forming mean lives.
+    approx(&c["vwap"], 1.2);
+    approx(&c["pf_vwap"], 1.1);
     // Volume and count are the whole bucket's, dust included — only prices are
     // filtered.
     approx(&c["volume_base"], 1010.0);
@@ -2635,7 +2643,9 @@ async fn ohlcv_in_xlm_takes_no_price_from_a_dust_only_source() {
     approx(&c0["close"], 10.0); // NOT 900.0, which carries 50x the volume
     approx(&c0["high"], 12.0);
     approx(&c0["low"], 9.0);
-    approx(&c0["vwap"], 10.0);
+    // Same as the USD arm: the merged `vwap` weighs the dust leg too, lands
+    // outside the price-forming band, and is clamped to its edge.
+    approx(&c0["vwap"], 12.0);
     approx(&c0["pf_vwap"], 10.0); // 1000 / 100
     approx(&c0["volume_base"], 5100.0);
     assert_eq!(c0["pf_trade_count"], 7);
@@ -2653,6 +2663,72 @@ async fn ohlcv_in_xlm_takes_no_price_from_a_dust_only_source() {
     assert!(c1["close_divergent"].is_null(), "no close, no divergence");
     approx(&c1["volume_base"], 3000.0);
     assert_eq!(c1["trade_count"], 1);
+
+    teardown(db).await;
+}
+
+/// ADR 0287 §7 and review C2, the positive case: `vwap` counts the dust, and
+/// `pf_vwap` does not. Both are on the wire, and the pair is the point — a
+/// reader can see how far the amount-derived mean sits from the price-forming
+/// one without either being hidden.
+///
+/// One priced source (mean 1.0 over 100 base) beside a DUST-ONLY source (mean
+/// 2.0 over 100 base, no price at all). Σ quote / Σ base over both is 1.5, and
+/// it sits inside the price-forming band `[0.9, 2.0]`, so nothing is clamped
+/// and the merge itself is what the assertion reads.
+///
+/// RED before this slice: `vwap` came back 1.0 — the price-forming mean under
+/// the name of the all-trades one, while the published OpenAPI text said
+/// "over every trade it holds, including the ones too small to form a price".
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_vwap_counts_the_dust_and_pf_vwap_does_not() {
+    let db = "it_ohlcv_vwap_all_trades_0286";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (4, 'BAR', 'credit', '{i}', '')",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ('2026-03-05 10:00:00', 4, 1, 'sdex', 1.0, 2.0, 0.9, 1.0, 100, 100, 25, 0.25, \
+              1.0, 4, 1, 4, 100, 100), \
+             ('2026-03-05 10:00:00', 4, 1, 'soroswap', 0, 0, 0, 0, 100, 200, 50, 0, \
+              2.0, 2, 1, 0, 0, 0)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/BAR:{}/ohlcv?granularity=1h&start=2026-03-05T10:00:00Z\
+         &end=2026-03-05T10:00:00Z&base_currency=XLM",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "body={json}");
+    let c = &data[0];
+
+    approx(&c["vwap"], 1.5); // (1.0 x 100 + 2.0 x 100) / 200 — dust included
+    approx(&c["pf_vwap"], 1.0); // 100 / 100 — the price-forming fills alone
+    approx(&c["close"], 1.0); // and the prices come from the priced row only
+    approx(&c["low"], 0.9);
+    approx(&c["high"], 2.0);
+    assert_eq!(c["pf_trade_count"], 4);
+    assert_eq!(c["trade_count"], 6);
 
     teardown(db).await;
 }
