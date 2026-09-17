@@ -2,10 +2,10 @@
 id: "0146"
 title: "All six rollup MVs zero a coarse row's close_usd when its newest sub-bucket is un-enriched"
 type: BUG
-status: active
+status: completed
 assignee: akot
-related_adr: []
-related_tasks: ["0144", "0145", "0142", "0137", "0148", "0149", "0095", "0136"]
+related_adr: ["0287"]
+related_tasks: ["0144", "0145", "0142", "0137", "0148", "0149", "0095", "0136", "0286", "0212"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "data-correctness", "materialized-view", "milestone-M2"]
 milestone: 2
@@ -39,9 +39,35 @@ history:
       on. Pre-flight before the first DROP: confirm the MV re-aggregation
       windows do not reach back to 2026-08-13, or [[0212]]'s peg-valued _1m
       rows re-enter the coarse tiers.
+  - date: "2026-09-17"
+    status: completed
+    who: akot
+    note: >
+      Closed as superseded by [[0286]]. The form of `close_usd` and `vwap`
+      this task specified is replaced by ADR 0287 / PR #320: coarse
+      `close_usd` = `close × argMaxIf(close_usd / close, t.timestamp,
+      close_usd > 0 AND close > 0)` (the latest priced child's RATE, which
+      skips the un-enriched sentinel as `argMaxIf(close_usd, …)` would have
+      and keeps `close`/`close_usd` on one bucket), `vwap` in Float64 with an
+      explicit zero. The six MVs are re-created ONCE, under
+      `docs/runbooks/0286-candle-definitions-rollout.md` (§4–§5, §8) — a
+      separate 0146 re-CREATE would open a second DROP window for nothing.
+      No code was written under this task. NOT yet on production: PR #320 is
+      open on this date and the re-CREATE + per-MV freshness check are
+      tracked by 0286's open rollout criterion, not here. Pre-flight from the
+      2026-09-14 entry, answered from the file: 1m→15m reads a 2 h window, so
+      [[0212]]'s peg-valued _1m rows cannot re-enter; 1d→1w (60 d) and 1d→1M
+      (400 d) reach past 2026-08-13 but read 1d, which [[0182]] repaired —
+      confirm on prod before the first DROP.
 ---
 
 # Rollup MVs inherit `close_usd = 0` from an un-enriched sub-bucket
+
+> **Superseded by [[0286]] (2026-09-17).** The form of `close_usd` and `vwap`
+> below is replaced by ADR 0287 / PR #320, and the six MVs are re-created once,
+> under `docs/runbooks/0286-candle-definitions-rollout.md`. The text below is
+> kept as the original analysis; see the acceptance criteria for what landed
+> where.
 
 ## Summary
 
@@ -125,16 +151,47 @@ The only route is DROP + re-CREATE, and that is not free:
 
 ## Acceptance Criteria
 
-- [ ] [[0142]] drift detection in place; a divergence between `rollups.sql` and
+- [x] [[0142]] drift detection in place; a divergence between `rollups.sql` and
       the live definitions is visible rather than silent.
-- [ ] [[0137]] freshness alarm deployed before the first DROP.
-- [ ] `vwap` written as `ifNull(volume_quote / nullIf(volume_base, 0), 0)`
+      → 0142 archived; `prices-clickhouse-drift` + the `mv-drift` alarm.
+- [x] [[0137]] freshness alarm deployed before the first DROP.
+      → 0137 archived; a pre-flight row of the 0286 rollout runbook.
+- [x] `vwap` written as `ifNull(volume_quote / nullIf(volume_base, 0), 0)`
       in all six MVs and the matching `preroll*.sql` sites, so a zero-volume
       coarse group writes 0 by construction rather than by
       `insert_null_as_default` (from [[0171]]'s review).
+      → Delivered by [[0286]] in a different form: Float64 division converted
+      with `ifNull(toDecimal128OrZero(toString(…), 14), toDecimal128(0, 14))`,
+      because Decimal division silently overflows past ~1.7e10 on 26.3.10.60.
+      One generator (`rollup_sql.rs`) renders `rollups.sql` and the prerolls.
 - [ ] All six MVs use `argMaxIf`; APPEND + `sum(version)` + aligned windows
       verifiably preserved after re-CREATE.
-- [ ] No coarse row carries `close_usd = 0` while `close > 0` and a priced
+      → Superseded, then deferred to [[0286]]: the SQL is the rate form (ADR
+      0287 §5), not `argMaxIf(close_usd, …)`; the MV set changes too
+      (`mv_ohlcv_1w_to_1M` → `mv_ohlcv_1d_to_1M`). The production re-CREATE is
+      0286's open rollout criterion.
+- [x] No coarse row carries `close_usd = 0` while `close > 0` and a priced
       sub-bucket exists underneath it — regression test on 26.3.10.60.
+      → `rollup_pf_it` (latest priced child un-enriched, rate taken from the
+      one before), `rollup_chain_it`, `preroll_close_usd_guard_it` — PR #320.
 - [ ] `close` / `close_usd` decoupling disclosed in the header.
+      → Obsolete: the rate form re-prices the bucket's own `close`, so the two
+      columns are same-bucket by construction; the `rollups.sql` header in
+      PR #320 says so.
 - [ ] Per-MV freshness confirmed recovered after each re-CREATE.
+      → Deferred to [[0286]] (rollout runbook §8e).
+
+## Implementation Notes
+
+None under this task — no code, no production change. Everything it asked for
+ships with [[0286]] (PR #320) and its rollout runbook.
+
+## Design Decisions
+
+### Emerged
+
+1. **Closed as superseded rather than kept open as a rollout tracker.** 0286
+   already carries the MV re-CREATE as an unchecked criterion; two tasks
+   tracking one operator step is how the 0120-style stale blocker happens.
+2. **No standalone `argMaxIf` delivery.** It would re-create six MVs twice —
+   two data-loss windows ([[0095]]) — for a form ADR 0287 replaces anyway.
