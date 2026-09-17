@@ -2,7 +2,7 @@
 id: "0277"
 title: "Bump stellar-xdr 27→28 before Protocol 28 (Adapter) activates on 2026-09-16 — BE must bump xdr-parser first"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0091", "0094", "0098", "0064"]
 tags: [layer-backend, priority-high, effort-small, phase-live, clickhouse, resilience, ingestion, deployment]
@@ -50,22 +50,109 @@ history:
       have been left on proto-27. Remaining work is gated on the 2026-09-16
       17:00 UTC vote — the crossing measurement and the alarm confirmation —
       so the task stays ACTIVE until then.
+  - date: 2026-09-17
+    status: active
+    who: okarcz
+    note: >
+      CROSSED CLEAN — 7 of 7 criteria met. First protocol-28 ledger is
+      64,458,446 (closed 2026-09-16 17:00:06 UTC, from BE's `default.ledgers`).
+      Every minute 16:00-18:30 UTC has both SDEX and AMM candles; the durable
+      cursor is at 64,471,003, 12,557 ledgers past activation and at the tip.
+      `rollup-freshness-1m` stayed OK on real data (RollupLagSeconds a flat 18 s
+      in every 15-min period vs 900 s), DLQ 0, ledger-processor Errors 0,
+      asset-discovery 68 runs / 0 errors. ⚠️ No empty-tx-set ledger has closed
+      under 28 yet, so the CAP-83 path is still verified in source only.
+      See §CROSSING RESULT.
+  - date: 2026-09-17
+    status: completed
+    who: okarcz
+    note: >
+      Completed and archived. All 7 criteria met; no code changed in this
+      closing pass, only the crossing record. Closed deliberately with one risk
+      left open rather than waiting an unbounded time for it: the first
+      empty-tx-set ledger under protocol 28 has not closed yet. It is handled
+      in source, a failure would surface on `rollup-freshness-1m`, and it is
+      recoverable (14-day doorbell retention, cursor written last).
 ---
 
 # stellar-xdr 27 → 28 for Protocol 28 "Adapter"
 
-## 📊 STATUS — 2026-09-14 15:11 UTC · ACTIVE, 5 of 7 criteria met
+## 📊 STATUS — 2026-09-17 10:30 UTC · 7 of 7 criteria met
 
-**Shipped and verified in production. Two criteria remain, both gated on the
-vote (2026-09-16 17:00 UTC).**
+**Protocol 28 activated at ledger 64,458,446 (2026-09-16 17:00:06 UTC) and live
+ingestion did not stall.** See §CROSSING RESULT below. The 09-14 status is kept
+underneath for the record.
 
 | # | criterion | state |
 | --- | --- | --- |
 | 1 | BE bumped `xdr-parser`, rev recorded | ✅ `840f2b58` |
 | 2 | Pin `=28.0.0`, check + tests green | ✅ 905 pass / 0 fail |
-| 3 | New variant handled; empty-tx-set advances the cursor | ✅ verified in source |
+| 3 | New variant handled; empty-tx-set advances the cursor | ✅ verified in source (⚠️ not yet exercised in prod) |
 | 4 | ledger-processor **deployed**, asset confirmed changed | ✅ 14:48:22 UTC |
 | 5 | `asset-discovery` deployed on 28 | ✅ 15:06:51 UTC |
+| 6 | Frontier measured **crossing** the activation ledger | ✅ 09-17, no gap |
+| 7 | `rollup-freshness-1m` confirmed to cover it | ✅ stayed OK on real data |
+
+## ✅ CROSSING RESULT — measured 2026-09-17 ~10:30 UTC
+
+Measured after the fact. The pre-vote baseline in §"What is owed" was not
+captured separately on 09-16, so the before/after diff comes from the candles
+themselves: a freeze leaves a hole in them, and there is none.
+
+**The activation ledger** — from BE's `default.ledgers` (`protocol_version`):
+
+| protocol | first ledger | first close (UTC) | last ledger | last close (UTC) |
+| --- | --- | --- | --- | --- |
+| 27 | — | — | 64,458,445 | 2026-09-16 17:00:01 |
+| 28 | **64,458,446** | **2026-09-16 17:00:06** | 64,471,001 | 2026-09-17 10:26:23 |
+
+**The frontier** (prod CH, `dev_read`):
+
+- `prices.price_ohlcv_1m` has candles in **every minute** 16:00 → 18:30 UTC on
+  09-16, from both SDEX and the AMMs. Per minute around activation: 16:59
+  → 65 SDEX / 1 AMM, 17:00 → 45 / 1, 17:01 → 54 / 1, 17:02 → 120 / 1.
+  SDEX volume in the 10-min buckets after 17:30 is *higher* than before, not
+  lower.
+- `prices.ingest_cursor FINAL` = **64,471,003** at 10:26:34 UTC on 09-17 —
+  12,557 ledgers past activation, at the tip.
+- `behind_sec` on 09-17 ~10:00: aquarius / sdex / soroswap **47 s**. Phoenix
+  read 12,227 s, then printed a 10:04 candle minutes later — the quiet-venue
+  pattern already recorded under §"Not blocking", not a stall.
+
+**The alarm** (AWS, read-only profile):
+
+- `prices-production-rollup-freshness-1m`: state **OK**, last transition
+  2026-09-14 12:36 UTC, **no state change** since 09-15.
+- It had **real data**, not `notBreaching` no-data: `Prices/Rollup
+  RollupLagSeconds` (`Table=price_ohlcv_1m`) has one sample in every 900 s
+  period 16:00 → 18:15 UTC, all **18 s** against the 900 s threshold.
+- ⚠️ **What this does and does not prove.** It proves the alarm stayed quiet on
+  a healthy crossing with live data behind it. It does **not** prove the alarm
+  fires on a halt, because there was no halt. That half rests on the earlier
+  inductions ([[0137]], [[0222]]).
+
+**Side channels:** `prices-ingest-dlq-production` max 0 every hour 15:00 →
+19:00 UTC; `prices-production-ledger-processor` Errors 0 every hour 15:00 →
+20:00 UTC; `prices-production-asset-discovery` **68 invocations / 0 errors**
+from 09-14 15:00 to 09-17 11:00 UTC. The first hourly pass on the new binary,
+owed below, is therefore done.
+
+### ⚠️ What is still unexercised
+
+1. **No empty-tx-set ledger has closed under protocol 28 yet.** BE's
+   `default.ledgers` has **0** rows with `protocol_version = 28` and
+   `transaction_count = 0` through 64,471,001. That ledger is where CAP-83's
+   `StellarValueExt::EmptyTxSet` appears — the "wall" this task warned about. It
+   is handled in source (criterion 3) but has not been decoded in production. If
+   it breaks, `rollup-freshness-1m` is the alarm that should catch it.
+2. **asset-discovery's zero errors are weak evidence.** Its ledger scan has
+   never run ([[0256]]), so it is not decoding ledgers at all. Its protocol-28
+   exposure becomes real only when that scan is switched on.
+
+## 🗄️ STATUS as of 2026-09-14 15:11 UTC — superseded above
+
+| # | criterion | state |
+| --- | --- | --- |
 | 6 | Frontier measured **crossing** the activation ledger | ⏳ **09-16** |
 | 7 | `rollup-freshness-1m` confirmed to cover it | ⏳ **09-16** |
 
@@ -597,12 +684,15 @@ few seconds of lag. **No stop, no gap.**
       `AM7q55L+…` → `B9geHxzCQsDYKwpraobpzhgzVKJCubAKQgutV6SMW0M=` at
       2026-09-14 15:06:51 UTC, with all nine EventBridge functions, cleanup
       still DISABLED, 51/51 alarms OK. See §DEPLOYED — asset-discovery.
-- [ ] The live candle frontier is measured crossing the Protocol 28 activation
+- [x] The live candle frontier is measured crossing the Protocol 28 activation
       ledger, recorded before/after — the same check that resolved proto27's
-      active-vs-latent question.
-- [ ] `prices-production-rollup-freshness-1m` stayed OK through the crossing
+      active-vs-latent question. — activation ledger 64,458,446 at 17:00:06
+      UTC; candles in every minute across it; cursor 12,557 ledgers past it.
+      See §CROSSING RESULT. ⚠️ No empty-tx-set ledger yet.
+- [x] `prices-production-rollup-freshness-1m` stayed OK through the crossing
       (or fired and was cleared), so the alarm is confirmed to cover this failure
-      rather than assumed to.
+      rather than assumed to. — stayed OK on real data (18 s lag every period).
+      Proves no false alarm, not detection; see §CROSSING RESULT.
 
 ## Notes
 
