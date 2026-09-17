@@ -129,6 +129,13 @@ pub async fn execute(
     // Fires the one-time activation-split minute-alignment check on whichever
     // partition straddles the split (decision 7).
     let mut checked_alignment = false;
+    // The same check at the RUN's two ends (review CR-02). Phase 3 re-ingests
+    // month by month, so `--end N` / `--start N+1` puts a run boundary on the
+    // last minute of every month — ~120 of them across the chain — and the
+    // minute open at `end` is written from this run's fills, then again from
+    // the next run's. One shot each, on whichever partition holds the ledger.
+    let mut checked_run_start = false;
+    let mut checked_run_end = false;
 
     // Run-level candle state (task 0286 S5, review A BL-01): the minute open at
     // a partition boundary is CARRIED into the next partition instead of being
@@ -246,24 +253,36 @@ pub async fn execute(
                 && activation_ledger <= partition.end
             {
                 checked_alignment = true;
-                if let (Some(m_prev), Some(m_act)) = (
-                    peek_ledger_minute(partition, activation_ledger - 1, temp_dir).await,
-                    peek_ledger_minute(partition, activation_ledger, temp_dir).await,
-                ) {
-                    if m_prev == m_act {
-                        warn!(
-                            activation_ledger,
-                            prev_ledger = activation_ledger - 1,
-                            straddled_minute = m_act,
-                            "activation split is NOT minute-aligned: the ledgers on either side of the split share one candle-minute, so its source='sdex' candle is written partially by both range runs (RMT replaces, not sums) and undercounts — reconcile that single minute from one pass after both runs, or accept the documented boundary artifact"
-                        );
-                    } else {
-                        info!(
-                            activation_ledger,
-                            "activation split is minute-aligned — no straddled sdex candle at the boundary"
-                        );
-                    }
+                let m_prev = peek_ledger_minute(partition, activation_ledger - 1, temp_dir).await;
+                let m_act = peek_ledger_minute(partition, activation_ledger, temp_dir).await;
+                match boundary_is_minute_aligned(m_prev, m_act) {
+                    Some(false) => warn!(
+                        activation_ledger,
+                        prev_ledger = activation_ledger - 1,
+                        straddled_minute = m_act.unwrap_or_default(),
+                        "activation split is NOT minute-aligned: the ledgers on either side of the split share one candle-minute, so its source='sdex' candle is written partially by both range runs (RMT replaces, not sums) — under ADR 0287 the second write can ERASE a priced minute, not merely undercount it. Rebuild that single minute from one pass after both runs, or accept the documented boundary artifact"
+                    ),
+                    Some(true) => info!(
+                        activation_ledger,
+                        "activation split is minute-aligned — no straddled sdex candle at the boundary"
+                    ),
+                    None => {}
                 }
+            }
+
+            // The run's own two ends (review CR-02). A boundary that falls on a
+            // 64k partition edge peeks `None` on the outside ledger and is
+            // skipped — it needs no check, because the flush boundary and the
+            // run boundary then coincide.
+            if !checked_run_start && start > 1 && partition.start <= start && start <= partition.end
+            {
+                checked_run_start = true;
+                check_boundary_alignment(partition, temp_dir, start - 1, start, "run_start").await;
+            }
+            if !checked_run_end && end < u32::MAX && partition.start <= end && end <= partition.end
+            {
+                checked_run_end = true;
+                check_boundary_alignment(partition, temp_dir, end, end + 1, "run_end").await;
             }
         } else {
             info!(
@@ -419,6 +438,58 @@ fn aggregate_unresolved(raw: &[UnresolvedPoolSwap], reg: &Registries) -> Vec<Unr
     out
 }
 
+/// Whether the two ledgers on either side of a range boundary fall in DIFFERENT
+/// candle-minutes (review CR-02).
+///
+/// * `Some(true)`  — aligned: the boundary splits two minutes and no candle
+///   straddles it.
+/// * `Some(false)` — the two ledgers share one candle-minute, so that minute is
+///   written partially by the run on each side of the boundary.
+/// * `None` — one of the two ledgers could not be read, which in practice means
+///   the boundary falls on a 64k partition edge (the neighbour is in a partition
+///   this run never synced). Such a boundary needs no check: the answer is
+///   simply unknown here and the caller skips silently.
+fn boundary_is_minute_aligned(prev: Option<u32>, next: Option<u32>) -> Option<bool> {
+    match (prev, next) {
+        (Some(p), Some(n)) => Some(p != n),
+        _ => None,
+    }
+}
+
+/// Best-effort minute-alignment check at ONE end of the run's range (review
+/// CR-02). `prev_ledger` is the last ledger below the boundary, `next_ledger`
+/// the first above it; exactly one of the two is in this run's range and the
+/// other is on disk whenever `partition` was synced whole.
+///
+/// Logs only — a straddling minute is a single bucket and the fix is a targeted
+/// reconcile from one pass, not a failed run.
+async fn check_boundary_alignment(
+    partition: &Partition,
+    temp_dir: &Path,
+    prev_ledger: u32,
+    next_ledger: u32,
+    boundary: &'static str,
+) {
+    let m_prev = peek_ledger_minute(partition, prev_ledger, temp_dir).await;
+    let m_next = peek_ledger_minute(partition, next_ledger, temp_dir).await;
+    match boundary_is_minute_aligned(m_prev, m_next) {
+        Some(false) => warn!(
+            boundary,
+            prev_ledger,
+            next_ledger,
+            straddled_minute = m_next.unwrap_or_default(),
+            "run boundary is NOT minute-aligned: the ledgers on either side of it share one candle-minute, so that minute's candle is written partially by BOTH runs (RMT replaces, not sums) — under ADR 0287 the second write can ERASE a priced minute, not merely undercount it, if its half holds only dust. Rebuild that single minute from ONE pass covering both sides, or move the boundary onto a minute edge"
+        ),
+        Some(true) => info!(
+            boundary,
+            prev_ledger, next_ledger, "run boundary is minute-aligned — no candle straddles it"
+        ),
+        // Neighbour not on disk: a partition-aligned boundary, or archive
+        // tail-lag. Nothing to say.
+        None => {}
+    }
+}
+
 fn partition_fully_done(
     partition: &Partition,
     start: u32,
@@ -522,5 +593,34 @@ mod tests {
     #[test]
     fn empty_input_yields_no_records() {
         assert!(aggregate_unresolved(&[], &Registries::new()).is_empty());
+    }
+
+    /// Review CR-02: the two ledgers on either side of a range boundary must
+    /// fall in different candle-minutes, or the minute they share is written
+    /// partially by both runs — and under ADR 0287 the second write can ERASE
+    /// the first rather than merely undercount it.
+    #[test]
+    fn a_boundary_between_two_minutes_is_aligned() {
+        assert_eq!(
+            boundary_is_minute_aligned(Some(1_700_000_040), Some(1_700_000_100)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn a_boundary_inside_one_minute_is_not_aligned() {
+        assert_eq!(
+            boundary_is_minute_aligned(Some(1_700_000_040), Some(1_700_000_040)),
+            Some(false)
+        );
+    }
+
+    /// Either side unreadable — the ledger is outside the synced partition, i.e.
+    /// the boundary falls on a 64k partition edge, which needs no check anyway.
+    #[test]
+    fn a_boundary_with_an_unreadable_side_answers_nothing() {
+        assert_eq!(boundary_is_minute_aligned(None, Some(1_700_000_040)), None);
+        assert_eq!(boundary_is_minute_aligned(Some(1_700_000_040), None), None);
+        assert_eq!(boundary_is_minute_aligned(None, None), None);
     }
 }

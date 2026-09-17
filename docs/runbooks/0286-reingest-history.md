@@ -100,9 +100,25 @@ from §6.
 
 ### 4a. Pick the month's ledger range
 
-Partitions are `toYYYYMM(timestamp)`; the backfill is ranged in LEDGERS. Derive
-one from the other out of the rows already in the table — `version DIV 1000` is
-the ledger a row's last fill came from:
+Partitions are `toYYYYMM(timestamp)`; the backfill is ranged in LEDGERS. The
+range must be **minute-aligned**, not merely month-aligned: the accumulators live
+for one invocation, so a minute split across two runs is written twice and the
+second write — if its half is dust — ERASES the priced first one
+(`0286-candle-definitions-rollout.md` §1a, the run-boundary row).
+
+A month starts at a minute boundary (`00:00:00`), so a range that starts at the
+first ledger of the month is aligned by construction:
+
+- `START` = the FIRST ledger whose `closed_at` is at or after the month's first
+  second. Read it from Horizon — `GET /ledgers/{seq}` returns `closed_at`, and
+  `GET /ledgers?order=asc&cursor=…` walks the neighbourhood — and confirm that
+  `closed_at(START − 1)` is in the previous month.
+- `END` = the next month's `START − 1`. Nothing else: derive the next month's
+  `START` the same way and subtract one, so the two ranges meet exactly on the
+  minute edge.
+
+To find the neighbourhood cheaply, the rows already in the table still help —
+`version DIV 1000` is the ledger a row's last fill came from:
 
 ```sql
 SELECT toYYYYMM(timestamp)               AS month,
@@ -113,17 +129,20 @@ WHERE toYYYYMM(timestamp) IN (<month>, <next month>)
 GROUP BY month ORDER BY month;
 ```
 
-Use `START` = the month's `first_ledger` and `END` = the next month's
-`first_ledger − 1`. Two consequences to write into the month's log line:
+but it answers "which ledgers wrote this month's rows", not "where does the
+month start" — a quiet month has no candle at either end, so take its answer as
+a starting point for the Horizon lookup, not as `START`.
 
-- A minute is only whole within one run, so the **first and last minute of every
-  run are undercounted** — the documented partition/run-boundary residual
-  (`running-ingestion-components.md`, "This gap is wider than the handoff"). List
-  them; they are the accepted reconciliation delta of step 4f.
-- Quiet months can have a ledger with no candle at either end. Round `START` DOWN
-  and `END` UP to the enclosing 64 000-ledger partition boundary when you can:
-  the flush boundary then coincides with the run boundary and no extra minute is
-  split.
+Two more things to write into the month's log line:
+
+- Round `START` DOWN and `END` UP to the enclosing 64 000-ledger partition
+  boundary **when the month's first ledger happens to sit on one** — the flush
+  boundary then coincides with the run boundary and nothing at all is split. Do
+  not round otherwise: it would move `START` into the previous month.
+- The backfill logs the alignment of BOTH ends of the run
+  (`run boundary is minute-aligned`, INFO / `run boundary is NOT minute-aligned`,
+  WARN). Record which of the two you got. A WARN means the straddling minute has
+  to be rebuilt from ONE pass covering both sides before step 4f is meaningful.
 
 ### 4b. FREEZE, as CH admin
 
@@ -237,11 +256,11 @@ A healthy run prints `pre-flight: all checks passed`, then
 
 Re-run the step-4c query and compare, per source:
 
-| Source                              | Expectation                                                                                                                                                                                                                                                |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sdex`                              | **Equal to the stroop** on `volume_base`, `volume_quote` and `trade_count` — except the run-boundary minutes of step 4a, and except the live era, where the old rows were written by the live processor.                                                   |
-| `soroswap` / `phoenix` / `aquarius` | **Greater than or equal**, never less. Task 0282 lost trades from every minute bucket that spanned a reconcile run; this ingest does not. Account for the delta **per source and per month** — an unexplained increase is as much a finding as a decrease. |
-| any source                          | `count()` may differ: a minute that traded only dust still exists, so candles are not lost — but a minute whose every fill was dropped upstream for a zero amount never existed in either shape.                                                           |
+| Source                              | Expectation                                                                                                                                                                                                                                                                                                                                                                                            |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `sdex`                              | **Equal to the stroop** on `volume_base`, `volume_quote` and `trade_count` — except the live era, where the old rows were written by the live processor. The run's two boundary minutes are WHOLE whenever step 4a logged `run boundary is minute-aligned` at both ends; a `NOT minute-aligned` WARN at either end makes that one minute an expected shortfall until it is rebuilt from a single pass. |
+| `soroswap` / `phoenix` / `aquarius` | **Greater than or equal**, never less. Task 0282 lost trades from every minute bucket that spanned a reconcile run; this ingest does not. Account for the delta **per source and per month** — an unexplained increase is as much a finding as a decrease.                                                                                                                                             |
+| any source                          | `count()` may differ: a minute that traded only dust still exists, so candles are not lost — but a minute whose every fill was dropped upstream for a zero amount never existed in either shape.                                                                                                                                                                                                       |
 
 Differences in `open`/`high`/`low`/`close` are the POINT of the exercise and are
 not reconciled. Differences in volume are a defect. Record both.
