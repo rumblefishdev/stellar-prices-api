@@ -10,6 +10,17 @@ tags:
 milestone: 2
 links: []
 history:
+  - date: 2026-09-17
+    status: backlog
+    who: okarcz
+    note: >
+      Re-measured on prod while preparing [[0282]]'s SDEX loss measurement,
+      where the collisions fan out an asset-id join: 3,312 asset_ids now serve
+      6,630 identities (3,300 / 6,606 on 09-02), still at most 3 per id (6 such
+      ids), soroban slice unchanged at 10 ids / 20 identities. Still growing.
+      The hourly full re-seed stopped on 2026-09-16 ([[0256]]), so a plain
+      count() is now stable — but every row carries that last re-seed's
+      updated_at, so the table cannot date when a collision appeared.
   - date: 2026-09-02
     status: backlog
     who: stkrolikiewicz
@@ -118,6 +129,34 @@ reads 1×, 2× or 3× depending on where the merge cycle is — 623,154 / 207,74
 415,495 were observed on three consecutive hours. **Every number in this section
 is `uniqExact`.** A raw count taken mid-cycle led, during 0210's deploy, to a
 false conclusion that the registry had doubled.
+
+## Re-measured on prod, 2026-09-17 — still growing
+
+Taken as `dev_read` while preparing [[0282]]'s SDEX loss measurement:
+
+```
+asset_ids serving >1 identity                     3,312   (3,300 on 09-02)
+identities living under those ids                 6,630   (6,606 on 09-02)
+worst single asset_id                                 3   identities (6 such ids)
+ids touching a soroban contract                      10   (20 identities — unchanged)
+prices.assets FINAL rows                        209,291
+```
+
++12 ids in 15 days. What changed around the measurement:
+
+- **The hourly full re-seed is gone** — [[0256]] (PR #319, deployed
+  2026-09-16) made `ensure_seed` write only assets above the watermark. The
+  "measurement hazard" below no longer applies to new counts: `count()` now
+  reads 1x.
+- ⚠️ **`updated_at` cannot date a collision.** The last full re-seed rewrote
+  every row at 2026-09-16 12:17 UTC (209,208 rows in that hour), so all 6,630
+  colliding rows carry that timestamp. Whether a given collision is old or new
+  has to come from somewhere else.
+- **It bit a measurement directly:** joining `price_ohlcv_1m` to `assets FINAL`
+  on `asset_id` for one 4-day SDEX window returned 1,491,309 rows for 1,459,439
+  candles — +31,870 fanned-out rows. [[0282]]'s SDEX measurement therefore
+  compares per-minute totals (no identity needed) and excludes pairs that touch
+  a colliding id.
 
 ## The deeper question this exposes
 
