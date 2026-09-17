@@ -121,9 +121,11 @@ async fn a_freshly_applied_chain_reports_no_drift() {
 /// already holds the MV, the apply says success anyway, and the drift check is
 /// what makes that visible.
 ///
-/// The edit used is the real one task 0146 needs — replacing the unguarded
-/// `argMax(close_usd, …)` with the `argMaxIf(…, close_usd > 0)` guard from task
-/// 0145 — so this doubles as evidence for why 0142 blocks it.
+/// The edit used is a real one: narrowing the `close_usd` rate's predicate,
+/// which is the kind of one-token correction task 0286 made to every MV body at
+/// once — so this doubles as evidence for why 0142 blocks such a change from
+/// landing by re-apply. (It was an `argMax → argMaxIf` edit until 0286
+/// replaced the carried product with a rate; the point is unchanged.)
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
 async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops() {
@@ -134,9 +136,11 @@ async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops
         .await
         .expect("the MV exists after setup");
 
+    let rate_gate = prices_clickhouse::rollup_sql::RATE_BEARING_CHILD;
+    let narrowed = format!("{rate_gate} AND t.pf_trade_count > 0");
     let edited = prices_clickhouse::ROLLUPS_SQL.replace(
-        "argMax(close_usd, t.timestamp)            AS close_usd",
-        "argMaxIf(close_usd, t.timestamp, close_usd > 0) AS close_usd",
+        &format!("t.timestamp, {rate_gate})"),
+        &format!("t.timestamp, {narrowed})"),
     );
     assert_ne!(
         edited,
@@ -145,7 +149,7 @@ async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops
          rollups.sql this test goes blind and must be updated, not deleted"
     );
     assert_eq!(
-        edited.matches("argMaxIf(close_usd").count(),
+        edited.matches(&narrowed).count(),
         6,
         "the edit must reach every MV in the chain"
     );
@@ -163,9 +167,13 @@ async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops
         "IF NOT EXISTS must have swallowed the edit — if this ever fails, the \
          rollup MVs became re-appliable and task 0142's premise has changed"
     );
-    assert!(
-        !after.contains("argMaxIf"),
-        "the live definition must still hold the OLD projection"
+    // The live body still carries the four price gates and no fifth one: the
+    // edit added a `pf_trade_count > 0` term to the close_usd rate, and it did
+    // not land.
+    assert_eq!(
+        after.matches("pf_trade_count > 0").count(),
+        4,
+        "the live definition must still hold the OLD projection, got: {after}"
     );
 
     // The check compares the file to the target, so the edited file is the
@@ -190,13 +198,24 @@ async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops
         );
         let d = &differences[0];
         assert_eq!(d.field, DriftField::Body);
+        // The mutation, in the SERVER-normalised spelling both sides are
+        // fingerprinted in (`formatQuery` parenthesises each conjunct). Assert
+        // on the MUTATION, not on `pf_trade_count > 0`: every declared body
+        // carries that substring four times — the four price gates — whether
+        // or not the edit reached it, so the bare form holds unconditionally
+        // and cannot tell the declared side from the live one.
         assert!(
-            d.declared.contains("argMaxIf(close_usd"),
-            "{}: the declared side must carry the edit",
-            report.name
+            d.declared.contains(&format!(
+                "(t.close_usd >= {floor}) AND (t.close >= {floor}) AND (t.pf_trade_count > 0)",
+                floor = prices_clickhouse::PRICE_FLOOR_SQL
+            )),
+            "{}: the declared side must carry the edit, not the live body: {}",
+            report.name,
+            d.declared
         );
         assert!(
-            !d.live.contains("argMaxIf(close_usd"),
+            d.declared.matches("pf_trade_count > 0").count()
+                > d.live.matches("pf_trade_count > 0").count(),
             "{}: the live side must still carry the old projection",
             report.name
         );

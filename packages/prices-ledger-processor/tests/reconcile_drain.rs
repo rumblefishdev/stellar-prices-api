@@ -26,7 +26,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use prices_ingest_core::{AssetRegistry, OhlcvCandle, OracleSample, Registries, decode_object};
+use prices_ingest_core::{
+    AssetRegistry, OfferLookupCounts, OhlcvCandle, OracleSample, Registries, decode_object,
+    extract_trades_with_counts,
+};
 use prices_ledger_processor::{
     cursor::{Cursor, StubFileCursor},
     galexie_key::ledger_s3_key,
@@ -518,4 +521,56 @@ async fn a_minute_split_across_objects_is_written_once_and_whole() {
     assert_eq!(released.end_cursor, FIRST + 3);
 
     assert_each_minute_written_once_and_whole(&sink, &chain, &per_ledger);
+}
+
+/// Task 0286 phase 2: a run reports how the fills it WROTE were priced. Every
+/// doorbell re-decodes the ledgers held back since the minute last turned, so a
+/// tally taken over everything a run DECODED counts a fill once per re-read —
+/// about six times at the tip — and unevenly, the first ledger of a minute more
+/// often than the last. The tally must follow the candles: a fill is counted by
+/// the run that writes its minute, once.
+#[tokio::test]
+async fn the_offer_lookup_tally_counts_each_written_fill_once() {
+    skip_if_no_fixtures!();
+    let template = template();
+    let per_ledger = extract_trades_with_counts(&template).1;
+    assert!(
+        per_ledger.order_book_fills + per_ledger.pool_fills > 0,
+        "the template ledger must carry fills, or the assertions below are 0 == 0"
+    );
+
+    let chain = chain(66, 5_500);
+    let open_minute = minute_of(chain.last().unwrap().1);
+    let written_ledgers = chain
+        .iter()
+        .filter(|(_, close)| minute_of(*close) != open_minute)
+        .count() as u64;
+
+    let dir = tempdir().unwrap();
+    let (reconciler, fetcher, _sink) = harness(dir.path()).await;
+    let mut total = OfferLookupCounts::default();
+    for (seq, close) in &chain {
+        fetcher.publish(*seq, fabricate(&template, *seq, *close));
+        let stats = reconciler.run(32).await.unwrap();
+        if stats.ledgers_persisted == 0 {
+            assert_eq!(
+                stats.offer_lookups,
+                OfferLookupCounts::default(),
+                "a run that wrote no minute has no written fills to report"
+            );
+        }
+        total.order_book_fills += stats.offer_lookups.order_book_fills;
+        total.offer_lookup_misses += stats.offer_lookups.offer_lookup_misses;
+        total.pool_fills += stats.offer_lookups.pool_fills;
+    }
+
+    assert_eq!(
+        total,
+        OfferLookupCounts {
+            order_book_fills: per_ledger.order_book_fills * written_ledgers,
+            offer_lookup_misses: per_ledger.offer_lookup_misses * written_ledgers,
+            pool_fills: per_ledger.pool_fills * written_ledgers,
+        },
+        "{written_ledgers} ledgers were written, each carrying {per_ledger:?}"
+    );
 }

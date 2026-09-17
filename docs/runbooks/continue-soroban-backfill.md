@@ -432,3 +432,7 @@ let it run to `=== sdex-backfill complete ===`.
 
 See also: `docs/runbooks/running-ingestion-components.md` (full flag reference,
 minute-seam rules) and `docs/runbooks/seed-pool-registry.md` (registry seeding).
+
+For the task-0286 phase-3 re-ingest — the same binary, but over months already
+indexed, so the partition is DROPPED and the resume markers CLEARED first —
+see [`0286-reingest-history.md`](0286-reingest-history.md).

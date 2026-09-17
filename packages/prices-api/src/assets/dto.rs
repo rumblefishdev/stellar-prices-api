@@ -274,26 +274,34 @@ pub struct AssetListResponse {
 /// do not depend on the USD rate (`volume_quote_usd` is already USD whatever the
 /// quote leg), so a price-less bucket still carries real activity.
 ///
-/// ## ⚠️ Dust prints — a present price that is not a market price (task 0116)
+/// ## Where the prices come from (ADR 0287, task 0286)
 ///
-/// A bucket whose entire volume is one or two **stroops** (`1e-7`, the smallest
-/// representable amount) in a single trade sets `close` from an order too small
-/// to carry price information. The arithmetic is right and the trade really
-/// happened; the input is meaningless. Measured on prod:
+/// Only from the bucket's own **price-forming** trades: `open` is the first,
+/// `close` the last, `high`/`low` their extremes, and nothing is carried over
+/// from a neighbouring bucket. A bucket with none has no price — a third
+/// population of nulls, alongside the two above, and the one
+/// [`Candle::pf_trade_count`] tells apart from them.
+///
+/// A fill's price is the ratio of the two integer **stroop** amounts exchanged
+/// (`1e-7` each), so a fill of a few stroops prints an exact small fraction —
+/// 1/17, 5/34 — that is arithmetically right and can sit hundreds of percent off
+/// the market. It costs a fraction of a cent to mint one. Measured on prod
+/// before the rule:
 ///
 /// | `1h` month | one-stroop buckets over $1,000 | worst `close` |
 /// |---|---|---|
 /// | 202502 (repaired) | **85.0%** | $29,606,748 on ~$3 of volume |
 /// | 202608 (live-written) | 22.3% | $3,517,649 on $0.35 of volume |
 ///
-/// It costs a fraction of a cent to mint one, and it decays cleanly with size:
-/// buckets carrying at least one whole token are over $1,000 just 0.11% (202502)
-/// and 0.008% (202608) of the time.
-///
-/// **This is not an enrichment defect.** The reference rate applied to these
+/// **This was never an enrichment defect.** The reference rate applied to those
 /// rows is correct — `close_usd / close` recovers the right XLM/USD price for
-/// the month. See [`Candle::volume_base`] for the filter, and
-/// [`Candle::volume_quote_usd`], which is *not* distorted by them.
+/// the month. The input was meaningless, not the conversion. See
+/// [`Candle::volume_quote_usd`], which those trades do *not* distort.
+///
+/// ⚠️ **History still reads the old way.** A row written before the migration
+/// carries `pf_trade_count = trade_count` by DEFAULT — the pre-0286 assertion
+/// that every fill formed a price — so candles from that era still publish a
+/// dust close. The history is re-ingested in a later phase of task 0286.
 #[derive(Debug, Serialize, serde::Deserialize, clickhouse::Row, ToSchema)]
 pub struct Candle {
     /// Bucket start (ISO-8601 UTC).
@@ -302,28 +310,27 @@ pub struct Candle {
     pub high: Option<String>,
     pub low: Option<String>,
     pub close: Option<String>,
-    /// Base-asset volume.
+    /// Base-asset volume, over **every** trade in the bucket — including the
+    /// ones too small to form a price.
     ///
-    /// ## Filtering dust prints
+    /// ⚠️ **No longer the dust discriminator.** Task 0116 told consumers to
+    /// identify a dust print here (`trade_count == 1` with `volume_base` at
+    /// `0.0000001`-`0.0000009`) and filter it client-side. Task 0286 moved that
+    /// judgement to the writer: prices now come only from price-forming fills,
+    /// and [`Candle::pf_trade_count`] reports how many there were. Reading size
+    /// as a quality signal was always unsound anyway — a third of dust buckets
+    /// that could be checked against a non-dust reference were priced correctly,
+    /// because one stroop of a genuinely expensive asset is a real order at the
+    /// right price, so a bare size threshold misclassifies precisely the assets
+    /// worth the most.
     ///
-    /// With [`Candle::trade_count`] this is the discriminator for the dust
-    /// prints described on [`Candle`]. A bucket with `trade_count == 1` and
-    /// `volume_base` at `0.0000001`-`0.0000009` is a single smallest-possible
-    /// order, and its `close` should not be charted or ranked as a price.
+    /// Volume stays unfiltered where the price fields do not, because those
+    /// trades carry almost none and so distort no volume aggregate. A bucket
+    /// whose every trade was dust reports its volume here and no price at all.
     ///
-    /// ⚠️ **Do not filter on size alone.** Of the dust buckets that could be
-    /// checked against a non-dust reference price for the same pair, **a third
-    /// were priced correctly** (within 0.1-10x of it). One stroop of a genuinely
-    /// expensive asset is a real order at the right price, so a bare size
-    /// threshold misclassifies precisely the assets worth the most. A size test
-    /// is sound for *suppressing an outlier you already doubt*, and unsound as a
-    /// standalone quality verdict.
-    ///
-    /// The stronger check is disagreement with the asset's own non-dust price —
-    /// but 93% of dust buckets are on assets with no non-dust trading at all in
-    /// the month, so for most of them no such reference exists. That population
-    /// is a different problem (an asset with no meaningful market, task 0274),
-    /// not a bad candle.
+    /// 93% of dust buckets are on assets with no non-dust trading at all in the
+    /// month. That population is a different problem (an asset with no
+    /// meaningful market, task 0274), not a bad candle.
     pub volume_base: String,
     /// USD-denominated quote volume, summed over **every** row in the bucket.
     ///
@@ -423,6 +430,46 @@ pub struct Candle {
     /// `None` when the price fields are absent, and for `base_currency=XLM`,
     /// where nothing is converted and so nothing is derived.
     pub derived: Option<bool>,
+    /// How many of the bucket's trades formed its price (task 0286).
+    ///
+    /// A fill's price is the ratio of two integer stroop amounts, so a fill of a
+    /// few stroops prints an exact small fraction — 1/17, 5/34 — that can sit
+    /// hundreds of percent off the market while being arithmetically correct.
+    /// Such a fill is **not price-forming**, and `open`/`high`/`low`/`close`
+    /// are taken only from the ones that are.
+    ///
+    /// `0` is a real answer and the one worth acting on: the bucket traded, its
+    /// volume and `trade_count` are reported, and it has **no price** — every
+    /// price field is `null` rather than carrying a dust print forward.
+    ///
+    /// Summed over every stored row merged into the bucket, dust rows included,
+    /// so it is always `<= trade_count`. `None` only on the synthesized USDC
+    /// self-series, which has no stored candle behind it to count fills from.
+    pub pf_trade_count: Option<u64>,
+    /// Volume-weighted mean of the bucket's **price-forming** fills, in
+    /// `base_currency` — [`Candle::vwap`] with the dust taken out.
+    ///
+    /// Denominated exactly like [`Candle::close`] (in USD mode, scaled by the
+    /// same per-bucket rate) and clamped into `[low, high]` for the same reason
+    /// `vwap` is: a mean of prices inside a band belongs inside that band, and
+    /// the response has to be self-consistent with the values it publishes.
+    ///
+    /// `null` when the bucket has no price-forming volume to weigh, and on the
+    /// synthesized USDC self-series. Never `0` — a zero here would be read as a
+    /// price.
+    pub pf_vwap: Option<String>,
+    /// Whether the bucket's [`Candle::close`] sits more than 1% away from its
+    /// [`Candle::pf_vwap`] — `|close / pf_vwap - 1| > 0.01`.
+    ///
+    /// The close is ONE fill (the last price-forming one) while `pf_vwap` is
+    /// the whole bucket's price-forming mean, so a wide gap is a thin or
+    /// one-sided bucket: the close is still the right answer to "what did it
+    /// last trade at", and a poor answer to "what is it worth". A chart can
+    /// render the flag; a ranking should probably prefer `pf_vwap`.
+    ///
+    /// `null` when either operand is `null` — nothing was compared, which is
+    /// not the same statement as "they agree".
+    pub close_divergent: Option<bool>,
     /// The outside USD series a `method = 'external'` rate was imported from —
     /// `chainlink` or `bitstamp` (task 0267, task 0265's composed history).
     ///

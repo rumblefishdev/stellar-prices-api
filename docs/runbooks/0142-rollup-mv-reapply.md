@@ -5,7 +5,15 @@ cluster that already holds the six refreshable rollup MVs, without
 reintroducing the task 0090/0095 data loss.
 
 **Applies to:** `mv_ohlcv_1m_to_15m`, `_15m_to_1h`, `_1h_to_4h`, `_4h_to_1d`,
-`_1d_to_1w`, `_1w_to_1M` on ch-prod-01.
+`_1d_to_1w`, `_1d_to_1M` on ch-prod-01.
+
+> ⚠️ **If the re-CREATE you are here for is task 0286's**, follow
+> [`0286-candle-definitions-rollout.md`](0286-candle-definitions-rollout.md)
+> instead of this file alone. That rollout changes all six bodies at once,
+> renames the month's MV (`mv_ohlcv_1w_to_1M` → `mv_ohlcv_1d_to_1M`, because the
+> month now rolls from the DAY) and rebuilds `price_ohlcv_1M` — none of which
+> this runbook covers. It uses the checklist below for each individual MV, and
+> wraps it in the FREEZE, the deploy order and the rollback the change needs.
 
 ## Why you cannot just re-apply the file
 
@@ -150,7 +158,7 @@ requirement is simply that the outage stays well inside the window:
 | `mv_ohlcv_1h_to_4h`  | 1 h             | 1 day    | ample                                     |
 | `mv_ohlcv_4h_to_1d`  | 4 h             | 7 days   | ample                                     |
 | `mv_ohlcv_1d_to_1w`  | 1 day           | 60 days  | ample                                     |
-| `mv_ohlcv_1w_to_1M`  | 1 day           | 400 days | ample                                     |
+| `mv_ohlcv_1d_to_1M`  | 1 day           | 400 days | ample                                     |
 
 **Measured 2026-08-14 on the 26.3.10.60 pin:** a freshly created refreshable MV
 runs its initial refresh **immediately at creation**, not at the next scheduled

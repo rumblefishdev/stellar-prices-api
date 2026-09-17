@@ -398,8 +398,10 @@ pub struct UsdResetSpec {
     /// all-time guard applied to a bounded operation.
     pub not_after: Option<u32>,
     /// When true (task 0268), the candidate set is additionally
-    /// `close_usd = close` — the peg tier's EXACT signature, so nothing the
-    /// oracle or external tier priced is re-opened — **and** a `usd_rate` row
+    /// `close_usd = close AND close > 0` — the peg tier's EXACT signature on a
+    /// candle that HAS a price (a dust-only candle is `0 = 0` forever, task
+    /// 0286), so nothing the oracle or external tier priced is re-opened —
+    /// **and** a `usd_rate` row
     /// with `method = 'external'` must exist for the bucket's UTC day.
     ///
     /// ## Why a predicate and not an epoch
@@ -485,7 +487,20 @@ impl UsdResetSpec {
 /// The steady-state candidate shape: a row missing either USD column, with
 /// volume to price. Shared by [`ChEnrichmentPass::count_candidates`] and the task
 /// 0114 repair driver's month enumeration.
-pub const CANDIDATE_PRED: &str = "(volume_quote_usd = 0 OR close_usd = 0) AND volume_quote > 0";
+///
+/// ⚠️ The `close > 0` term is load-bearing (task 0286 / ADR 0287 §6). Since the
+/// price-forming definition, a DUST-ONLY candle — volume, but not one fill whose
+/// price means anything — is written `close = 0`, and `close_usd` for such a row
+/// can only ever be `0 × rate = 0`. Under the old `close_usd = 0` term it
+/// therefore matched on EVERY pass, forever: no statement could change it, so
+/// every pass after the first enriched nothing while reporting a non-empty
+/// backlog, latching the `warn!` below and the `EnrichmentRowsEnriched = 0`
+/// signal (task 0214's shape). Asking `close_usd = 0 AND close > 0` asks the
+/// question that can be answered — is there a PRICE here not yet valued — while
+/// `volume_quote_usd = 0` still admits the dust row ONCE, because its volume is
+/// real and does get priced.
+pub const CANDIDATE_PRED: &str =
+    "(volume_quote_usd = 0 OR (close_usd = 0 AND close > 0)) AND volume_quote > 0";
 
 /// Rows a [`UsdResetSpec`] still has work to do on: the named quote leg, at or
 /// after the epoch, **still holding a written USD value**.
@@ -507,9 +522,13 @@ pub fn reset_pending_pred(db: &str, tbl: &str, spec: &UsdResetSpec) -> String {
     if let Some(na) = spec.not_after {
         pred.push_str(&format!(" AND timestamp < toDateTime({na})"));
     }
+    // `close > 0` beside the par signature (task 0286): a dust-only candle is
+    // `close = 0`, so `close_usd = close` holds for it as `0 = 0` before and
+    // after every refill — it would be re-opened on every run and the pending
+    // count would never drain. It has no USD close to repair.
     if spec.require_external_rate {
         pred.push_str(&format!(
-            " AND close_usd = close AND {}",
+            " AND close_usd = close AND close > 0 AND {}",
             external_rate_day_pred(db)
         ));
     }
@@ -577,6 +596,28 @@ fn external_rate_day_pred(db: &str) -> String {
     )
 }
 
+/// What makes a row of the XLM/USDC reference market usable as a reference,
+/// spelled ONCE (task 0286 S5, review B WR-01).
+///
+/// This fragment is asked in three places — this module's reference subquery,
+/// [`pivot_reference_day_pred`]'s day set, and `views.sql`'s `usd_reference` /
+/// `price_usd_series`. A row whose stored `close` is 0 has no price to
+/// contribute, however much volume it carries, and `volume_base > 0` is what
+/// keeps it out of a volume-weighted mean's denominator.
+///
+/// ⚠️ It is a SHARED TERM, not the whole of any of the three (review IN-01).
+/// The pivot's reference subquery is `{PRICED_REFERENCE_ROW} AND
+/// pf_trade_count > 0`; the day set below is the fragment ALONE. The day set is
+/// therefore strictly wider, and the divergence runs in the recoverable
+/// direction: a day whose only reference minute is a dust-only one is admitted,
+/// the row is re-opened, and the refill then finds nothing — a stale value a
+/// later run can still fix, which is the same bias
+/// [`pivot_reference_day_pred`] documents for its own day/window mismatch.
+/// Adding `pf_trade_count > 0` to the day set would narrow it correctly; it is
+/// not done here because the term is a DEFAULT on every pre-0286 row, so until
+/// phase 3 re-ingests the history it would narrow on a column that says nothing.
+const PRICED_REFERENCE_ROW: &str = "close > 0 AND volume_base > 0";
+
 /// **"A usable reference candle exists for this bucket's UTC day"** — the
 /// pivot-leg mode's second day-set (task 0228, review round 2, finding 3),
 /// spliced into the same three sites as [`external_rate_day_pred`] and for the
@@ -596,10 +637,13 @@ fn external_rate_day_pred(db: &str) -> String {
 ///
 /// Uncorrelated `IN (SELECT …)` over the SAME table the pivot reads, at the same
 /// grain, so it is legal in the bare `WHERE` of the month enumeration like its
-/// sibling. "Usable" is what the pivot's reference subquery can turn into a
-/// non-NULL vwap: `close > 0 AND volume_base > 0`. Canonical USDC is resolved by
-/// identity inside the fragment rather than plumbed in as an id, so the three
-/// sites need no reference lookup before rendering.
+/// sibling. "Usable" here is [`PRICED_REFERENCE_ROW`] — `close > 0 AND
+/// volume_base > 0` — which is the shared TERM of the pivot's reference
+/// subquery, not the whole of it (the subquery also asks
+/// `pf_trade_count > 0`); that const's own doc says why the day set is
+/// deliberately the wider of the two. Canonical USDC is resolved by identity
+/// inside the fragment rather than plumbed in as an id, so the three sites need
+/// no reference lookup before rendering.
 ///
 /// ## Where the DAY under- and over-reaches, and why that is acceptable
 ///
@@ -622,7 +666,7 @@ fn pivot_reference_day_pred(db: &str, tbl: &str, spec: &UsdResetSpec) -> String 
            AND quote_asset_id IN (SELECT asset_id FROM {db}.assets FINAL \
                                   WHERE asset_code = 'USDC' AND issuer_address = '{USDC_ISSUER}' \
                                     AND contract_address = '') \
-           AND close > 0 AND volume_base > 0)",
+           AND {PRICED_REFERENCE_ROW})",
         q = spec.quote_asset_id,
     )
 }
@@ -1014,9 +1058,10 @@ impl ChEnrichmentPass {
     /// Count candles still at `volume_quote_usd = 0` (with non-zero
     /// `volume_quote`) at or below the watermark — the population the
     /// `EnrichmentRowsRemainingAtVolumeZero` metric (spec §5) is named for.
-    /// Distinct from [`Self::count_candidates`], which counts rows missing
-    /// *either* USD column (`volume_quote_usd = 0 OR close_usd = 0`): the
-    /// `close_usd`-only remainder must not inflate a "volume zero" gauge.
+    /// Distinct from [`Self::count_candidates`], which counts every row
+    /// [`CANDIDATE_PRED`] admits — a missing `volume_quote_usd`, or a PRICED
+    /// row (`close > 0`) missing its `close_usd`: the `close_usd`-only
+    /// remainder must not inflate a "volume zero" gauge.
     ///
     /// Returns two figures from a single `FINAL` scan: `total` (the whole
     /// backlog, for the dashboard/forensic metric) and `recent` (only candles
@@ -1517,42 +1562,20 @@ impl ChEnrichmentPass {
     /// Decimal(38,14)` product inside the column's precision.
     ///
     /// `volume_quote_usd` is write-once (`if(volume_quote_usd > 0, …)`), matching
-    /// the peg/pivot statements: the widened candidate filter
-    /// (`volume_quote_usd = 0 OR close_usd = 0`) re-admits rows enriched before
-    /// `close_usd` existed (`volume_quote_usd > 0`, `close_usd = 0`) so their
-    /// `close_usd` gets backfilled, but their already-set (depeg-aware)
+    /// the peg/pivot statements: the candidate filter ([`CANDIDATE_PRED`])
+    /// re-admits a PRICED row enriched before `close_usd` existed
+    /// (`volume_quote_usd > 0`, `close_usd = 0`, `close > 0`) so its
+    /// `close_usd` gets backfilled, but its already-set (depeg-aware)
     /// `volume_quote_usd` must not be silently rewritten from a different ASOF
     /// match. `close_usd` is unconditional — it is the column this pass owns.
+    /// A DUST-ONLY row (`close = 0`) is not re-admitted for `close_usd` at all:
+    /// its `close_usd` can only ever be 0, which is why the term is
+    /// `close_usd = 0 AND close > 0` and not the pre-0286 `close_usd = 0`.
     async fn enrich_batch(&self, watermark: u32) -> Result<(), ChEnrichError> {
-        let sql = format!(
-            "INSERT INTO {db}.{tbl} \
-                 (timestamp, asset_id, quote_asset_id, source, \
-                  open, high, low, close, \
-                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, \
-                  trade_count, version) \
-             SELECT \
-                 p.timestamp, p.asset_id, p.quote_asset_id, p.source, \
-                 p.open, p.high, p.low, p.close, \
-                 p.volume_base, p.volume_quote, \
-                 if(p.volume_quote_usd > 0, p.volume_quote_usd, CAST(o.price_usd * p.volume_quote AS Decimal(38, 14))) AS volume_quote_usd, \
-                 CAST(o.price_usd * p.close AS Decimal(38, 14)) AS close_usd, \
-                 p.vwap, p.trade_count, \
-                 p.version + 1 AS version \
-             FROM {db}.{tbl} AS p FINAL \
-             ASOF LEFT JOIN {db}.oracle_prices AS o \
-                     ON o.asset_id = p.quote_asset_id \
-                    AND o.oracle_name = ? \
-                    AND o.timestamp <= p.timestamp \
-             WHERE (p.volume_quote_usd = 0 OR p.close_usd = 0) \
-               AND p.volume_quote > 0 \
-               AND o.price_usd IS NOT NULL \
-               AND (p.timestamp - o.timestamp) <= ? \
-               AND p.timestamp <= toDateTime(?){win} \
-             ORDER BY p.timestamp \
-             LIMIT ?",
-            db = self.cfg.database,
-            tbl = self.cfg.table,
-            win = self.window_pred("p.timestamp"),
+        let sql = oracle_sql(
+            &self.cfg.database,
+            &self.cfg.table,
+            &self.window_pred("p.timestamp"),
         );
         self.client
             .query(&sql)
@@ -1985,12 +2008,20 @@ impl ChEnrichmentPass {
     }
 }
 
-/// The 15-column INSERT target list, shared by every enrichment statement so the
-/// SELECT projections stay positionally aligned with it.
-const INSERT_COLUMNS: &str = "timestamp, asset_id, quote_asset_id, source, \
-     open, high, low, close, \
-     volume_base, volume_quote, volume_quote_usd, close_usd, vwap, \
-     trade_count, version";
+/// The INSERT target list shared by every enrichment statement: the canonical
+/// candle columns, in DDL order, from the one crate that owns them.
+///
+/// Built from [`prices_clickhouse::CANDLE_COLUMNS`] rather than spelled out
+/// here, because the ingest writer is pinned to the same list (task 0286 / BRIEF
+/// F6b). A NAMED list that omits a column is not an error — ClickHouse fills it
+/// from its DEFAULT — and `pf_trade_count DEFAULT trade_count` then reports a
+/// dust-only minute as FULLY price-forming. So a re-insert that forgets a pf
+/// column does not fail; it quietly asserts the opposite of the truth, on
+/// whatever rows the next enrichment pass happens to touch. Sharing the list is
+/// what makes that impossible to do by omission.
+pub(crate) fn insert_columns() -> String {
+    prices_clickhouse::CANDLE_COLUMNS.join(", ")
+}
 
 /// One statement of a peg-pivot step, with the shape that decides how it is
 /// bound. The two variants take **different bind sequences**, which is why this
@@ -2048,6 +2079,48 @@ fn plan_peg_pivot_step(
     plan
 }
 
+/// Oracle statement: a candle's quote asset is valued at the newest oracle
+/// reading at or before its bucket, `close_usd = close × price_usd`. Bound
+/// parameters, in order: the oracle name, the staleness window, the snapshot
+/// watermark and the `LIMIT`.
+///
+/// Extracted from [`ChEnrichmentPass::enrich_batch`] by task 0286 so it is unit
+/// testable like the other four statements — its column list and its candidate
+/// predicate are contracts, and until now the only way to read either back was
+/// `system.query_log` on production (the 0215 shape).
+///
+/// The candidate term is `(p.volume_quote_usd = 0 OR (p.close_usd = 0 AND
+/// p.close > 0))`, matching [`CANDIDATE_PRED`]: a dust-only candle has volume to
+/// price but no price to value, so it must be admitted once for its
+/// `volume_quote_usd` and never again for a `close_usd` that cannot move.
+fn oracle_sql(db: &str, tbl: &str, window: &str) -> String {
+    let columns = insert_columns();
+    format!(
+        "INSERT INTO {db}.{tbl} ({columns}) \
+         SELECT \
+             p.timestamp, p.asset_id, p.quote_asset_id, p.source, \
+             p.open, p.high, p.low, p.close, \
+             p.volume_base, p.volume_quote, \
+             if(p.volume_quote_usd > 0, p.volume_quote_usd, CAST(o.price_usd * p.volume_quote AS Decimal(38, 14))) AS volume_quote_usd, \
+             CAST(o.price_usd * p.close AS Decimal(38, 14)) AS close_usd, \
+             p.vwap, p.trade_count, \
+             p.version + 1 AS version, \
+             p.pf_trade_count, p.pf_volume, p.pf_price_volume \
+         FROM {db}.{tbl} AS p FINAL \
+         ASOF LEFT JOIN {db}.oracle_prices AS o \
+                 ON o.asset_id = p.quote_asset_id \
+                AND o.oracle_name = ? \
+                AND o.timestamp <= p.timestamp \
+         WHERE (p.volume_quote_usd = 0 OR (p.close_usd = 0 AND p.close > 0)) \
+           AND p.volume_quote > 0 \
+           AND o.price_usd IS NOT NULL \
+           AND (p.timestamp - o.timestamp) <= ? \
+           AND p.timestamp <= toDateTime(?){window} \
+         ORDER BY p.timestamp \
+         LIMIT ?"
+    )
+}
+
 /// Peg statement: USDC/USDT-quoted candles get `close_usd = close × $1`. Returns
 /// `None` when neither stablecoin is in the registry (nothing to peg). Bound
 /// parameters, in order: the snapshot watermark (`p.timestamp <= toDateTime(?)`,
@@ -2063,8 +2136,9 @@ fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32], window: &str) -> Option<Stri
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(", ");
+    let columns = insert_columns();
     Some(format!(
-        "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
+        "INSERT INTO {db}.{tbl} ({columns}) \
          SELECT \
              p.timestamp, p.asset_id, p.quote_asset_id, p.source, \
              p.open, p.high, p.low, p.close, \
@@ -2072,9 +2146,10 @@ fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32], window: &str) -> Option<Stri
              if(p.volume_quote_usd > 0, p.volume_quote_usd, CAST(p.volume_quote AS Decimal(38, 14))) AS volume_quote_usd, \
              CAST(p.close AS Decimal(38, 14)) AS close_usd, \
              p.vwap, p.trade_count, \
-             p.version + 1 AS version \
+             p.version + 1 AS version, \
+             p.pf_trade_count, p.pf_volume, p.pf_price_volume \
          FROM {db}.{tbl} AS p FINAL \
-         WHERE p.close_usd = 0 \
+         WHERE p.close_usd = 0 AND (p.close > 0 OR p.volume_quote_usd = 0) \
            AND p.volume_quote > 0 \
            AND p.quote_asset_id IN ({in_list}) \
            AND p.timestamp <= toDateTime(?){window} \
@@ -2288,8 +2363,9 @@ pub fn external_window_s(table: &str) -> u32 {
 fn external_sql(db: &str, tbl: &str, usdc_id: u32, window: &str) -> String {
     let bend = bucket_end_expr(tbl, "timestamp");
     let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
+    let columns = insert_columns();
     format!(
-        "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
+        "INSERT INTO {db}.{tbl} ({columns}) \
          SELECT \
              p.timestamp, p.asset_id, p.quote_asset_id, p.source, \
              p.open, p.high, p.low, p.close, \
@@ -2297,17 +2373,19 @@ fn external_sql(db: &str, tbl: &str, usdc_id: u32, window: &str) -> String {
              CAST(r.usd * p.volume_quote AS Decimal(38, 14)) AS volume_quote_usd, \
              CAST(r.usd * p.close AS Decimal(38, 14)) AS close_usd, \
              p.vwap, p.trade_count, \
-             p.version + 1 AS version \
+             p.version + 1 AS version, \
+             p.pf_trade_count, p.pf_volume, p.pf_price_volume \
          FROM ( \
              SELECT \
                  timestamp, asset_id, quote_asset_id, source, \
                  open, high, low, close, \
                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, \
                  trade_count, version, \
+                 pf_trade_count, pf_volume, pf_price_volume, \
                  1 AS k, \
                  {bend} AS bend \
              FROM {db}.{tbl} FINAL \
-             WHERE close_usd = 0 \
+             WHERE close_usd = 0 AND (close > 0 OR volume_quote_usd = 0) \
                AND volume_quote > 0 \
                AND quote_asset_id = {usdc_id} \
                AND timestamp < toDateTime({epoch}) \
@@ -2400,7 +2478,7 @@ fn reset_sql(db: &str, tbl: &str, spec: &UsdResetSpec, window: &str) -> String {
     }
     if spec.require_external_rate {
         bounds.push_str(&format!(
-            " AND p.close_usd = p.close AND {}",
+            " AND p.close_usd = p.close AND p.close > 0 AND {}",
             external_rate_day_pred(db)
         ));
     }
@@ -2416,8 +2494,9 @@ fn reset_sql(db: &str, tbl: &str, spec: &UsdResetSpec, window: &str) -> String {
             pivot_reference_day_pred(db, tbl, spec)
         ));
     }
+    let columns = insert_columns();
     format!(
-        "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
+        "INSERT INTO {db}.{tbl} ({columns}) \
          SELECT \
              p.timestamp, p.asset_id, p.quote_asset_id, p.source, \
              p.open, p.high, p.low, p.close, \
@@ -2425,7 +2504,8 @@ fn reset_sql(db: &str, tbl: &str, spec: &UsdResetSpec, window: &str) -> String {
              CAST(0 AS Decimal(38, 14)) AS volume_quote_usd, \
              CAST(0 AS Decimal(38, 14)) AS close_usd, \
              p.vwap, p.trade_count, \
-             p.version + 1 AS version \
+             p.version + 1 AS version, \
+             p.pf_trade_count, p.pf_volume, p.pf_price_volume \
          FROM {db}.{tbl} AS p FINAL \
          WHERE p.quote_asset_id = {q} \
            AND p.timestamp >= toDateTime({nb}){bounds} \
@@ -2555,8 +2635,9 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> St
     // the write path and the two read surfaces agree on any bucket holding both.
     // The else-branch is 0, which the outer `WHERE` then drops.
     let rate = format!("multiIf({o_ok}, po.orate, {e_ok}, re.erate, toDecimal128(0, 14))");
+    let columns = insert_columns();
     format!(
-        "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
+        "INSERT INTO {db}.{tbl} ({columns}) \
          SELECT \
              po.timestamp, po.asset_id, po.quote_asset_id, po.source, \
              po.open, po.high, po.low, po.close, \
@@ -2564,7 +2645,8 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> St
              if(po.volume_quote_usd > 0, po.volume_quote_usd, CAST(po.refusd * toFloat64(po.volume_quote) * toFloat64({rate}) AS Decimal(38, 14))) AS volume_quote_usd, \
              CAST(po.refusd * toFloat64(po.close) * toFloat64({rate}) AS Decimal(38, 14)) AS close_usd, \
              po.vwap, po.trade_count, \
-             po.version + 1 AS version \
+             po.version + 1 AS version, \
+             po.pf_trade_count, po.pf_volume, po.pf_price_volume \
          FROM ( \
              SELECT \
                  pr.timestamp AS timestamp, pr.asset_id AS asset_id, \
@@ -2573,6 +2655,8 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> St
                  pr.volume_base AS volume_base, pr.volume_quote AS volume_quote, \
                  pr.volume_quote_usd AS volume_quote_usd, pr.vwap AS vwap, \
                  pr.trade_count AS trade_count, pr.version AS version, \
+                 pr.pf_trade_count AS pf_trade_count, pr.pf_volume AS pf_volume, \
+                 pr.pf_price_volume AS pf_price_volume, \
                  pr.k AS k, pr.bend AS bend, pr.refusd AS refusd, \
                  ro.orts AS orts, ro.orate AS orate \
              FROM ( \
@@ -2583,6 +2667,8 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> St
                      p.volume_base AS volume_base, p.volume_quote AS volume_quote, \
                      p.volume_quote_usd AS volume_quote_usd, p.vwap AS vwap, \
                      p.trade_count AS trade_count, p.version AS version, \
+                     p.pf_trade_count AS pf_trade_count, p.pf_volume AS pf_volume, \
+                     p.pf_price_volume AS pf_price_volume, \
                      p.k AS k, p.bend AS bend, \
                      r.usd AS refusd \
                  FROM ( \
@@ -2591,11 +2677,12 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> St
                          open, high, low, close, \
                          volume_base, volume_quote, volume_quote_usd, close_usd, vwap, \
                          trade_count, version, \
+                         pf_trade_count, pf_volume, pf_price_volume, \
                          1 AS k, \
                          {bend} AS bend \
                      FROM {db}.{tbl} FINAL \
                      WHERE quote_asset_id = {ref_id} \
-                       AND close_usd = 0 \
+                       AND close_usd = 0 AND (close > 0 OR volume_quote_usd = 0) \
                        AND volume_quote > 0 \
                        AND timestamp <= toDateTime(?){window} \
                  ) AS p \
@@ -2606,6 +2693,7 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> St
                          sum(toFloat64(close) * toFloat64(volume_base)) / nullIf(sum(toFloat64(volume_base)), 0) AS usd \
                      FROM {db}.{tbl} FINAL \
                      WHERE asset_id = {ref_id} AND quote_asset_id = {usdc_id} \
+                       AND {PRICED_REFERENCE_ROW} AND pf_trade_count > 0 \
                        AND timestamp <= toDateTime(?) \
                      GROUP BY timestamp \
                      ORDER BY timestamp \
@@ -2943,6 +3031,25 @@ mod tests {
             "the pending predicate has no table alias to qualify: {pred}"
         );
         assert!(!pred.contains("p.close_usd"), "{pred}");
+    }
+
+    /// Task 0286: `close_usd = close` is also true of a candle with NO price
+    /// (`0 = 0`), before and after every refill, so on its own it re-opens every
+    /// dust-only candle on every run. The signature is about a price that was
+    /// pegged; it needs a price. Both sites, each in its own qualification.
+    #[test]
+    fn the_par_signature_needs_a_price_to_have_been_pegged() {
+        let spec = usdc_external_reset();
+        let pred = reset_pending_pred("prices", "price_ohlcv_1d", &spec);
+        assert!(
+            pred.contains(" AND close_usd = close AND close > 0 AND"),
+            "the pending predicate must not count a dust-only candle: {pred}"
+        );
+        let sql = reset_sql("prices", "price_ohlcv_1d", &spec, "");
+        assert!(
+            sql.contains(" AND p.close_usd = p.close AND p.close > 0 AND"),
+            "the reset must not re-open a dust-only candle: {sql}"
+        );
     }
 
     /// D-04: the reset's candidate set carries the peg tier's EXACT signature, so
@@ -3404,7 +3511,7 @@ mod tests {
     }
 
     /// A versioned INSERT, never a mutation, so a FREEZE stays a rollback point —
-    /// and the projection stays positionally aligned with [`INSERT_COLUMNS`].
+    /// and the projection stays positionally aligned with [`insert_columns`].
     #[test]
     fn pivot_sql_is_a_versioned_insert_aligned_with_the_insert_columns() {
         let sql = pivot_sql("prices", "price_ohlcv_1d", 5, 3, "");
@@ -3412,7 +3519,7 @@ mod tests {
             sql.starts_with("INSERT INTO prices.price_ohlcv_1d"),
             "{sql}"
         );
-        assert!(sql.contains(INSERT_COLUMNS), "{sql}");
+        assert!(sql.contains(&insert_columns()), "{sql}");
         assert!(sql.contains("po.version + 1 AS version"), "{sql}");
         assert!(!sql.contains("ALTER TABLE"), "{sql}");
         // The two USD columns keep their position between volume_quote and vwap.
@@ -4152,5 +4259,325 @@ mod tests {
             "{sql}"
         );
         assert_eq!(sql.matches("usd_rate FINAL").count(), 2, "{sql}");
+    }
+
+    // ----------------------------------------------------------------------
+    // Task 0286 / ADR 0287 §6 — one column list, and predicates that terminate.
+    //
+    // Every statement below re-INSERTS a whole candle row. Two things can go
+    // wrong silently, and both are pinned here rather than discovered on
+    // production:
+    //
+    //  * a column the NAMED list omits is filled from its DEFAULT, and
+    //    `pf_trade_count DEFAULT trade_count` declares a dust-only minute fully
+    //    price-forming (BRIEF F6b);
+    //  * a candidate predicate that no statement can satisfy re-selects the same
+    //    rows on every pass, so the backlog never empties and the "enriched 0
+    //    rows" warning latches (task 0214's shape).
+    // ----------------------------------------------------------------------
+
+    /// Split a projection list on TOP-LEVEL commas. `CAST(… AS Decimal(38, 14))`
+    /// carries one of its own, so a naive split invents a column.
+    fn split_top_level(list: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut depth = 0usize;
+        let mut cur = String::new();
+        for ch in list.chars() {
+            match ch {
+                '(' => {
+                    depth += 1;
+                    cur.push(ch);
+                }
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    cur.push(ch);
+                }
+                ',' if depth == 0 => {
+                    out.push(cur.trim().to_string());
+                    cur.clear();
+                }
+                _ => cur.push(ch),
+            }
+        }
+        if !cur.trim().is_empty() {
+            out.push(cur.trim().to_string());
+        }
+        out
+    }
+
+    /// The column an expression lands in: its alias if it has one, else its
+    /// (possibly qualified) source column. This is the name ClickHouse routes
+    /// the INSERT by.
+    fn output_name(expr: &str) -> String {
+        let named = match expr.rfind(" AS ") {
+            Some(i) => &expr[i + 4..],
+            None => expr,
+        };
+        named.trim().rsplit('.').next().unwrap_or(named).to_string()
+    }
+
+    /// The INSERT's named column list.
+    fn insert_list(sql: &str) -> Vec<String> {
+        let head = &sql[..sql.find("SELECT").expect("a SELECT")];
+        let open = head.find('(').expect("a column list");
+        let close = head.rfind(')').expect("a closing paren");
+        split_top_level(&head[open + 1..close])
+    }
+
+    /// The OUTERMOST SELECT's projection, as the column names it produces. The
+    /// outer projection always ends at the first ` FROM ` — the nested levels of
+    /// the pivot and the external statement all come after it.
+    fn outer_projection(sql: &str) -> Vec<String> {
+        let start = sql.find("SELECT ").expect("a SELECT") + "SELECT ".len();
+        let end = start + sql[start..].find(" FROM ").expect("a FROM");
+        split_top_level(&sql[start..end])
+            .iter()
+            .map(|e| output_name(e))
+            .collect()
+    }
+
+    /// Every re-inserting statement, by name.
+    fn every_statement() -> Vec<(&'static str, String)> {
+        let spec = UsdResetSpec {
+            quote_asset_id: 7,
+            not_before: 1_600_000_000,
+            not_after: None,
+            require_external_rate: false,
+            require_pivot_usdc_rate: false,
+        };
+        vec![
+            ("oracle_sql", oracle_sql("prices", "price_ohlcv_1m", "")),
+            (
+                "peg_sql",
+                peg_sql("prices", "price_ohlcv_1m", &[3, 7], "").expect("stable ids given"),
+            ),
+            (
+                "external_sql",
+                external_sql("prices", "price_ohlcv_1m", 3, ""),
+            ),
+            (
+                "reset_sql",
+                reset_sql("prices", "price_ohlcv_1m", &spec, ""),
+            ),
+            ("pivot_sql", pivot_sql("prices", "price_ohlcv_1m", 5, 3, "")),
+        ]
+    }
+
+    #[test]
+    fn insert_columns_is_the_canonical_candle_list() {
+        assert_eq!(
+            insert_columns(),
+            prices_clickhouse::CANDLE_COLUMNS.join(", ")
+        );
+        assert_eq!(split_top_level(&insert_columns()).len(), 18);
+        assert!(insert_columns().ends_with("pf_trade_count, pf_volume, pf_price_volume"));
+    }
+
+    /// The whole point: the target list and the projection are the SAME eighteen
+    /// names, in the same order, in every statement. A projection short of the
+    /// list does not fail — the missing column takes its DEFAULT.
+    #[test]
+    fn every_statement_inserts_and_projects_all_eighteen_candle_columns() {
+        let want: Vec<String> = prices_clickhouse::CANDLE_COLUMNS
+            .iter()
+            .map(|c| (*c).to_string())
+            .collect();
+        for (name, sql) in every_statement() {
+            assert_eq!(insert_list(&sql), want, "{name}: INSERT column list");
+            assert_eq!(
+                outer_projection(&sql),
+                want,
+                "{name}: outermost SELECT projection"
+            );
+        }
+    }
+
+    /// The pivot carries the pf columns through ALL FOUR of its SELECT levels.
+    /// They must NOT be modelled on `close_usd`, which the middle levels drop on
+    /// purpose (it is the column the statement is computing); a pf column
+    /// dropped at any level is simply absent from the INSERT and silently
+    /// becomes `trade_count`.
+    #[test]
+    fn the_pivot_carries_the_pf_columns_through_all_four_levels() {
+        let sql = pivot_sql("prices", "price_ohlcv_1m", 5, 3, "");
+        for col in ["pf_trade_count", "pf_volume", "pf_price_volume"] {
+            for level in [
+                format!("po.{col}"),          // the outer projection
+                format!("pr.{col} AS {col}"), // the oracle-rate level
+                format!("p.{col} AS {col}"),  // the reference level
+            ] {
+                assert!(sql.contains(&level), "pivot: `{level}` missing");
+            }
+        }
+        // The innermost scan of the candle table, which names bare columns.
+        // Asserted on whitespace-collapsed text: the statement is a continued
+        // string literal, so its indentation is an artefact of the source.
+        let squashed = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            squashed.contains(
+                "trade_count, version, pf_trade_count, pf_volume, pf_price_volume, 1 AS k"
+            ),
+            "pivot: the innermost scan must select the pf columns: {squashed}"
+        );
+    }
+
+    /// BRIEF §4.6. The dust term is what makes the pass terminate.
+    #[test]
+    fn the_candidate_predicate_asks_for_a_price_not_merely_a_missing_value() {
+        assert_eq!(
+            CANDIDATE_PRED,
+            "(volume_quote_usd = 0 OR (close_usd = 0 AND close > 0)) AND volume_quote > 0"
+        );
+        // It must stay UNQUALIFIED: `repair::months_with_zeros` splices it into a
+        // `FROM {db}.{tbl} FINAL` scan that aliases nothing, so a `p.` here is an
+        // UNKNOWN_IDENTIFIER there — and that path is the one an operator runs
+        // against production by hand.
+        assert!(!CANDIDATE_PRED.contains("p."), "{CANDIDATE_PRED}");
+        assert_eq!(
+            repair_target_pred("prices", "price_ohlcv_1d", None),
+            CANDIDATE_PRED
+        );
+    }
+
+    #[test]
+    fn the_oracle_statement_matches_the_candidate_predicate() {
+        let sql = oracle_sql("prices", "price_ohlcv_1m", "");
+        assert!(
+            sql.contains("WHERE (p.volume_quote_usd = 0 OR (p.close_usd = 0 AND p.close > 0))"),
+            "{sql}"
+        );
+        assert!(
+            !sql.contains("(p.volume_quote_usd = 0 OR p.close_usd = 0)"),
+            "{sql}"
+        );
+    }
+
+    /// The peg predicate is `p.`-qualified on ALL THREE columns, and the bare
+    /// spelling appears nowhere.
+    ///
+    /// The 0268 incident: ClickHouse resolves a bare identifier against this
+    /// SELECT's own aliases first, and this statement aliases `close_usd` and
+    /// `volume_quote_usd` to the values it is WRITING — so a bare predicate
+    /// tests the new value, not the stored one, and the filter silently means
+    /// something else.
+    #[test]
+    fn the_peg_predicate_is_qualified_on_every_column_it_names() {
+        let sql = peg_sql("prices", "price_ohlcv_1m", &[3, 7], "").unwrap();
+        assert!(
+            sql.contains("WHERE p.close_usd = 0 AND (p.close > 0 OR p.volume_quote_usd = 0)"),
+            "{sql}"
+        );
+        assert!(
+            !sql.contains("WHERE close_usd = 0"),
+            "the bare spelling resolves to this SELECT's own alias: {sql}"
+        );
+    }
+
+    /// The external and pivot statements filter inside their INNERMOST scan of
+    /// the candle table, where no conflicting alias is in scope — so they carry
+    /// the bare spelling, deliberately, and must not acquire a `p.` that would
+    /// not resolve there.
+    #[test]
+    fn the_external_and_pivot_scans_carry_the_bare_widened_predicate() {
+        for (name, sql) in [
+            (
+                "external_sql",
+                external_sql("prices", "price_ohlcv_1m", 3, ""),
+            ),
+            ("pivot_sql", pivot_sql("prices", "price_ohlcv_1m", 5, 3, "")),
+        ] {
+            assert!(
+                sql.contains("close_usd = 0 AND (close > 0 OR volume_quote_usd = 0)"),
+                "{name}: {sql}"
+            );
+            assert_eq!(
+                sql.matches("close_usd = 0 ").count(),
+                sql.matches("close_usd = 0 AND (close > 0 OR volume_quote_usd = 0)")
+                    .count(),
+                "{name}: an un-widened close_usd term survived: {sql}"
+            );
+        }
+    }
+
+    /// BRIEF F9. The pivot's reference is a volume-weighted close over the
+    /// reference market with no price filter at all, so a dust-only row — a
+    /// thousand units of volume at `close = 0` — drags it toward zero, and a
+    /// bucket made only of dust yields exactly 0, which `IS NOT NULL` admits.
+    /// Both are silent: every candle priced from that bucket comes out 0 and
+    /// reads as un-enriched rather than wrong.
+    #[test]
+    fn the_pivot_reference_ignores_dust_only_buckets() {
+        let sql = pivot_sql("prices", "price_ohlcv_1m", 5, 3, "");
+        let reference = &sql[sql.find("AS ref_asset_id").expect("the reference subquery")..];
+        assert!(
+            reference.contains("AND pf_trade_count > 0"),
+            "the reference must weight only price-forming rows: {reference}"
+        );
+    }
+
+    /// Review B WR-01. `pf_trade_count > 0` alone is the WEAKEST of the three
+    /// implementations of this one reference: `views.sql` and
+    /// [`pivot_reference_day_pred`] both say `close > 0 AND volume_base > 0`,
+    /// and until phase 3 every legacy row reads `pf_trade_count` from its
+    /// DEFAULT. A row with `close = 0` and 33 billion units of volume then
+    /// contributes `0 x volume` to the numerator and its whole volume to the
+    /// denominator — the reference is dragged toward zero, passes
+    /// `r.usd IS NOT NULL`, and under-prices every XLM-quoted candle in the
+    /// bucket. Meanwhile the day-set predicate excludes that same day, so the
+    /// two halves of the reset path disagree about what is refillable.
+    ///
+    /// ⚠️ What this asserts is that both CARRY the shared fragment — not that
+    /// they are equal, which they are not (review IN-01): the reference subquery
+    /// adds `pf_trade_count > 0` and the day set does not. The name says
+    /// "carries", and [`PRICED_REFERENCE_ROW`]'s doc says why the day set is the
+    /// wider of the two.
+    #[test]
+    fn the_pivot_reference_and_the_day_set_both_carry_the_priced_reference_term() {
+        let sql = pivot_sql("prices", "price_ohlcv_1m", 5, 3, "");
+        let reference = &sql[sql.find("AS ref_asset_id").expect("the reference subquery")..];
+        assert!(
+            reference.contains(PRICED_REFERENCE_ROW),
+            "the reference must exclude a row that cannot print its price: {reference}"
+        );
+
+        let spec = UsdResetSpec {
+            quote_asset_id: 7,
+            not_before: 0,
+            not_after: None,
+            require_external_rate: false,
+            require_pivot_usdc_rate: false,
+        };
+        let day_set = pivot_reference_day_pred("prices", "price_ohlcv_1m", &spec);
+        assert!(
+            day_set.contains(PRICED_REFERENCE_ROW),
+            "the day-set predicate must carry the same fragment: {day_set}"
+        );
+        // The asymmetry, pinned so it cannot become accidental: the day set is
+        // the fragment alone, and is therefore the wider of the two.
+        assert!(
+            !day_set.contains("pf_trade_count"),
+            "the day set is the fragment ALONE — narrowing it on a column that \
+             is a DEFAULT on every pre-0286 row is a phase-3 change: {day_set}"
+        );
+    }
+
+    /// The reset statement keeps its OWN predicate — it targets written values,
+    /// not zeros, so the candidate widening does not apply to it — and gains
+    /// only the wider column list.
+    #[test]
+    fn the_reset_statement_keeps_its_own_predicate() {
+        let spec = UsdResetSpec {
+            quote_asset_id: 7,
+            not_before: 1_600_000_000,
+            not_after: None,
+            require_external_rate: false,
+            require_pivot_usdc_rate: false,
+        };
+        let sql = reset_sql("prices", "price_ohlcv_1m", &spec, "");
+        assert!(
+            sql.contains("AND (p.close_usd > 0 OR p.volume_quote_usd > 0)"),
+            "{sql}"
+        );
+        assert!(!sql.contains("p.close_usd = 0"), "{sql}");
     }
 }

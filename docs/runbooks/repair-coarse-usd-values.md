@@ -1669,3 +1669,6 @@ sweep, which pins `usd_reset: None`.
   forward-filling from earlier months, so a month's first buckets keep a valid
   anchor even when bounded to one partition.
 - All figures are `FINAL`-collapsed reads; do not compare without `FINAL`.
+- The FREEZE / ATTACH / UNFREEZE idiom above is reused verbatim, with a
+  `reingest_0286_` prefix, by
+  [`0286-reingest-history.md`](0286-reingest-history.md) (task 0286 phase 3).

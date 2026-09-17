@@ -194,6 +194,9 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     // of a silent LEFT-JOIN drop.
     let mut ledgers_missing_close: u64 = 0;
     let mut events_missing_close: u64 = 0;
+    // Events whose transaction could not be resolved in BE's default.transactions
+    // and therefore took `transaction_index = 0` (task 0286 D1's fallback).
+    let mut apply_order_fallbacks: u64 = 0;
 
     // Run-level state (persists across chunks): one accumulator per source, one
     // write buffer per source, and the count of assets already written to
@@ -270,9 +273,29 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
             // drop one event, never abort the run.
             let topics = serde_json::from_str::<Value>(&r.topics_xdr).unwrap_or(Value::Null);
             let data = serde_json::from_str::<Value>(&r.data_xdr).unwrap_or(Value::Null);
+            let (transaction_index, used_fallback) =
+                resolve_transaction_index(r.application_order, r.apply_order_found);
+            if used_fallback {
+                // Degraded but VISIBLE, the same shape as the missing-close
+                // counters above: one warning for the whole run so a chunk of
+                // millions cannot flood the log, plus a counter printed in the
+                // summary so "it worked" and "it silently used tx 0 everywhere"
+                // are never the same output.
+                if apply_order_fallbacks == 0 {
+                    warn!(
+                        ledger = r.ledger_sequence,
+                        transaction_id = r.transaction_id,
+                        "no apply order in default.transactions for this transaction — its AMM \
+                         events are ordered as transaction 0; verify BE's transactions table \
+                         covers the range (warned once per run, counted in the summary)"
+                    );
+                }
+                apply_order_fallbacks += 1;
+            }
             cur_events.push(RawSorobanEvent {
                 contract_id: strkey.clone(),
                 transaction_id: r.transaction_id.to_string(),
+                transaction_index,
                 ledger_sequence: r.ledger_sequence,
                 event_index: r.event_index as u32,
                 topics,
@@ -393,6 +416,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
         cli.dry_run,
         unresolved_genuine.len(),
         dropped_swaps,
+        apply_order_fallbacks,
     );
     info!(
         elapsed_s = run_start.elapsed().as_secs(),
@@ -478,6 +502,27 @@ fn aggregate_unresolved(raw: &[UnresolvedPoolSwap], reg: &Registries) -> Vec<Unr
     out
 }
 
+/// Map one streamed row's join result onto the fill key's `transaction_index`
+/// (task 0286 D1). Returns the index and whether the FALLBACK was taken.
+///
+/// The marker, not the value, decides: a LEFT join hands an unmatched row the
+/// column's type DEFAULT rather than NULL, so `application_order = 0` on its
+/// own cannot tell "the first transaction of the ledger" from "BE's
+/// `default.transactions` does not cover this ledger". A negative order is not
+/// a position either — it can only come from a corrupt or unexpected row — so
+/// it degrades the same way instead of wrapping into a huge `u16`.
+///
+/// No local fixture exercises the fallback end to end: it needs BE's
+/// ClickHouse, which no test in this repo may reach. It is covered at the
+/// SQL-text level (`source::chunk_sql` tests) and at the mapping level (below).
+pub(crate) fn resolve_transaction_index(application_order: i16, found: u8) -> (u16, bool) {
+    if found == 0 || application_order < 0 {
+        return (0, true);
+    }
+    (application_order as u16, false)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn print_summary(
     ticks_by_source: &HashMap<&'static str, u64>,
     failed_by_source: &HashMap<&'static str, u64>,
@@ -486,6 +531,7 @@ fn print_summary(
     dry_run: bool,
     unresolved_contracts: usize,
     dropped_swaps: u64,
+    apply_order_fallbacks: u64,
 ) {
     println!();
     println!("=== events-backfill complete ===");
@@ -508,6 +554,9 @@ fn print_summary(
     println!("swaps dropped (unresolved):{dropped_swaps}");
     let failed_total: u64 = failed_by_source.values().sum();
     println!("swaps failed dispatch:     {failed_total}");
+    // Always printed, 0 included: it is the line that says the fill order in
+    // this run came from BE's real apply order rather than from a fallback.
+    println!("events with no apply order:{apply_order_fallbacks}");
 }
 
 #[cfg(test)]
@@ -527,6 +576,7 @@ mod tests {
         RawSorobanEvent {
             contract_id: POOL.to_string(),
             transaction_id: format!("tx-{ledger}"),
+            transaction_index: 0,
             ledger_sequence: ledger,
             event_index: 0,
             topics: json!([
@@ -647,6 +697,35 @@ mod tests {
         assert_eq!(
             flushed[0].trade_count, 2,
             "both swaps must be summed into minute M's candle (an undercount would show 1)"
+        );
+    }
+
+    /// Task 0286 D1's fallback. BE's `default.transactions` is the only source
+    /// of the apply order; a transaction it does not cover must not stop the
+    /// reprice, but it must not be indistinguishable from a resolved one
+    /// either. A LEFT join gives an unmatched row the column's type DEFAULT (0,
+    /// not NULL), so the found-marker — not the value — is what decides.
+    #[test]
+    fn an_unresolved_transaction_falls_back_to_zero_and_is_counted() {
+        assert_eq!(
+            resolve_transaction_index(7, 1),
+            (7, false),
+            "a joined row uses BE's application_order and counts no fallback"
+        );
+        assert_eq!(
+            resolve_transaction_index(0, 0),
+            (0, true),
+            "no joined row: order as transaction 0, and say so"
+        );
+        assert_eq!(
+            resolve_transaction_index(9, 0),
+            (0, true),
+            "a leftover value without the marker is not an apply order"
+        );
+        assert_eq!(
+            resolve_transaction_index(-1, 1),
+            (0, true),
+            "a negative application_order cannot be a position; degrade, do not wrap"
         );
     }
 }
