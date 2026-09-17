@@ -452,6 +452,23 @@ export interface EnvironmentConfig {
      * Max contiguous ledgers walked per reconcile run (`MAX_ITERATIONS`).
      * Bounds one invocation's S3 fetch + decode budget against the Lambda
      * timeout; the Rust default is 16.
+     *
+     * ⚠️ **Task 0282 made this load-bearing for correctness, not just latency.**
+     * A run may only write a minute once it has walked PAST the end of it, so
+     * the budget must fit `ledgers-per-minute + 1`. If one minute ever holds
+     * `maxIterations` ledgers the run can never see past it, and without the
+     * `forced_progress` escape hatch ingestion would stop dead with every
+     * external signal reading healthy (the doorbell is consumed, the queue
+     * drains, no error). The hatch flushes a PARTIAL minute instead — which
+     * re-creates the 0282 loss for that minute — and raises
+     * `ForcedPartialFlushes`.
+     *
+     * Raised 16 → 32 deliberately: this is a CAP, not a target, so a run that
+     * needs 13 ledgers still stops at 13 and the extra headroom costs nothing.
+     * Measured 2026-09-15 over 7 days / 10,560 minutes, pubnet produced 10
+     * ledgers/min 24.2%, 11 ledgers 75.7%, 12 ledgers 0.05% and never more —
+     * so the worst walk is 13. Timeout headroom is ample: p99 invocation
+     * duration is 452 ms against a 60 s timeout.
      */
     readonly maxIterations: number;
     /**

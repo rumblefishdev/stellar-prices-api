@@ -2927,11 +2927,13 @@ dependencies = [
  "prices-ingest-core",
  "serde",
  "serde_json",
+ "stellar-xdr",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zstd",
 ]
 
 [[package]]
