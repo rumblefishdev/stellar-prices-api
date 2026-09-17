@@ -33,9 +33,39 @@ history:
       task as a precondition for the AMM side of the live-era months, so the
       reverse question (does live write candles for unregistered pools?) is
       the one that gates the most.
+  - date: 2026-09-17
+    status: active
+    who: okarcz
+    note: >
+      Classified. 06F4207B is the Aquarius router (already filtered, must stay
+      out). 003710B3 + 95A8E001 are a Uniswap-v3-style pool family with its own
+      factory — 16,933 swaps never indexed. The other routers only repeat pool
+      swaps. The stored-exceeds-raw contradiction was the instrument: the
+      signature column is NULL for most string-topic events, so soroswap really
+      has 51,589 swaps (43.8% lost) and phoenix ~4,194 (~12% lost). And the
+      registry is stale since the backfill's 2026-07-06 end: 22 aquarius pools
+      (34,684 trades) and 10 soroswap pools are missing, and live forgets them
+      on every cold start — which answers 0286's precondition 9 with YES.
+      Spawned 0290 (new venue) and 0291 (registry refresh).
 ---
 
 # The pool registry does not describe what is actually trading
+
+## 📊 STATUS — 2026-09-17 · classified, 6 of 7 criteria met
+
+Findings in [notes/S-classification-2026-09-17.md](notes/S-classification-2026-09-17.md).
+
+- ⛔ **The headline below is overstated** — it counted swaps with
+  `signature = 'swap'`, which misses most Soroswap and Phoenix swaps (string
+  topics leave `signature` NULL).
+- **Router `06F4207B`** = Aquarius router → already ignored, keep it that way.
+- **Pool family `003710B3` / `95A8E001`** = Uniswap-v3-style venue we do not
+  index → 16,933 swaps missing → [[0290]].
+- **Registry stale since 2026-07-06** → 22 Aquarius + 10 Soroswap pools
+  missing, dropped by live after cold starts → [[0291]]. Must be fixed before
+  [[0286]] phase 3 reaches 2026-07.
+- ⏳ Open: how many of the 22 pools' trades live actually stored — needs
+  post-fix data; check alongside [[0282]]'s 2026-09-19 measurement.
 
 ## Summary
 
@@ -149,19 +179,32 @@ need opposite treatment.
 
 ## Acceptance Criteria
 
-- [ ] `06F4207B` (2 contracts, 258,809 swaps) is classified: pool, router, or
-      something else — with the evidence that settles it.
-- [ ] `003710B3` (46 contracts, 16,214 swaps) is classified the same way.
-- [ ] The remaining unregistered emitters are classified or explicitly dismissed
-      as immaterial, with their event counts.
-- [ ] A statement of whether we are **missing trades**, at risk of
-      **double-counting**, or neither — and how many trades that is worth.
-- [ ] The stored-exceeds-raw contradiction for soroswap and phoenix is explained.
-- [ ] It is recorded whether `prices.pool_registry` is fit to be used as the
+- [x] `06F4207B` (2 contracts, 258,809 swaps) is classified: pool, router, or
+      something else — with the evidence that settles it. → **Aquarius router**
+      (interface + 87.6% co-occurrence with registered Aquarius `trade`s, the
+      rest with unregistered Aquarius pools).
+- [x] `003710B3` (46 contracts, 16,214 swaps) is classified the same way. →
+      **Uniswap-v3-style pool family** (constructor + event shape), factory
+      `CD3KRKGD…GLYF`; second code version `95A8E001`. Venue name still unknown.
+- [x] The remaining unregistered emitters are classified or explicitly dismissed
+      as immaterial, with their event counts. → three routers (100%
+      co-occurrence with pool swaps), the rest ≤ 36 events each. See the note.
+- [x] A statement of whether we are **missing trades**, at risk of
+      **double-counting**, or neither — and how many trades that is worth. →
+      **missing:** 16,933 v3-style swaps + 34,684 Aquarius trades / 267 Soroswap
+      swaps from unregistered pools (at risk after cold starts); **no
+      double-counting today.**
+- [x] The stored-exceeds-raw contradiction for soroswap and phoenix is explained.
+      → the `signature` column, not extra pools. Corrected: soroswap 51,589 raw
+      vs 28,980 stored (43.8% lost), phoenix ~4,194 vs 3,675 (~12%).
+- [x] It is recorded whether `prices.pool_registry` is fit to be used as the
       denominator in raw-vs-stored measurements, since [[0282]] and [[0101]]
-      both rely on it.
+      both rely on it. → **not as-is**: stale since 2026-07-06, and
+      `signature` cannot count string-topic venues.
 - [ ] Any follow-up work (a new venue extractor, a registry-refresh mechanism)
-      is spawned as its own task rather than absorbed here.
+      is spawned as its own task rather than absorbed here. → [[0290]],
+      [[0291]] spawned 2026-09-17. ⏳ Left open for the one measurement still
+      owed (see STATUS).
 
 ## Notes
 
