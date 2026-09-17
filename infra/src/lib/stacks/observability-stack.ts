@@ -14,6 +14,7 @@ import {
   workerFunctionName,
   SCHEDULED_WORKERS,
   SCHEDULE_DISABLED_WORKERS,
+  WORKERS_WITHOUT_HEALTH_ALARMS,
 } from '../lambda-baseline.js';
 import {
   ingestDlqName,
@@ -47,8 +48,11 @@ export interface ObservabilityStackProps extends cdk.StackProps {
  * collide on `alarmName` and mask the real defect instead of fixing it.
  */
 export interface WorkerHealthAlarms {
-  /** Duration approaching the configured timeout — warns BEFORE it becomes errors. */
-  readonly duration: cloudwatch.Alarm;
+  /**
+   * Duration approaching the configured timeout — warns BEFORE it becomes
+   * errors. Absent for a worker declared with `noDurationAlarm`.
+   */
+  readonly duration?: cloudwatch.Alarm;
   /** Zero invocations — the worker is not running at all. */
   readonly noInvocations: cloudwatch.Alarm;
 }
@@ -67,6 +71,17 @@ interface WorkerHealthAlarmProps {
   readonly cadence: cdk.Duration;
   /** Appended to each alarm description: what breaks when this worker stops. */
   readonly impact: string;
+  /**
+   * Set — to the REASON — for a worker whose run length is a budget rather
+   * than a symptom, and skip the duration alarm for it. The 80%-of-timeout
+   * threshold assumes a run that grows only when something is wrong; a worker
+   * that deliberately walks until a wall-clock budget sits at that threshold
+   * every single run, and the alarm would fire permanently (task 0223 found
+   * this on supply: budget 240 s, timeout 300 s, threshold 240 000 ms). The
+   * liveness alarm is unaffected — it is the one that matters for such a
+   * worker anyway.
+   */
+  readonly noDurationAlarm?: string;
 }
 
 /**
@@ -114,7 +129,15 @@ function addWorkerHealthAlarms(
   snsAction: cw_actions.SnsAction,
   props: WorkerHealthAlarmProps,
 ): WorkerHealthAlarms {
-  const { name, idPrefix, functionName, timeout, cadence, impact } = props;
+  const {
+    name,
+    idPrefix,
+    functionName,
+    timeout,
+    cadence,
+    impact,
+    noDurationAlarm,
+  } = props;
 
   const metric = (
     metricName: string,
@@ -132,13 +155,15 @@ function addWorkerHealthAlarms(
   // 80% of the timeout. A worker creeping toward its limit is the leading
   // indicator; once it crosses, every run fails and the errors alarm is
   // reporting an outage that already started.
+  //
+  // Skipped, with the reason recorded at the call site, for a worker whose run
+  // length is a budget by design — see `noDurationAlarm`.
   const durationThresholdMs = Math.floor(timeout.toMilliseconds() * 0.8);
-  const duration = new cloudwatch.Alarm(
-    scope,
-    `${idPrefix}WorkerDurationAlarm`,
-    {
+  let duration: cloudwatch.Alarm | undefined;
+  if (noDurationAlarm === undefined) {
+    duration = new cloudwatch.Alarm(scope, `${idPrefix}WorkerDurationAlarm`, {
       alarmName: `prices-${envName}-${name}-duration-near-timeout`,
-      alarmDescription: `The ${name} worker is running at ≥80% of its ${timeout.toHumanString()} Lambda timeout (Duration.Maximum ≥ ${durationThresholdMs} ms for two consecutive periods). It has not failed yet, but it is trending at the wall and will start timing out. ${impact} Investigate before it becomes an outage — this is the warning enrichment did not have in 2026-07.`,
+      alarmDescription: `The ${name} worker is running at ≥80% of its ${timeout.toHumanString()} Lambda timeout (Duration.Maximum ≥ ${durationThresholdMs} ms for two consecutive periods). It has not failed yet, but it is trending at the wall and will start timing out. ${impact} Investigate before it becomes an outage — this is the warning enrichment did not have in 2026-07. OK also means "nothing ran" — liveness is prices-${envName}-${name}-no-invocations (task 0223).`,
       metric: metric('Duration', 'Maximum', cadence),
       threshold: durationThresholdMs,
       evaluationPeriods: 2,
@@ -146,10 +171,10 @@ function addWorkerHealthAlarms(
       comparisonOperator:
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    },
-  );
-  duration.addAlarmAction(snsAction);
-  duration.addOkAction(snsAction);
+    });
+    duration.addAlarmAction(snsAction);
+    duration.addOkAction(snsAction);
+  }
 
   // Three cadences of total silence: the schedule rule was disabled, deleted,
   // or is failing to invoke. Lambda publishes NO Invocations datapoint for a
@@ -1104,8 +1129,10 @@ export class ObservabilityStack extends cdk.Stack {
       'LedgerProcessorErrorAlarm',
       {
         alarmName: `prices-${config.envName}-ledger-processor-errors`,
-        alarmDescription:
-          'The live ledger-processor Lambda is throwing invocation errors (AWS/Lambda Errors ≥ 1 over 5 min). Distinct from a poison-pill doorbell (see the DLQ alarm): this is the handler crashing. Check the ledger-processor logs.',
+        // Hand-rolled outside createWorkerLambda, so the liveness sentence that
+        // helper appends to every worker's -errors alarm is repeated here by hand
+        // (task 0223) — the third of three builders, easy to miss.
+        alarmDescription: `The live ledger-processor Lambda is throwing invocation errors (AWS/Lambda Errors ≥ 1 over 5 min). Distinct from a poison-pill doorbell (see the DLQ alarm): this is the handler crashing. Check the ledger-processor logs. OK here means no failing invocation was observed in the last period; a function that is not invoked at all publishes nothing and ALSO reads OK. Liveness is prices-${config.envName}-ledger-processor-no-invocations (task 0223).`,
         metric: new cloudwatch.Metric({
           namespace: 'AWS/Lambda',
           metricName: 'Errors',
@@ -1507,22 +1534,40 @@ export class ObservabilityStack extends cdk.Stack {
     // detection window. Neither can silently disarm an alarm. Threading the
     // functions through was judged not worth the stack coupling — see
     // §Design Decisions in task 0112.
-    // Not every scheduled worker has these two platform alarms. The three
-    // without are listed HERE, by name, so the gap is a decision on record and
-    // the assertion below forces one for any worker added later:
-    // - cleanup: its rule is DISABLED (task 0200) — a no-invocations alarm
-    //   would fire forever.
-    // - asset-discovery, supply: run hourly/daily with a cheap, bounded body;
-    //   their `-errors` alarm (createWorkerLambda) is the coverage today.
-    //   asset-discovery is the subject of task 0256 (the ledger scan has never
-    //   run on production) — revisit both there. Recorded in task 0125 Future
-    //   Work.
-    const workersWithoutHealthAlarms: readonly string[] = [
-      'cleanup',
-      'asset-discovery',
-      'supply',
-    ];
+    // Not every scheduled worker has these two platform alarms. The ones
+    // without live in WORKERS_WITHOUT_HEALTH_ALARMS (lambda-baseline.ts), each
+    // with its reason, because createWorkerLambda prints that reason into the
+    // worker's -errors alarm description — the gap has to be visible where an
+    // operator reads it, not only here. The assertion below forces a decision
+    // for any worker added later. Task 0223 moved `supply` OUT of that list:
+    // its earlier exemption ("the -errors alarm is the coverage") was circular,
+    // since -errors reads OK on zero invocations.
+    const workersWithoutHealthAlarms: readonly string[] = Object.keys(
+      WORKERS_WITHOUT_HEALTH_ALARMS,
+    );
     const workerHealth: Array<WorkerHealthAlarmProps> = [
+      {
+        // Task 0223. Exempt until then on the grounds that its -errors alarm
+        // was "the coverage" — which reads OK when nothing runs. The only
+        // writer of prices.asset_supply, and nothing else watches it yet
+        // (its freshness alarm is task 0284).
+        name: 'supply',
+        idPrefix: 'Supply',
+        functionName: workerFunctionName(config.envName, 'supply'),
+        timeout: cdk.Duration.minutes(5),
+        cadence: cdk.Duration.hours(1),
+        impact:
+          'market_cap_usd in current_prices is price × token_supply from prices.asset_supply, whose only writer is this worker: market caps go stale silently while prices keep moving.',
+        // Measured 2026-09-15 before the first deploy: Duration.Maximum is
+        // ~240.5 s EVERY run, because the Horizon walk stops at
+        // DEFAULT_TIME_BUDGET_SECS = 240 (supply-worker/src/lib.rs, task 0084)
+        // and the timeout is 300 s — exactly the 80% threshold. A duration
+        // alarm here would have latched on its second evaluation and been
+        // re-surfaced by the 0214 digest every day: the failure 0223 exists
+        // to remove, self-inflicted.
+        noDurationAlarm:
+          'run length is a wall-clock budget (240 s of a 300 s timeout), not a symptom',
+      },
       {
         name: 'enrichment',
         idPrefix: 'Enrichment',
@@ -1602,6 +1647,18 @@ export class ObservabilityStack extends cdk.Stack {
     // falls through silently (deep review WR-02, PR #280 review finding 2).
     {
       const covered = new Set<string>(workerHealth.map((w) => w.name));
+      // A worker whose schedule is disabled on purpose must also be exempt
+      // here, or its -no-invocations alarm fires forever — and since task
+      // 0214 the daily digest would then re-surface it every single day.
+      // This is the cleanup case (task 0200) made a rule rather than a comment.
+      for (const name of SCHEDULE_DISABLED_WORKERS) {
+        if (!workersWithoutHealthAlarms.includes(name)) {
+          throw new Error(
+            `ObservabilityStack: "${name}" is in SCHEDULE_DISABLED_WORKERS but not in WORKERS_WITHOUT_HEALTH_ALARMS — ` +
+              'its -no-invocations alarm would latch forever; exempt it with a reason (lambda-baseline.ts)',
+          );
+        }
+      }
       for (const name of SCHEDULED_WORKERS) {
         const has = covered.has(name);
         const exempt = workersWithoutHealthAlarms.includes(name);
