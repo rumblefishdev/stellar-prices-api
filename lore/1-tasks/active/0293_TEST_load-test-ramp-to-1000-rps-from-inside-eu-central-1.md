@@ -2,7 +2,7 @@
 id: "0293"
 title: "Load-test run 2: ramp 100 → 250 → 500 → 1000 req/s of cache misses, driven from inside eu-central-1 — and the three-row report M3 asks for"
 type: TEST
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0260", "0121", "0122", "0047", "0249"]
 tags: [layer-infra, priority-high, effort-medium, performance, clickhouse, load-test, milestone-M3]
@@ -22,6 +22,12 @@ history:
       0 errors, gateway p95 74 ms — but the client on a laptop measured p95
       464 ms, so no number from that run can stand in the report. This task
       owns run 2 and the report.
+  - date: 2026-09-17
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated the same day. First job: commit run 1's k6 export and the
+      report section on this task's branch; then the four preconditions.
 ---
 
 # Load-test run 2: ramp to 1000 req/s from inside eu-central-1, and the report
