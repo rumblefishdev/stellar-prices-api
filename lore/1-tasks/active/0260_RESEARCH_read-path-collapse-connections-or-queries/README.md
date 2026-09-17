@@ -119,6 +119,20 @@ history:
       stays open, reframed. Four statements from 2026-09-16 are WITHDRAWN and
       marked in place: "no query round trip happened", the 80–130 ms "floor",
       "degradation preceded the errors", and "needs the box / not reachable".
+  - date: 2026-09-17
+    status: active
+    who: stkrolikiewicz
+    note: >
+      QUOTA FIXED ON THE BOX, 12:13 UTC. sbe task 0561 / PR #462 (merged,
+      develop 07210e28) set `queries` and `execution_time` of `prices_read`
+      to unlimited and kept read_rows 50 B / read_bytes 1 TiB / result_rows
+      10 B as the resource guards; deployed by an in-place overwrite of the
+      bind-mounted quotas.xml, no restart. `system.quota_limits` now shows
+      max_queries NULL, max_execution_time NULL for prices_read. The
+      remaining wall for the M3 runs is read_bytes at ~700 k queries/h — the
+      1000 req/s × 5 min run (300 k) fits with ~2× margin. AC 2's controlled
+      re-run is unblocked on the ClickHouse side; the gateway-5XX alarm
+      ([[0249]]) and the stage throttle check remain prerequisites.
 ---
 
 # Read path collapse at 100 req/s of misses — connections or queries?
@@ -174,6 +188,23 @@ double the Tranche 3 one.
 - Establish where the ~170–240 ms of an uncontended miss actually goes: the
   AWS→Hetzner hop (~80–130 ms per §6), the query itself, or connection setup.
 - Determine what recovered the system, since nothing was done on our side.
+
+## ✅ Quota fixed — 2026-09-17 12:13 UTC
+
+sbe task 0561, PR #462 (merged, develop `07210e28`), deployed the same day by
+an in-place overwrite of the bind-mounted `quotas.xml` (inode kept, ClickHouse
+hot-reloaded, no restart). `system.quota_limits` for `prices_read`:
+
+| | max_queries | max_execution_time | max_read_rows | max_read_bytes | max_result_rows |
+|---|---|---|---|---|---|
+| before | 10,000 | 1000 | 50 B | 1 TiB | 10 B |
+| after | **NULL** | **NULL** | 50 B | 1 TiB | 10 B |
+
+The byte/row guards stay by design — they are what keeps this tenant from
+draining the shared box, and the reason `prices_reader` was not moved to
+sbe's `unlimited` quota. Next wall for a load run is `read_bytes` at roughly
+700 k queries/h; the largest M3 run (1000 req/s × 5 min = 300 k) fits with
+~2× margin. Every other quota on the box was byte-identical before and after.
 
 ## 🔑 Cause named — 2026-09-17, from the ClickHouse box
 
@@ -469,7 +500,8 @@ observability gaps. Fold it in there rather than adding an 86th backlog item.
       — *something else: the `prices_reader` hourly query quota, 28,853 × code 201*
 - [ ] The uncontended miss budget is broken down into network / query /
       connection setup — *open, reframed: cold-connection cost vs the rest;
-      needs a controlled re-run, which needs the quota fixed first*
+      needs a controlled re-run — the quota is fixed as of 2026-09-17 12:13
+      UTC (sbe 0561), so the ClickHouse side no longer blocks it*
 - [x] It is stated whether the ceiling is ours alone or shared with
       soroban-block-explorer ([[0047]]) — *ours alone, the quota is per user*
 - [x] A remediation is recommended **against the identified cause**, explicitly
