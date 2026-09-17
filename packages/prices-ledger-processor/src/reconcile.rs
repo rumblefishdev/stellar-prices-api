@@ -63,8 +63,9 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use prices_ingest_core::{
-    AssetRegistry, CandleAccumulator, OracleSample, Registries, decode_object, extract_trades,
-    ledger_close_time, ledger_sequence, offer_lookup_counts, process_ledger, raw_trade_to_tick,
+    AssetRegistry, CandleAccumulator, OfferLookupCounts, OracleSample, Registries, decode_object,
+    extract_trades_with_counts, ledger_close_time, ledger_sequence, process_ledger,
+    raw_trade_to_tick,
 };
 use tokio::sync::Mutex;
 use tracing::info;
@@ -105,6 +106,8 @@ pub struct RunStats {
     /// line alone is not observable, and every other signal on this path reads
     /// healthy (the doorbell is consumed, the queue drains, no error is raised).
     pub forced_partial_flush: bool,
+    /// How the order-book fills this run WROTE were priced (task 0286 phase 2).
+    pub offer_lookups: OfferLookupCounts,
     pub rows_emitted: u64,
     /// Candle-INSERT latency for this run, or `None` when the run wrote no
     /// candles at all. `None` rather than a zeroed struct so an idle run
@@ -203,7 +206,6 @@ where
         // not to this — see the task-0282 block below.
         let mut current = start;
         let mut persisted = 0u64;
-        let offer_lookups_before = offer_lookup_counts();
 
         // Accumulate across the whole contiguous run, then flush only the
         // minutes this run saw the END of — see `run_boundary` below.
@@ -221,6 +223,12 @@ where
         // cursor was always `obj_max`, so that held for free; the minute-boundary
         // rewind can pick an interior ledger, so it has to be enforced.
         let mut ledger_minutes: Vec<(u64, u32, bool)> = Vec::new();
+        // (minute_start, tally) per decoded ledger: how its order-book fills were
+        // priced (task 0286 phase 2). Kept per ledger because the tally must
+        // follow the CANDLES — a held-back ledger is decoded again by every run
+        // until its minute closes, so a tally over everything decoded counts its
+        // fills once per re-read. Summed below over the flushed minutes only.
+        let mut ledger_offer_lookups: Vec<(u32, OfferLookupCounts)> = Vec::new();
 
         for _ in 0..max_iterations {
             let next = current + 1;
@@ -239,7 +247,8 @@ where
             let mut obj_ledgers: Vec<(u64, u32)> = Vec::new();
             for lcm in &lcms {
                 // Classic SDEX trades from operation results.
-                for trade in extract_trades(lcm) {
+                let (trades, offer_lookups) = extract_trades_with_counts(lcm);
+                for trade in trades {
                     sdex.merge(&raw_trade_to_tick(&trade, &mut state.assets));
                 }
                 // Soroban AMM trades + oracle samples.
@@ -253,6 +262,7 @@ where
                 // these minute keys and the candle keys cannot drift apart.
                 let minute = (ledger_close_time(lcm) as u32 / 60) * 60;
                 obj_ledgers.push((seq, minute));
+                ledger_offer_lookups.push((minute, offer_lookups));
                 obj_max = obj_max.max(seq);
             }
             // Flag only this object's HIGHEST ledger as a valid cursor landing
@@ -275,6 +285,7 @@ where
                 ledgers_persisted: 0,
                 ledgers_held_back: 0,
                 forced_partial_flush: false,
+                offer_lookups: OfferLookupCounts::default(),
                 rows_emitted: 0,
                 // Nothing was persisted, so no INSERT happened: no datapoint.
                 ch_write: None,
@@ -407,6 +418,7 @@ where
                 ledgers_held_back: ledger_minutes.len() as u64,
                 // Holding back is the DESIGNED path, not the escape hatch.
                 forced_partial_flush: false,
+                offer_lookups: OfferLookupCounts::default(),
                 rows_emitted: 0,
                 ch_write: None,
             });
@@ -463,7 +475,12 @@ where
         // Task 0286 phase 2 (S4): how many order-book fills this run priced from
         // the offer they crossed, and how many fell back to their own amounts.
         // The rate, not a once-per-process warn line.
-        let offer_lookups = offer_lookup_counts().since(offer_lookups_before);
+        // Same rule as `flush_older_than(flush_boundary)` above, so the tally
+        // covers exactly the minutes whose candles this run wrote.
+        let offer_lookups = ledger_offer_lookups
+            .iter()
+            .filter(|(minute, _)| *minute < flush_boundary)
+            .fold(OfferLookupCounts::default(), |acc, (_, c)| acc.plus(*c));
         info!(
             start,
             end = current,
@@ -483,6 +500,7 @@ where
             ledgers_persisted: persisted,
             ledgers_held_back: held_back as u64,
             forced_partial_flush: forced,
+            offer_lookups,
             rows_emitted,
             ch_write: (!ch_write.samples_ms.is_empty()).then_some(ch_write),
         })

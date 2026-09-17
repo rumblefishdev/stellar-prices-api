@@ -85,6 +85,15 @@ impl OfferLookupCounts {
         }
     }
 
+    /// Two tallies added up — a run's share is the sum of its ledgers'.
+    pub fn plus(self, other: Self) -> Self {
+        Self {
+            order_book_fills: self.order_book_fills + other.order_book_fills,
+            offer_lookup_misses: self.offer_lookup_misses + other.offer_lookup_misses,
+            pool_fills: self.pool_fills + other.pool_fills,
+        }
+    }
+
     fn note(&mut self, is_order_book: bool, price_source: PriceSource) {
         match (is_order_book, price_source) {
             (false, _) => self.pool_fills += 1,
