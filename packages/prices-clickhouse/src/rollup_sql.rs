@@ -305,6 +305,24 @@ fn lower_bound(tier: &Tier, bounds: &Bounds<'_>) -> Result<Option<String>, Rollu
 pub const PRICE_FORMING_CHILD: &str =
     "t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)";
 
+/// The predicate a child must pass to LEND ITS RATE (`close_usd / close`) to the
+/// coarse `close_usd` — both legs at the same floor as [`PRICE_FORMING_CHILD`].
+///
+/// It used to be `t.close_usd > 0 AND t.close > 0`, which skips the un-enriched
+/// sentinel and nothing else. A ratio of two values a few ticks wide is not a
+/// rate: the prod row `PRICE_FLOOR_SQL`'s doc quotes (`close = 5e-14,
+/// close_usd = 4e-14`) reads as 0.8, and as the latest "priced" child it
+/// re-priced a healthy parent close — on every tier above it, since the wrong
+/// `close_usd` then carries the same rate upward. The floor is on `close_usd` as
+/// well as `close` because a real price beside a four-tick USD value is the same
+/// defect from the other side; `/ohlcv` refuses to convert either
+/// (`queries_ch.rs`, `convertible`).
+///
+/// No `pf_trade_count` term: a post-0286 child with none has `close = 0` and
+/// fails the floor, and a legacy child's DEFAULT says nothing either way.
+pub const RATE_BEARING_CHILD: &str = "t.close_usd >= toDecimal128('0.000000000001', 14) \
+AND t.close >= toDecimal128('0.000000000001', 14)";
+
 /// The coarse rollup SELECT for one tier — the body of its MV and of every
 /// bounded re-roll. See the module docs for what each projection means.
 pub fn rollup_select(tier: &Tier, db: &str, bounds: &Bounds<'_>) -> Result<String, RollupSqlError> {
@@ -336,7 +354,7 @@ pub fn rollup_select(tier: &Tier, db: &str, bounds: &Bounds<'_>) -> Result<Strin
     sum(t.volume_quote) AS volume_quote,
     sum(t.volume_quote_usd) AS volume_quote_usd,
     ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) \
-/ toFloat64(t.close), t.timestamp, t.close_usd > 0 AND t.close > 0)), 14), 0) AS close_usd,
+/ toFloat64(t.close), t.timestamp, {RATE_BEARING_CHILD})), 14), 0) AS close_usd,
     ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) \
 / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
     sum(t.trade_count) AS trade_count,
@@ -579,14 +597,16 @@ mod tests {
     #[test]
     fn close_usd_is_a_rate_re_priced_by_this_buckets_close() {
         for (what, sql) in every_rendering() {
+            let floor = crate::PRICE_FLOOR_SQL;
             assert_eq!(
-                sql.matches(
+                sql.matches(&format!(
                     "argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, \
-                     t.close_usd > 0 AND t.close > 0)"
-                )
+                     t.close_usd >= {floor} AND t.close >= {floor})"
+                ))
                 .count(),
                 1,
-                "{what}: the rate must be taken exactly once"
+                "{what}: the rate must be taken exactly once, from a child whose \
+                 close_usd AND close both clear the precision floor"
             );
             assert!(
                 sql.contains("toFloat64(close) * argMaxIf("),
@@ -601,6 +621,21 @@ mod tests {
                 !sql.contains("argMax(close_usd"),
                 "{what}: an unguarded argMax on close_usd (task 0145) survived"
             );
+        }
+    }
+
+    /// A ratio of two values under the precision floor is quantisation noise (the
+    /// prod row `close = 5e-14, close_usd = 4e-14` reads as a rate of 0.8), so
+    /// the rate gate draws the SAME line as the price gate — never `> 0`.
+    #[test]
+    fn no_rendering_takes_a_rate_from_a_value_that_merely_exceeds_zero() {
+        for (what, sql) in every_rendering() {
+            for loose in ["t.close_usd > 0", "t.close > 0"] {
+                assert!(
+                    !sql.contains(loose),
+                    "{what}: `{loose}` admits a sub-floor child into the close_usd rate"
+                );
+            }
         }
     }
 

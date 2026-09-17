@@ -136,9 +136,11 @@ async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops
         .await
         .expect("the MV exists after setup");
 
+    let rate_gate = prices_clickhouse::rollup_sql::RATE_BEARING_CHILD;
+    let narrowed = format!("{rate_gate} AND t.pf_trade_count > 0");
     let edited = prices_clickhouse::ROLLUPS_SQL.replace(
-        "t.close_usd > 0 AND t.close > 0",
-        "t.close_usd > 0 AND t.close > 0 AND t.pf_trade_count > 0",
+        &format!("t.timestamp, {rate_gate})"),
+        &format!("t.timestamp, {narrowed})"),
     );
     assert_ne!(
         edited,
@@ -147,9 +149,7 @@ async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops
          rollups.sql this test goes blind and must be updated, not deleted"
     );
     assert_eq!(
-        edited
-            .matches("t.close_usd > 0 AND t.close > 0 AND t.pf_trade_count > 0")
-            .count(),
+        edited.matches(&narrowed).count(),
         6,
         "the edit must reach every MV in the chain"
     );
@@ -205,8 +205,10 @@ async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops
         // or not the edit reached it, so the bare form holds unconditionally
         // and cannot tell the declared side from the live one.
         assert!(
-            d.declared
-                .contains("(t.close_usd > 0) AND (t.close > 0) AND (t.pf_trade_count > 0)"),
+            d.declared.contains(&format!(
+                "(t.close_usd >= {floor}) AND (t.close >= {floor}) AND (t.pf_trade_count > 0)",
+                floor = prices_clickhouse::PRICE_FLOOR_SQL
+            )),
             "{}: the declared side must carry the edit, not the live body: {}",
             report.name,
             d.declared

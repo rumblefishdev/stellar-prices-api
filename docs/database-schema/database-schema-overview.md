@@ -591,10 +591,13 @@ SELECT
     sum(t.volume_quote_usd) AS volume_quote_usd, -- included: it traded
     -- close_usd is this bucket's OWN close re-priced by the latest priced
     -- child's RATE, never a carried product — that is what keeps `close` and
-    -- `close_usd` on the same sub-bucket (ADR 0287 §5).
+    -- `close_usd` on the same sub-bucket (ADR 0287 §5). A child lends its rate
+    -- only if BOTH legs clear the 1e-12 precision floor: a ratio of two values a
+    -- few ticks wide (prod: 5e-14 / 4e-14) is quantisation noise, not a rate.
     ifNull(toDecimal128OrZero(toString(toFloat64(close)
         * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp,
-                   t.close_usd > 0 AND t.close > 0)), 14), 0) AS close_usd,
+                   t.close_usd >= toDecimal128('0.000000000001', 14)
+                   AND t.close >= toDecimal128('0.000000000001', 14))), 14), 0) AS close_usd,
     -- Both derived Decimals go through toDecimal128OrZero(toString(Float64)):
     -- Decimal division SILENTLY overflows past a ~1.7e10 dividend on 26.3.10.60
     -- (no exception, a wrong number) and divideDecimal throws on a zero divisor.

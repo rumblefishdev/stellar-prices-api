@@ -98,8 +98,8 @@
 --   version count, not just on the max ledger it happens to contain.
 --
 -- close_usd is a RATE, re-priced by the bucket's own close (task 0286, ADR 0287
---   §5): `close × argMaxIf(close_usd / close, t.timestamp, close_usd > 0 AND
---   close > 0)`. This SUPERSEDES task 0145's `argMaxIf(close_usd, …)` and, with
+--   §5): `close × argMaxIf(close_usd / close, t.timestamp, close_usd >= 1e-12
+--   AND close >= 1e-12)`. This SUPERSEDES task 0145's `argMaxIf(close_usd, …)` and, with
 --   it, the consequence 0145 accepted — that `close` and `close_usd` could come
 --   from DIFFERENT sub-buckets. They are same-bucket again by construction. The
 --   reason 0145 existed is unchanged and still handled: `close_usd` is baked by
@@ -174,7 +174,7 @@ SELECT
     sum(t.volume_base) AS volume_base,
     sum(t.volume_quote) AS volume_quote,
     sum(t.volume_quote_usd) AS volume_quote_usd,
-    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd > 0 AND t.close > 0)), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd >= toDecimal128('0.000000000001', 14) AND t.close >= toDecimal128('0.000000000001', 14))), 14), 0) AS close_usd,
     ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
     sum(t.trade_count) AS trade_count,
     sum(t.version) AS version,
@@ -210,7 +210,7 @@ SELECT
     sum(t.volume_base) AS volume_base,
     sum(t.volume_quote) AS volume_quote,
     sum(t.volume_quote_usd) AS volume_quote_usd,
-    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd > 0 AND t.close > 0)), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd >= toDecimal128('0.000000000001', 14) AND t.close >= toDecimal128('0.000000000001', 14))), 14), 0) AS close_usd,
     ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
     sum(t.trade_count) AS trade_count,
     sum(t.version) AS version,
@@ -239,7 +239,7 @@ SELECT
     sum(t.volume_base) AS volume_base,
     sum(t.volume_quote) AS volume_quote,
     sum(t.volume_quote_usd) AS volume_quote_usd,
-    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd > 0 AND t.close > 0)), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd >= toDecimal128('0.000000000001', 14) AND t.close >= toDecimal128('0.000000000001', 14))), 14), 0) AS close_usd,
     ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
     sum(t.trade_count) AS trade_count,
     sum(t.version) AS version,
@@ -268,7 +268,7 @@ SELECT
     sum(t.volume_base) AS volume_base,
     sum(t.volume_quote) AS volume_quote,
     sum(t.volume_quote_usd) AS volume_quote_usd,
-    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd > 0 AND t.close > 0)), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd >= toDecimal128('0.000000000001', 14) AND t.close >= toDecimal128('0.000000000001', 14))), 14), 0) AS close_usd,
     ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
     sum(t.trade_count) AS trade_count,
     sum(t.version) AS version,
@@ -300,7 +300,7 @@ SELECT
     sum(t.volume_base) AS volume_base,
     sum(t.volume_quote) AS volume_quote,
     sum(t.volume_quote_usd) AS volume_quote_usd,
-    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd > 0 AND t.close > 0)), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd >= toDecimal128('0.000000000001', 14) AND t.close >= toDecimal128('0.000000000001', 14))), 14), 0) AS close_usd,
     ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
     sum(t.trade_count) AS trade_count,
     sum(t.version) AS version,
@@ -333,7 +333,7 @@ SELECT
     sum(t.volume_base) AS volume_base,
     sum(t.volume_quote) AS volume_quote,
     sum(t.volume_quote_usd) AS volume_quote_usd,
-    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd > 0 AND t.close > 0)), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd >= toDecimal128('0.000000000001', 14) AND t.close >= toDecimal128('0.000000000001', 14))), 14), 0) AS close_usd,
     ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
     sum(t.trade_count) AS trade_count,
     sum(t.version) AS version,

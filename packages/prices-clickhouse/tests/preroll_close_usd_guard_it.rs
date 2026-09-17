@@ -20,7 +20,8 @@
 //! Task 0286 / ADR 0287 §5 SUPERSEDED the guard with something stronger: the
 //! coarse `close_usd` is now this bucket's own `close` re-priced by the latest
 //! priced child's RATE (`close_usd / close`). The un-enriched sentinel is
-//! skipped exactly as before — that is what `close_usd > 0 AND close > 0` does —
+//! skipped exactly as before — that is what the rate predicate does (both legs at
+//! or above the precision floor, `rollup_sql::RATE_BEARING_CHILD`) —
 //! but `close` and `close_usd` are no longer allowed to come from different
 //! sub-buckets, which is the consequence task 0145 had to accept. The
 //! expectation below is therefore the rate-derived product, recomputed rather

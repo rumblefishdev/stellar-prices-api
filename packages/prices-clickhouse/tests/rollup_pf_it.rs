@@ -129,6 +129,25 @@ impl Minute {
         }
     }
 
+    /// A child whose `close` AND `close_usd` both sit under the precision floor —
+    /// the row `PRICE_FLOOR_SQL`'s doc comment quotes from prod: five ticks over
+    /// four. Its ratio (0.8 here) looks like an ordinary rate and is quantisation
+    /// noise; it is "priced" only in the sense that enrichment wrote something.
+    const fn noise_priced(ts: &'static str) -> Self {
+        Self {
+            ts,
+            open: "0.00000000000005",
+            high: "0.00000000000005",
+            low: "0.00000000000005",
+            close: "0.00000000000005",
+            volume_base: "1000",
+            volume_quote: "0.00000000005",
+            close_usd: "0.00000000000004",
+            trade_count: 19,
+            pf_trade_count: 19,
+        }
+    }
+
     /// A DUST-ONLY minute: fills happened and count in volume, but not one of
     /// them formed a price, so the candle has none (ADR 0287 §3).
     const fn dust(ts: &'static str) -> Self {
@@ -403,6 +422,94 @@ async fn a_coarse_bucket_whose_last_child_is_dust_closes_at_the_last_priced_chil
             "{table}: close_usd must be this bucket's close re-priced by the \
              latest priced child's rate (1.2 x 2.0 = 2.4), got {close_usd}. \
              2.2 is the carried product — the other child's close_usd."
+        );
+    }
+
+    teardown(&admin, db).await;
+}
+
+/// The RATE is held to the same precision floor as the prices (`1e-12`).
+///
+/// The latest "priced" child is the prod shape `close = 5e-14,
+/// close_usd = 4e-14`. The price gate already refuses it, so the bucket closes
+/// at 1.1 — but a rate gate of `close_usd > 0 AND close > 0` admits it, takes
+/// 4/5 = 0.8 as the latest rate and re-prices that healthy close to 0.88,
+/// where the only measured rate in the bucket (2.2 / 1.1 = 2.0) says 2.2.
+/// RED on that gate, on every tier: the noise rate is carried up.
+#[tokio::test]
+#[ignore = "requires the local ClickHouse 26.3.10.60"]
+async fn a_rate_between_two_values_under_the_precision_floor_never_re_prices_the_bucket() {
+    let db = "it_rollup_pf_rate_floor";
+    let admin = setup(db).await;
+
+    admin
+        .query(&insert_minutes(
+            db,
+            &[
+                Minute::priced("2026-04-02 00:00:00", "1.0", "1.5", "0.9", "1.1", "2.2"),
+                Minute::noise_priced("2026-04-02 00:01:00"),
+            ],
+        ))
+        .execute()
+        .await
+        .expect("insert minutes");
+
+    preroll(&admin, db).await;
+
+    for table in COARSE {
+        let [_, _, _, close, close_usd, _] = candle(&admin, db, table, "").await;
+        approx(close, 1.1, &format!("{table}: close"));
+        assert!(
+            (close_usd - 2.2).abs() < 1e-6,
+            "{table}: close_usd must come from the last child whose rate is a \
+             measurement (1.1 x 2.0 = 2.2), got {close_usd}. 0.88 is 1.1 x (4e-14 / \
+             5e-14) — a ratio of two values under the precision floor."
+        );
+    }
+
+    teardown(&admin, db).await;
+}
+
+/// …and the floor is on BOTH legs of the rate. Here the latest child's `close`
+/// is a real price (1.2, so it closes the bucket) and only its `close_usd` is
+/// four ticks — a USD value that cannot carry a rate. `/ohlcv` refuses to
+/// convert such a row (`close_usd >= 1e-12`); the rollup must not build every
+/// coarse `close_usd` above it from it. RED on a gate that floors `close` alone:
+/// the bucket publishes `close_usd = 4e-14` beside a close of 1.2.
+#[tokio::test]
+#[ignore = "requires the local ClickHouse 26.3.10.60"]
+async fn a_close_usd_under_the_precision_floor_carries_no_rate() {
+    let db = "it_rollup_pf_rate_floor_usd";
+    let admin = setup(db).await;
+
+    admin
+        .query(&insert_minutes(
+            db,
+            &[
+                Minute::priced("2026-04-02 00:00:00", "1.0", "1.5", "0.9", "1.1", "2.2"),
+                Minute::priced(
+                    "2026-04-02 00:01:00",
+                    "1.1",
+                    "1.6",
+                    "1.0",
+                    "1.2",
+                    "0.00000000000004",
+                ),
+            ],
+        ))
+        .execute()
+        .await
+        .expect("insert minutes");
+
+    preroll(&admin, db).await;
+
+    for table in COARSE {
+        let [_, _, _, close, close_usd, _] = candle(&admin, db, table, "").await;
+        approx(close, 1.2, &format!("{table}: close"));
+        assert!(
+            (close_usd - 2.4).abs() < 1e-6,
+            "{table}: close_usd must be 1.2 x the last MEASURED rate (2.0) = 2.4, \
+             got {close_usd} — a four-tick close_usd is not a rate"
         );
     }
 

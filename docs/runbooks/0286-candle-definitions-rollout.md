@@ -164,8 +164,9 @@ retyped by hand is the only way to get a wrong one.
 ⚠️ **The live MVs still carry an unguarded `argMax(close_usd, t.timestamp)`.**
 Do not patch that separately with the 0145 guard first: the bodies you are
 about to create carry
-`close × argMaxIf(close_usd / close, t.timestamp, close_usd > 0 AND close > 0)`,
-which skips the un-enriched sentinel exactly as the guard would AND keeps
+`close × argMaxIf(close_usd / close, t.timestamp, close_usd >= 1e-12 AND close >= 1e-12)`
+(the same precision floor as the price gates — a ratio of two sub-floor values is
+noise, not a rate), which skips the un-enriched sentinel exactly as the guard would AND keeps
 `close_usd` on the same bucket as `close`. **The six MVs are re-created ONCE** —
 a second DROP window buys nothing.
 
