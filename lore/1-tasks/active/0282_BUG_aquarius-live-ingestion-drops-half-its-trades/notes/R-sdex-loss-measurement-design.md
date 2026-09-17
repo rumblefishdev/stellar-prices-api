@@ -135,3 +135,84 @@ buckets should be single-ledger and therefore intact, with damage concentrated
 on a handful of busy pairs. **That is a hypothesis, not a result**, and stating
 it here is so that a number matching it is not read as confirmation of anything
 other than itself.
+
+---
+
+# 📊 RESULTS — partition 993 (2026-07-19 17:01 → 07-23 21:01 UTC)
+
+**Run 2026-09-17.** Local ClickHouse 26.3.10.60 (fresh Docker project
+`sdexloss`), `sdex-backfill --transport local --mode combined` from `develop`
+at `cc950cc` (extraction code unchanged in substance since 2026-07-14).
+Production exported read-only as `dev_read`. Edge minutes dropped as planned.
+Pre-run checks: `backfill_progress` newest data 2026-07-06 for both streams
+(its `target_ledger` 63,795,749 is only the progress denominator); prod still
+holds `_1m` SDEX for the window. Partition 1000 still running at the time of
+writing.
+
+## 🔴 SDEX loses ~64% of its trades — worse than Aquarius
+
+| | truth (archive) | production | lost |
+| --- | --- | --- | --- |
+| trades | **5,528,759** | **1,970,460** | **3,558,299 (64.4%)** |
+| candles | 1,459,439 | 1,459,439 | 0 |
+
+**No candle is missing — the candles that exist are undercounted.** Every one
+of the 5,639 minutes checked early was short, none over.
+
+## ✅ The instrument is sound — single-trade candles match exactly
+
+Bucket-level, joined on `(minute, asset_type:code:issuer)` both sides:
+
+| truth trades in candle | candles | exact in prod | short | over | trades retained |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 720,447 | 703,792 | **0** | 0 | 97.7%* |
+| 2-3 | 389,985 | 80,954 | 299,289 | 0 | **55.2%** |
+| 4-10 | 249,767 | 8,332 | 237,346 | 0 | **30.3%** |
+| 11+ | 99,240 | 249 | 98,785 | 0 | **12.0%** |
+
+\* The 16,655 single-trade candles with no prod match **all** touch one of the
+3,312 colliding asset ids ([[0139]]), which the prod side excludes — an
+exclusion artefact, not loss. Among comparable single-trade candles the match
+is **100%**, and **no candle anywhere carries more trades in prod than in
+truth**. So both sides count trades identically, and the shortfall is the
+0282 mechanism: the busier the candle, the more writes it took, the less
+survived — the same shape as Aquarius (41.9% / 15.1%).
+
+## What the damage looks like
+
+Of 1,428,747 comparable candles, **635,420 (44.5%) are damaged**. In those:
+
+| field | still correct |
+| --- | --- |
+| `close` | **100%** — the last write carries the minute's last trade |
+| `high` | 51.4% |
+| `low` | 44.9% |
+| `open` | **10.5%** |
+| `volume_base` | ~⅓ retained (mean 35.5%, median 33.3%) |
+
+Undamaged candles match on all four prices, 100%.
+
+**The loss is spread, not concentrated.** The ten most-damaged pairs carry
+only 19% of all lost trades:
+
+| pair | truth | prod | lost |
+| --- | --- | --- | --- |
+| XLM / USDC (GA5Z…) | 290,132 | 22,766 | **92.2%** |
+| GOLD (GBCB…) / XLM | 210,198 | 21,153 | 89.9% |
+| SHX (GDST…) / XLM | 135,985 | 13,874 | 89.8% |
+| VELO (GDM4…) / XLM | 100,980 | 11,214 | 88.9% |
+| GOLD / SHX | 99,391 | 12,193 | 87.7% |
+
+⚠️ **XLM/USDC is the reference market** for USD pricing, so its volume is
+understated ~13x in the live era. Its `close` is right, so `close_usd`
+derived from it should be unaffected — worth confirming, not assuming.
+
+## Against the decision rule (written 2026-09-15, before the run)
+
+**> 5% → full SDEX reprice, scoped as its own task.** The prior expectation
+("the low end") was wrong: most SDEX *candles* are single-trade and intact, but
+most SDEX *trades* sit in busy candles, and those lost the most.
+
+⏳ Held until partition 1000 confirms. Note for the scoping: [[0286]] phase 3
+already re-ingests the whole chain from the archive, which rebuilds SDEX too —
+so the "own task" may be that same run rather than a separate one.

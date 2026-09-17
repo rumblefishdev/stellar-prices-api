@@ -108,7 +108,7 @@ writes it whole. No errors, no DLQ, no forced partial flushes. Details in
 | 1 | Mechanism identified | ✅ |
 | 2 | Live fix deployed | ✅ 2026-09-17 12:04 UTC |
 | 3 | **Live fix verified: a full day at ~0% loss** | ⏳ **measure 2026-09-18 on 2026-09-19** (pre-fix baseline 51.8-63.6%/day) |
-| 4 | SDEX loss quantified | ⏳ not started — design ready, can start now |
+| 4 | SDEX loss quantified | ◐ **partition 993: 64.4% of SDEX trades lost** (5.53M → 1.97M); partition 1000 running — see [the note](notes/R-sdex-loss-measurement-design.md#-results--partition-993-2026-07-19-1701--07-23-2101-utc) |
 | 5 | Live-path drops observable | ◐ forced flush alarmed; unresolved-pool swaps still silent |
 | 6 | Repair decision | ⏳ after 3 + 4 + [[0285]] — repair itself is [[0286]] phase 3 |
 | 7 | Phoenix shortfall | ⏳ not started |
