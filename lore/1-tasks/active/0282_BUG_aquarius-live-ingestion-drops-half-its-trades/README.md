@@ -91,6 +91,16 @@ history:
       frontier 68 s behind. Avg duration ~205 → ~776 ms, log volume ~2.3x —
       both inside the cost analysis. Criterion 2 (a full day at ~0% loss) is
       owed: measure 2026-09-18 on 2026-09-19. Pre-fix baseline 51.8-63.6%.
+  - date: 2026-09-17
+    status: active
+    who: okarcz
+    note: >
+      SDEX measured: the live path lost 66.3% of SDEX trades over two sample
+      windows (64.4% Jul 19-23, 68.2% Aug 17-21; 11.35M true vs 3.82M stored),
+      re-derived from the ledger archive locally. Single-trade candles match
+      exactly, nothing is over-counted, close is always right. Decision with
+      the operator: the repair is 0286 phase 3, not a separate SDEX job.
+      0285 also corrected the soroswap/phoenix picture (43.8% / ~12% lost).
 ---
 
 # Aquarius live ingestion drops about half of every day's trades
@@ -108,9 +118,9 @@ writes it whole. No errors, no DLQ, no forced partial flushes. Details in
 | 1 | Mechanism identified | ✅ |
 | 2 | Live fix deployed | ✅ 2026-09-17 12:04 UTC |
 | 3 | **Live fix verified: a full day at ~0% loss** | ⏳ **measure 2026-09-18 on 2026-09-19** (pre-fix baseline 51.8-63.6%/day) |
-| 4 | SDEX loss quantified | ◐ **partition 993: 64.4% of SDEX trades lost** (5.53M → 1.97M); partition 1000 running — see [the note](notes/R-sdex-loss-measurement-design.md#-results--partition-993-2026-07-19-1701--07-23-2101-utc) |
+| 4 | SDEX loss quantified | ✅ **66.3% of SDEX trades lost** (11.35M true → 3.82M stored, two windows) — see [the note](notes/R-sdex-loss-measurement-design.md) |
 | 5 | Live-path drops observable | ◐ forced flush alarmed; unresolved-pool swaps still silent |
-| 6 | Repair decision | ⏳ after 3 + 4 + [[0285]] — repair itself is [[0286]] phase 3 |
+| 6 | Repair decision | ✅ **decided: [[0286]] phase 3** rebuilds SDEX + AMM; AMM live-era months wait for [[0291]] |
 | 7 | Phoenix shortfall | ⏳ not started |
 
 **Next:**
@@ -633,19 +643,23 @@ just re-corrupts. That constraint is real; it simply does not apply to
       ~45-55%; the July ~10% days were written by an accumulating path, and the
       break is [[0064]]'s durable cursor on 2026-07-15/16. ⚠️ This criterion was
       previously ticked with the OPPOSITE answer. See §"Why it did NOT grow".
-- [ ] ⛔ **Whether SDEX is affected is NOT answered** — previously ticked "YES"
-      on 23 contested buckets of 595; that reading was retracted the same day
-      (the rows are byte-identical duplicates, not slices) and the tick was
-      never removed. SDEX remains plausible on the mechanism and **unmeasured**.
-      See §RETRACTED.
-- [ ] SDEX's loss is **quantified**, with an instrument that does not depend on
-      catching duplicates before the merge. 📐 **Design drafted** —
+- [x] **Whether SDEX is affected — YES, measured 2026-09-17.** The 09-14
+      "yes" was retracted because its evidence was duplicates, not slices; the
+      archive re-derivation now settles it properly. See the SDEX note.
+- [x] SDEX's loss is **quantified**, with an instrument that does not depend on
+      catching duplicates before the merge. → **66.3%** of trades over two
+      windows (64.4% / 68.2%). 📐 **Design drafted** —
       [notes/R-sdex-loss-measurement-design.md](notes/R-sdex-loss-measurement-design.md):
       re-derive truth from the ledger archive into a LOCAL ClickHouse and diff
       against prod, over archive partitions 993 and 1000 (~13% of the live era).
       Decision rule is recorded there **before** the run. Not blocked by the
       live fix — run it in parallel.
-- [ ] A decision is recorded on repairing the historical estate, with a range.
+- [x] A decision is recorded on repairing the historical estate, with a range.
+      → 2026-09-17: **[[0286]] phase 3** re-ingests the whole chain, which
+      repairs SDEX and AMM. The damaged range is **2026-07-06 → the phase-1
+      deploy** (07-06 → 07-15 partly, written while the cursor kept resetting;
+      live-era fully). AMM months from 2026-07 need [[0291]] first. Expected
+      SDEX `trade_count` rise in the live era: ~2.8-3.1x.
 - [ ] Live-path drops become observable — a dropped swap leaves a trace
       somewhere, rather than nothing at all. ◐ **Half covered by #313:** the one
       path that still loses data after the fix — a forced partial flush — is
@@ -653,7 +667,9 @@ just re-corrupts. That constraint is real; it simply does not apply to
       the live path cannot resolve. Only the backfill writes
       `prices.unresolved_pools`, so live leaves no trace at all. Close to
       [[0285]]; fold it in there or spawn it — not decided.
-- [ ] Phoenix's parallel shortfall is measured and either folded in or spawned.
+- [x] Phoenix's parallel shortfall is measured and either folded in or spawned.
+      → ~12% lost (≈4,194 true swaps vs 3,675 stored, live era), via [[0285]]'s
+      corrected count; soroswap 43.8%. Folded in: same mechanism, same repair.
 
 ## Notes
 
@@ -664,9 +680,8 @@ just re-corrupts. That constraint is real; it simply does not apply to
   is what made this measurable.
 - ✅ **PR #313 merged (`2cb5b2b`) and deployed 2026-09-17 12:04 UTC.** The
   full-day verification is owed on 2026-09-19. See §"DEPLOY RUNBOOK — PR #313".
-- ⚠️ **This task's TITLE still says "and SDEX is affected too"**, which was
-  retracted on 2026-09-14. It is what the board renders, so it is worth
-  correcting deliberately rather than silently.
+- ✅ **The TITLE's "and SDEX is affected too" is now TRUE** — retracted
+  2026-09-14 for bad evidence, measured 2026-09-17 at 66.3%. No change needed.
 
 # 📕 DEPLOY RUNBOOK — PR #313
 

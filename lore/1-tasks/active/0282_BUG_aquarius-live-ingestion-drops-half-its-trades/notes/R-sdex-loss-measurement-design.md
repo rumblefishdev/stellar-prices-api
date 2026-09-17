@@ -216,3 +216,52 @@ most SDEX *trades* sit in busy candles, and those lost the most.
 ⏳ Held until partition 1000 confirms. Note for the scoping: [[0286]] phase 3
 already re-ingests the whole chain from the archive, which rebuilds SDEX too —
 so the "own task" may be that same run rather than a separate one.
+
+---
+
+# 📊 RESULTS — partition 1000 (2026-08-17 19:41 → 08-21 23:54 UTC) and the verdict
+
+Same method, same code, run finished 13:59 UTC 2026-09-17.
+
+| | truth (archive) | production | lost |
+| --- | --- | --- | --- |
+| trades | **5,818,584** | **1,850,290** | **3,968,294 (68.2%)** |
+| candles | 1,282,341 | 1,282,341 | 0 |
+
+| truth trades in candle | candles | exact | short | over | trades kept | `open` right (damaged) | `close` right (damaged) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 794,704 | 786,962 | 0 | 0 | 99.0%* | — | — |
+| 2-3 | 257,888 | 41,734 | 211,734 | 0 | 51.0% | 15.0% | **100%** |
+| 4-10 | 141,849 | 5,841 | 129,770 | 0 | 28.3% | 13.7% | **100%** |
+| 11+ | 87,900 | 601 | 77,263 | 0 | 12.3% | 3.4% | **100%** |
+
+\* All 28,436 candles without a prod match (every class) touch a colliding
+asset id ([[0139]]) — the exclusion artefact again, not loss.
+
+## Both samples together
+
+| sample | truth | prod | lost | truth ÷ prod |
+| --- | --- | --- | --- | --- |
+| 993 (Jul 19-23) | 5,528,759 | 1,970,460 | 64.4% | 2.81x |
+| 1000 (Aug 17-21) | 5,818,584 | 1,850,290 | 68.2% | 3.14x |
+| **total** | **11,347,343** | **3,820,750** | **66.3%** | **2.97x** |
+
+Same shape in both, same checks passing in both: no single-trade candle is
+short, nothing is over-counted, `close` is always right.
+
+## 🔒 Verdict against the rule written 2026-09-15
+
+**> 5% → full SDEX repair.** Decided 2026-09-17 with the operator: **the repair
+is [[0286]] phase 3**, which rebuilds SDEX from the archive in the same run as
+everything else. No separate SDEX job.
+
+**Expectation for phase 3's verification** (live-era months, from 2026-07-16):
+SDEX `trade_count` rises by roughly **2.8-3.1x**, candle counts unchanged,
+`close` unchanged; `open`/`high`/`low`/volume move.
+
+## Kept for re-use
+
+The local Docker project `sdexloss` (volume `sdexloss_clickhouse-data`) holds
+the rebuilt truth for both windows, and `.temp/sdex-loss/` the production
+exports. Re-running the comparison after phase 3 against the same local truth
+is the cheapest verification there is.
