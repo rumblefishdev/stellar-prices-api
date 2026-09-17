@@ -95,6 +95,39 @@ history:
 
 # Aquarius live ingestion drops about half of every day's trades
 
+## 📊 STATUS — 2026-09-17 ~12:15 UTC · FIX DEPLOYED, full-day check owed
+
+**The live fix is in production.** PR #313 was merged as `2cb5b2b` and deployed
+at **12:04:20 UTC** (Observability, then Compute). In the first minutes it
+behaves as designed: each run holds back the unfinished minute, then one run
+writes it whole. No errors, no DLQ, no forced partial flushes. Details in
+§"DEPLOY RUNBOOK — PR #313".
+
+| # | work | state |
+| --- | --- | --- |
+| 1 | Mechanism identified | ✅ |
+| 2 | Live fix deployed | ✅ 2026-09-17 12:04 UTC |
+| 3 | **Live fix verified: a full day at ~0% loss** | ⏳ **measure 2026-09-18 on 2026-09-19** (pre-fix baseline 51.8-63.6%/day) |
+| 4 | SDEX loss quantified | ⏳ not started — design ready, can start now |
+| 5 | Live-path drops observable | ◐ forced flush alarmed; unresolved-pool swaps still silent |
+| 6 | Repair decision | ⏳ after 3 + 4 + [[0285]] — repair itself is [[0286]] phase 3 |
+| 7 | Phoenix shortfall | ⏳ not started |
+
+**Next:**
+
+1. **2026-09-19:** run step 8 of the runbook for 2026-09-18.
+2. **In parallel, now:** SDEX measurement
+   ([notes/R-sdex-loss-measurement-design.md](notes/R-sdex-loss-measurement-design.md))
+   and [[0285]].
+3. [[0286]]'s PR #320 can now rebase onto `develop`. Its owner was told #313 goes
+   first. Also passed on: #320's offer-lookup counters over-count after #313
+   (held-back ledgers are re-read), 0285 must precede its phase 3, and one
+   phase-3 criterion must expect *higher* live-era volumes.
+
+⚠️ **For whoever reads the candles:** the first minute after 12:04 UTC was
+written from its tail only (the old code left the cursor mid-minute). Expected
+and one-off.
+
 ## Summary
 
 `prices.price_ohlcv_1m` records roughly **half** the Aquarius trades that exist
@@ -379,10 +412,11 @@ invocations in durable state, or move `1m` to a summing engine so concurrent
 partial writes add. The last changes the table contract and needs its own
 decision.
 
-### ⏳ PR #313 carries the fix — review items closed, NOT merged, NOT deployed
+### ✅ PR #313 carries the fix — MERGED and DEPLOYED 2026-09-17
 
-**State 2026-09-17:** head `cc5c9b8`, `develop` merged in, all four CI checks
-green on it. Nothing merged and nothing deployed — both wait on the operator.
+**State 2026-09-17:** head `cc5c9b8` (CI green) squash-merged as `2cb5b2b` at
+11:55 UTC, deployed 12:04 UTC. See §"DEPLOY RUNBOOK — PR #313" for the
+verification record.
 
 What changed since the review:
 
@@ -422,9 +456,9 @@ What changed since the review:
   nearly every run (~15k/day) for no signal. See the observability criterion
   below for where the real gap is.
 
-### 🔜 Before merging / deploying #313
+### ✅ Before merging / deploying #313 — all done 2026-09-17
 
-1. **Merge order with [[0286]]'s PR #320.** Both change
+1. ✅ **Merge order with [[0286]]'s PR #320** (agreed with its owner). Both change
    `packages/prices-ledger-processor/src/reconcile.rs`,
    `packages/prices-ingest-core/src/lib.rs` and `infra/src/lib/types.ts`, and
    #320 lists "0282 deployed" as a precondition. So **#313 merges first and
@@ -561,7 +595,7 @@ rewriting them, and it gates the repair decision for **98% of the estate**
 
 | work | depends on | can start |
 | --- | --- | --- |
-| Live fix (PR #313) | ~~[[0277]]'s Protocol 28 crossing~~ ✅ done; merge before [[0286]]'s #320 | **now** — operator's merge + deploy |
+| Live fix (PR #313) | ~~[[0277]]'s Protocol 28 crossing~~ ✅ | ✅ **deployed 2026-09-17**; verify 2026-09-19 |
 | **SDEX quantification** | **nothing** | **now** — see [notes/R-sdex-loss-measurement-design.md](notes/R-sdex-loss-measurement-design.md) |
 | [[0285]] classification | nothing | now |
 | Repair scope decision | SDEX number + 0285 classification | after both |
@@ -591,7 +625,9 @@ just re-corrupts. That constraint is real; it simply does not apply to
 - [x] **The mechanism is identified** — per-bucket RMT write contention, and
       the pool-set vs sample question is answered: **neither**. See §ROOT CAUSE.
 - [ ] The live path is fixed and verified by the same raw-vs-stored comparison
-      running at ~0% loss for a full day.
+      running at ~0% loss for a full day. ◐ **Fixed and deployed 2026-09-17
+      12:04 UTC; the full-day measurement (2026-09-18) is owed on 2026-09-19.**
+      Pre-fix baseline: 63.6% / 60.1% / 51.8% lost on 09-15 / 09-16 / 09-17.
 - [x] ⛔ **The "~10% → ~50% growth" question is answered by DISSOLVING it** —
       re-measured 2026-09-15, there was no growth. Every live-processed day is
       ~45-55%; the July ~10% days were written by an accumulating path, and the
@@ -626,8 +662,8 @@ just re-corrupts. That constraint is real; it simply does not apply to
   move aquarius by +27% in its window. 0101 is sequenced behind this decision.
 - The reprice tool is **not** implicated and needs no change — its correctness
   is what made this measurable.
-- ⏳ **PR #313 is ready, not merged, not deployed** (2026-09-17, CI green on
-  `cc5c9b8`). See §"PR #313 carries the fix".
+- ✅ **PR #313 merged (`2cb5b2b`) and deployed 2026-09-17 12:04 UTC.** The
+  full-day verification is owed on 2026-09-19. See §"DEPLOY RUNBOOK — PR #313".
 - ⚠️ **This task's TITLE still says "and SDEX is affected too"**, which was
   retracted on 2026-09-14. It is what the board renders, so it is worth
   correcting deliberately rather than silently.
