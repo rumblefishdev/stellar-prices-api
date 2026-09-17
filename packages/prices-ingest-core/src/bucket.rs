@@ -244,10 +244,14 @@ fn finalise(bucket: &mut OpenBucket) -> OhlcvCandle {
             pf_price_volume = clamp.add(pf_price_volume, notional);
             last = f;
         }
-        bucket.candle.open = clamp.value(first.price);
-        bucket.candle.close = clamp.value(last.price);
-        bucket.candle.high = clamp.value(high);
-        bucket.candle.low = clamp.value(low);
+        // ⚠️ NOT clamped (review IN-03). The filter above already refused every
+        // price outside the column's domain, so a clamp here could not fire —
+        // and one that cannot fire still sets `clamp.fired` in a reader's mind,
+        // which is what made the WARN below claim more than it meant.
+        bucket.candle.open = first.price;
+        bucket.candle.close = last.price;
+        bucket.candle.high = high;
+        bucket.candle.low = low;
         bucket.candle.pf_trade_count = pf_trade_count;
         bucket.candle.pf_volume = pf_volume;
         bucket.candle.pf_price_volume = pf_price_volume;
@@ -259,14 +263,23 @@ fn finalise(bucket: &mut OpenBucket) -> OhlcvCandle {
         // downstream — S3's pf_vwap and its divergence flag would be computed
         // from a fabricated number — so say which candle it happened to
         // (task 0286 WR-05).
+        //
+        // ⚠️ VOLUMES only, now (review IN-03). The prices above are no longer
+        // clamped at all: a price outside the column domain forms no price and
+        // never reaches them. What can still saturate is a volume sum, the
+        // `vwap` quotient, and `pf_volume` / `pf_price_volume` — all of which
+        // are measurements of something that happened, so saturating them is
+        // the right trade and saying so is the whole of this WARN.
         warn!(
             minute_start = bucket.candle.minute_start,
             asset_id = bucket.candle.asset_id,
             quote_asset_id = bucket.candle.quote_asset_id,
             trade_count = bucket.candle.trade_count,
             "candle value saturated at the Decimal(38, 14) column domain — a \
-             price or volume of this minute exceeds what the column can hold, \
-             and the written value is clamped, not measured"
+             VOLUME of this minute (volume_base / volume_quote / vwap / \
+             pf_volume / pf_price_volume) exceeds what the column can hold, and \
+             the written value is clamped, not measured. The price fields are \
+             unaffected: a price outside the domain forms no price"
         );
     }
 
