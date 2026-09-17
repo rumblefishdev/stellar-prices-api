@@ -113,6 +113,18 @@ pub struct RunAccumulators {
     sdex: CandleAccumulator,
     /// One accumulator per AMM venue source (phoenix / soroswap / aquarius).
     amm: HashMap<&'static str, CandleAccumulator>,
+    /// Resume markers for the ledgers of the minute still OPEN (review WR-01).
+    ///
+    /// A row in `backfill_sdex_ledgers` means "this ledger's fills are already
+    /// in `price_ohlcv_1m`", and a re-run skips every ledger it finds there. The
+    /// ledgers of the open minute do not satisfy that yet: their fills are in
+    /// these accumulators, in memory. Marking them anyway used to mean that an
+    /// interrupt lost the whole minute — the usual case is that ALL of a
+    /// minute's ~12 ledgers sit in the tail of one partition, so the re-run
+    /// skips every one of them and no row is ever written.
+    held_markers: Vec<u32>,
+    /// The candle-minute `held_markers` belong to; `None` when nothing is held.
+    held_minute: Option<u32>,
 }
 
 impl RunAccumulators {
@@ -138,6 +150,42 @@ impl RunAccumulators {
         }
         out.retain(|(_, candles)| !candles.is_empty());
         out
+    }
+
+    /// The resume markers a partition end may write now, given the ledgers it
+    /// indexed (`(sequence, candle-minute)`, in order) and the minute left open
+    /// behind them (the last indexed ledger's, `None` when it indexed nothing).
+    ///
+    /// Everything strictly older than the open minute has been written by
+    /// [`RunAccumulators::drain_closed`] already and is due; the rest is held
+    /// until a later partition closes that minute, or until the run ends
+    /// ([`RunAccumulators::take_held_markers`]).
+    fn release_markers(&mut self, indexed: &[(u32, u32)], open_minute: Option<u32>) -> Vec<u32> {
+        let Some(open) = open_minute else {
+            // Nothing was indexed here, so nothing was closed here either.
+            return Vec::new();
+        };
+        let mut due = Vec::new();
+        if self.held_minute.is_some_and(|held| held < open) {
+            due.append(&mut self.held_markers);
+            self.held_minute = None;
+        }
+        for (seq, minute) in indexed {
+            if *minute < open {
+                due.push(*seq);
+            } else {
+                self.held_markers.push(*seq);
+                self.held_minute = Some(*minute);
+            }
+        }
+        due
+    }
+
+    /// Every held marker, because the run is over: the open minute has just been
+    /// (or is about to be) written, so its ledgers really are in ClickHouse.
+    fn take_held_markers(&mut self) -> Vec<u32> {
+        self.held_minute = None;
+        std::mem::take(&mut self.held_markers)
     }
 
     /// Everything still open, per source. The ONLY caller that may lose
@@ -192,6 +240,11 @@ pub async fn flush_open_minutes(
         sink.write_candles(&candles, source).await?;
         totals.note_candles(&candles, source);
     }
+    // The markers held back for that minute are due now — and only now (review
+    // WR-01). Written after the candles, so an interrupt in between costs a
+    // re-read, never a row.
+    sink.write_completed_ledgers(&accs.take_held_markers())
+        .await?;
     Ok(())
 }
 
@@ -242,7 +295,14 @@ pub async fn index_partition(
     // ([`RunAccumulators`]): the minute straddling the boundary is carried into
     // the next partition instead of being written twice.
     let mut oracle_buf: Vec<OracleSample> = Vec::new();
-    let mut ledgers_in_partition: Vec<u32> = Vec::new();
+    // `(sequence, candle-minute)` per indexed ledger — the minute decides
+    // whether the ledger's resume marker may be written at this partition end
+    // (review WR-01).
+    let mut ledgers_in_partition: Vec<(u32, u32)> = Vec::new();
+    // The minute the last processed ledger closed in. A ledger whose file
+    // carries no `LedgerCloseMeta` of its own inherits it: it contributed no
+    // fill, so it belongs to whatever minute is open around it.
+    let mut last_minute: u32 = 0;
 
     for seq in first..=last {
         if completed.contains(&seq) {
@@ -296,6 +356,7 @@ pub async fn index_partition(
             }
 
             let current_minute = ledger_minute(lcm);
+            last_minute = current_minute;
             for (source, candles) in accs.drain_closed(current_minute) {
                 sink.write_candles(&candles, source).await?;
                 stats.note_candles(&candles, source);
@@ -306,7 +367,7 @@ pub async fn index_partition(
             }
         }
 
-        ledgers_in_partition.push(seq);
+        ledgers_in_partition.push((seq, last_minute));
         stats.indexed += 1;
     }
 
@@ -318,17 +379,30 @@ pub async fn index_partition(
         sink.write_oracle(&oracle_buf).await?;
     }
 
-    // ⚠️ The resume markers are written for the WHOLE partition, including the
-    // ledgers whose minute is still open and therefore not yet in ClickHouse
-    // (task 0286 S5). A crash between here and the run's final
-    // [`flush_open_minutes`] leaves those fills unwritten while a re-run skips
-    // their ledgers — the boundary minute then reads short rather than wrong.
-    // The trade is deliberate: the alternative, writing the partial minute here
-    // as the code did before, REPLACES a priced row with a dust-only one under
-    // `ReplacingMergeTree`, which is silent and unrecoverable without a
-    // re-ingest. Recovery for the crash case is documented as a hard gate in
-    // `docs/runbooks/0286-candle-definitions-rollout.md`.
-    sink.write_completed_ledgers(&ledgers_in_partition).await?;
+    // Resume markers, for the ledgers whose candles are actually in ClickHouse
+    // (review WR-01). A marker says "skip this ledger on the next run", so a
+    // ledger of the still-OPEN minute must NOT carry one: its fills are in
+    // `accs`, in memory, and an interrupt here would lose that minute entirely
+    // — a minute is ~12 ledgers and they are usually all in one partition tail,
+    // so the re-run would skip every one of them and write no row at all.
+    // Those markers are held in the run accumulators and released by whichever
+    // partition closes the minute, or by `flush_open_minutes` at the end of the
+    // run. The remaining exposure is one re-read of the open minute's ledgers.
+    let due_markers = match end {
+        PartitionEnd::Carry => accs.release_markers(
+            &ledgers_in_partition,
+            ledgers_in_partition.last().map(|(_, minute)| *minute),
+        ),
+        // The run ends here: `candles_at_partition_end` above drained every
+        // open minute, so everything held and everything indexed is in the
+        // table.
+        PartitionEnd::Drain => {
+            let mut due = accs.take_held_markers();
+            due.extend(ledgers_in_partition.iter().map(|(seq, _)| *seq));
+            due
+        }
+    };
+    sink.write_completed_ledgers(&due_markers).await?;
 
     stats.wall_clock = wall_start.elapsed();
     let offer_lookups = offer_lookup_counts().since(offer_lookups_before);
@@ -492,5 +566,73 @@ mod tests {
         assert_eq!(drained[0].1.len(), 1);
         assert_eq!(drained[0].1[0].trade_count, 2);
         assert_eq!(drained[0].1[0].close, Decimal::from(4));
+    }
+
+    /// Review WR-01: a resume marker says "this ledger's fills are in
+    /// ClickHouse". A ledger of the still-OPEN minute has not been written yet,
+    /// so its marker is held back until the minute closes — otherwise an
+    /// interrupt loses that minute entirely: the accumulator dies with the
+    /// process and the re-run skips those ledgers on their markers.
+    #[test]
+    fn a_marker_is_held_until_its_ledgers_minute_closes() {
+        let mut accs = RunAccumulators::new();
+        let m = minute_of(MINUTE_M);
+        let m_next = minute_of(MINUTE_M_PLUS_1);
+
+        // Partition A ends inside minute M: 98 and 99 closed in M-1, 100 is in
+        // the minute still open.
+        let ready = accs.release_markers(&[(98, m - 60), (99, m - 60), (100, m)], Some(m));
+        assert_eq!(
+            ready,
+            vec![98, 99],
+            "only the closed minutes are marked done"
+        );
+
+        // Partition B ends in the NEXT minute, so M is closed and written now.
+        let ready = accs.release_markers(&[(101, m), (102, m_next)], Some(m_next));
+        assert_eq!(
+            ready,
+            vec![100, 101],
+            "the held marker is released with the rest of its minute, and the \
+             new open minute holds 102 back"
+        );
+    }
+
+    /// A partition that indexed nothing (every ledger already completed, or the
+    /// whole folder skipped) closes no minute, so it releases nothing.
+    #[test]
+    fn a_partition_that_indexed_nothing_releases_nothing() {
+        let mut accs = RunAccumulators::new();
+        let m = minute_of(MINUTE_M);
+
+        assert!(accs.release_markers(&[(100, m)], Some(m)).is_empty());
+        assert!(
+            accs.release_markers(&[], None).is_empty(),
+            "no ledger indexed here means no minute closed here"
+        );
+        assert_eq!(
+            accs.take_held_markers(),
+            vec![100],
+            "and the marker is still held, not lost"
+        );
+    }
+
+    /// The run ends — by `PartitionEnd::Drain` or by `flush_open_minutes` after
+    /// an S3-skipped last partition — so every open minute is written and every
+    /// held marker becomes due.
+    #[test]
+    fn the_end_of_a_run_releases_every_held_marker() {
+        let mut accs = RunAccumulators::new();
+        let m = minute_of(MINUTE_M);
+
+        assert!(
+            accs.release_markers(&[(100, m), (101, m)], Some(m))
+                .is_empty()
+        );
+        assert_eq!(accs.take_held_markers(), vec![100, 101]);
+        assert!(
+            accs.take_held_markers().is_empty(),
+            "taking twice does not write a marker twice"
+        );
     }
 }
