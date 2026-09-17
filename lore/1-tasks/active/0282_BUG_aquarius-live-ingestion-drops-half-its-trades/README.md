@@ -619,3 +619,170 @@ just re-corrupts. That constraint is real; it simply does not apply to
 - ⚠️ **This task's TITLE still says "and SDEX is affected too"**, which was
   retracted on 2026-09-14. It is what the board renders, so it is worth
   correcting deliberately rather than silently.
+
+# 📕 DEPLOY RUNBOOK — PR #313
+
+Written 2026-09-17. The operator merges and deploys; the read-only checks can be
+run by anyone with `soroban-readonly` and `dev_read`. Generic procedure:
+[`docs/runbooks/deploy-ledger-processor.md`](../../../../docs/runbooks/deploy-ledger-processor.md).
+This section carries only what is specific to #313.
+
+**Order is fixed: merge → build → diff both → Observability → Compute →
+verify.** The alarm watches a metric only the new binary emits and reads
+no-data as OK, so landing it first is harmless. The reverse leaves a window in
+which the escape hatch can fire unseen.
+
+## Step 0 — [GitHub, or local machine with `gh`] merge #313
+
+```bash
+gh pr merge 313 --squash
+```
+
+Squash, like #314. Check the squash message carries no AI co-author trailer.
+Tell [[0286]]'s owner it is in, so #320 can rebase.
+
+## Step 1 — [local machine, repo root] preflight
+
+```bash
+export AWS_PROFILE=soroban-admin
+export AWS_REGION=eu-central-1
+git checkout develop && git pull --ff-only
+git log --oneline -1                  # expect the #313 squash commit
+npm run xdr:verify-protocol-gap       # expect: current (pinned 28 | mainnet 28)
+```
+
+## Step 2 — [local machine, repo root] build the bootstrap
+
+🔴 Skipping this deploys the OLD binary with a green result.
+
+```bash
+cargo lambda build -p prices-ledger-processor --release --arm64 --features lambda
+ls -l target/lambda/prices-ledger-processor/bootstrap   # mtime = seconds ago
+file target/lambda/prices-ledger-processor/bootstrap    # ELF 64-bit ... ARM aarch64
+```
+
+## Step 3 — [local machine, `infra/`] diff BOTH stacks by name
+
+```bash
+cd infra
+npx nx build infra
+npx cdk --app "node dist/bin/production.js" diff Prices-production-Observability --method=template --strict
+npx cdk --app "node dist/bin/production.js" diff Prices-production-Compute --method=template --strict
+```
+
+**Expected — previewed 2026-09-17 from the PR branch with `soroban-readonly`:**
+
+| stack | expected changes | anything else → |
+| --- | --- | --- |
+| Observability | `[+]` `LedgerProcessorForcedPartialFlushAlarm`; `[~]` `OverviewDashboard`; `DashboardAlarmCount` 53 → 54; many `[~]` `AlarmDescription` that only turn `?` into `—` / `≥` / `§` / `→` / `×` | **stop** |
+| Compute | `[~]` `LedgerProcessorFunction` only: `Code.S3Key` and `Environment.Variables.MAX_ITERATIONS` 16 → 32 | **stop** |
+
+The `?` → `—` edits are cosmetic: an earlier deploy was synthesised from a
+shell with a different locale (same as [[0277]]). No other Lambda in the
+Compute stack showed a change, so the local `target/lambda/*` for them matched
+production at preview time — re-check that it still does.
+
+## Step 4 — [local machine, `infra/`] deploy Observability FIRST
+
+```bash
+make deploy-production-observability
+```
+
+Then check (read-only): `prices-production-ledger-processor-forced-partial-flush`
+exists and is `OK` or `INSUFFICIENT_DATA`.
+
+## Step 5 — [local machine, `infra/`] deploy Compute
+
+```bash
+make deploy-production-compute     # NOT make deploy-production (all stacks)
+```
+
+## Step 6 — [local machine or read-only] prove the running binary changed
+
+```bash
+aws lambda get-function-configuration \
+  --function-name prices-production-ledger-processor \
+  --query '[LastModified,Architectures[0],CodeSha256,Environment.Variables.MAX_ITERATIONS]' --output text
+```
+
+`LastModified` seconds ago, `arm64`, `MAX_ITERATIONS` = `32`. **Record the
+`CodeSha256` here.**
+
+## Step 7 — [read-only, first ~30 min] the new loop is behaving
+
+- **Logs** (`/aws/lambda/prices-production-ledger-processor`): most runs log
+  *"run is entirely inside one open minute — holding back, cursor unmoved"*;
+  about one run a minute logs *"reconcile run complete"* with `held_back` ≥ 0.
+  No *"iteration budget exhausted"* WARN.
+- **Cursor** (`prices.ingest_cursor FINAL`) moves roughly once a minute and
+  stays at the tip.
+- **Frontier** — `behind_sec` for sdex/aquarius/soroswap ≤ ~80 s (was ~50 s).
+  That is the designed latency, not a stall. `rollup-freshness-1m` fires only
+  at 900 s.
+- **DLQ** `prices-ingest-dlq-production` = 0, Lambda `Errors` = 0,
+  `Prices/Ingest ForcedPartialFlushes` has no datapoints.
+- ⚠️ **The first minute after the deploy is written from its tail only** — the
+  old code left the cursor mid-minute. Expected; self-heals from the next
+  minute. Do not read it as the fix failing.
+
+## Step 8 — [prod CH, `dev_read`] the acceptance measurement, one full day
+
+Run on the day AFTER the first full UTC day on the new binary. Target: `pct_lost`
+≈ 0 (criterion 2). Adjust `d_from` / `d_to`.
+
+**Baseline before the fix** (measured 2026-09-17 ~11:30 UTC, the last row is
+a partial day):
+
+| day | raw | stored | lost | % lost |
+| --- | --- | --- | --- | --- |
+| 2026-09-15 | 30,680 | 11,177 | 19,503 | **63.6** |
+| 2026-09-16 | 21,183 | 8,453 | 12,730 | **60.1** |
+| 2026-09-17 | 6,988 | 3,369 | 3,619 | **51.8** |
+
+```sql
+WITH
+  toDate('2026-09-15') AS d_from,
+  toDate('2026-09-17') AS d_to,
+  pools AS (
+    SELECT c.id AS cid
+    FROM default.soroban_contracts AS c
+    WHERE c.contract_id IN (SELECT contract_id FROM prices.pool_registry FINAL WHERE venue = 'aquarius')
+  ),
+  days AS (
+    SELECT sequence AS seq, toDate(closed_at) AS day
+    FROM default.ledgers
+    WHERE toDate(closed_at) BETWEEN d_from AND d_to
+  ),
+  raw AS (
+    SELECT d.day, count() AS raw_trades
+    FROM default.soroban_events AS e
+    INNER JOIN days AS d ON d.seq = e.ledger_sequence
+    WHERE e.signature = 'trade'
+      AND e.contract_id IN (SELECT cid FROM pools)
+      AND e.ledger_sequence BETWEEN (SELECT min(seq) FROM days) AND (SELECT max(seq) FROM days)
+    GROUP BY d.day
+  ),
+  stored AS (
+    SELECT toDate(timestamp) AS day, sum(trade_count) AS stored_trades
+    FROM prices.price_ohlcv_1m FINAL
+    WHERE source = 'aquarius' AND toDate(timestamp) BETWEEN d_from AND d_to
+    GROUP BY day
+  )
+SELECT r.day, r.raw_trades, s.stored_trades,
+       r.raw_trades - s.stored_trades AS lost,
+       round(100 * (r.raw_trades - s.stored_trades) / r.raw_trades, 1) AS pct_lost
+FROM raw AS r
+LEFT JOIN stored AS s ON s.day = r.day
+ORDER BY r.day
+FORMAT PrettyCompact
+```
+
+`raw` counts `trade` events only from contracts in `prices.pool_registry`,
+which [[0285]] shows does not match what actually trades. So a small residual
+(either sign) after the fix is a registry question, not this defect.
+
+## Rollback
+
+Check out the commit before the #313 squash, rerun steps 2, 3 and 5.
+Redeploying Compute also restores `MAX_ITERATIONS=16`. The Observability alarm
+can stay — without the new binary it simply never receives data.
