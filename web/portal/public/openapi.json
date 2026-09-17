@@ -989,7 +989,7 @@
           },
           "vwap": {
             "type": ["string", "null"],
-            "description": "Volume-weighted average price of the bucket, in `base_currency`, over every trade it holds — including the ones too small to form a price. `pf_vwap` is the same mean with those left out. `null` when the bucket has no price."
+            "description": "Volume-weighted average price of the bucket, in `base_currency`, over the trades it holds — including the ones too small to form a price. `pf_vwap` is the same mean with those left out. `null` when the bucket has no price.\n\nWHICH trades it weighs depends on the denomination, so the two can differ on a bucket that holds a source with no usable price. With `base_currency=XLM` it is every row of the bucket, as stored. With `USD` it is every row that has a usable rate to convert it with — a row whose own price is below the precision floor, or that has no USD value yet, cannot be restated in USD and is left out of the mean rather than counted at zero.\n\nBounded by the published `low` and `high` so the response stays self-consistent. Those come from the price-forming trades only, so on a bucket where the trades that formed no price carry most of the volume the raw mean falls outside that range and the value reported is the nearer bound. Compare it with `pf_vwap` when the difference matters."
           }
         }
       },
