@@ -270,12 +270,18 @@ ALTER TABLE prices.price_ohlcv_15m ATTACH PARTITION 202609
   FROM '/var/lib/clickhouse/shadow/rollout_0286_prices_price_ohlcv_15m_202609/';
 ```
 
-`price_ohlcv_1M` rolls back differently, because step 5c truncated it whole
-rather than writing over one partition: DROP nothing, and ATTACH EVERY frozen
-partition back.
+`price_ohlcv_1M` rolls back whole rather than per partition, because step 5c
+truncated it whole and then re-rolled it: by the time anyone rolls back the
+table is FULL of new-definition rows, so ATTACHing the frozen partitions on top
+would put two rows per `(timestamp, asset, quote, source)` into a
+`ReplacingMergeTree(version)` and let `sum(version)` pick between them
+arbitrarily. TRUNCATE first, then ATTACH every frozen partition back.
 
 ```sql
--- Per partition listed by section 3's enumeration for price_ohlcv_1M.
+-- 1. Remove what the 5c re-roll wrote (5c truncated the table; truncate it again).
+TRUNCATE TABLE prices.price_ohlcv_1M;
+
+-- 2. Per partition listed by section 3's enumeration for price_ohlcv_1M.
 ALTER TABLE prices.price_ohlcv_1M ATTACH PARTITION 202609
   FROM '/var/lib/clickhouse/shadow/rollout_0286_prices_price_ohlcv_1M_202609/';
 ```
