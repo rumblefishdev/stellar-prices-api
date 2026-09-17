@@ -104,12 +104,33 @@ Enumerate what to freeze rather than typing it out:
 SELECT table, partition, formatReadableSize(sum(bytes_on_disk)) AS size
 FROM system.parts
 WHERE database = 'prices' AND active
-  AND table IN ('price_ohlcv_15m','price_ohlcv_1h','price_ohlcv_4h',
-                'price_ohlcv_1d','price_ohlcv_1w','price_ohlcv_1M')
-  AND toDate(concat(substring(partition, 1, 4), '-',
-                    substring(partition, 5, 2), '-01')) >= toStartOfMonth(now() - INTERVAL 400 DAY)
+  AND (
+        -- ⚠️ price_ohlcv_1M is the one table step 5c TRUNCATES WHOLE, so it is
+        -- frozen WHOLE. Filtering it to the 400-day window — as this query did
+        -- until the S5 review — snapshots ~14 months and then destroys ten
+        -- years of monthly candles that section 6 cannot ATTACH back.
+        table = 'price_ohlcv_1M'
+        OR ( table IN ('price_ohlcv_15m','price_ohlcv_1h','price_ohlcv_4h',
+                       'price_ohlcv_1d','price_ohlcv_1w')
+             AND toDate(concat(substring(partition, 1, 4), '-',
+                               substring(partition, 5, 2), '-01'))
+                 >= toStartOfMonth(now() - INTERVAL 400 DAY) )
+      )
 GROUP BY table, partition
 ORDER BY table, partition;
+```
+
+Sanity-check that the month really was frozen whole before you go on — the two
+counts must be equal:
+
+```sql
+SELECT uniqExact(partition) AS partitions_1M FROM system.parts
+WHERE database = 'prices' AND active AND table = 'price_ohlcv_1M';
+```
+
+```bash
+ssh … 'docker exec app-clickhouse-1 ls /var/lib/clickhouse/shadow/ \
+        | grep -c rollout_0286_prices_price_ohlcv_1M_'
 ```
 
 The parts land under
@@ -169,25 +190,56 @@ DROP VIEW prices.mv_ohlcv_1w_to_1M;
 present in `price_ohlcv_1M` must be covered by `price_ohlcv_1d`, or the TRUNCATE
 throws away months the re-roll cannot rebuild.
 
+⚠️ **Coverage, not presence.** A gate of `count() > 0` passes a month whose 1d
+table holds a single day: the re-roll then rebuilds that month from one day —
+volume, `trade_count` and the pf sums all short — and, since 5c has already
+truncated, there is nothing left to compare it against. Cleanup (task 0200,
+disabled since 2026-07-20) dropped whole 1m months and the 0114/0212 gaps are
+real, so partial months exist. The gate below compares the two tables on the
+population each month actually carries: the set of `(asset, quote, source)`
+series, and the day count against the month's own length.
+
 ```sql
-SELECT m.month, m.rows_1M, d.days
+SELECT
+    m.month,
+    m.rows_1M,
+    m.series_1M,
+    d.days,
+    d.series_1d,
+    -- the month's own length, clamped for the month in progress
+    if(m.month = toStartOfMonth(now()),
+       toDayOfMonth(now()),
+       toDayOfMonth(toLastDayOfMonth(m.month))) AS days_expected
 FROM (
-    SELECT toStartOfMonth(timestamp) AS month, count() AS rows_1M
+    SELECT toStartOfMonth(timestamp) AS month,
+           count() AS rows_1M,
+           uniqExact((asset_id, quote_asset_id, source)) AS series_1M
     FROM prices.price_ohlcv_1M FINAL GROUP BY month
 ) AS m
 LEFT JOIN (
-    SELECT toStartOfMonth(timestamp) AS month, count() AS days
+    SELECT toStartOfMonth(timestamp) AS month,
+           uniqExact(toDate(timestamp)) AS days,
+           uniqExact((asset_id, quote_asset_id, source)) AS series_1d
     FROM prices.price_ohlcv_1d FINAL GROUP BY month
 ) AS d USING (month)
-WHERE d.days = 0 OR isNull(d.days)
+WHERE d.days = 0 OR isNull(d.days)      -- no 1d at all
+   OR d.series_1d < m.series_1M         -- series the month has and the days do not
+   OR d.days < days_expected            -- a short month: the re-roll would truncate it
 ORDER BY m.month;
 ```
 
 **Zero rows, or STOP.** A non-empty result means `price_ohlcv_1d` does not cover
-some month the 1M table holds. Do not truncate. Either pre-roll the missing days
-first (`schema/preroll.sql`, or `preroll-live-gap.sql` for a bounded range) or
+some month the 1M table holds — at all, or not for every series, or not for
+every day. Do not truncate. Either pre-roll the missing days first
+(`schema/preroll.sql`, or `preroll-live-gap.sql` for a bounded range) or
 escalate — phase 3's re-ingest is the durable answer and this rollout does not
 depend on the month being rebuilt today.
+
+If a shortfall is understood and accepted (a month the chain genuinely never
+traded through, a documented 0114/0212 gap), record WHICH months and why in the
+rollout log before truncating. "The gate was noisy" is not a reason; the whole
+table is about to be destroyed and `price_ohlcv_1M` is the only tier with no
+finer copy of itself outside the FREEZE.
 
 **5c. Truncate and re-roll.**
 
@@ -216,6 +268,16 @@ ALTER TABLE prices.price_ohlcv_15m DROP PARTITION 202609;
 -- 2. Put the frozen copy back.
 ALTER TABLE prices.price_ohlcv_15m ATTACH PARTITION 202609
   FROM '/var/lib/clickhouse/shadow/rollout_0286_prices_price_ohlcv_15m_202609/';
+```
+
+`price_ohlcv_1M` rolls back differently, because step 5c truncated it whole
+rather than writing over one partition: DROP nothing, and ATTACH EVERY frozen
+partition back.
+
+```sql
+-- Per partition listed by section 3's enumeration for price_ohlcv_1M.
+ALTER TABLE prices.price_ohlcv_1M ATTACH PARTITION 202609
+  FROM '/var/lib/clickhouse/shadow/rollout_0286_prices_price_ohlcv_1M_202609/';
 ```
 
 Then re-CREATE the pre-0286 MVs — the bodies are in git, not in your memory:
