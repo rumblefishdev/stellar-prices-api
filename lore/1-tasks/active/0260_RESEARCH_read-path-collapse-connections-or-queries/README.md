@@ -123,6 +123,17 @@ history:
     status: active
     who: stkrolikiewicz
     note: >
+      Re-run protocol written (run 1 at 100 req/s wide pool, run 2 as a ramp
+      to 1000). Two facts corrected against the deployed stage: the /price
+      route's throttle is 10,000 req/s, not the overview's 200; the binding
+      gateway cap is the loadtest usage plan at 150 req/s, which blocks the
+      500/1000 runs until raised. Noted that M3 AC 5 is met literally by the
+      09-03 regime-2 run; the re-run is for the honest number and the Work
+      list's 500/1000.
+  - date: 2026-09-17
+    status: active
+    who: stkrolikiewicz
+    note: >
       QUOTA FIXED ON THE BOX, 12:13 UTC. sbe task 0561 / PR #462 (merged,
       develop 07210e28) set `queries` and `execution_time` of `prices_read`
       to unlimited and kept read_rows 50 B / read_bytes 1 TiB / result_rows
@@ -307,15 +318,66 @@ line agrees ("single-digit-ms p50 SELECTs … once the connection is warm"): its
 cold start / TLS setup versus everything else — and only a controlled re-run
 under sustained load shows whether p95 < 100 ms holds on misses.
 
-### What a re-run still needs — beyond the quota
+### Re-run protocol — 2026-09-17, after the quota fix
 
-- a gateway-5XX alarm first ([[0249]]) — 26 minutes of outage paged nobody;
-- the stage throttle: the overview states 200 req/s per method stage-wide, which
-  would stop the 500 and 1000 req/s runs at the gateway — to verify in `infra/`;
-- an observer on `system.quotas_usage` and an agreed abort signal; starting a few
-  minutes before `:00` caps the cost of a mistake at minutes;
-- a way to defeat the cache at 500/1000 req/s: production lists ~3.5 k assets and
-  a full-miss pool must be ≫ RATE × TTL — not designed yet.
+Two facts checked against the deployed stage and the usage plans
+(`aws apigateway get-stage` / `get-usage-plans`, 2026-09-17 ~13:00 UTC), both
+correcting the paragraph this replaces:
+
+- **The stage throttle is not a blocker.** `GET /v1/assets/{id}/price` carries
+  its own method setting — **10,000 req/s, burst 5,000** (cache TTL 10 s). The
+  200 / 400 in `production.json` is the `*/*` default and the overview's "200
+  req/s per method stage-wide" is stale for this route.
+- **The real gateway cap is the usage plan.** `prices-production-loadtest-plan`
+  (`i12bsj`, the plan named in the 0121 report) is **150 req/s, burst 300,
+  1 M/month**. A 100 req/s run fits; 500 and 1000 are refused with 429 before
+  they reach anything. The plan is from the manual-tier runbook, so raising it
+  is a CLI call, not a deploy.
+
+Also noted: M3 AC 5 reads "p95 <100 ms at 100 req/s, plan named". The
+2026-09-03 regime-2 run (20 assets, p95 47 ms, plan named) meets that literally.
+What the re-run adds is the honest number — what a miss costs when it reaches
+ClickHouse — and the 500 / 1000 results the Work list asks for.
+
+#### Run 1 — 100 req/s, wide pool (regime 3 again), supervised
+
+Closes AC 2 and gives the first miss-dominated p95. Everything it needs exists:
+quota fixed, plan allows 150, stage allows 10,000, `price_load.js` and the pool
+procedure are in the repo (`pool-wide.json` is gitignored — regenerate).
+
+1. Regenerate the wide pool from the current listing (~3.5 k assets; 4,301 last
+   time with the 0121 fixups).
+2. Observer on the box before the first request: `system.quotas_usage` for
+   `prices_reader`, `query_log` exceptions, and CloudWatch gateway 5XX. Nobody
+   watched on 2026-09-03; nothing paged ([[0249]] is still backlog, Adam's).
+3. **Start at ~:50.** If anything still blocks the read path, the hourly
+   interval releases it within minutes instead of up to 59.
+4. Abort signal: the k6 operator stops on the first gateway 5XX or p95 > 200 ms
+   in the live summary; the observer calls it on the first code 201/241 or on
+   ClickHouse p50 leaving single digits.
+5. Record: k6 JSON into `docs/loadtest-results/`, the hit-rate estimate for the
+   run, `quotas_usage` before/after, the ClickHouse per-minute table for the
+   window (same query as the 09-03 note).
+
+#### Run 2 — ramp 100 → 250 → 500 → 1000 req/s
+
+Not before all four:
+
+1. **Raise the loadtest plan** to ≥ 1000 req/s, burst ≥ 2000; the 1 M/month
+   quota holds ~two full ramps (300 k at 1000 alone), so count them.
+2. **Defeat the cache without 10 k assets.** The cache key is the path plus
+   `min_volume_usd` (0122), so ~3.5 k assets × a few `min_volume_usd` values
+   gives ≫ 10 k distinct keys. Add the variant to `price_load.js`; the report
+   must state the resulting hit rate, not assume zero.
+3. **A window agreed with sbe.** This is the first run that can genuinely
+   saturate the box: each miss reads ~17.5 k rows / ~1.5 MiB, so 1000 req/s of
+   misses is ~1.5 GB/s of reads on a host shared with soroban-block-explorer.
+   Nobody has measured that ceiling; [[0047]]'s question becomes live here.
+4. **Ramp, not a jump.** Hold each step long enough for p95 to settle; stop at
+   the first step that breaks the abort rule above and report that step as the
+   knee. A knee below 1000 is a result, not a failure of the test.
+
+Then the report: three rows, the plan named, one honest hit-rate column.
 
 ### 🔴 Withdrawn from the 2026-09-16 findings below
 
