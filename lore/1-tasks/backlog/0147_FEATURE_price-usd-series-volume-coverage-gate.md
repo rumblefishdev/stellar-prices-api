@@ -3,8 +3,8 @@ id: "0147"
 title: "Replace price_usd_series*'s close_usd > 0 filter with a volume-coverage gate"
 type: FEATURE
 status: backlog
-related_adr: []
-related_tasks: ["0144", "0118", "0131", "0116", "0146", "0150", "0061"]
+related_adr: ["0292", "0287"]
+related_tasks: ["0144", "0118", "0131", "0116", "0146", "0150", "0061", "0151", "0286"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "data-correctness", "be-interop", "milestone-M2"]
 milestone: 2
@@ -18,6 +18,30 @@ history:
       Spawned from [[0144]] future work (phase 5) — BE 0199 finding 3i. Both of
       BE's own proposed fixes were measured and rejected; this is the
       implementable form of their intent.
+  - date: "2026-09-17"
+    status: backlog
+    who: akot
+    note: >
+      Re-read against [[0286]] (merged, ADR 0287) and ADR 0292 from [[0151]],
+      which DECIDES what this task SHIPS. Not solved by 0286: it deliberately
+      left `views.sql` / `current.sql` without a price-forming gate, and BE's
+      yXLM print (0.764 units = ~7.6M stroops) clears the 0.1 % bound. [[0146]]
+      is closed as superseded — the rollup half is 0286's rate-form `close_usd`.
+      From ADR 0292: a candle is PRICED iff `close >= 1e-12 AND
+      close_usd >= 1e-12`; `priced_volume_share = Σ pf_volume(priced) /
+      Σ pf_volume(eligible)`, eligible = quote asset has a conversion path, so
+      unpriceable legs AND dust-only candles are outside the denominator; the
+      gate is the default, the share is always on the wire, an absolute floor
+      sits beside the ratio; X is measured on our own history after the 0286
+      rollout (research found no outside number to copy — nobody else has an
+      async conversion step; a median would not have fixed the yXLM case). Also
+      handed over: the same floor and a pf gate in `views.sql` arm A and
+      `usd_reference*`, WITH the cross-surface test under the floor (a test of
+      agreement cannot land before its fix); `current.sql`'s `src_is_live` /
+      `src_volume` counting dust-only minutes; the untested 1h filter; and the
+      additive wire fields `price_status` (priced | carried | unpriced) and
+      `as_of` on the current-price surfaces. Gap list:
+      `docs/database-schema/close-usd-zero-guardrails.md`.
 ---
 
 # Volume-coverage gate for `price_usd_series` / `price_usd_series_1h`
@@ -87,9 +111,10 @@ masquerades as a good value.
 - [[0116]] is what makes the dust rows junk in the first place; this gate stops
   a junk row *being* the answer. Complementary, not alternative.
 
-## Still needed after [[0146]]
+## Still needed after [[0286]]
 
-[[0146]] fixes zeros manufactured by the rollup chain. This gate covers the case
+[[0286]] (which superseded [[0146]]) fixes zeros manufactured by the rollup
+chain. This gate covers the case
 where the **base table's own rows** are unpriced, which no rollup fix can reach.
 
 ## Acceptance Criteria
