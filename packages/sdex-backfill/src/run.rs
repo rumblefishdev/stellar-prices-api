@@ -177,14 +177,7 @@ pub async fn execute(
             };
 
         if current_complete {
-            // Only the last partition of the run may drain the open minute:
-            // every earlier boundary carries it into the partition that holds
-            // its remaining fills.
-            let partition_end = if i + 1 == todo.len() {
-                PartitionEnd::Drain
-            } else {
-                PartitionEnd::Carry
-            };
+            let partition_end = partition_end(i, todo.len());
             let mut stats = index_partition(
                 partition,
                 temp_dir,
@@ -438,6 +431,23 @@ fn aggregate_unresolved(raw: &[UnresolvedPoolSwap], reg: &Registries) -> Vec<Unr
     out
 }
 
+/// Which partition of a run may drain the minute it leaves open (review WR-02).
+///
+/// Only the LAST one: every earlier boundary carries the open minute into the
+/// partition that holds its remaining fills, because writing it here and again
+/// there would replace the first half with the second under
+/// `ReplacingMergeTree` — and under ADR 0287 a dust-only second half erases a
+/// priced minute rather than merely shortening it.
+///
+/// A single-partition run is that last partition, so it drains.
+fn partition_end(index: usize, len: usize) -> PartitionEnd {
+    if index + 1 == len {
+        PartitionEnd::Drain
+    } else {
+        PartitionEnd::Carry
+    }
+}
+
 /// Whether the two ledgers on either side of a range boundary fall in DIFFERENT
 /// candle-minutes (review CR-02).
 ///
@@ -593,6 +603,27 @@ mod tests {
     #[test]
     fn empty_input_yields_no_records() {
         assert!(aggregate_unresolved(&[], &Registries::new()).is_empty());
+    }
+
+    /// Review WR-02: the decision the whole carry-the-open-minute fix turns on.
+    /// Inverted to an unconditional `Drain`, every other test in the crate still
+    /// passes and the boundary minute is written twice again.
+    ///
+    /// ⚠️ What this does NOT cover: that `execute` calls `partition_end` with
+    /// the loop index, and that it calls `flush_open_minutes` after the loop.
+    /// `index_partition` takes a concrete `Sink` (a ClickHouse writer with no
+    /// trait behind it), so neither can be driven from a unit test; both are
+    /// exercised end to end by the ignored `candles_it` suite.
+    #[test]
+    fn only_the_last_partition_of_a_run_drains_the_open_minute() {
+        assert_eq!(partition_end(0, 3), PartitionEnd::Carry);
+        assert_eq!(partition_end(1, 3), PartitionEnd::Carry);
+        assert_eq!(partition_end(2, 3), PartitionEnd::Drain);
+    }
+
+    #[test]
+    fn a_single_partition_run_drains() {
+        assert_eq!(partition_end(0, 1), PartitionEnd::Drain);
     }
 
     /// Review CR-02: the two ledgers on either side of a range boundary must
