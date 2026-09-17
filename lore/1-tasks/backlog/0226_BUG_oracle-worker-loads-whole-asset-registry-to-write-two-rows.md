@@ -88,6 +88,16 @@ history:
       Cross-linked the oracle's own full-registry write (`lib.rs:569`) — owned
       by [[0140]], but it sits in the same pass this task rewrites, so the two
       changes have to be made with each other in view. No scope moved.
+  - date: 2026-09-17
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      The measurement the 09-16 entry said this task lacked now exists: a cold
+      container reading the 1× registry starts at 148 MB and peaks at 191 MB
+      (58–75 % of 256). [[0256]]'s fix ended the OOMs ([[0241]] closed). This
+      task is an efficiency task, not an outage fix — but one more un-merged
+      copy of the registry puts the oracle back at the ceiling. Priority left
+      at high for the operator to lower; not lowered here.
 ---
 
 # The oracle worker reads the entire asset registry on every run
@@ -191,6 +201,28 @@ eu-central-1, 8,755 invocations/month at 7.71 s average:
 🔑 **It was not declined on cost. It was declined because it is not a fix.** The
 registry grows monotonically; 512 MB postpones the same failure. The operator's
 call, 2026-08-26: do not spend headroom to hide a design problem.
+
+## Measured at 1× — 2026-09-17, after [[0256]]'s fix
+
+| | before the fix (2026-09-15 00:00 → 09-16 12:42 UTC) | after (24 h, → 2026-09-17 12:47 UTC) |
+|---|---|---|
+| `wrote asset rows` by asset-discovery | 37 of 37 runs, ~209 k rows each | **0 of 24 runs** |
+| `existing_assets` seen by the oracle | 209 k → 418 k → 627 k → **836 k**, merging back every ~4 h | **209,208 → 209,292**, one copy |
+| oracle `Max Memory Used`, hourly peak | 210–**256 MB** (the limit) | **148–191 MB** on every new container |
+| OOM / `signal: killed` lines | 5 in ~37 h | **0** |
+| `AWS/Lambda Errors` | 2–5 a day, every day since at least 09-10 (1.0–1.7 %) | **0 on 289 invocations** |
+| `prices-production-oracle-errors` | 18 firings 09-12 → 09-16, each 3–5 min | none since 09-16 07:23 UTC (29 h) |
+
+Every one of the five OOMs fell in an hour where the oracle read ~836 k rows —
+four un-merged copies. Since the fix it has never read more than one. The one
+post-deploy 250 MB reading is a container born before the deploy carrying its
+old high-water mark; it was gone by 12:47 UTC. Ten cold containers since all
+start at **148 MB** and peak at 191 MB — 58–75 % of the 256 MB limit.
+
+What this settles for this task: the load is **not** what reaches the ceiling
+on its own — ~209 k rows cost ~148 MB cold. What it leaves: the oracle still
+pays that 148 MB and a full-table read every 5 minutes to resolve two ids, and
+the headroom to a second copy of the registry is ~65 MB.
 
 ## Implementation
 
