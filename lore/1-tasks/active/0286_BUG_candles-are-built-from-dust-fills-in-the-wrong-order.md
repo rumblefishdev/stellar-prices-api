@@ -4,7 +4,7 @@ title: "Candles take every fill at equal weight, including stroop-dust, in the w
 type: BUG
 status: active
 related_adr: ["0287"]
-related_tasks: ["0278", "0276", "0266", "0228", "0146", "0142", "0137", "0200", "0088", "0282"]
+related_tasks: ["0278", "0276", "0266", "0228", "0146", "0142", "0137", "0200", "0088", "0282", "0285"]
 tags: [layer-backend, priority-high, effort-large, ohlcv, ingest, enrichment, clickhouse, data-correctness, api-contract]
 links:
   - "../../2-adrs/0287_candle-prices-come-from-price-forming-fills-and-a-windowed-close.md"
@@ -239,16 +239,22 @@ has no price.
   overlapping coarse partitions and pre-roll them from the new 1m → next
   month; the 1w tier last, because weeks straddle months. "Reconciled"
   means: SDEX volumes equal to the stroop except the documented backfill
-  partition-boundary minutes and the live era, which may come back larger
-  where [[0282]] lost trades; AMM sources ≥ with the delta accounted for per
-  source and month. The Soroban AMM history enters through
+  partition-boundary minutes; AMM sources ≥ with the delta accounted for per
+  source and month; and, as a SEPARATE check, the days written live between
+  2026-07-16 and the #313 deploy (2026-09-17 12:04 UTC) come back HIGHER
+  than the snapshot by [[0282]]'s measured shortfall — there the snapshot is
+  the damaged side, so "equal" would itself be a finding. The Soroban AMM history enters through
   `events-backfill` (pool registry seeded first — [[0088]]), with the same
   D1–D3 rules; BE's `default.transactions` coverage of the range is a
   precondition, the fallback share recorded.
 - Preconditions: phases 1–2 live and measured on new data; cleanup off for
-  the whole run ([[0200]]); disk budgeted for the snapshots; [[0282]]
-  settled, because the re-ingest writes with the same `version` semantics
-  and a later dust-only write of a minute now replaces a priced one.
+  the whole run ([[0200]]); disk budgeted for the snapshots; [[0282]]'s
+  fix (PR #313) deployed and checked over a full day, because a later
+  dust-only write of a minute now replaces a priced one; and, for the AMM
+  side of the live-era months only, [[0285]]'s reverse question answered
+  (does the live path write candles for pools absent from `pool_registry`?
+  `events-backfill` could not put those back after the `DROP PARTITION`) —
+  SDEX and the pre-live AMM months do not wait for it.
 - **Cost not in the ledger estimate:** re-ingested rows carry
   `close_usd = 0`, so the enrichment worker re-prices the entire history
   afterwards (0268's campaign re-priced 9.94 M candles in ~24 min; 0228's,
@@ -349,9 +355,10 @@ Phase 3:
 - [ ] Every monthly partition of `price_ohlcv_1m` re-ingested; per partition
       and per source `sum(volume_base)`, `sum(volume_quote)`,
       `sum(trade_count)` reconciled against the FREEZE snapshot — equal for
-      SDEX (boundary minutes and the live era documented), ≥ with the delta
-      explained by [[0282]] for AMM sources; differences otherwise only in
-      OHLC.
+      SDEX (boundary minutes documented), ≥ for AMM sources; the days
+      written live between 2026-07-16 and 2026-09-17 12:04 UTC checked
+      separately and HIGHER by [[0282]]'s measured shortfall, expected vs got
+      logged per source; differences otherwise only in OHLC.
 - [ ] Coarse tiers pre-rolled from the new 1m; XLM/USDC 1d closes on the
       seven dust days of the analysis are within 5 % of Bitstamp (the "last
       price-forming fill" close was not measured on the 1 181-day set —
@@ -461,6 +468,20 @@ price-forming 1m close on all 14 393 pairs; 10.5 % of SDEX minutes have
     refill, so the campaign re-opened it on every run and its pending count
     never drained. Its volume stays as the tier that priced it left it — dust
     volume, deliberately not worth a second signature.
+16. **The live offer-lookup tally follows the candles** (`a697c9c`, after the
+    merge of #313). Runs now re-decode the ledgers of the open minute, so the
+    process-wide counter diffed across a run counted held-back fills twice;
+    it is kept per ledger and summed over the flushed minutes, the rule
+    `flush_older_than` uses, and carried on `RunStats`.
+17. **#313's forced partial flush is an accepted, alarmed erase path.** A run
+    that spends its whole `maxIterations` budget inside one minute flushes it
+    partial; under ADR 0287 a dust-only remainder then erases that minute's
+    price. Needs a sub-2 s close time (12 ledgers/minute measured, budget 32);
+    listed in rollout runbook §1a with its alarm,
+    `prices-production-ledger-processor-forced-partial-flush`.
+18. **[[0285]] gates only the live-era AMM months of phase 3**, not the
+    phase: every other month's old rows were written under the registry rule
+    the re-ingest applies.
 
 ## Issues Encountered
 
@@ -499,10 +520,13 @@ intentional.
 - The phase-1 unit test for the `vwap` trap only "comes alive" in phase 2
   (before D2 dust is never price-forming), but write it in phase 1 so the
   rollup arithmetic is pinned from the start.
-- [[0282]] (candle writes replaced instead of summed across a reconcile run)
-  touches the same `version` semantics phase 3 depends on, and under the new
-  definition a later dust-only write of a minute replaces a priced one
-  outright — settle it before the ingest is deployed.
+- [[0282]] was fixed by PR #313 (merged `2cb5b2b`, deployed 2026-09-17
+  12:04 UTC; its full-day raw-vs-stored check is owed on that task). The fix
+  does NOT sum writes — a second write of a minute still replaces the first —
+  it ends every reconcile run on a whole minute and re-reads the held-back
+  ledgers, so the live processor writes each minute once. Under the new
+  definition a dust-only second write erases a priced minute, so the ingest
+  is still deployed only after that check is recorded.
 - Known consequence, not a defect: a Soroban token with 0–3 decimals needs
   > 1 000 raw units on both legs to form price, i.e. 10 whole tokens per
   fill for a 2-decimal token; such an asset gets volume and no price until
