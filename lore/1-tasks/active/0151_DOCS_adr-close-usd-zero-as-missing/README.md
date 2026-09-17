@@ -4,14 +4,14 @@ title: "ADR: close_usd's zero-as-missing sentinel is what makes the whole 0144 b
 type: DOCS
 status: active
 assignee: akot
-related_adr: ["0287"]
+related_adr: ["0287", "0292"]
 related_tasks: ["0144", "0135", "0146", "0147", "0148", "0149", "0138", "0154", "0111", "0286", "0167"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "schema", "adr", "data-correctness"]
 links:
-  - "../../../packages/prices-clickhouse/schema/init.sql"
-  - "../../../packages/prices-clickhouse/schema/views.sql"
-  - "../active/0144_BUG_be-0199-usd-read-surface-defects/notes/I-usd-rate-table.md"
+  - "../../../../packages/prices-clickhouse/schema/init.sql"
+  - "../../../../packages/prices-clickhouse/schema/views.sql"
+  - "../../archive/0144_BUG_be-0199-usd-read-surface-defects/notes/I-usd-rate-table.md"
 history:
   - date: 2026-08-05
     status: backlog
@@ -77,6 +77,26 @@ history:
       predicate `close_usd > 0 AND close > 0` in all six MVs, and `/ohlcv`'s
       price-absent contract beside `price_usd_series`, which has no pf gate.
       [[0146]] in the table below is closed as superseded by 0286.
+  - date: "2026-09-17"
+    status: active
+    who: akot
+    note: >
+      ADR 0292 proposed, with the guardrail inventory it points to
+      (`docs/database-schema/close-usd-zero-guardrails.md`). Converted to a
+      directory: `notes/R-zero-sentinel-code-audit.md` (every reader and writer
+      of the zero on the 0286 code; two defects it found were fixed in 0286 as
+      its decisions 14 and 15) and `notes/R-outside-practice.md` (how
+      exchanges, vendors, oracles and API guidelines encode a missing price —
+      the six decisions checked one by one). Decided: the sentinel stays; the
+      "no price" marker is `pf_trade_count = 0`; pending / unpriceable /
+      no_price are computed at read time and published with `as_of`; one
+      definition of "priced" for 0147 and 0154; `0` stays on the current-price
+      surfaces with additive `price_status`; the inventory is a living
+      document and invariants are asserted by the freshness probe, not by
+      CHECK constraints. Still open here: the zero-reading / zero-product loop
+      in `oracle_sql`, the cross-surface test under the floor, the probe
+      assertion, the `views.sql` / `init.sql` comment fixes. The wire fields
+      are decided here and shipped by 0147.
 ---
 
 # ADR — `close_usd` zero-as-missing

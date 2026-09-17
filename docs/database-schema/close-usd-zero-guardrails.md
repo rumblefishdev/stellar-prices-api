@@ -1,0 +1,106 @@
+# `close_usd = 0` — the guardrail inventory
+
+> **Living document.** Decided by [ADR 0292](../../lore/2-adrs/0292_close-usd-zero-is-a-named-sentinel-with-a-published-reason.md):
+> the zero sentinel stays, so every site that reads or writes it is listed here
+> with its guard and the test that pins the guard. **Change this file in the same
+> PR as the code it describes.** A new reader of `close_usd` — or of `close` as
+> "has a price" — that is not in this list is a review finding.
+>
+> Compiled 2026-09-17 from a three-part audit of `develop` at `51fff85`
+> (task 0151). Sites are named by file and symbol, not line number, on purpose.
+
+## The value being guarded
+
+`close_usd Decimal(38, 14) DEFAULT 0`, non-nullable, on `price_ohlcv_{1m,15m,1h,4h,1d,1w,1M}`.
+
+| # | What a zero means | How a reader can tell |
+|---|---|---|
+| 1 | **Pending** — enrichment has not reached the row | quote asset has a conversion path, row not priced |
+| 2 | **Unpriceable** — no oracle, no reference market for the quote asset | quote asset has no conversion path |
+| 3 | **Genuinely zero** | it cannot — assumed not to occur |
+| 4 | **No price in this bucket** (ADR 0287) | `pf_trade_count = 0` (then `close = 0` too) |
+
+**Priced** means `close >= 1e-12 AND close_usd >= 1e-12` — one floor
+(`prices_clickhouse::PRICE_FLOOR_SQL`) in SQL, Rust ingest and the read path.
+
+**Status column:** ✅ pinned — a test fails if the guard is removed · ◐ partial —
+see note · ⛔ gap — no guard or no test, with its owner.
+
+## 1. Storage and ingest
+
+| Site | What it does with the zero | Guard | Pinned by | |
+|---|---|---|---|---|
+| `init.sql` — `close_usd … DEFAULT 0` (×7) | conflates meanings 1–4 by construction | none — this is the decision | `candle_migration_it::pf_columns_migrate_every_candle_table_and_preserve_old_rows` (column order only) | — |
+| `init.sql` — `pf_trade_count DEFAULT trade_count` (×7) | a legacy row reads `pf > 0` even with `close = 0` | the second term of every price gate (`close >= 1e-12`) | same test (DEFAULT on a 1m and a 1d row) | ✅ |
+| `prices-ingest-core/src/writer.rs` — `close_usd: 0` on every ingest row | always writes meaning 1; for a dust-only row it silently is meaning 4; a re-write of a minute resets an enriched row | none | `candle_write_it::a_written_candle_round_trips_every_column_including_the_pf_ones` | ⛔ re-write erasing an enriched minute — task 0282 / task 0286 decision 17 |
+| `writer.rs` — pf columns named in the row struct | stops the DEFAULT declaring a dust-only row price-forming | field names == `CANDLE_COLUMNS` | `the_row_struct_names_every_candle_column`, `the_row_builder_maps_each_pf_column_from_its_own_field`, `candle_write_it` (reads back `pf = 2`) | ✅ |
+| `bucket.rs` — price fields from price-forming fills only | writes meaning 4 as `open = high = low = close = 0, pf = 0` | `price_forming && price_survives_column_scale` | `dust_only_minute_has_volume_but_no_price`, `a_price_under_the_column_resolution_forms_no_price_either`, `a_price_too_large_for_the_column_forms_no_price` | ✅ |
+| `tick.rs`, `soroban.rs` — `price_forming` | guarantees `pf > 0 ⇒ close >= 1e-12` on new rows | bound on raw amounts + the floor | `a_fill_whose_price_underflows_the_price_column_is_not_price_forming`, `the_amm_arm_draws_the_line_at_the_precision_floor`, `amm_ticks_are_classified_on_the_raw_amounts_before_scaling`, `price.rs::the_ingest_floor_is_the_sql_floor` | ✅ |
+
+## 2. Rollups and pre-rolls (`rollup_sql.rs` → `rollups.sql`, `preroll.sql`, `preroll-live-gap.sql`)
+
+| Site | What it does with the zero | Guard | Pinned by | |
+|---|---|---|---|---|
+| `argMinIf(open)`, `maxIf(high)`, `minIf(low)`, `argMaxIf(close)` (×17 renderings) | keeps meaning 4 and a legacy `close = 0` out of all four price aggregates; an all-dust bucket returns 0 = meaning 4 one tier up | `PRICE_FORMING_CHILD`: `pf_trade_count > 0 AND close >= 1e-12` | unit `every_price_aggregate_is_gated_on_a_price_forming_child`, `the_price_gate_uses_the_shared_floor`; `rollup_pf_it`: `a_dust_only_child_contributes_to_no_price_aggregate_of_its_parent`, `a_bucket_of_nothing_but_dust_has_no_price_and_keeps_its_volume`, `a_legacy_row_that_claims_a_price_it_cannot_print_reaches_no_price_aggregate`, `a_child_priced_under_the_precision_floor_reaches_no_price_aggregate`, `ohlc_ordering_holds_on_every_tier` | ✅ |
+| coarse `close_usd = close × argMaxIf(close_usd / close, …)` (×17) | skips children in meanings 1, 2, 4 and any child whose two values are a few ticks wide; with no rate-bearing child returns 0 | `RATE_BEARING_CHILD`: both legs `>= 1e-12` | unit `close_usd_is_a_rate_re_priced_by_this_buckets_close`, `no_rendering_takes_a_rate_from_a_value_that_merely_exceeds_zero`; `rollup_pf_it`: `a_rate_between_two_values_under_the_precision_floor_never_re_prices_the_bucket`, `a_close_usd_under_the_precision_floor_carries_no_rate`, `a_coarse_bucket_whose_last_child_is_dust_closes_at_the_last_priced_child`; `preroll_close_usd_guard_it` (both tests) | ✅ |
+| coarse row with `close > 0`, `close_usd = 0` | still conflates meanings 1 and 2 | none in storage — classified at read time (ADR 0292 §3) | — | ⛔ accepted; the coarse sweep re-prices meaning 1 |
+| `sum(t.volume_quote_usd)` (×17) | un-enriched children add 0, so a partial USD volume looks complete | none in SQL; the live path re-rolls on `sum(version)` | `rollup_chain_it::enrichment_propagates_through_full_rollup_chain` (live re-roll only) | ◐ pre-roll path untested — accepted |
+| `vwap = … / nullIf(volume_base, 0)` → explicit 0 | 0 = "no base volume", not a price | `nullIf` + `toDecimal128(0, 14)` | `the_derived_decimals_never_throw_and_vwap_is_explicitly_zero`, `rollup_pf_it::vwap_and_close_usd_survive_the_decimal_overflow_threshold` | ✅ |
+| the six MV bodies on the live path | same SELECT | same | text equality: `rollups_sql_is_exactly_the_generators_six_mv_ddls`; deployed definitions: the 0142 drift detector | ◐ no behavioural test goes THROUGH the MVs — the gates are exercised via `PREROLL_SQL` |
+| `preroll-incremental.sql`, `preroll-amm-reprice.sql` | guard meaning 1 only, blind to meaning 4 | header `HISTORICAL — DO NOT RUN`; positional 15-column INSERT fails | unit test on the header; `no_preroll_script_uses_an_unguarded_argmax_on_close_usd` | ✅ |
+| legacy child whose `close` clears the floor while its `low` does not | `minIf` can still take a sub-floor `low` | none — unwritable after 0286 | documented on `a_child_priced_under_the_precision_floor…` | ⛔ dies with 0286 phase 3 |
+
+## 3. Enrichment (`enrichment-worker/src/ch_enrich.rs`, `frontier.rs`)
+
+| Site | What it does with the zero | Guard | Pinned by | |
+|---|---|---|---|---|
+| `CANDIDATE_PRED` (also `count_candidates`, `repair_target_pred`, `months_with_zeros`) | admits a dust-only row ONCE (its volume is real), never again | `close_usd = 0 AND close > 0` | unit `the_candidate_predicate_asks_for_a_price_not_merely_a_missing_value`; IT `a_dust_only_minute_is_priced_once_and_is_never_reselected` (oracle tier, 1m) | ◐ behavioural on oracle / 1m only |
+| `oracle_sql` | `close_usd = o.price_usd × p.close`, unconditional | candidate predicate + staleness bound. `o.price_usd IS NOT NULL` is dead (non-Nullable column, `join_use_nulls = 0`) | `the_oracle_statement_matches_the_candidate_predicate` (string) | ⛔ **a zero reading, or a product that rounds to 0 at 14 dp, leaves `close > 0, close_usd = 0` — re-inserted at `version + 1` on every pass.** Task 0151 |
+| `write_oracle` (`prices-ingest-core/src/writer.rs`) | stores whatever the oracle returned | none — no `price_usd > 0` | — | ⛔ same finding. Task 0151 |
+| `peg_sql` | `WHERE p.close_usd = 0 AND (p.close > 0 OR p.volume_quote_usd = 0)` | `p.`-qualified term | `the_peg_predicate_is_qualified_on_every_column_it_names` (string) | ◐ no behavioural dust-on-peg test; the "peg" row of `pf_columns_survive_every_enrichment_rewrite` is priced by the external tier |
+| `external_sql` | unmatched ASOF (0) is never used as a rate | `r.usd > 0`, staleness, epoch bound | `the_external_and_pivot_scans_carry_the_bare_widened_predicate`; IT `external_tier_leaves_a_bucket_with_no_usable_rate_on_the_peg_value` and two more | ✅ (dust row: string only) |
+| pivot rate legs | no rate ⇒ no write | `WHERE {rate} > 0` | IT `a_pivot_leg_with_no_usdc_rate_in_window_is_left_unpriced` | ✅ |
+| pivot reference (`PRICED_REFERENCE_ROW`) | built from `close`, never `close_usd`; sentinel rows excluded | `close > 0 AND volume_base > 0 AND pf_trade_count > 0` | `close > 0`: IT `the_pivot_ignores_a_legacy_reference_minute_…`; `pf_trade_count > 0`: unit `the_pivot_reference_ignores_dust_only_buckets` (string) | ◐ the IT for the pf term seeds `close = 0` too, so it passes without it |
+| `pivot_reference_day_pred` | deliberately wider than the reference (no pf term) | after the write: `reset > enriched` in `coarse-repair` | `the_pivot_reset_never_zeroes_a_bucket_whose_reference_market_is_silent` | ◐ a dust-only reference DAY is untested |
+| reset terminator | zero = "already re-opened" | `(close_usd > 0 OR volume_quote_usd > 0)` | `the_reset_statement_keeps_its_own_predicate`, IT `the_usd_reset_recomputes_written_values_but_respects_the_epoch` | ✅ |
+| 0268 par signature | a dust-only row is `0 = 0` forever | `close_usd = close AND close > 0` (both sites) | unit `the_par_signature_needs_a_price_to_have_been_pegged`; IT `the_external_reset_never_reopens_a_candle_that_has_no_price` | ✅ |
+| `count_remaining_at_volume_zero` | the ONLY place meaning 1 is told from 2 — by row age | recency window | IT `recency_bounded_backlog_excludes_deep_history_floor` | ✅ |
+| frontier `Exhausted` | "no progress" read as meaning 2; a floor month flips `Exhausted → Pending` every recheck | recheck rotation | `the_frontier_advances_exhausts_and_never_revisits`, `a_backfill_into_an_exhausted_month_reopens_it` | ⛔ oscillation untested — accepted as noise (ADR 0292) |
+| `insert_columns()` + pf pass-through (5 statements) | keeps the meaning-4 marker through every rewrite | shared column list | `every_statement_inserts_and_projects_all_eighteen_candle_columns`, `the_pivot_carries_the_pf_columns_through_all_four_levels` | ✅ |
+| `tests/post_run_0228_it.rs` — reference vwap | sums `close = 0` dust rows into its denominator; diverges from the write path after 0286 phase 3 | outer `close > 0` only | — | ⛔ task 0286 (blocks its phase 3) |
+
+## 4. Read and publish
+
+| Site | What a consumer sees for a zero | Guard | Pinned by | |
+|---|---|---|---|---|
+| `views.sql` — series arm A, `WHERE p.close_usd > 0 AND p.volume_base > 0` (1d, 1h) | row omitted | the filter | 1d: `views_expose_usd_series_and_reference` (by value); zero volume: `a_zero_volume_only_base_is_absent_and_its_neighbours_still_publish` | ◐ the 1h filter has no test; "only unpriced rows ⇒ asset absent" is pinned at neither grain — task 0147 |
+| `views.sql` — `sum(v) / nullIf(sum(w), 0)` | a number over the PRICED subset, labelled `traded`, no coverage signal; `w = volume_base`, not `pf_volume` | none | — | ⛔ task 0147 (coverage gate, `priced_volume_share`) |
+| `views.sql` — `> 0`, not the `1e-12` floor | a sub-floor legacy row is published as `traded` while `/ohlcv` refuses it | none | cross-surface: `ohlcv_agrees_with_price_usd_series_on_the_same_bucket` (USDC only) | ⛔ test in task 0151, fix in 0147 |
+| `views.sql` — `usd_reference*`, `p.close > 0 AND p.volume_base > 0` | bucket omitted → `no_reference` | volume term | `usd_reference_omits_a_bucket_whose_reference_candles_have_no_volume` | ◐ no pf term (the enrichment pivot has one); `close > 0` untested — task 0147 |
+| `current.sql` — `argMaxIf(close_usd, timestamp, close_usd > 0)` | last priced close carried up to 24 h; a literal `0` with `method = ''` only if the whole window is unpriced | tip-skip; empty `method` | `current_prices_mv_writes_0072_columns_and_filters_outliers`, `an_unpriced_asset_carries_the_empty_sentinel_not_traded` | ◐ no `as_of`: `updated_at` is the refresh time — ADR 0292 §5, shipped by 0147 |
+| `current.sql` — `src_is_live`, `src_volume` | a dust-only minute keeps a venue "live"; its USD volume weights `vwap_24h` | none for meaning 4 | — | ⛔ task 0147 |
+| `current_price_usd`, `/price`, `/assets` | literal `0` / `"0"` | documented sentinel | DEFAULTs only | ◐ `price_status` + `as_of` — ADR 0292 §5 |
+| `/ohlcv` USD arm (`queries_ch.rs`) — `convertible`, `valid` | price fields `null`, volume present; `pf_trade_count` separates meaning 4 from 1/2 | `countIf(valid) = 0 → NULL` wrappers | `the_usd_arm_admits_only_rows_that_formed_a_price`, `ohlcv_unpriced_bucket_is_returned_with_price_fields_absent`, `ohlcv_a_dust_only_bucket_has_no_price_and_keeps_its_volume`, `ohlcv_guards_a_zero_close`, `ohlcv_refuses_to_derive_a_rate_from_values_at_the_decimal_floor` | ✅ |
+| `/ohlcv` quote-leg arm | `null` | `PF_ROWS` gate + wrappers, same floor | `the_quote_leg_gate_carries_the_same_precision_floor…`, `ohlcv_in_xlm_takes_no_price_from_a_dust_only_source` | ✅ |
+| `/ohlcv` — `pf_vwap`, `close_divergent`, USDC peg tail | `null`, never 0 | `nullIf`, None rule, explicit NULL tail | `the_price_forming_vwap_is_clamped_into_the_published_band_and_never_zero`, `the_peg_series_reports_no_price_forming_fields` | ✅ |
+| `rollup-freshness-probe/src/usd_sanity.rs` — stranded metric | meaning 4 excluded, not miscounted | `close_usd = 0 AND close > 5e-14`, 48 h grace | `dust_below_the_underflow_bound_is_not_counted_as_stranded` | ✅ |
+
+## 5. Invariants asserted on stored data
+
+Checked by a scheduled query in `rollup-freshness-probe`, alarmed — not by
+ClickHouse `CHECK` constraints (ADR 0292, Alternatives).
+
+| Invariant | State |
+|---|---|
+| `pf_trade_count = 0 ⇒ close = 0` | ⛔ assertion added by task 0151 |
+| `close_usd > 0 ⇒ close > 0` | ⛔ assertion added by task 0151 |
+
+## Open gaps, by owner
+
+| Owner | Gap |
+|---|---|
+| **0151** | the zero-reading / zero-product loop in `oracle_sql` + `write_oracle`; the cross-surface test under the floor; the two stored-data assertions |
+| **0147** | coverage gate and `priced_volume_share`; the floor and a pf gate in `views.sql` / `current.sql`; `price_status` and `as_of`; the untested 1h filter |
+| **0286** | `post_run_0228_it`'s reference filter (before phase 3); the legacy `low` residue (dies with phase 3) |
+| **0282** | a re-written dust-tail minute erasing an enriched row |
+| accepted | coarse `close > 0, close_usd = 0` ambiguity in storage; partial `sum(volume_quote_usd)` on the pre-roll path; frontier oscillation on floor months; no behavioural test through the MV bodies |
