@@ -134,6 +134,16 @@ history:
     status: active
     who: stkrolikiewicz
     note: >
+      Run 1 done (100 req/s, 4,020-asset pool, 13:56–14:03 UTC): 0 errors on
+      29,968 requests, ClickHouse median 8–9 ms, gateway p95 74 ms; k6 on the
+      laptop measured p95 464 ms and the ~390 ms difference sits outside AWS
+      (client→gateway). AC 2 closed with the decomposition. All six criteria
+      now ticked; the task stays active only for run 2 (ramp to 1000 from a
+      client inside eu-central-1) and the report.
+  - date: 2026-09-17
+    status: active
+    who: stkrolikiewicz
+    note: >
       QUOTA FIXED ON THE BOX, 12:13 UTC. sbe task 0561 / PR #462 (merged,
       develop 07210e28) set `queries` and `execution_time` of `prices_read`
       to unlimited and kept read_rows 50 B / read_bytes 1 TiB / result_rows
@@ -359,6 +369,56 @@ procedure are in the repo (`pool-wide.json` is gitignored — regenerate).
    run, `quotas_usage` before/after, the ClickHouse per-minute table for the
    window (same query as the 09-03 note).
 
+#### ✅ Run 1 done — 2026-09-17 13:56–14:03 UTC
+
+Pool 4,039 listed → **4,020 under test** (19 dropped on 404, all named in the
+k6 log). k6 v2.2.0 from the operator's laptop, plan `prices-production-loadtest-plan`
+(150 req/s), warm-up 30 s + **5 min at 100.00 iters/s**. Export:
+`docs/loadtest-results/2026-09-17-regime3-wide.json`. Observer on the box and
+CloudWatch every 30 s throughout; nobody had to abort.
+
+**The read path held.** `phase:main`: 29,968 requests, **0 failed**, checks
+100 %, 0 dropped iterations. ClickHouse: ~5,300 queries/min from
+`prices_reader`, median **8–9 ms**, 0 exceptions, quota counter `9169/inf` at
+the point where 2026-09-03 was already refusing. Gateway 5XX: 0. Lambda:
+34,893 invocations, 0 errors, 0 throttles, `ConcurrentExecutions` max 55.
+
+**But k6 saw p95 = 464 ms** (`http_req_duration{phase:main}`: med 72, p90 196,
+p95 464, p99 665, max 2,766) against the script's 200 ms threshold — `exit=99`.
+Where those milliseconds sit, from the inside out:
+
+| link | p50 | p95 | source |
+|---|---|---|---|
+| ClickHouse, query execution | 8 ms | — | `system.query_log` |
+| Lambda handler, warm container | 16 ms | 25 ms | REPORT lines, n = 34,845 |
+| API Gateway, own overhead | ~6 ms | ~10 ms | `Latency` − `IntegrationLatency` |
+| **API Gateway, as measured by the gateway** | **31 ms** | **74 ms** (39–89 per minute; p99 92–137) | `Latency`, REGIONAL endpoint, no CloudFront |
+| cold start: `Init` + first call (new TLS to ClickHouse) | ~370 + ~190 ms | — | 48 of 34,893 invocations (0.14 %) |
+| **k6 on the laptop, end to end** | **72 ms** | **464 ms** | k6 export |
+
+The ~390 ms between the gateway's p95 and k6's is **outside AWS**: k6's
+`http_req_tls_handshaking` and `http_req_connecting` are 0 at p95 (connections
+reused); the whole tail is `http_req_waiting`. On 2026-09-03, from the same
+laptop, `http_req_waiting` was med 45 / p95 47 — a 2 ms tail; today it is med
+72 / p95 422. Same baseline (~41–45 ms client→gateway), a tail that was not
+there two weeks ago. What produced it is not determinable from here.
+
+**AC 2 answered.** Query ≈ 8 ms; AWS↔Hetzner network a few ms (the whole
+Lambda round trip incl. the query is 16 ms); connection setup ≈ 560 ms but only
+on a cold container (0.14 %). 0121's "170–240 ms uncontended miss" was client
+network plus cold containers, not a property of the data path.
+
+**For M3 AC 5.** The gateway-measured p95 (74 ms) is under the 100 ms bar on a
+miss-dominated run — the first such number that exists. The client-measured
+p95 (464 ms) is not, and the criterion does not say where it is measured. The
+report must carry both and name the client's location. **Run 2 and any number
+meant for the report must come from a client inside `eu-central-1`** (EC2 or
+CloudShell); it removes the one variable we do not control, and a laptop could
+not push 500–1000 req/s anyway.
+
+Noted, not explained: the gateway's per-minute p95 alternates 45 / 81 / 44 /
+89 / 49 / 85 ms — something periodic adds ~40 ms every other minute.
+
 #### Run 2 — ramp 100 → 250 → 500 → 1000 req/s
 
 Not before all four:
@@ -560,10 +620,10 @@ observability gaps. Fold it in there rather than adding an 86th backlog item.
 - [x] The failure mode is named: connection ceiling, query saturation, or
       something else — with evidence, not inference from response times
       — *something else: the `prices_reader` hourly query quota, 28,853 × code 201*
-- [ ] The uncontended miss budget is broken down into network / query /
-      connection setup — *open, reframed: cold-connection cost vs the rest;
-      needs a controlled re-run — the quota is fixed as of 2026-09-17 12:13
-      UTC (sbe 0561), so the ClickHouse side no longer blocks it*
+- [x] The uncontended miss budget is broken down into network / query /
+      connection setup — *run 1, 2026-09-17: query ≈ 8 ms, AWS↔Hetzner a few ms
+      (16 ms Lambda round trip), connection setup ≈ 560 ms on a cold container
+      only (0.14 %); the tail k6 saw sat between the laptop and the gateway*
 - [x] It is stated whether the ceiling is ours alone or shared with
       soroban-block-explorer ([[0047]]) — *ours alone, the quota is per user*
 - [x] A remediation is recommended **against the identified cause**, explicitly
