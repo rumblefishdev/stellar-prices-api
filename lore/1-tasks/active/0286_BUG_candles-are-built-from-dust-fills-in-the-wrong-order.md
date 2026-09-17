@@ -48,8 +48,8 @@ history:
       phase 1 starts: window anchored at the last price-forming minute (60-min
       cap from there); open = close on 1m, disclosed; rollups maxIf/minIf, no
       carried high/low, stateless ingest with read-side carry-forward; coarse
-      close_usd = close × latest priced child's rate (replaces 0146's product
-      carry — one MV re-CREATE for both); missing 1m tail falls back to the
+      close_usd = close × latest priced child's rate (replaces the product
+      carry — one MV re-CREATE); missing 1m tail falls back to the
       child's close with close_window_fills = 0; close_median stored; pool
       price post-fill; pf_trade_count everywhere; 0142/0137 already live;
       0228's reset campaign unnecessary after the re-ingest, re-enrichment
@@ -183,9 +183,9 @@ has no price.
   `vwap` and `close_usd` computed in Float64 and converted without throwing
   (Decimal division silently overflows past ~1.7e10 on 26.3.10.60);
   **coarse `close_usd`** = `close × argMaxIf(close_usd / close, timestamp,
-  close_usd > 0)` — the latest priced child's *rate* (ADR §5), which
-  supersedes [[0146]]'s `argMaxIf(close_usd, …)`: re-create the six MVs
-  once, with both, under 0146's checklist ([[0142]] and [[0137]] are live).
+  close_usd > 0)` — the latest priced child's *rate* (ADR §5), not a carried
+  `argMaxIf(close_usd, …)`: re-create the six MVs once, under [[0142]]'s
+  re-apply checklist ([[0142]] and [[0137]] are live).
   Keep `t.`-qualification inside every aggregate (`ILLEGAL_AGGREGATION`
   otherwise) and the drift detector's constraints on the file.
 - **Enrichment** (`ch_enrich.rs`; ADR §6): `CANDIDATE_PRED` becomes
@@ -328,7 +328,7 @@ Phase 1:
       ADR 0287, 2026-09-15, amended 2026-09-16 (first/last price-forming
       fill, no carry-forward, no settle pass).
 - [ ] Six MVs re-created with APPEND + `sum(version)` + aligned windows
-      verified, per-MV freshness recovered ([[0146]]'s checklist), the
+      verified, per-MV freshness recovered ([[0142]]'s re-apply checklist), the
       rollout run in the deploy order above with the ingest last.
 - [ ] Measured on the first week of new data: residual high/low bias vs
       Bitstamp on XLM, share of minutes with `pf_trade_count = 0` by source
@@ -412,8 +412,8 @@ price-forming 1m close on all 14 393 pairs; 10.5 % of SDEX minutes have
    third amendment); no carry-forward, no settle pass.
 2. **1M rolls from 1d**, not 1w — a week straddling a month must not carry
    the next month's trades into the 1M close.
-3. **Coarse `close_usd` = close × latest priced child's rate**, superseding
-   [[0146]]'s carried product; both land in one MV re-CREATE.
+3. **Coarse `close_usd` = close × latest priced child's rate**, not a
+   carried product; it lands in the one MV re-CREATE.
 4. **Deploy order** schema → enrichment + API → MV re-CREATE → ingest last.
 
 ### Emerged

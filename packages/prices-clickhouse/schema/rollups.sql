@@ -60,13 +60,12 @@
 --   summed; dust trades happened, and `vwap` still weights every one of them.
 --
 --   `close_usd` is this bucket's own `close` re-priced by the LATEST PRICED
---   child's RATE (`close_usd / close`), never a carried product. That
---   supersedes task 0146's `argMaxIf(close_usd, …)` rather than sitting beside
---   it: carrying the product left `close` and `close_usd` on different
---   sub-buckets (the consequence task 0145 accepted); re-pricing the bucket's
---   own close makes them same-bucket again by construction. With no priced
---   child the rate is 0 and so is `close_usd`, which the coarse sweep then
---   prices.
+--   child's RATE (`close_usd / close`), never a carried product
+--   (`argMaxIf(close_usd, …)`): carrying the product left `close` and
+--   `close_usd` on different sub-buckets (the consequence task 0145
+--   accepted); re-pricing the bucket's own close makes them same-bucket
+--   again by construction. With no priced child the rate is 0 and so is
+--   `close_usd`, which the coarse sweep then prices.
 --
 --   Both derived Decimals go through `ifNull(toDecimal128OrZero(toString(…),
 --   14), 0)`: Decimal division silently overflows past a ~1.7e10 dividend on

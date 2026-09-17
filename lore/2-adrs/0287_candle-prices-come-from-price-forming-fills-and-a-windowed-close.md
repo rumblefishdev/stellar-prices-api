@@ -189,9 +189,8 @@ only the fills that carry no price information are kept out of its prices.
   rows keep their old meaning until phase 3 re-ingests them. Rollups use
   `argMinIf`/`argMaxIf`/`maxIf`/`minIf` on `pf_trade_count > 0` and a
   Float64-safe `vwap`/`close_usd` (Decimal division silently overflows past
-  ~1.7e10 on the production build). The six rollup MVs are re-created; the
-  only other change sharing that DROP window is [[0146]]'s
-  `argMaxIf(close_usd)`, superseded by §5. Every writer of a candle table —
+  ~1.7e10 on the production build). The six rollup MVs are re-created, once;
+  §5's rate-form `close_usd` lands in that same DROP window. Every writer of a candle table —
   the name-routed Rust writer, the pre-roll scripts, every enrichment
   re-insert — carries the new columns in the same change: a re-insert that
   omits them takes the DEFAULT and declares a dust-only row price-forming.

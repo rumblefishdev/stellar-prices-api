@@ -124,7 +124,7 @@ async fn a_freshly_applied_chain_reports_no_drift() {
 /// The edit used is a real one: narrowing the `close_usd` rate's predicate,
 /// which is the kind of one-token correction task 0286 made to every MV body at
 /// once — so this doubles as evidence for why 0142 blocks such a change from
-/// landing by re-apply. (It was task 0146's `argMax → argMaxIf` until 0286
+/// landing by re-apply. (It was an `argMax → argMaxIf` edit until 0286
 /// replaced the carried product with a rate; the point is unchanged.)
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]

@@ -26,9 +26,9 @@
 //!   conditional aggregate matches no row and returns the type default 0 (F6c),
 //!   which is the same "no price" encoding the 1m tier writes.
 //! - `close_usd` is `close` × the latest priced child's **rate**
-//!   (`close_usd / close`), never a carried product. This supersedes task
-//!   0146's `argMaxIf(close_usd, …)`: carrying the product decoupled `close`
-//!   and `close_usd` (they came from different sub-buckets — the consequence
+//!   (`close_usd / close`), never a carried product
+//!   (`argMaxIf(close_usd, …)`): carrying the product decoupled `close` and
+//!   `close_usd` (they came from different sub-buckets — the consequence
 //!   task 0145 accepted); re-pricing the bucket's own close by the latest rate
 //!   makes them same-bucket again by construction.
 //! - `vwap` stays Σ`volume_quote` / Σ`volume_base` over EVERY fill, price-forming
@@ -44,8 +44,8 @@
 //! `vwap` fallback is spelled `toDecimal128(0, 14)` rather than left NULL
 //! because `init.sql` declares `vwap Decimal(38, 14)` — NOT Nullable. Today's
 //! MVs only land a NULL there because `insert_null_as_default` rewrites it to
-//! the column default; making the zero explicit is the "explicit vwap" item of
-//! task 0146.
+//! the column default; the explicit zero makes the value independent of that
+//! server setting (task 0171's review, PR #312).
 //!
 //! Every column inside an aggregate is `t.`-qualified. An unqualified one
 //! raises `ILLEGAL_AGGREGATION` (Code 184) once the bucket key is aliased
@@ -574,8 +574,8 @@ mod tests {
     }
 
     /// BRIEF §4.5: `close_usd` is the bucket's own close re-priced by the latest
-    /// priced child's RATE. The carried-product form (task 0146) must be gone —
-    /// it is what decoupled `close` from `close_usd`.
+    /// priced child's RATE. The carried-product form must be gone — it is what
+    /// decoupled `close` from `close_usd`.
     #[test]
     fn close_usd_is_a_rate_re_priced_by_this_buckets_close() {
         for (what, sql) in every_rendering() {
@@ -594,8 +594,8 @@ mod tests {
             );
             assert!(
                 !sql.contains("argMaxIf(close_usd"),
-                "{what}: the carried-product form survived — task 0146's fix is \
-                 superseded by the rate, not kept beside it"
+                "{what}: the carried-product form survived — the rate replaces \
+                 it, it is not kept beside it"
             );
             assert!(
                 !sql.contains("argMax(close_usd"),
@@ -604,7 +604,7 @@ mod tests {
         }
     }
 
-    /// BRIEF F11 + task 0146's "explicit vwap": both derived Decimals go through
+    /// BRIEF F11 + the explicit `vwap` zero: both derived Decimals go through
     /// the never-throwing Float64 pattern, and `vwap` falls back to an EXPLICIT
     /// zero because `init.sql` declares the column NOT Nullable.
     #[test]

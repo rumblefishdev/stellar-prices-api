@@ -369,7 +369,7 @@ async fn a_bucket_of_nothing_but_dust_has_no_price_and_keeps_its_volume() {
 /// The fixture separates the two deliberately: the last priced minute
 /// (`close = 1.2`) is not yet enriched (`close_usd = 0`), so the latest rate
 /// comes from the minute before it (`2.2 / 1.1 = 2.0`). The rate form gives
-/// `1.2 × 2.0 = 2.4`; the carried-product form task 0146 shipped would give
+/// `1.2 × 2.0 = 2.4`; the carried-product form task 0145 shipped would give
 /// `2.2`, a USD close belonging to a price the candle no longer reports.
 ///
 /// RED on the pre-0286 SQL, twice over: `rollups.sql` closes at the dust
