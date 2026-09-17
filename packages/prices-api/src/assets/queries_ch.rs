@@ -782,27 +782,15 @@ const PF_VWAP_USD_RAW: &str = "nullIf(toDecimal128OrNull(toString( \
 /// underflowed `Decimal(38, 14)` and stored as `0` claims to be price-forming
 /// and has no price — and this arm published it as `"0"`. The floor is
 /// [`PRECISION_FLOOR`], the same line the USD arm's `valid` draws, so the two
-/// arms cannot disagree about which rows may supply a price; the literal is
-/// repeated here only because one `const` cannot be built from another, and
+/// arms cannot disagree about which rows may supply a price; the floor's literal
+/// is repeated here only because one `const` cannot be built from another, and
 /// `the_quote_leg_gate_carries_the_same_precision_floor_the_usd_arm_has` pins
-/// them together.
+/// them together. Every aggregate of this arm interpolates this one spelling
+/// ([`quote_leg_aggregates`]).
 ///
 /// Gating on `close` alone covers all four price columns: the ingest writes
 /// them together, so a row with a printable `close` has printable extremes.
 const PF_ROWS: &str = "pf_trade_count > 0 AND close >= toDecimal128('0.000000000001', 14)";
-
-/// The quote-leg arm's published extremes — gated, so neither a dust row's
-/// high nor a legacy zero-price row's low can become the bucket's.
-const QL_HIGH: &str =
-    "maxIf(high, pf_trade_count > 0 AND close >= toDecimal128('0.000000000001', 14))";
-const QL_LOW: &str =
-    "minIf(low, pf_trade_count > 0 AND close >= toDecimal128('0.000000000001', 14))";
-
-/// The quote-leg arm's price-forming mean, in the stored denomination. Same
-/// zero rule as [`PF_VWAP_USD_RAW`].
-const PF_VWAP_QL_RAW: &str = "nullIf(toDecimal128OrNull(toString( \
-                 sumIf(toFloat64(pf_price_volume), pf_trade_count > 0 AND close >= toDecimal128('0.000000000001', 14)) \
-                 / nullIf(sumIf(toFloat64(pf_volume), pf_trade_count > 0 AND close >= toDecimal128('0.000000000001', 14)), 0)), 14), 0)";
 
 /// Synthesize a USD series for a **peg asset** — one that is only ever stored as
 /// a quote leg, never as a base (ADR 0011 §6).
@@ -962,6 +950,17 @@ fn quote_leg_aggregates() -> String {
     let vwap_raw = "toDecimal128OrNull(toString( \
                  sum(toFloat64(volume_quote)) \
                  / nullIf(sum(toFloat64(volume_base)), 0)), 14)";
+    // The published extremes — gated, so neither a dust row's high nor a legacy
+    // zero-price row's low can become the bucket's.
+    let ql_high = format!("maxIf(high, {PF_ROWS})");
+    let ql_low = format!("minIf(low, {PF_ROWS})");
+    // The price-forming mean, in the stored denomination. Same zero rule as
+    // `PF_VWAP_USD_RAW`.
+    let pf_vwap_raw = format!(
+        "nullIf(toDecimal128OrNull(toString( \
+                 sumIf(toFloat64(pf_price_volume), {PF_ROWS}) \
+                 / nullIf(sumIf(toFloat64(pf_volume), {PF_ROWS}), 0)), 14), 0)"
+    );
     // ⚠️ Every price aggregate below is a `-If` and every one of them is
     // WRAPPED. Over zero matching rows `maxIf`/`minIf`/`argMaxIf` return the
     // type's DEFAULT — `0` — rather than NULL (verified on 26.3.10.60), so an
@@ -969,19 +968,19 @@ fn quote_leg_aggregates() -> String {
     // nothing but dust: a price, asserted, where the bucket has none.
     format!(
         "if(countIf({PF_ROWS}) = 0, NULL, toString(argMaxIf(open, volume_base, {PF_ROWS}))) AS o, \
-             if(countIf({PF_ROWS}) = 0, NULL, toString({QL_HIGH})) AS h, \
-             if(countIf({PF_ROWS}) = 0, NULL, toString({QL_LOW})) AS l, \
+             if(countIf({PF_ROWS}) = 0, NULL, toString({ql_high})) AS h, \
+             if(countIf({PF_ROWS}) = 0, NULL, toString({ql_low})) AS l, \
              if(countIf({PF_ROWS}) = 0, NULL, toString(argMaxIf(close, volume_base, {PF_ROWS}))) AS c, \
              toString(sum(volume_base)) AS vb, \
              toString(sum(volume_quote_usd)) AS vqu, \
              if(countIf({PF_ROWS}) = 0 OR isNull({vwap_raw}), NULL, \
-                 toString(least(greatest({vwap_raw}, {QL_LOW}), {QL_HIGH}))) AS vw, \
+                 toString(least(greatest({vwap_raw}, {ql_low}), {ql_high}))) AS vw, \
              toUInt64(sum(trade_count)) AS tc, \
              CAST(NULL AS Nullable(String)) AS meth, \
              CAST(NULL AS Nullable(UInt8)) AS drv, \
              toNullable(toUInt64(sum(pf_trade_count))) AS pftc, \
-             if(isNull({PF_VWAP_QL_RAW}), NULL, \
-                toString(least(greatest({PF_VWAP_QL_RAW}, {QL_LOW}), {QL_HIGH}))) AS pfvw, \
+             if(isNull({pf_vwap_raw}), NULL, \
+                toString(least(greatest({pf_vwap_raw}, {ql_low}), {ql_high}))) AS pfvw, \
              {CLOSE_DIVERGENT_PLACEHOLDER}, \
              {PROVENANCE_NULL_TAIL}"
     )
