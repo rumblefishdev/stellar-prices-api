@@ -3,8 +3,15 @@
 //! Mirrors BE's indexer: read cursor, derive the next S3 key, fetch, decode,
 //! extract+bucket, write, advance the cursor **last**. Stops at the first gap or
 //! `max_iterations`. The cursor write is the ordering barrier — a crash before
-//! it leaves the cursor unchanged and the next invocation re-processes the run
-//! (idempotent: ReplacingMergeTree collapses re-inserts by `version`).
+//! it leaves the cursor unchanged and the next invocation re-processes the run.
+//!
+//! ⚠️ **Re-processing is near-idempotent, not idempotent.** A re-read minute is
+//! rebuilt whole and carries the same payload, so the surviving row is correct.
+//! But `operation_index` is not stable across re-processing, so the same trade
+//! can come back with a different `version`, and ReplacingMergeTree then keeps
+//! both rows until a merge rather than collapsing them — production holds such
+//! byte-identical pairs (task 0282). Do not lean on `version` equality: what
+//! makes a re-read safe is that it writes the WHOLE minute again, never a slice.
 //!
 //! The decode→extract→canonicalise→bucket step is `prices_ingest_core` — the
 //! same code the SDEX backfill runs — so live candles are byte-identical to
@@ -39,6 +46,18 @@
 //! accumulator state between invocations, which is what makes a cold start
 //! behave like a warm one. It scales with ledgers-per-minute, the same factor
 //! that drives the `forced_progress` escape hatch below.
+//!
+//! 🔑 **The cursor always parks on a minute boundary** (outside the escape
+//! hatch). It is only ever written as the last ledger of a COMPLETE minute, so
+//! whenever the process stops — crash, outage, redeploy — the next run resumes at
+//! the first ledger of a minute and no minute is split across the stop. A backlog
+//! therefore drains one or more whole minutes per run until the tip, where runs
+//! go back to holding back the open minute. `tests/reconcile_drain.rs` pins this
+//! across successive runs.
+//!
+//! ⚠️ The first run after deploying this over the old code is the exception: the
+//! old code left the cursor mid-minute, so that one minute is written from its
+//! tail only. It self-heals from the next minute on.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -294,9 +313,10 @@ where
         // `ApproximateAgeOfOldestMessage` stays at 0). Ingestion would stop dead
         // while every signal read healthy.
         //
-        // Production runs `maxIterations: 16` against ~12 ledgers/minute at a 5 s
-        // close time — four of headroom. A tighter close time or one dense minute
-        // is enough to cross it.
+        // Production runs `maxIterations: 32` (`infra/envs/production.json`).
+        // Measured over 7 days the network never closed more than 12 ledgers in a
+        // minute, so the longest walk that must see a minute turn is 13. Crossing
+        // 32 needs a sub-2 s close time — a deliberate network change, not drift.
         //
         // So in exactly that case, flush the open minute and advance anyway. That
         // re-exposes the task-0282 partial-write hazard for that ONE minute, and
@@ -316,7 +336,9 @@ where
                 max_iterations,
                 ledgers = ledger_minutes.len(),
                 open_minute,
-                "iteration budget exhausted inside ONE minute — flushing a PARTIAL                  minute to keep the cursor moving; raise ledgerProcessor.maxIterations                  above the ledgers-per-minute rate (task 0282)"
+                "iteration budget exhausted inside ONE minute — flushing a PARTIAL minute \
+                 to keep the cursor moving; raise ledgerProcessor.maxIterations above \
+                 the ledgers-per-minute rate (task 0282)"
             );
         }
 
