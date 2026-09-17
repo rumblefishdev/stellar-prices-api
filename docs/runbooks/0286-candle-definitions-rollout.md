@@ -191,56 +191,104 @@ DROP VIEW prices.mv_ohlcv_1w_to_1M;
 present in `price_ohlcv_1M` must be covered by `price_ohlcv_1d`, or the TRUNCATE
 throws away months the re-roll cannot rebuild.
 
-⚠️ **Coverage, not presence.** A gate of `count() > 0` passes a month whose 1d
-table holds a single day: the re-roll then rebuilds that month from one day —
-volume, `trade_count` and the pf sums all short — and, since 5c has already
-truncated, there is nothing left to compare it against. Cleanup (task 0200,
-disabled since 2026-07-20) dropped whole 1m months and the 0114/0212 gaps are
-real, so partial months exist. The gate below compares the two tables on the
-population each month actually carries: the set of `(asset, quote, source)`
-series, and the day count against the month's own length.
+⚠️ **Coverage, not presence, and SETS not counts.** A gate of `count() > 0`
+passes a month whose 1d table holds a single day: the re-roll then rebuilds that
+month from one day — volume, `trade_count` and the pf sums all short — and, since
+5c has already truncated, there is nothing left to compare it against. Cleanup
+(task 0200, disabled since 2026-07-20) dropped whole 1m months and the 0114/0212
+gaps are real, so partial months exist.
+
+Counting is not enough either (review WR-07): a month where 1M holds `{A, B}`
+and 1d holds `{A, C}` has equal `uniqExact`s, passes, and loses series `B`
+permanently. The two gates below therefore compare the SETS of
+`(asset_id, quote_asset_id, source)`, and ask the "is this month short" question
+**per series** rather than once per month.
+
+**Gate 1 — every series the month holds must exist in the days.**
 
 ```sql
 SELECT
     m.month,
     m.rows_1M,
-    m.series_1M,
-    d.days,
-    d.series_1d,
-    -- the month's own length, clamped for the month in progress
-    if(m.month = toStartOfMonth(now()),
-       toDayOfMonth(now()),
-       toDayOfMonth(toLastDayOfMonth(m.month))) AS days_expected
+    length(m.series_1M) AS series_1M,
+    length(d.series_1d) AS series_1d,
+    length(arrayFilter(x -> NOT has(d.series_1d, x), m.series_1M)) AS missing,
+    arraySlice(arrayFilter(x -> NOT has(d.series_1d, x), m.series_1M), 1, 5) AS missing_sample
 FROM (
     SELECT toStartOfMonth(timestamp) AS month,
            count() AS rows_1M,
-           uniqExact((asset_id, quote_asset_id, source)) AS series_1M
+           groupUniqArray((asset_id, quote_asset_id, source)) AS series_1M
     FROM prices.price_ohlcv_1M FINAL GROUP BY month
 ) AS m
 LEFT JOIN (
     SELECT toStartOfMonth(timestamp) AS month,
-           uniqExact(toDate(timestamp)) AS days,
-           uniqExact((asset_id, quote_asset_id, source)) AS series_1d
+           groupUniqArray((asset_id, quote_asset_id, source)) AS series_1d
     FROM prices.price_ohlcv_1d FINAL GROUP BY month
 ) AS d USING (month)
-WHERE d.days = 0 OR isNull(d.days)      -- no 1d at all
-   OR d.series_1d < m.series_1M         -- series the month has and the days do not
-   OR d.days < days_expected            -- a short month: the re-roll would truncate it
+WHERE missing > 0
 ORDER BY m.month;
 ```
 
-**Zero rows, or STOP.** A non-empty result means `price_ohlcv_1d` does not cover
-some month the 1M table holds — at all, or not for every series, or not for
-every day. Do not truncate. Either pre-roll the missing days first
+A month with no 1d rows at all joins to an empty array, so every one of its
+series comes back in `missing` — the "no 1d" case needs no clause of its own.
+
+**Gate 2 — no series may be SHORT of what the month already claims.**
+
+```sql
+SELECT
+    m.month,
+    m.asset_id,
+    m.quote_asset_id,
+    m.source,
+    d.days,
+    if(m.month = toStartOfMonth(now()),
+       toDayOfMonth(now()),
+       toDayOfMonth(toLastDayOfMonth(m.month))) AS days_in_month,
+    m.trades_1M,
+    d.trades_1d
+FROM (
+    SELECT toStartOfMonth(timestamp) AS month, asset_id, quote_asset_id, source,
+           sum(trade_count) AS trades_1M
+    FROM prices.price_ohlcv_1M FINAL
+    GROUP BY month, asset_id, quote_asset_id, source
+) AS m
+LEFT JOIN (
+    SELECT toStartOfMonth(timestamp) AS month, asset_id, quote_asset_id, source,
+           uniqExact(toDate(timestamp)) AS days,
+           sum(trade_count) AS trades_1d
+    FROM prices.price_ohlcv_1d FINAL
+    GROUP BY month, asset_id, quote_asset_id, source
+) AS d USING (month, asset_id, quote_asset_id, source)
+WHERE d.days = 0 OR d.trades_1d < m.trades_1M
+ORDER BY m.month, m.asset_id, m.quote_asset_id, m.source;
+```
+
+⚠️ **The per-series failure condition is `trade_count`, not the day count.** A
+series that genuinely traded on one day of the month has one day and is
+complete; the day count cannot tell that apart from a series that lost
+twenty-nine. `trades_1d < trades_1M` can: both tiers ultimately sum the same 1m
+rows, so a series whose days no longer carry the trades its month claims is a
+series the re-roll would shrink. `days` and `days_in_month` are reported beside
+it because they are what an operator reads to see WHICH days went missing.
+
+Measured on the local 26.3.10.60 pin, 2026-09-17: both statements parse and
+return **0 rows** against the verification database (2 months, 16 054 1M rows).
+The old per-month rule flagged that same April for "2 of 30 days" — noise from
+series that traded once — while asking nothing about whether any series was
+actually missing.
+
+**Zero rows from BOTH, or STOP.** A non-empty result means `price_ohlcv_1d` does
+not cover some month the 1M table holds — not for every series, or not for every
+trade. Do not truncate. Either pre-roll the missing days first
 (`schema/preroll.sql`, or `preroll-live-gap.sql` for a bounded range) or
 escalate — phase 3's re-ingest is the durable answer and this rollout does not
 depend on the month being rebuilt today.
 
 If a shortfall is understood and accepted (a month the chain genuinely never
-traded through, a documented 0114/0212 gap), record WHICH months and why in the
-rollout log before truncating. "The gate was noisy" is not a reason; the whole
-table is about to be destroyed and `price_ohlcv_1M` is the only tier with no
-finer copy of itself outside the FREEZE.
+traded through, a documented 0114/0212 gap), record WHICH months and series and
+why in the rollout log before truncating. "The gate was noisy" is not a reason;
+the whole table is about to be destroyed and `price_ohlcv_1M` is the only tier
+with no finer copy of itself outside the FREEZE.
 
 **5c. Truncate and re-roll.**
 
