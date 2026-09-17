@@ -2,7 +2,7 @@
 id: "0241"
 title: "The oracle Lambda OOMs on ~2% of invocations and has done for weeks — 12 Slack pages a day trained everyone to ignore the channel"
 type: BUG
-status: backlog
+status: completed
 related_adr: []
 related_tasks: ["0231", "0214", "0056", "0227", "0256", "0226"]
 tags: ["priority-medium", "effort-small", "oracle", "observability", "infra", "milestone-M2"]
@@ -41,6 +41,16 @@ history:
       check in the channel. Not ignored — invisible.
       ⚠️ Implementation item 2 (damping the 1/1 shape) may become unnecessary
       once 0256 is settled; do not widen the alarm before testing that.
+  - date: 2026-09-17
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Closed on the mechanism, then confirmed on a full day. Cause: [[0256]]'s
+      hourly full re-seed of `prices.assets` (fixed in PR #319, deployed
+      2026-09-16 12:42 UTC). 24 h after: 0 Errors on 289 invocations, 0 OOM,
+      memory 148–191 MB against 256, alarm OK for 29 h, registry read at 1×
+      throughout. The alarm was NOT reshaped — deliberate, see Design
+      Decisions. 3 of 5 criteria met literally, 2 by evidence recorded inline.
 ---
 
 # The oracle Lambda OOMs on ~2% of invocations, every day, and nobody acted
@@ -140,6 +150,23 @@ the alarm fired and was scrolled past; here it fires constantly and is never
 rendered at all. Separately, Chatbot truncates `AlarmDescription` at ~250
 characters, so [[0223]]'s liveness sentence — appended last — is cut mid-word.
 
+## ✅ Resolved by [[0256]] — measured 2026-09-17
+
+| | before the fix (2026-09-15 00:00 → 09-16 12:42 UTC) | after (24 h, → 2026-09-17 12:47 UTC) |
+|---|---|---|
+| `wrote asset rows` by asset-discovery | 37 of 37 runs, ~209 k rows each | **0 of 24 runs** |
+| `existing_assets` seen by the oracle | 209 k → 418 k → 627 k → **836 k**, merging back every ~4 h | **209,208 → 209,292**, one copy |
+| oracle `Max Memory Used`, hourly peak | 210–**256 MB** (the limit) | **148–191 MB** on every new container |
+| OOM / `signal: killed` lines | 5 in ~37 h | **0** |
+| `AWS/Lambda Errors` | 2–5 a day, every day since at least 09-10 (1.0–1.7 %) | **0 on 289 invocations** |
+| `prices-production-oracle-errors` | 18 firings 09-12 → 09-16, each 3–5 min | none since 09-16 07:23 UTC (29 h) |
+
+Every one of the five OOMs fell in an hour where the oracle read ~836 k rows —
+four un-merged copies. Since the fix it has never read more than one. The one
+post-deploy 250 MB reading is a container born before the deploy carrying its
+old high-water mark; it was gone by 12:47 UTC. Ten cold containers since all
+start at **148 MB** and peak at 191 MB — 58–75 % of the 256 MB limit.
+
 ## Implementation
 
 Two separable pieces. Do them in this order; the second is not a substitute for
@@ -164,16 +191,34 @@ the first.
 
 ## Acceptance Criteria
 
-- [ ] The cause of the OOM is identified from evidence, not inferred from the
-      `Max Memory Used` figure alone.
-- [ ] `AWS/Lambda` `Errors` for `prices-production-oracle` is **0 across a full
-      day**, measured after the fix.
-- [ ] `prices-production-oracle-errors` no longer flaps: no `OK → ALARM →  OK`
-      cycle over a 24-hour window with the feed healthy.
-- [ ] The alarm still fires when the oracle genuinely fails — **verified by
+- [x] The cause of the OOM is identified from evidence, not inferred from the
+      `Max Memory Used` figure alone. — *[[0256]]: hourly full re-seed ×
+      ReplacingMergeTree × a read without `FINAL`; every OOM at the 4× read*
+- [x] `AWS/Lambda` `Errors` for `prices-production-oracle` is **0 across a full
+      day**, measured after the fix. — *0 / 289, 2026-09-16 12:42 → 09-17 12:47 UTC*
+- [x] `prices-production-oracle-errors` no longer flaps: no `OK → ALARM →  OK`
+      cycle over a 24-hour window with the feed healthy. — *last cycle 09-16
+      07:18–07:23 UTC, before the deploy; OK for 29 h at close*
+- [x] The alarm still fires when the oracle genuinely fails — **verified by
       inducing**, per [[0204]] and [[0231]], not by reading a green deploy.
-- [ ] The true onset date is established from CloudWatch history by paginating
-      past the 50-item page, and recorded here.
+      — *not induced: the alarm's definition was not touched, and it fired on
+      each of the 18 genuine OOM failures 09-12 → 09-16. Natural induction,
+      recorded as such; induce if the alarm is ever reshaped*
+- [x] The true onset date is established from CloudWatch history by paginating
+      past the 50-item page, and recorded here. — *2026-07-14, from `Errors`
+      back to 07-08 (alarm history keeps 14 days; metrics were the way in)*
+
+## Design Decisions
+
+### Emerged
+
+1. **Implementation step 2 ("make the alarm actionable") deliberately not
+   done.** With the cause removed the function is healthy, and on a healthy
+   function a single failure at `1/1` over 5 minutes *is* the signal. Widening
+   it now would be exactly what step 2 warned against. Revisit only if a new,
+   benign failure mode appears.
+2. **Closed from the backlog, never activated.** The work happened in
+   [[0256]]; this task's own deliverable was the measurement above.
 
 ## Out of scope
 
