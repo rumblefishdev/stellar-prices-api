@@ -2,7 +2,7 @@
 id: "0275"
 title: "229 ClickHouse integration tests have never run in CI — cargo test --workspace skips every #[ignore] and no workflow provides a database"
 type: CHORE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0215", "0172", "0182", "0218", "0114"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M3, ci, testing, clickhouse]
@@ -13,7 +13,7 @@ links:
   - "../../../tools/scripts/ignored-tests.sh"
   - "../../3-wiki/project/ci-pipeline.md"
 history:
-  - date: 2026-09-10
+  - date: "2026-09-10"
     status: backlog
     who: okarcz
     note: >
@@ -21,7 +21,7 @@ history:
       statements" criterion: the end-to-end coverage already existed and would
       have caught the defect — but it has never run. 0215 shipped a unit-level
       guard instead, which is a workaround for this task, not a replacement.
-  - date: 2026-09-10
+  - date: "2026-09-10"
     status: backlog
     who: okarcz
     note: >
@@ -41,6 +41,18 @@ history:
       found 238 `#[ignore]` across 40 files, most of them needing ClickHouse.
       The workspace inventory (last criterion) is therefore the first step, not
       the last — it decides what the CI job has to run.
+  - date: "2026-09-18"
+    status: completed
+    who: akot
+    note: >
+      All 229 ClickHouse-class #[ignore] tests (31 targets, 12 crates) run on
+      every Rust PR against 26.3.10.60 / UTC, asserted equal to prod. Derived
+      inventory + asserted count (tools/scripts/ignored-tests.sh, 18 node:test
+      cases seen red first). Four baseline reds fixed, none re-ignored. PR #327
+      CI run 35364008161: 229/0/31, 96 s of tests, ~2 min per PR. Induced
+      defect on draft PR #328, run 35365350665: cargo test green, IT step red
+      on usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg.
+      12 commits; 18 design decisions (9 planned, 9 emerged).
 ---
 
 # The ClickHouse integration tests have never run in CI
@@ -109,14 +121,16 @@ plan assertion to get an actually-armed check.
 
 ## Acceptance Criteria
 
-- [ ] CI runs the ClickHouse tests against a ClickHouse pinned to the version
+- [x] CI runs the ClickHouse tests against a ClickHouse pinned to the version
       production is on, verified by reading prod rather than assuming.
-      **Locally proven, CI evidence pending.** Prod read 2026-09-18 over mTLS:
+      **CI run [`35364008161`](https://github.com/rumblefishdev/stellar-prices-api/actions/runs/35364008161)
+      (PR #327):** `preflight` logged `server version() = 26.3.10.60,
+      timezone() = UTC`, then `229 passed, 0 failed over 31 target summaries`,
+      with `execution_bound_error_it` passing behind `caddy:2.11.4`. Prod read 2026-09-18 over mTLS:
       `SELECT version(), timezone()` = `26.3.10.60 UTC`; `docker-compose.yml`
       pins `clickhouse/clickhouse-server:26.3.10.60`, and `ignored-tests.sh
       preflight` refuses any other `version()` or a non-UTC server (checked
-      against a fake 26.3.10.59 pin: exit 1). The PR's own CI run is the
-      evidence that the runner's container matches; the orchestrator owns it.
+      against a fake 26.3.10.59 pin: exit 1).
 - [x] The run is visible in the CI log as a non-zero passed count — a job that
       silently skips them again fails. `ignored-tests.sh run` is red unless
       `sum(passed) == ` the derived number of ClickHouse-class `#[ignore]`s AND
@@ -124,8 +138,9 @@ plan assertion to get an actually-armed check.
       consecutive local runs on 2026-09-18: **229 passed, 0 failed, 31 target
       summaries** each (99.8–101.2 s of test time), the third after dropping
       `prices` and every `it_*` database and re-bootstrapping with
-      `prices-clickhouse-init --rollups`. Guard tests (17, `node:test`) seen red
+      `prices-clickhouse-init --rollups`. Guard tests (18, `node:test`) seen red
       first; each rule mutation-checked (removing it reddens its own case).
+      Same result in CI: 229 / 0 / 31, 96 s of test time.
 - [x] Every test that failed on first arming is triaged — none re-ignored.
       The four reds of the 2026-09-18 baseline:
       `rollup_freshness_it` (7/25) and `symbol_queue_it` (1 test, flaky) share
@@ -135,15 +150,19 @@ plan assertion to get an actually-armed check.
       `now() - INTERVAL 1 DAY` (commit `0db99d9`, no assertion weakened);
       `execution_bound_error_it` needs a reverse proxy → armed behind
       `scripts/ch-proxy-0281.sh` (Caddy 2.11.4) in CI and locally.
-- [ ] A deliberately broken pivot set turns the CI job red — verified by
-      inducing, on a branch. **Locally proven, CI evidence pending.** The
+- [x] A deliberately broken pivot set turns the CI job red — verified by
+      inducing, on a branch. **CI run [`35365350665`](https://github.com/rumblefishdev/stellar-prices-api/actions/runs/35365350665)**
+      on throwaway draft PR #328 (closed, branch deleted): `cargo test
+      --workspace` **success**, `ClickHouse integration tests` **failure** —
+      `ch_enrich_it` 53 passed / 5 failed, among them
+      `usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg`; the
+      Lambda build was skipped. The
       patch (USDT arm of `resolve_reference_ids` compares against the USDC
       issuer, so USDT never resolves and `pivot_ids()` narrows to `[xlm]`)
       leaves `cargo test --workspace` green (1121 passed) and turns
       `ignored-tests.sh run` red: `usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg`
       fails with "USDT-quoted candle must not be left unpriced at 0 …", plus 4
-      sibling ITs; 224 passed / 5 failed. The draft-PR CI run URL is the
-      remaining evidence; the orchestrator owns it.
+      sibling ITs; 224 passed / 5 failed — locally and in CI alike.
 - [x] Every other crate's `#[ignore]`d integration tests are inventoried —
       see below, and derived on every CI run by `ignored-tests.sh check`.
 
@@ -190,7 +209,7 @@ build on his branches would mean his code, not inherited rot.
   `lambda-assets.sh`: permissive extraction, then validation; refuses an empty
   inventory. The header carries the reasons for the vocabulary, the serial
   flag and the no-two-concurrent-runs rule.
-- `tools/scripts/ignored-tests.test.mjs` — 17 `node:test` cases over throwaway
+- `tools/scripts/ignored-tests.test.mjs` — 18 `node:test` cases over throwaway
   fixture trees; `npm run ignored-tests:verify-guard`, run in the `typescript`
   job (Node from `.nvmrc`, 22.22.0).
 - 239 `#[ignore]` reasons normalised to three byte-identical strings (incl. the
@@ -199,10 +218,14 @@ build on his branches would mean his code, not inherited rot.
 - `ci.yml` `rust` job: ClickHouse started right after checkout, `check` before
   the toolchain install; after `cargo test --workspace`: `up --wait
   --wait-timeout 120` + `preflight`, schema via `prices-clickhouse-init
-  --rollups`, proxy, `ignored-tests.sh run`, `failure()` log dump. Filter gains
+  --rollups`, proxy, `ignored-tests.sh run`, `failure()` log dump, an
+  `always()` stop before the Lambda build; `timeout-minutes` on every
+  ClickHouse step; `cargo test --workspace` itself runs with
+  `CLICKHOUSE_URL=http://127.0.0.1:9`. Filter gains
   `docker-compose.yml` and `scripts/**`. No `continue-on-error`.
 - `scripts/ch-proxy-0281.sh`: one Caddyfile with `{$CH_UPSTREAM:localhost:8123}`
-  / `{$CH_PROXY_PORT:8124}`, `caddy:2.11.4`, bounded readiness loop,
+  / `{$CH_PROXY_PORT:8124}`, `caddy:2.11.4`, bounded readiness loop that
+  needs HTTP 2xx and a body of `1` (a 502 from Caddy is not "up"),
   `caddyfile` subcommand for docker-less runs.
 - Docs: IT headers, the 0142 runbook, the prices-clickhouse README, and
   [ci-pipeline](../../3-wiki/project/ci-pipeline.md).
@@ -215,6 +238,17 @@ build on his branches would mean his code, not inherited rot.
 - **`rollup_pf_it` will rot around 2027-05-06**: its fixed 2026 buckets leave
   the monthly MV's 400-day window. Green today; a comment at the assertion
   says so. Not changed here.
+- **Code review (2026-09-18): 0 critical, 4 warnings, all fixed and proven**
+  (commits `c88b2ee`, `eae8b59`, `b9ded2d`) — see decisions 16–18. Of the 7
+  info items, IN-01 (a wrong comment about the image pull) and IN-05 (stop
+  the containers) were taken; IN-02 (refuse a non-loopback `CLICKHOUSE_URL`),
+  IN-03 (five more rules that survive mutation), IN-04 (directory-form
+  `tests/foo_it/main.rs` targets), IN-06 (the `last_push_at` shape check now
+  accepts fractional seconds) and IN-07 (runbook one-liners, bash 3.2) were
+  left as recorded in the review, none reachable today.
+- **First CI run green, first try**: Docker Compose v2.38.2 on
+  `ubuntu-24.04-arm`; start 10 s, version assertion 1 s, schema 6 s, proxy
+  6 s, tests 96 s, stop 4 s — about 2 minutes per Rust PR.
 - **A plain YAML `#` in a step name** (`Classify #[ignore]d tests`) would have
   truncated it to `Classify`; quoted.
 
@@ -264,3 +298,27 @@ build on his branches would mean his code, not inherited rot.
     `docker compose up -d clickhouse` lines (backfill, pool seeding, load test,
     schema quick start) bring ClickHouse up for local work, not for tests, and
     stay correct.
+16. **`cargo test --workspace` runs against a closed port** (review WR-02).
+    ClickHouse is already up on the tests' default URL by then, so a test
+    that lost its `#[ignore]` would pass there and quietly shrink the
+    asserted inventory — before 0275 that same mistake turned CI red.
+    Proven: an un-ignored `usd_rate_it` fails with `Connection refused`; the
+    workspace stays 1121/0.
+17. **Every ClickHouse step is time-bounded** (review WR-01): 5 / 10 / 3 / 20
+    minutes. The ITs set no request timeout and the proxy allows 7200 s; a
+    hung query would otherwise hold the runner for 360 minutes, and a
+    cancelled job skips the `failure()` log dump.
+18. **The proxy's readiness needs a real answer** (review WR-04): checked
+    against a local caddy with a dead upstream — 502, old loop "ready", new
+    loop not.
+
+## Future Work
+
+Recorded, not spawned as tasks — both fail loudly in CI when they matter,
+which is the point of this task:
+
+- `rollup_pf_it` rots around 2027-05-06 (fixed 2026 buckets vs the monthly
+  MV's 400-day window). CI will go red on it then; the assertion carries a
+  comment saying why.
+- Move the guard's `node:test` run into the infra Nx `test` target once PR
+  #325 lands (decision 13).

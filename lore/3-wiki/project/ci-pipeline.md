@@ -77,8 +77,8 @@ killed by a signal or the runner's OOM ceiling, which prints no summary at all.
 `--test-threads=1` is also deliberate (decided with Adam, 2026-09-18) — several
 targets write the shared `prices` database, and two of them were measured flaky
 in parallel. It costs **~100 s of test time serial vs ~50 s parallel**, measured
-on the workstation (three runs at 99.8–101.2 s). The first CI runs are the
-number to record here next to `Build Lambda bootstraps`' 3m24s.
+on the workstation (three runs at 99.8–101.2 s) and **96 s in CI** (run
+`35364008161`); about 2 minutes per Rust PR with the container, schema and proxy.
 
 The guard's own tests (`npm run ignored-tests:verify-guard`, `node:test` over
 fixture trees) run in the `typescript` job, which pins Node from `.nvmrc`. When
@@ -137,14 +137,17 @@ the shape of; `typescript` is ~45s end to end and not worth optimizing.
 | ----------------------------------------------------- | --------- | ------- |
 | setup (checkout, toolchain, rust-cache, cargo-lambda) | 29s       | 9%      |
 | `cargo fmt` / `check` / `clippy` / `test`             | 45s       | 15%     |
-| ClickHouse integration tests (task 0275)¹             | —         | —       |
+| ClickHouse integration tests (task 0275)¹             | ~2m03s    | —       |
 | **Build Lambda bootstraps**                           | **3m24s** | **67%** |
 | Verify Lambda artifacts                               | 0s        | —       |
 | `actions/setup-node` + `npm ci` + `cdk synth`         | 29s       | 9%      |
 | **total**                                             | **5m08s** |         |
 
-¹ Added after this measurement; ~100 s of serial test time on the workstation
-plus schema bootstrap and image pull, not yet measured in CI. See
+¹ Added after this measurement, so it has no share of the 2026-08-04 total.
+Measured in run `35364008161` (PR #327, 2026-09-18): start 10s, version
+assertion 1s, schema 6s, proxy 6s, **tests 96s**, stop 4s. In that same run
+`cargo test --workspace` took 1m49s, `Build Lambda bootstraps` 5m46s and the
+whole job 12m05s, so the table's other rows are out of date as well. See
 [The ClickHouse integration tests](#the-clickhouse-integration-tests).
 
 **If you want to make CI faster, `Build Lambda bootstraps` is the only step that
