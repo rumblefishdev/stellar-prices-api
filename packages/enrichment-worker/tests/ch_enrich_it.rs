@@ -4182,3 +4182,244 @@ async fn the_pivot_ignores_a_dust_only_reference_minute() {
         .await
         .unwrap();
 }
+
+// ---- Task 0151 / ADR 0292: the guardrails the audit left behavioural-untested ----
+
+/// A dust-only minute quoted in a PEGGED asset is priced once, for its volume,
+/// by the peg tier — and never re-selected.
+///
+/// `a_dust_only_minute_is_priced_once_and_is_never_reselected` pins this on the
+/// ORACLE tier at 1m; the peg tier had only a string assertion, and the "peg"
+/// row of `pf_columns_survive_every_enrichment_rewrite` is actually priced by
+/// the EXTERNAL tier (it seeds a rate of exactly 1.0 below the epoch, so the two
+/// tiers are numerically identical and the mislabel is invisible).
+///
+/// Tier attribution is BY VALUE — there is no per-tier counter. The candle sits
+/// ABOVE `USDC_ORACLE_EPOCH_S`, so the external tier is structurally excluded by
+/// its own epoch bound, and the day carries a rate of 0.9681, so if it ever ran
+/// anyway the volume would read 4.8405 instead of 5.0. No `oracle_prices` row
+/// exists for USDC, so the oracle tier cannot write either. The peg tier is the
+/// only writer left.
+///
+/// The FOO/EXO companion is load-bearing, not decoration: every tier statement
+/// is issued only while `count_candidates(CANDIDATE_PRED) > 0`, so with a
+/// one-row fixture "never re-selected" could not fail even if the predicate
+/// were wide open. The exotic quote is a candidate no tier can price, which
+/// keeps the loop alive for the second pass.
+///
+/// RED without `OR p.volume_quote_usd = 0` in `peg_sql`: the dust row is never
+/// selected at all and its volume is never valued.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_dust_only_minute_quoted_in_a_pegged_asset_is_priced_once_by_the_peg_tier() {
+    let db = "it_enrich_dust_on_peg";
+    let client = setup_scratch(db).await;
+    // 2026-03-11 + 1 min: above the epoch, so the external tier cannot run.
+    let ts = USDC_ORACLE_EPOCH_S + 60;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    // FOO/USDC: dust — real volume, no price formed, so no close to value.
+    // FOO/EXO: a permanent candidate no tier can price (keeps the loop alive).
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ({ts}, 10,  2, 'sdex', 0,0,0,0, 1, 5, 0, 0, 5, 5, 1, 0, 0, 0), \
+             ({ts}, 10, 20, 'sdex', 9,9,9,9, 1, 9, 0, 0, 9, 1, 1, 1, 1, 9)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // A rate that is NOT 1.0, on the candle's day: if the external tier ever
+    // widened past the epoch this test goes red instead of quietly passing.
+    seed_external_rate(&client, db, utc_day_start(ts), DEPEG_RATE).await;
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let volume_usd = client
+        .query(&format!(
+            "SELECT toFloat64(volume_quote_usd) FROM {db}.price_ohlcv_1m FINAL \
+             WHERE asset_id = 10 AND quote_asset_id = 2 AND timestamp = ?"
+        ))
+        .bind(ts)
+        .fetch_one::<f64>()
+        .await
+        .unwrap();
+    assert!(
+        (volume_usd - 5.0).abs() < 1e-9,
+        "the peg tier values the dust row's volume at x $1 (5.0), got {volume_usd}: \
+         0.0 means it was never selected — the `OR p.volume_quote_usd = 0` disjunct \
+         is gone and a dust row's real volume is stranded — and 4.8405 means the \
+         external tier priced a candle above the oracle epoch"
+    );
+    assert_eq!(
+        close_usd(&client, db, 10, 2, ts).await,
+        0.0,
+        "a candle that formed no price has no close to value: close_usd stays 0"
+    );
+
+    let after_first = version_of(&client, db, 10, 2, ts).await;
+    assert_eq!(after_first, 2, "the dust row is written exactly once");
+    assert_eq!(
+        candidates_left(&client, db).await,
+        1,
+        "only the exotic-quote companion may remain a candidate"
+    );
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+    assert_eq!(
+        version_of(&client, db, 10, 2, ts).await,
+        after_first,
+        "the dust row has nothing left to change and must not be re-selected; a \
+         growing version is the pre-0286 `WHERE close_usd = 0` latch, re-inserting \
+         an identical row on every pass"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// A reference minute that formed no price is ignored by the pivot — even
+/// though it CLAIMS a close.
+///
+/// The two existing pivot reference ITs both seed `close = 0` on their
+/// contaminating rows, so `close > 0` alone excludes them and the subquery's
+/// `AND pf_trade_count > 0` never carries any weight. This is the fixture that
+/// makes that term load-bearing: the `late` reference has a perfectly ordinary
+/// `close` of 0.60 and 1000 of volume, and is disqualified by the pf count
+/// alone.
+///
+/// RED without `AND pf_trade_count > 0`: the `late` bucket wins the ASOF
+/// outright and the subject is priced from a close nobody traded at.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_pivot_ignores_a_reference_minute_that_formed_no_price() {
+    let db = "it_enrich_pivot_pf_only_ref";
+    let client = setup_scratch(db).await;
+    let early = 1_600_000_000u32;
+    let late = early + 600;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    // XLM/USDC reference market:
+    //  - `early`: a genuinely price-forming row at 0.30.
+    //  - `late`:  claims 0.60 on 1000 of volume but formed NO price. Being the
+    //    newest bucket it wins the ASOF unless the pf term excludes it.
+    // FOO/XLM at `late` is the subject.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ({early}, 1, 2, 'sdex', 0.30,0.30,0.30,0.30, 1000, 300, 0, 0, 0.30, 5, 1, 2, 1000, 300), \
+             ({late}, 1, 2, 'sdex', 0.60,0.60,0.60,0.60, 1000, 600, 0, 0, 0.60, 3, 1, 0, 0, 0), \
+             ({late}, 10, 1, 'phoenix', 13.3333,13.3333,13.3333,13.3333, 3, 40, 0, 0, 13.3333, 5, 1, 2, 3, 40)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    seed_external_rate(&client, db, DEEP_DAY_START, 1.0).await;
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let priced = close_usd(&client, db, 10, 1, late).await;
+    assert!(
+        (priced - 4.0).abs() < 1e-4,
+        "the reference must be the price-forming row's 0.30 (13.3333 x 0.30 = 4.0), \
+         got {priced}: 8.0 means `AND pf_trade_count > 0` is gone from the pivot's \
+         reference subquery and a close nobody traded at priced the subject"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// A pivot reset does not re-open a day whose only reference candles are dust.
+///
+/// `the_pivot_reset_never_zeroes_a_bucket_whose_reference_market_is_silent`
+/// pins the day with NO reference candle at all. This one pins the day that has
+/// a reference candle carrying real volume and no price — which the day set
+/// must also refuse, because the refill reads a subquery that additionally
+/// demands `pf_trade_count > 0` and would find nothing to price the row from.
+/// Both days carry the same imported rate, so the rate is not what separates
+/// them.
+///
+/// RED with `close > 0` dropped from the day set: the dust day is admitted, the
+/// subject is zeroed and then not refilled — strictly worse than the stale
+/// value it replaced.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_pivot_reset_never_re_opens_a_day_whose_only_reference_is_dust() {
+    let db = "it_enrich_0228_dust_reference_day";
+    let (with_ref, dust_ref) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    let stored = FOO_XLM_CLOSE * XLM_USDC_CLOSE;
+    // Day 1: a price-forming XLM/USDC reference. Day 2: an XLM/USDC candle with
+    // 1000 of volume that formed no price at all. A FOO/XLM subject on both,
+    // each carrying a stored (pre-0228) value. All 18 columns: left to its
+    // DEFAULT, `pf_trade_count` would take `trade_count` and turn the dust
+    // reference into a healthy one.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ({with_ref}, 1, 2,'sdex', {XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE}, 1000,58.8,0,0,{XLM_USDC_CLOSE},1,1, 1,1000,58.8), \
+             ({with_ref},10, 1,'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1, 1,5,50), \
+             ({dust_ref}, 1, 2,'sdex', 0,0,0,0, 1000,1,0,0,0.001,3,1, 0,0,0), \
+             ({dust_ref},10, 1,'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1, 1,5,50)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
+    seed_external_rate(&client, db, DEPEG_DAY + 5 * 86_400, DEPEG_RATE).await;
+
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1h".to_string();
+    c.one_shot = true;
+    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    let stats = ChEnrichmentPass::new(c).run().await.unwrap();
+
+    assert_eq!(
+        stats.rows_reset, 1,
+        "only the day with a PRICE-FORMING reference may be re-opened: a day whose \
+         only reference candle is dust has nothing the pivot can refill from"
+    );
+    let (kept, ver) = pivot_subject_1h(&client, db, dust_ref).await;
+    assert!(
+        (kept - stored).abs() < 1e-6 && ver == 1,
+        "the dust-reference day must keep its stored value untouched, got {kept} \
+         v{ver}. 0.0 at v2 means the day set admitted it on volume alone, the row \
+         was zeroed, and the refill subquery — which also asks pf_trade_count > 0 — \
+         found nothing to price it with"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
