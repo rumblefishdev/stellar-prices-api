@@ -164,7 +164,15 @@ CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1M  AS prices.price_ohlcv_1m;
 
 -- Historical USD close (task 0061). close_usd = oracle_usd × close, computed at
 -- enrichment time (DEFAULT 0 until the enrichment pass fills it, mirroring
--- volume_quote_usd). Added to the base CREATE above so fresh AS-copies inherit
+-- volume_quote_usd).
+--
+-- ⚠️ That 0 is a SENTINEL with four meanings, kept on purpose (ADR 0292): not yet
+-- enriched; never priceable (no oracle or reference market for the quote asset);
+-- genuinely zero (assumed not to occur); and — since ADR 0287 — "this bucket has
+-- no price" (`pf_trade_count = 0`, so `close = 0` and `rate × 0 = 0`, permanent
+-- and correct). No aggregate may read it as a number: every reader and its guard
+-- is listed in docs/database-schema/close-usd-zero-guardrails.md, and a new one
+-- belongs there in the same PR. Added to the base CREATE above so fresh AS-copies inherit
 -- it; these idempotent ALTERs add it to databases created before 0061, where the
 -- AS-copies do NOT inherit a post-hoc base-table ALTER — so apply per table.
 ALTER TABLE prices.price_ohlcv_1m  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;

@@ -514,7 +514,9 @@ mod tests {
 
     /// Non-vacuity for the comparison itself: an edit to the body — the exact
     /// change `IF NOT EXISTS` swallows on a provisioned target — must register.
-    /// This is the guarded `close_usd` projection task 0146 needs to land.
+    /// The edit is the `argMax → argMaxIf` guard on `close_usd` — the fixtures
+    /// here predate task 0286, which replaced that projection with a rate; any
+    /// one-token body edit makes the point.
     #[test]
     fn an_edited_body_does_not_fingerprint_as_in_sync() {
         let edited = DECLARED.replace(

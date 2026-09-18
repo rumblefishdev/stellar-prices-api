@@ -149,9 +149,9 @@ Invariants, and the mechanism that confirms each:
 | No aggregate over `close_usd`, or over `close` as a price, runs without a guard that excludes the sentinel | the guardrail inventory; unit tests on every generated rollup/pre-roll rendering (`rollup_sql.rs`); `no_preroll_script_uses_an_unguarded_argmax_on_close_usd` |
 | A rate is never derived from a value under the precision floor | `rollup_pf_it` (both legs), `ohlcv_it` (`…at_the_decimal_floor`) |
 | The shipped MV bodies are the generator's | text-equality pins in `prices-clickhouse/src/lib.rs`; the 0142 drift detector on deployed definitions |
-| A row no statement can change is not re-selected forever | `a_dust_only_minute_is_priced_once_and_is_never_reselected`; `the_external_reset_never_reopens_a_candle_that_has_no_price`; the zero-product case — test added by task 0151 |
-| `pf_trade_count = 0 ⇒ close = 0` and `close_usd > 0 ⇒ close > 0` on stored rows | scheduled assertion in `rollup-freshness-probe` (added by task 0151) |
-| Surfaces agree on the same row, or disagree only as §5 says | cross-surface test added by task 0151; extended by [[0147]] |
+| A row no statement can change is not re-selected forever, and not re-written at all | `a_dust_only_minute_is_priced_once_and_is_never_reselected`; `the_external_reset_never_reopens_a_candle_that_has_no_price`; `a_usd_close_that_rounds_to_zero_is_written_once_and_never_rewritten`; `an_oracle_reading_of_zero_writes_nothing` |
+| `pf_trade_count = 0 ⇒ close = 0` and `close_usd > 0 ⇒ close > 0` on stored rows | `rollup-freshness-probe::zero_invariants` — metric `CandleZeroInvariantViolations`, alarm ladder `prices-{env}-zero-invariant-*` |
+| Surfaces agree on the same row, or disagree only as §5 says | `ohlcv_agrees_with_price_usd_series_on_the_same_bucket` (USDC); the sub-floor case lands with the floor in `views.sql` — [[0147]] |
 
 ## Consequences
 

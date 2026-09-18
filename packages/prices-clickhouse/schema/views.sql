@@ -169,6 +169,15 @@
 -- close_usd is always returned as a value-or-absent: a miss is a missing row
 -- (NULL after the reader's LEFT JOIN), never an error and never a dropped row.
 --
+-- ⚠️ That contract covers THESE views — `price_usd_series*` and
+-- `usd_reference*` — and no other surface. ADR 0292 §5 writes down what each
+-- surface publishes when a bucket has no USD price: here the row is absent;
+-- `/ohlcv` returns the bucket with `null` price fields and its volume;
+-- `current_price_usd` (below) carries a SENTINEL 0. The underlying
+-- `close_usd = 0` has four meanings — pending, unpriceable, genuinely zero, and
+-- (ADR 0287) "this bucket has no price" — and `no_asset_price` above does not
+-- tell them apart; the reason is a read-time classification (ADR 0292 §3).
+--
 -- ## JOIN interop contract (exact column forms — avoids silent JOIN mismatch)
 --   asset_kind       String, one of 'native' / 'credit' / 'contract'.
 --   asset_code       trimmed String (e.g. 'XLM','USDC') — NOT a padded
@@ -970,9 +979,13 @@ WHERE sac_address != '';
 
 ----------------------------------------------------------------------
 -- prices.current_price_usd — live spot (tip) per asset, natural-identity keyed.
--- Same contract as price_usd_series (natural id, NULL-never-error via the
--- consumer's LEFT JOIN) but for "now": one row per asset with the latest USD
--- price + `updated_at`. ⚠️ **`updated_at` is the MV's refresh time, not the
+-- Same KEYING as price_usd_series (natural id, joined by the consumer's LEFT
+-- JOIN) but for "now": one row per asset with the latest USD price +
+-- `updated_at`. ⚠️ NOT the same missing-value contract: an asset with no priced
+-- candle in the 24 h window is PRESENT here with `price_usd = 0` and
+-- `method = ''` — a sentinel, where the series omit the row (the sentinel table
+-- above; ADR 0292 §5, which also decides the additive `price_status` / `as_of`
+-- fields that will make the 0 and a carried price legible). ⚠️ **`updated_at` is the MV's refresh time, not the
 -- price's age** — since task 0135 `price_usd` is the latest *priced* close and
 -- is not age-bounded, so a staleness policy keyed on `updated_at` cannot see
 -- how old it is. See the sentinel table above; no column carries the price's
