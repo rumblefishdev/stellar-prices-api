@@ -64,16 +64,22 @@ the shape of; `typescript` is ~45s end to end and not worth optimizing.
 | ----------------------------------------------------- | --------- | ------- |
 | setup (checkout, toolchain, rust-cache, cargo-lambda) | 29s       | 9%      |
 | `cargo fmt` / `check` / `clippy` / `test`             | 45s       | 15%     |
-| **Build Lambda bootstraps**                           | **3m24s** | **67%** |
-| Verify Lambda artifacts                               | 0s        | —       |
+| **Build and verify Lambda bootstraps** ¹              | **3m24s** | **67%** |
 | `actions/setup-node` + `npm ci` + `cdk synth`         | 29s       | 9%      |
 | **total**                                             | **5m08s** |         |
 
-**If you want to make CI faster, `Build Lambda bootstraps` is the only step that
-matters.** It is two thirds of the job. Everything else is rounding error.
+¹ Measured as two steps, `Build Lambda bootstraps` (3m24s) and `Verify Lambda
+artifacts` (0s). Task 0141 merged them into one step running
+`tools/scripts/build-lambda-assets.sh` — the same script `make build-lambdas`
+runs before a deploy. The cargo invocation is unchanged, so the timing stands;
+the merged step has not been re-measured.
 
-Note that `Build Lambda bootstraps` varies ~17s run to run on identical commit
-content — compare step timings, never job totals, when measuring a change here.
+**If you want to make CI faster, `Build and verify Lambda bootstraps` is the only
+step that matters.** It is two thirds of the job. Everything else is rounding
+error.
+
+Note that it varies ~17s run to run on identical commit content — compare step
+timings, never job totals, when measuring a change here.
 
 ## Why the `rust` job installs Node (do not "clean this up")
 
