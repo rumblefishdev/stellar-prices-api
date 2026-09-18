@@ -97,6 +97,102 @@ history:
       in `oracle_sql`, the cross-surface test under the floor, the probe
       assertion, the `views.sql` / `init.sql` comment fixes. The wire fields
       are decided here and shipped by 0147.
+  - date: "2026-09-18"
+    status: active
+    who: akot
+    note: >
+      **Everything still open above is closed, and every guardrail is now
+      pinned by a test SEEN to fail without it.** By commit: the
+      `oracle_sql` no-op guard (`479fd80`), the probe's zero-invariant
+      assertion (`2e04d9b`), its CloudWatch ladder (`07e5dbf`), the comment
+      fixes with the inventory and ADR Confirmation (`394fa4b`), three new
+      behavioural ITs closing the audit's A4 gaps (`16e4857`), and the docs
+      (runbook, inventory, this README). Nine RED proofs recorded: each guard
+      term was removed, the named test seen to fail, and the source restored
+      byte-identical before any commit. Suites green on ClickHouse 26.3.10.60:
+      `ch_enrich_it` 58/58, `rollup_freshness_it` 22/22 single-threaded,
+      `prices-clickhouse` ITs (one env-only red, `execution_bound_error_it`,
+      which needs `CLICKHOUSE_PROXY_URL`), workspace units 172/62/59, infra
+      typecheck + lint. The four `◐` rows the inventory assigned to 0151 are `✅` and its
+      "Open gaps, by owner" table names 0151 nowhere. New runbook
+      `docs/runbooks/0151-zero-invariant-probe-rollout.md` carries the deploy
+      order — probe and alarms go out only AFTER [[0286]]'s schema step, since
+      the query reads `pf_trade_count` and the read would error (corrected
+      below: this does NOT suppress the other checks). **Not deployed: that is an operator
+      step.** The cross-surface test under the floor stays with [[0147]], where
+      the fix is — a test of agreement cannot land before the thing it asserts.
+  - date: "2026-09-18"
+    status: active
+    who: akot
+    note: >
+      **Code review of the branch: 1 critical, 7 warnings — what was 0151's is
+      fixed, what was not is written down.** Critical: the new runbook's
+      Rollback named `make destroy-production-observability`, which destroys the
+      WHOLE alarm stack, not the ladder — replaced by a revert-and-deploy with a
+      diff check. Its production-read block was copied from the 0142 drift
+      BINARY and does nothing for plain SQL — replaced by the mTLS `dev_read`
+      route. The probe's `FINAL` (the alarm's only recovery path) and its 48 h
+      window were pinned by a string match: two ITs added, each seen RED with
+      the term removed (`violations 2, scanned 3` for `1, 2`; `1, 2` for
+      `0, 1`). The shared `usdSanityEscalationCounts` doc now says it drives
+      three ladders; "dust-only" is disambiguated between the post-0286 shape
+      and the legacy one. **Not fixed here, all three in the inventory:** the
+      scan prunes to a monthly partition, not 48 h, and its production cost is
+      unmeasured — a deploy gate in the runbook; `oracle_sql` rewrites a stored
+      `close_usd` unconditionally; `Decimal(38,14) × Decimal(38,14)` wraps
+      silently at `>= 1e10` (measured: `0.12 × 2e11` → negative). The last two
+      predate this task and need tasks of their own.
+  - date: "2026-09-18"
+    status: active
+    who: akot
+    note: >
+      **PR #323 open against `develop`; a second, independent review of it found
+      the probe blind to the very defect its alarm names.** A statement that
+      OMITS `pf_trade_count` takes DEFAULT `trade_count`, so a dust-only minute
+      is stored as `close = 0, pf_trade_count = 5` — and neither invariant saw
+      it (one needs the count at 0, the other a USD close). Reproduced on a
+      scratch row, then fixed test-first: a third invariant,
+      `pf_trade_count > 0 ⇒ close > 0`, seen RED (`violations 0` for `1`).
+      Also: the empty-scan refusal was borrowed from USD-sanity and told the
+      operator the USDT identity had drifted (task 0139) — it has its own
+      message now; the check moved LAST in the invocation so a slow scan cannot
+      cost the MV-drift datum, whose alarm is NOT_BREACHING on missing data; the
+      ladder's first rung is pinned at 1 instead of following a key that exists
+      to be tuned for the USDT ladders; the docs stop claiming the scan catches
+      a backfill — its window is on BUCKET time; and the runbook's "alarms
+      settle in OK" step, which passes even when no datapoint ever arrives, asks
+      CloudWatch for the datum instead. The longer alarm text went to 1251
+      characters; caught by measuring, confirmed by `make synth-production`
+      (the stack's own 1024-char guard) at 981. Probe ITs 25/25.
+      **Correction of a claim made earlier in this task, in the runbook and in
+      the PR text:** a failed zero-invariant read does NOT take the other five
+      checks down. `main.rs` is built so that no check suppresses another — the
+      rest publish normally and the invocation errors only at the end, tripping
+      the probe's own dead-probe alarm. The ordering rule stands, for a smaller
+      and truer reason: deployed before 0286's schema step, the check latches
+      the dead-probe alarm on a probe that is alive. The claim came from the
+      task brief, not from reading the handler, and survived a verifier and two
+      reviews because each checked that the cited lines exist, not what the
+      comment twenty lines above them says.
+  - date: "2026-09-18"
+    status: active
+    who: akot
+    note: >
+      **The two unknowns this task carried into its PR are measured, on
+      production, read-only as `dev_read`.** The scan's cost: 0.038 s, 649,878
+      rows read, 36.5 MB, for 448,376 candles in the 48 h window — part-level
+      pruning on `timestamp` does far better than the "whole monthly partition"
+      both reviews and the runbook feared. Whether the third invariant would
+      latch the alarm on the day 0286's schema step lands (the new column takes
+      DEFAULT `trade_count`, so `trade_count` stands in for it today): 0 rows
+      break any of the three. The runbook keeps both gates, now with a baseline
+      to compare against. Also verified from CODE rather than from the
+      inventory: `pf_trade_count > 0 ⇒ close > 0` holds for every post-0286
+      writer — `bucket.rs::finalise` sets both from the same filtered fill set,
+      `price_survives_column_scale` demands the rounded price `>= 1e-12`, and
+      all five enrichment statements pass `close` and `pf_trade_count` through
+      unchanged. `ch_enrich_it` re-run on the branch AFTER merging `develop`:
+      58/58. Stale counts fixed (the PR adds nine ITs, not six).
 ---
 
 # ADR — `close_usd` zero-as-missing
@@ -255,17 +351,42 @@ answer.
 
 ## Acceptance Criteria
 
-- [ ] ADR filed in `lore/2-adrs/` with a decision, not just an analysis.
+- [x] ADR filed in `lore/2-adrs/` with a decision, not just an analysis —
+      `0292_close-usd-zero-is-a-named-sentinel-with-a-published-reason.md`,
+      `## Decision` (six numbered verdicts, accepted by Adam 2026-09-17).
 - [x] The rate-table option ([[I-usd-rate-table]]) decided 2026-08-06 — adopted
       **narrowly inside [[0154]]**, schema-wide refactor rejected for now, with
       the revisit trigger recorded. The two gating unknowns move to 0154 at
       reduced scope.
-- [ ] The ADR carries the **rejected** option and its reasoning, not just the
-      chosen one — a rejected option with a revisit trigger is the point.
-- [ ] `close_usd`'s published null-ness is stated as a **contract term**, with
-      BE's dash-renders-as-missing constraint cited.
-- [ ] Cross-linked from [[0144]] and from `init.sql`'s column comment.
-- [ ] The `views.sql` value-or-absent contract either implemented or the
-      header corrected to match reality.
-- [ ] If "accept the sentinel" is the outcome, the guardrails that make it
-      acceptable are enumerated and each has a test.
+- [x] The ADR carries the **rejected** option and its reasoning, not just the
+      chosen one — `## Alternatives considered` carries six: `Nullable(Decimal)`,
+      the schema-wide rate table (with its 2026-08-06 revisit trigger), a per-row
+      `usd_status` (DEFERRED, with a window), ClickHouse `CHECK` constraints,
+      publishing `null` in place on the current-price surfaces, and one
+      missing-value encoding API-wide.
+- [x] `close_usd`'s published null-ness is stated as a **contract term**, with
+      BE's dash-renders-as-missing constraint cited — ADR 0292 §5 and the
+      Context bullet quoting BE, 2026-08-06: *"a NULL renders as a dash and
+      removes the pool from every USD view we have."*
+- [x] Cross-linked from [[0144]] (`related_adr: ["0292"]` and its 2026-09-17
+      cross-link history note) and from `init.sql`'s column comment
+      (`⚠️ That 0 is a SENTINEL with four meanings, kept on purpose (ADR 0292)`).
+- [x] The `views.sql` value-or-absent contract either implemented or the
+      header corrected to match reality — **header corrected**: the
+      value-or-absent promise is now scoped to `price_usd_series*` /
+      `usd_reference*`, and `current_price_usd`'s header says plainly that it
+      publishes a sentinel `0` rather than omitting the row.
+- [x] If "accept the sentinel" is the outcome, the guardrails that make it
+      acceptable are enumerated and each has a test — the enumeration is
+      `docs/database-schema/close-usd-zero-guardrails.md`, and nothing it
+      assigns to 0151 is still ◐ or ⛔. The guards closed in this pass, each
+      seen RED against its removed term before being kept:
+      `the_oracle_statement_never_writes_a_row_it_cannot_change`,
+      `a_usd_close_that_rounds_to_zero_is_written_once_and_never_rewritten`,
+      `an_oracle_reading_of_zero_writes_nothing` (commit `479fd80`);
+      `the_zero_invariant_scan_counts_only_rows_that_break_an_invariant`
+      (`2e04d9b`);
+      `a_dust_only_minute_quoted_in_a_pegged_asset_is_priced_once_by_the_peg_tier`,
+      `the_pivot_ignores_a_reference_minute_that_formed_no_price`,
+      `the_pivot_reset_never_re_opens_a_day_whose_only_reference_is_dust`
+      (`16e4857`).

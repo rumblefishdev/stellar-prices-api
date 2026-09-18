@@ -29,6 +29,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         PegCounts, StrandedCounts, peg_metric, peg_query, publish_sanity, stranded_metric,
         stranded_query,
     };
+    use rollup_freshness_probe::zero_invariants::{
+        ZeroInvariantCounts, zero_invariant_metric, zero_invariant_query,
+    };
     use rollup_freshness_probe::{TableLag, freshness_query, lag_metrics, publish};
     use std::sync::Arc;
 
@@ -53,6 +56,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     // a single shared tier made the peg direction structurally blind.
     let stranded_query = Arc::new(stranded_query());
     let peg_query = Arc::new(peg_query());
+    let zero_invariant_query = Arc::new(zero_invariant_query());
 
     let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .load()
@@ -67,6 +71,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         let query = query.clone();
         let stranded_query = stranded_query.clone();
         let peg_query = peg_query.clone();
+        let zero_invariant_query = zero_invariant_query.clone();
         let environment = environment.clone();
         async move {
             // ⚠️ EVERY CHECK RUNS, AND A FAILURE IN ONE MUST NOT SUPPRESS
@@ -263,6 +268,44 @@ async fn main() -> Result<(), lambda_runtime::Error> {
 
             // Log before deciding the invocation's fate: on a partial failure
             // this line is the only record of what the healthy checks measured.
+            // ---- 5. The zero sentinel's stored-data invariants (ADR 0292) ---
+            //
+            // LAST on purpose. It is the one unscoped read here: `timestamp` is the
+            // fourth sort-key column, so the 48 h window prunes only to the monthly
+            // partition, which is then merged `FINAL` across every pair. Measured on
+            // production 2026-09-18 it is cheap (0.04 s, 650k rows read) — but it
+            // is still the read whose cost grows with the table. A hard Lambda timeout loses whatever has not
+            // been published yet, and the MV-drift datum above is `NOT_BREACHING` on
+            // missing data — so a slow scan placed before it would turn a lost
+            // `APPEND` into a false OK. Placed here, a timeout costs only this check.
+            //
+            // Not scoped to a quote leg, unlike the two USD-sanity checks (3): a
+            // candle with no price-forming fill carries no price whatever it is
+            // quoted in. Independent of them for the same reason they are
+            // independent of each other — one refusal says nothing about another.
+            let mut zero_counts: Option<ZeroInvariantCounts> = None;
+            match ch
+                .query(&zero_invariant_query)
+                .fetch_one::<ZeroInvariantCounts>()
+                .await
+            {
+                Ok(counts) => {
+                    zero_counts = Some(counts);
+                    match zero_invariant_metric(&counts) {
+                        Ok(metric) => {
+                            if let Err(e) =
+                                publish_sanity(&cw, &environment, std::slice::from_ref(&metric))
+                                    .await
+                            {
+                                failures.push(format!("zero-invariants publish: {e}"));
+                            }
+                        }
+                        Err(refusal) => failures.push(format!("zero-invariants: {refusal}")),
+                    }
+                }
+                Err(e) => failures.push(format!("zero-invariants read: {e}")),
+            }
+
             tracing::info!(
                 tiers,
                 current_prices_rows = current_age.map(|a| a.row_count).unwrap_or_default(),
@@ -274,6 +317,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 usd_peg_scanned = peg_counts.map(|c| c.scanned).unwrap_or_default(),
                 usd_stranded = stranded_counts.map(|c| c.stranded).unwrap_or_default(),
                 usd_stranded_scanned = stranded_counts.map(|c| c.scanned).unwrap_or_default(),
+                zero_invariant_violations = zero_counts.map(|c| c.violations).unwrap_or_default(),
+                zero_invariant_scanned = zero_counts.map(|c| c.scanned).unwrap_or_default(),
                 mv_drift_critical = drift_critical,
                 mv_drift = drift_count,
                 mv_visible_objects = visible_objects.unwrap_or_default(),
@@ -305,6 +350,10 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     "peg_scanned": peg_counts.map(|c| c.scanned),
                     "stranded": stranded_counts.map(|c| c.stranded),
                     "stranded_scanned": stranded_counts.map(|c| c.scanned),
+                },
+                "zero_invariants": {
+                    "violations": zero_counts.map(|c| c.violations),
+                    "scanned": zero_counts.map(|c| c.scanned),
                 },
                 "mv_drift": {
                     "critical": drift_critical,
