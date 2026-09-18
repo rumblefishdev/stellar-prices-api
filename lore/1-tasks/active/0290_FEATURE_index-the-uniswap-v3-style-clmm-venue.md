@@ -2,7 +2,8 @@
 id: "0290"
 title: "Index the Uniswap-v3-style concentrated-liquidity venue (factory CD3KRKGD…) — ~8.5k swaps a month we never see"
 type: FEATURE
-status: backlog
+status: active
+assignee: okarcz
 related_adr: []
 related_tasks: ["0285", "0286", "0282"]
 tags: [layer-indexing, priority-medium, effort-medium, amm, ingestion, data-correctness]
@@ -16,6 +17,15 @@ history:
       Spawned from 0285's classification. A pool family with its own factory
       emits Uniswap-v3-shaped swaps (16,933 over 2026-07-16 → 09-15) and no
       extractor of ours recognises it.
+  - date: 2026-09-18
+    status: active
+    who: okarcz
+    note: >
+      Activated. Picked up because 0291 is blocked on 0286's schema and 0282 /
+      0285 both wait on the 2026-09-19 measurement; this is the last known
+      missing-trades gap from 0285 and is independent of the deploy freeze
+      (research + extractor + tests; nothing to deploy until 0286 phase 1
+      lands). Start by naming the venue and decoding its swap event.
 ---
 
 # Index the Uniswap-v3-style concentrated-liquidity venue
