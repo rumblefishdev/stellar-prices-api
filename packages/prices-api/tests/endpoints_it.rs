@@ -85,12 +85,26 @@ async fn setup(db: &str) -> Client {
         .execute()
         .await
         .unwrap();
+    // `INSERT … SELECT` so `now()` evaluates (the idiom of
+    // backfill-freshness-probe/tests/freshness_it.rs). The running stream's
+    // `last_push_at` is now()-relative: `/v1/backfill/status` reports a
+    // `running` stream whose last push is older than 7 days as `stalled`, and
+    // the literal this seed used to carry ('2026-06-15 11:30:00') aged past that
+    // threshold and turned `backfill_status_maps_both_streams` red (task 0275).
+    // Every other value is a literal on purpose — none of them is compared
+    // against the clock. Siblings checked for the same rot by reading what
+    // their seeds compare against `now()`, not by waiting: `ohlcv_it` seeds no
+    // `last_push_at` (NULL is never stalled), prices-clickhouse `views_it` uses
+    // year 2096, enrichment-worker `ch_enrich_it` is all now()-relative.
     admin
         .query(&format!(
             "INSERT INTO {db}.backfill_progress \
-             (task_name, start_ledger, target_ledger, current_ledger, status, last_push_at, completed_at, earliest_data_available) VALUES \
-             ('sdex_archive', 1, 57234198, 34891234, 'running', '2026-06-15 11:30:00', NULL, '2015-11-18 03:47:00'), \
-             ('soroban_amm', 0, 0, 0, 'completed', '2026-04-14 08:23:11', '2026-04-14 08:23:11', '2024-02-20 17:00:00')"
+             (task_name, start_ledger, target_ledger, current_ledger, status, last_push_at, completed_at, earliest_data_available) \
+             SELECT 'sdex_archive', 1, 57234198, 34891234, 'running', \
+                    toDateTime(now() - INTERVAL 1 DAY), CAST(NULL AS Nullable(DateTime)), toDateTime('2015-11-18 03:47:00') \
+             UNION ALL \
+             SELECT 'soroban_amm', 0, 0, 0, 'completed', \
+                    toDateTime('2026-04-14 08:23:11'), toDateTime('2026-04-14 08:23:11'), toDateTime('2024-02-20 17:00:00')"
         ))
         .execute()
         .await
@@ -344,7 +358,20 @@ async fn backfill_status_maps_both_streams() {
     // oldest ledger reflected and what remains is the stretch still BELOW it:
     // remaining = current - start = 34891234 - 1
     assert_eq!(json["sdex"]["ledgers_remaining"], 34891233u64);
-    assert_eq!(json["sdex"]["last_push_at"], "2026-06-15T11:30:00Z");
+    // Seeded as `now() - INTERVAL 1 DAY`, so pin the wire format (RFC 3339,
+    // UTC `Z`) and the value to within a few minutes, never its text.
+    let last_push = json["sdex"]["last_push_at"]
+        .as_str()
+        .expect("last_push_at is a string");
+    assert!(last_push.ends_with('Z'), "last_push_at={last_push}");
+    let age = chrono::Utc::now()
+        - chrono::DateTime::parse_from_rfc3339(last_push)
+            .expect("last_push_at is RFC 3339")
+            .with_timezone(&chrono::Utc);
+    assert!(
+        (age - chrono::Duration::days(1)).num_seconds().abs() < 300,
+        "last_push_at={last_push} is not ~1 day ago (age {age})"
+    );
     // earliest_data_available = oldest OHLCV row this stream has landed (AC 6)
     assert_eq!(
         json["sdex"]["earliest_data_available"],
