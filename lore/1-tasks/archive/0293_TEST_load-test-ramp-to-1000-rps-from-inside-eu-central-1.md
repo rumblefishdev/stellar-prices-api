@@ -2,7 +2,7 @@
 id: "0293"
 title: "Load-test run 2: ramp 100 → 250 → 500 → 1000 req/s of cache misses, driven from inside eu-central-1 — and the three-row report M3 asks for"
 type: TEST
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0260", "0121", "0122", "0047", "0249"]
 tags: [layer-infra, priority-high, effort-medium, performance, clickhouse, load-test, milestone-M3]
@@ -63,6 +63,17 @@ history:
       `production-ingestion-backlog-age` for 8 minutes. Decisions: no handler
       timing instrumentation; laptop-with-controls accepted as the client.
       Both temporary AWS changes (usage plan, reserved concurrency) reverted.
+  - date: 2026-09-18
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Closed after PR #326 merged (41e6feb2). 7 of 8 criteria met; the eighth
+      (client inside eu-central-1) was dropped by decision and replaced by
+      measured-network controls plus gateway-side p95 on every row. Tranche 3
+      AC 5 met on the scenario it names (p95 49.0 ms); 500 req/s held; the
+      shared ClickHouse box's ceiling is between 500 and ~900 req/s. 11
+      commits, 24 files: report, script changes, 17 k6 exports, 4 observer
+      logs. No follow-up task spawned — see Closing.
 ---
 
 # Load-test run 2: ramp to 1000 req/s from inside eu-central-1, and the report
@@ -329,6 +340,65 @@ bottleneck is the shared ClickHouse box — not Lambda, not the gateway.
 - [x] p95 at 100 req/s reported both gateway-measured and client-measured, with the M3 bar (100 ms) beside it
 - [x] Report committed with the k6 exports for every row, including run 1's
 - [x] If the knee is shared-box saturation, [[0047]] gets the numbers
+
+## Closing — 2026-09-18
+
+### Design Decisions
+
+#### From Plan
+
+1. **Ramped approach to the higher rates with an abort rule and a live
+   observer** — kept, and it is what turned the 1000 req/s overload into a
+   1.5-minute event instead of a five-minute one.
+2. **Cache defeated through `min_volume_usd` variants**, hit rate reported per
+   row from the gateway's own counters.
+
+#### Emerged
+
+3. **The laptop stayed the client.** Its network is measured around every run
+   and each row carries the gateway's p95; the in-region client (criterion 1)
+   was dropped by team decision once the 2026-09-17 tail was shown to be the
+   network.
+4. **Two separate runs (500, 1000) instead of one four-step ramp** — the
+   operator's call on the day; each got a ramped warm-up from 100.
+5. **A temporary reserved-concurrency cap (700) on the API handler for the
+   1000 run**, outside CDK, removed 39 minutes later. Not in the plan; it is
+   why the overload throttled only the test and not the account.
+6. **A 404 for an asset that aged out of the 24 h window is not a failed
+   request** — counted in `aged_out` with its own 1 % bar.
+7. **Task documents were edited on the branch**, not on develop, once the
+   first such commit had landed there — editing in both places would have
+   conflicted at merge. They reached develop with the PR.
+
+### Issues Encountered
+
+- **A day-old pool** lost 38 % of its assets to 404 (diagnostic run); fixed by
+  `gen_pool.mjs` in the run's chain.
+- **A backfill was recorded as running when it was not**; withdrawn the same
+  day, note kept in place.
+- **The first post-run alarm check covered only `prices-production-*`** and
+  missed the explorer's page. Check the whole account after any run on shared
+  infrastructure.
+- **The session scratchpad is wiped between days** — the observer script had to
+  be rebuilt minutes before a run. Anything needed twice belongs in the repo;
+  the observer logs were moved to `docs/loadtest-results/` for that reason.
+- **`iterationInTest` restarts per scenario**, so main replayed keys the
+  warm-up had just cached (2.6 % hits at 500 req/s); fixed by a half-cycle
+  variant offset before the 1000 run.
+
+### Future Work — deliberately not spawned
+
+- **Narrowing the knee** (held steps at 650 / 800 req/s): informational, not
+  needed for M3, would need another agreed window and most of a month's key
+  quota. Reopen only if someone needs the number.
+- **The ~4 % slow mode between Lambda and ClickHouse**: the operator decided
+  not to instrument it (2026-09-18). [[0249]] still owns the read path's
+  missing timing.
+- **Something on the box runs every two minutes** (ClickHouse p95 40–54 ms in
+  even minutes): the box is sbe's; reported in the channel summary.
+- `docs/prices-api-general-overview.md` still says "200 req/s per method
+  stage-wide"; the `/price` route is at 10,000 / 5,000. A one-line docs fix
+  for whoever next touches that file.
 
 ## Notes
 
