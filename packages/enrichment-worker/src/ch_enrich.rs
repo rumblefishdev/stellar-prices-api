@@ -1614,7 +1614,7 @@ impl ChEnrichmentPass {
                 refs.xlm = Some(r.asset_id);
             } else if r.asset_code == "USDC" && r.issuer_address == USDC_ISSUER {
                 refs.usdc = Some(r.asset_id);
-            } else if r.asset_code == "USDT" && r.issuer_address == USDT_ISSUER {
+            } else if r.asset_code == "USDT" && r.issuer_address == USDC_ISSUER {
                 refs.usdt = Some(r.asset_id);
             }
         }
