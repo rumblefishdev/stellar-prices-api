@@ -2,7 +2,7 @@
 id: "0275"
 title: "19 ClickHouse integration tests have never run in CI — cargo test --workspace skips every #[ignore] and no workflow provides a database"
 type: CHORE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0215", "0172", "0182", "0218", "0114"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M3, ci, testing, clickhouse]
@@ -31,6 +31,14 @@ history:
       to prod's `version()` read the same day, so the version-parity question
       is answered before the work starts. What remains is genuinely small — a
       service container plus `-- --ignored`.
+  - date: "2026-09-18"
+    status: active
+    who: akot
+    note: >
+      Activated. The "19 tests" in the title is stale: a count on 2026-09-18
+      found 238 `#[ignore]` across 40 files, most of them needing ClickHouse.
+      The workspace inventory (last criterion) is therefore the first step, not
+      the last — it decides what the CI job has to run.
 ---
 
 # The ClickHouse integration tests have never run in CI
