@@ -76,6 +76,15 @@ const API_KEY = __ENV.API_KEY || '';
 const RATE = Number(__ENV.RATE || 100);
 const WARMUP = __ENV.WARMUP || '30s';
 const DURATION = __ENV.DURATION || '5m';
+// Cache-key variants per asset, for rates where the pool alone cannot defeat the
+// cache. The gateway keys /price on the path AND `min_volume_usd`, and the handler
+// applies that parameter in memory AFTER the same ClickHouse query — so a variant
+// is a distinct cache entry at an identical database cost, with `price_usd`
+// untouched. Distinct keys = pool × VARIANTS, walked round-robin; to stay
+// miss-only they must satisfy keys / RATE ≫ TTL (10 s). ~3,300 live assets give
+// 33 s at 100 req/s with no variants, but need 4 at 500 req/s and 8 at 1000.
+const VARIANTS = Math.max(1, Number(__ENV.VARIANTS || 1));
+const CACHE_TTL_S = 10;
 
 // Asset pool. ASSET pins a single id (cache-dominated); otherwise the pool is
 // read from a JSON file — the 20-asset conformance list by default, so 0121 and
@@ -111,11 +120,14 @@ export const options = {
     // Excluded from thresholds — its job is to have containers already warm.
     ...(WARMUP_ON
       ? {
+          // A ramp, not a step: at RATE ≤ 100 it is flat (the 0121 behaviour); above
+          // that it climbs from 100 so the shared ClickHouse box meets the load
+          // gradually and the operator can abort on the way up, not at the top.
           warmup: {
-            executor: 'constant-arrival-rate',
-            rate: RATE,
+            executor: 'ramping-arrival-rate',
+            startRate: Math.min(RATE, 100),
             timeUnit: '1s',
-            duration: WARMUP,
+            stages: [{ target: RATE, duration: WARMUP }],
             ...VU_POOL,
             tags: { phase: 'warmup' },
           },
@@ -167,7 +179,9 @@ const PARAMS = {
     // Managed WAF rulesets 403 a missing User-Agent; k6 sends one, this pins it.
     'User-Agent': 'stellar-prices-api-loadtest/0121 (k6)',
   },
-  tags: { endpoint: 'price' },
+  // `name` pins the URL tag: without it every asset × variant is its own time
+  // series in k6 — tens of thousands at the higher rates.
+  tags: { endpoint: 'price', name: 'GET /v1/assets/{id}/price' },
   // Anything other than 200 is a failure. The default (status < 400) would let
   // a 204 or a challenge served as 2xx pass silently.
   responseCallback: http.expectedStatuses(200),
@@ -231,6 +245,14 @@ export function setup() {
     exec.test.abort(`pool: no asset answered 200 out of ${POOL.length} probed — nothing to measure`);
   }
   console.log(`pool: ${live.length} asset(s) under test`);
+  const keys = live.length * VARIANTS;
+  const revisit = keys / RATE;
+  console.log(`cache: ${keys} distinct key(s) (${VARIANTS} variant(s)), each revisited every ${revisit.toFixed(1)} s vs a ${CACHE_TTL_S} s TTL`);
+  // Only meaningful for a pool meant to defeat the cache; the 1- and 20-asset
+  // regimes are cache-dominated on purpose and say so in the README.
+  if (live.length > 100 && revisit < 2.5 * CACHE_TTL_S) {
+    console.warn(`cache: revisit interval under ${2.5 * CACHE_TTL_S} s — this run is NOT miss-only; raise VARIANTS and state the hit rate in the report`);
+  }
   return { pool: live };
 }
 
@@ -244,8 +266,13 @@ export function setup() {
 // join would only ever cover the misses.
 export default function (data) {
   const pool = data.pool;
-  const asset = pool[exec.scenario.iterationInTest % pool.length];
-  const res = http.get(`${BASE_URL}/v1/assets/${encodeURIComponent(asset)}/price`, MAIN_PARAMS);
+  const i = exec.scenario.iterationInTest;
+  const asset = pool[i % pool.length];
+  // Whole passes over the pool share a variant, so a key comes back only after
+  // pool × VARIANTS iterations. Variant 0 sends no query string (the 0121 URL).
+  const v = Math.floor(i / pool.length) % VARIANTS;
+  const qs = v === 0 ? '' : `?min_volume_usd=${(v * 1e-9).toFixed(9)}`;
+  const res = http.get(`${BASE_URL}/v1/assets/${encodeURIComponent(asset)}/price${qs}`, MAIN_PARAMS);
   agedOut.add(res.status === 404);
   // Not checked: a 404 has no price body, and failing both checks on it would
   // smuggle the aged-out share back into `checks` under another name.

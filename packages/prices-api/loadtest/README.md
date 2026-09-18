@@ -194,6 +194,28 @@ k6 run $K -e BASE_URL="$BASE_URL" -e API_KEY="$API_KEY" -e ASSETS=./pool-wide.js
   --summary-trend-stats="$S" --summary-export=loadtest-wide.json; echo "exit=$?"
 ```
 
+### Above 100 req/s
+
+```sh
+ulimit -n 10240   # macOS allows 256 open files per shell; k6 needs a socket per VU
+node packages/prices-api/loadtest/gen_pool.mjs && \
+k6 run $K -e BASE_URL="$BASE_URL" -e API_KEY="$API_KEY" -e ASSETS=./pool-wide.json \
+  -e PROBE_BATCH=25 -e RATE=500 -e VARIANTS=4 -e WARMUP=60s -e VUS=200 -e MAX_VUS=1000 \
+  --summary-trend-stats="$S" --summary-export=loadtest-500.json; echo "exit=$?"
+```
+
+- **`VARIANTS`** multiplies the cache keys: `/price` is keyed on the path plus
+  `min_volume_usd`, which the handler applies in memory after the same ClickHouse
+  query — a distinct cache entry at an identical database cost. Choose it so that
+  `pool × VARIANTS / RATE ≥ 25 s` against the 10 s TTL; `setup()` prints the
+  figure and warns when the run is not miss-only. ~3,400 assets: 4 at 500 req/s,
+  8 at 1000.
+- **The warm-up is a ramp** from 100 req/s to `RATE` over `WARMUP`, so the shared
+  box meets the load gradually and an abort can happen on the way up.
+- The key's usage plan must carry the rate (`prices-production-loadtest-plan`
+  was 150 req/s until 2026-09-18), and the run needs an observer on the box —
+  see task 0293 for the abort rule.
+
 `exit=0` means every threshold held.
 
 A **404 in the measured phase is not a failed request**: the asset slid out of
