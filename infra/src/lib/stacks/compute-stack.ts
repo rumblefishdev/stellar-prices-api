@@ -52,7 +52,9 @@ export function ingestDlqName(envName: string): string {
  * `RustFunction`, which shells out to `cargo lambda build` at synth.
  * The prices-api infra does not (yet) carry that dependency, so this
  * stack consumes the pre-built `provided.al2023` bootstrap via
- * `Code.fromAsset`. Build it first:
+ * `Code.fromAsset`. `make deploy-production-compute` builds it first, via
+ * `make build-lambdas` (`tools/scripts/build-lambda-assets.sh`, task 0141);
+ * a raw `cdk deploy` does not, and packages whatever is on disk:
  *
  *     cargo lambda build -p prices-ledger-processor --release --arm64 --features lambda
  *

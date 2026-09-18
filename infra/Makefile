@@ -36,6 +36,21 @@ destroy-cicd: build
 # its own.
 build-production: build
 
+# `build` above compiles the CDK TypeScript ONLY. The Lambda code is whatever
+# sits in `../target/lambda/<name>/` when `Code.fromAsset` zips it — so a deploy
+# that did not build the Rust ships the last thing anyone happened to build, and
+# every signal says it worked: a clean S3Key change in `cdk diff`, a green
+# deploy, a passing `/health` (a keyless API Gateway MOCK — it never reaches a
+# Lambda and cannot be used to verify one). Task 0141: 2026-08-03 shipped a
+# stale `prices-api` this way; on 2026-08-12 the same directory held eleven
+# 10-byte `#!/bin/sh` stubs.
+#
+# So every target that can ship a Lambda depends on this. It is cargo that
+# decides freshness — a no-op when the artifacts are current — and the script
+# then refuses anything that is not a distinct aarch64 ELF per asset.
+build-lambdas:
+	../tools/scripts/build-lambda-assets.sh
+
 synth-production: build-production
 	npx cdk --app "$(PRODUCTION_APP)" synth
 
@@ -69,7 +84,7 @@ flush-production-cache:
 # So `make diff-production` before any production deploy, and read it for removals
 # rather than skimming it for additions. This applies to every deploy target below
 # too; it lives here because this is the one that deploys all stacks at once.
-deploy-production: build-production
+deploy-production: build-production build-lambdas
 	npx cdk --app "$(PRODUCTION_APP)" deploy --all --require-approval broadening
 	$(MAKE) flush-production-cache
 
@@ -77,21 +92,21 @@ destroy-production: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy --all --force
 
 deploy-production-secrets: build-production
-	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Secrets --require-approval broadening
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Secrets --exclusively --require-approval broadening
 
 destroy-production-secrets: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Secrets --force
 
 # Ships a new api-handler, so it ships a new OpenAPI document — flush too.
-deploy-production-compute: build-production
-	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Compute --require-approval broadening
+deploy-production-compute: build-production build-lambdas
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Compute --exclusively --require-approval broadening
 	$(MAKE) flush-production-cache
 
 destroy-production-compute: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Compute --force
 
 deploy-production-apigateway: build-production
-	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-ApiGateway --require-approval broadening
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-ApiGateway --exclusively --require-approval broadening
 
 # Nothing imports this stack's exports since task 0195 retired
 # `PortalHostingStack` (which used the RestApi id for its execute-api origin),
@@ -171,14 +186,14 @@ sync-portal-explorer: build-portal-explorer verify-portal-guild
 	  --cache-control 'public, max-age=0, must-revalidate'
 	aws cloudfront create-invalidation --distribution-id $(EXPLORER_DISTRIBUTION_ID) --paths '/api/*'
 
-deploy-production-eventbridge: build-production
-	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-EventBridge --require-approval broadening
+deploy-production-eventbridge: build-production build-lambdas
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-EventBridge --exclusively --require-approval broadening
 
 destroy-production-eventbridge: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-EventBridge --force
 
 deploy-production-observability: build-production
-	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Observability --require-approval broadening
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Observability --exclusively --require-approval broadening
 
 destroy-production-observability: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Observability --force
