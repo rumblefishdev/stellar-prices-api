@@ -42,6 +42,36 @@ history:
       additive wire fields `price_status` (priced | carried | unpriced) and
       `as_of` on the current-price surfaces. Gap list:
       `docs/database-schema/close-usd-zero-guardrails.md`.
+  - date: "2026-09-18"
+    status: backlog
+    who: akot
+    note: >
+      **ADR 0292's read-time rules were prototyped in SQL on ClickHouse
+      26.3.10.60, on the real column types (`CREATE TABLE … AS
+      prices.price_ohlcv_1m`), and they WORK** — throwaway scratch database,
+      nothing kept. §3: four rows all at `close_usd = 0` classify as `priced` /
+      `pending` / `unpriceable` / `no_price` from columns they already have.
+      §4: BE's 7.7x hour reproduced — one priced 0.764-unit print at 0.05
+      beside 1000 units still pending at a true 0.0065: today's
+      `WHERE close_usd > 0` publishes 0.05; the share reads 0.076 % and the gate
+      withholds it; once enrichment catches up it publishes 0.006573 at 100 %.
+      A bucket holding ONLY the 0.764 print reads 100 % and is still withheld —
+      that is what the absolute floor is for. §5: `price_status` and an age in
+      minutes fall out of `argMaxIf` / `maxIf` on the same priced predicate.
+      **Three traps the prototype hit, for whoever builds this:**
+      (1) the naive weighted mean THROWS — `Decimal * Decimal / Decimal` on
+      these columns raises `DECIMAL_OVERFLOW` (code 407); cast to `Float64` per
+      row BEFORE multiplying, as `views.sql` already does for `v` and `w`.
+      (2) `as_of` can itself be a zero-sentinel: `maxIf(timestamp, <priced>)`
+      over no matching row returns `1970-01-01`, not NULL — published as-is
+      that is a 56-year-old price, the very class ADR 0292 is about; use
+      `maxIfOrNull` or an explicit guard, and pin it with a test.
+      (3) "the quote asset has a conversion path" does not exist as data — the
+      prototype used a one-row table; this task must decide its source of truth,
+      and `unpriceable` changes retroactively when a reference market appears.
+      The thresholds the prototype used (50 %, 10 units) were invented for the
+      demonstration and are NOT a proposal: X is still measured after the 0286
+      rollout.
 ---
 
 # Volume-coverage gate for `price_usd_series` / `price_usd_series_1h`
