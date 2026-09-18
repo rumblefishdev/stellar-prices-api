@@ -1265,6 +1265,42 @@ async fn the_zero_invariant_scan_counts_only_rows_that_break_an_invariant() {
     reset_sanity_tables(&c).await;
 }
 
+/// The writer defect the alarm names as its usual cause, reproduced as a writer
+/// would commit it: a statement that OMITS `pf_trade_count`. The column then
+/// takes its DEFAULT (`trade_count`), so a dust-only minute — `close = 0` — is
+/// stored claiming five price-forming fills (ADR 0287's trap). Neither of the
+/// first two invariants can see it: one needs `pf_trade_count = 0`, the other
+/// `close_usd > 0`. RED without the third, `pf_trade_count > 0 ⇒ close > 0`.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn a_dust_minute_written_without_its_pf_column_is_a_zero_invariant_violation() {
+    use rollup_freshness_probe::zero_invariants::ZeroInvariantCounts;
+
+    let c = client();
+    reset_sanity_tables(&c).await;
+
+    // No pf_trade_count, pf_volume or pf_price_volume in the column list.
+    exec(
+        &c,
+        "INSERT INTO prices.price_ohlcv_1m \
+           (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+            volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+         SELECT now() - INTERVAL 2 MINUTE, 14, 2, 'sdex', 0, 0, 0, 0, 5, 5, 0, 0, 0, 5, 1",
+    )
+    .await;
+
+    assert_eq!(
+        read_zero_invariants(&c).await,
+        ZeroInvariantCounts {
+            violations: 1,
+            scanned: 1
+        },
+        "a candle that claims price-forming fills must carry a price"
+    );
+
+    reset_sanity_tables(&c).await;
+}
+
 /// `FINAL` is the alarm's whole recovery path: an operator repairs a violating
 /// candle by re-inserting it at a higher `version`, and the count must DROP.
 /// RED without `FINAL`: the superseded row is still read, so the repair adds a
