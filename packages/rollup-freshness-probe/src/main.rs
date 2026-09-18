@@ -272,8 +272,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             //
             // LAST on purpose. It is the one unscoped read here: `timestamp` is the
             // fourth sort-key column, so the 48 h window prunes only to the monthly
-            // partition, which is then merged `FINAL` across every pair. Its cost on
-            // production is unmeasured. A hard Lambda timeout loses whatever has not
+            // partition, which is then merged `FINAL` across every pair. Measured on
+            // production 2026-09-18 it is cheap (0.04 s, 650k rows read) — but it
+            // is still the read whose cost grows with the table. A hard Lambda timeout loses whatever has not
             // been published yet, and the MV-drift datum above is `NOT_BREACHING` on
             // missing data — so a slow scan placed before it would turn a lost
             // `APPEND` into a false OK. Placed here, a timeout costs only this check.

@@ -343,7 +343,8 @@ export class ObservabilityStack extends cdk.Stack {
   /**
    * Candles breaking a stored-data invariant of the `close_usd = 0` sentinel
    * (ADR 0292, task 0151), keyed by count: a candle with no price-forming fill
-   * that carries a price, or a USD close without a close. Asserted by the probe
+   * that carries a price, a USD close without a close, or a candle claiming
+   * price-forming fills it has no price from. Asserted by the probe
    * on a schedule instead of by a ClickHouse CHECK constraint, which would fail
    * the insert and stall a rollup tier.
    */

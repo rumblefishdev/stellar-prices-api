@@ -174,6 +174,25 @@ history:
       task brief, not from reading the handler, and survived a verifier and two
       reviews because each checked that the cited lines exist, not what the
       comment twenty lines above them says.
+  - date: "2026-09-18"
+    status: active
+    who: akot
+    note: >
+      **The two unknowns this task carried into its PR are measured, on
+      production, read-only as `dev_read`.** The scan's cost: 0.038 s, 649,878
+      rows read, 36.5 MB, for 448,376 candles in the 48 h window — part-level
+      pruning on `timestamp` does far better than the "whole monthly partition"
+      both reviews and the runbook feared. Whether the third invariant would
+      latch the alarm on the day 0286's schema step lands (the new column takes
+      DEFAULT `trade_count`, so `trade_count` stands in for it today): 0 rows
+      break any of the three. The runbook keeps both gates, now with a baseline
+      to compare against. Also verified from CODE rather than from the
+      inventory: `pf_trade_count > 0 ⇒ close > 0` holds for every post-0286
+      writer — `bucket.rs::finalise` sets both from the same filtered fill set,
+      `price_survives_column_scale` demands the rounded price `>= 1e-12`, and
+      all five enrichment statements pass `close` and `pf_trade_count` through
+      unchanged. `ch_enrich_it` re-run on the branch AFTER merging `develop`:
+      58/58. Stale counts fixed (the PR adds nine ITs, not six).
 ---
 
 # ADR — `close_usd` zero-as-missing

@@ -91,6 +91,10 @@ investigate that first.
 
 ### Expect a non-zero count right after 0286 — and wait it out, do not repair it
 
+On 2026-09-18 production held **no** such row in the window (0 of 448,376), so
+this is a contingency, not an expectation. It is kept because the count is a
+property of the last 48 hours of trading, not of the code.
+
 0286 rolls out schema first and **ingest last**. In between, the old ingest keeps
 writing rows without the pf columns, so they take `pf_trade_count = trade_count`.
 Where such a row's price underflowed to `close = 0`, it breaks invariant 3 — not
@@ -105,8 +109,22 @@ The window is 48 hours, but `timestamp` is the **fourth** column of the table's
 sort key (`asset_id, quote_asset_id, source, timestamp`), so ClickHouse prunes
 to the monthly **partition**, not to 48 hours, and then reads it with `FINAL` —
 on the largest table, every 15 minutes. Unlike the two USD-sanity scans it has
-no quote-leg predicate to narrow it. Nothing here has been measured on
-production: the local ClickHouse holds a handful of rows.
+no quote-leg predicate to narrow it.
+
+**Measured on production, 2026-09-18** (before 0286's schema step, so with
+`trade_count` standing in for `pf_trade_count` — which is exactly the value the
+column takes by DEFAULT the moment it is added):
+
+| Reading                        | Value             |
+| ------------------------------ | ----------------- |
+| candles in the 48 h window     | 448,376           |
+| rows read / bytes read         | 649,878 / 36.5 MB |
+| server time                    | **0.038 s**       |
+| rows breaking any of the three | **0**             |
+
+So the mechanism above is real and the cost, today, is negligible: part-level
+pruning on `timestamp` does far better than "the whole month". That was taken on
+the 18th of a month, on a table that only grows — hence the gate stays.
 
 A scan that ClickHouse refuses or times out behaves exactly like the missing
 column in section 1: the other checks publish normally, the invocation errors,
@@ -254,9 +272,9 @@ would be indistinguishable from a clean tier.
 > dashboard — with no confirmation prompt. It does not "remove the ladder"; it
 > removes production's alarms.
 
-To remove **only** this ladder, revert the commit that added the
-`zeroInvariantAlarms` block to `infra/src/lib/stacks/observability-stack.ts`,
-then:
+To remove **only** this ladder, delete the `zeroInvariantAlarms` block (and its
+field) from `infra/src/lib/stacks/observability-stack.ts` — two commits touch it,
+so a single `git revert` will not do — then:
 
 ```bash
 make diff-production                    # expect exactly three alarms removed, nothing else

@@ -33,8 +33,8 @@ history:
       Accepted. Adam accepted the six verdicts on 2026-09-17; what was
       outstanding was the evidence, and it is now in. Every guardrail TASK 0151
       OWNS is pinned by a test that has been SEEN to fail with its guard
-      removed — eleven RED proofs across the enrichment no-op guard, the probe's
-      two stored-data invariants with their `FINAL` and their window, the peg
+      removed — twelve RED proofs across the enrichment no-op guard, the probe's
+      three stored-data invariants with their `FINAL` and their window, the peg
       tier's dust disjunct, the pivot reference's `pf_trade_count` term and the
       reset's reference-day set. That is narrower than "every guardrail": the
       inventory still carries open rows, each with an owner ([[0147]], [[0286]],
