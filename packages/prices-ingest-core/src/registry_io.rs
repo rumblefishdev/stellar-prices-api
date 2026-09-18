@@ -61,6 +61,12 @@ impl Registries {
                             }
                         }
                     }
+                    Venue::Sushiswap => {
+                        if let Some(p) = self.sushiswap.lookup(contract_id) {
+                            row.token0 = p.token0.clone();
+                            row.token1 = p.token1.clone();
+                        }
+                    }
                     Venue::Aquarius => {}
                 }
                 row
@@ -106,6 +112,13 @@ impl Registries {
             match venue {
                 Venue::Soroswap => {
                     self.soroswap.register(
+                        row.contract_id.clone(),
+                        row.token0.clone(),
+                        row.token1.clone(),
+                    );
+                }
+                Venue::Sushiswap => {
+                    self.sushiswap.register(
                         row.contract_id.clone(),
                         row.token0.clone(),
                         row.token1.clone(),
@@ -168,9 +181,13 @@ mod tests {
         reg.phoenix
             .register_with_wasm("CPHOENIX".into(), 0, [0xab; 32]);
         reg.venue.insert("CAQUA".into(), Venue::Aquarius);
+        // Task 0290: pair-backed like Soroswap, but its OWN registry.
+        reg.venue.insert("CSUSHI".into(), Venue::Sushiswap);
+        reg.sushiswap
+            .register("CSUSHI".into(), "CSUSHI0".into(), "CSUSHI1".into());
 
         let rows = reg.to_pool_rows();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4);
         // Sorted, stable order.
         assert_eq!(rows[0].contract_id, "CAQUA");
 
@@ -187,6 +204,18 @@ mod tests {
         );
         let ph = loaded.phoenix.lookup("CPHOENIX").expect("phoenix pool");
         assert_eq!(ph.wasm_hash, Some([0xab; 32]));
+
+        // The sushiswap pool round-trips into its own registry, and the two
+        // pair-backed venues stay disjoint (task 0290).
+        assert_eq!(loaded.venue.get("CSUSHI"), Some(&Venue::Sushiswap));
+        let su = loaded.sushiswap.lookup("CSUSHI").expect("sushiswap pair");
+        assert_eq!(
+            (su.token0.as_str(), su.token1.as_str()),
+            ("CSUSHI0", "CSUSHI1")
+        );
+        assert!(!loaded.soroswap.contains("CSUSHI"));
+        assert!(!loaded.sushiswap.contains("CSOROSWAP"));
+
         assert_eq!(loaded.pool_count(), reg.pool_count());
     }
 
