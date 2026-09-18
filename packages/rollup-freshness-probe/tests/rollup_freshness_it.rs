@@ -1191,10 +1191,20 @@ async fn a_stopped_mv_current_prices_freezes_updated_at_and_its_age_grows() {
 
 // ---- ADR 0292 / task 0151: the stored-data invariants of the zero sentinel ----
 
-/// One `price_ohlcv_1m` row, two minutes old, with every column the invariants
-/// read spelled out — the pf column above all: left to its DEFAULT
-/// (`trade_count`) it would turn the dust-only fixture into a healthy row.
-async fn insert_invariant_row(c: &Client, asset_id: u32, close: &str, close_usd: &str, pf: u32) {
+/// One `price_ohlcv_1m` row with every column the invariants read spelled out —
+/// the pf column above all: left to its DEFAULT (`trade_count`) it would turn
+/// the dust-only fixture into a healthy row.
+///
+/// `ts` is a unix timestamp fixed by the caller, NOT `now()` evaluated per
+/// insert: the table's key is `(asset_id, quote_asset_id, source, timestamp)`,
+/// so a repair only supersedes the row it repairs if it lands on the same one.
+async fn insert_invariant_row(
+    c: &Client,
+    ts: u32,
+    asset_id: u32,
+    (close, close_usd, pf): (&str, &str, u32),
+    version: u32,
+) {
     exec(
         c,
         &format!(
@@ -1202,12 +1212,21 @@ async fn insert_invariant_row(c: &Client, asset_id: u32, close: &str, close_usd:
                (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
                 volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
                 version, pf_trade_count, pf_volume, pf_price_volume) \
-             SELECT now() - INTERVAL 2 MINUTE, {asset_id}, 2, 'sdex', \
-                    {close}, {close}, {close}, {close}, 1, 1, 0, {close_usd}, 1, 3, 1, \
+             SELECT toDateTime({ts}), {asset_id}, 2, 'sdex', \
+                    {close}, {close}, {close}, {close}, 1, 1, 0, {close_usd}, 1, 3, {version}, \
                     {pf}, {pf}, {pf}"
         ),
     )
     .await;
+}
+
+async fn read_zero_invariants(
+    c: &Client,
+) -> rollup_freshness_probe::zero_invariants::ZeroInvariantCounts {
+    c.query(&rollup_freshness_probe::zero_invariants::zero_invariant_query())
+        .fetch_one()
+        .await
+        .expect("the invariant query executes and deserializes")
 }
 
 /// The assertion must **execute and deserialize** on the production build, and
@@ -1218,23 +1237,22 @@ async fn insert_invariant_row(c: &Client, asset_id: u32, close: &str, close_usd:
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn the_zero_invariant_scan_counts_only_rows_that_break_an_invariant() {
-    use rollup_freshness_probe::zero_invariants::{
-        ZeroInvariantCounts, zero_invariant_metric, zero_invariant_query,
-    };
+    use rollup_freshness_probe::zero_invariants::{ZeroInvariantCounts, zero_invariant_metric};
 
     let c = client();
     reset_sanity_tables(&c).await;
-
-    insert_invariant_row(&c, 10, "5", "0", 3).await; // priced, pending enrichment
-    insert_invariant_row(&c, 11, "0", "0", 0).await; // dust-only: no price, correctly
-    insert_invariant_row(&c, 12, "5", "0", 0).await; // ⛔ no price-forming fill, yet a close
-    insert_invariant_row(&c, 13, "0", "3", 3).await; // ⛔ a USD close without a close
-
-    let counts = c
-        .query(&zero_invariant_query())
-        .fetch_one::<ZeroInvariantCounts>()
+    let ts: u32 = c
+        .query("SELECT toUnixTimestamp(now() - INTERVAL 2 MINUTE)")
+        .fetch_one()
         .await
-        .expect("the invariant query executes and deserializes");
+        .unwrap();
+
+    insert_invariant_row(&c, ts, 10, ("5", "0", 3), 1).await; // priced, pending enrichment
+    insert_invariant_row(&c, ts, 11, ("0", "0", 0), 1).await; // dust-only: no price, correctly
+    insert_invariant_row(&c, ts, 12, ("5", "0", 0), 1).await; // ⛔ no price-forming fill, yet a close
+    insert_invariant_row(&c, ts, 13, ("0", "3", 3), 1).await; // ⛔ a USD close without a close
+
+    let counts = read_zero_invariants(&c).await;
     assert_eq!(
         counts,
         ZeroInvariantCounts {
@@ -1243,6 +1261,73 @@ async fn the_zero_invariant_scan_counts_only_rows_that_break_an_invariant() {
         }
     );
     assert_eq!(zero_invariant_metric(&counts).unwrap().value, 2.0);
+
+    reset_sanity_tables(&c).await;
+}
+
+/// `FINAL` is the alarm's whole recovery path: an operator repairs a violating
+/// candle by re-inserting it at a higher `version`, and the count must DROP.
+/// RED without `FINAL`: the superseded row is still read, so the repair adds a
+/// scanned row and clears nothing — a page that latches after the data is fixed.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn a_repaired_candle_stops_counting_as_a_zero_invariant_violation() {
+    use rollup_freshness_probe::zero_invariants::ZeroInvariantCounts;
+
+    let c = client();
+    reset_sanity_tables(&c).await;
+    let ts: u32 = c
+        .query("SELECT toUnixTimestamp(now() - INTERVAL 2 MINUTE)")
+        .fetch_one()
+        .await
+        .unwrap();
+
+    insert_invariant_row(&c, ts, 12, ("5", "0", 0), 1).await; // ⛔ the violation
+    insert_invariant_row(&c, ts, 13, ("0", "3", 3), 1).await; // ⛔ a second, left unrepaired
+    insert_invariant_row(&c, ts, 12, ("0", "0", 0), 2).await; // the repair of the first
+
+    assert_eq!(
+        read_zero_invariants(&c).await,
+        ZeroInvariantCounts {
+            violations: 1,
+            scanned: 2
+        },
+        "a repair at a higher version must clear its violation, not add a row to the scan"
+    );
+
+    reset_sanity_tables(&c).await;
+}
+
+/// The window is a claim about scope, not only about cost: a legacy row written
+/// before task 0286 is out of scope until its phase 3 re-ingests the history
+/// (ADR 0292), and must neither page nor pad `scanned`. RED without the `WHERE`.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn a_violation_older_than_the_window_is_out_of_the_zero_invariant_scan() {
+    use rollup_freshness_probe::zero_invariants::{
+        ZERO_INVARIANT_LOOKBACK_SECONDS, ZeroInvariantCounts,
+    };
+
+    let c = client();
+    reset_sanity_tables(&c).await;
+    let now: u32 = c
+        .query("SELECT toUnixTimestamp(now())")
+        .fetch_one()
+        .await
+        .unwrap();
+    let inside = now - 120;
+    let outside = now - ZERO_INVARIANT_LOOKBACK_SECONDS as u32 - 3_600;
+
+    insert_invariant_row(&c, inside, 10, ("5", "0", 3), 1).await; // healthy, in the window
+    insert_invariant_row(&c, outside, 12, ("5", "0", 0), 1).await; // ⛔ but an hour past it
+
+    assert_eq!(
+        read_zero_invariants(&c).await,
+        ZeroInvariantCounts {
+            violations: 0,
+            scanned: 1
+        }
+    );
 
     reset_sanity_tables(&c).await;
 }

@@ -24,6 +24,13 @@
 //! row would stall a refreshable MV's tier and turn a data defect into a
 //! freshness incident.
 //!
+//! ⚠️ **Exact zero, not the precision floor, on purpose.** Invariant 2 reads
+//! `close = 0`, so a legacy row with `close = 1e-13` and `close_usd > 0` is not
+//! counted although every price gate treats it as having no price. Such a row is
+//! a pre-0286 residue, not a writer regression: it cannot be written any more
+//! (`price_forming` enforces the floor at ingest) and it dies with 0286 phase 3.
+//! Counting it would latch the alarm on history nobody can repair in place.
+//!
 //! ⚠️ **Windowed, on purpose.** Legacy rows written before task 0286 are out of
 //! scope until its phase 3 re-ingests them; an all-time scan would also be a
 //! full read of the largest table on every probe tick.
