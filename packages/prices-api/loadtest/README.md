@@ -127,8 +127,13 @@ Generate a wide pool by walking the listing (any key works; it is one page per
 200 assets):
 
 ```sh
-node -e 'const id=a=>a.contract_address||(a.issuer_address?`${a.asset_code}:${a.issuer_address}`:"native");const f=async()=>{let c=null,out=[];do{const u=new URL(process.env.BASE_URL+"/v1/assets");u.searchParams.set("limit","200");if(c)u.searchParams.set("cursor",c);const r=await fetch(u,{headers:{"x-api-key":process.env.API_KEY}});const j=await r.json();out.push(...j.data.map(id));c=j.cursor;await new Promise(s=>setTimeout(s,1100));}while(c);console.log(JSON.stringify([...new Set(out)]));};f()' > packages/prices-api/loadtest/pool-wide.json
+node packages/prices-api/loadtest/gen_pool.mjs
 ```
+
+⚠️ **Generate it in the same command chain as the run, not earlier.** `/price`
+serves only assets with a 1m candle in the last 24 h, and about a third of that
+long tail turns over daily. Measured 2026-09-18: a pool 20 h old had lost
+**1,536 of 4,039** assets to 404 at setup, and 67 more slid out mid-run.
 
 ⚠️ **The native asset is why that `id()` helper is not just `code:issuer`.** XLM
 comes back from the listing as `asset_type: "classic"` with **both**
@@ -182,13 +187,20 @@ k6 run $K -e BASE_URL="$BASE_URL" -e API_KEY="$API_KEY" -e ASSET=native \
 k6 run $K -e BASE_URL="$BASE_URL" -e API_KEY="$API_KEY" \
   --summary-trend-stats="$S" --summary-export=loadtest-ac.json; echo "exit=$?"
 
-# 3/3 — wide pool, the real data path
+# 3/3 — wide pool, the real data path. The pool is rebuilt FIRST, in this chain.
+node packages/prices-api/loadtest/gen_pool.mjs && \
 k6 run $K -e BASE_URL="$BASE_URL" -e API_KEY="$API_KEY" -e ASSETS=./pool-wide.json \
   -e PROBE_BATCH=25 \
   --summary-trend-stats="$S" --summary-export=loadtest-wide.json; echo "exit=$?"
 ```
 
 `exit=0` means every threshold held.
+
+A **404 in the measured phase is not a failed request**: the asset slid out of
+the 24 h price window after `setup()` probed it, and 404 is the correct answer.
+It is counted in `aged_out` instead, with its own bar (`rate<0.01`) — past 1 %
+the pool was stale and the run is void. Report the `aged_out` rate next to the
+error rate; `http_req_failed` now means 5xx, 429 and transport failures only.
 
 **Leave ≥ 30 s between regimes, to clear the gateway cache and nothing else.**
 The cache TTL is 10 s, so 30 s empties it three times over. Do not stretch the

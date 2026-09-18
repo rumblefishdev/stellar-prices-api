@@ -69,6 +69,7 @@ import http from 'k6/http';
 import { check } from 'k6';
 import exec from 'k6/execution';
 import { SharedArray } from 'k6/data';
+import { Rate } from 'k6/metrics';
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
 const API_KEY = __ENV.API_KEY || '';
@@ -144,8 +145,21 @@ export const options = {
     // a drop during warmup is containers scaling, which is that phase's whole
     // purpose, and must not be reported as "did not sustain 100 req/s".
     'dropped_iterations{phase:main}': ['count<1'],
+    // Share of measured requests answered 404 — see `agedOut` below. It is not an
+    // error rate, so it has its own bar: past 1 % the pool was stale when the run
+    // started and the run measures the pool file, not the API. Regenerate the
+    // pool in the same command chain (gen_pool.mjs) and run again.
+    'aged_out{phase:main}': ['rate<0.01'],
   },
 };
+
+// An asset can leave the pool AFTER setup() probed it: /price serves only assets
+// with a 1m candle in the last 24 h, and that window slides during the run.
+// Measured 2026-09-18 (task 0293): 67 of 30,001 main-phase requests got 404 this
+// way, which crossed `http_req_failed` at 0.22 % and exited 99 on a run with
+// zero server errors. A 404 for an asset without a price is a correct answer, so
+// it is counted here instead of as a failed request.
+const agedOut = new Rate('aged_out');
 
 const PARAMS = {
   headers: {
@@ -158,6 +172,10 @@ const PARAMS = {
   // a 204 or a challenge served as 2xx pass silently.
   responseCallback: http.expectedStatuses(200),
 };
+
+// Measured requests only: 404 is expected too (see `agedOut`). The probe keeps
+// the strict PARAMS — there a 404 is exactly what it exists to find.
+const MAIN_PARAMS = { ...PARAMS, responseCallback: http.expectedStatuses(200, 404) };
 
 // Probe the pool once and keep only assets the API can actually serve. An asset
 // with no current-price row answers 404 forever, so leaving one in the pool puts
@@ -227,7 +245,11 @@ export function setup() {
 export default function (data) {
   const pool = data.pool;
   const asset = pool[exec.scenario.iterationInTest % pool.length];
-  const res = http.get(`${BASE_URL}/v1/assets/${encodeURIComponent(asset)}/price`, PARAMS);
+  const res = http.get(`${BASE_URL}/v1/assets/${encodeURIComponent(asset)}/price`, MAIN_PARAMS);
+  agedOut.add(res.status === 404);
+  // Not checked: a 404 has no price body, and failing both checks on it would
+  // smuggle the aged-out share back into `checks` under another name.
+  if (res.status === 404) return;
   check(res, {
     'status is 200': (r) => r.status === 200,
     // A body-read failure must not pass as a slow 200.
