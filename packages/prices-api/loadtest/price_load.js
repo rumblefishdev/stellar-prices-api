@@ -69,12 +69,22 @@ import http from 'k6/http';
 import { check } from 'k6';
 import exec from 'k6/execution';
 import { SharedArray } from 'k6/data';
+import { Rate } from 'k6/metrics';
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
 const API_KEY = __ENV.API_KEY || '';
 const RATE = Number(__ENV.RATE || 100);
 const WARMUP = __ENV.WARMUP || '30s';
 const DURATION = __ENV.DURATION || '5m';
+// Cache-key variants per asset, for rates where the pool alone cannot defeat the
+// cache. The gateway keys /price on the path AND `min_volume_usd`, and the handler
+// applies that parameter in memory AFTER the same ClickHouse query — so a variant
+// is a distinct cache entry at an identical database cost, with `price_usd`
+// untouched. Distinct keys = pool × VARIANTS, walked round-robin; to stay
+// miss-only they must satisfy keys / RATE ≫ TTL (10 s). ~3,300 live assets give
+// 33 s at 100 req/s with no variants, but need 4 at 500 req/s and 8 at 1000.
+const VARIANTS = Math.max(1, Number(__ENV.VARIANTS || 1));
+const CACHE_TTL_S = 10;
 
 // Asset pool. ASSET pins a single id (cache-dominated); otherwise the pool is
 // read from a JSON file — the 20-asset conformance list by default, so 0121 and
@@ -110,11 +120,14 @@ export const options = {
     // Excluded from thresholds — its job is to have containers already warm.
     ...(WARMUP_ON
       ? {
+          // A ramp, not a step: at RATE ≤ 100 it is flat (the 0121 behaviour); above
+          // that it climbs from 100 so the shared ClickHouse box meets the load
+          // gradually and the operator can abort on the way up, not at the top.
           warmup: {
-            executor: 'constant-arrival-rate',
-            rate: RATE,
+            executor: 'ramping-arrival-rate',
+            startRate: Math.min(RATE, 100),
             timeUnit: '1s',
-            duration: WARMUP,
+            stages: [{ target: RATE, duration: WARMUP }],
             ...VU_POOL,
             tags: { phase: 'warmup' },
           },
@@ -144,8 +157,21 @@ export const options = {
     // a drop during warmup is containers scaling, which is that phase's whole
     // purpose, and must not be reported as "did not sustain 100 req/s".
     'dropped_iterations{phase:main}': ['count<1'],
+    // Share of measured requests answered 404 — see `agedOut` below. It is not an
+    // error rate, so it has its own bar: past 1 % the pool was stale when the run
+    // started and the run measures the pool file, not the API. Regenerate the
+    // pool in the same command chain (gen_pool.mjs) and run again.
+    'aged_out{phase:main}': ['rate<0.01'],
   },
 };
+
+// An asset can leave the pool AFTER setup() probed it: /price serves only assets
+// with a 1m candle in the last 24 h, and that window slides during the run.
+// Measured 2026-09-18 (task 0293): 67 of 30,001 main-phase requests got 404 this
+// way, which crossed `http_req_failed` at 0.22 % and exited 99 on a run with
+// zero server errors. A 404 for an asset without a price is a correct answer, so
+// it is counted here instead of as a failed request.
+const agedOut = new Rate('aged_out');
 
 const PARAMS = {
   headers: {
@@ -153,11 +179,17 @@ const PARAMS = {
     // Managed WAF rulesets 403 a missing User-Agent; k6 sends one, this pins it.
     'User-Agent': 'stellar-prices-api-loadtest/0121 (k6)',
   },
-  tags: { endpoint: 'price' },
+  // `name` pins the URL tag: without it every asset × variant is its own time
+  // series in k6 — tens of thousands at the higher rates.
+  tags: { endpoint: 'price', name: 'GET /v1/assets/{id}/price' },
   // Anything other than 200 is a failure. The default (status < 400) would let
   // a 204 or a challenge served as 2xx pass silently.
   responseCallback: http.expectedStatuses(200),
 };
+
+// Measured requests only: 404 is expected too (see `agedOut`). The probe keeps
+// the strict PARAMS — there a 404 is exactly what it exists to find.
+const MAIN_PARAMS = { ...PARAMS, responseCallback: http.expectedStatuses(200, 404) };
 
 // Probe the pool once and keep only assets the API can actually serve. An asset
 // with no current-price row answers 404 forever, so leaving one in the pool puts
@@ -213,6 +245,14 @@ export function setup() {
     exec.test.abort(`pool: no asset answered 200 out of ${POOL.length} probed — nothing to measure`);
   }
   console.log(`pool: ${live.length} asset(s) under test`);
+  const keys = live.length * VARIANTS;
+  const revisit = keys / RATE;
+  console.log(`cache: ${keys} distinct key(s) (${VARIANTS} variant(s)), each revisited every ${revisit.toFixed(1)} s vs a ${CACHE_TTL_S} s TTL`);
+  // Only meaningful for a pool meant to defeat the cache; the 1- and 20-asset
+  // regimes are cache-dominated on purpose and say so in the README.
+  if (live.length > 100 && revisit < 2.5 * CACHE_TTL_S) {
+    console.warn(`cache: revisit interval under ${2.5 * CACHE_TTL_S} s — this run is NOT miss-only; raise VARIANTS and state the hit rate in the report`);
+  }
   return { pool: live };
 }
 
@@ -226,8 +266,22 @@ export function setup() {
 // join would only ever cover the misses.
 export default function (data) {
   const pool = data.pool;
-  const asset = pool[exec.scenario.iterationInTest % pool.length];
-  const res = http.get(`${BASE_URL}/v1/assets/${encodeURIComponent(asset)}/price`, PARAMS);
+  const i = exec.scenario.iterationInTest;
+  const asset = pool[i % pool.length];
+  // Whole passes over the pool share a variant, so a key comes back only after
+  // pool × VARIANTS iterations. Variant 0 sends no query string (the 0121 URL).
+  // `iterationInTest` restarts at 0 in `main`, which would replay variant 0 — the
+  // keys the warm-up's last pass may have cached seconds earlier (2.6 % hits at
+  // the head of the 2026-09-18 500 req/s run). Starting main half a cycle away
+  // lands it on keys the warm-up last touched well over a TTL ago.
+  const off = exec.scenario.name === 'main' ? Math.floor(VARIANTS / 2) : 0;
+  const v = (Math.floor(i / pool.length) + off) % VARIANTS;
+  const qs = v === 0 ? '' : `?min_volume_usd=${(v * 1e-9).toFixed(9)}`;
+  const res = http.get(`${BASE_URL}/v1/assets/${encodeURIComponent(asset)}/price${qs}`, MAIN_PARAMS);
+  agedOut.add(res.status === 404);
+  // Not checked: a 404 has no price body, and failing both checks on it would
+  // smuggle the aged-out share back into `checks` under another name.
+  if (res.status === 404) return;
   check(res, {
     'status is 200': (r) => r.status === 200,
     // A body-read failure must not pass as a slow 200.
