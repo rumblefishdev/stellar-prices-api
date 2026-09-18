@@ -102,7 +102,7 @@ history:
     who: akot
     note: >
       **Everything still open above is closed, and every guardrail is now
-      pinned by a test SEEN to fail without it.** Six local commits: the
+      pinned by a test SEEN to fail without it.** By commit: the
       `oracle_sql` no-op guard (`479fd80`), the probe's zero-invariant
       assertion (`2e04d9b`), its CloudWatch ladder (`07e5dbf`), the comment
       fixes with the inventory and ADR Confirmation (`394fa4b`), three new
@@ -111,8 +111,9 @@ history:
       term was removed, the named test seen to fail, and the source restored
       byte-identical before any commit. Suites green on ClickHouse 26.3.10.60:
       `ch_enrich_it` 58/58, `rollup_freshness_it` 22/22 single-threaded,
-      `prices-clickhouse` ITs, workspace units 172/62/59, infra typecheck +
-      lint. The four `◐` rows the inventory assigned to 0151 are `✅` and its
+      `prices-clickhouse` ITs (one env-only red, `execution_bound_error_it`,
+      which needs `CLICKHOUSE_PROXY_URL`), workspace units 172/62/59, infra
+      typecheck + lint. The four `◐` rows the inventory assigned to 0151 are `✅` and its
       "Open gaps, by owner" table names 0151 nowhere. New runbook
       `docs/runbooks/0151-zero-invariant-probe-rollout.md` carries the deploy
       order — probe and alarms go out only AFTER [[0286]]'s schema step, since
@@ -120,6 +121,27 @@ history:
       invocation, not just its own check. **Not deployed: that is an operator
       step.** The cross-surface test under the floor stays with [[0147]], where
       the fix is — a test of agreement cannot land before the thing it asserts.
+  - date: "2026-09-18"
+    status: active
+    who: akot
+    note: >
+      **Code review of the branch: 1 critical, 7 warnings — what was 0151's is
+      fixed, what was not is written down.** Critical: the new runbook's
+      Rollback named `make destroy-production-observability`, which destroys the
+      WHOLE alarm stack, not the ladder — replaced by a revert-and-deploy with a
+      diff check. Its production-read block was copied from the 0142 drift
+      BINARY and does nothing for plain SQL — replaced by the mTLS `dev_read`
+      route. The probe's `FINAL` (the alarm's only recovery path) and its 48 h
+      window were pinned by a string match: two ITs added, each seen RED with
+      the term removed (`violations 2, scanned 3` for `1, 2`; `1, 2` for
+      `0, 1`). The shared `usdSanityEscalationCounts` doc now says it drives
+      three ladders; "dust-only" is disambiguated between the post-0286 shape
+      and the legacy one. **Not fixed here, all three in the inventory:** the
+      scan prunes to a monthly partition, not 48 h, and its production cost is
+      unmeasured — a deploy gate in the runbook; `oracle_sql` rewrites a stored
+      `close_usd` unconditionally; `Decimal(38,14) × Decimal(38,14)` wraps
+      silently at `>= 1e10` (measured: `0.12 × 2e11` → negative). The last two
+      predate this task and need tasks of their own.
 ---
 
 # ADR — `close_usd` zero-as-missing

@@ -4354,11 +4354,15 @@ async fn the_pivot_ignores_a_reference_minute_that_formed_no_price() {
 ///
 /// `the_pivot_reset_never_zeroes_a_bucket_whose_reference_market_is_silent`
 /// pins the day with NO reference candle at all. This one pins the day that has
-/// a reference candle carrying real volume and no price — which the day set
-/// must also refuse, because the refill reads a subquery that additionally
-/// demands `pf_trade_count > 0` and would find nothing to price the row from.
-/// Both days carry the same imported rate, so the rate is not what separates
-/// them.
+/// a reference candle carrying real volume and no price — the post-0286
+/// dust-only shape, `close = 0` with `pf_trade_count = 0` — which the day set
+/// refuses on its `close > 0` term. Both days carry the same imported rate, so
+/// the rate is not what separates them.
+///
+/// ⚠️ NOT pinned here, and admitted on purpose: a LEGACY reference minute with
+/// `close > 0` and `pf_trade_count = 0`. The day set omits the pf term (it is a
+/// DEFAULT on every pre-0286 row), so that day IS re-opened and then not
+/// refilled — see the comment on `PRICED_REFERENCE_ROW` in `ch_enrich.rs`.
 ///
 /// RED with `close > 0` dropped from the day set: the dust day is admitted, the
 /// subject is zeroed and then not refilled — strictly worse than the stale

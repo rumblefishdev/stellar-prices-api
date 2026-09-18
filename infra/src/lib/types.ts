@@ -375,6 +375,14 @@ export interface EnvironmentConfig {
      * `close_usd = 0` past a 48 h grace despite a representable `close`). Each
      * threshold here becomes one alarm on each metric.
      *
+     * ⚠️ **Since task 0151 these rungs drive a THIRD ladder too**:
+     * `CandleZeroInvariantViolations` (ADR 0292), which is **not** scoped to a
+     * quote leg and reads a 48 h window of `price_ohlcv_1m`, not 7 days. Its
+     * healthy value is exactly 0, so only the first rung carries meaning there
+     * and the rationale below for `100` / `10000` is about the USDT metrics, not
+     * about it. **Changing these rungs re-tunes all three ladders.** If they ever
+     * need to diverge, split the key rather than tuning this one for one of them.
+     *
      * ⚠️ **Why a ladder and not a single `>= 1`.** A wrong `close_usd` is a
      * **standing condition** — it stays wrong until a person repairs it — so it
      * hits the same CloudWatch wall gap 2 hit: an alarm notifies on a state

@@ -609,9 +609,12 @@ fn external_rate_day_pred(db: &str) -> String {
 /// The pivot's reference subquery is `{PRICED_REFERENCE_ROW} AND
 /// pf_trade_count > 0`; the day set below is the fragment ALONE. The day set is
 /// therefore strictly wider, and the divergence runs in the recoverable
-/// direction: a day whose only reference minute is a dust-only one is admitted,
-/// the row is re-opened, and the refill then finds nothing — a stale value a
-/// later run can still fix, which is the same bias
+/// direction: a day whose only reference minute is a LEGACY one — `close > 0`
+/// with `pf_trade_count = 0`, not the post-0286 dust-only shape, whose
+/// `close = 0` this fragment already refuses
+/// (`the_pivot_reset_never_re_opens_a_day_whose_only_reference_is_dust`) — is
+/// admitted, the row is re-opened, and the refill then finds nothing — a stale
+/// value a later run can still fix, which is the same bias
 /// [`pivot_reference_day_pred`] documents for its own day/window mismatch.
 /// Adding `pf_trade_count > 0` to the day set would narrow it correctly; it is
 /// not done here because the term is a DEFAULT on every pre-0286 row, so until
