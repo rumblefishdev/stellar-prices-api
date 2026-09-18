@@ -388,25 +388,48 @@ freeze. The real write only helps once 0290's ledger-processor is deployed
 
    ```bash
    cargo build --release -p events-backfill --target x86_64-unknown-linux-musl
-   scp target/x86_64-unknown-linux-musl/release/events-backfill <prod-host>:~/events-backfill-0290
+   scp -i ~/.ssh/sorban-prod_ed25519 target/x86_64-unknown-linux-musl/release/events-backfill \
+     deploy@168.119.73.161:~/events-backfill-0290
    ```
+
+   ✅ **Done 2026-09-18** from commit `7021ae2`: the binary is on `ch-prod-01`
+   at `~/events-backfill-0290`. Rebuild and re-copy only if the branch changes.
 
    A separate file name, so 0291's binary on the host is not overwritten.
 
-2. **[prod host, under tmux]** the dry run. It starts at **60,000,000**, not
-   0291's 63,000,000: the first SushiSwap factory event is at ledger 60,147,305.
-   `<TIP>` = the latest ledger in `default.soroban_events`.
+2. **[local machine]** fetch the ClickHouse `default` password from Secrets
+   Manager. Prints only its length — it must be **`44`** (`0` → run
+   `aws sso login --profile soroban-admin` and retry):
 
    ```bash
-   read -rs CH_PW
-   CLICKHOUSE_PASSWORD="$CH_PW" ~/events-backfill-0290 --discover-pools \
-     --start 60000000 --end <TIP> \
-     --clickhouse-url http://localhost:8123 --dry-run
+   CH_PW=$(aws --profile soroban-admin --region eu-central-1 \
+     secretsmanager get-secret-value \
+     --secret-id soroban/production/operator/env --query SecretString --output text \
+     | sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\?CLICKHOUSE_PASSWORD=[[:space:]]*//p' \
+     | tr -d "\"'" | tr -d '\r' | head -1); echo "${#CH_PW}"
    ```
 
-   About 15 chunks of 320k ledgers at 2-4 s each: roughly a minute.
+3. **[local machine]** run the dry run on the host, the password on **stdin**
+   (never argv, never pasted). It starts at **60,000,000**, not 0291's
+   63,000,000: the first SushiSwap factory event is at ledger 60,147,305.
+   `--end` = the latest ledger in `default.soroban_events` (64,491,946 on
+   2026-09-18; any later value is fine). No tmux needed — about a minute.
 
-3. **[read the output]** Expected as of 2026-09-18:
+   ```bash
+   printf '%s\n' "$CH_PW" | ssh -T -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+     'read -r CH_PW; chmod +x ~/events-backfill-0290; CLICKHOUSE_PASSWORD="$CH_PW" ~/events-backfill-0290 --discover-pools --start 60000000 --end 64491946 --clickhouse-url http://localhost:8123 --dry-run' \
+     2>&1 | tee /tmp/discover-0290-dryrun.log
+   unset CH_PW
+   grep -E "factory events read|DRY RUN|changed|ERROR" /tmp/discover-0290-dryrun.log
+   ```
+
+   ⚠️ **First attempt 2026-09-18 failed harmlessly** with ClickHouse
+   `Code: 194` (`REQUIRED_PASSWORD`): the password was typed into
+   `read -rs` on the host and arrived empty. It stopped at the `SELECT 1`
+   pre-flight — nothing read, nothing written. The stdin route above
+   removes the hand-typed step.
+
+4. **[read the output]** Expected as of 2026-09-18:
    - one `pool not in prices.pool_registry` line per pool, every one
      `change="new"`, `venue="sushiswap"`;
    - then `to_write=133 per_venue={"sushiswap": 133}`.
@@ -417,7 +440,7 @@ freeze. The real write only helps once 0290's ledger-processor is deployed
    - The other protocol's five token-less `pool_created` events at ledger
      63.17M must **not** appear.
 
-4. **[later, after 0286 phase 1 and 0290's deploy]** drop `--dry-run` to write,
+5. **[later, after 0286 phase 1 and 0290's deploy]** drop `--dry-run` to write,
    run the dry run again (it must report `to_write=0`), then verify:
 
    ```sql
