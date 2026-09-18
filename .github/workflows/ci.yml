@@ -103,6 +103,15 @@ jobs:
       # runs solely on the author's machine guards nothing after the PR is open.
       - run: npx nx run-many -t lint build typecheck test
 
+      # The guard behind the rust job's integration-test step (task 0275):
+      # tools/scripts/ignored-tests.sh classifies every `#[ignore]` and derives
+      # what CI must run. Its own tests use throwaway fixture trees, need no
+      # Rust and no ClickHouse, and run here because this job pins Node to
+      # .nvmrc — the file argument is explicit because `node --test <dir>`
+      # fails on Node 22.
+      - name: Test the #[ignore] inventory guard
+        run: npm run ignored-tests:verify-guard
+
       # Cheap counterpart to the rust job's build+verify+synth guard.
       #
       # The heavy guard lives in the `rust` job, which only runs when
