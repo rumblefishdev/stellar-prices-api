@@ -43,8 +43,8 @@ The alarm stack alone is harmless before the probe (the metric simply never
 arrives, and the ladder treats missing data as `NOT_BREACHING`), but there is no
 reason to split them: deploy both, after 0286.
 
-**Confirm the precondition** (read-only, on the host — see "Where these commands
-run" below):
+**Confirm the precondition** (read-only — see "Where these commands run"
+below):
 
 ```sql
 SELECT count() FROM system.columns
@@ -58,9 +58,9 @@ WHERE database = 'prices' AND table = 'price_ohlcv_1m' AND name = 'pf_trade_coun
 Run the assertion by hand before you deploy the thing that alarms on it. The
 expected result is **`violations = 0`** with a `scanned` well above zero.
 
-> ⚠️ The query names its table **unqualified** (`FROM price_ohlcv_1m FINAL`), so
-> a manual run must select the database — `CLICKHOUSE_DATABASE=prices` for the
-> binary, or `USE prices` / `prices.price_ohlcv_1m` in a client.
+> ⚠️ The probe's own query names its table **unqualified**
+> (`FROM price_ohlcv_1m FINAL`) because the Lambda binds its client to `prices`.
+> A manual run has no such binding, so the copy below is qualified. Keep it so.
 
 ```sql
 SELECT countIf((pf_trade_count = 0 AND close != 0)
@@ -76,38 +76,60 @@ alarm is `NOT_BREACHING` on missing data and a query that matched nothing must
 not read as a clean bill of health. If `scanned` is 0, ingestion is the problem —
 investigate that first.
 
+### Cost of the scan — measure it, this is the second way to lose the probe
+
+The window is 48 hours, but `timestamp` is the **fourth** column of the table's
+sort key (`asset_id, quote_asset_id, source, timestamp`), so ClickHouse prunes
+to the monthly **partition**, not to 48 hours, and then reads it with `FINAL` —
+on the largest table, every 15 minutes. Unlike the two USD-sanity scans it has
+no quote-leg predicate to narrow it. Nothing here has been measured on
+production: the local ClickHouse holds a handful of rows.
+
+A scan that times out fails exactly like the missing column in section 1 — the
+read lands in `failures` and the **whole invocation** goes red. And the check
+runs before the MV-drift check inside one 300-second Lambda, so a slow scan
+costs that check its turn even when it does finish.
+
+So take the timing from the same manual run (append `FORMAT JSON` and read
+`statistics.elapsed`, or time the `curl`):
+
+| Manual run                                  | Meaning                                                                                                                               |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| a few seconds                               | deploy                                                                                                                                |
+| tens of seconds, or `MEMORY_LIMIT_EXCEEDED` | **do not deploy.** Record the numbers on lore task 0151 and narrow the query first (a shorter window, or a partition-aligned `FINAL`) |
+
+Re-take the number in the first week of a month and in the last: the partition
+being read is a day old in one case and thirty in the other.
+
 ## Where these commands run
 
-⚠️ **Read this before section 1 or 2.** `Config::from_env()` defaults
-`CLICKHOUSE_URL` to `http://localhost:8123`, so a bare run on a local machine
-reads the **local dev ClickHouse** and returns a clean result that says nothing
-whatever about production.
+⚠️ **Read this before section 1 or 2.** Both reads are plain SQL, and both name
+their table as `prices.…` on purpose, so nothing depends on a default database.
+A client pointed at `localhost:8123` reads the **local dev ClickHouse** and
+returns a clean result that says nothing whatever about production — check the
+host in the command before you read the answer.
 
 Prod's HTTP endpoint (`ch.sorobanscan.rumblefish.dev`) is mTLS-only behind Caddy
-and `prices_clickhouse::client()` builds a plaintext client, so there is no path
-from a workstation to prod for these binaries. Run **on the Hetzner host,
-against the loopback port**:
+(task 0276). Run the reads from a workstation with your **personal read
+certificate**, which maps to the read-only ClickHouse user `dev_read`:
 
 ```bash
-# On the Hetzner host (connection details: the prod SSH access note).
-read -rs CH_PW
-CLICKHOUSE_URL=http://localhost:8123 \
-CLICKHOUSE_USER=default \
-CLICKHOUSE_PASSWORD="$CH_PW" \
-CLICKHOUSE_DATABASE=prices \
-  clickhouse-client --query "$(cat query.sql)"
+curl --fail-with-body -sS \
+  --cert   "$READ_CERT" \
+  --key    "$READ_KEY" \
+  --cacert "$PRICES_CA" \
+  https://ch.sorobanscan.rumblefish.dev/ \
+  --data-binary @query.sql
 ```
 
-The password goes into the environment via a **silent prompt**, never into
-`argv` — `/proc/<pid>/cmdline` is world-readable, so a password passed as a flag
-is visible to any `ps` on the box.
+Put the SQL of section 1 or 2 into `query.sql` first. No password is involved:
+the certificate is the credential, so nothing secret reaches `argv`. Do **not**
+use a write certificate (`dev_shared`, `prices_writer`) for a read — `dev_read`
+cannot change anything by construction, and that is the point of having it.
 
-> The **mTLS PEM route** (`$HOME/prices-mtls/prices_writer.{crt,key}`, `ca.crt`,
-> `MTLS_{CERT,KEY,CA}_PATH`, `CH_DOMAIN=ch.sorobanscan.rumblefish.dev`) is a
-> different path, for the **writer binaries** that go through Caddy
-> (`0286-reingest-history.md`, `continue-soroban-backfill.md`,
-> `repair-coarse-usd-values.md`). Both checks here are read-only, so use the
-> loopback route above; the PEM route is named only so the two are not confused.
+`dev_read` is capped at **3.73 GiB per query**. If section 2's scan is refused
+with `MEMORY_LIMIT_EXCEEDED`, that is a finding about the query's cost, not an
+obstacle to route around — see "Cost of the scan" in section 2.
 
 ## 3. If the count is not zero
 
@@ -177,24 +199,46 @@ would be indistinguishable from a clean tier.
 - The probe's structured log line carries `zero_invariant_violations` and
   `zero_invariant_scanned` — check `scanned` is non-zero on the first tick after
   the deploy.
-- `checks_failed` on that same line must be `0`.
+- `checks_failed` on that same line must be `0`. Read it **first**: a failed
+  read logs `zero_invariant_scanned = 0` too, exactly like an empty table, and
+  only `checks_failed` tells the two apart.
 - All three alarms should settle in `OK` (not `INSUFFICIENT_DATA`) within two
   15-minute periods.
 
 ## Rollback
 
-`make destroy-production-observability` removes the ladder; the probe check
-itself is not independently toggleable, so rolling it back means deploying the
-previous EventBridge stack build. If the check is failing because the
-precondition was not met, the fix is to complete 0286's schema step, not to
-remove the check.
+> ⛔ **Never `make destroy-production-observability`.** That target is
+> `cdk destroy Prices-production-Observability --force`: it deletes the WHOLE
+> stack — every rollup-freshness tier, the DLQ ladder, disk headroom, MV drift,
+> `current_prices` age, both USD-sanity ladders, the SNS wiring and the
+> dashboard — with no confirmation prompt. It does not "remove the ladder"; it
+> removes production's alarms.
+
+To remove **only** this ladder, revert the commit that added the
+`zeroInvariantAlarms` block to `infra/src/lib/stacks/observability-stack.ts`,
+then:
+
+```bash
+make diff-production                    # expect exactly three alarms removed, nothing else
+make deploy-production-observability
+```
+
+If the diff shows anything beyond the three `prices-production-zero-invariant-*`
+alarms, stop.
+
+The probe check is not independently toggleable: rolling it back means reverting
+its wiring in `packages/rollup-freshness-probe/src/main.rs` and redeploying the
+EventBridge stack. Remove the check **before** the ladder, or the ladder just
+goes quiet on missing data. If the check is failing because the precondition was
+not met, the fix is to complete 0286's schema step, not to remove the check.
 
 ## Related
 
 - [`0286-candle-definitions-rollout.md`](0286-candle-definitions-rollout.md) —
   phase 1, whose schema step is this runbook's hard precondition.
-- [`0142-rollup-mv-reapply.md`](0142-rollup-mv-reapply.md) — the "Where these
-  commands run" pattern copied above.
+- [`0142-rollup-mv-reapply.md`](0142-rollup-mv-reapply.md) — the host-loopback
+  route, which is for the drift BINARY (it reads `Config::from_env()`). Its
+  environment block does nothing for plain SQL; do not copy it here.
 - `packages/rollup-freshness-probe/src/zero_invariants.rs` — the query, the
   metric and the empty-scan refusal.
 - `docs/database-schema/close-usd-zero-guardrails.md` — the guardrail inventory
