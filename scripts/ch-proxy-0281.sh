@@ -83,7 +83,9 @@ case "${1:-up}" in
       -e CH_UPSTREAM -e CH_PROXY_PORT \
       -v "$conf":/etc/caddy/Caddyfile:ro "$image" >/dev/null
     attempt=0
-    until curl -sS --max-time 2 "http://localhost:${port}/?query=SELECT%201" >/dev/null 2>&1; do
+    # `-f` and the body check: Caddy answers 502 while its upstream is
+    # unreachable, and a 502 is not "up".
+    until [[ "$(curl -fsS --max-time 2 "http://localhost:${port}/?query=SELECT%201" 2>/dev/null)" == 1 ]]; do
       attempt=$((attempt + 1))
       if [[ $attempt -ge $max_attempts ]]; then
         echo "ch-proxy-0281: proxy on :${port} did not answer SELECT 1 after ${max_attempts} attempts." >&2
