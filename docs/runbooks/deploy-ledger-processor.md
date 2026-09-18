@@ -18,8 +18,12 @@ Two things you must understand up front:
 2. **CDK packages a pre-built binary.** The ComputeStack consumes
    `target/lambda/prices-ledger-processor/bootstrap` via `Code.fromAsset` — it
    does **not** compile Rust at synth time. So whatever bootstrap is sitting in
-   that path is exactly what ships. **If you skip the build step, you silently
-   redeploy the old binary.**
+   that path is exactly what ships. Until task 0141 that made a skipped build a
+   **silent redeploy of the old binary** (it happened, 2026-08-03). Now
+   `make deploy-production-compute` and `make deploy-production-eventbridge`
+   depend on `make build-lambdas`, which builds every Lambda the CDK app
+   references and refuses any bootstrap that is not a distinct aarch64 ELF. A raw
+   `npx cdk … deploy` has no such guard — deploy through `make`.
 
 ### ⚠️ This runbook covers ONE of the two Lambdas that decode ledger XDR
 
@@ -41,13 +45,8 @@ both deploys before you start. The steps below apply unchanged to the
 EventBridge stack — substitute the build and the deploy target:
 
 ```bash
-cargo lambda build -p asset-discovery --release --arm64 --features lambda
-cd infra && make deploy-production-eventbridge
+cd infra && make deploy-production-eventbridge   # builds the Lambdas first
 ```
-
-⚠️ `--features lambda` is mandatory here too: `asset-discovery`'s bin is
-`required-features = ["lambda"]`, so a build without it **silently skips the bin
-and produces no bootstrap** — the same trap as step 1 below.
 
 > First shipped this way in task 0066 (RustFunction adoption is a later
 > follow-up). The proto27 unfreeze (tasks 0091 → 0094) is the motivating case:
@@ -94,27 +93,43 @@ whether the binary you are about to ship can decode the ledgers it will be
 handed. See [Protocol-version lag](#protocol-version-lag--the-standing-check)
 below for what its three answers mean.
 
-### 1. Build the ARM64 bootstrap **with the new code**
-
-`--features lambda` is **mandatory**. The `prices-ledger-processor` bin is
-declared `required-features = ["lambda"]`, so a build without it silently skips
-the bin and produces no bootstrap.
+### 1. Build the ARM64 bootstraps **with the new code**
 
 ```bash
-cargo lambda build -p prices-ledger-processor --release --arm64 --features lambda
+cd infra && make build-lambdas
 ```
 
-→ writes `target/lambda/prices-ledger-processor/bootstrap`.
+This is the same script CI runs (`tools/scripts/build-lambda-assets.sh`): one
+`cargo lambda build --release --arm64 --features lambda -p …` over every asset
+the CDK app references, the list derived from the CDK source. Do not hand-type
+the cargo command instead — `--features lambda` is mandatory (each bin is
+`required-features = ["lambda"]`, so a build without it silently skips the bin
+and produces no bootstrap), and a single-crate build resolves cargo features
+differently from the group build, so it can yield a different binary from the one
+CI verified.
 
-### 2. Confirm the artifact is fresh and correct
+Step 4 runs this again by itself; doing it here first is what makes the diff in
+step 3 a diff of the artifacts that will ship.
 
-```bash
-ls -l target/lambda/prices-ledger-processor/bootstrap    # mtime = seconds ago
-file target/lambda/prices-ledger-processor/bootstrap     # ELF 64-bit ... ARM aarch64
+Needs `cargo-lambda` and, on an x86 machine, `zig`. 🔴 Use the toolchain CI
+pins (`.github/workflows/ci.yml`: rustc 1.97.1, cargo-lambda 1.9.1) — rustc ≥
+1.98 fails every aarch64 link under zig with `unsupported linker arg`. That
+failure is loud; it cannot ship anything.
+
+### 2. Confirm the artifacts are correct
+
+The build ends by verifying every bootstrap and printing one line per asset:
+
+```
+<sha256>  prices-ledger-processor  14134024 bytes
+…
+verified 11 Lambda bootstrap(s)
 ```
 
-This check is your guard against Step 1 having failed or been skipped — never
-deploy on a stale/missing artifact.
+It exits non-zero, naming the asset, if a bootstrap is missing, is not an ELF
+(the 10-byte `#!/bin/sh` stubs found on 2026-08-12), is not aarch64, or is
+byte-identical to another asset's. Freshness is not something to eyeball from an
+mtime: cargo decided what needed rebuilding.
 
 ### 3. Preview the change (read-only, safe)
 
@@ -158,7 +173,10 @@ than trusting the diff alone.
 make deploy-production-compute
 ```
 
-`deploy-production-compute` deploys only the ComputeStack. `make
+`deploy-production-compute` builds the Lambdas, then deploys only the
+ComputeStack — every per-stack target passes `--exclusively`, so no dependency
+stack rides along (before task 0141 none did, and `deploy-production-apigateway`
+would have deployed Compute as a side effect). `make
 deploy-production` deploys _all_ stacks — avoid it unless you intend a full-app
 deploy. Override the asset path with `LEDGER_PROCESSOR_ASSET_DIR` if building
 elsewhere.
