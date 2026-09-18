@@ -52,6 +52,16 @@ pub const CH_WRITE_LATENCY: &str = "ClickHouseWriteLatencyMs";
 /// ledgers-per-minute rate — raise `ledgerProcessor.maxIterations`.
 pub const FORCED_PARTIAL_FLUSH: &str = "ForcedPartialFlushes";
 
+/// Trades a reconcile run dropped because they came from a contract shaped like
+/// a pool we index (Aquarius `trade`, Soroswap pair `swap`, Phoenix swap) that is
+/// missing from `prices.pool_registry` (task 0291).
+///
+/// Emitted ONLY when non-zero, so the alarm on it is `>= 1` over
+/// `NOT_BREACHING`. With the live processor persisting the pools it learns, a
+/// non-zero value means a pool reached the chain by a path we never saw — a new
+/// factory, or a factory event missed before a cold start.
+pub const UNREGISTERED_POOL_EVENTS: &str = "UnregisteredPoolEvents";
+
 /// `PutMetricData` accepts at most 150 entries in a datum's `Values` array, so
 /// a run with more INSERTs than that spills into further datums of the same
 /// metric rather than being truncated (or, worse, aggregated back into
@@ -145,6 +155,20 @@ pub fn forced_partial_flush_metrics(forced: bool) -> Vec<Metric> {
     }
 }
 
+/// The dropped-trade datapoint for one run (task 0291): the total across
+/// sources, or nothing when the run dropped none. Same absent-while-healthy rule
+/// as [`forced_partial_flush_metrics`].
+pub fn unregistered_pool_event_metrics(total: u64) -> Vec<Metric> {
+    if total == 0 {
+        return Vec::new();
+    }
+    vec![Metric {
+        name: UNREGISTERED_POOL_EVENTS,
+        unit: Unit::Count,
+        values: vec![total as f64],
+    }]
+}
+
 /// Publish `metrics` to CloudWatch under [`METRIC_NAMESPACE`], tagged with an
 /// `Environment` dimension. One `PutMetricData` call for the whole batch.
 ///
@@ -209,6 +233,21 @@ mod tests {
             forced_partial_flush_metrics(false).is_empty(),
             "the healthy path must put nothing on the wire, not a 0"
         );
+    }
+
+    /// Task 0291: same absent-while-healthy contract as the forced flush.
+    #[test]
+    fn a_run_that_dropped_no_unregistered_trades_publishes_no_datapoint() {
+        assert!(unregistered_pool_event_metrics(0).is_empty());
+    }
+
+    #[test]
+    fn dropped_unregistered_trades_publish_one_count_of_the_total() {
+        let m = unregistered_pool_event_metrics(7);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].name, UNREGISTERED_POOL_EVENTS);
+        assert_eq!(m[0].unit, Unit::Count);
+        assert_eq!(m[0].values, vec![7.0]);
     }
 
     #[test]

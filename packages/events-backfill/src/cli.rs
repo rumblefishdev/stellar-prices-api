@@ -51,6 +51,12 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
 
+    /// Discover AMM pools instead of repricing: read the factory events in
+    /// `[start, end]` and write the pools `prices.pool_registry` does not hold
+    /// yet (task 0291). With `--dry-run`, only lists them. Writes no candles.
+    #[arg(long, default_value_t = false)]
+    pub discover_pools: bool,
+
     /// Verbose (DEBUG) logging.
     #[arg(long, default_value_t = false)]
     pub verbose: bool,

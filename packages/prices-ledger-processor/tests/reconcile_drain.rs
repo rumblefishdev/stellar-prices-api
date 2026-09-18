@@ -27,8 +27,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use prices_ingest_core::{
-    AssetRegistry, OfferLookupCounts, OhlcvCandle, OracleSample, Registries, decode_object,
-    extract_trades_with_counts,
+    AssetRegistry, OfferLookupCounts, OhlcvCandle, OracleSample, PoolRegistryRow, Registries,
+    decode_object, extract_trades_with_counts,
 };
 use prices_ledger_processor::{
     cursor::{Cursor, StubFileCursor},
@@ -177,6 +177,10 @@ impl CandleSink for RecordingSink {
         _registry: &AssetRegistry,
         _since: u32,
     ) -> Result<(), SinkError> {
+        Ok(())
+    }
+
+    async fn write_pool_rows(&self, _rows: &[PoolRegistryRow]) -> Result<(), SinkError> {
         Ok(())
     }
 }

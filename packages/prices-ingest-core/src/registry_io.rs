@@ -10,6 +10,8 @@
 //! per venue entry, enriched with the Soroswap pair tokens / Phoenix pool
 //! details, round-trips the whole registry.
 
+use std::collections::HashMap;
+
 use extractors_core::Venue;
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +68,30 @@ impl Registries {
             .collect();
         rows.sort_by(|a, b| a.contract_id.cmp(&b.contract_id));
         rows
+    }
+
+    /// The rows of [`to_pool_rows`](Self::to_pool_rows) that `persisted` does not
+    /// already hold verbatim — a pool learned since the snapshot, or one whose
+    /// row changed. `persisted` is keyed by `contract_id`.
+    ///
+    /// The live processor's pool write (task 0291): its registry is warm across
+    /// invocations and grows from factory events, and before this it was never
+    /// written back, so a cold start forgot every pool learned since the last
+    /// backfill. Writing only this delta keeps the steady state at zero INSERTs,
+    /// the same rule task 0132 set for assets.
+    ///
+    /// The snapshot must be built from this registry's OWN `to_pool_rows`, not
+    /// from the raw table rows: [`load_pool_rows`](Self::load_pool_rows)
+    /// normalises some rows (a malformed Phoenix `wasm_hash` loads as none), and
+    /// a raw snapshot would report those as changed on every run.
+    pub fn pool_rows_unpersisted(
+        &self,
+        persisted: &HashMap<String, PoolRegistryRow>,
+    ) -> Vec<PoolRegistryRow> {
+        self.to_pool_rows()
+            .into_iter()
+            .filter(|row| persisted.get(&row.contract_id) != Some(row))
+            .collect()
     }
 
     /// Rehydrate registries from persisted rows (merged into `self`, so a load
@@ -162,6 +188,76 @@ mod tests {
         let ph = loaded.phoenix.lookup("CPHOENIX").expect("phoenix pool");
         assert_eq!(ph.wasm_hash, Some([0xab; 32]));
         assert_eq!(loaded.pool_count(), reg.pool_count());
+    }
+
+    fn snapshot(reg: &Registries) -> HashMap<String, PoolRegistryRow> {
+        reg.to_pool_rows()
+            .into_iter()
+            .map(|r| (r.contract_id.clone(), r))
+            .collect()
+    }
+
+    #[test]
+    fn unpersisted_is_empty_right_after_the_snapshot() {
+        let mut reg = Registries::new();
+        reg.venue.insert("CAQUA".into(), Venue::Aquarius);
+        reg.venue.insert("CSOROSWAP".into(), Venue::Soroswap);
+        reg.soroswap
+            .register("CSOROSWAP".into(), "CTOKEN0".into(), "CTOKEN1".into());
+        let persisted = snapshot(&reg);
+        assert!(reg.pool_rows_unpersisted(&persisted).is_empty());
+    }
+
+    #[test]
+    fn unpersisted_yields_only_the_newly_learned_pool() {
+        let mut reg = Registries::new();
+        reg.venue.insert("CAQUA".into(), Venue::Aquarius);
+        let persisted = snapshot(&reg);
+
+        reg.venue.insert("CNEWPAIR".into(), Venue::Soroswap);
+        reg.soroswap
+            .register("CNEWPAIR".into(), "CTOKEN0".into(), "CTOKEN1".into());
+
+        let rows = reg.pool_rows_unpersisted(&persisted);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].contract_id, "CNEWPAIR");
+        assert_eq!(
+            (rows[0].token0.as_str(), rows[0].token1.as_str()),
+            ("CTOKEN0", "CTOKEN1")
+        );
+    }
+
+    #[test]
+    fn unpersisted_yields_a_pool_whose_row_changed() {
+        let mut reg = Registries::new();
+        reg.venue.insert("CPHOENIX".into(), Venue::Phoenix);
+        reg.phoenix.register("CPHOENIX".into(), 0);
+        let persisted = snapshot(&reg);
+
+        reg.phoenix
+            .register_with_wasm("CPHOENIX".into(), 0, [0xab; 32]);
+
+        let rows = reg.pool_rows_unpersisted(&persisted);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].wasm_hash, hex::encode([0xab; 32]));
+    }
+
+    #[test]
+    fn a_normalised_row_is_not_reported_as_changed() {
+        // A malformed wasm_hash loads as "no hash", so the registry's own row
+        // differs from the table's. The snapshot is built from the registry, so
+        // this must not re-write the pool on every run.
+        let mut reg = Registries::new();
+        reg.load_pool_rows(&[PoolRegistryRow {
+            contract_id: "CPHOENIX".into(),
+            venue: "phoenix".into(),
+            token0: String::new(),
+            token1: String::new(),
+            pool_type: 0,
+            wasm_hash: "not-hex".into(),
+        }]);
+        let persisted = snapshot(&reg);
+        assert!(reg.pool_rows_unpersisted(&persisted).is_empty());
     }
 
     #[test]

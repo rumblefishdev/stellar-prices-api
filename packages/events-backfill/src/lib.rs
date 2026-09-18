@@ -8,6 +8,7 @@
 //! processor uses, so repriced candles are byte-identical to the live path.
 
 pub mod cli;
+pub mod discover;
 pub mod error;
 pub mod run;
 pub mod source;

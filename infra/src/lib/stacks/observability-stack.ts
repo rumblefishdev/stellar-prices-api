@@ -315,6 +315,8 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly ledgerProcessorErrorAlarm: cloudwatch.Alarm;
   /** Task 0282: the reconcile loop flushed a PARTIAL minute to avoid deadlocking. */
   public readonly ledgerProcessorForcedPartialFlushAlarm: cloudwatch.Alarm;
+  /** Task 0291: live dropped trades from a pool missing from `pool_registry`. */
+  public readonly ledgerProcessorUnregisteredPoolAlarm: cloudwatch.Alarm;
   /** Live ledger-processor DLQ-depth alarm (task 0056 finding B). Rung 1. */
   public readonly ledgerProcessorDlqAlarm: cloudwatch.Alarm;
   /**
@@ -1197,6 +1199,45 @@ export class ObservabilityStack extends cdk.Stack {
     );
     this.ledgerProcessorForcedPartialFlushAlarm.addAlarmAction(snsAction);
     this.ledgerProcessorForcedPartialFlushAlarm.addOkAction(snsAction);
+
+    // Task 0291 — live dropped trades from a pool that is missing from
+    // `prices.pool_registry`. The registry stopped growing when the history
+    // backfill ended (2026-07-06), and until 0291 the live processor learned new
+    // pools in memory only, so every cold start forgot them: 27 Aquarius, 14
+    // Soroswap and 1 Phoenix pool, ~5% of Aquarius trades, dropped with no error
+    // and no row anywhere.
+    //
+    // The processor counts events shaped like a pool we index (Aquarius
+    // `trade`, Soroswap pair `swap`, Phoenix swap) from contracts it cannot
+    // classify, and publishes `UnregisteredPoolEvents` only when non-zero. Routers
+    // and the unindexed Uniswap-v3-style venue (task 0290) do not match those
+    // shapes, so with a complete registry the metric is absent and
+    // NOT_BREACHING + `>= 1` is the whole alarm.
+    this.ledgerProcessorUnregisteredPoolAlarm = new cloudwatch.Alarm(
+      this,
+      'LedgerProcessorUnregisteredPoolAlarm',
+      {
+        alarmName: `prices-${config.envName}-ledger-processor-unregistered-pool`,
+        alarmDescription:
+          'The ledger-processor dropped AMM trades from a contract that looks like an Aquarius, Soroswap or Phoenix pool but is missing from prices.pool_registry (task 0291). Those trades produce no candle. The processor now persists pools it learns from factory events, so this means a pool arrived by a path it never saw: a new factory or factory event shape, or a factory event processed before the 0291 deploy. The WARN "dropped trades from pools missing from prices.pool_registry" lists the contracts. Fix: run events-backfill --discover-pools over the range holding its factory event (docs/runbooks/seed-pool-registry.md), then reprice the dropped minutes.',
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Ingest',
+          metricName: 'UnregisteredPoolEvents',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        // Emitted only when trades were dropped: "missing" is healthy.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ledgerProcessorUnregisteredPoolAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorUnregisteredPoolAlarm.addOkAction(snsAction);
 
     // Poison-pill / permanent-failure doorbells: under reportBatchItemFailures a
     // handler that keeps failing one item re-drives it (no Lambda Error) until
