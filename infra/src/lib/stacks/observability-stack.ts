@@ -1385,9 +1385,10 @@ export class ObservabilityStack extends cdk.Stack {
       idPrefix: string,
       alarmSuffix: string,
       describe: (count: number) => string,
+      counts: readonly number[] = config.opsAlarms.usdSanityEscalationCounts,
     ): Record<string, cloudwatch.Alarm> =>
       Object.fromEntries(
-        config.opsAlarms.usdSanityEscalationCounts.map((count) => {
+        counts.map((count) => {
           const alarm = new cloudwatch.Alarm(this, `${idPrefix}${count}`, {
             alarmName: `prices-${config.envName}-${alarmSuffix}-${count}`,
             alarmDescription: describe(count),
@@ -1438,7 +1439,17 @@ export class ObservabilityStack extends cdk.Stack {
       'ZeroInvariantAlarmCount',
       'zero-invariant',
       (count) =>
-        `${count} or more price_ohlcv_1m candles written in the last 48 h break an invariant every reader of close / close_usd relies on (ADR 0292): either pf_trade_count = 0 with close != 0 (a candle that formed no price carries one - views.sql and current.sql publish it, /ohlcv refuses it), or close_usd > 0 with close = 0 (a USD close without a close - it lends a coarse bucket a rate against zero). A WRITER did this: find it before repairing. Usual cause: a statement that omits pf_trade_count and takes its DEFAULT (trade_count) - the Rust writer is name-routed, so an omitted column is silent (ADR 0287). Check recent INSERT ... SELECT, pre-roll scripts and enrichment statements against docs/database-schema/close-usd-zero-guardrails.md. Query: packages/rollup-freshness-probe/src/zero_invariants.rs. Rungs tunable via config.opsAlarms.usdSanityEscalationCounts.`,
+        `${count} or more price_ohlcv_1m candles whose BUCKET falls in the last 48 h break a stored-data invariant every reader of close / close_usd relies on (ADR 0292): pf_trade_count = 0 with close != 0 (no price formed, yet one is stored - views.sql and current.sql publish it, /ohlcv refuses it); close_usd > 0 with close = 0 (a USD close without a close); or pf_trade_count > 0 with close = 0 (claims price-forming fills it has no price from). A WRITER did this: find it before repairing. Usual cause, which the third condition exists to catch: a statement that omits pf_trade_count and takes its DEFAULT (trade_count) - the Rust writer is name-routed, so the omission is silent (ADR 0287). Check recent INSERT ... SELECT, pre-roll scripts and enrichment statements against docs/database-schema/close-usd-zero-guardrails.md. The window is on bucket time: a backfill into older buckets is NOT covered. Runbook: docs/runbooks/0151-zero-invariant-probe-rollout.md. First rung is fixed at 1.`,
+      // The healthy reading is exactly 0, so a first rung above 1 would hide real
+      // violations — and the shared key exists to be tuned for the USDT ladders,
+      // whose populations are nothing like this one. Pin the rung that carries
+      // the meaning; borrow only the rungs that say how fast it is growing.
+      [
+        1,
+        ...config.opsAlarms.usdSanityEscalationCounts.filter(
+          (count) => count > 1,
+        ),
+      ],
     );
 
     // Materialized-view drift, on a schedule (task 0204, gap 3). Task 0142 built

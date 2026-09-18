@@ -380,8 +380,10 @@ export interface EnvironmentConfig {
      * quote leg and reads a 48 h window of `price_ohlcv_1m`, not 7 days. Its
      * healthy value is exactly 0, so only the first rung carries meaning there
      * and the rationale below for `100` / `10000` is about the USDT metrics, not
-     * about it. **Changing these rungs re-tunes all three ladders.** If they ever
-     * need to diverge, split the key rather than tuning this one for one of them.
+     * about it. That ladder therefore pins its first rung at `1` in the stack
+     * and borrows only the rungs above it from here, so raising the first rung
+     * to quiet a USDT ladder cannot hide a violation there. **Changing the
+     * higher rungs still re-tunes all three ladders.**
      *
      * ⚠️ **Why a ladder and not a single `>= 1`.** A wrong `close_usd` is a
      * **standing condition** — it stays wrong until a person repairs it — so it
