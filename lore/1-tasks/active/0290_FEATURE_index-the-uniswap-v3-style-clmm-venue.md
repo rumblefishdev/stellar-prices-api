@@ -132,7 +132,10 @@ among the deployer's earlier batches (`272253DE`, `148CA1A9`, `391D449E`,
 `pool_created`" below: four factory generations, found with a chunked scan on
 `signature = 'pool_created'` (under 1 s per 640k-ledger chunk).
 
-**✅ DECIDED with the operator 2026-09-18 — seed by pool wasm hash.** A one-off
+**🗄️ SUPERSEDED the same afternoon — see "✅ DECIDED: discover from
+`pool_created`" below.** Kept for the record:
+
+~~**DECIDED with the operator 2026-09-18 — seed by pool wasm hash.**~~ A one-off
 discovers every pool whose wasm is `003710B3` / `95A8E001`, whichever factory
 generation created it, and live learns new pools from the live factory
 `CD3KRKGD…GLYF` going forward. Rationale: it covers all 99 traded pools without
@@ -178,16 +181,23 @@ All four SushiSwap factories share the SushiSwap deployer
   token pair, so `learn_factory`'s arm (which requires `pool_address`,
   `token0` and `token1`) registers none of them. Pinned by a test.
 
-**Consequence for the 2026-09-18 wasm-hash decision above — ⛔ operator to
-confirm.** That decision rested on "without first identifying the dead
-rehearsal factories". The factory-event read needs no identification — it has
-no emitter filter, as `learn_factory` has none — and it finds a **superset**:
-the 119 the wasm-hash seed would find, plus the 14 older-wasm pools it would
-miss. It also yields the token pair, which a wasm-hash list alone does not.
-Commit `291c21c` extends `--discover-pools` to `pool_created` accordingly; the
-wasm-hash seed has not been built. Until the operator confirms, the decision
-above stands as recorded. A `--discover-pools --dry-run` over 60,000,000 → tip
-is expected to report **133 new `sushiswap` pools**.
+**✅ DECIDED with the operator 2026-09-18 (afternoon) — discover from
+`pool_created`, not by pool wasm hash.** This replaces the morning's
+wasm-hash decision. That decision rested on "without first identifying the
+dead rehearsal factories"; the factory-event read needs no identification — it
+has no emitter filter, as `learn_factory` has none — and it finds a
+**superset**: the 119 the wasm-hash seed would find, plus the 14 older-wasm
+pools it would miss. It also yields the token pair, which a wasm-hash list
+alone does not. Commit `291c21c` extends `--discover-pools` to `pool_created`;
+the wasm-hash seed was never built and will not be. A
+`--discover-pools --dry-run` over 60,000,000 → tip is expected to report
+**133 new `sushiswap` pools**.
+
+This also shrinks the morning's "future factory" consequence: live learns a
+`pool_created` by shape from **any** emitter, not only `CD3KRKGD…GLYF`, so a
+replacement factory emitting the same event is learned without a code change.
+[[0291]]'s `UnregisteredPoolEvents` alarm remains the backstop for one that
+changes the event.
 
 ### Price comes from the amounts; `sqrt_price_x96` is a free cross-check
 
