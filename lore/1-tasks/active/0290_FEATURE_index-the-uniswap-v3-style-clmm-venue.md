@@ -302,6 +302,22 @@ protocol's real `pool_created` learns nothing. The SQL-pinning test
 filter text (intentional). `events-backfill` + `prices-ingest-core`: 126 passed,
 0 failed.
 
+**Router test (commit `7021ae2`).**
+`a_routed_sushiswap_trade_prices_once_from_the_pool_not_the_router`
+(`prices-ingest-core/src/soroban.rs`) drives a real routed trade — ledger
+64,481,111, pool `CCR2CH4G…H2MQ` swap at event 4 and router `CDMIM23W…ZCHL`'s
+summary of the same amounts at event 5 — through `process_soroban_event_rows`.
+It requires exactly one `sushiswap` tick, no router in the registry, and no
+missing-pool count; and a router wrongly registered as a SushiSwap pool must
+still add no tick (its data has no `amount0`/`amount1`). Negative controls:
+giving the router pool-shaped data fails the missing-pool assertion, and with
+that assertion removed fails the tick count at `left: 2`. ✅ Both failed.
+
+A router `swap` from an unregistered contract still lands in `out.unresolved`
+(the generic "unknown contract emitted a `swap`" record). That is a record,
+not a failure: the backfill never reads unregistered contracts, and nothing
+trips on it. Left as is and not pinned by the test.
+
 **Modified test:** `routers_and_unindexed_venues_are_not_counted_as_unregistered_pools`
 (`soroban.rs`) previously asserted this venue is NOT counted, with a bare `swap`
 row named `clmm`. That premise is now wrong — we index it. The row was replaced
@@ -351,6 +367,60 @@ weakened: the test still asserts `None` for every row in the list.
       and a cold start — after 0286 phase 1 lifts the Compute deploy freeze.
 - [ ] Live candles for it match a raw count of its pool `swap` events for a full
       day.
-- [ ] Its routers stay unindexed (a test pins it).
+- [x] Its routers stay unindexed (a test pins it). →
+      `a_routed_sushiswap_trade_prices_once_from_the_pool_not_the_router`
+      (`7021ae2`), a real routed transaction, negative-controlled. See
+      Implementation Notes.
 - [ ] History from the first pool is backfilled, or explicitly deferred with a
       reason.
+
+# 📕 RUNBOOK — `--discover-pools` dry run for SushiSwap V3
+
+Read-only: `--dry-run` writes nothing, so it is safe during the Compute deploy
+freeze. The real write only helps once 0290's ledger-processor is deployed
+(after 0286 phase 1), so it waits for that.
+
+**Run identity** is 0291's ([seed-pool-registry.md](../../../docs/runbooks/seed-pool-registry.md),
+"Discover missing pools"): the Hetzner host, ClickHouse `default`,
+`localhost:8123`, a static build.
+
+1. **[local machine, repo root, branch `feat/0290_…`]** build and copy:
+
+   ```bash
+   cargo build --release -p events-backfill --target x86_64-unknown-linux-musl
+   scp target/x86_64-unknown-linux-musl/release/events-backfill <prod-host>:~/events-backfill-0290
+   ```
+
+   A separate file name, so 0291's binary on the host is not overwritten.
+
+2. **[prod host, under tmux]** the dry run. It starts at **60,000,000**, not
+   0291's 63,000,000: the first SushiSwap factory event is at ledger 60,147,305.
+   `<TIP>` = the latest ledger in `default.soroban_events`.
+
+   ```bash
+   read -rs CH_PW
+   CLICKHOUSE_PASSWORD="$CH_PW" ~/events-backfill-0290 --discover-pools \
+     --start 60000000 --end <TIP> \
+     --clickhouse-url http://localhost:8123 --dry-run
+   ```
+
+   About 15 chunks of 320k ledgers at 2-4 s each: roughly a minute.
+
+3. **[read the output]** Expected as of 2026-09-18:
+   - one `pool not in prices.pool_registry` line per pool, every one
+     `change="new"`, `venue="sushiswap"`;
+   - then `to_write=133 per_venue={"sushiswap": 133}`.
+   - More than 133 is fine if SushiSwap created pools after 2026-09-18.
+   - ⛔ **Stop and investigate** on any `change="changed"` line (an existing
+     row would be rewritten), or on a venue other than `sushiswap` (the other
+     venues were seeded by 0291 on 2026-09-18 and should report 0).
+   - The other protocol's five token-less `pool_created` events at ledger
+     63.17M must **not** appear.
+
+4. **[later, after 0286 phase 1 and 0290's deploy]** drop `--dry-run` to write,
+   run the dry run again (it must report `to_write=0`), then verify:
+
+   ```sql
+   SELECT venue, count() FROM prices.pool_registry FINAL GROUP BY venue ORDER BY venue;
+   -- expected: sushiswap 133 (or more), other venues unchanged
+   ```
