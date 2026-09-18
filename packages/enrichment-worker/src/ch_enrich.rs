@@ -2093,6 +2093,19 @@ fn plan_peg_pivot_step(
 /// p.close > 0))`, matching [`CANDIDATE_PRED`]: a dust-only candle has volume to
 /// price but no price to value, so it must be admitted once for its
 /// `volume_quote_usd` and never again for a `close_usd` that cannot move.
+///
+/// ## A write that changes nothing is not a write (ADR 0292)
+///
+/// The row is written only if at least one USD column would become non-zero.
+/// Without that, a reading of 0 (`oracle_prices.price_usd` is non-Nullable and
+/// nothing on its write path refuses a 0 — the `IS NOT NULL` below never did),
+/// or a product under the column's 14 decimal places, leaves
+/// `close_usd = 0 AND close > 0`: still a candidate, so the identical row was
+/// re-inserted at `version + 1` on every pass, at the head of
+/// `ORDER BY timestamp LIMIT`. Both halves are `p.`-qualified — this SELECT
+/// aliases both columns to the values it writes. Post-0286 only this tier can
+/// round to zero: a price-forming `close` is `>= 1e-12`, and the peg, external
+/// and pivot rates are all within a few orders of 1.
 fn oracle_sql(db: &str, tbl: &str, window: &str) -> String {
     let columns = insert_columns();
     format!(
@@ -2114,6 +2127,8 @@ fn oracle_sql(db: &str, tbl: &str, window: &str) -> String {
          WHERE (p.volume_quote_usd = 0 OR (p.close_usd = 0 AND p.close > 0)) \
            AND p.volume_quote > 0 \
            AND o.price_usd IS NOT NULL \
+           AND ((p.volume_quote_usd = 0 AND CAST(o.price_usd * p.volume_quote AS Decimal(38, 14)) > 0) \
+             OR (p.close_usd = 0 AND CAST(o.price_usd * p.close AS Decimal(38, 14)) > 0)) \
            AND (p.timestamp - o.timestamp) <= ? \
            AND p.timestamp <= toDateTime(?){window} \
          ORDER BY p.timestamp \
@@ -4449,6 +4464,29 @@ mod tests {
         assert!(
             !sql.contains("(p.volume_quote_usd = 0 OR p.close_usd = 0)"),
             "{sql}"
+        );
+    }
+
+    /// ADR 0292: the oracle statement writes a row only if the write would CHANGE
+    /// a USD column. A reading of 0, or a product under the column's 14 decimal
+    /// places, otherwise leaves `close_usd = 0 AND close > 0` — still a candidate
+    /// — and the identical row is re-inserted at `version + 1` on every pass.
+    /// Both halves are `p.`-qualified: this SELECT aliases both columns to the
+    /// values it is writing (the 0268 alias trap).
+    #[test]
+    fn the_oracle_statement_never_writes_a_row_it_cannot_change() {
+        let sql = oracle_sql("prices", "price_ohlcv_1m", "");
+        assert!(
+            sql.contains(
+                "(p.volume_quote_usd = 0 AND CAST(o.price_usd * p.volume_quote AS Decimal(38, 14)) > 0)"
+            ),
+            "the volume half of the no-op guard is missing: {sql}"
+        );
+        assert!(
+            sql.contains(
+                "(p.close_usd = 0 AND CAST(o.price_usd * p.close AS Decimal(38, 14)) > 0)"
+            ),
+            "the close half of the no-op guard is missing: {sql}"
         );
     }
 

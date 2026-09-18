@@ -3840,6 +3840,131 @@ async fn a_dust_only_minute_is_priced_once_and_is_never_reselected() {
         .unwrap();
 }
 
+async fn version_of(client: &Client, db: &str, asset: u32, quote: u32, ts: u32) -> u64 {
+    client
+        .query(&format!(
+            "SELECT toUInt64(version) FROM {db}.price_ohlcv_1m FINAL \
+             WHERE asset_id = ? AND quote_asset_id = ? AND timestamp = ?"
+        ))
+        .bind(asset)
+        .bind(quote)
+        .bind(ts)
+        .fetch_one::<u64>()
+        .await
+        .unwrap()
+}
+
+/// ADR 0292: a write that changes nothing is not a write.
+///
+/// A candle HAS a price (`close = 1e-9`) and its quote asset HAS an oracle
+/// reading (`1e-6`), but their product is `1e-15` — below the column's 14
+/// decimal places, so `close_usd` is written as 0. The row then still reads
+/// `close_usd = 0 AND close > 0`, i.e. a candidate, and nothing can ever change
+/// that. RED without the guard: every pass re-inserts the identical row at
+/// `version + 1`, forever, at the head of `ORDER BY timestamp LIMIT`.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_usd_close_that_rounds_to_zero_is_written_once_and_never_rewritten() {
+    let db = "it_enrich_zero_product";
+    let client = setup_scratch(db).await;
+    let ts = 1_700_000_000u32;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES ({ts}, 20, 'reflector', 0.000001, '{{}}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // FOO/EXO: a real, price-forming close of 1e-9 EXO and 9 EXO of volume.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ({ts}, 10, 20, 'sdex', 0.000000001,0.000000001,0.000000001,0.000000001, \
+              9000000000, 9, 0, 0, 0.000000001, 1, 1, 1, 9000000000, 9)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+    // The first pass is a real write: the volume gets its USD value.
+    let after_first = version_of(&client, db, 10, 20, ts).await;
+    assert_eq!(after_first, 2, "the first pass prices the volume");
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+    assert_eq!(
+        version_of(&client, db, 10, 20, ts).await,
+        after_first,
+        "the second pass had nothing to change and must not re-insert the row"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// …and an oracle READING of zero prices nothing at all. `oracle_prices.price_usd`
+/// is non-Nullable and nothing on the write path refuses a 0, so the statement's
+/// `IS NOT NULL` never protected it. RED without the guard: the row is
+/// re-inserted with both USD columns still 0 on every pass.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn an_oracle_reading_of_zero_writes_nothing() {
+    let db = "it_enrich_zero_reading";
+    let client = setup_scratch(db).await;
+    let ts = 1_700_000_000u32;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES ({ts}, 20, 'reflector', 0, '{{}}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
+             ({ts}, 10, 20, 'sdex', 9,9,9,9, 1, 9, 0, 0, 9, 1, 1, 1, 1, 9)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+    assert_eq!(
+        version_of(&client, db, 10, 20, ts).await,
+        1,
+        "a zero reading is not a price: the candle must be left exactly as it was"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
 /// Every re-inserting statement carries the three price-forming columns.
 ///
 /// RED on the pre-0286 15-column INSERT list. ClickHouse fills a column a NAMED
