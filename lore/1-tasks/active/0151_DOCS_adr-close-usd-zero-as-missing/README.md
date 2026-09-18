@@ -97,6 +97,29 @@ history:
       in `oracle_sql`, the cross-surface test under the floor, the probe
       assertion, the `views.sql` / `init.sql` comment fixes. The wire fields
       are decided here and shipped by 0147.
+  - date: "2026-09-18"
+    status: active
+    who: akot
+    note: >
+      **Everything still open above is closed, and every guardrail is now
+      pinned by a test SEEN to fail without it.** Six local commits: the
+      `oracle_sql` no-op guard (`479fd80`), the probe's zero-invariant
+      assertion (`2e04d9b`), its CloudWatch ladder (`07e5dbf`), the comment
+      fixes with the inventory and ADR Confirmation (`394fa4b`), three new
+      behavioural ITs closing the audit's A4 gaps (`16e4857`), and the docs
+      (runbook, inventory, this README). Nine RED proofs recorded: each guard
+      term was removed, the named test seen to fail, and the source restored
+      byte-identical before any commit. Suites green on ClickHouse 26.3.10.60:
+      `ch_enrich_it` 58/58, `rollup_freshness_it` 22/22 single-threaded,
+      `prices-clickhouse` ITs, workspace units 172/62/59, infra typecheck +
+      lint. The four `◐` rows the inventory assigned to 0151 are `✅` and its
+      "Open gaps, by owner" table names 0151 nowhere. New runbook
+      `docs/runbooks/0151-zero-invariant-probe-rollout.md` carries the deploy
+      order — probe and alarms go out only AFTER [[0286]]'s schema step, since
+      the query reads `pf_trade_count` and a failed read fails the WHOLE probe
+      invocation, not just its own check. **Not deployed: that is an operator
+      step.** The cross-surface test under the floor stays with [[0147]], where
+      the fix is — a test of agreement cannot land before the thing it asserts.
 ---
 
 # ADR — `close_usd` zero-as-missing
@@ -255,17 +278,42 @@ answer.
 
 ## Acceptance Criteria
 
-- [ ] ADR filed in `lore/2-adrs/` with a decision, not just an analysis.
+- [x] ADR filed in `lore/2-adrs/` with a decision, not just an analysis —
+      `0292_close-usd-zero-is-a-named-sentinel-with-a-published-reason.md`,
+      `## Decision` (six numbered verdicts, accepted by Adam 2026-09-17).
 - [x] The rate-table option ([[I-usd-rate-table]]) decided 2026-08-06 — adopted
       **narrowly inside [[0154]]**, schema-wide refactor rejected for now, with
       the revisit trigger recorded. The two gating unknowns move to 0154 at
       reduced scope.
-- [ ] The ADR carries the **rejected** option and its reasoning, not just the
-      chosen one — a rejected option with a revisit trigger is the point.
-- [ ] `close_usd`'s published null-ness is stated as a **contract term**, with
-      BE's dash-renders-as-missing constraint cited.
-- [ ] Cross-linked from [[0144]] and from `init.sql`'s column comment.
-- [ ] The `views.sql` value-or-absent contract either implemented or the
-      header corrected to match reality.
-- [ ] If "accept the sentinel" is the outcome, the guardrails that make it
-      acceptable are enumerated and each has a test.
+- [x] The ADR carries the **rejected** option and its reasoning, not just the
+      chosen one — `## Alternatives considered` carries six: `Nullable(Decimal)`,
+      the schema-wide rate table (with its 2026-08-06 revisit trigger), a per-row
+      `usd_status` (DEFERRED, with a window), ClickHouse `CHECK` constraints,
+      publishing `null` in place on the current-price surfaces, and one
+      missing-value encoding API-wide.
+- [x] `close_usd`'s published null-ness is stated as a **contract term**, with
+      BE's dash-renders-as-missing constraint cited — ADR 0292 §5 and the
+      Context bullet quoting BE, 2026-08-06: *"a NULL renders as a dash and
+      removes the pool from every USD view we have."*
+- [x] Cross-linked from [[0144]] (`related_adr: ["0292"]` and its 2026-09-17
+      cross-link history note) and from `init.sql`'s column comment
+      (`⚠️ That 0 is a SENTINEL with four meanings, kept on purpose (ADR 0292)`).
+- [x] The `views.sql` value-or-absent contract either implemented or the
+      header corrected to match reality — **header corrected**: the
+      value-or-absent promise is now scoped to `price_usd_series*` /
+      `usd_reference*`, and `current_price_usd`'s header says plainly that it
+      publishes a sentinel `0` rather than omitting the row.
+- [x] If "accept the sentinel" is the outcome, the guardrails that make it
+      acceptable are enumerated and each has a test — the enumeration is
+      `docs/database-schema/close-usd-zero-guardrails.md`, and nothing it
+      assigns to 0151 is still ◐ or ⛔. The guards closed in this pass, each
+      seen RED against its removed term before being kept:
+      `the_oracle_statement_never_writes_a_row_it_cannot_change`,
+      `a_usd_close_that_rounds_to_zero_is_written_once_and_never_rewritten`,
+      `an_oracle_reading_of_zero_writes_nothing` (commit `479fd80`);
+      `the_zero_invariant_scan_counts_only_rows_that_break_an_invariant`
+      (`2e04d9b`);
+      `a_dust_only_minute_quoted_in_a_pegged_asset_is_priced_once_by_the_peg_tier`,
+      `the_pivot_ignores_a_reference_minute_that_formed_no_price`,
+      `the_pivot_reset_never_re_opens_a_day_whose_only_reference_is_dust`
+      (`16e4857`).

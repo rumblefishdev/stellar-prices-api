@@ -43,7 +43,8 @@ The alarm stack alone is harmless before the probe (the metric simply never
 arrives, and the ladder treats missing data as `NOT_BREACHING`), but there is no
 reason to split them: deploy both, after 0286.
 
-**Confirm the precondition** (read-only, on the host — see section 3):
+**Confirm the precondition** (read-only, on the host — see "Where these commands
+run" below):
 
 ```sql
 SELECT count() FROM system.columns
