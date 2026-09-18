@@ -1188,3 +1188,61 @@ async fn a_stopped_mv_current_prices_freezes_updated_at_and_its_age_grows() {
 
     drop_scratch_db(db).await;
 }
+
+// ---- ADR 0292 / task 0151: the stored-data invariants of the zero sentinel ----
+
+/// One `price_ohlcv_1m` row, two minutes old, with every column the invariants
+/// read spelled out — the pf column above all: left to its DEFAULT
+/// (`trade_count`) it would turn the dust-only fixture into a healthy row.
+async fn insert_invariant_row(c: &Client, asset_id: u32, close: &str, close_usd: &str, pf: u32) {
+    exec(
+        c,
+        &format!(
+            "INSERT INTO prices.price_ohlcv_1m \
+               (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+                version, pf_trade_count, pf_volume, pf_price_volume) \
+             SELECT now() - INTERVAL 2 MINUTE, {asset_id}, 2, 'sdex', \
+                    {close}, {close}, {close}, {close}, 1, 1, 0, {close_usd}, 1, 3, 1, \
+                    {pf}, {pf}, {pf}"
+        ),
+    )
+    .await;
+}
+
+/// The assertion must **execute and deserialize** on the production build, and
+/// count exactly the rows that break an invariant — no healthy shape among them.
+/// The two healthy rows are the ones a careless predicate would flag: a priced
+/// candle not yet enriched (`close_usd = 0` is meaning 1, not a violation) and
+/// a dust-only candle (`close = 0` is CORRECT when `pf_trade_count = 0`).
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn the_zero_invariant_scan_counts_only_rows_that_break_an_invariant() {
+    use rollup_freshness_probe::zero_invariants::{
+        ZeroInvariantCounts, zero_invariant_metric, zero_invariant_query,
+    };
+
+    let c = client();
+    reset_sanity_tables(&c).await;
+
+    insert_invariant_row(&c, 10, "5", "0", 3).await; // priced, pending enrichment
+    insert_invariant_row(&c, 11, "0", "0", 0).await; // dust-only: no price, correctly
+    insert_invariant_row(&c, 12, "5", "0", 0).await; // ⛔ no price-forming fill, yet a close
+    insert_invariant_row(&c, 13, "0", "3", 3).await; // ⛔ a USD close without a close
+
+    let counts = c
+        .query(&zero_invariant_query())
+        .fetch_one::<ZeroInvariantCounts>()
+        .await
+        .expect("the invariant query executes and deserializes");
+    assert_eq!(
+        counts,
+        ZeroInvariantCounts {
+            violations: 2,
+            scanned: 4
+        }
+    );
+    assert_eq!(zero_invariant_metric(&counts).unwrap().value, 2.0);
+
+    reset_sanity_tables(&c).await;
+}

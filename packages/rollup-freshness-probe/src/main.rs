@@ -29,6 +29,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         PegCounts, StrandedCounts, peg_metric, peg_query, publish_sanity, stranded_metric,
         stranded_query,
     };
+    use rollup_freshness_probe::zero_invariants::{
+        ZeroInvariantCounts, zero_invariant_metric, zero_invariant_query,
+    };
     use rollup_freshness_probe::{TableLag, freshness_query, lag_metrics, publish};
     use std::sync::Arc;
 
@@ -53,6 +56,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     // a single shared tier made the peg direction structurally blind.
     let stranded_query = Arc::new(stranded_query());
     let peg_query = Arc::new(peg_query());
+    let zero_invariant_query = Arc::new(zero_invariant_query());
 
     let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .load()
@@ -67,6 +71,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         let query = query.clone();
         let stranded_query = stranded_query.clone();
         let peg_query = peg_query.clone();
+        let zero_invariant_query = zero_invariant_query.clone();
         let environment = environment.clone();
         async move {
             // ⚠️ EVERY CHECK RUNS, AND A FAILURE IN ONE MUST NOT SUPPRESS
@@ -218,6 +223,35 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 Err(e) => failures.push(format!("usd-peg-applied read: {e}")),
             }
 
+            // ---- 3b. The zero sentinel's stored-data invariants (ADR 0292) --
+            //
+            // Not scoped to a quote leg, unlike the two checks above: a candle
+            // with no price-forming fill carries no price whatever it is quoted
+            // in. Independent of them for the same reason they are independent
+            // of each other — one tier's refusal says nothing about another's.
+            let mut zero_counts: Option<ZeroInvariantCounts> = None;
+            match ch
+                .query(&zero_invariant_query)
+                .fetch_one::<ZeroInvariantCounts>()
+                .await
+            {
+                Ok(counts) => {
+                    zero_counts = Some(counts);
+                    match zero_invariant_metric(&counts) {
+                        Ok(metric) => {
+                            if let Err(e) =
+                                publish_sanity(&cw, &environment, std::slice::from_ref(&metric))
+                                    .await
+                            {
+                                failures.push(format!("zero-invariants publish: {e}"));
+                            }
+                        }
+                        Err(refusal) => failures.push(format!("zero-invariants: {refusal}")),
+                    }
+                }
+                Err(e) => failures.push(format!("zero-invariants read: {e}")),
+            }
+
             // ---- 4. Materialized-view drift (task 0204, gap 3) ------------
             //
             // This is the only read in the invocation that touches `system.*`.
@@ -274,6 +308,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 usd_peg_scanned = peg_counts.map(|c| c.scanned).unwrap_or_default(),
                 usd_stranded = stranded_counts.map(|c| c.stranded).unwrap_or_default(),
                 usd_stranded_scanned = stranded_counts.map(|c| c.scanned).unwrap_or_default(),
+                zero_invariant_violations = zero_counts.map(|c| c.violations).unwrap_or_default(),
+                zero_invariant_scanned = zero_counts.map(|c| c.scanned).unwrap_or_default(),
                 mv_drift_critical = drift_critical,
                 mv_drift = drift_count,
                 mv_visible_objects = visible_objects.unwrap_or_default(),
@@ -305,6 +341,10 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     "peg_scanned": peg_counts.map(|c| c.scanned),
                     "stranded": stranded_counts.map(|c| c.stranded),
                     "stranded_scanned": stranded_counts.map(|c| c.scanned),
+                },
+                "zero_invariants": {
+                    "violations": zero_counts.map(|c| c.violations),
+                    "scanned": zero_counts.map(|c| c.scanned),
                 },
                 "mv_drift": {
                     "critical": drift_critical,
