@@ -304,6 +304,14 @@ test('15: ANSI colour around cargo output is parsed the same', () => {
   assert.match(r.out, /3 passed/);
 });
 
+test('15b: one summary more than the derived targets fails, even when the passed sum matches', () => {
+  // 2 + 1 + 0 = 3 = CH_TESTS: only the line count can see the extra target.
+  const r = assertLog([result(2), result(1), result(0)]);
+  assert.notEqual(r.code, 0);
+  assert.match(r.err, /3 'test result:' lines for 2 ClickHouse targets/);
+  assert.doesNotMatch(r.err, /count mismatch/);
+});
+
 test('16: a Doc-tests summary in the log fails rather than being miscounted', () => {
   const r = assertLog([result(2), result(1), '   Doc-tests alpha', result(0)]);
   assert.notEqual(r.code, 0);
