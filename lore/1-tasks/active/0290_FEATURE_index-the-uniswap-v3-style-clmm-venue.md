@@ -128,10 +128,20 @@ work, and a `topics_xdr LIKE '%pool_created%'` scan over the whole era exceeds
 among the deployer's earlier batches (`272253DE`, `148CA1A9`, `391D449E`,
 `068104A7`, `CD86E132`, …, one per rehearsal generation).
 
-**Alternative worth weighing:** seed the registry by **pool wasm hash**
-(`003710B3` / `95A8E001`) in a one-off, and have live learn only from the live
-factory. That covers every pool regardless of which generation made it, and
-reuses [[0291]]'s `--discover-pools` shape.
+**✅ DECIDED with the operator 2026-09-18 — seed by pool wasm hash.** A one-off
+discovers every pool whose wasm is `003710B3` / `95A8E001`, whichever factory
+generation created it, and live learns new pools from the live factory
+`CD3KRKGD…GLYF` going forward. Rationale: it covers all 99 traded pools without
+first identifying the dead rehearsal factories (an archaeology exercise whose
+only cheap route — `deployer_id` — is NULL for factory-deployed contracts), and
+it reuses [[0291]]'s `--discover-pools` shape, which was proven on production
+this morning. The rejected alternative was enumerating and registering every
+factory generation.
+
+⚠️ Consequence to keep in view: a pool created by a **future** rehearsal or
+replacement factory would be missed by live, exactly as [[0291]]'s pools were.
+[[0291]]'s `UnregisteredPoolEvents` alarm is the backstop — extend its shape
+matcher to this venue's `swap` so a missed pool is heard, not silent.
 
 ### Price comes from the amounts; `sqrt_price_x96` is a free cross-check
 
@@ -187,6 +197,70 @@ Worked example, pool `CCR2CH4G…H2MQ` (token0 **XLM**, token1 **USDC**) at ledg
   rule ([[0286]]).
 - Backfill from the family's first pool, in the same run as [[0286]] phase 3
   if the timing allows.
+
+## Implementation Notes
+
+Branch `feat/0290_index-the-uniswap-v3-style-clmm-venue`, commit `51a3030`.
+**Workspace 1,118 passed, 0 failed** (1,115 before, +3 new tests).
+
+- **`extractors-core`**: `Venue::Sushiswap` → `"sushiswap"`, both directions.
+- **`soroswap-extractor` is now venue-neutral rather than copied.** Its
+  `decode_swap` ALREADY handled this exact CLMM shape (signed
+  `amount0`/`amount1`), and `swap_action` already returns `"swap"` for a bare
+  `[Symbol("swap")]` topic — the only venue-specific thing was the hardcoded
+  `venue: Venue::Soroswap` on the emitted row. So the types were generalised to
+  `TokenPair` / `PairPoolRegistry` / `PairSwapExtractor` with `Soroswap*` kept
+  as aliases (no call site changed), and the extractor carries a `venue`.
+  `PairSwapExtractor::new` still means Soroswap; `with_venue` is the new path.
+  A second extractor crate would have been a divergent copy of tested code.
+- **`learn_factory`**: a `pool_created` arm. It matches on SHAPE like every
+  other arm — no factory address is hardcoded anywhere in the codebase — which
+  is why one arm covers all four factory generations. Requires all three
+  addresses (`pool_address`, `token0`, `token1`), so a differently-shaped
+  `pool_created` from another protocol cannot register a tokenless pool.
+- **Separate registries.** `Registries.sushiswap` is its own
+  `PairPoolRegistry` instance, so a contract_id can never resolve to the other
+  pair-backed venue's tokens. `pool_count()` includes it.
+- **`dispatch`** gained a fifth parameter and a `Venue::Sushiswap` arm.
+- **`registry_io`**: `to_pool_rows` / `load_pool_rows` arms, so pools persist
+  and survive a cold start through [[0291]]'s write path unchanged.
+- **The unresolvable-pair guard** (`classify_amm_groups`) was Soroswap-only;
+  it is now a `match` over venue, so a SushiSwap pool whose pair is unknown is
+  recorded in `unresolved` instead of vanishing.
+- **`unregistered_pool_venue`** keys on the DATA (`amount0` + `amount1`) via a
+  new `has_data_key`, not on the topic — see Issues.
+
+**Negative controls** (each new test must fail without its code):
+
+| control | result |
+| --- | --- |
+| `pool_created` arm removed from `learn_factory` | `sushiswap_factory_pool_created_learns_the_pair` FAILS ✅ |
+| shape matcher keyed on topic only | the new router test AND the pre-existing `routers_and_unindexed_venues…` both FAIL ✅ |
+
+**Modified test:** `routers_and_unindexed_venues_are_not_counted_as_unregistered_pools`
+(`soroban.rs`) previously asserted this venue is NOT counted, with a bare `swap`
+row named `clmm`. That premise is now wrong — we index it. The row was replaced
+with a real SushiSwap **router** payload (`amount_in`/`amount_out`), which must
+still be uncounted, and the bare no-amounts case was kept. No assertion was
+weakened: the test still asserts `None` for every row in the list.
+
+## Issues Encountered
+
+- 🔴 **The routers share the pools' topic exactly.** Both emit
+  `topics = [Symbol("swap")]`; only the data differs —
+  `{ amount_in, amount_out }` for a router against
+  `{ amount0, amount1, liquidity, sqrt_price_x96, tick }` for a pool. A shape
+  matcher keyed on the topic alone counts **every routed swap** as a missing
+  pool, and 0285 measured 5,792 + 1,726 router swaps whose transactions each
+  also hold the pool swap they wrap. Caught before writing the matcher, by
+  reading a real router event; negative control 2 pins it.
+- The whole-era `topics_xdr LIKE '%pool_created%'` scan exceeds `dev_read`'s
+  30 s limit. Filtering by emitter contract id first (factories are few) makes
+  the same question cheap — the general lesson from [[0291]] applies.
+- `soroban_contracts.deployer_id` is **NULL for factory-deployed contracts**, so
+  it cannot be used to attribute a pool to its factory. The pool's exact
+  `deployed_at_ledger` plus a single-ledger event filter works instead, and is
+  how the earlier factory wasm `FC9B0DF0` was found.
 
 ## Acceptance Criteria
 
