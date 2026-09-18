@@ -186,7 +186,8 @@ deploys that stack and nothing it depends on.
 
 `make build` compiles the CDK TypeScript only. The Lambda code is whatever is
 in `../target/lambda/<name>/` at synth time, so every target that can ship a
-Lambda (`deploy-production`, `-compute`, `-eventbridge`) first runs
+Lambda (`deploy-production`, `-compute`, `-eventbridge`) — and
+`diff-production`, so the diff is of what would ship — first runs
 `make build-lambdas` — `tools/scripts/build-lambda-assets.sh`, the same build
 CI runs, followed by a check that each bootstrap is a distinct aarch64 ELF
 (task 0141). Deploy through `make`; a raw `npx cdk deploy` ships whatever is on

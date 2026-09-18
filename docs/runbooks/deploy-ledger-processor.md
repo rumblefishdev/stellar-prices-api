@@ -109,7 +109,8 @@ differently from the group build, so it can yield a different binary from the on
 CI verified.
 
 Step 4 runs this again by itself; doing it here first is what makes the diff in
-step 3 a diff of the artifacts that will ship.
+step 3 a diff of the artifacts that will ship — step 3 uses a raw `npx cdk diff`,
+which builds nothing (`make diff-production` does, but see step 3 for why not).
 
 Needs `cargo-lambda` and, on an x86 machine, `zig`. 🔴 Use the toolchain CI
 pins (`.github/workflows/ci.yml`: rustc 1.97.1, cargo-lambda 1.9.1) — rustc ≥
@@ -178,8 +179,16 @@ ComputeStack — every per-stack target passes `--exclusively`, so no dependency
 stack rides along (before task 0141 none did, and `deploy-production-apigateway`
 would have deployed Compute as a side effect). `make
 deploy-production` deploys _all_ stacks — avoid it unless you intend a full-app
-deploy. Override the asset path with `LEDGER_PROCESSOR_ASSET_DIR` if building
-elsewhere.
+deploy.
+
+🔴 Do **not** export `LEDGER_PROCESSOR_ASSET_DIR` (or any other `*_ASSET_DIR`)
+to deploy a build from elsewhere. CDK would package that directory while the
+build and its checks ran on `target/lambda/`; `make build-lambdas` refuses to
+run with one set, and so with `CARGO_TARGET_DIR` pointing outside the repo, for
+the same reason — what is verified must be what ships. A change spanning Compute
+**and** ApiGateway (a new route and its handler) needs
+`deploy-production-compute` first, then `deploy-production-apigateway`: neither
+target deploys the other any more.
 
 ### 5. Verify the new code is live
 

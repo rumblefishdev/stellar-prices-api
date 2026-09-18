@@ -409,8 +409,7 @@ The `api-handler` Lambda lives in the **Compute** stack.
 
 ```bash
 cd infra
-make build-lambdas            # Rust → target/lambda/*; so the diff below is of what ships
-make diff-production          # read-only; review before deploying
+make diff-production          # builds the Lambdas first, then a read-only diff; review it
 make deploy-production-compute
 ```
 
@@ -422,10 +421,9 @@ Three things to know before running this:
   S3Key diff, stub responses — and only step 7 caught it (task 0141). Since
   0141 `deploy-production-compute` depends on `build-lambdas`
   (`tools/scripts/build-lambda-assets.sh`): cargo rebuilds what is out of date,
-  then every bootstrap is refused unless it is a distinct aarch64 ELF. Running
-  `make build-lambdas` by hand first, as above, is only so that the diff you
-  review is of the artifacts the deploy will ship; the deploy's own build is
-  then a no-op.
+  then every bootstrap is refused unless it is a distinct aarch64 ELF.
+  `diff-production` depends on it too, so the diff you review is of the artifacts
+  the deploy will ship; the deploy's own build is then a ~1 s no-op.
 - **It also heals the 0132 CFN drift.** The 0132 egress fix was shipped by a
   surgical `aws lambda update-function-code` precisely to avoid deploying the
   then-unrolled 0072 read-API, which left CloudFormation believing the live
