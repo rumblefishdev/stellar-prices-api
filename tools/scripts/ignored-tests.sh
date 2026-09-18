@@ -379,7 +379,7 @@ cmd_run() {
 
   recs="$(cmd_targets "$root")"
   echo "ignored-tests: ${CH_TESTS} ClickHouse test(s) in ${CH_TARGETS} target(s):"
-  sed 's/^/  /' <<<"$recs"
+  while IFS= read -r name; do echo "  ${name}"; done <<<"$recs"
   # `--test NAME` once per distinct name; a name shared by two crates selects
   # both (the per-crate list above is the attribution cargo's own Running
   # lines cannot give — both seed_it binaries log identically).
