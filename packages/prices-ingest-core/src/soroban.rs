@@ -1752,6 +1752,110 @@ mod tests {
         assert!(out.unresolved.is_empty(), "a priced pool is not unresolved");
     }
 
+    /// Task 0290, acceptance criterion "its routers stay unindexed". A routed
+    /// SushiSwap trade emits TWO `[Symbol("swap")]` events in one transaction:
+    /// the pool's, and the router's summary of the same trade. Only the pool's
+    /// may become a tick, or every routed trade is counted twice.
+    ///
+    /// Real production transaction, ledger 64,481,111: pool `CCR2CH4G…H2MQ`
+    /// (XLM/USDC) at event 4, router `CDMIM23W…ZCHL` at event 5 carrying the
+    /// same amounts as `amount_in`/`amount_out`.
+    #[test]
+    fn a_routed_sushiswap_trade_prices_once_from_the_pool_not_the_router() {
+        const SEQ: u32 = 64_481_111;
+        const CLOSED_AT: i64 = 1_700_000_000;
+        const POOL: &str = "CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ";
+        const ROUTER: &str = "CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL";
+        const XLM: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const USDC: &str = "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75";
+
+        let event = |contract_id: &str, event_index: u32, data: Value| RawSorobanEvent {
+            contract_id: contract_id.to_string(),
+            transaction_id: "4737599797939127393".to_string(),
+            transaction_index: 0,
+            ledger_sequence: SEQ,
+            event_index,
+            topics: json!([{"type":"sym","value":"swap"}]),
+            data,
+        };
+        let pool_swap = event(
+            POOL,
+            4,
+            json!({"type":"map","value":[
+                {"key":{"type":"sym","value":"amount0"},"value":{"type":"i128","value":"10951822930"}},
+                {"key":{"type":"sym","value":"amount1"},"value":{"type":"i128","value":"-2000561352"}},
+                {"key":{"type":"sym","value":"liquidity"},"value":{"type":"u128","value":"22083689118901"}},
+                {"key":{"type":"sym","value":"recipient"},"value":{"type":"address","value":"GCBYPF2OVPSZ7NJSXIOINCBMOSMY7I6KOWHPZV36OH4OH5R2A63DKUKY"}},
+                {"key":{"type":"sym","value":"sender"},"value":{"type":"address","value":"GCBYPF2OVPSZ7NJSXIOINCBMOSMY7I6KOWHPZV36OH4OH5R2A63DKUKY"}},
+                {"key":{"type":"sym","value":"sqrt_price_x96"},"value":{"type":"u256","value":"00000000000000000000000000000000000000006d911cd1319d4706470e4080"}},
+                {"key":{"type":"sym","value":"tick"},"value":{"type":"i32","value":-16974}}
+            ]}),
+        );
+        let router_swap = event(
+            ROUTER,
+            5,
+            json!({"type":"map","value":[
+                {"key":{"type":"sym","value":"amount_in"},"value":{"type":"i128","value":"10951822930"}},
+                {"key":{"type":"sym","value":"amount_out"},"value":{"type":"i128","value":"2000561352"}},
+                {"key":{"type":"sym","value":"recipient"},"value":{"type":"address","value":"GCBYPF2OVPSZ7NJSXIOINCBMOSMY7I6KOWHPZV36OH4OH5R2A63DKUKY"}}
+            ]}),
+        );
+
+        let registry = || {
+            let mut reg = Registries::new();
+            reg.venue.insert(POOL.to_string(), Venue::Sushiswap);
+            reg.sushiswap
+                .register(POOL.to_string(), XLM.to_string(), USDC.to_string());
+            reg
+        };
+
+        // As in production: the pool is registered, the router is not.
+        let mut reg = registry();
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        process_soroban_event_rows(
+            SEQ,
+            CLOSED_AT,
+            &[pool_swap.clone(), router_swap.clone()],
+            &mut reg,
+            &mut assets,
+            &mut out,
+        );
+        assert_eq!(out.amm_ticks.len(), 1, "one routed trade, one tick");
+        assert_eq!(out.amm_ticks[0].0, "sushiswap");
+        assert!(
+            !reg.venue.contains_key(ROUTER),
+            "nothing in a routed trade may register the router"
+        );
+        assert_eq!(
+            out.unregistered_pool_events,
+            Vec::<(&str, u32)>::new(),
+            "the router's swap is not a missing pool"
+        );
+
+        // Second line of defence: even a router wrongly registered as a
+        // SushiSwap pool prices nothing, because its summary has no
+        // amount0/amount1 to decode.
+        let mut reg = registry();
+        reg.venue.insert(ROUTER.to_string(), Venue::Sushiswap);
+        reg.sushiswap
+            .register(ROUTER.to_string(), XLM.to_string(), USDC.to_string());
+        let mut out = LedgerSoroban::default();
+        process_soroban_event_rows(
+            SEQ,
+            CLOSED_AT,
+            &[pool_swap, router_swap],
+            &mut reg,
+            &mut assets,
+            &mut out,
+        );
+        assert_eq!(
+            out.amm_ticks.len(),
+            1,
+            "a registered router must still add no tick"
+        );
+    }
+
     #[test]
     fn seam_learns_factory_and_skips_oracle_across_transactions() {
         // The seam's own responsibilities beyond classify: (1) group by

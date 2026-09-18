@@ -150,7 +150,7 @@ API returned a contract of an unexpected type — investigate before seeding it.
 
 `events-backfill --discover-pools` reads the AMM factory events in a ledger
 range from BE's `default.soroban_events` (Aquarius `add_pool`, Phoenix `create`,
-Soroswap `new_pair`), runs them through the same `learn_factory` the live
+Soroswap `new_pair`, SushiSwap V3 `pool_created` — task 0290), runs them through the same `learn_factory` the live
 processor uses, and writes **only the pools `prices.pool_registry` does not
 already hold**. No API key, no rewrite of existing rows, no candles. A re-run
 writes nothing.
@@ -183,7 +183,9 @@ scp target/x86_64-unknown-linux-musl/release/events-backfill <prod-host>:~/event
 factories (Phoenix and Soroswap leave `signature` NULL), 2-4 s per 320k-ledger
 chunk on the shared box. As of 2026-09-17 every missing pool was created after
 ledger 63,000,000 (checked per venue over the whole Soroban era), so the
-catch-up only needs `63000000` to the tip.
+catch-up only needs `63000000` to the tip. **Task 0290 is the exception:**
+SushiSwap V3's pools go back to ledger 60,147,305, so its run starts at
+`60000000` — the exact command is in the 0290 task file.
 
 ```bash
 # On the prod host, under tmux:
