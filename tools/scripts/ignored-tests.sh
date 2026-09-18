@@ -40,12 +40,56 @@
 # its NAME with any other `_it` target: `--test NAME` selects every target of
 # that name across the workspace.
 #
-# Usage:  tools/scripts/ignored-tests.sh <subcommand> [repo-root]
+# HOW THE RUN IS COUNTED (D4)
+# ---------------------------
+# `run` is ONE cargo invocation over the derived target names, then two
+# assertions on its log: the summed `passed` equals the number of CH-class
+# `#[ignore]` attributes, AND the number of `test result:` lines equals the
+# number of CH targets. The second catches a binary killed by a signal or the
+# OOM killer, which prints no summary at all and would otherwise read as
+# inventory drift. Any `failed` is red. A renamed or deleted target is a hard
+# named cargo error before any test runs.
 #
+# `--workspace --test NAME`, not `-p PKG --test NAME` pairs: cargo treats `-p`
+# and `--test` as a cross product, not pairs, and `--workspace --test seed_it`
+# selects both crates' `seed_it` (proved by the CH_TARGETS line count). Never
+# `--test '*_it'`: that glob arms the NET/PROD targets too.
+#
+# --test-threads=1 IS DELIBERATE — do not "optimise" it away (D9, Adam,
+# 2026-09-18). Several targets write the shared `prices` database rather than
+# a scratch one: `rollup_freshness_it` went 7 of 25 red in parallel and 25/25
+# serially; `symbol_queue_it`'s
+# `a_resolved_symbol_leaves_the_queue_even_after_failures` was red 1 run in 2
+# in parallel, green 3/3 serially. `supply_it`, `progress_it`, `freshness_it`
+# and `usd_rate_population_it` (which TRUNCATEs usd_rate / oracle_prices /
+# assets) share it too. Measured cost: ~109 s of test time vs ~50 s.
+#
+# NEVER RUN TWO OF THESE AGAINST ONE SERVER AT ONCE. Across targets the run is
+# safe only because cargo runs test binaries one after another inside ONE
+# invocation. Two invocations — two CI jobs, or a developer while CI runs —
+# truncate each other's tables. No lock is taken: the real risk is two
+# machines against one server, which no local lock can see.
+#
+# Usage:  tools/scripts/ignored-tests.sh [subcommand] [repo-root]
+#
+#   run        (default) check, preflight, the counted cargo run, assert
 #   check      classify every #[ignore]; exit non-zero on any violation
 #   targets    one `-p <package> --test <target>` line per CH target, sorted
 #   expect     CH_TESTS= CH_TARGETS= NET_TESTS= PROD_TESTS=, derived
 #   image-tag  the ClickHouse version pinned in docker-compose.yml
+#   preflight  wait for $CLICKHOUSE_URL, assert version() == image-tag and
+#              timezone() == UTC
+#   assert LOG [repo-root]   judge a saved cargo log against `expect`
+#
+# Locally (ClickHouse per docker-compose.yml, or any server of that version):
+#
+#   scripts/ch-proxy-0281.sh up        # execution_bound_error_it needs it
+#   CLICKHOUSE_URL=http://localhost:8123 \
+#   CLICKHOUSE_PROXY_URL=http://localhost:8124 \
+#     tools/scripts/ignored-tests.sh
+#
+# The schema must exist first (`cargo run -q -p prices-clickhouse --bin
+# prices-clickhouse-init -- --rollups`, idempotent); CI does exactly this.
 #
 # `repo-root` defaults to this checkout; the guard's own tests
 # (ignored-tests.test.mjs) point it at throwaway fixture trees.
@@ -66,7 +110,7 @@ die() {
 }
 
 usage() {
-  echo "usage: $0 {check|targets|expect|image-tag} [repo-root]" >&2
+  echo "usage: $0 [run|check|targets|expect|image-tag|preflight] [repo-root] | assert LOG [repo-root]" >&2
   exit 2
 }
 
@@ -244,8 +288,125 @@ cmd_image_tag() {
   printf '%s\n' "$tags"
 }
 
-sub="${1:-}"
-[[ -n "$sub" ]] || usage
+ch_query() {
+  local url="$1" sql="$2" auth=()
+  [[ -n "${CLICKHOUSE_USER:-}" ]] && auth+=(-H "X-ClickHouse-User: ${CLICKHOUSE_USER}")
+  [[ -n "${CLICKHOUSE_PASSWORD:-}" ]] && auth+=(-H "X-ClickHouse-Key: ${CLICKHOUSE_PASSWORD}")
+  curl -fsS --max-time 5 "${auth[@]}" --data-binary "$sql" "${url}/"
+}
+
+# The server under test must be the pinned build, in UTC — `prices-api` ITs
+# compare literal timestamps and read empty data under any other zone.
+cmd_preflight() {
+  local root="$1" url="${CLICKHOUSE_URL:-http://localhost:8123}" want attempt=0 version tz
+  want="$(cmd_image_tag "$root")"
+  echo "ignored-tests: preflight against ${url} (expecting ClickHouse ${want}, UTC)"
+  # This retry IS the readiness check — do not replace it with a sleep.
+  # `docker compose up --wait` reports healthy on an in-container healthcheck
+  # that can reach the image's TEMPORARY initdb server (bound to the
+  # container's loopback), and right after initdb that server is killed and
+  # nothing listens until the real one starts. Only a query from the host
+  # proves the port the tests use is being served.
+  until ch_query "$url" 'SELECT 1' >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    if [[ $attempt -ge 60 ]]; then
+      echo "ignored-tests: ${url} did not answer 'SELECT 1' after 60 attempts:" >&2
+      ch_query "$url" 'SELECT 1' >&2 || true
+      exit 1
+    fi
+    sleep 1
+  done
+  version="$(ch_query "$url" 'SELECT version()')"
+  tz="$(ch_query "$url" 'SELECT timezone()')"
+  echo "ignored-tests: server version() = ${version}, timezone() = ${tz}"
+  [[ "$version" == "$want" ]] ||
+    die "server is ClickHouse ${version}, but docker-compose.yml pins ${want} — the tests must run against the build production runs."
+  [[ "$tz" == UTC ]] ||
+    die "server timezone() is ${tz}, not UTC — production is UTC and the ITs compare literal timestamps."
+}
+
+# Judge a saved cargo log against the derived inventory.
+cmd_assert() {
+  local log="$1" root="$2" counts clean summaries n_lines=0 passed=0 failed=0 p f errors=()
+  [[ -f "$log" ]] || die "no such log: ${log}"
+  counts="$(cmd_expect "$root")"
+  local CH_TESTS CH_TARGETS NET_TESTS PROD_TESTS
+  eval "$counts"
+  # Tolerate colour even though `run` asks cargo for none: the rust job sets
+  # CARGO_TERM_COLOR=always job-wide.
+  clean="$(sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g' "$log")"
+  if grep -qE '^[[:space:]]*Doc-tests ' <<<"$clean"; then
+    die "the log contains a Doc-tests run — a --test-filtered run builds none, so this is not the log of \`run\` and its summaries cannot be counted against the inventory."
+  fi
+  summaries="$(grep -E '^[[:space:]]*test result: ' <<<"$clean" || true)"
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    p="$(sed -nE 's/.* ([0-9]+) passed;.*/\1/p' <<<"$line")"
+    f="$(sed -nE 's/.* ([0-9]+) failed;.*/\1/p' <<<"$line")"
+    [[ -n "$p" && -n "$f" ]] || die "unparseable summary line: ${line}"
+    n_lines=$((n_lines + 1))
+    passed=$((passed + p))
+    failed=$((failed + f))
+  done <<<"$summaries"
+
+  if [[ $failed -gt 0 ]]; then
+    errors+=("${failed} failed — the failures are named in the log above.")
+  fi
+  if [[ $n_lines -lt $CH_TARGETS ]]; then
+    errors+=("only ${n_lines} of ${CH_TARGETS} ClickHouse targets printed a 'test result:' line; $((CH_TARGETS - n_lines)) produced no summary at all (killed by a signal, the OOM killer, or a crash before libtest reported). Look at the log, not the inventory.")
+  elif [[ $n_lines -gt $CH_TARGETS ]]; then
+    errors+=("${n_lines} 'test result:' lines for ${CH_TARGETS} ClickHouse targets — the run selected targets the inventory does not list.")
+  elif [[ $passed -ne $CH_TESTS ]]; then
+    errors+=("count mismatch: expected ${CH_TESTS} passed ClickHouse tests (derived from the #[ignore] inventory), got ${passed}.")
+  fi
+  if [[ ${#errors[@]} -gt 0 ]]; then
+    echo "ignored-tests: the ClickHouse integration run is RED:" >&2
+    printf '  %s\n' "${errors[@]}" >&2
+    exit 1
+  fi
+  echo "ignored-tests: ${passed} passed, ${failed} failed over ${n_lines} target summaries — matches the derived inventory (${CH_TESTS} tests, ${CH_TARGETS} targets)."
+}
+
+cmd_run() {
+  local root="$1" counts recs names=() name log status=0
+  counts="$(cmd_expect "$root")"
+  local CH_TESTS CH_TARGETS NET_TESTS PROD_TESTS
+  eval "$counts"
+  if [[ -z "${CLICKHOUSE_PROXY_URL:-}" ]]; then
+    die "CLICKHOUSE_PROXY_URL is unset. execution_bound_error_it is armed and needs a reverse proxy in front of ClickHouse: run \`scripts/ch-proxy-0281.sh up\` and set CLICKHOUSE_PROXY_URL=http://localhost:8124."
+  fi
+  cmd_preflight "$root"
+
+  recs="$(cmd_targets "$root")"
+  echo "ignored-tests: ${CH_TESTS} ClickHouse test(s) in ${CH_TARGETS} target(s):"
+  sed 's/^/  /' <<<"$recs"
+  # `--test NAME` once per distinct name; a name shared by two crates selects
+  # both (the per-crate list above is the attribution cargo's own Running
+  # lines cannot give — both seed_it binaries log identically).
+  while IFS= read -r name; do
+    names+=(--test "$name")
+  done < <(sed -E 's/.* --test //' <<<"$recs" | sort -u)
+
+  log="${IGNORED_TESTS_LOG:-$(mktemp "${TMPDIR:-/tmp}/ignored-tests.XXXXXX.log")}"
+  echo "ignored-tests: log: ${log}"
+  echo "ignored-tests: cargo test --workspace ${names[*]} --no-fail-fast -- --ignored --test-threads=1"
+  (
+    cd "$root"
+    set -o pipefail
+    CARGO_TERM_COLOR=never cargo test --workspace "${names[@]}" --no-fail-fast \
+      -- --ignored --test-threads=1 2>&1 | tee "$log"
+  ) || status=$?
+  # Judge the log even when cargo failed, so the verdict names what went wrong.
+  cmd_assert "$log" "$root"
+  [[ $status -eq 0 ]] || die "cargo exited ${status} although the counts matched."
+}
+
+sub="${1:-run}"
+if [[ "$sub" == assert ]]; then
+  [[ -n "${2:-}" ]] || usage
+  cmd_assert "$2" "${3:-$default_root}"
+  exit 0
+fi
 root="${2:-$default_root}"
 
 case "$sub" in
@@ -257,5 +418,7 @@ case "$sub" in
   targets) cmd_targets "$root" ;;
   expect) cmd_expect "$root" ;;
   image-tag) cmd_image_tag "$root" ;;
+  preflight) cmd_preflight "$root" ;;
+  run) cmd_run "$root" ;;
   *) usage ;;
 esac

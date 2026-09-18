@@ -230,3 +230,82 @@ test('10b: an #[ignore] outside packages/*/tests/*_it.rs fails', () => {
   assert.match(r.err, /packages\/alpha\/src\/lib\.rs:3/);
   assert.match(r.err, /outside/);
 });
+
+// ---- `assert <logfile> [root]`: the counted run's verdict (task 0275, D4) ----
+//
+// The fixture tree derives CH_TESTS=3 over CH_TARGETS=2; each case feeds a
+// synthetic cargo log, so no cargo and no ClickHouse are needed.
+
+function countedTree() {
+  return tree({
+    ...crate('alpha'),
+    'packages/alpha/tests/store_it.rs': itFile(CH, CH),
+    ...crate('beta'),
+    'packages/beta/tests/seed_it.rs': itFile(CH),
+    'packages/beta/tests/rpc_it.rs': itFile(NET),
+  });
+}
+
+const result = (passed, failed = 0) =>
+  `test result: ${failed ? 'FAILED' : 'ok'}. ${passed} passed; ${failed} failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s`;
+
+function assertLog(lines) {
+  const root = countedTree();
+  const log = join(root, 'cargo.log');
+  writeFileSync(log, lines.join('\n') + '\n');
+  return run('assert', log, root);
+}
+
+test('11: a log matching both derived counts passes', () => {
+  const r = assertLog([
+    '     Running tests/store_it.rs (target/debug/deps/store_it-aaaa)',
+    result(2),
+    '     Running tests/seed_it.rs (target/debug/deps/seed_it-bbbb)',
+    result(1),
+  ]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /3 passed/);
+});
+
+test('12: a binary with no summary at all is reported as such, not as drift', () => {
+  const r = assertLog([
+    '     Running tests/store_it.rs (target/debug/deps/store_it-aaaa)',
+    result(2),
+    '     Running tests/seed_it.rs (target/debug/deps/seed_it-bbbb)',
+    'error: test failed, to rerun pass `-p beta --test seed_it`',
+    "Caused by: process didn't exit successfully (signal: 9, SIGKILL: kill)",
+  ]);
+  assert.notEqual(r.code, 0);
+  assert.match(r.err, /produced no summary/);
+  assert.match(r.err, /1 of 2/);
+  assert.doesNotMatch(r.err, /count mismatch/);
+});
+
+test('13: the right number of summaries with too few passes is a count mismatch', () => {
+  const r = assertLog([result(1), result(1)]);
+  assert.notEqual(r.code, 0);
+  assert.match(r.err, /count mismatch/);
+  assert.match(r.err, /expected 3/);
+  assert.match(r.err, /got 2/);
+});
+
+test('14: any failed test fails the run, whatever the sums', () => {
+  const r = assertLog([result(2), result(1, 1)]);
+  assert.notEqual(r.code, 0);
+  assert.match(r.err, /1 failed/);
+});
+
+test('15: ANSI colour around cargo output is parsed the same', () => {
+  const esc = String.fromCharCode(27);
+  const colored = (passed) =>
+    `${esc}[0m${esc}[1mtest result: ${esc}[32mok${esc}[0m. ${passed} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s`;
+  const r = assertLog([colored(2), colored(1)]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /3 passed/);
+});
+
+test('16: a Doc-tests summary in the log fails rather than being miscounted', () => {
+  const r = assertLog([result(2), result(1), '   Doc-tests alpha', result(0)]);
+  assert.notEqual(r.code, 0);
+  assert.match(r.err, /Doc-tests/);
+});
