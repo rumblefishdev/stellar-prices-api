@@ -2,7 +2,7 @@
 id: "0141"
 title: "make deploy-production-compute ships whatever is in target/lambda/ — no freshness check against the tree"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0072", "0077", "0070", "0132"]
 tags: ["priority-high", "effort-small", "deployment", "footgun", "infra"]
@@ -36,6 +36,20 @@ history:
       every Lambda in production with a shell stub, not with an old binary.
       Worked around by hand with `--exclusively`; nothing in the repo stops
       the next person from missing it.
+  - date: "2026-09-18"
+    status: active
+    who: akot
+    note: >
+      Activated ahead of [[0286]]'s rollout, which is a series of Compute
+      deploys. Approach chosen: the deploy **builds** the Lambdas rather than
+      judging their freshness — cargo is the freshness check (a no-op when the
+      tree is unchanged), followed by a per-bootstrap ELF/aarch64 verification
+      that catches the 10-byte `#!/bin/sh` stubs on its own. A hand-rolled
+      staleness detector was rejected: the Rust sources `include_str!` two
+      files from `docs/runbooks/`, so "the crate's sources" is not the input
+      set. Scope also takes in `deploy-production-eventbridge`
+      (`eventbridge-stack.ts` references `target/lambda` too) and
+      `--exclusively` on every per-stack target.
 ---
 
 # The deploy path ships stale Lambda binaries and reports success
