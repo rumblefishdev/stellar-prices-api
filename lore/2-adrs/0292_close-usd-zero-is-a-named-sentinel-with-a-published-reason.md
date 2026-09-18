@@ -1,7 +1,7 @@
 ---
 id: "0292"
 title: "`close_usd = 0` stays the storage sentinel for 'no USD value' — its four meanings are named, the reason is computed at read time and published beside the number, and no NULL replaces a number a consumer reads today"
-status: proposed
+status: accepted
 deciders: [akot]
 related_tasks: ["0151", "0144", "0146", "0147", "0154", "0167", "0171", "0198", "0286", "0139"]
 related_adrs: ["0287", "0011"]
@@ -26,6 +26,26 @@ history:
       missing price. Six decisions, each checked against outside practice; the
       rate-table question was already decided 2026-08-06 and is recorded, not
       re-opened.
+  - date: "2026-09-18"
+    status: accepted
+    who: akot
+    note: >
+      Accepted. Adam accepted the six verdicts on 2026-09-17; what was
+      outstanding was the evidence, and it is now in. Every guardrail TASK 0151
+      OWNS is pinned by a test that has been SEEN to fail with its guard
+      removed — eleven RED proofs across the enrichment no-op guard, the probe's
+      two stored-data invariants with their `FINAL` and their window, the peg
+      tier's dust disjunct, the pivot reference's `pf_trade_count` term and the
+      reset's reference-day set. That is narrower than "every guardrail": the
+      inventory still carries open rows, each with an owner ([[0147]], [[0286]],
+      [[0282]]), four accepted with their reason, and two the 0151 code review
+      found that predate it and have no task yet (an unconditional `close_usd`
+      rewrite in `oracle_sql`; a silent Decimal wrap at `>= 1e10`). The
+      inventory names 0151 in no open-gap row. "Accept the sentinel,
+      with these guardrails" is therefore a decision with the guardrails
+      actually built, not a promise of them. The wire fields (`price_status`,
+      `as_of`, `priced_volume_share`) are decided here and shipped by [[0147]];
+      the cross-surface test under the floor lands there too, with the fix.
 ---
 
 # ADR 0292: `close_usd = 0` is a named sentinel with a published reason
@@ -151,7 +171,7 @@ Invariants, and the mechanism that confirms each:
 | The shipped MV bodies are the generator's | text-equality pins in `prices-clickhouse/src/lib.rs`; the 0142 drift detector on deployed definitions |
 | A row no statement can change is not re-selected forever, and not re-written at all | `a_dust_only_minute_is_priced_once_and_is_never_reselected` (oracle tier) and `a_dust_only_minute_quoted_in_a_pegged_asset_is_priced_once_by_the_peg_tier` (peg tier); `the_external_reset_never_reopens_a_candle_that_has_no_price`; `a_usd_close_that_rounds_to_zero_is_written_once_and_never_rewritten`; `an_oracle_reading_of_zero_writes_nothing` |
 | A dust-only candle is never used as a PRICE by anything that reads one | the pivot's reference subquery: `the_pivot_ignores_a_dust_only_reference_minute`, `the_pivot_ignores_a_legacy_reference_minute_that_claims_a_price_it_has_not_got` and `the_pivot_ignores_a_reference_minute_that_formed_no_price` (the one that makes `pf_trade_count > 0` load-bearing); the reset's day set: `the_pivot_reset_never_zeroes_a_bucket_whose_reference_market_is_silent` and `the_pivot_reset_never_re_opens_a_day_whose_only_reference_is_dust` |
-| `pf_trade_count = 0 ⇒ close = 0` and `close_usd > 0 ⇒ close > 0` on stored rows | `rollup-freshness-probe::zero_invariants` — metric `CandleZeroInvariantViolations`, alarm ladder `prices-{env}-zero-invariant-*` |
+| `pf_trade_count = 0 ⇒ close = 0` and `close_usd > 0 ⇒ close > 0` on stored rows | `rollup-freshness-probe::zero_invariants` — metric `CandleZeroInvariantViolations`, alarm ladder `prices-{env}-zero-invariant-*`; ITs `the_zero_invariant_scan_counts_only_rows_that_break_an_invariant`, `a_repaired_candle_stops_counting_as_a_zero_invariant_violation` (`FINAL`), `a_violation_older_than_the_window_is_out_of_the_zero_invariant_scan` |
 | Surfaces agree on the same row, or disagree only as §5 says | `ohlcv_agrees_with_price_usd_series_on_the_same_bucket` (USDC); the sub-floor case lands with the floor in `views.sql` — [[0147]] |
 
 ## Consequences
