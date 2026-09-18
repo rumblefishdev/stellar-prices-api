@@ -23,6 +23,15 @@ history:
       2026-09-16 found several with no owner at all. This task owns the
       package and keeps the per-criterion ledger; it does not own closing
       every gap.
+  - date: 2026-09-18
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Corrected within the hour, from the task files rather than from my own
+      two-day-old ledger: [[0275]] was activated today and now covers the whole
+      workspace (238 ignored tests, not 207, and owned), and [[0239]] is about
+      macOS prerequisites for a local deploy — it does NOT own the fresh-account
+      `cdk deploy` of AC 7, which has no task.
 ---
 
 # SCF Milestone 3 verification package
@@ -60,10 +69,10 @@ deviation, or handed to post-delivery with a name on it.
 | 1 | `/backfill/status`: running, fresh push, `earliest_data_available` ≤ 2018-01-01 | amended 2026-09-08 in §9 — the archive completed 2026-07-27; depth met (2015-11-18), liveness graded on freshness alarms. Declared in M2 deviations §4 | carry the deviation forward; re-run the figures |
 | 2 | OpenAPI lints clean; Swagger UI deployed | [[0233]] (spec vs portal docs) | polish, not a blocker — confirm the lint output and the URL |
 | 3 | Portal accessible; self-service key flow works | [[0164]] (end-to-end proof on production), [[0249]] (api-handler error alarm; portal closes itself at cold start), [[0179]] (SDF consent for the Discord guild — check whether still needed) | **open** |
-| 4 | Integration suite passes on CI, link provided | [[0275]] covers only `enrichment-worker`; the 63 API endpoint tests are `#[ignore]` and **no task owns them** — 207 ignored tests across 33 files in the workspace | **open, partly unowned** |
+| 4 | Integration suite passes on CI, link provided | [[0275]] — **active since 2026-09-18 (Adam)**, re-scoped the same day to the whole workspace: 238 `#[ignore]` across 40 files, most needing ClickHouse, the 63 API endpoint tests among them; its inventory decides what the CI job runs | **open, owned** |
 | 5 | Load test: p95 <100 ms at 100 req/s, plan named | [[0293]], [[0260]]; `docs/prices-api-load-test-100rps.md` §"Evidence run and the ceiling" | **met 2026-09-18** — AC scenario p95 49.0 ms; miss-only row and the 500/1000 req/s rows beside it |
 | 6 | Security checklist: no wildcard IAM, mTLS only, secrets not in env, inputs validated | [[0194]] (audit, archived); 10 `resources: ['*']` statements in `infra/src/lib/stacks/*.ts` need naming and a reason each | needs the table |
-| 7 | Repo public; `cdk deploy` from README works in a fresh account | repo is PUBLIC (checked 2026-09-16); [[0239]] (fresh-account deploy never rehearsed) | half met |
+| 7 | Repo public; `cdk deploy` from README works in a fresh account | repo is PUBLIC (checked 2026-09-16). The fresh-account deploy has never been rehearsed and **no task owns it** — [[0239]] is adjacent only (two undocumented macOS prerequisites for a *local* deploy) | **half met, the other half unowned** |
 | 8 | Dashboard accessible to Stellar via a read-only IAM role; all alarms OK | the role **does not exist in `infra/`; no task** | **open, unowned** |
 | 9 | 7-day post-launch report: uptime, error rate, p95, push cadence, `earliest_data_available` | **no task**; needs an agreed definition of "launch" | **open, unowned** |
 
@@ -105,9 +114,9 @@ ledger-processor; `tracingEnabled` on the stage, checked 2026-09-16);
 - **Freshness.** Re-run every cited figure close to submission. A month-long
   backfill starts 2026-09-21 on the shared box — latency and load figures taken
   during it describe a different box from the 2026-09-18 load-test numbers.
-- **Unowned gaps.** AC 8 (read-only role), AC 9 (7-day report) and the API half
-  of AC 4 have no task. Creating them is the first step here — or recording
-  that a criterion will be declared as a deviation instead.
+- **Unowned gaps.** AC 8 (read-only role), AC 9 (7-day report) and the
+  fresh-account half of AC 7 have no task. Creating them is the first step
+  here — or recording that a criterion will be declared as a deviation instead.
 
 ## Acceptance Criteria
 
