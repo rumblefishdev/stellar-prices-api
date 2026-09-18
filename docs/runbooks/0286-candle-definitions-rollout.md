@@ -368,6 +368,10 @@ is documented in [`repair-coarse-usd-values.md`](repair-coarse-usd-values.md).
 - **The 0137 rollup freshness alarm may fire** for whichever tier is momentarily
   dropped. Do not silence it. Let it prove it works and confirm it returns to OK
   in section 8.
+- **`prices-production-zero-invariant-*` does not exist yet, and must not** until
+  the schema step in section 2 has run — its probe check reads `pf_trade_count`
+  and a failed read fails the entire probe invocation, not just that check. See
+  [`0151-zero-invariant-probe-rollout.md`](0151-zero-invariant-probe-rollout.md).
 
 ## 8. Verification
 
@@ -477,4 +481,7 @@ and a rollout is not the place to tighten a threshold.
   `schema/init.sql` — the generated statements and the deploy-order comment.
 - [`0286-reingest-history.md`](0286-reingest-history.md) — phase 3: rebuilding
   the history this rollout deliberately leaves alone (section 9).
+- [`0151-zero-invariant-probe-rollout.md`](0151-zero-invariant-probe-rollout.md)
+  — the zero-invariant probe and its alarm ladder, which go out only AFTER this
+  rollout's schema step (task 0151, ADR 0292).
 - ADR 0287 §2–§6; lore task 0286 phase 1.
