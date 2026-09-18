@@ -33,7 +33,7 @@ fn sample_registry() -> Registries {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn pool_registry_round_trips_through_clickhouse() {
     let c = Client::default().with_url(ch_url());
     prices_clickhouse::apply_sql(&c, prices_clickhouse::INIT_SQL)

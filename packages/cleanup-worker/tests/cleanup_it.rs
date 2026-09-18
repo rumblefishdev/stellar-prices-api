@@ -35,7 +35,7 @@ async fn count_in_month(client: &Client, yyyymm: &str) -> u64 {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn drops_expired_partitions_keeps_recent() {
     let client = Client::default().with_url(ch_url());
     prices_clickhouse::apply_sql(&client, prices_clickhouse::INIT_SQL)

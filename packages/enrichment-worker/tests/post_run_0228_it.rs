@@ -448,7 +448,7 @@ fn judge(g: &Grain, m: &Measurement, mech: Option<&Mechanism>) -> Option<String>
 /// contain the day must show the campaign went through them with no row left at
 /// zero. Acceptance criteria 1 and 2.
 #[tokio::test]
-#[ignore = "operator after-check: run against prod AFTER the 0228 re-enrichment campaign"]
+#[ignore = "requires production — operator after-check; never gates a PR"]
 async fn the_pivot_leg_on_the_depeg_day_carries_the_measured_usdc_rate() {
     let ch = client();
     let mut failures = Vec::new();
@@ -476,7 +476,7 @@ async fn the_pivot_leg_on_the_depeg_day_carries_the_measured_usdc_rate() {
 /// carried factor must be ~1.0 — which a table scaled uniformly ~3% low could not
 /// satisfy while also passing the test above.
 #[tokio::test]
-#[ignore = "operator after-check: run against prod AFTER the 0228 re-enrichment campaign"]
+#[ignore = "requires production — operator after-check; never gates a PR"]
 async fn the_pivot_leg_carries_no_discount_once_usdc_is_back_at_par() {
     let ch = client();
     let m = measure(&ch, "price_ohlcv_1d", RECOVERED_DAY, RECOVERED_DAY + 86_400).await;

@@ -78,7 +78,7 @@ fn bound(table: &str) -> i64 {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn freshness_query_executes_deserializes_and_gates_empty_tiers() {
     let c = client();
     prices_clickhouse::apply_sql(&c, prices_clickhouse::INIT_SQL)
@@ -205,7 +205,7 @@ async fn freshness_query_executes_deserializes_and_gates_empty_tiers() {
 /// fails and tells the next reader the gate's rationale has changed — rather
 /// than the gate silently becoming cargo cult.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ungated_max_over_empty_tier_yields_the_epoch_not_null() {
     let c = client();
     prices_clickhouse::apply_sql(&c, prices_clickhouse::INIT_SQL)
@@ -256,7 +256,7 @@ async fn ungated_max_over_empty_tier_yields_the_epoch_not_null() {
 /// columns will not deserialize into `DiskUsage` — the bug that shipped a
 /// broken `backfill-freshness-probe` in PR #97.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn disk_query_executes_and_deserializes() {
     use rollup_freshness_probe::disk::{
         DISK_FREE_PERCENT_METRIC, DiskUsage, disk_metrics, disk_query, free_percent,
@@ -305,7 +305,7 @@ async fn disk_query_executes_and_deserializes() {
 /// Creates and drops its own least-privileged user, so it asserts the real
 /// privilege behaviour rather than a mock of it.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn restricted_user_can_read_disk_headroom_but_not_system_disks() {
     use rollup_freshness_probe::disk::{DiskUsage, disk_query};
 
@@ -489,7 +489,7 @@ async fn read_peg(c: &Client) -> PegCounts {
 /// arithmetic: a healthy leg reads zero on both directions rather than being
 /// unable to tell.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero() {
     let c = client();
     reset_sanity_tables(&c).await;
@@ -515,7 +515,7 @@ async fn usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero() {
 /// applied to gap 4: write the exact two defects into the table and assert each
 /// one is counted. Without this the alarm is only proven to *exist*.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usd_sanity_counts_both_induced_defects() {
     let c = client();
     reset_sanity_tables(&c).await;
@@ -546,7 +546,7 @@ async fn usd_sanity_counts_both_induced_defects() {
 /// zero on every single run. Without this the alarm would breach permanently
 /// and get muted — the state task 0204 exists to end.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_freshly_written_zero_is_not_yet_stranded() {
     let c = client();
     reset_sanity_tables(&c).await;
@@ -568,7 +568,7 @@ async fn a_freshly_written_zero_is_not_yet_stranded() {
 /// Task 0182 hit exactly this and its first bound (`1e-11`) was three orders of
 /// magnitude too generous.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
     let c = client();
     reset_sanity_tables(&c).await;
@@ -592,7 +592,7 @@ async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
 /// quote-leg filter were dropped, the alarm would breach forever on healthy
 /// data.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_exotic_quoted_zero_is_ignored_because_it_is_by_design() {
     let c = client();
     reset_sanity_tables(&c).await;
@@ -611,7 +611,7 @@ async fn an_exotic_quoted_zero_is_ignored_because_it_is_by_design() {
 /// that has already been corrected — an alarm firing on history rather than on
 /// state.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it() {
     let c = client();
     reset_sanity_tables(&c).await;
@@ -645,7 +645,7 @@ async fn a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it() 
 /// would score a check that never ran as perfectly healthy. `resolved_legs`
 /// exists so `peg_metric` can refuse it, and `main.rs` fails the invocation.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused() {
     let c = client();
     reset_sanity_tables(&c).await;
@@ -680,7 +680,7 @@ async fn an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused() {
 /// confident **0** over that population. The assertion that matters is the
 /// second one: the tier the check used to read shows nothing wrong.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_peg_row_only_in_1m_is_counted_although_every_coarse_tier_reads_clean() {
     let c = client();
     reset_sanity_tables(&c).await;
@@ -717,7 +717,7 @@ async fn a_peg_row_only_in_1m_is_counted_although_every_coarse_tier_reads_clean(
 /// the tempting simplification — one query over one tier — is what made the peg
 /// direction blind, and a future "let's just union them" would restore it.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn each_direction_only_scans_its_own_tier() {
     let c = client();
     reset_sanity_tables(&c).await;
@@ -757,7 +757,7 @@ async fn each_direction_only_scans_its_own_tier() {
 /// table — which is the property that makes a cleanup run unable to move the
 /// count.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_peg_window_excludes_rows_a_cleanup_run_could_delete() {
     let c = client();
     reset_sanity_tables(&c).await;
@@ -783,7 +783,7 @@ async fn the_peg_window_excludes_rows_a_cleanup_run_could_delete() {
 /// they came from one query, and the muting failure from the other side once
 /// they read different tiers.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_empty_peg_scan_does_not_suppress_the_stranded_metric() {
     let c = client();
     reset_sanity_tables(&c).await;
@@ -833,7 +833,7 @@ fn drift_value(metrics: &[DriftMetric], name: &str) -> f64 {
 /// fails to execute or a fingerprint parser that no longer matches what
 /// ClickHouse renders.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_freshly_applied_schema_reports_no_drift() {
     let c = client();
     let visible: u64 = c
@@ -871,7 +871,7 @@ async fn a_freshly_applied_schema_reports_no_drift() {
 /// Without this the alarm is proven to exist but not to detect anything —
 /// exactly the "verified by reading the CDK" failure AC 4 names.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_edited_declaration_is_detected_as_drift() {
     let c = client();
     let visible: u64 = c
@@ -917,7 +917,7 @@ async fn an_edited_declaration_is_detected_as_drift() {
 /// Creates a throwaway MV and target rather than touching the real rollup chain,
 /// and drops both afterwards.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_live_mv_without_append_is_detected_as_critical() {
     let c = client();
     exec(&c, "DROP VIEW IF EXISTS prices.mv_gap3_probe").await;
@@ -970,7 +970,7 @@ async fn a_live_mv_without_append_is_detected_as_critical() {
 /// published as "every MV is missing" — which would page as if the whole rollup
 /// chain had been deleted.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_invisible_database_suppresses_the_counts_instead_of_paging() {
     let c = client();
     let visible: u64 = c
@@ -1042,7 +1042,7 @@ async fn current_prices_age(
 /// — empty, stale, and holding an unmerged newer version — and the FINAL
 /// correction to the task sketch, pinned against the engine rather than argued.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn current_prices_age_query_executes_and_breaches_when_stale_or_empty() {
     use rollup_freshness_probe::EMPTY_TIER_SENTINEL_SECONDS;
     use rollup_freshness_probe::current_prices::{AGE_BOUND_SECONDS, current_prices_metric};
@@ -1110,7 +1110,7 @@ async fn current_prices_age_query_executes_and_breaches_when_stale_or_empty() {
 /// grows one-for-one with the clock and the rows stay put; START + REFRESH bring
 /// it back. It doubles as a rehearsal of the production commands in task 0283.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_stopped_mv_current_prices_freezes_updated_at_and_its_age_grows() {
     let db = "it_current_prices_mv_0243";
     let c = scratch_db(db).await;
@@ -1235,7 +1235,7 @@ async fn read_zero_invariants(
 /// candle not yet enriched (`close_usd = 0` is meaning 1, not a violation) and
 /// a dust-only candle (`close = 0` is CORRECT when `pf_trade_count = 0`).
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_zero_invariant_scan_counts_only_rows_that_break_an_invariant() {
     use rollup_freshness_probe::zero_invariants::{ZeroInvariantCounts, zero_invariant_metric};
 
@@ -1272,7 +1272,7 @@ async fn the_zero_invariant_scan_counts_only_rows_that_break_an_invariant() {
 /// first two invariants can see it: one needs `pf_trade_count = 0`, the other
 /// `close_usd > 0`. RED without the third, `pf_trade_count > 0 ⇒ close > 0`.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_dust_minute_written_without_its_pf_column_is_a_zero_invariant_violation() {
     use rollup_freshness_probe::zero_invariants::ZeroInvariantCounts;
 
@@ -1306,7 +1306,7 @@ async fn a_dust_minute_written_without_its_pf_column_is_a_zero_invariant_violati
 /// RED without `FINAL`: the superseded row is still read, so the repair adds a
 /// scanned row and clears nothing — a page that latches after the data is fixed.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_repaired_candle_stops_counting_as_a_zero_invariant_violation() {
     use rollup_freshness_probe::zero_invariants::ZeroInvariantCounts;
 
@@ -1338,7 +1338,7 @@ async fn a_repaired_candle_stops_counting_as_a_zero_invariant_violation() {
 /// before task 0286 is out of scope until its phase 3 re-ingests the history
 /// (ADR 0292), and must neither page nor pad `scanned`. RED without the `WHERE`.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_violation_older_than_the_window_is_out_of_the_zero_invariant_scan() {
     use rollup_freshness_probe::zero_invariants::{
         ZERO_INVARIANT_LOOKBACK_SECONDS, ZeroInvariantCounts,

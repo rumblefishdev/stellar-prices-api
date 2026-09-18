@@ -272,7 +272,7 @@ fn approx(got: f64, want: f64, what: &str) {
 /// RED on the pre-0286 SQL: `min(low)` returns 0 and `argMax(close, …)` returns
 /// the dust minute's 0, on all six tiers.
 #[tokio::test]
-#[ignore = "requires the local ClickHouse 26.3.10.60"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_dust_only_child_contributes_to_no_price_aggregate_of_its_parent() {
     let db = "it_rollup_pf_dust";
     let admin = setup(db).await;
@@ -332,7 +332,7 @@ async fn a_dust_only_child_contributes_to_no_price_aggregate_of_its_parent() {
 /// aggregate matches nothing and returns the type default 0 (F6c), which is the
 /// same "no price" encoding the 1m tier writes. The volume is still there.
 #[tokio::test]
-#[ignore = "requires the local ClickHouse 26.3.10.60"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_bucket_of_nothing_but_dust_has_no_price_and_keeps_its_volume() {
     let db = "it_rollup_pf_all_dust";
     let admin = setup(db).await;
@@ -394,7 +394,7 @@ async fn a_bucket_of_nothing_but_dust_has_no_price_and_keeps_its_volume() {
 /// RED on the pre-0286 SQL, twice over: `rollups.sql` closes at the dust
 /// minute's 0, and `preroll.sql` carries 2.2.
 #[tokio::test]
-#[ignore = "requires the local ClickHouse 26.3.10.60"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_coarse_bucket_whose_last_child_is_dust_closes_at_the_last_priced_child() {
     let db = "it_rollup_pf_close";
     let admin = setup(db).await;
@@ -437,7 +437,7 @@ async fn a_coarse_bucket_whose_last_child_is_dust_closes_at_the_last_priced_chil
 /// where the only measured rate in the bucket (2.2 / 1.1 = 2.0) says 2.2.
 /// RED on that gate, on every tier: the noise rate is carried up.
 #[tokio::test]
-#[ignore = "requires the local ClickHouse 26.3.10.60"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_rate_between_two_values_under_the_precision_floor_never_re_prices_the_bucket() {
     let db = "it_rollup_pf_rate_floor";
     let admin = setup(db).await;
@@ -477,7 +477,7 @@ async fn a_rate_between_two_values_under_the_precision_floor_never_re_prices_the
 /// coarse `close_usd` above it from it. RED on a gate that floors `close` alone:
 /// the bucket publishes `close_usd = 4e-14` beside a close of 1.2.
 #[tokio::test]
-#[ignore = "requires the local ClickHouse 26.3.10.60"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_close_usd_under_the_precision_floor_carries_no_rate() {
     let db = "it_rollup_pf_rate_floor_usd";
     let admin = setup(db).await;
@@ -526,7 +526,7 @@ async fn a_close_usd_under_the_precision_floor_carries_no_rate() {
 /// month that extreme landed in MARCH and April never saw it. RED there; the
 /// month rolls from the day now.
 #[tokio::test]
-#[ignore = "requires the local ClickHouse 26.3.10.60"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlc_ordering_holds_on_every_tier() {
     let db = "it_rollup_pf_ordering";
     let admin = setup(db).await;
@@ -600,7 +600,7 @@ async fn ohlc_ordering_holds_on_every_tier() {
 /// `vwap` must read an explicit 0, because `init.sql` declares the column NOT
 /// Nullable.
 #[tokio::test]
-#[ignore = "requires the local ClickHouse 26.3.10.60"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn vwap_and_close_usd_survive_the_decimal_overflow_threshold() {
     let db = "it_rollup_pf_overflow";
     let admin = setup(db).await;
@@ -669,7 +669,7 @@ async fn vwap_and_close_usd_survive_the_decimal_overflow_threshold() {
 /// (`price::price_survives_column_scale`) — so it dies with the phase-3
 /// re-ingest, not here.
 #[tokio::test]
-#[ignore = "requires the local ClickHouse 26.3.10.60"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_child_priced_under_the_precision_floor_reaches_no_price_aggregate() {
     let db = "it_rollup_pf_sub_floor";
     let admin = setup(db).await;
@@ -726,7 +726,7 @@ async fn a_child_priced_under_the_precision_floor_reaches_no_price_aggregate() {
 /// dwarfs the healthy minute's it is the loudest possible zero — a real bucket
 /// with a real price publishing `low = 0`.
 #[tokio::test]
-#[ignore = "requires the local ClickHouse 26.3.10.60"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_legacy_row_that_claims_a_price_it_cannot_print_reaches_no_price_aggregate() {
     let db = "it_rollup_pf_legacy_zero";
     let admin = setup(db).await;

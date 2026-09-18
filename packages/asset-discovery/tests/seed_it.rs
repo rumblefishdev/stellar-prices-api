@@ -15,7 +15,7 @@ fn ch_url() -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn seed_populates_assets_idempotently() {
     let writer = OhlcvWriter::plaintext(&ch_url());
 

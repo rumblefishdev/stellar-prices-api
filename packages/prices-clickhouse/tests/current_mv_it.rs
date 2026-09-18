@@ -78,7 +78,7 @@ fn insert_row(db: &str, asset: u32, close_usd: &str, vol_usd: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn current_prices_mv_computes_price_volume_and_market_cap() {
     let db = "it_current_mv_0039";
     let admin = setup(db).await;
@@ -201,7 +201,7 @@ async fn current_prices_mv_computes_price_volume_and_market_cap() {
 ///           a no-op (no funded venue to defend) and the dust venue is KEPT,
 ///           exactly like the liveness bound's all-dead arm
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
     let db = "it_current_mv_0072";
     let admin = setup(db).await;
@@ -988,7 +988,7 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
 /// Needs its own scratch database because `xlm_usd` is a single scalar for the
 /// whole MV: the only way to make it absent is to have no XLM row anywhere.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_xlm_lands_on_the_sentinel_when_the_xlm_divisor_is_missing() {
     let db = "it_current_mv_0138_no_xlm";
     let admin = setup(db).await;
@@ -1129,7 +1129,7 @@ async fn method_of(admin: &Client, db: &str, asset: u32) -> String {
 /// publish a row, priced from the measured rate rather than a $1 placeholder,
 /// and tagged so a consumer can tell the two apart.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usdc_publishes_a_row_from_the_measured_rate_and_is_tagged_oracle() {
     let db = "it_current_mv_0178_usdc";
     let admin = setup(db).await;
@@ -1196,7 +1196,7 @@ async fn usdc_publishes_a_row_from_the_measured_rate_and_is_tagged_oracle() {
 /// ~7.4x error wearing the MORE authoritative label. The allowlist is USDC by
 /// name; widening it is gated on task 0173.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_oracle_allowlist_is_usdc_only_and_never_repegs_stellar_usdt() {
     let db = "it_current_mv_0178_usdt";
     let admin = setup(db).await;
@@ -1235,7 +1235,7 @@ async fn the_oracle_allowlist_is_usdc_only_and_never_repegs_stellar_usdt() {
 /// revision keyed on `asset_id = usdc_asset_id`, so the moment USDC gained a
 /// base candle it served a real TRADED close tagged 'oracle'.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usdc_with_a_base_candle_is_traded_not_oracle_and_never_doubles() {
     let db = "it_current_mv_0178_arm";
     let admin = setup(db).await;
@@ -1288,7 +1288,7 @@ async fn usdc_with_a_base_candle_is_traded_not_oracle_and_never_doubles() {
 /// base-only. Asserted together so a later edit cannot quietly re-base one
 /// without the other.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn volume_counts_both_legs_while_per_source_weighting_stays_base_only() {
     let db = "it_current_mv_0178_vol";
     let admin = setup(db).await;
@@ -1332,7 +1332,7 @@ async fn volume_counts_both_legs_while_per_source_weighting_stays_base_only() {
 /// method that applies. It must carry the '' sentinel, not 'traded' — labelling
 /// a missing price as a real aggregate is the ambiguity this column removes.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_unpriced_asset_carries_the_empty_sentinel_not_traded() {
     let db = "it_current_mv_0178_sentinel";
     let admin = setup(db).await;

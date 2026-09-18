@@ -27,7 +27,7 @@ fn pool(protocol: &str, address: &str, ta: &str, tb: &str, pool_type: &str) -> A
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn seeds_pool_registry_and_normalises_venues() {
     let writer = OhlcvWriter::plaintext(&ch_url());
     prices_clickhouse::apply_sql(writer.client(), prices_clickhouse::INIT_SQL)

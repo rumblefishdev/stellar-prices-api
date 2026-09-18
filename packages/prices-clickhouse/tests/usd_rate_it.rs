@@ -33,7 +33,7 @@ async fn setup(db: &str) -> Client {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usd_rate_has_the_0154_shape_keyed_on_natural_identity() {
     let db = "it_usd_rate_shape";
     let client = setup(db).await;

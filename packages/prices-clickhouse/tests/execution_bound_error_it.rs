@@ -75,7 +75,7 @@ async fn setup() -> Client {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_exceeded_bound_reaches_the_caller_as_a_clickhouse_exception() {
     setup().await;
 

@@ -32,7 +32,7 @@ fn fixtures_present() -> bool {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn discover_window_scans_fixtures_and_advances_cursor() {
     if !fixtures_present() {
         eprintln!("skipping: bundled ledger fixtures not present");

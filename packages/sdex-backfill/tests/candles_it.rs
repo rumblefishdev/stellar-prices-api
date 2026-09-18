@@ -54,7 +54,7 @@ async fn count(c: &Client, where_sql: &str) -> u64 {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn per_source_candles_coexist_and_rewrites_are_idempotent() {
     let c = Client::default().with_url(ch_url());
     prices_clickhouse::apply_sql(&c, prices_clickhouse::INIT_SQL)

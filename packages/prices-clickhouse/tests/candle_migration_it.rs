@@ -87,7 +87,7 @@ async fn pf_row(client: &Client, db: &str, table: &str) -> (u32, f64, f64) {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn pf_columns_migrate_every_candle_table_and_preserve_old_rows() {
     let db = "it_candle_migration";
     let admin = Client::default().with_url(ch_url());

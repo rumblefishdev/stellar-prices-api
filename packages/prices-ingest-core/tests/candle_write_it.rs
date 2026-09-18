@@ -84,7 +84,7 @@ fn approx(got: f64, want: f64, what: &str) {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_written_candle_round_trips_every_column_including_the_pf_ones() {
     let db = "it_candle_write";
     let admin = Client::default().with_url(ch_url());

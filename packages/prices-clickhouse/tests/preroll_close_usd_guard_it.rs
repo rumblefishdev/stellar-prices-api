@@ -99,7 +99,7 @@ async fn scalar(client: &Client, sql: &str) -> f64 {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn preroll_carries_the_latest_priced_close_usd_not_the_unenriched_zero() {
     let db = "it_preroll_close_usd_guard";
     let admin = Client::default().with_url(ch_url());
@@ -225,7 +225,7 @@ async fn preroll_carries_the_latest_priced_close_usd_not_the_unenriched_zero() {
 /// which is the representational problem task 0151 owns. Pinned here so nobody
 /// later reads the guard as a stronger promise than it makes.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn preroll_still_writes_zero_when_no_sub_bucket_was_ever_priced() {
     let db = "it_preroll_close_usd_all_unpriced";
     let admin = Client::default().with_url(ch_url());

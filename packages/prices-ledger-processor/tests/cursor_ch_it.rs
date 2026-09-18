@@ -31,7 +31,7 @@ async fn schema() -> Client {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn empty_id_reads_as_empty_not_read_error() {
     // A never-written id → 0 rows → `Empty` (the first-run seed signal), which is
     // distinct from a `Read` error (a transient/failed query) so main seeds ONLY
@@ -41,7 +41,7 @@ async fn empty_id_reads_as_empty_not_read_error() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn write_then_read_roundtrips_and_advances() {
     let cursor = ClickHouseCursor::new(schema().await, "it-advance");
     // Seed, then advance to a higher ledger — FINAL returns the highest.
@@ -51,7 +51,7 @@ async fn write_then_read_roundtrips_and_advances() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn cursor_survives_a_new_client_instance() {
     // The whole point of 0064: a brand-new client (≙ a recycled Lambda
     // execution environment with a wiped /tmp) reads the SAME persisted value —
@@ -70,7 +70,7 @@ async fn cursor_survives_a_new_client_instance() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_lower_write_never_rewinds_the_cursor() {
     // The RMT(ledger) guard: even if a stray lower write lands (e.g. a spurious
     // re-seed to the floor after a transient read error), FINAL keeps the HIGHEST
@@ -87,7 +87,7 @@ async fn a_lower_write_never_rewinds_the_cursor() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn distinct_ids_are_independent() {
     let c = schema().await;
     ClickHouseCursor::new(c.clone(), "it-consumer-a")

@@ -63,7 +63,7 @@ async fn attempts_for(client: &clickhouse::Client, contract: &str) -> Option<u8>
 /// with no `symbol()` from a node that failed to read a ledger entry, so one
 /// negative answer is not allowed to publish a permanent empty symbol.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_negative_answer_is_retried_until_the_count_is_exhausted() {
     let writer = OhlcvWriter::plaintext(&ch_url());
     let client = writer.client();
@@ -108,7 +108,7 @@ async fn a_negative_answer_is_retried_until_the_count_is_exhausted() {
 /// writer resets `attempts` to 0 on success, a stale high count must not keep
 /// re-queueing a contract that has since answered.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_resolved_symbol_leaves_the_queue_even_after_failures() {
     let writer = OhlcvWriter::plaintext(&ch_url());
     let client = writer.client();

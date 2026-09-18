@@ -70,7 +70,7 @@ async fn rate_rows(client: &Client) -> Vec<(u32, f64, String, u8)> {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn copies_oracle_readings_and_re_runs_without_duplicating() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;
@@ -138,7 +138,7 @@ async fn copies_oracle_readings_and_re_runs_without_duplicating() {
 /// checking would file one asset's readings under another's identity — in a
 /// table built to be trusted forever. The write must be REFUSED, not attempted.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn refuses_to_write_when_the_peg_asset_id_is_shared() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;
@@ -192,7 +192,7 @@ fn usdt() -> AssetIdentity {
 /// age out of `oracle_prices` at 13 months: the exact permanent loss this table
 /// exists to prevent. The copy must fill gaps wherever they sit.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn snapshots_a_backdated_reading_that_lands_below_the_frontier() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;
@@ -241,7 +241,7 @@ async fn snapshots_a_backdated_reading_that_lands_below_the_frontier() {
 /// partial write, which is the failure mode the guard exists to prevent. The
 /// original test only used one identity, so it could not catch this.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_collision_on_one_peg_writes_nothing_for_any_peg() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;
@@ -312,7 +312,7 @@ async fn a_collision_on_one_peg_writes_nothing_for_any_peg() {
 /// why the guard outlives the bug — the writer is fixed, but this test pins the
 /// property that a malformed upstream timestamp never reaches the forever-table.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn does_not_snapshot_the_0086_junk_1970_timestamps() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;

@@ -170,7 +170,7 @@ fn approx(v: &Value, expected: f64) {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn asset_detail_native() {
     let db = "it_ep_detail_0040";
     let client = setup(db).await;
@@ -184,7 +184,7 @@ async fn asset_detail_native() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn asset_detail_returns_home_domain_from_metadata() {
     // Task 0067: home_domain is served from the asset_metadata LEFT JOIN, not the
     // assets identity row. The fixture only seeds it in asset_metadata.
@@ -233,7 +233,7 @@ async fn seed_soroban(db: &str, symbol: Option<&str>) {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn asset_detail_returns_soroban_symbol_as_code() {
     // Task 0210. The symbol is served from the asset_symbol LEFT JOIN, not the
     // assets identity row — the same single-writer shape 0067 gave home_domain,
@@ -252,7 +252,7 @@ async fn asset_detail_returns_soroban_symbol_as_code() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn asset_detail_unresolved_soroban_code_is_empty() {
     // No asset_symbol row: the join misses and `code` stays `""`, which is the
     // pre-0210 behaviour. Consumers must not see a partially-composed value.
@@ -267,7 +267,7 @@ async fn asset_detail_unresolved_soroban_code_is_empty() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn asset_detail_unknown_is_404() {
     let db = "it_ep_detail_unknown_0040";
     let client = setup(db).await;
@@ -277,7 +277,7 @@ async fn asset_detail_unknown_is_404() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn batch_returns_found_and_not_found() {
     let db = "it_ep_batch_0040";
     let client = setup(db).await;
@@ -292,7 +292,7 @@ async fn batch_returns_found_and_not_found() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn batch_empty_is_400() {
     let db = "it_ep_batch_empty_0040";
     let client = setup(db).await;
@@ -303,7 +303,7 @@ async fn batch_empty_is_400() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn oracles_returns_latest_per_name() {
     let db = "it_ep_oracles_0040";
     let client = setup(db).await;
@@ -320,7 +320,7 @@ async fn oracles_returns_latest_per_name() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn oracles_unknown_asset_is_404() {
     let db = "it_ep_oracles_unknown_0040";
     let client = setup(db).await;
@@ -330,7 +330,7 @@ async fn oracles_unknown_asset_is_404() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn backfill_status_maps_both_streams() {
     let db = "it_ep_backfill_0040";
     let client = setup(db).await;

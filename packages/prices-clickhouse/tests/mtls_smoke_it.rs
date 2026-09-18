@@ -66,7 +66,7 @@ fn load_target() -> Option<(String, MtlsBundle, String)> {
 }
 
 #[tokio::test]
-#[ignore = "live mTLS round-trip — set CH_DOMAIN + MTLS_{CERT,KEY,CA}_PATH and run with --ignored"]
+#[ignore = "requires production — operator after-check; never gates a PR"]
 async fn mtls_round_trip_select_one_and_lists_tables() {
     let Some((domain, bundle, database)) = load_target() else {
         eprintln!(

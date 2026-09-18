@@ -139,7 +139,7 @@ const CANDLES: &str = "INSERT INTO {db}.price_ohlcv_1m \
      (1600000000,10,20,'sdex',    9,9,9,9,             1,  9, 0,0, 9,       1,1)";
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn enrich_fills_close_usd_across_oracle_peg_and_pivot_tiers() {
     let db = "it_enrich_tiers";
     let client = setup_scratch(db).await;
@@ -243,7 +243,7 @@ async fn enrich_fills_close_usd_across_oracle_peg_and_pivot_tiers() {
 /// oracle tier un-drained, so the later candle must stay `close_usd = 0` (NOT
 /// the $1 peg). Pass 2's oracle tier then drains and gives it the oracle value.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn oracle_budget_exhaustion_defers_instead_of_pegging() {
     let db = "it_enrich_undrained";
     let client = setup_scratch(db).await;
@@ -331,7 +331,7 @@ async fn oracle_budget_exhaustion_defers_instead_of_pegging() {
 /// trip the no-progress break. `run_through` pins the boundary so a single-
 /// threaded test can stand in for the concurrent insert.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn watermark_defers_candles_newer_than_the_snapshot() {
     let db = "it_enrich_watermark";
     let client = setup_scratch(db).await;
@@ -399,7 +399,7 @@ async fn watermark_defers_candles_newer_than_the_snapshot() {
 /// with the new `ChPassStats` fields populated (oracle_misses = 5 handed to the
 /// peg tier, rows_enriched = 5, candidates_after = 0, duration_ms > 0).
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn one_shot_drains_full_backlog() {
     let db = "it_enrich_oneshot";
     let client = setup_scratch(db).await;
@@ -471,7 +471,7 @@ async fn one_shot_drains_full_backlog() {
 /// `now()`. With a 1-hour recency window the full backlog is 2 but the recency-
 /// bounded count is just the fresh candle (1).
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn recency_bounded_backlog_excludes_deep_history_floor() {
     let db = "it_enrich_recency";
     let client = setup_scratch(db).await;
@@ -546,7 +546,7 @@ async fn recency_bounded_backlog_excludes_deep_history_floor() {
 /// DELETE/UPDATE), which is the sole-copy safety property: the 1m source for the
 /// affected historical span is gone, so the coarse table cannot be rebuilt.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn coarse_repair_row_outranks_large_summed_version() {
     let db = "it_enrich_coarse_version";
     let client = setup_scratch(db).await;
@@ -690,7 +690,7 @@ async fn coarse_repair_row_outranks_large_summed_version() {
 /// summary reports the correct per-month before/after (exotic floor surfaces as
 /// `zeros_after = 1`, not a failure).
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn coarse_repair_driver_bounds_span_and_reports_per_month() {
     let db = "it_coarse_repair_driver";
     let client = setup_scratch(db).await;
@@ -821,7 +821,7 @@ async fn coarse_repair_driver_bounds_span_and_reports_per_month() {
 ///      recorded under `skipped_tables` (NOT `failed_tables`, which is the alarm
 ///      series) and never touched.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn coarse_sweep_bounds_trailing_window_and_refuses_the_1m_base() {
     let db = "it_coarse_sweep";
     let client = setup_scratch(db).await;
@@ -941,7 +941,7 @@ async fn coarse_sweep_bounds_trailing_window_and_refuses_the_1m_base() {
 /// already-elapsed deadline it must enrich NOTHING and record no failures/skips
 /// (deferred ≠ failed), leaving the seeded zero for the next run.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn coarse_sweep_defers_all_work_past_its_deadline() {
     let db = "it_coarse_sweep_deadline";
     let client = setup_scratch(db).await;
@@ -1014,7 +1014,7 @@ async fn coarse_sweep_defers_all_work_past_its_deadline() {
 /// a single bounded run does NOT drain the whole backlog, and successive runs
 /// converge it to the `no_reference` floor.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn coarse_repair_bounded_mode_defers_overflow_across_runs() {
     let db = "it_coarse_repair_bounded";
     let client = setup_scratch(db).await;
@@ -1126,7 +1126,7 @@ async fn coarse_repair_bounded_mode_defers_overflow_across_runs() {
 /// `argMax(close_usd, …)` sites read it unguarded. Hence the explicit `> 0`
 /// assertion below.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg() {
     let db = "it_enrich_0172_usdt_pivot";
     let client = setup_scratch(db).await;
@@ -1251,7 +1251,7 @@ async fn setup_0182(db: &str, t_old: u32, t_new: u32) -> Client {
 /// If this test ever starts failing because the values moved, the tiers have
 /// stopped being idempotent — which is a much bigger problem than 0182.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_ordinary_pass_cannot_see_a_wrong_but_written_close_usd() {
     let db = "it_enrich_0182_control";
     let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
@@ -1288,7 +1288,7 @@ async fn an_ordinary_pass_cannot_see_a_wrong_but_written_close_usd() {
 /// would zero the pre-2021 rows that have no pivot reference and strand them at
 /// `close_usd = 0` permanently.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
     let db = "it_enrich_0182_reset";
     let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
@@ -1365,7 +1365,7 @@ async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
 /// not catch it — an unknown asset has no Reflector rows either, which is
 /// exactly what that gate is looking for.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_usd_reset_refuses_a_quote_leg_that_no_tier_can_reprice() {
     let db = "it_enrich_0182_unpriceable";
     let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
@@ -1407,7 +1407,7 @@ async fn the_usd_reset_refuses_a_quote_leg_that_no_tier_can_reprice() {
 /// draining), which would leave the reset's zeroes published until some later
 /// run. The combination is refused rather than risked.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_usd_reset_refuses_a_bounded_pass() {
     let db = "it_enrich_0182_bounded";
     let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
@@ -1470,7 +1470,7 @@ async fn the_usd_reset_refuses_a_bounded_pass() {
 /// lower bound at the same time; only the upper one needed to move. The floor is
 /// therefore widened by one `window_s`, and this is the test that it is.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_usd_reset_is_refused_by_an_oracle_row_that_forward_fills_into_it() {
     let db = "it_enrich_0182_shadow_band";
     let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
@@ -1529,7 +1529,7 @@ async fn the_usd_reset_is_refused_by_an_oracle_row_that_forward_fills_into_it() 
 /// the peg tier wrote $1 back over the lot. Task 0182's incident, different
 /// quote asset. Refused in the library, so no driver can assemble it.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_external_reset_refuses_a_quote_leg_that_is_not_canonical_usdc() {
     let db = "it_enrich_0268_usdt_external";
     let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
@@ -1564,7 +1564,7 @@ async fn an_external_reset_refuses_a_quote_leg_that_is_not_canonical_usdc() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_leg() {
     let db = "it_enrich_0182_oracle_gate";
     let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
@@ -1648,7 +1648,7 @@ async fn frontier_state(client: &Client, db: &str, month: u32) -> Option<String>
 ///   * 202102 — FOO/USDC, peggable.
 ///   * 202103 — FOO/USDC, peggable.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_frontier_advances_exhausts_and_never_revisits() {
     use enrichment_worker::frontier::{HistoricalSweepConfig, run_historical_sweep};
 
@@ -1769,7 +1769,7 @@ async fn the_frontier_advances_exhausts_and_never_revisits() {
 /// two contend for the same rows every hour, which is the coupling task 0111
 /// exists to remove.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_sweep_never_enters_the_live_window() {
     use enrichment_worker::frontier::{HistoricalSweepConfig, run_historical_sweep};
 
@@ -1829,7 +1829,7 @@ async fn the_sweep_never_enters_the_live_window() {
 /// rows would sit unenriched forever while the frontier read clean, which is
 /// the "skipped rows that look healthy" failure class that cost 26 days in 0215.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_backfill_into_an_exhausted_month_reopens_it() {
     use enrichment_worker::frontier::{HistoricalSweepConfig, run_historical_sweep};
 
@@ -2013,7 +2013,7 @@ const DEPEG_RATE: f64 = 0.9681;
 /// MEASURED rate, not from `× $1`, and `volume_quote_usd` is scaled by the same
 /// rate. `4 × 0.9681 = 3.8724` — the 3.19% the peg tier used to discard.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn external_tier_prices_a_usdc_leg_from_the_measured_rate() {
     let db = "it_enrich_external_measured";
     let client = setup_scratch(db).await;
@@ -2064,7 +2064,7 @@ async fn external_tier_prices_a_usdc_leg_from_the_measured_rate() {
 /// because the oracle tier runs first and the external tier's candidate filter
 /// is `close_usd = 0`. A second pass does not move it.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn external_tier_never_overwrites_a_candle_the_oracle_tier_priced() {
     let db = "it_enrich_external_oracle_wins";
     let client = setup_scratch(db).await;
@@ -2113,7 +2113,7 @@ async fn external_tier_never_overwrites_a_candle_the_oracle_tier_priced() {
 /// and then could not be recomputed. A row with no usable reference must come
 /// out of the pass exactly as it went in.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn external_tier_leaves_a_bucket_with_no_usable_rate_on_the_peg_value() {
     let db = "it_enrich_external_no_reference";
     let client = setup_scratch(db).await;
@@ -2182,7 +2182,7 @@ async fn seed_foo_usdc_candle(client: &Client, db: &str, ts: u32, close: f64, vq
 /// wrong direction, on the scheduled Lambda's own table. Two rates a day apart,
 /// distinguishable by value, and the candle in the last hour of the first day.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_one_minute_bucket_in_the_last_hour_of_a_day_gets_that_days_rate() {
     let db = "it_enrich_external_day_boundary";
     let client = setup_scratch(db).await;
@@ -2249,7 +2249,7 @@ async fn seed_foo_usdc_candle_in(client: &Client, db: &str, table: &str, ts: u32
 /// strict (`rts < bend`), so the SAME day's rate must win and the +1d rate must
 /// not. `3.96` here means the calendar end overshot or the strictness was lost.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_daily_bucket_resolves_the_calendar_bucket_end_against_the_server() {
     let db = "it_enrich_external_calendar_1d";
     let client = setup_scratch(db).await;
@@ -2288,7 +2288,7 @@ async fn a_daily_bucket_resolves_the_calendar_bucket_end_against_the_server() {
 /// bug `bucket_end_expr`'s doc block describes) would land on 10-02 and select
 /// the 10-01 rate instead — `3.96`, a plausible number, from the wrong month.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_monthly_bucket_resolves_the_calendar_month_end_against_the_server() {
     let db = "it_enrich_external_calendar_1m_month";
     let client = setup_scratch(db).await;
@@ -2332,7 +2332,7 @@ async fn a_monthly_bucket_resolves_the_calendar_month_end_against_the_server() {
 /// to the peg tier instead, where its `close_usd = close` signature reads as
 /// `assumed-par` — the truth.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn external_tier_never_prices_a_candle_above_the_oracle_epoch() {
     let db = "it_enrich_external_epoch_bound";
     let client = setup_scratch(db).await;
@@ -2364,7 +2364,7 @@ async fn external_tier_never_prices_a_candle_above_the_oracle_epoch() {
 /// USD columns from the one imported rate — never `close_usd` at 0.9681 beside a
 /// `volume_quote_usd` still at par.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn external_tier_recomputes_a_half_priced_row_from_the_one_reference() {
     let db = "it_enrich_external_half_priced";
     let client = setup_scratch(db).await;
@@ -2449,7 +2449,7 @@ fn external_reset() -> UsdResetSpec {
 /// RED without `close > 0` beside the signature: `rows_reset = 2` and the dust
 /// row comes back at `version = 3` (reset + refill).
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_external_reset_never_reopens_a_candle_that_has_no_price() {
     let db = "it_enrich_0268_dust_only";
     let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
@@ -2520,7 +2520,7 @@ async fn the_external_reset_never_reopens_a_candle_that_has_no_price() {
 /// Daily and coarser tables resolve at the bucket END, where the daily row and
 /// the 23:00 hourly row carry the same close, so they must NOT be refused.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_external_reset_refuses_a_sub_daily_table_on_a_daily_only_load() {
     let db = "it_enrich_0268_daily_only";
     let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
@@ -2572,7 +2572,7 @@ async fn the_external_reset_refuses_a_sub_daily_table_on_a_daily_only_load() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_external_reset_never_zeroes_a_bucket_it_cannot_refill() {
     let db = "it_enrich_0268_reset";
     let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
@@ -2617,7 +2617,7 @@ async fn the_external_reset_never_zeroes_a_bucket_it_cannot_refill() {
 /// silently doing nothing. A clean, healthy, entirely empty repair is the same
 /// green all-clear that hid task 0182 for a month.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_external_reset_refuses_when_no_external_rates_are_loaded() {
     let db = "it_enrich_0268_no_rates";
     let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
@@ -2665,7 +2665,7 @@ async fn the_external_reset_refuses_when_no_external_rates_are_loaded() {
 /// the oracle-shadow guard's window does not reach but the external tier's
 /// candidate set does. Nothing is written.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_external_reset_refuses_a_pre_epoch_oracle_reading_below_its_own_window() {
     let db = "it_enrich_0268_pre_epoch_oracle";
     let client = setup_scratch(db).await;
@@ -2720,7 +2720,7 @@ async fn the_external_reset_refuses_a_pre_epoch_oracle_reading_below_its_own_win
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_bounded_usd_reset_is_not_refused_by_oracle_rows_above_its_window() {
     let db = "it_enrich_0268_bounded_guard";
     let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
@@ -2780,7 +2780,7 @@ async fn the_bounded_usd_reset_is_not_refused_by_oracle_rows_above_its_window() 
 /// its window would discard values in months the operator never snapshotted, and
 /// the rollback point would not cover them.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_external_reset_touches_only_the_bounded_month() {
     let db = "it_enrich_0268_month_bound";
     // 2020-09-13 and 2020-10-02 — different monthly partitions, both covered by
@@ -2878,7 +2878,7 @@ async fn pivot_close_usd_in(client: &Client, db: &str, table: &str, ts: u32) -> 
 /// value is still denominated in USDC while wearing a dollar column name.
 /// `0.0` means the rate was not found at all, which is the 0182 class of failure.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_pivot_leg_is_scaled_by_the_measured_usdc_rate_on_the_depeg_day() {
     for (table, ts) in [
         ("price_ohlcv_1d", DEPEG_DAY),
@@ -2925,7 +2925,7 @@ async fn a_pivot_leg_is_scaled_by_the_measured_usdc_rate_on_the_depeg_day() {
 ///
 /// The two rates are far apart on purpose: recency alone would pick the import.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_pivot_leg_prefers_the_oracle_rate_over_the_external_rate() {
     let db = "it_enrich_0228_oracle_wins";
     let client = setup_0228_pivot(db, "price_ohlcv_1d", DEPEG_DAY).await;
@@ -2964,7 +2964,7 @@ async fn a_pivot_leg_prefers_the_oracle_rate_over_the_external_rate() {
 /// proves: that is the premise the campaign's reset rests on — a bucket the pivot
 /// cannot price is one the reset must never re-open.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_pivot_leg_with_no_usdc_rate_in_window_is_left_unpriced() {
     let db = "it_enrich_0228_no_rate";
     let client = setup_0228_pivot(db, "price_ohlcv_1d", DEPEG_DAY).await;
@@ -3069,7 +3069,7 @@ async fn pivot_subject_1h(client: &Client, db: &str, ts: u32) -> (f64, u64) {
 /// $1 back over the lot. The error names the 0268 mode, because that mistake has
 /// an exact right answer.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_pivot_reset_refuses_the_canonical_usdc_leg() {
     let db = "it_enrich_0228_usdc_leg";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
@@ -3118,7 +3118,7 @@ async fn the_pivot_reset_refuses_the_canonical_usdc_leg() {
 /// campaign, for every table and every month. Appendix C's precondition 5 is the
 /// query that finds out before the operator starts.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_pivot_reset_refuses_an_oracle_shadowed_span() {
     let db = "it_enrich_0228_oracle_shadow";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
@@ -3157,7 +3157,7 @@ async fn the_pivot_reset_refuses_an_oracle_shadowed_span() {
 /// entirely empty repair — the same green all-clear that hid task 0182 for a
 /// month.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_pivot_reset_refuses_when_no_external_rates_are_loaded() {
     let db = "it_enrich_0228_no_rates";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
@@ -3191,7 +3191,7 @@ async fn the_pivot_reset_refuses_when_no_external_rates_are_loaded() {
 /// driver now runs the check BEFORE enumerating months, dry run included, so
 /// the promise is kept from the first invocation.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_repair_driver_refuses_an_unloaded_series_before_enumerating_months() {
     let db = "it_enrich_0228_driver_no_rates";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
@@ -3258,7 +3258,7 @@ async fn the_repair_driver_refuses_an_unloaded_series_before_enumerating_months(
 /// reset zeroed the XLM leg, and no pivot ever refilled it — task 0182's
 /// incident with a different missing piece.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_pivot_reset_refuses_when_canonical_usdc_is_not_a_tracked_asset() {
     let db = "it_enrich_0228_no_usdc_asset";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
@@ -3320,7 +3320,7 @@ async fn the_pivot_reset_refuses_when_canonical_usdc_is_not_a_tracked_asset() {
 /// both before enumerating months: the rehearsal refuses what the real run
 /// refuses (WR-01's rule).
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_dry_run_refuses_the_wrong_leg_for_either_rate_gated_mode() {
     let db = "it_enrich_0228_dry_run_leg";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
@@ -3412,7 +3412,7 @@ async fn a_dry_run_refuses_the_wrong_leg_for_either_rate_gated_mode() {
 /// any month is enumerated, dry run included, through ONE list that
 /// `reset_step` runs too.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() {
     let db = "it_enrich_0228_dry_run_all";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
@@ -3521,7 +3521,7 @@ async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() 
 /// XLM/USDC reference candle, so the reference is NOT what separates them — the
 /// rate is, which is what the day-set predicate is for.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_pivot_reset_never_zeroes_a_bucket_it_cannot_refill() {
     let db = "it_enrich_0228_uncovered";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
@@ -3586,7 +3586,7 @@ async fn the_pivot_reset_never_zeroes_a_bucket_it_cannot_refill() {
 /// write. The reset now also requires a usable reference candle on the bucket's
 /// UTC day, at the same grain, in the same table the pivot reads.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_pivot_reset_never_zeroes_a_bucket_whose_reference_market_is_silent() {
     let db = "it_enrich_0228_no_reference";
     let (with_ref, without_ref) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
@@ -3661,7 +3661,7 @@ async fn the_pivot_reset_never_zeroes_a_bucket_whose_reference_market_is_silent(
 /// 0182 mode — and that the mode never reaches the recurring sweep, which pins
 /// `usd_reset: None`.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_pivot_reset_is_value_idempotent_across_runs() {
     let db = "it_enrich_0228_idempotent";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
@@ -3781,7 +3781,7 @@ async fn candidates_left(client: &Client, db: &str) -> u64 {
 /// `(close_usd = 0 AND close > 0)` asks the question that can actually be
 /// answered: is there a PRICE here that has not been valued yet.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_dust_only_minute_is_priced_once_and_is_never_reselected() {
     let db = "it_enrich_dust_once";
     let client = setup_scratch(db).await;
@@ -3863,7 +3863,7 @@ async fn version_of(client: &Client, db: &str, asset: u32, quote: u32, ts: u32) 
 /// that. RED without the guard: every pass re-inserts the identical row at
 /// `version + 1`, forever, at the head of `ORDER BY timestamp LIMIT`.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_usd_close_that_rounds_to_zero_is_written_once_and_never_rewritten() {
     let db = "it_enrich_zero_product";
     let client = setup_scratch(db).await;
@@ -3920,7 +3920,7 @@ async fn a_usd_close_that_rounds_to_zero_is_written_once_and_never_rewritten() {
 /// `IS NOT NULL` never protected it. RED without the guard: the row is
 /// re-inserted with both USD columns still 0 on every pass.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_oracle_reading_of_zero_writes_nothing() {
     let db = "it_enrich_zero_reading";
     let client = setup_scratch(db).await;
@@ -3973,7 +3973,7 @@ async fn an_oracle_reading_of_zero_writes_nothing() {
 /// enrichment pass after the rollout (BRIEF F6b). This is the live hazard the
 /// deploy order exists for.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn pf_columns_survive_every_enrichment_rewrite() {
     let db = "it_enrich_pf_survive";
     let client = setup_scratch(db).await;
@@ -4073,7 +4073,7 @@ async fn pf_columns_survive_every_enrichment_rewrite() {
 /// averages 0.30 with 0 to 0.15, and the later all-legacy bucket wins the ASOF
 /// with a reference of 0.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_pivot_ignores_a_legacy_reference_minute_that_claims_a_price_it_has_not_got() {
     let db = "it_enrich_pivot_legacy_ref";
     let client = setup_scratch(db).await;
@@ -4132,7 +4132,7 @@ async fn the_pivot_ignores_a_legacy_reference_minute_that_claims_a_price_it_has_
 /// RED on the pre-0286 subquery, twice: the mixed bucket averages 0.30 with 0 to
 /// 0.15, and the later all-dust bucket wins the ASOF and yields no rate at all.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_pivot_ignores_a_dust_only_reference_minute() {
     let db = "it_enrich_pivot_dust_ref";
     let client = setup_scratch(db).await;
@@ -4210,7 +4210,7 @@ async fn the_pivot_ignores_a_dust_only_reference_minute() {
 /// RED without `OR p.volume_quote_usd = 0` in `peg_sql`: the dust row is never
 /// selected at all and its volume is never valued.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_dust_only_minute_quoted_in_a_pegged_asset_is_priced_once_by_the_peg_tier() {
     let db = "it_enrich_dust_on_peg";
     let client = setup_scratch(db).await;
@@ -4301,7 +4301,7 @@ async fn a_dust_only_minute_quoted_in_a_pegged_asset_is_priced_once_by_the_peg_t
 /// RED without `AND pf_trade_count > 0`: the `late` bucket wins the ASOF
 /// outright and the subject is priced from a close nobody traded at.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_pivot_ignores_a_reference_minute_that_formed_no_price() {
     let db = "it_enrich_pivot_pf_only_ref";
     let client = setup_scratch(db).await;
@@ -4368,7 +4368,7 @@ async fn the_pivot_ignores_a_reference_minute_that_formed_no_price() {
 /// subject is zeroed and then not refilled — strictly worse than the stale
 /// value it replaced.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_pivot_reset_never_re_opens_a_day_whose_only_reference_is_dust() {
     let db = "it_enrich_0228_dust_reference_day";
     let (with_ref, dust_ref) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);

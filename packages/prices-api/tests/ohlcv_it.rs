@@ -156,7 +156,7 @@ fn approx(v: &Value, expected: f64) {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_merges_sources_and_notes_backfill() {
     let db = "it_ohlcv_merge_0040";
     let client = setup(db).await;
@@ -198,7 +198,7 @@ async fn ohlcv_merges_sources_and_notes_backfill() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_xlm_quote_has_no_candles() {
     let db = "it_ohlcv_xlm_0040";
     let client = setup(db).await;
@@ -216,7 +216,7 @@ async fn ohlcv_xlm_quote_has_no_candles() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_invalid_timeframe_is_400() {
     let db = "it_ohlcv_badtf_0040";
     let client = setup(db).await;
@@ -231,7 +231,7 @@ async fn ohlcv_invalid_timeframe_is_400() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_unknown_asset_is_404() {
     let db = "it_ohlcv_unknown_0040";
     let client = setup(db).await;
@@ -286,7 +286,7 @@ async fn seed_xlm_only(db: &str, admin: &Client) {
 /// `quote_asset_id = <USDC>` and returned `200` with an empty array — the answer
 /// 20,481 assets were getting, indistinguishable from "never traded".
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usd_serves_an_asset_that_never_traded_against_usdc() {
     let db = "it_ohlcv_xlm_only_0170";
     let client = setup(db).await;
@@ -321,7 +321,7 @@ async fn ohlcv_usd_serves_an_asset_that_never_traded_against_usdc() {
 /// right-hand edge of every chart and make "not yet priced" look like "did not
 /// trade" — the confusion this task exists to remove.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_unpriced_bucket_is_returned_with_price_fields_absent() {
     let db = "it_ohlcv_unpriced_0170";
     let client = setup(db).await;
@@ -366,7 +366,7 @@ async fn ohlcv_unpriced_bucket_is_returned_with_price_fields_absent() {
 /// aggregation rather than labelled, because every available label — `peg` above
 /// all — would assert something false.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_peg_signature_on_a_pivot_leg_is_not_labelled_peg() {
     let db = "it_ohlcv_anomaly_0170";
     let client = setup(db).await;
@@ -407,7 +407,7 @@ async fn ohlcv_peg_signature_on_a_pivot_leg_is_not_labelled_peg() {
 /// Converting first makes the comparison 3.0 vs 1.3, and the answer is 3.0 for
 /// a reason rather than by luck.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_converts_each_leg_before_merging_across_them() {
     let db = "it_ohlcv_order_0170";
     let client = setup(db).await;
@@ -462,7 +462,7 @@ async fn ohlcv_converts_each_leg_before_merging_across_them() {
 /// a column-type mismatch in that branch is invisible to it. `BAR` is quoted in
 /// XLM, so this one actually decodes rows.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_xlm_denomination_decodes_rows() {
     let db = "it_ohlcv_xlm_rows_0170";
     let client = setup(db).await;
@@ -545,7 +545,7 @@ async fn seed_peg_rate(db: &str, admin: &Client) {
 /// A bound on the imported ROW cannot fix this: the offending row is at 13:00,
 /// already below the epoch. The bucket is what must be bounded.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_peg_series_stops_importing_across_the_oracle_epoch() {
     let db = "it_ohlcv_epoch_gap_0267";
     let client = setup(db).await;
@@ -679,7 +679,7 @@ async fn ohlcv_peg_series_stops_importing_across_the_oracle_epoch() {
 /// exact string plus the numeric check together say what matters: the right
 /// number, at full stored precision, in the form the operator's runbook expects.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdc_publishes_the_imported_measurement_for_the_2023_depeg() {
     let db = "it_ohlcv_0267_depeg";
     let client = setup(db).await;
@@ -765,7 +765,7 @@ async fn ohlcv_usdc_publishes_the_imported_measurement_for_the_2023_depeg() {
 /// prevent, and a test that restates the number would keep passing while the
 /// code moved away from it.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdc_reads_each_side_of_the_oracle_epoch_with_its_own_method() {
     use prices_clickhouse::USDC_ORACLE_EPOCH_S as EPOCH;
 
@@ -890,7 +890,7 @@ async fn ohlcv_usdc_reads_each_side_of_the_oracle_epoch_with_its_own_method() {
 /// stamping hid the divergence in production; a rule held only by another
 /// tool's invariant is not a rule either surface can be trusted on.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdc_oracle_outranks_a_later_import_in_the_same_bucket() {
     let db = "it_ohlcv_0267_oracle_outranks_import";
     let client = setup(db).await;
@@ -984,7 +984,7 @@ async fn ohlcv_usdc_oracle_outranks_a_later_import_in_the_same_bucket() {
 /// its own, falls back to the labelled peg. Forward-filling a daily import
 /// past its day would be task 0246's defect returning in a new place.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdc_serves_an_imported_day_at_every_hour_of_it() {
     let db = "it_ohlcv_0267_hourly_import_window";
     let client = setup(db).await;
@@ -1059,7 +1059,7 @@ async fn ohlcv_usdc_serves_an_imported_day_at_every_hour_of_it() {
 /// USDC/USDC self-pair and matched zero rows. Dropping the quote filter does not
 /// help; the series has to be synthesized.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdc_self_pair_is_synthesized_from_the_measured_rate() {
     let db = "it_ohlcv_peg_0170";
     let client = setup(db).await;
@@ -1096,7 +1096,7 @@ async fn ohlcv_usdc_self_pair_is_synthesized_from_the_measured_rate() {
 /// `usd_rate` starts 2026-03-11 on prod while `timeframe=all` reads back to
 /// 2021, so this is the majority of the real series — not an edge case.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdc_before_any_observation_falls_back_to_a_labelled_peg() {
     let db = "it_ohlcv_peg_fallback_0170";
     let client = setup(db).await;
@@ -1135,7 +1135,7 @@ async fn ohlcv_usdc_before_any_observation_falls_back_to_a_labelled_peg() {
 /// request, as a `readonly = 1` user, must still answer. A future `SETTINGS`
 /// clause fails here instead of on prod.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_peg_series_answers_for_a_readonly_user() {
     let db = "it_ohlcv_peg_readonly_0170";
     let _ = setup(db).await;
@@ -1188,7 +1188,7 @@ async fn ohlcv_peg_series_answers_for_a_readonly_user() {
 /// entirely ordinary-looking number, which is exactly why a band check on the
 /// derived rate cannot catch it. The inputs are what is wrong, not the value.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_refuses_to_derive_a_rate_from_values_at_the_decimal_floor() {
     let db = "it_ohlcv_precision_0170";
     let client = setup(db).await;
@@ -1230,7 +1230,7 @@ async fn ohlcv_refuses_to_derive_a_rate_from_values_at_the_decimal_floor() {
 /// `close = 0` is a distinct population from `close_usd = 0` and needs its own
 /// coverage: dividing by it is what the guard exists to prevent.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_guards_a_zero_close() {
     let db = "it_ohlcv_zero_close_0170";
     let client = setup(db).await;
@@ -1264,7 +1264,7 @@ async fn ohlcv_guards_a_zero_close() {
 /// USDT is not at par, and overriding real market data with an assumed rate is
 /// how 44,657 candles came to be overstated ~7.4x.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdt_as_a_base_keeps_its_real_market_data() {
     let db = "it_ohlcv_usdt_base_0170";
     let client = setup(db).await;
@@ -1314,7 +1314,7 @@ async fn ohlcv_usdt_as_a_base_keeps_its_real_market_data() {
 /// distinguishable from one that is merely unrepresentable in the requested
 /// denomination. Before the fix both were an empty `200`.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_never_traded_is_distinguishable_from_unrepresentable() {
     let db = "it_ohlcv_never_traded_0170";
     let client = setup(db).await;
@@ -1372,7 +1372,7 @@ async fn ohlcv_never_traded_is_distinguishable_from_unrepresentable() {
 /// `USDC_usd / XLM_usd`. Seeded so the answer is unambiguous: USDC at 0.9993 USD
 /// and XLM at 0.25 USD gives 3.9972 XLM per USDC.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdc_in_xlm_is_derived_from_two_usd_rates() {
     let db = "it_ohlcv_usdc_xlm_0170";
     let client = setup(db).await;
@@ -1407,7 +1407,7 @@ async fn ohlcv_usdc_in_xlm_is_derived_from_two_usd_rates() {
 /// as "this bucket is priced" would dereference a null. The unpriced right-hand
 /// edge is exactly where it would have bitten.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdc_in_xlm_nulls_provenance_when_the_denominator_is_unpriced() {
     let db = "it_ohlcv_xlm_den_null_0170";
     let client = setup(db).await;
@@ -1488,7 +1488,7 @@ fn assert_ohlc_ordered(c: &Value, label: &str) {
 /// `low > close` and the assertion fires. The magnitude matters: at three
 /// figures the float has precision to spare and nothing crosses.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_derived_low_cannot_round_above_the_exact_close() {
     let db = "it_ohlcv_low_above_close_0229";
     let client = setup(db).await;
@@ -1534,7 +1534,7 @@ async fn ohlcv_derived_low_cannot_round_above_the_exact_close() {
 /// **6.57e-12 below** the exact close. Both directions are covered because a
 /// clamp on only one of them is a fix that looks complete and is not.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_derived_high_cannot_round_below_the_exact_close() {
     let db = "it_ohlcv_high_below_close_0229";
     let client = setup(db).await;
@@ -1577,7 +1577,7 @@ async fn ohlcv_derived_high_cannot_round_below_the_exact_close() {
 /// nothing is on a second scale. The test exists to PIN that, not to catch a
 /// live bug: if the as-stored arm ever grows a conversion, this fails.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_xlm_denomination_keeps_ohlc_ordered() {
     let db = "it_ohlcv_xlm_ordered_0229";
     let client = setup(db).await;
@@ -1623,7 +1623,7 @@ async fn ohlcv_xlm_denomination_keeps_ohlc_ordered() {
 /// identity. Pinned rather than assumed, because ADR 0011 §6 could later give the
 /// extremes their own derivation and the equality would stop being free.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_peg_series_keeps_ohlc_ordered() {
     let db = "it_ohlcv_peg_ordered_0229";
     let client = setup(db).await;
@@ -1683,7 +1683,7 @@ async fn ohlcv_peg_series_keeps_ohlc_ordered() {
 /// compute, presented as if measured. The bucket is still returned; only the
 /// unrepresentable field is absent, per ADR 0011 §5.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_an_unrepresentable_extreme_stays_null_rather_than_becoming_the_close() {
     let db = "it_ohlcv_overflow_null_0229";
     let client = setup(db).await;
@@ -1737,7 +1737,7 @@ async fn ohlcv_an_unrepresentable_extreme_stays_null_rather_than_becoming_the_cl
 /// 🔑 Nothing would have surfaced this: [[0120]]'s assertion is
 /// `low <= open,close <= high` and never looks at vwap.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_vwap_cannot_round_above_the_high() {
     let db = "it_ohlcv_vwap_above_0229";
     let client = setup(db).await;
@@ -1768,7 +1768,7 @@ async fn ohlcv_vwap_cannot_round_above_the_high() {
 
 /// The mirror — the merged `vwap` rounds BELOW the clamped low.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_vwap_cannot_round_below_the_low() {
     let db = "it_ohlcv_vwap_below_0229";
     let client = setup(db).await;
@@ -1810,7 +1810,7 @@ async fn ohlcv_vwap_cannot_round_below_the_low() {
 /// 🔑 The lesson is the seed, not the fix: a one-row probe of a MERGE aggregate
 /// tests a path production does not have.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_xlm_merged_vwap_stays_inside_the_band() {
     let db = "it_ohlcv_xlm_vwap_0229";
     let client = setup(db).await;
@@ -1954,7 +1954,7 @@ async fn seed_0246(db: &str, admin: &Client) {
 /// (both sit later in the hour) and rendered the bucket as the `$1` peg, while
 /// the view published the measured 1.0007.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_agrees_with_price_usd_series_on_the_same_bucket() {
     let db = "it_ohlcv_0246_cross_surface";
     let client = setup(db).await;
@@ -2058,7 +2058,7 @@ async fn ohlcv_agrees_with_price_usd_series_on_the_same_bucket() {
 /// file by `composed_usdc_csv.rs`, so this test and the loader cannot disagree
 /// about what the answer should be.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdc_serves_the_depeg_day_hour_by_hour_from_the_hourly_import() {
     let db = "it_ohlcv_0267_hourly_depeg";
     let client = setup(db).await;
@@ -2133,7 +2133,7 @@ async fn ohlcv_usdc_serves_the_depeg_day_hour_by_hour_from_the_hourly_import() {
 /// both returned 1.0007/`oracle`; they must now return the `$1` fallback and say
 /// so.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_does_not_forward_fill_a_stale_rate_into_later_buckets() {
     let db = "it_ohlcv_0246_no_forward_fill";
     let client = setup(db).await;
@@ -2196,7 +2196,7 @@ async fn ohlcv_does_not_forward_fill_a_stale_rate_into_later_buckets() {
 /// So this pins BOTH halves: the measurement carries across the poll gap, and it
 /// still stops. A regression in either direction fails here.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_at_1m_carries_a_measurement_across_the_oracle_poll_gap() {
     let db = "it_ohlcv_0246_1m_cadence";
     let client = setup(db).await;
@@ -2281,7 +2281,7 @@ async fn ohlcv_at_1m_carries_a_measurement_across_the_oracle_poll_gap() {
 /// 3. **post-epoch, scaled** -> `oracle`. Same signature as case 2, different
 ///    side of the epoch, and that is the ONLY thing separating them.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_usdc_leg_labels_par_external_and_oracle_by_signature_and_epoch() {
     let db = "it_ohlcv_labels_0268";
     let _ = setup(db).await;
@@ -2489,7 +2489,7 @@ async fn seed_price_forming(db: &str, admin: &Client) {
 /// the trading that happened. Carrying a price forward from a neighbouring
 /// bucket, or publishing the 1/17 print, are the two wrong answers.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_a_dust_only_bucket_has_no_price_and_keeps_its_volume() {
     let db = "it_ohlcv_dust_only_0286";
     let client = setup(db).await;
@@ -2528,7 +2528,7 @@ async fn ohlcv_a_dust_only_bucket_has_no_price_and_keeps_its_volume() {
 /// real one. Volume is not evidence that a price is usable: the price-forming
 /// count is.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_a_dust_only_source_with_the_larger_volume_does_not_supply_the_prices() {
     let db = "it_ohlcv_dust_source_0286";
     let client = setup(db).await;
@@ -2570,7 +2570,7 @@ async fn ohlcv_a_dust_only_source_with_the_larger_volume_does_not_supply_the_pri
 /// The three fields task 0286 adds to the wire, on a bucket where the close and
 /// the price-forming vwap genuinely disagree.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_publishes_the_price_forming_count_vwap_and_divergence() {
     let db = "it_ohlcv_pf_wire_0286";
     let client = setup(db).await;
@@ -2605,7 +2605,7 @@ async fn ohlcv_publishes_the_price_forming_count_vwap_and_divergence() {
 /// The quote-leg arm (`base_currency=XLM`) applies no rate and aggregates the
 /// stored decimals directly, so it needs its own gate — and its own proof.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_in_xlm_takes_no_price_from_a_dust_only_source() {
     let db = "it_ohlcv_xlm_dust_0286";
     let client = setup(db).await;
@@ -2693,7 +2693,7 @@ async fn ohlcv_in_xlm_takes_no_price_from_a_dust_only_source() {
 /// the name of the all-trades one, while the published OpenAPI text said
 /// "over every trade it holds, including the ones too small to form a price".
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_vwap_counts_the_dust_and_pf_vwap_does_not() {
     let db = "it_ohlcv_vwap_all_trades_0286";
     let client = setup(db).await;
@@ -2759,7 +2759,7 @@ async fn ohlcv_vwap_counts_the_dust_and_pf_vwap_does_not() {
 ///
 /// RED before the floor: `close` and `low` come back `"0"`.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_in_xlm_takes_no_price_from_a_legacy_row_that_cannot_print_one() {
     let db = "it_ohlcv_xlm_legacy_zero_0286";
     let client = setup(db).await;
@@ -2822,7 +2822,7 @@ async fn ohlcv_in_xlm_takes_no_price_from_a_legacy_row_that_cannot_print_one() {
 /// no price-forming fills to count. All three fields are `null` there — not
 /// `0`, which would claim a bucket of dust.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ohlcv_the_usdc_peg_series_reports_no_price_forming_fields() {
     let db = "it_ohlcv_peg_pf_0286";
     let client = setup(db).await;

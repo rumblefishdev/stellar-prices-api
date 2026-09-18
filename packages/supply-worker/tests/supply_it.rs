@@ -1,11 +1,11 @@
-//! Integration tests for the supply worker (task 0039).
+//! ClickHouse integration test for the supply worker (task 0039).
 //!
 //!   docker compose up -d clickhouse
-//!   cargo test -p supply-worker -- --ignored          # CH + network
+//!   cargo test -p supply-worker --test supply_it -- --ignored
 //!
 //! `load_and_write_supply_roundtrip` needs local ClickHouse (destructive to
-//! prices.assets / prices.asset_supply). `fetch_real_usdc_supply` makes a
-//! read-only public GET to horizon.stellar.org.
+//! prices.assets / prices.asset_supply). The crate's network test lives in
+//! `supply_net_it.rs`, so that `--ignored` here never reaches Horizon.
 
 use clickhouse::Client;
 use rust_decimal::Decimal;
@@ -16,7 +16,7 @@ fn ch_url() -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn load_and_write_supply_roundtrip() {
     let client = Client::default().with_url(ch_url());
     prices_clickhouse::apply_init_sql(&client)
@@ -89,27 +89,5 @@ async fn load_and_write_supply_roundtrip() {
     assert!(
         (supply - 999.5).abs() < 1e-6,
         "round-tripped supply, got {supply}"
-    );
-}
-
-#[tokio::test]
-#[ignore = "read-only public network GET to horizon.stellar.org"]
-async fn fetch_real_usdc_supply() {
-    let http = reqwest::Client::builder()
-        .user_agent("stellar-prices-supply-worker-test/0.1")
-        .build()
-        .unwrap();
-    let supply = supply_worker::fetch_supply(
-        &http,
-        supply_worker::DEFAULT_HORIZON,
-        "USDC",
-        "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
-    )
-    .await
-    .expect("horizon fetch")
-    .expect("USDC has a Horizon record");
-    assert!(
-        supply > Decimal::ZERO,
-        "USDC circulating supply should be positive, got {supply}"
     );
 }

@@ -17,7 +17,7 @@ fn ch_url() -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn home_domain_survives_a_second_write_assets() {
     let writer = OhlcvWriter::plaintext(&ch_url());
     prices_clickhouse::apply_sql(writer.client(), prices_clickhouse::INIT_SQL)

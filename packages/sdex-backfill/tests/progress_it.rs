@@ -91,7 +91,7 @@ async fn write(sink: &Sink, mode: ExtractMode, start: u32, obs: Observed, phase:
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn combined_then_sdex_progress_end_to_end() {
     let c = client();
     prices_clickhouse::apply_sql(&c, prices_clickhouse::INIT_SQL)

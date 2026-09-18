@@ -84,7 +84,7 @@ async fn live_ddl(client: &Client, db: &str, name: &str) -> Option<String> {
 /// applied, byte-identical chain, and a permanently-red check is worse than
 /// none: the real drift arrives unnoticed inside the noise.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_freshly_applied_chain_reports_no_drift() {
     let db = "it_drift_clean";
     let client = setup_scratch(db).await;
@@ -127,7 +127,7 @@ async fn a_freshly_applied_chain_reports_no_drift() {
 /// landing by re-apply. (It was an `argMax → argMaxIf` edit until 0286
 /// replaced the carried product with a rate; the point is unchanged.)
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops() {
     let db = "it_drift_edited";
     let client = setup_scratch(db).await;
@@ -244,7 +244,7 @@ async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops
 /// A missing MV is silent by nature: the target table simply stops receiving
 /// rows, which looks identical to a quiet market until someone reads a chart.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_dropped_mv_is_reported_as_missing() {
     let db = "it_drift_missing";
     let client = setup_scratch(db).await;
@@ -285,7 +285,7 @@ async fn a_dropped_mv_is_reported_as_missing() {
 /// not-append condition — the second is what tells an operator this is
 /// destroying data now, not merely stale.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_replace_mode_mv_is_reported_as_drift_and_as_not_append() {
     let db = "it_drift_replace_mode";
     let client = setup_scratch(db).await;
@@ -341,7 +341,7 @@ async fn a_replace_mode_mv_is_reported_as_drift_and_as_not_append() {
 /// lost `APPEND`. The tool's whole purpose is defeated by a report that goes
 /// quiet at the first surprise.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_unreadable_definition_degrades_one_row_not_the_whole_report() {
     let db = "it_drift_unreadable";
     let client = setup_scratch(db).await;
@@ -402,7 +402,7 @@ async fn an_unreadable_definition_degrades_one_row_not_the_whole_report() {
 /// Walking `rollups.sql` alone cannot find it, so without the sweep the tool
 /// would print an all-clear while two MVs insert into one ReplacingMergeTree.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_undeclared_writer_into_a_rollup_target_is_reported() {
     let db = "it_drift_undeclared";
     let client = setup_scratch(db).await;
@@ -473,7 +473,7 @@ async fn an_undeclared_writer_into_a_rollup_target_is_reported() {
 /// wiping the coarse table on every refresh without saying so. This asserts the
 /// sweep fingerprints what it finds rather than only naming it.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_undeclared_writer_in_replace_mode_is_reported_as_not_append() {
     let db = "it_drift_undeclared_replace";
     let client = setup_scratch(db).await;
@@ -525,7 +525,7 @@ async fn an_undeclared_writer_in_replace_mode_is_reported_as_not_append() {
 /// instead. If a future ClickHouse drops that function or changes it back to
 /// raising, this fails loudly rather than silently restoring the defect.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_or_null_render_returns_empty_instead_of_raising() {
     let db = "it_drift_ornull";
     let client = setup_scratch(db).await;
@@ -565,7 +565,7 @@ async fn the_or_null_render_returns_empty_instead_of_raising() {
 /// hand-edited MV on a provisioned cluster is the realistic drift, and it is
 /// what an `IF NOT EXISTS` apply can never correct.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_hand_edited_window_is_reported_as_drift() {
     let db = "it_drift_hand_edited";
     let client = setup_scratch(db).await;
