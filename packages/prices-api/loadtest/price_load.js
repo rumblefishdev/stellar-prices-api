@@ -270,7 +270,12 @@ export default function (data) {
   const asset = pool[i % pool.length];
   // Whole passes over the pool share a variant, so a key comes back only after
   // pool × VARIANTS iterations. Variant 0 sends no query string (the 0121 URL).
-  const v = Math.floor(i / pool.length) % VARIANTS;
+  // `iterationInTest` restarts at 0 in `main`, which would replay variant 0 — the
+  // keys the warm-up's last pass may have cached seconds earlier (2.6 % hits at
+  // the head of the 2026-09-18 500 req/s run). Starting main half a cycle away
+  // lands it on keys the warm-up last touched well over a TTL ago.
+  const off = exec.scenario.name === 'main' ? Math.floor(VARIANTS / 2) : 0;
+  const v = (Math.floor(i / pool.length) + off) % VARIANTS;
   const qs = v === 0 ? '' : `?min_volume_usd=${(v * 1e-9).toFixed(9)}`;
   const res = http.get(`${BASE_URL}/v1/assets/${encodeURIComponent(asset)}/price${qs}`, MAIN_PARAMS);
   agedOut.add(res.status === 404);
