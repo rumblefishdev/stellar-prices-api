@@ -154,8 +154,9 @@ jobs:
       - uses: actions/checkout@v4
 
       # ClickHouse for the integration-test step after `cargo test` (task
-      # 0275), started this early so the image pull and the container's own
-      # initdb overlap the toolchain install and the compile below. The pin is
+      # 0275), started this early so the container's startup and its own
+      # initdb overlap the toolchain install and the compile below (the image
+      # pull itself happens inside this step). The pin is
       # docker-compose.yml's — one copy, asserted by `preflight` later. The
       # `clickhouse-data` volume must NEVER be cached or restored: initdb runs
       # only on an empty data dir, and a warm volume skips init.sql and
@@ -214,7 +215,14 @@ jobs:
       # `--all-targets` also lints the crate's tests; `enrichment-worker` was on
       # no clippy list at all before this (tasks 0267/0268).
       - run: cargo clippy -p enrichment-worker --features aws-mtls --all-targets --no-deps -- -D warnings
+      # ClickHouse is already listening on the tests' default URL
+      # (localhost:8123) by now. Point this step at a closed port so a
+      # ClickHouse test that loses its `#[ignore]` fails HERE, as it did
+      # before 0275, instead of passing quietly and shrinking the inventory
+      # the integration step asserts.
       - run: cargo test --workspace
+        env:
+          CLICKHOUSE_URL: http://127.0.0.1:9
 
       # ---- ClickHouse integration tests (task 0275) ----
       #
@@ -231,6 +239,7 @@ jobs:
       # docker-compose.yml pin and timezone() is UTC. `--wait-timeout` turns
       # a server that never gets healthy into a failure instead of a hang.
       - name: Wait for ClickHouse and assert its version
+        timeout-minutes: 5
         env:
           CLICKHOUSE_URL: http://localhost:8123
         run: |
@@ -240,6 +249,7 @@ jobs:
       # The mounted init.sql creates the database but not the rollup MVs; the
       # init binary is the one complete, idempotent bootstrap.
       - name: Apply the ClickHouse schema
+        timeout-minutes: 10
         env:
           CLICKHOUSE_URL: http://localhost:8123
         run: cargo run -q -p prices-clickhouse --bin prices-clickhouse-init -- --rollups
@@ -247,12 +257,18 @@ jobs:
       # `execution_bound_error_it` is vacuous without a reverse proxy in the
       # path, as production has (task 0281). Armed, not excluded.
       - name: Start the ClickHouse reverse proxy
+        timeout-minutes: 3
         run: scripts/ch-proxy-0281.sh up
 
       # One cargo invocation, serial (`--test-threads=1` — several targets
       # share the `prices` database), red unless every derived test passed
       # and every target printed a summary. Same command as on a workstation.
+      # Bounded: the ITs set no request timeout and the proxy allows 7200 s,
+      # so one hung query would otherwise hold the runner for the 360-minute
+      # job default — and a cancelled job skips the `failure()` log dump.
+      # Measured ~100 s of test time serially (2026-09-18).
       - name: ClickHouse integration tests
+        timeout-minutes: 20
         env:
           CLICKHOUSE_URL: http://localhost:8123
           CLICKHOUSE_PROXY_URL: http://localhost:8124
@@ -266,6 +282,13 @@ jobs:
           docker compose ps || true
           docker compose logs clickhouse | tail -n 200 || true
           docker logs ch-proxy-0281 2>&1 | tail -n 50 || true
+
+      # Free the runner (4 CPU / 8 GB) before the release Lambda build.
+      - name: Stop ClickHouse and the proxy
+        if: always()
+        run: |
+          scripts/ch-proxy-0281.sh down || true
+          docker compose down -v || true
 
       # The set of Lambda assets is DERIVED from the CDK source rather than
       # hand-listed here. Three hand-maintained copies (build list, verify

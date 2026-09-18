@@ -50,15 +50,25 @@ crates; 5 network, 5 production.
 
 The steps, in order, and what each one guards:
 
-| step                                          | guards                                                                                                                                                                                                          |
-| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Start ClickHouse` (right after checkout)     | `docker compose up -d clickhouse` early, so the image pull overlaps the compile. The pin is `docker-compose.yml`'s — one copy.                                                                                  |
-| `Classify #[ignore]d tests`                   | `ignored-tests.sh check` — database-free, seconds; a vocabulary violation fails before anything expensive runs                                                                                                  |
-| `Wait for ClickHouse and assert its version`  | `up --wait --wait-timeout 120`, then `preflight`: a host-side retry (the in-container healthcheck is satisfied by the image's temporary initdb server), then `version()` equals the pin and `timezone()` is UTC |
-| `Apply the ClickHouse schema`                 | `prices-clickhouse-init -- --rollups` — the mounted `init.sql` creates the database but not the rollup MVs                                                                                                      |
-| `Start the ClickHouse reverse proxy`          | `scripts/ch-proxy-0281.sh up` (`caddy:2.11.4`) — `execution_bound_error_it` is vacuous without a proxy in the path (task 0281)                                                                                  |
-| `ClickHouse integration tests`                | `ignored-tests.sh run`: ONE `cargo test --workspace --test …` invocation, `--no-fail-fast -- --ignored --test-threads=1`; red unless passed == the derived count AND every target printed a summary             |
-| `ClickHouse and proxy logs` (`if: failure()`) | dumps the container logs — the image's entrypoint echoes every decision it makes                                                                                                                                |
+| step                                             | guards                                                                                                                                                                                                          |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Start ClickHouse` (right after checkout)        | `docker compose up -d clickhouse` early, so the container's startup overlaps the compile (the pull happens inside the step). The pin is `docker-compose.yml`'s — one copy.                                      |
+| `Classify #[ignore]d tests`                      | `ignored-tests.sh check` — database-free, seconds; a vocabulary violation fails before anything expensive runs                                                                                                  |
+| `Wait for ClickHouse and assert its version`     | `up --wait --wait-timeout 120`, then `preflight`: a host-side retry (the in-container healthcheck is satisfied by the image's temporary initdb server), then `version()` equals the pin and `timezone()` is UTC |
+| `Apply the ClickHouse schema`                    | `prices-clickhouse-init -- --rollups` — the mounted `init.sql` creates the database but not the rollup MVs                                                                                                      |
+| `Start the ClickHouse reverse proxy`             | `scripts/ch-proxy-0281.sh up` (`caddy:2.11.4`) — `execution_bound_error_it` is vacuous without a proxy in the path (task 0281)                                                                                  |
+| `ClickHouse integration tests`                   | `ignored-tests.sh run`: ONE `cargo test --workspace --test …` invocation, `--no-fail-fast -- --ignored --test-threads=1`; red unless passed == the derived count AND every target printed a summary             |
+| `ClickHouse and proxy logs` (`if: failure()`)    | dumps the container logs — the image's entrypoint echoes every decision it makes                                                                                                                                |
+| `Stop ClickHouse and the proxy` (`if: always()`) | frees the 4 CPU / 8 GB runner before the release Lambda build                                                                                                                                                   |
+
+Two further guards sit outside the table. The unit step `cargo test --workspace`
+runs with `CLICKHOUSE_URL=http://127.0.0.1:9`: ClickHouse is already listening on
+the tests' default URL by then, so without it a ClickHouse test that lost its
+`#[ignore]` would pass there quietly and shrink the inventory instead of failing
+as it did before 0275. And the ClickHouse steps carry `timeout-minutes` (5 / 10 /
+3 / 20): the tests set no request timeout and the proxy allows 7200 s, so one hung
+query would otherwise hold the runner for the 360-minute job default — and a
+cancelled job skips the `failure()` log dump.
 
 The two count assertions are deliberate: the summed `passed` catches a test that
 stopped running, and the number of `test result:` lines catches a test binary
