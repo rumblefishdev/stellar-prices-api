@@ -7,6 +7,10 @@
 //! on a third-party RPC, so the parser and envelope builder are pinned by offline
 //! unit tests in `symbols.rs`; this test is what proves the two ends actually
 //! meet against a real contract.
+//!
+//! Recorded in the `#[ignore]` inventory (tools/scripts/ignored-tests.sh) as a
+//! public-network test and deliberately never run by CI: third-party uptime
+//! must not gate a PR, and a developer can fix none of it (task 0275).
 
 use asset_discovery::symbols::{DEFAULT_SOROBAN_RPC, Outcome, http_client, resolve_symbol};
 

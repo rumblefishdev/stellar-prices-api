@@ -5,8 +5,8 @@
 //! that re-writing the same candle is idempotent — the "re-run → count FINAL
 //! stable" acceptance criterion — through the real backfill `Sink` write path.
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p sdex-backfill --test candles_it -- --ignored --nocapture
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p sdex-backfill --test candles_it -- --ignored --nocapture --test-threads=1
 //!
 //! Destructive to local `prices.price_ohlcv_1m` (truncates it); never run
 //! against a shared/prod cluster.

@@ -1,6 +1,7 @@
 # CI pipeline
 
-Current state of `.github/workflows/ci.yml`. Measured 2026-08-04.
+Current state of `.github/workflows/ci.yml`. Measured 2026-08-04; the ClickHouse
+integration-test steps were added by task 0275 (2026-09-18).
 
 ## Shape
 
@@ -15,16 +16,78 @@ changes (ubuntu-latest, ~7s)
 
 Both workers also run unconditionally on `push` to `master`.
 
-| Job          | Runs when                                                                                         | Does                                                                                |
-| ------------ | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `changes`    | always                                                                                            | paths-filter → `rust` / `typescript` booleans                                       |
-| `typescript` | `libs/**`, `infra/**`, `package*.json`, `tsconfig*.json`, `nx.json`, `ci.yml`, `tools/scripts/**` | `nx format:check`, `nx run-many -t lint build typecheck`, `verify-lambda-assets.sh` |
-| `rust`       | `packages/**`, `Cargo.{toml,lock}`, `ci.yml`, `tools/scripts/**`                                  | `cargo fmt/check/clippy/test`, build 9 Lambda bootstraps, verify them, `cdk synth`  |
+| Job          | Runs when                                                                                            | Does                                                                                                                     |
+| ------------ | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `changes`    | always                                                                                               | paths-filter → `rust` / `typescript` booleans                                                                            |
+| `typescript` | `libs/**`, `infra/**`, `package*.json`, `tsconfig*.json`, `nx.json`, `ci.yml`, `tools/scripts/**`    | `nx format:check`, `nx run-many -t lint build typecheck`, the `#[ignore]` guard's tests, `verify-lambda-assets.sh`       |
+| `rust`       | `packages/**`, `Cargo.{toml,lock}`, `ci.yml`, `tools/scripts/**`, `docker-compose.yml`, `scripts/**` | `cargo fmt/check/clippy/test`, the 229 ClickHouse integration tests, build 9 Lambda bootstraps, verify them, `cdk synth` |
 
 `ci.yml` and `tools/scripts/**` appear in **both** filters deliberately — the
 Lambda asset guards live in those scripts, and without the entry a PR touching
 only a guard would run no job and CI would never exercise the one file both jobs
 depend on.
+
+`docker-compose.yml` and `scripts/**` are in the `rust` filter because the
+integration tests run against the ClickHouse the compose file pins and one of
+them needs the proxy in `scripts/` — a PR that bumps the pin or breaks the proxy
+must run the job that depends on them.
+
+## The ClickHouse integration tests
+
+Owned by task 0275. Until then every ClickHouse integration test sat behind
+`#[ignore]` and ran only by hand, so a guard like 0215's pivot-set test could not
+fail the build. Now all of them run in the `rust` job on every Rust PR.
+
+**The inventory is derived, never listed.** `tools/scripts/ignored-tests.sh`
+classifies every `#[ignore]` under `packages/` by its reason — a closed
+vocabulary of three prefixes: `requires ClickHouse` (run), `requires public
+network` and `requires production` (recorded, never run: third-party uptime and
+production state must not gate a PR). A bare or unknown reason, an `#[ignore]`
+outside `packages/*/tests/*_it.rs`, a test target holding two classes, a
+ClickHouse target sharing its name with another `_it` target, or an empty
+inventory fails the build. At 0275: 229 ClickHouse tests in 31 targets across 12
+crates; 5 network, 5 production.
+
+The steps, in order, and what each one guards:
+
+| step                                          | guards                                                                                                                                                                                                          |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Start ClickHouse` (right after checkout)     | `docker compose up -d clickhouse` early, so the image pull overlaps the compile. The pin is `docker-compose.yml`'s — one copy.                                                                                  |
+| `Classify #[ignore]d tests`                   | `ignored-tests.sh check` — database-free, seconds; a vocabulary violation fails before anything expensive runs                                                                                                  |
+| `Wait for ClickHouse and assert its version`  | `up --wait --wait-timeout 120`, then `preflight`: a host-side retry (the in-container healthcheck is satisfied by the image's temporary initdb server), then `version()` equals the pin and `timezone()` is UTC |
+| `Apply the ClickHouse schema`                 | `prices-clickhouse-init -- --rollups` — the mounted `init.sql` creates the database but not the rollup MVs                                                                                                      |
+| `Start the ClickHouse reverse proxy`          | `scripts/ch-proxy-0281.sh up` (`caddy:2.11.4`) — `execution_bound_error_it` is vacuous without a proxy in the path (task 0281)                                                                                  |
+| `ClickHouse integration tests`                | `ignored-tests.sh run`: ONE `cargo test --workspace --test …` invocation, `--no-fail-fast -- --ignored --test-threads=1`; red unless passed == the derived count AND every target printed a summary             |
+| `ClickHouse and proxy logs` (`if: failure()`) | dumps the container logs — the image's entrypoint echoes every decision it makes                                                                                                                                |
+
+The two count assertions are deliberate: the summed `passed` catches a test that
+stopped running, and the number of `test result:` lines catches a test binary
+killed by a signal or the runner's OOM ceiling, which prints no summary at all.
+
+`--test-threads=1` is also deliberate (decided with Adam, 2026-09-18) — several
+targets write the shared `prices` database, and two of them were measured flaky
+in parallel. It costs **~100 s of test time serial vs ~50 s parallel**, measured
+on the workstation (three runs at 99.8–101.2 s). The first CI runs are the
+number to record here next to `Build Lambda bootstraps`' 3m24s.
+
+The guard's own tests (`npm run ignored-tests:verify-guard`, `node:test` over
+fixture trees) run in the `typescript` job, which pins Node from `.nvmrc`. When
+the infra Nx `test` target from PR #325 lands, they belong there — a one-line
+follow-up, not a dependency.
+
+**Two traps a future editor must not undo:**
+
+- **Never cache or restore the `clickhouse-data` volume.** The image runs
+  initdb only on an empty data dir; a warm volume skips `init.sql` and
+  `CREATE DATABASE prices` while printing `Skipping initialization`.
+- **`CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1` in `docker-compose.yml` is
+  load-bearing.** With `CLICKHOUSE_USER=default` and no password, it is the only
+  clause in the image's entrypoint that opens the `default` user to `::/0`.
+  Delete it and every test fails at connect time.
+
+Run them locally exactly as CI does: `scripts/ch-proxy-0281.sh up`, then
+`CLICKHOUSE_PROXY_URL=http://localhost:8124 tools/scripts/ignored-tests.sh`.
+Never two runs against one server at once.
 
 ## The Lambda asset guards
 
@@ -64,10 +127,15 @@ the shape of; `typescript` is ~45s end to end and not worth optimizing.
 | ----------------------------------------------------- | --------- | ------- |
 | setup (checkout, toolchain, rust-cache, cargo-lambda) | 29s       | 9%      |
 | `cargo fmt` / `check` / `clippy` / `test`             | 45s       | 15%     |
+| ClickHouse integration tests (task 0275)¹             | —         | —       |
 | **Build Lambda bootstraps**                           | **3m24s** | **67%** |
 | Verify Lambda artifacts                               | 0s        | —       |
 | `actions/setup-node` + `npm ci` + `cdk synth`         | 29s       | 9%      |
 | **total**                                             | **5m08s** |         |
+
+¹ Added after this measurement; ~100 s of serial test time on the workstation
+plus schema bootstrap and image pull, not yet measured in CI. See
+[The ClickHouse integration tests](#the-clickhouse-integration-tests).
 
 **If you want to make CI faster, `Build Lambda bootstraps` is the only step that
 matters.** It is two thirds of the job. Everything else is rounding error.

@@ -1,6 +1,7 @@
 //! Task 0286 / ADR 0287 — the pf-column migration, against a real ClickHouse.
 //!
-//!     cargo test -p prices-clickhouse --test candle_migration_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p prices-clickhouse --test candle_migration_it -- --ignored --test-threads=1
 //!
 //! `init.sql` is applied to databases that already hold billions of pre-0286
 //! candle rows. The three price-forming columns are added with DEFAULT

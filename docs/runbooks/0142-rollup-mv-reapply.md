@@ -126,15 +126,21 @@ timestamp` for the `TO`-table insert routing to work, and that alias
       header of `rollups.sql`.
 
 Then prove the edit locally against the prod-pinned server before it goes near
-the cluster:
+the cluster. CI runs these three — and every other ClickHouse integration test —
+on the PR (task 0275), but a schema edit is worth seeing green before it is
+pushed:
 
 ```bash
-docker compose up -d clickhouse           # 26.3.10.60, the prod pin
+docker compose up -d --wait clickhouse    # 26.3.10.60, the prod pin
+cargo run -q -p prices-clickhouse --bin prices-clickhouse-init -- --rollups
 cargo test -p prices-clickhouse --lib
-cargo test -p prices-clickhouse --test rollup_drift_it   -- --ignored
-cargo test -p prices-clickhouse --test rollup_append_it  -- --ignored
-cargo test -p prices-clickhouse --test rollup_chain_it   -- --ignored
+cargo test -p prices-clickhouse --test rollup_drift_it   -- --ignored --test-threads=1
+cargo test -p prices-clickhouse --test rollup_append_it  -- --ignored --test-threads=1
+cargo test -p prices-clickhouse --test rollup_chain_it   -- --ignored --test-threads=1
 ```
+
+Or all of them, exactly as CI does: `scripts/ch-proxy-0281.sh up`, then
+`CLICKHOUSE_PROXY_URL=http://localhost:8124 tools/scripts/ignored-tests.sh`.
 
 `rollup_append_it` is the one that matters most here: it places data **outside**
 the refresh window and proves a refresh preserves it. An edit that reintroduces

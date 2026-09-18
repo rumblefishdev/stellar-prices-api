@@ -1,8 +1,8 @@
 //! Live-ClickHouse integration test for `GET /v1/assets/{id}/price`. Gated
 //! `#[ignore]` (matches the `prices-clickhouse` integration tests):
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p prices-api --test price_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p prices-api --test price_it -- --ignored --test-threads=1
 //!
 //! Each test owns an isolated scratch database (the `prices.*` schema rewritten
 //! onto the scratch name) and drops it at the end. The handler's SQL uses

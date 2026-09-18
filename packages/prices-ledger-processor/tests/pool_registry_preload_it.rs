@@ -4,8 +4,8 @@
 //! `prices.unresolved_pools`. Mirrors the backfill's `pool_registry_it` but
 //! exercises the live [`ClickHouseSink`], against a local Docker ClickHouse.
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p prices-ledger-processor --test pool_registry_preload_it -- --ignored --nocapture
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p prices-ledger-processor --test pool_registry_preload_it -- --ignored --nocapture --test-threads=1
 //!
 //! Destructive to the local `prices.pool_registry` table (truncates it); never
 //! run against a shared/prod cluster.

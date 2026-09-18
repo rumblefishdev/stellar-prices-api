@@ -1,7 +1,8 @@
 //! Task 0286 / ADR 0287 — a real candle, through the real writer, into a real
 //! ClickHouse, read back on all eighteen columns.
 //!
-//!     cargo test -p prices-ingest-core --test candle_write_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p prices-ingest-core --test candle_write_it -- --ignored --test-threads=1
 //!
 //! The property this exists for cannot be seen from either side alone. The
 //! clickhouse crate routes an INSERT by struct field NAME, so a candle column

@@ -80,6 +80,10 @@
 //! `usdc_is_back_at_par_a_few_days_later` exists so the first test cannot be
 //! satisfied by pricing EVERYTHING ~3% low — a uniformly scaled table would pass
 //! the depeg check and fail this one.
+//!
+//! Recorded in the `#[ignore]` inventory (tools/scripts/ignored-tests.sh) as a
+//! production test and deliberately never run by CI: production state must not
+//! gate a PR (task 0275).
 
 use clickhouse::Client;
 

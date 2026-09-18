@@ -1,7 +1,7 @@
 //! Live-ClickHouse integration test for `prices.usd_rate` (task 0167).
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p prices-clickhouse --test usd_rate_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p prices-clickhouse --test usd_rate_it -- --ignored --test-threads=1
 
 use clickhouse::Client;
 

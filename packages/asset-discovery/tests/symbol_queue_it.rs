@@ -1,8 +1,8 @@
 //! The `asset_symbol` retry queue (task 0210), against a local Docker
 //! ClickHouse with the `prices` schema applied.
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p asset-discovery --test symbol_queue_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p asset-discovery --test symbol_queue_it -- --ignored --test-threads=1
 //!
 //! Uses the real `prices` database, so it is destructive to those local tables —
 //! fine for the ephemeral Docker instance, never against a shared cluster.

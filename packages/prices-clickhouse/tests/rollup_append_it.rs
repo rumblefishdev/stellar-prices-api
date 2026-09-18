@@ -1,7 +1,7 @@
 //! APPEND-mode rollup durability test (task 0095).
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p prices-clickhouse --test rollup_append_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p prices-clickhouse --test rollup_append_it -- --ignored --test-threads=1
 //!
 //! This is the test the 0059 full-chain test *structurally could not be*.
 //! `rollup_chain_it.rs` deliberately anchors every row INSIDE the refresh window

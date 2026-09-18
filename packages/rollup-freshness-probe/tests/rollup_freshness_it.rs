@@ -16,8 +16,8 @@
 //! - a **stalled** tier must produce a lag over its bound — the 0136 scenario.
 //!
 //! ```text
-//! docker compose up -d clickhouse
-//! cargo test -p rollup-freshness-probe --test rollup_freshness_it -- --ignored --nocapture
+//! tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//! cargo test -p rollup-freshness-probe --test rollup_freshness_it -- --ignored --nocapture --test-threads=1
 //! ```
 //!
 //! ⚠️ **Destructive, and to more than the candles.** These tests `TRUNCATE`

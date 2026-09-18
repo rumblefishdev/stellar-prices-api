@@ -4,8 +4,8 @@
 //! RowBinary column-list insert, `LowCardinality(venue)`, and `FINAL` read) —
 //! the durable output a partial re-backfill / the live processor loads.
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p sdex-backfill --test pool_registry_it -- --ignored --nocapture
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p sdex-backfill --test pool_registry_it -- --ignored --nocapture --test-threads=1
 //!
 //! Destructive to the local `prices.pool_registry` table (truncates it); never
 //! run against a shared/prod cluster.

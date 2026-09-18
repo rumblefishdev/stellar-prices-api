@@ -1,8 +1,8 @@
 //! Integration test for the cleanup worker (task 0039) against a local Docker
 //! ClickHouse with the `prices` schema:
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p cleanup-worker --test cleanup_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p cleanup-worker --test cleanup_it -- --ignored --test-threads=1
 //!
 //! Destructive to the local `prices.price_ohlcv_1m` table — never run against
 //! a shared/prod cluster.

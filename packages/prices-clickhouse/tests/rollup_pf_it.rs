@@ -1,6 +1,7 @@
 //! Price-forming rollup semantics, end-to-end on the real shipped SQL
 //! (task 0286 / ADR 0287 §2–§5).
 //!
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
 //!     cargo test -p prices-clickhouse --test rollup_pf_it -- --ignored --test-threads=4
 //!
 //! A candle's prices come only from the price-forming trades of its own bucket.
@@ -566,6 +567,13 @@ async fn ohlc_ordering_holds_on_every_tier() {
     }
 
     // The month boundary, exactly. April holds the extreme; March does not.
+    //
+    // ⚠️ Time bomb, noted by task 0275 and deliberately left alone while green:
+    // these buckets are fixed 2026 literals, but the monthly MV only rolls
+    // `timestamp >= toStartOfInterval(now() - INTERVAL 400 DAY, INTERVAL 1 MONTH)`
+    // (schema/rollups.sql, mirrored in src/rollup_sql.rs). From about
+    // 2027-05-06 the March 2026 bucket falls out of that window and this test
+    // turns red with nothing changed. The fix then is a now()-relative seed.
     let [_, april_high, april_low, _, _, _] = candle(
         &admin,
         db,

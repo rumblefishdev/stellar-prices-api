@@ -1,8 +1,8 @@
 //! Live-ClickHouse integration test for the read-surface views
 //! (`price_usd_series`, `usd_reference`). Gated `#[ignore]`:
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p prices-clickhouse --test views_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p prices-clickhouse --test views_it -- --ignored --test-threads=1
 //!
 //! Owns an isolated scratch database (the `prices.*` schema + views rewritten
 //! onto the scratch name) and drops it at the end.

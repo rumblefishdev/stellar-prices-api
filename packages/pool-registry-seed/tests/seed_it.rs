@@ -3,8 +3,8 @@
 //! normalisation landed (aqua→aquarius, sdex + unknown poolType dropped). Needs
 //! a local ClickHouse with the `prices` schema:
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p pool-registry-seed --test seed_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p pool-registry-seed --test seed_it -- --ignored --test-threads=1
 //!
 //! Destructive to the local `prices.pool_registry` table — never run against a
 //! shared/prod cluster.

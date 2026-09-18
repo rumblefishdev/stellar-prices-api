@@ -1,7 +1,7 @@
 //! Pre-roll `close_usd` guard regression test (task 0145).
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p prices-clickhouse --test preroll_close_usd_guard_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p prices-clickhouse --test preroll_close_usd_guard_it -- --ignored --test-threads=1
 //!
 //! `close_usd` is baked by a separate, LAGGING enrichment pass onto a
 //! non-nullable `Decimal(38,14) DEFAULT 0` column, so "not yet enriched" and

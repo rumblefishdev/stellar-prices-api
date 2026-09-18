@@ -2,8 +2,8 @@
 //! ClickHouse's own error — the code, the elapsed time and the bound crossed
 //! (task 0281).
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p prices-clickhouse --test execution_bound_error_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p prices-clickhouse --test execution_bound_error_it -- --ignored --test-threads=1
 //!
 //! WHY THIS EXISTS
 //! ---------------

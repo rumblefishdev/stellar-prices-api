@@ -1,8 +1,8 @@
 //! Live-ClickHouse integration tests for `GET /v1/assets/{id}/ohlcv`. Gated
 //! `#[ignore]`:
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p prices-api --test ohlcv_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p prices-api --test ohlcv_it -- --ignored --test-threads=1
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

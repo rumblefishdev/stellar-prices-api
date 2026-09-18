@@ -32,6 +32,10 @@
 //! (provisioned by task 0063; never committed). The key is read straight into
 //! rustls and never logged — `MtlsBundle`'s Debug redacts all PEM, and this test
 //! prints only the table count, never the material.
+//!
+//! Recorded in the `#[ignore]` inventory (tools/scripts/ignored-tests.sh) as a
+//! production test and deliberately never run by CI: production state must not
+//! gate a PR (task 0275).
 #![cfg(feature = "aws-mtls")]
 
 use prices_clickhouse::mtls::{MtlsBundle, client_with_mtls};

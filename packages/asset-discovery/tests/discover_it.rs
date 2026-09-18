@@ -3,8 +3,8 @@
 //! `prices-ledger-processor` (contiguous ledgers 62460540–62460542). Needs a
 //! local ClickHouse with the `prices` schema:
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p asset-discovery --test discover_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p asset-discovery --test discover_it -- --ignored --test-threads=1
 //!
 //! Destructive to the local `prices.assets` / `prices.discovery_state` tables —
 //! never run against a shared/prod cluster.

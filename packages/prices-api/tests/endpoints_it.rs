@@ -1,8 +1,8 @@
 //! Live-ClickHouse integration tests for the Phase 2 endpoints (asset detail,
 //! batch, oracles, backfill). Gated `#[ignore]`:
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p prices-api --test endpoints_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p prices-api --test endpoints_it -- --ignored --test-threads=1
 //!
 //! Each test owns an isolated scratch database, dropped at the end.
 

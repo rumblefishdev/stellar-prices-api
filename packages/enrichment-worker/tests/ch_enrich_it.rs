@@ -1,8 +1,8 @@
 //! Live-ClickHouse integration tests for the production enrichment pass
 //! (`ch_enrich`). Gated `#[ignore]` — they need a reachable ClickHouse:
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p enrichment-worker --test ch_enrich_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p enrichment-worker --test ch_enrich_it -- --ignored --test-threads=1
 //!
 //! Each test owns an isolated scratch database (real schema applied from
 //! `prices-clickhouse::INIT_SQL`, rewritten onto the scratch name) and drops it

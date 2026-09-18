@@ -1,8 +1,8 @@
 //! Integration test for the seed path (task 0054), against a local Docker
 //! ClickHouse with the `prices` schema applied.
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p asset-discovery --test seed_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p asset-discovery --test seed_it -- --ignored --test-threads=1
 //!
 //! Uses the real `prices` database (the writer addresses `prices.assets`
 //! literally), so it is destructive to that local table — fine for the

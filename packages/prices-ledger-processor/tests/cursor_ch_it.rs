@@ -5,8 +5,8 @@
 //! recycles), instead of resetting to a seed. Runs against a local Docker
 //! ClickHouse:
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p prices-ledger-processor --test cursor_ch_it -- --ignored --nocapture
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p prices-ledger-processor --test cursor_ch_it -- --ignored --nocapture --test-threads=1
 //!
 //! Isolation: these run in parallel against one shared `prices.ingest_cursor`
 //! table, so each test uses a DISTINCT `id` and never truncates (a global

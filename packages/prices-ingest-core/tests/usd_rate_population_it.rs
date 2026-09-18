@@ -1,7 +1,7 @@
 //! Task 0167 — `populate_usd_rate_from_oracle` against a live ClickHouse.
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p prices-ingest-core --test usd_rate_population_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p prices-ingest-core --test usd_rate_population_it -- --ignored --test-threads=1
 //!
 //! Uses the real `prices` schema rewritten onto a scratch database. The writer
 //! hardcodes `prices.*` table names, so the scratch db is selected on the

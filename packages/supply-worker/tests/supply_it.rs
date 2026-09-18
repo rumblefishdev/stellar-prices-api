@@ -1,7 +1,7 @@
 //! ClickHouse integration test for the supply worker (task 0039).
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p supply-worker --test supply_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p supply-worker --test supply_it -- --ignored --test-threads=1
 //!
 //! `load_and_write_supply_roundtrip` needs local ClickHouse (destructive to
 //! prices.assets / prices.asset_supply). The crate's network test lives in

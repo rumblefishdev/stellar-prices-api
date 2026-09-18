@@ -10,8 +10,8 @@
 //! IS NOT NULL` gate (finding A: no live-only false-fire) and that `FINAL`
 //! returns the latest version, not a stale pre-merge `running` row.
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p backfill-freshness-probe --test freshness_it -- --ignored --nocapture
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p backfill-freshness-probe --test freshness_it -- --ignored --nocapture --test-threads=1
 //!
 //! Destructive to the local `prices.backfill_progress` table (truncates it);
 //! never run against a shared/prod cluster.

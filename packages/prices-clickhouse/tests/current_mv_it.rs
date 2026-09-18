@@ -1,8 +1,8 @@
 //! Integration test for the `mv_current_prices` refreshable MV (task 0039),
 //! against a local Docker ClickHouse:
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p prices-clickhouse --test current_mv_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p prices-clickhouse --test current_mv_it -- --ignored --test-threads=1
 //!
 //! Verifies the MV computes price_usd / volume_24h_usd / market_cap_usd from
 //! price_ohlcv_1m + asset_supply, and that a missing supply → market_cap 0

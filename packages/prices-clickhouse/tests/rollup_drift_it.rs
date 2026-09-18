@@ -1,7 +1,7 @@
 //! Live-ClickHouse integration test for rollup-MV drift detection (task 0142).
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p prices-clickhouse --test rollup_drift_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p prices-clickhouse --test rollup_drift_it -- --ignored --test-threads=1
 //!
 //! Runs against ClickHouse pinned to the production version (26.3.10.60),
 //! because every part of this is a claim about the server's own DDL handling:
