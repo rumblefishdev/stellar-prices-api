@@ -28,6 +28,13 @@ history:
     note: >
       Activated the same day. First job: commit run 1's k6 export and the
       report section on this task's branch; then the four preconditions.
+  - date: 2026-09-18
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Team decision at the daily: the ramp runs as planned, 500 and 1000
+      req/s are informational, and the M3 evidence uses whatever the run
+      measures. See "Decision — 2026-09-18".
 ---
 
 # Load-test run 2: ramp to 1000 req/s from inside eu-central-1, and the report
@@ -94,6 +101,34 @@ one row per rate, the plan named, client location named, gateway-measured and
 client-measured p95 side by side, and the hit-rate estimate per row. Include
 run 1 (the export `docs/loadtest-results/2026-09-17-regime3-wide.json` is
 still uncommitted in the working tree — commit it on this task's branch).
+
+## Decision — 2026-09-18 (daily)
+
+Agreed with the team:
+
+- **The ramp runs as planned.** 500 req/s, and 1000 if the box allows, are
+  **informational** — they answer the Work list's "results at 100/s, 500/s,
+  1000/s" and name our ceiling. Neither is a pass/fail bar for M3.
+- **The only bar is AC 5: p95 < 100 ms at 100 req/s, plan named** (200 ms was
+  Tranche 2's AC 2, not this one). The 20-asset AC scenario already meets it
+  (p95 47 ms, 2026-09-03), and run 1's miss-only p95 measured at the gateway is
+  74 ms — also under the bar. Only the laptop-measured 464 ms is over it, which
+  is why the in-region client comes first: it may make any further argument
+  unnecessary.
+- **The evidence package uses the numbers the run produces, as p95.** The
+  criterion names p95, so a mean does not replace it; it can sit beside it as
+  an extra column. Report the miss-only rows and the AC scenario side by side,
+  each with its hit rate.
+- **The cache argument, stated so production data cannot contradict it.** Do
+  not claim that today's users hit the cache: CloudWatch for
+  `prices-production-api`, 2026-09-04 → 09-16 (load-test day excluded), shows
+  63 `CacheHitCount` against ~1,650 `CacheMissCount` (~4 %) on 0–1,100
+  requests/day — at that volume a 10 s TTL almost never sees the same key
+  twice. The honest form: at low traffic nearly everything is a miss and a miss
+  costs ~74 ms p95 at the gateway; the cache earns its keep under volume
+  concentrated on popular assets, which is the regime where load matters
+  (regime 2: ~98 % hits, p95 47 ms at 100 req/s). 1000 req/s of pure misses is
+  a synthetic worst case, reported as the data path's ceiling.
 
 ## Acceptance Criteria
 
