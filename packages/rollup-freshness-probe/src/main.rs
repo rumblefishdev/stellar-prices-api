@@ -223,35 +223,6 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 Err(e) => failures.push(format!("usd-peg-applied read: {e}")),
             }
 
-            // ---- 3b. The zero sentinel's stored-data invariants (ADR 0292) --
-            //
-            // Not scoped to a quote leg, unlike the two checks above: a candle
-            // with no price-forming fill carries no price whatever it is quoted
-            // in. Independent of them for the same reason they are independent
-            // of each other — one tier's refusal says nothing about another's.
-            let mut zero_counts: Option<ZeroInvariantCounts> = None;
-            match ch
-                .query(&zero_invariant_query)
-                .fetch_one::<ZeroInvariantCounts>()
-                .await
-            {
-                Ok(counts) => {
-                    zero_counts = Some(counts);
-                    match zero_invariant_metric(&counts) {
-                        Ok(metric) => {
-                            if let Err(e) =
-                                publish_sanity(&cw, &environment, std::slice::from_ref(&metric))
-                                    .await
-                            {
-                                failures.push(format!("zero-invariants publish: {e}"));
-                            }
-                        }
-                        Err(refusal) => failures.push(format!("zero-invariants: {refusal}")),
-                    }
-                }
-                Err(e) => failures.push(format!("zero-invariants read: {e}")),
-            }
-
             // ---- 4. Materialized-view drift (task 0204, gap 3) ------------
             //
             // This is the only read in the invocation that touches `system.*`.
@@ -297,6 +268,43 @@ async fn main() -> Result<(), lambda_runtime::Error> {
 
             // Log before deciding the invocation's fate: on a partial failure
             // this line is the only record of what the healthy checks measured.
+            // ---- 5. The zero sentinel's stored-data invariants (ADR 0292) ---
+            //
+            // LAST on purpose. It is the one unscoped read here: `timestamp` is the
+            // fourth sort-key column, so the 48 h window prunes only to the monthly
+            // partition, which is then merged `FINAL` across every pair. Its cost on
+            // production is unmeasured. A hard Lambda timeout loses whatever has not
+            // been published yet, and the MV-drift datum above is `NOT_BREACHING` on
+            // missing data — so a slow scan placed before it would turn a lost
+            // `APPEND` into a false OK. Placed here, a timeout costs only this check.
+            //
+            // Not scoped to a quote leg, unlike the two USD-sanity checks (3): a
+            // candle with no price-forming fill carries no price whatever it is
+            // quoted in. Independent of them for the same reason they are
+            // independent of each other — one refusal says nothing about another.
+            let mut zero_counts: Option<ZeroInvariantCounts> = None;
+            match ch
+                .query(&zero_invariant_query)
+                .fetch_one::<ZeroInvariantCounts>()
+                .await
+            {
+                Ok(counts) => {
+                    zero_counts = Some(counts);
+                    match zero_invariant_metric(&counts) {
+                        Ok(metric) => {
+                            if let Err(e) =
+                                publish_sanity(&cw, &environment, std::slice::from_ref(&metric))
+                                    .await
+                            {
+                                failures.push(format!("zero-invariants publish: {e}"));
+                            }
+                        }
+                        Err(refusal) => failures.push(format!("zero-invariants: {refusal}")),
+                    }
+                }
+                Err(e) => failures.push(format!("zero-invariants read: {e}")),
+            }
+
             tracing::info!(
                 tiers,
                 current_prices_rows = current_age.map(|a| a.row_count).unwrap_or_default(),
