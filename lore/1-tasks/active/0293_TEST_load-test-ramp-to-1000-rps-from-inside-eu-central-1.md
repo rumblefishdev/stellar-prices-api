@@ -43,8 +43,9 @@ history:
       regime 3 at 100 req/s gave k6 p95 127 ms (464 the day before) with the
       gateway at ~80 — yesterday's tail WAS the client network, now shown
       rather than argued. Not an evidence run: the pool was a day old (1,536
-      of 4,039 assets 404 at setup, 67 more mid-run), a backfill was running,
-      and the after-control showed the network tail growing. New finding: a
+      of 4,039 assets 404 at setup, 67 more mid-run) and the after-control
+      showed the network tail growing. (An earlier version of this entry also
+      said a backfill was running — it was not; it starts 2026-09-21.) New finding: a
       ~4 % slow mode of ~+60 ms sits between Lambda and ClickHouse — not the
       database, not idle containers, not cold starts.
 ---
@@ -171,10 +172,18 @@ the same command chain as the run.** (b) 67 requests in `phase:main` got 404 as
 assets slid out of the 24 h window mid-run; k6 counts non-2xx as failed, so
 `http_req_failed` crossed 0.1 % and k6 exited 99 with zero server errors. A 404
 for an asset without a price is a correct answer — count it separately in the
-script. (c) A backfill (after the 0282/0286 changes) was running on the shared
-box. (d) The after-control's tail grew (p95 82, p99 373): the network started
+script. (c) The after-control's tail grew (p95 82, p99 373): the network started
 degrading late in the chain, so 127 is slightly pessimistic; ~120 on a fully
 clean path.
+
+> 🔴 **Corrected the same day.** This list first carried a fourth reason — "a
+> backfill (after the 0282/0286 changes) was running on the shared box". It was
+> not: the backfill **starts Monday 2026-09-21** and is estimated at 22–28 days.
+> Two consequences. The "every other minute" slow queries in finding 4 are
+> therefore **not** the backfill and stay unexplained. And 2026-09-18 →
+> 09-20 is the last window in which the box can be measured without it: a ramp
+> run before Monday names our ceiling; one run after it names our ceiling under
+> a month-long backfill, and has to say so.
 
 **3. Where the gateway's p95 ≈ 80 ms comes from — a ~4 % slow mode, not the
 database.** 90 % of requests clear the gateway in ≤ 37 ms; p95 flips between

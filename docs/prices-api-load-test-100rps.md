@@ -466,8 +466,7 @@ On a clean path k6 equals network + gateway at every percentile, and the
 miss-only p95 is **~120–127 ms from Poland, ~80 ms at the gateway**. This run
 is diagnostic, not evidence: the pool was a day old (1,536 of 4,039 assets
 404 at setup; 67 more slid out of the 24 h price window mid-run and tripped
-k6's error threshold with zero server errors), and a backfill was running on
-the shared box. The gateway's p95 is set by a ~4 % slow mode (~+60 ms) between
+k6's error threshold with zero server errors). The gateway's p95 is set by a ~4 % slow mode (~+60 ms) between
 Lambda and ClickHouse — not the database (p95 10 ms), not cold starts, not
 idle containers. Details in task 0293.
 
