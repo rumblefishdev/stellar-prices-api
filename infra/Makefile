@@ -54,7 +54,11 @@ build-lambdas:
 synth-production: build-production
 	npx cdk --app "$(PRODUCTION_APP)" synth
 
-diff-production: build-production
+# Depends on `build-lambdas` for the same reason the deploys do (task 0141): a
+# diff against stale artifacts that happen to match what is live shows no
+# Lambda change, and the deploy that follows then rebuilds and replaces them.
+# What you diff must be what you ship. ~1 s when the artifacts are current.
+diff-production: build-production build-lambdas
 	npx cdk --app "$(PRODUCTION_APP)" diff
 
 # The /api-docs-json stage-cache entry has a 3600s TTL, which is only safe
@@ -105,6 +109,12 @@ deploy-production-compute: build-production build-lambdas
 destroy-production-compute: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Compute --force
 
+# `--exclusively` matters most here. ApiGateway imports the api-handler from
+# Compute, so without the flag this target deployed Compute too — from whatever
+# was in `target/lambda/` (task 0141, 2026-08-12). The price: a change that
+# spans both stacks (a new route AND its handler) needs
+# `deploy-production-compute` FIRST, then this. Deploy only this and the new
+# route proxies to the old handler behind a green deploy.
 deploy-production-apigateway: build-production
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-ApiGateway --exclusively --require-approval broadening
 

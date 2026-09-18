@@ -101,6 +101,14 @@ jobs:
       # obviously missing. The portal changed that: its Vitest suite is the only
       # thing standing between a regression and `/api-tokens/`, and a suite that
       # runs solely on the author's machine guards nothing after the PR is open.
+      #
+      # It also runs the deploy-path guards of task 0141 — the infra project's
+      # `test` target is `tools/scripts/*.test.mjs`: the bootstrap verifier
+      # against stubbed, host-built, missing and duplicated artifacts, and
+      # `infra/Makefile` (every deploy able to ship a Lambda builds first, every
+      # per-stack deploy is `--exclusively`). As an Nx target and not a bare
+      # step so that `verify:staged` / `verify:push` run it too, on the pinned
+      # Node: `node --test <dir>` works on 26 and fails on the 22 CI uses.
       - run: npx nx run-many -t lint build typecheck test
 
       # Cheap counterpart to the rust job's build+verify+synth guard.
@@ -122,15 +130,6 @@ jobs:
       - name: Verify Lambda assets map to buildable crates
         shell: bash
         run: tools/scripts/verify-lambda-assets.sh
-
-      # The deploy-path guards of task 0141, which no other step exercises: the
-      # bootstrap verifier against stubbed, host-built, missing and duplicated
-      # artifacts, and `infra/Makefile` — that every deploy able to ship a
-      # Lambda builds first, and that every per-stack deploy is
-      # `--exclusively`. Builds nothing (`make -n`), so it belongs on the
-      # Node-only runner.
-      - name: Test the Lambda deploy guards
-        run: npm run test:scripts
 
   rust:
     name: Rust (fmt, clippy, test, lambda build)

@@ -34,6 +34,18 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="${1:-$(cd "${here}/../.." && pwd)}"
 
+# The verifier below and `Code.fromAsset` both read `<root>/target/lambda/`.
+# With `CARGO_TARGET_DIR` or a `build.target-dir` in some cargo config, cargo
+# writes the fresh bootstraps somewhere else, and the weeks-old ones still
+# sitting under `<root>/target/` — perfectly good aarch64 ELFs — would be
+# verified and shipped. "Cargo is the freshness check" only holds if the files
+# checked are the files cargo just wrote, so refuse before building anything.
+target_dir="$(cargo metadata --no-deps --offline --format-version 1 --manifest-path "${root}/Cargo.toml" | jq -r '.target_directory')"
+if [[ "$(realpath -m "$target_dir")" != "$(realpath -m "${root}/target")" ]]; then
+  echo "::error::cargo's target dir is '${target_dir}', but CDK packages '${root}/target/lambda/'. Unset CARGO_TARGET_DIR / build.target-dir for this build." >&2
+  exit 1
+fi
+
 args=()
 while IFS= read -r name; do
   [[ -z "$name" ]] && continue
@@ -48,11 +60,19 @@ fi
 # What is about to be built, in the operator's scrollback next to the deploy.
 # A dirty tree is reported, not refused: whether to ship one is the operator's
 # call, but it must not be possible to do it without having been told.
+provenance=""
 if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
-  echo "building Lambdas from $(git -C "$root" rev-parse --abbrev-ref HEAD) @ $(git -C "$root" describe --always --dirty)"
+  provenance="$(git -C "$root" rev-parse --abbrev-ref HEAD) @ $(git -C "$root" describe --always --dirty)"
+  echo "building Lambdas from ${provenance}"
 fi
 
 echo "cargo lambda build --release --arm64 --features lambda ${args[*]}"
 (cd "$root" && cargo lambda build --release --arm64 --features lambda "${args[@]}")
 
 "${here}/verify-lambda-bootstraps.sh" "$root"
+
+# Again, because the first copy is minutes of cargo output up the scrollback and
+# this one sits directly above `cdk deploy`.
+if [[ -n "$provenance" ]]; then
+  echo "Lambdas built from ${provenance}"
+fi
