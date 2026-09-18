@@ -7,15 +7,24 @@ Deploys one new probe check and one new CloudWatch alarm ladder:
 | the `zero-invariants` check inside `rollup-freshness-probe` | `Prices-production-EventBridge`   | `make deploy-production-eventbridge`   |
 | the `prices-production-zero-invariant-*` ladder             | `Prices-production-Observability` | `make deploy-production-observability` |
 
-The check asserts two things about STORED rows, on `price_ohlcv_1m`, over a
+The check asserts three things about STORED rows, on `price_ohlcv_1m`, over a
 48-hour window (`packages/rollup-freshness-probe/src/zero_invariants.rs`):
 
 1. `pf_trade_count = 0 ⇒ close = 0` — a candle that formed no price carries none.
 2. `close_usd > 0 ⇒ close > 0` — a USD close is `rate × close`, so it cannot
    exist without one.
+3. `pf_trade_count > 0 ⇒ close > 0` — a candle that claims price-forming fills
+   carries the price they formed. This is the one that catches a statement that
+   **omits `pf_trade_count`**: the column takes its `DEFAULT (trade_count)`, so a
+   dust-only minute is stored as `close = 0, pf_trade_count = 5`, which neither
+   of the first two can see.
 
 Tests pin the writers we know about. This pins the data, which is what catches
-the writer nobody listed.
+the writer nobody listed — **at the live tip only**. The window is on the
+candle's BUCKET time, not on when the row was written (the table has no
+insert-time column). A backfill, a pre-roll script or a hand-run `INSERT … SELECT`
+into buckets older than 48 hours is **not** covered; a historical rewrite such as
+0286 phase 3 needs its own assertion over the partitions it touched.
 
 ## 1. Hard precondition: 0286's schema step must already be on production
 
@@ -23,21 +32,24 @@ the writer nobody listed.
 > `pf_trade_count` column.** As of this writing task 0286 is **merged (`d11d20a`)
 > and NOT deployed**, so the precondition is **not** yet met.
 
-This is an ordering rule, not a preference, and the mechanism is worth
-understanding before you weigh skipping it:
+This is an ordering rule, and it is worth knowing exactly what breaks if it is
+skipped — it is less than it sounds, and still not acceptable:
 
 - `zero_invariant_query()` names `pf_trade_count`. On a ClickHouse without that
   column the read does not return a bad number — it **errors**.
-- A failed read is pushed onto `failures`
-  (`main.rs`, `failures.push(format!("zero-invariants read: {e}"))`).
-- At the end of the invocation, **a non-empty `failures` fails the WHOLE probe
-  run** (`main.rs`, `if !failures.is_empty() { return Err(...) }`).
+- The probe is built so that one check's failure never suppresses another
+  (`main.rs`, the comment opening the handler): the failed read is recorded in
+  `failures`, **every other check still runs and publishes normally**, and only
+  at the end does a non-empty `failures` make the invocation return an error.
+- That error trips the probe's own invocation-errors alarm — the **dead-probe
+  signal** ("the per-tier rollup lag metric may be stale, blinding every rollup
+  freshness alarm").
 
-So deploying the probe early does not merely leave one check dark. It turns
-**every probe tick red** and takes the other checks down with it — rollup
-freshness, current-prices age, disk headroom, the USD-sanity counts and the
-MV-drift check all run in the same invocation. You would lose five working
-alarms to gain one that cannot work yet.
+So deploying the probe early does **not** take the other checks down. What it
+does is make the dead-probe alarm fire, and stay fired, every 15 minutes, for a
+probe that is in fact alive. A dead-probe alarm that is permanently red cannot
+tell anyone when the probe really dies — the false-page failure mode, on the one
+alarm that watches the watcher.
 
 The alarm stack alone is harmless before the probe (the metric simply never
 arrives, and the ladder treats missing data as `NOT_BREACHING`), but there is no
@@ -64,7 +76,8 @@ expected result is **`violations = 0`** with a `scanned` well above zero.
 
 ```sql
 SELECT countIf((pf_trade_count = 0 AND close != 0)
-            OR (close_usd > 0 AND close = 0)) AS violations,
+            OR (close_usd > 0 AND close = 0)
+            OR (pf_trade_count > 0 AND close = 0)) AS violations,
        count() AS scanned
 FROM prices.price_ohlcv_1m FINAL
 WHERE timestamp >= now() - INTERVAL 172800 SECOND;
@@ -76,6 +89,16 @@ alarm is `NOT_BREACHING` on missing data and a query that matched nothing must
 not read as a clean bill of health. If `scanned` is 0, ingestion is the problem —
 investigate that first.
 
+### Expect a non-zero count right after 0286 — and wait it out, do not repair it
+
+0286 rolls out schema first and **ingest last**. In between, the old ingest keeps
+writing rows without the pf columns, so they take `pf_trade_count = trade_count`.
+Where such a row's price underflowed to `close = 0`, it breaks invariant 3 — not
+because a writer regressed, but because the writer that fixes it is not deployed
+yet. Those rows age out of the window by themselves: if section 2 reads non-zero
+and every offending row (section 3's query) predates 0286's ingest step, wait
+until that step is 48 hours old and read again. Deploy on a `0`, not before.
+
 ### Cost of the scan — measure it, this is the second way to lose the probe
 
 The window is 48 hours, but `timestamp` is the **fourth** column of the table's
@@ -85,10 +108,13 @@ on the largest table, every 15 minutes. Unlike the two USD-sanity scans it has
 no quote-leg predicate to narrow it. Nothing here has been measured on
 production: the local ClickHouse holds a handful of rows.
 
-A scan that times out fails exactly like the missing column in section 1 — the
-read lands in `failures` and the **whole invocation** goes red. And the check
-runs before the MV-drift check inside one 300-second Lambda, so a slow scan
-costs that check its turn even when it does finish.
+A scan that ClickHouse refuses or times out behaves exactly like the missing
+column in section 1: the other checks publish normally, the invocation errors,
+and the dead-probe alarm goes red for a probe that is alive. A **hard Lambda
+timeout** (300 seconds for the whole invocation) is the worse case — it loses
+whatever has not been published yet — and that is why this check runs LAST:
+every other datum, the MV-drift one included, is out before it starts, so a
+runaway scan can only cost itself.
 
 So take the timing from the same manual run (append `FORMAT JSON` and read
 `statistics.elapsed`, or time the `curl`):
@@ -149,7 +175,8 @@ first destroys the evidence and the writer just re-creates them.
          trade_count, pf_trade_count, version
   FROM prices.price_ohlcv_1m FINAL
   WHERE timestamp >= now() - INTERVAL 172800 SECOND
-    AND ((pf_trade_count = 0 AND close != 0) OR (close_usd > 0 AND close = 0))
+    AND ((pf_trade_count = 0 AND close != 0) OR (close_usd > 0 AND close = 0)
+      OR (pf_trade_count > 0 AND close = 0))
   ORDER BY timestamp DESC LIMIT 100;
   ```
 
@@ -202,8 +229,21 @@ would be indistinguishable from a clean tier.
 - `checks_failed` on that same line must be `0`. Read it **first**: a failed
   read logs `zero_invariant_scanned = 0` too, exactly like an empty table, and
   only `checks_failed` tells the two apart.
-- All three alarms should settle in `OK` (not `INSUFFICIENT_DATA`) within two
-  15-minute periods.
+- **The metric actually arrives.** Do NOT take the alarms reading `OK` as
+  evidence: the ladder is `NOT_BREACHING` on missing data, so all three settle in
+  `OK` within two periods even if the probe never publishes a single datapoint —
+  a step that passes either way proves nothing. Ask CloudWatch for the datum:
+
+  ```bash
+  aws cloudwatch get-metric-statistics \
+    --namespace Prices/Rollup --metric-name CandleZeroInvariantViolations \
+    --dimensions Name=Environment,Value=production \
+    --statistics Maximum --period 900 \
+    --start-time "$(date -u -d '-1 hour' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)"
+  ```
+
+  At least one datapoint, with `Maximum` = `0`. An empty `Datapoints` list means
+  the check is not publishing — read the probe's log line for `checks_failed`.
 
 ## Rollback
 

@@ -117,8 +117,8 @@ history:
       "Open gaps, by owner" table names 0151 nowhere. New runbook
       `docs/runbooks/0151-zero-invariant-probe-rollout.md` carries the deploy
       order — probe and alarms go out only AFTER [[0286]]'s schema step, since
-      the query reads `pf_trade_count` and a failed read fails the WHOLE probe
-      invocation, not just its own check. **Not deployed: that is an operator
+      the query reads `pf_trade_count` and the read would error (corrected
+      below: this does NOT suppress the other checks). **Not deployed: that is an operator
       step.** The cross-surface test under the floor stays with [[0147]], where
       the fix is — a test of agreement cannot land before the thing it asserts.
   - date: "2026-09-18"
@@ -142,6 +142,38 @@ history:
       `close_usd` unconditionally; `Decimal(38,14) × Decimal(38,14)` wraps
       silently at `>= 1e10` (measured: `0.12 × 2e11` → negative). The last two
       predate this task and need tasks of their own.
+  - date: "2026-09-18"
+    status: active
+    who: akot
+    note: >
+      **PR #323 open against `develop`; a second, independent review of it found
+      the probe blind to the very defect its alarm names.** A statement that
+      OMITS `pf_trade_count` takes DEFAULT `trade_count`, so a dust-only minute
+      is stored as `close = 0, pf_trade_count = 5` — and neither invariant saw
+      it (one needs the count at 0, the other a USD close). Reproduced on a
+      scratch row, then fixed test-first: a third invariant,
+      `pf_trade_count > 0 ⇒ close > 0`, seen RED (`violations 0` for `1`).
+      Also: the empty-scan refusal was borrowed from USD-sanity and told the
+      operator the USDT identity had drifted (task 0139) — it has its own
+      message now; the check moved LAST in the invocation so a slow scan cannot
+      cost the MV-drift datum, whose alarm is NOT_BREACHING on missing data; the
+      ladder's first rung is pinned at 1 instead of following a key that exists
+      to be tuned for the USDT ladders; the docs stop claiming the scan catches
+      a backfill — its window is on BUCKET time; and the runbook's "alarms
+      settle in OK" step, which passes even when no datapoint ever arrives, asks
+      CloudWatch for the datum instead. The longer alarm text went to 1251
+      characters; caught by measuring, confirmed by `make synth-production`
+      (the stack's own 1024-char guard) at 981. Probe ITs 25/25.
+      **Correction of a claim made earlier in this task, in the runbook and in
+      the PR text:** a failed zero-invariant read does NOT take the other five
+      checks down. `main.rs` is built so that no check suppresses another — the
+      rest publish normally and the invocation errors only at the end, tripping
+      the probe's own dead-probe alarm. The ordering rule stands, for a smaller
+      and truer reason: deployed before 0286's schema step, the check latches
+      the dead-probe alarm on a probe that is alive. The claim came from the
+      task brief, not from reading the handler, and survived a verifier and two
+      reviews because each checked that the cited lines exist, not what the
+      comment twenty lines above them says.
 ---
 
 # ADR — `close_usd` zero-as-missing
