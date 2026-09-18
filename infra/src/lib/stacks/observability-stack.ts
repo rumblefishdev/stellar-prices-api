@@ -339,6 +339,14 @@ export class ObservabilityStack extends cdk.Stack {
    */
   public readonly usdStrandedAlarms: Record<string, cloudwatch.Alarm>;
   /**
+   * Candles breaking a stored-data invariant of the `close_usd = 0` sentinel
+   * (ADR 0292, task 0151), keyed by count: a candle with no price-forming fill
+   * that carries a price, or a USD close without a close. Asserted by the probe
+   * on a schedule instead of by a ClickHouse CHECK constraint, which would fail
+   * the insert and stall a rollup tier.
+   */
+  public readonly zeroInvariantAlarms: Record<string, cloudwatch.Alarm>;
+  /**
    * A rollup MV that has lost `APPEND` (task 0204, gap 3) — history destroyed
    * on every refresh. Separate from {@link mvDriftAlarm} because this is the
    * only drift severity that compounds while nobody looks.
@@ -1376,6 +1384,20 @@ export class ObservabilityStack extends cdk.Stack {
       'usd-stranded',
       (count) =>
         `${count} or more USDT-quoted candles are still at close_usd = 0 more than 48 h after being written, despite a close large enough to price. A zero is indistinguishable from "no data" at ~130 unguarded argMax(close_usd, ...) sites (task 0145), and BE render an empty "--" TVL when nothing priced within 48 h, so this is a value the consumer has already LOST, not one that is merely late. KNOWN CAUSE as of 2026-08-20: the USDT pivot has NEVER priced a price_ohlcv_1m row (measured pivot_written = 0 against 1,564,045 peg-written), so this leg has been dark since 2026-08-13 and this alarm stays latched until that is fixed - tasks 0209 (root cause) and 0212 (the peg-valued rows). Verify on _1m, NEVER on a coarse tier: task 0182 repaired the coarse tables directly, so _1h reads clean over a broken _1m. Do NOT re-run a reset repair - 0182 own reset CREATED 157 stranded candles. Rungs tunable via config.opsAlarms.usdSanityEscalationCounts.`,
+    );
+
+    // The zero sentinel's stored-data invariants (ADR 0292, task 0151). Same
+    // ladder: a regressed writer keeps adding rows, so the count has depth. Any
+    // non-zero value is a defect — the healthy reading is exactly 0 — so the
+    // first rung is the one that matters and the rest say how fast it is
+    // growing. NOT scoped to a quote leg, unlike the two ladders above. See
+    // packages/rollup-freshness-probe/src/zero_invariants.rs.
+    this.zeroInvariantAlarms = usdSanityRungs(
+      'CandleZeroInvariantViolations',
+      'ZeroInvariantAlarmCount',
+      'zero-invariant',
+      (count) =>
+        `${count} or more price_ohlcv_1m candles written in the last 48 h break an invariant every reader of close / close_usd relies on (ADR 0292): either pf_trade_count = 0 with close != 0 (a candle that formed no price carries one - views.sql and current.sql publish it, /ohlcv refuses it), or close_usd > 0 with close = 0 (a USD close without a close - it lends a coarse bucket a rate against zero). A WRITER did this: find it before repairing. Usual cause: a statement that omits pf_trade_count and takes its DEFAULT (trade_count) - the Rust writer is name-routed, so an omitted column is silent (ADR 0287). Check recent INSERT ... SELECT, pre-roll scripts and enrichment statements against docs/database-schema/close-usd-zero-guardrails.md. Query: packages/rollup-freshness-probe/src/zero_invariants.rs. Rungs tunable via config.opsAlarms.usdSanityEscalationCounts.`,
     );
 
     // Materialized-view drift, on a schedule (task 0204, gap 3). Task 0142 built
