@@ -2,7 +2,7 @@
 id: "0260"
 title: 'Read path collapsed at 100 req/s of cache misses — connection ceiling or query performance?'
 type: RESEARCH
-status: active
+status: completed
 related_adr: ['0007']
 related_tasks: ['0121', '0047', '0122']
 tags:
@@ -130,6 +130,26 @@ history:
       500/1000 runs until raised. Noted that M3 AC 5 is met literally by the
       09-03 regime-2 run; the re-run is for the honest number and the Work
       list's 500/1000.
+  - date: 2026-09-17
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Run 1 done (100 req/s, 4,020-asset pool, 13:56–14:03 UTC): 0 errors on
+      29,968 requests, ClickHouse median 8–9 ms, gateway p95 74 ms; k6 on the
+      laptop measured p95 464 ms and the ~390 ms difference sits outside AWS
+      (client→gateway). AC 2 closed with the decomposition. All six criteria
+      now ticked; the task stays active only for run 2 (ramp to 1000 from a
+      client inside eu-central-1) and the report.
+  - date: 2026-09-17
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Closed. Question answered: the 2026-09-03 collapse was neither
+      connections nor query cost but a 10,000 queries/hour ClickHouse quota
+      on prices_reader (28,853 code-201 refusals), fixed on the box 12:13 UTC
+      via sbe 0561 / PR #462. All six criteria met; run 1 at 100 req/s of
+      misses held (0 errors, gateway p95 74 ms). Run 2 and the report spawned
+      as [[0293]]. Four statements from 09-16 withdrawn and marked in place.
   - date: 2026-09-17
     status: active
     who: stkrolikiewicz
@@ -359,6 +379,56 @@ procedure are in the repo (`pool-wide.json` is gitignored — regenerate).
    run, `quotas_usage` before/after, the ClickHouse per-minute table for the
    window (same query as the 09-03 note).
 
+#### ✅ Run 1 done — 2026-09-17 13:56–14:03 UTC
+
+Pool 4,039 listed → **4,020 under test** (19 dropped on 404, all named in the
+k6 log). k6 v2.2.0 from the operator's laptop, plan `prices-production-loadtest-plan`
+(150 req/s), warm-up 30 s + **5 min at 100.00 iters/s**. Export:
+`docs/loadtest-results/2026-09-17-regime3-wide.json`. Observer on the box and
+CloudWatch every 30 s throughout; nobody had to abort.
+
+**The read path held.** `phase:main`: 29,968 requests, **0 failed**, checks
+100 %, 0 dropped iterations. ClickHouse: ~5,300 queries/min from
+`prices_reader`, median **8–9 ms**, 0 exceptions, quota counter `9169/inf` at
+the point where 2026-09-03 was already refusing. Gateway 5XX: 0. Lambda:
+34,893 invocations, 0 errors, 0 throttles, `ConcurrentExecutions` max 55.
+
+**But k6 saw p95 = 464 ms** (`http_req_duration{phase:main}`: med 72, p90 196,
+p95 464, p99 665, max 2,766) against the script's 200 ms threshold — `exit=99`.
+Where those milliseconds sit, from the inside out:
+
+| link | p50 | p95 | source |
+|---|---|---|---|
+| ClickHouse, query execution | 8 ms | — | `system.query_log` |
+| Lambda handler, warm container | 16 ms | 25 ms | REPORT lines, n = 34,845 |
+| API Gateway, own overhead | ~6 ms | ~10 ms | `Latency` − `IntegrationLatency` |
+| **API Gateway, as measured by the gateway** | **31 ms** | **74 ms** (39–89 per minute; p99 92–137) | `Latency`, REGIONAL endpoint, no CloudFront |
+| cold start: `Init` + first call (new TLS to ClickHouse) | ~370 + ~190 ms | — | 48 of 34,893 invocations (0.14 %) |
+| **k6 on the laptop, end to end** | **72 ms** | **464 ms** | k6 export |
+
+The ~390 ms between the gateway's p95 and k6's is **outside AWS**: k6's
+`http_req_tls_handshaking` and `http_req_connecting` are 0 at p95 (connections
+reused); the whole tail is `http_req_waiting`. On 2026-09-03, from the same
+laptop, `http_req_waiting` was med 45 / p95 47 — a 2 ms tail; today it is med
+72 / p95 422. Same baseline (~41–45 ms client→gateway), a tail that was not
+there two weeks ago. What produced it is not determinable from here.
+
+**AC 2 answered.** Query ≈ 8 ms; AWS↔Hetzner network a few ms (the whole
+Lambda round trip incl. the query is 16 ms); connection setup ≈ 560 ms but only
+on a cold container (0.14 %). 0121's "170–240 ms uncontended miss" was client
+network plus cold containers, not a property of the data path.
+
+**For M3 AC 5.** The gateway-measured p95 (74 ms) is under the 100 ms bar on a
+miss-dominated run — the first such number that exists. The client-measured
+p95 (464 ms) is not, and the criterion does not say where it is measured. The
+report must carry both and name the client's location. **Run 2 and any number
+meant for the report must come from a client inside `eu-central-1`** (EC2 or
+CloudShell); it removes the one variable we do not control, and a laptop could
+not push 500–1000 req/s anyway.
+
+Noted, not explained: the gateway's per-minute p95 alternates 45 / 81 / 44 /
+89 / 49 / 85 ms — something periodic adds ~40 ms every other minute.
+
 #### Run 2 — ramp 100 → 250 → 500 → 1000 req/s
 
 Not before all four:
@@ -560,10 +630,10 @@ observability gaps. Fold it in there rather than adding an 86th backlog item.
 - [x] The failure mode is named: connection ceiling, query saturation, or
       something else — with evidence, not inference from response times
       — *something else: the `prices_reader` hourly query quota, 28,853 × code 201*
-- [ ] The uncontended miss budget is broken down into network / query /
-      connection setup — *open, reframed: cold-connection cost vs the rest;
-      needs a controlled re-run — the quota is fixed as of 2026-09-17 12:13
-      UTC (sbe 0561), so the ClickHouse side no longer blocks it*
+- [x] The uncontended miss budget is broken down into network / query /
+      connection setup — *run 1, 2026-09-17: query ≈ 8 ms, AWS↔Hetzner a few ms
+      (16 ms Lambda round trip), connection setup ≈ 560 ms on a cold container
+      only (0.14 %); the tail k6 saw sat between the laptop and the gateway*
 - [x] It is stated whether the ceiling is ours alone or shared with
       soroban-block-explorer ([[0047]]) — *ours alone, the quota is per user*
 - [x] A remediation is recommended **against the identified cause**, explicitly
@@ -572,6 +642,47 @@ observability gaps. Fold it in there rather than adding an 86th backlog item.
       — *the quota interval rolled over at 07:00:00*
 - [x] If the cause is structural, ADR 0007's sidecar-ClickHouse fallback is
       revisited on the record — *not structural; not triggered*
+
+## Closing — 2026-09-17
+
+### Design Decisions
+
+#### Emerged
+
+1. **Closed on six criteria without run 2.** The research question is
+   answered with evidence from the box; the ramp to 1000 is a test with an
+   agreed window and its own preconditions, not research. Spawned as [[0293]].
+2. **The quota fix was made in sbe's repo and applied in place**, not through
+   their Ansible role: the operator's local env was from July and the role
+   re-renders `.env` (with `no_log`). One file, same inode, hot reload, no
+   restart. Recorded in sbe 0561.
+3. **Yesterday's findings were kept and marked, not rewritten.** Withdrawn
+   statements carry a dated marker in place so the correction is traceable.
+
+### Issues Encountered
+
+- **[[0281]] destroyed the direct evidence** for eight days — 28,853 empty
+  error bodies whose text said "Quota … exceeded". Fixed before this task
+  ran, which is why run 1 would have been diagnosable in minutes.
+- **AWS CLI prints CloudWatch timestamps in local time** (+02:00); the first
+  morning measurement sliced them as UTC and put every OOM 2 h before its
+  alarm. Caught by arithmetic, fixed by parsing the offset.
+- **Three guard failures on 2026-09-16**, the third destructive (this file's
+  Acceptance Criteria and Notes deleted by a rewrite-to-EOF and restored from
+  git). Root cause: a check and a destructive action in one breath, with the
+  check advisory. Every edit since ends its guard with `exit`.
+- **The access was there all along** — `sorban-prod` in `~/.ssh/config`; what
+  the 09-16 "not reachable" meant was "not asked for".
+
+### Future Work
+
+- [[0293]] — run 2 (ramp to 1000 from inside eu-central-1) and the report.
+- [[0249]] — gateway-5XX alarm; 26 minutes paged nobody.
+- [[0047]] — the shared-box ceiling, live once run 2 reaches the knee.
+- sbe: task 0250 assumes quotas are not enforced on the Caddy path; the box's
+  own log says they are (every code 201 since May). Reported to Karol
+  2026-09-17; theirs to decide.
+- sbe: `system.*_log` on the box has no TTL (text_log 76 GiB). Reported.
 
 ## Notes
 

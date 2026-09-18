@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use stellar_xdr::{LedgerCloseMeta, TransactionMeta};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use extractors_core::{SorobanEventRow, TaggedValue, Venue, VenueRegistry};
 use ledger_processor::dispatch::dispatch;
@@ -160,6 +160,21 @@ pub struct LedgerSoroban {
     /// recorded, so routine non-swap traffic (liquidity events, which dispatch
     /// also rejects) does not inflate it.
     pub dispatch_errors: Vec<(&'static str, u32)>,
+    /// `(source, trades)` for every contract the registry does not hold whose
+    /// events have the shape of a pool we index — trades the registry makes us
+    /// drop (task 0291). See [`unregistered_pool_venue`].
+    ///
+    /// Separate from `unresolved`, which counts any pool-level `swap` and is the
+    /// backfills' fatal guard: that set also holds routers and venues we do not
+    /// index at all, so it can never be expected to read zero on the live path.
+    /// This one can — a non-zero value means a pool we could price is missing
+    /// from `prices.pool_registry`.
+    pub unregistered_pool_events: Vec<(&'static str, u32)>,
+    /// The contracts behind `unregistered_pool_events`, one entry per contract
+    /// per transaction. The caller logs them: this decoder runs again for every
+    /// re-read ledger and in callers that never read the count, so it only
+    /// logs at debug level.
+    pub unregistered_pool_contracts: Vec<String>,
 }
 
 fn collect_tx_metas(lcm: &LedgerCloseMeta) -> Vec<&TransactionMeta> {
@@ -484,6 +499,27 @@ fn classify_amm_groups(
         let venue = match reg.venue.get(&contract_id) {
             Some(v) => v.clone(),
             None => {
+                // Unknown contract that looks like a pool we index: its trades
+                // are dropped only because the registry lacks it (task 0291).
+                // Counted apart from `unresolved` — see
+                // `LedgerSoroban::unregistered_pool_events`.
+                let mut by_venue: Vec<(&'static str, u32)> = Vec::new();
+                for venue in rows.iter().filter_map(unregistered_pool_venue) {
+                    let source = venue.as_source();
+                    match by_venue.iter_mut().find(|(s, _)| *s == source) {
+                        Some((_, n)) => *n += 1,
+                        None => by_venue.push((source, 1)),
+                    }
+                }
+                if !by_venue.is_empty() {
+                    debug!(
+                        contract_id,
+                        ?by_venue,
+                        "pool events from a contract missing from pool_registry"
+                    );
+                    out.unregistered_pool_events.extend(by_venue);
+                    out.unregistered_pool_contracts.push(contract_id.clone());
+                }
                 // Unknown contract. Most are not AMM pools and are correctly
                 // ignored — but if this one emitted a pool-level `swap`, its
                 // volume is being dropped. Record it for the post-run re-check
@@ -559,6 +595,40 @@ fn unresolved_from_swaps(
     })
 }
 
+/// The venue whose POOL emits an event of this shape — one match per trade — or
+/// `None`. Used only for contracts absent from the registry, to count the
+/// trades a registry gap drops (task 0291). Mirrors what each extractor reads:
+///
+/// - Aquarius pool `trade`: `[Symbol("trade"), Address(sold), Address(bought), …]`
+///   (all three pool kinds, `concentrated` included — task 0291 checked a
+///   concentrated pool's `trade` against `AquariusPoolExtractor`);
+/// - Soroswap pair `swap`: `[String("SoroswapPair"), Symbol("swap")]`;
+/// - Phoenix XYK swap: a group of `[String("swap"), String(<field>)]` rows, of
+///   which exactly one carries `sell_token`, so that row stands for the swap.
+///
+/// The router `swap` summaries (Aquarius, Soroswap) and the unindexed
+/// Uniswap-v3-style venue (task 0290) match none of these, so on a complete
+/// registry this counts nothing.
+fn unregistered_pool_venue(row: &SorobanEventRow) -> Option<Venue> {
+    let t0 = row.topics.first().and_then(|t| t.as_str())?;
+    let is_address = |i: usize| row.topics.get(i).and_then(|t| t.as_address()).is_some();
+    match t0 {
+        "trade" if is_address(1) && is_address(2) => Some(Venue::Aquarius),
+        "SoroswapPair" if topic_str(row, 1) == Some("swap") => Some(Venue::Soroswap),
+        "swap" if topic_str(row, 1) == Some("sell_token") => Some(Venue::Phoenix),
+        _ => None,
+    }
+}
+
+/// The Symbol/String value of topic `i`. `TaggedValue::as_str` also answers for
+/// an Address, which must not pass for an action or field name.
+fn topic_str(row: &SorobanEventRow, i: usize) -> Option<&str> {
+    match row.topics.get(i)? {
+        TaggedValue::Symbol(s) | TaggedValue::String(s) => Some(s),
+        _ => None,
+    }
+}
+
 /// Recognise the Aquarius-router `swap` *summary* event by its topic shape.
 ///
 ///   topics = [ Symbol("swap"),
@@ -579,6 +649,17 @@ fn topics_to_tagged(topics: &Value) -> Vec<TaggedValue> {
         .as_array()
         .map(|a| a.iter().map(json_to_tagged).collect())
         .unwrap_or_default()
+}
+
+/// Grow `reg` from one factory event, without pricing anything — the discovery
+/// half of [`process_soroban_event_rows`] on its own (task 0291). `topics` /
+/// `data` are the same typed-JSON SCVal trees [`RawSorobanEvent`] carries. A
+/// non-factory event is ignored, so a caller may feed any event through it.
+///
+/// This is how `events-backfill --discover-pools` fills `prices.pool_registry`
+/// with the exact classification the live processor would have learned.
+pub fn learn_factory_event(topics: &Value, data: &Value, reg: &mut Registries) {
+    learn_factory(topics, data, reg);
 }
 
 /// Recognise factory events and register the created pool. Detected by event
@@ -1006,6 +1087,148 @@ mod tests {
             out.amm_ticks[0].0, "phoenix",
             "tick tagged with the phoenix source"
         );
+    }
+
+    fn event(contract: &str, topics: Vec<TaggedValue>, index: u32) -> SorobanEventRow {
+        SorobanEventRow {
+            contract_id: contract.to_string(),
+            transaction_id: "tx".to_string(),
+            ledger_sequence: 64_000_000,
+            event_index: index,
+            topics,
+            data: TaggedValue::Vec(vec![]),
+        }
+    }
+
+    fn addr(s: &str) -> TaggedValue {
+        TaggedValue::Address(s.to_string())
+    }
+
+    #[test]
+    fn unregistered_pool_events_are_counted_per_venue_one_per_trade() {
+        // Task 0291: pool-shaped events from contracts the registry does not
+        // hold. Each venue's shape is counted once per TRADE — a Phoenix swap is
+        // a group of field rows, of which only `sell_token` counts.
+        use phoenix_extractor::test_fixtures::{XLM_USDC_POOL, make_phoenix_xyk_events};
+
+        const AQUA: &str = "CDQ4OYM3RPLEWNZFVAJQGEYLSDMPHEZYMHVOQBKI767UWV5XV5ISAJE2";
+        const PAIR: &str = "CAZ4Z273BBAAFL5NYNQJKEMZDQBRCPKAS4GOXDUFXPSE56M4ONBJUOVD";
+        let trade = |i| {
+            event(
+                AQUA,
+                vec![
+                    TaggedValue::Symbol("trade".into()),
+                    addr("CTOKENA"),
+                    addr("CTOKENB"),
+                    addr("GTRADER"),
+                ],
+                i,
+            )
+        };
+        let pair_swap = event(
+            PAIR,
+            vec![
+                TaggedValue::String("SoroswapPair".into()),
+                TaggedValue::Symbol("swap".into()),
+            ],
+            0,
+        );
+
+        let mut groups: HashMap<String, Vec<SorobanEventRow>> = HashMap::new();
+        groups.insert(AQUA.to_string(), vec![trade(0), trade(1)]);
+        groups.insert(PAIR.to_string(), vec![pair_swap]);
+        groups.insert(
+            XLM_USDC_POOL.to_string(),
+            make_phoenix_xyk_events(XLM_USDC_POOL, 0),
+        );
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        classify_amm_groups(groups, 0, &Registries::new(), &mut assets, 1, 1, &mut out);
+
+        let mut counted = out.unregistered_pool_events.clone();
+        counted.sort();
+        assert_eq!(
+            counted,
+            vec![("aquarius", 2), ("phoenix", 1), ("soroswap", 1)]
+        );
+        let mut contracts = out.unregistered_pool_contracts.clone();
+        contracts.sort();
+        let mut expected = vec![AQUA, PAIR, XLM_USDC_POOL];
+        expected.sort();
+        assert_eq!(contracts, expected);
+        assert!(out.amm_ticks.is_empty());
+    }
+
+    #[test]
+    fn routers_and_unindexed_venues_are_not_counted_as_unregistered_pools() {
+        // Shapes that are NOT a pool we index. Counting them would keep the
+        // task-0291 alarm permanently red.
+        let aquarius_router = event(
+            "CROUTER",
+            vec![
+                TaggedValue::Symbol("swap".into()),
+                TaggedValue::Vec(vec![addr("CTOKENA"), addr("CTOKENB")]),
+                addr("GTRADER"),
+            ],
+            0,
+        );
+        let soroswap_router = event(
+            "CSOROSWAPROUTER",
+            vec![
+                TaggedValue::String("SoroswapRouter".into()),
+                TaggedValue::Symbol("swap".into()),
+            ],
+            0,
+        );
+        // The Uniswap-v3-style venue (task 0290): a bare `swap` with map data.
+        let clmm = event("CCLMM", vec![TaggedValue::Symbol("swap".into())], 0);
+        // A `trade` whose topics are not token addresses.
+        let other_trade = event(
+            "COTHER",
+            vec![
+                TaggedValue::Symbol("trade".into()),
+                TaggedValue::Symbol("buy".into()),
+            ],
+            0,
+        );
+        // A Phoenix-looking row that names an address, not a field.
+        let odd_swap = event(
+            "CODD",
+            vec![TaggedValue::String("swap".into()), addr("CSELL_TOKEN")],
+            0,
+        );
+
+        for row in [
+            aquarius_router,
+            soroswap_router,
+            clmm,
+            other_trade,
+            odd_swap,
+        ] {
+            assert_eq!(unregistered_pool_venue(&row), None, "{:?}", row.topics);
+        }
+    }
+
+    #[test]
+    fn a_registered_pool_is_not_counted_as_unregistered() {
+        use phoenix_extractor::test_fixtures::{
+            XLM_USDC_POOL, common_xyk_wasm_hash, make_phoenix_xyk_events,
+        };
+        let mut reg = Registries::new();
+        reg.venue.insert(XLM_USDC_POOL.to_string(), Venue::Phoenix);
+        reg.phoenix
+            .register_with_wasm(XLM_USDC_POOL.to_string(), 0, common_xyk_wasm_hash());
+        let mut groups: HashMap<String, Vec<SorobanEventRow>> = HashMap::new();
+        groups.insert(
+            XLM_USDC_POOL.to_string(),
+            make_phoenix_xyk_events(XLM_USDC_POOL, 0),
+        );
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        classify_amm_groups(groups, 0, &reg, &mut assets, 1, 1, &mut out);
+        assert!(out.unregistered_pool_events.is_empty());
+        assert_eq!(out.amm_ticks.len(), 1);
     }
 
     #[test]

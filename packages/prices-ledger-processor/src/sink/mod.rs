@@ -11,8 +11,8 @@
 use std::future::Future;
 
 use prices_ingest_core::{
-    AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, OracleSample, Registries,
-    retry_with_backoff,
+    AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, OracleSample, PoolRegistryRow,
+    Registries, retry_with_backoff,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +44,14 @@ pub trait CandleSink {
         &self,
         registry: &AssetRegistry,
         since: u32,
+    ) -> impl Future<Output = Result<(), SinkError>> + Send;
+
+    /// Persist AMM pools this run learned from factory events — only the rows
+    /// not yet durably in `prices.pool_registry` (task 0291; see
+    /// [`Registries::pool_rows_unpersisted`]). A no-op write on an empty slice.
+    fn write_pool_rows(
+        &self,
+        rows: &[PoolRegistryRow],
     ) -> impl Future<Output = Result<(), SinkError>> + Send;
 }
 
@@ -153,6 +161,17 @@ impl CandleSink for ClickHouseSink {
         .await
         .map(|_| ())
     }
+
+    async fn write_pool_rows(&self, rows: &[PoolRegistryRow]) -> Result<(), SinkError> {
+        // Idempotent (RMT on contract_id) → retried like the other writes.
+        retry_with_backoff(
+            &DEFAULT_BACKOFF_MS,
+            |_| true,
+            || async { self.writer.write_pool_rows(rows).await.map_err(redact) },
+        )
+        .await
+        .map(|_| ())
+    }
 }
 
 /// Map an ingest error into a sink error. `IngestError`'s `Display` is already
@@ -169,6 +188,7 @@ pub struct CountingSink {
     pub candles: std::sync::atomic::AtomicU64,
     pub oracle: std::sync::atomic::AtomicU64,
     pub assets: std::sync::atomic::AtomicU64,
+    pub pools: std::sync::atomic::AtomicU64,
 }
 
 impl CandleSink for CountingSink {
@@ -192,6 +212,12 @@ impl CandleSink for CountingSink {
         let n = registry.assets_since(since).count() as u64;
         self.assets
             .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn write_pool_rows(&self, rows: &[PoolRegistryRow]) -> Result<(), SinkError> {
+        self.pools
+            .fetch_add(rows.len() as u64, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 }

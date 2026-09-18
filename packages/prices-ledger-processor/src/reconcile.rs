@@ -59,12 +59,12 @@
 //! old code left the cursor mid-minute, so that one minute is written from its
 //! tail only. It self-heals from the next minute on.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
 
 use prices_ingest_core::{
-    AssetRegistry, CandleAccumulator, OfferLookupCounts, OracleSample, Registries, decode_object,
-    extract_trades_with_counts, ledger_close_time, ledger_sequence, process_ledger,
+    AssetRegistry, CandleAccumulator, OfferLookupCounts, OracleSample, PoolRegistryRow, Registries,
+    decode_object, extract_trades_with_counts, ledger_close_time, ledger_sequence, process_ledger,
     raw_trade_to_tick,
 };
 use tokio::sync::Mutex;
@@ -109,6 +109,13 @@ pub struct RunStats {
     /// How the order-book fills this run WROTE were priced (task 0286 phase 2).
     pub offer_lookups: OfferLookupCounts,
     pub rows_emitted: u64,
+    /// `prices.pool_registry` rows this run wrote — pools learned from factory
+    /// events since the last successful write (task 0291). 0 in steady state.
+    pub pools_persisted: u64,
+    /// Trades, per source, from contracts that look like a pool we index but are
+    /// missing from the registry — dropped, not priced (task 0291). Counted over
+    /// the minutes this run WROTE, like `offer_lookups`. Empty when healthy.
+    pub unregistered_pool_events: BTreeMap<&'static str, u64>,
     /// Candle-INSERT latency for this run, or `None` when the run wrote no
     /// candles at all. `None` rather than a zeroed struct so an idle run
     /// publishes no `ClickHouseWriteLatencyMs` datapoint instead of a 0 ms one
@@ -133,6 +140,13 @@ pub struct ProcessingState {
     /// candles that reference their ids). Init: every asset loaded at cold start
     /// is already in `prices.assets`, so it starts at the loaded `watermark()`.
     pub persisted_asset_watermark: u32,
+    /// The `prices.pool_registry` rows known **durably written**, keyed by
+    /// `contract_id` — the pool counterpart of `persisted_asset_watermark`
+    /// (task 0291). `registries` grows from factory events while the container
+    /// is warm; each run writes the rows that differ from this and records them
+    /// here only *after* the write succeeds, so a failed write is retried next
+    /// run. Init: everything loaded at cold start is already in the table.
+    pub persisted_pools: HashMap<String, PoolRegistryRow>,
 }
 
 pub struct Reconciler<F, C, S> {
@@ -158,6 +172,13 @@ where
         // Everything loaded from `prices.assets` at cold start is already durable,
         // so the persisted watermark starts at the loaded registry's next id.
         let persisted_asset_watermark = assets.watermark();
+        // Same for pools. Built from the registry's own rows, not the table's —
+        // see `Registries::pool_rows_unpersisted`.
+        let persisted_pools = registries
+            .to_pool_rows()
+            .into_iter()
+            .map(|row| (row.contract_id.clone(), row))
+            .collect();
         Self {
             fetcher,
             cursor,
@@ -166,6 +187,7 @@ where
                 assets,
                 registries,
                 persisted_asset_watermark,
+                persisted_pools,
             }),
         }
     }
@@ -229,6 +251,12 @@ where
         // until its minute closes, so a tally over everything decoded counts its
         // fills once per re-read. Summed below over the flushed minutes only.
         let mut ledger_offer_lookups: Vec<(u32, OfferLookupCounts)> = Vec::new();
+        // (minute_start, source, trades) dropped because their pool is missing
+        // from the registry (task 0291). Per ledger for the same reason as the
+        // tally above: a held-back ledger is re-read by every run until its
+        // minute closes.
+        let mut ledger_unregistered: Vec<(u32, &'static str, u32)> = Vec::new();
+        let mut ledger_unregistered_contracts: Vec<(u32, String)> = Vec::new();
 
         for _ in 0..max_iterations {
             let next = current + 1;
@@ -263,6 +291,16 @@ where
                 let minute = (ledger_close_time(lcm) as u32 / 60) * 60;
                 obj_ledgers.push((seq, minute));
                 ledger_offer_lookups.push((minute, offer_lookups));
+                ledger_unregistered.extend(
+                    sob.unregistered_pool_events
+                        .iter()
+                        .map(|(source, n)| (minute, *source, *n)),
+                );
+                ledger_unregistered_contracts.extend(
+                    sob.unregistered_pool_contracts
+                        .iter()
+                        .map(|c| (minute, c.clone())),
+                );
                 obj_max = obj_max.max(seq);
             }
             // Flag only this object's HIGHEST ledger as a valid cursor landing
@@ -287,6 +325,8 @@ where
                 forced_partial_flush: false,
                 offer_lookups: OfferLookupCounts::default(),
                 rows_emitted: 0,
+                pools_persisted: 0,
+                unregistered_pool_events: BTreeMap::new(),
                 // Nothing was persisted, so no INSERT happened: no datapoint.
                 ch_write: None,
             });
@@ -378,6 +418,32 @@ where
             .await?;
         state.persisted_asset_watermark = state.assets.watermark();
 
+        // Then the pools this run learned from factory events (task 0291). Until
+        // this write existed the live registry was memory-only: a pool created
+        // after the last backfill was known only while the container that saw
+        // its factory event stayed warm, and every cold start silently dropped
+        // its trades. Written BEFORE the cursor moves past the factory event —
+        // a held-back ledger is re-read and re-learned, but one the cursor has
+        // passed never is, so this is the last chance to keep the pool. Same
+        // retry rule as the assets above: a failed write leaves the snapshot
+        // unmoved and the next run writes the rows again.
+        let new_pools = state
+            .registries
+            .pool_rows_unpersisted(&state.persisted_pools);
+        let pools_persisted = new_pools.len() as u64;
+        self.sink.write_pool_rows(&new_pools).await?;
+        if pools_persisted > 0 {
+            info!(
+                pools = pools_persisted,
+                "persisted AMM pools learned from factory events"
+            );
+        }
+        state.persisted_pools.extend(
+            new_pools
+                .into_iter()
+                .map(|row| (row.contract_id.clone(), row)),
+        );
+
         // `unwrap_or(current)` not `start`: an object that decoded to no ledgers
         // still advanced `current` past it, and that advance must not be lost.
         let highest_decoded = ledger_minutes
@@ -420,6 +486,9 @@ where
                 forced_partial_flush: false,
                 offer_lookups: OfferLookupCounts::default(),
                 rows_emitted: 0,
+                // Pools are dimension rows written above, like the assets.
+                pools_persisted,
+                unregistered_pool_events: BTreeMap::new(),
                 ch_write: None,
             });
         };
@@ -481,6 +550,25 @@ where
             .iter()
             .filter(|(minute, _)| *minute < flush_boundary)
             .fold(OfferLookupCounts::default(), |acc, (_, c)| acc.plus(*c));
+        let mut unregistered_pool_events: BTreeMap<&'static str, u64> = BTreeMap::new();
+        for (_, source, n) in ledger_unregistered
+            .iter()
+            .filter(|(minute, _, _)| *minute < flush_boundary)
+        {
+            *unregistered_pool_events.entry(source).or_insert(0) += *n as u64;
+        }
+        if !unregistered_pool_events.is_empty() {
+            let contracts: BTreeSet<&str> = ledger_unregistered_contracts
+                .iter()
+                .filter(|(minute, _)| *minute < flush_boundary)
+                .map(|(_, c)| c.as_str())
+                .collect();
+            tracing::warn!(
+                ?unregistered_pool_events,
+                ?contracts,
+                "dropped trades from pools missing from prices.pool_registry (task 0291)"
+            );
+        }
         info!(
             start,
             end = current,
@@ -488,6 +576,7 @@ where
             held_back,
             open_minute,
             rows = rows_emitted,
+            pools_persisted,
             order_book_fills = offer_lookups.order_book_fills,
             offer_lookup_misses = offer_lookups.offer_lookup_misses,
             pool_fills = offer_lookups.pool_fills,
@@ -502,6 +591,8 @@ where
             forced_partial_flush: forced,
             offer_lookups,
             rows_emitted,
+            pools_persisted,
+            unregistered_pool_events,
             ch_write: (!ch_write.samples_ms.is_empty()).then_some(ch_write),
         })
     }
