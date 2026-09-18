@@ -2,8 +2,8 @@
 //! ClickHouse's own error — the code, the elapsed time and the bound crossed
 //! (task 0281).
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p prices-clickhouse --test execution_bound_error_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p prices-clickhouse --test execution_bound_error_it -- --ignored --test-threads=1
 //!
 //! WHY THIS EXISTS
 //! ---------------
@@ -75,7 +75,7 @@ async fn setup() -> Client {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_exceeded_bound_reaches_the_caller_as_a_clickhouse_exception() {
     setup().await;
 

@@ -1,7 +1,7 @@
 //! Live-ClickHouse integration test for `prices.usd_rate` (task 0167).
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p prices-clickhouse --test usd_rate_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p prices-clickhouse --test usd_rate_it -- --ignored --test-threads=1
 
 use clickhouse::Client;
 
@@ -33,7 +33,7 @@ async fn setup(db: &str) -> Client {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usd_rate_has_the_0154_shape_keyed_on_natural_identity() {
     let db = "it_usd_rate_shape";
     let client = setup(db).await;
