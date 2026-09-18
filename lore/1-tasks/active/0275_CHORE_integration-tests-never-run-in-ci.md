@@ -1,6 +1,6 @@
 ---
 id: "0275"
-title: "19 ClickHouse integration tests have never run in CI — cargo test --workspace skips every #[ignore] and no workflow provides a database"
+title: "229 ClickHouse integration tests have never run in CI — cargo test --workspace skips every #[ignore] and no workflow provides a database"
 type: CHORE
 status: active
 related_adr: []
@@ -10,6 +10,8 @@ milestone: 3
 links:
   - "../../../.github/workflows/ci.yml"
   - "../../../packages/enrichment-worker/tests/ch_enrich_it.rs"
+  - "../../../tools/scripts/ignored-tests.sh"
+  - "../../3-wiki/project/ci-pipeline.md"
 history:
   - date: 2026-09-10
     status: backlog
@@ -44,6 +46,11 @@ history:
 # The ClickHouse integration tests have never run in CI
 
 ## Summary
+
+> **Corrected 2026-09-18.** The "19" below was `ch_enrich_it` alone, counted on
+> 2026-09-10. The workspace holds **239** `#[ignore]`d tests, **229** of them
+> ClickHouse-class, in 31 targets across 12 crates — see
+> [Inventory](#inventory-2026-09-18). The text below is kept as written.
 
 `packages/enrichment-worker/tests/ch_enrich_it.rs` holds **19 integration
 tests** against a real ClickHouse. Every one is `#[ignore]`, because they need a
@@ -102,17 +109,58 @@ plan assertion to get an actually-armed check.
 
 ## Acceptance Criteria
 
-- [ ] CI runs the `ch_enrich_it` tests against a ClickHouse pinned to the
-      version production is on, verified by reading prod rather than assuming.
-- [ ] The run is visible in the CI log as a non-zero passed count — a job that
-      silently skips them again fails this criterion.
-- [ ] Every test that fails on first arming is triaged: fixed, or deleted with
-      the reason recorded. None are re-ignored to make the build green.
-      (Expected to be vacuous — all 19 pass as of 2026-09-10.)
-- [ ] A deliberately broken pivot set (or equivalent induced defect) turns the
-      CI job red — verified by inducing, on a branch, not inferred.
-- [ ] Any other crate's `#[ignore]`d integration tests are inventoried, so this
-      is answered for the workspace and not just `enrichment-worker`.
+- [ ] CI runs the ClickHouse tests against a ClickHouse pinned to the version
+      production is on, verified by reading prod rather than assuming.
+      **Locally proven, CI evidence pending.** Prod read 2026-09-18 over mTLS:
+      `SELECT version(), timezone()` = `26.3.10.60 UTC`; `docker-compose.yml`
+      pins `clickhouse/clickhouse-server:26.3.10.60`, and `ignored-tests.sh
+      preflight` refuses any other `version()` or a non-UTC server (checked
+      against a fake 26.3.10.59 pin: exit 1). The PR's own CI run is the
+      evidence that the runner's container matches; the orchestrator owns it.
+- [x] The run is visible in the CI log as a non-zero passed count — a job that
+      silently skips them again fails. `ignored-tests.sh run` is red unless
+      `sum(passed) == ` the derived number of ClickHouse-class `#[ignore]`s AND
+      one `test result:` line per derived target, with `failed == 0`. Three
+      consecutive local runs on 2026-09-18: **229 passed, 0 failed, 31 target
+      summaries** each (99.8–101.2 s of test time), the third after dropping
+      `prices` and every `it_*` database and re-bootstrapping with
+      `prices-clickhouse-init --rollups`. Guard tests (17, `node:test`) seen red
+      first; each rule mutation-checked (removing it reddens its own case).
+- [x] Every test that failed on first arming is triaged — none re-ignored.
+      The four reds of the 2026-09-18 baseline:
+      `rollup_freshness_it` (7/25) and `symbol_queue_it` (1 test, flaky) share
+      the `prices` database → the whole step runs `--test-threads=1` (D9);
+      `endpoints_it::backfill_status_maps_both_streams` had a fixture
+      timestamp that aged past the 7-day stall threshold → seeded
+      `now() - INTERVAL 1 DAY` (commit `0db99d9`, no assertion weakened);
+      `execution_bound_error_it` needs a reverse proxy → armed behind
+      `scripts/ch-proxy-0281.sh` (Caddy 2.11.4) in CI and locally.
+- [ ] A deliberately broken pivot set turns the CI job red — verified by
+      inducing, on a branch. **Locally proven, CI evidence pending.** The
+      patch (USDT arm of `resolve_reference_ids` compares against the USDC
+      issuer, so USDT never resolves and `pivot_ids()` narrows to `[xlm]`)
+      leaves `cargo test --workspace` green (1121 passed) and turns
+      `ignored-tests.sh run` red: `usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg`
+      fails with "USDT-quoted candle must not be left unpriced at 0 …", plus 4
+      sibling ITs; 224 passed / 5 failed. The draft-PR CI run URL is the
+      remaining evidence; the orchestrator owns it.
+- [x] Every other crate's `#[ignore]`d integration tests are inventoried —
+      see below, and derived on every CI run by `ignored-tests.sh check`.
+
+## Inventory (2026-09-18)
+
+Derived by `tools/scripts/ignored-tests.sh expect` / `targets`, not by hand.
+
+| class | reason prefix | tests | targets | CI |
+|---|---|---|---|---|
+| CH | `requires ClickHouse` | **229** | 31 in 12 crates | every Rust PR |
+| NET | `requires public network` | 5 | `asset-discovery/symbol_rpc_it` (3), `oracle-worker/oracle_it` (1), `supply-worker/supply_net_it` (1) | never |
+| PROD | `requires production` | 5 | `enrichment-worker/post_run_0228_it` (2), `post_run_0268_it` (2), `prices-clickhouse/mtls_smoke_it` (1) | never |
+
+NET/PROD are recorded only: no nightly job and no backlog task (Adam,
+2026-09-18) — third-party uptime and production state must not gate a PR.
+`prices-ledger-processor/tests/incremental_assets_it.rs` has no `#[ignore]` and
+already runs in `cargo test --workspace`.
 
 ## ⏱️ Timing against Adam's open PRs
 
@@ -134,3 +182,85 @@ build on his branches would mean his code, not inherited rot.
   different build proves less than it appears to.
 - Do not fold this into [[0215]]. Its defect is fixed and its remaining scope is
   one crate; this is a workspace-wide gap in how tests are enforced.
+
+## Implementation Notes
+
+- `tools/scripts/ignored-tests.sh` — `check` / `targets` / `expect` /
+  `image-tag` / `preflight` / `assert LOG` / `run` (default). Shaped after
+  `lambda-assets.sh`: permissive extraction, then validation; refuses an empty
+  inventory. The header carries the reasons for the vocabulary, the serial
+  flag and the no-two-concurrent-runs rule.
+- `tools/scripts/ignored-tests.test.mjs` — 17 `node:test` cases over throwaway
+  fixture trees; `npm run ignored-tests:verify-guard`, run in the `typescript`
+  job (Node from `.nvmrc`, 22.22.0).
+- 239 `#[ignore]` reasons normalised to three byte-identical strings (incl. the
+  7 bare ones in `ch_enrich_it.rs`); `supply_it`'s Horizon test moved to
+  `supply_net_it.rs`.
+- `ci.yml` `rust` job: ClickHouse started right after checkout, `check` before
+  the toolchain install; after `cargo test --workspace`: `up --wait
+  --wait-timeout 120` + `preflight`, schema via `prices-clickhouse-init
+  --rollups`, proxy, `ignored-tests.sh run`, `failure()` log dump. Filter gains
+  `docker-compose.yml` and `scripts/**`. No `continue-on-error`.
+- `scripts/ch-proxy-0281.sh`: one Caddyfile with `{$CH_UPSTREAM:localhost:8123}`
+  / `{$CH_PROXY_PORT:8124}`, `caddy:2.11.4`, bounded readiness loop,
+  `caddyfile` subcommand for docker-less runs.
+- Docs: IT headers, the 0142 runbook, the prices-clickhouse README, and
+  [ci-pipeline](../../3-wiki/project/ci-pipeline.md).
+
+## Issues Encountered
+
+- **The baseline was not 19/19 green.** Four targets were red on a fresh
+  server (see the triage criterion); two were isolation, one time rot, one a
+  missing proxy. None was a product defect.
+- **`rollup_pf_it` will rot around 2027-05-06**: its fixed 2026 buckets leave
+  the monthly MV's 400-day window. Green today; a comment at the assertion
+  says so. Not changed here.
+- **A plain YAML `#` in a step name** (`Classify #[ignore]d tests`) would have
+  truncated it to `Classify`; quoted.
+
+## Design Decisions
+
+### From Plan
+
+1. **Closed vocabulary (D1)** — three reason prefixes; bare or unknown fails.
+2. **One class per target (D2)** — `supply_it` split.
+3. **One derived script (D3)** — `ignored-tests.sh`, called identically by CI
+   and humans; nothing hand-listed.
+4. **The count is asserted (D4)** — passed sum and summary-line count.
+5. **Same `rust` job, after `cargo test --workspace` (D5)** — binaries are
+   already compiled.
+6. **`docker compose up`, not `services:` (D6)** — one pin; `preflight`
+   asserts version and UTC.
+7. **Caddy for `execution_bound_error_it` (D7)** — armed, not excluded.
+8. **No `continue-on-error` (D8)**, not even for one run.
+9. **`--test-threads=1` for the whole step (D9)** — Adam, 2026-09-18; ~100 s
+   serial vs ~50 s parallel, no per-target exception list.
+
+### Emerged
+
+10. **The induced defect moved from the pivot set to `resolve_reference_ids`.**
+    Narrowing `pivot_ids()` reddens two plain unit tests —
+    `ch_enrich.rs:4219-4220` (`pivot_ids() == [5, 7]`) and `:3638`
+    (`plan_issues_one_peg_and_two_pivots`) — so CI would die at
+    `cargo test --workspace` before the IT step ran: a vacuous proof.
+    `resolve_reference_ids` only runs against a live client and nothing
+    unit-pins it; breaking its USDT arm is the exact 0215 shape (a reference
+    that silently fails to resolve). Both halves verified locally.
+11. **`plan_issues_one_peg_and_two_pivots` (0215) stays.** It pins which
+    statements are issued; the ITs pin the outcome. Complements, not
+    duplicates — and decision 10 is itself evidence it earns its place.
+12. **`cargo test --workspace --test NAME …`, one invocation.** `-p` and
+    `--test` form a cross product in cargo, not pairs, so a `-p/--test` list
+    would be a false comfort; `--test seed_it` selects both crates' `seed_it`,
+    and the summary-line count proves it. `targets` still prints `-p` per
+    target for attribution.
+13. **The guard's tests run in the `typescript` job**, not through PR #325's
+    infra Nx `test` target, which is not on `develop`. Move them there once it
+    lands.
+14. **`check` also fails an `#[ignore]` outside `packages/*/tests/*_it.rs`**
+    and a CH target sharing its name with any other `_it` target — both would
+    otherwise escape the derivation silently.
+15. **Only the 0142 runbook changed among the runbooks.** The other
+    `docker compose up -d clickhouse` lines (backfill, pool seeding, load test,
+    schema quick start) bring ClickHouse up for local work, not for tests, and
+    stay correct.
