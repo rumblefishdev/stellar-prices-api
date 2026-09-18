@@ -4,7 +4,7 @@ title: "SCF Milestone 3 verification package — evidence doc, form answers, vid
 type: DOCS
 status: backlog
 related_adr: []
-related_tasks: ["0102", "0128", "0293", "0260", "0275", "0164", "0249", "0179", "0233", "0239", "0194", "0047"]
+related_tasks: ["0102", "0128", "0293", "0260", "0275", "0164", "0249", "0179", "0233", "0239", "0194", "0047", "0295", "0296", "0297"]
 tags: [layer-docs, priority-high, effort-medium, milestone-M3, scf, submission, evidence]
 milestone: 3
 links:
@@ -72,9 +72,9 @@ deviation, or handed to post-delivery with a name on it.
 | 4 | Integration suite passes on CI, link provided | [[0275]] — **active since 2026-09-18 (Adam)**, re-scoped the same day to the whole workspace: 238 `#[ignore]` across 40 files, most needing ClickHouse, the 63 API endpoint tests among them; its inventory decides what the CI job runs | **open, owned** |
 | 5 | Load test: p95 <100 ms at 100 req/s, plan named | [[0293]], [[0260]]; `docs/prices-api-load-test-100rps.md` §"Evidence run and the ceiling" | **met 2026-09-18** — AC scenario p95 49.0 ms; miss-only row and the 500/1000 req/s rows beside it |
 | 6 | Security checklist: no wildcard IAM, mTLS only, secrets not in env, inputs validated | [[0194]] (audit, archived); 10 `resources: ['*']` statements in `infra/src/lib/stacks/*.ts` need naming and a reason each | needs the table |
-| 7 | Repo public; `cdk deploy` from README works in a fresh account | repo is PUBLIC (checked 2026-09-16). The fresh-account deploy has never been rehearsed and **no task owns it** — [[0239]] is adjacent only (two undocumented macOS prerequisites for a *local* deploy) | **half met, the other half unowned** |
-| 8 | Dashboard accessible to Stellar via a read-only IAM role; all alarms OK | the role **does not exist in `infra/`; no task** | **open, unowned** |
-| 9 | 7-day post-launch report: uptime, error rate, p95, push cadence, `earliest_data_available` | **no task**; needs an agreed definition of "launch" | **open, unowned** |
+| 7 | Repo public; `cdk deploy` from README works in a fresh account | repo is PUBLIC (checked 2026-09-16). The fresh-account deploy has never been rehearsed — [[0297]]; [[0239]] is adjacent only (two undocumented macOS prerequisites for a *local* deploy) | **half met; the other half owned, not started** |
+| 8 | Dashboard accessible to Stellar via a read-only IAM role; all alarms OK | the role does not exist in `infra/` — [[0295]]; needs the Stellar team's AWS account id or their preference for a shared link | **open, owned, not started** |
+| 9 | 7-day post-launch report: uptime, error rate, p95, push cadence, `earliest_data_available` | [[0296]]; blocked on an agreed definition of "launch"; two of its five metrics are obsolete since the archive completed | **open, owned, blocked on a decision** |
 
 Work items without a numbered criterion: **X-Ray tracing end-to-end** — met
 (`TracingConfig.Mode: Active` on api-handler, oracle, enrichment,
@@ -114,9 +114,10 @@ ledger-processor; `tracingEnabled` on the stage, checked 2026-09-16);
 - **Freshness.** Re-run every cited figure close to submission. A month-long
   backfill starts 2026-09-21 on the shared box — latency and load figures taken
   during it describe a different box from the 2026-09-18 load-test numbers.
-- **Unowned gaps.** AC 8 (read-only role), AC 9 (7-day report) and the
-  fresh-account half of AC 7 have no task. Creating them is the first step
-  here — or recording that a criterion will be declared as a deviation instead.
+- **The three gaps that had no owner now have tasks**: [[0295]] (AC 8,
+  read-only dashboard access), [[0296]] (AC 9, 7-day report) and [[0297]]
+  (AC 7, fresh-account deploy). Each may end as a declared deviation rather
+  than a closed criterion — that outcome belongs in this package too.
 
 ## Acceptance Criteria
 
