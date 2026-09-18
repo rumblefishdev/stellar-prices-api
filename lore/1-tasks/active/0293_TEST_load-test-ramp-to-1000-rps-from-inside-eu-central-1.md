@@ -35,6 +35,18 @@ history:
       Team decision at the daily: the ramp runs as planned, 500 and 1000
       req/s are informational, and the M3 evidence uses whatever the run
       measures. See "Decision — 2026-09-18".
+  - date: 2026-09-18
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Diagnostic run from the laptop, bracketed by two cache controls:
+      regime 3 at 100 req/s gave k6 p95 127 ms (464 the day before) with the
+      gateway at ~80 — yesterday's tail WAS the client network, now shown
+      rather than argued. Not an evidence run: the pool was a day old (1,536
+      of 4,039 assets 404 at setup, 67 more mid-run), a backfill was running,
+      and the after-control showed the network tail growing. New finding: a
+      ~4 % slow mode of ~+60 ms sits between Lambda and ClickHouse — not the
+      database, not idle containers, not cold starts.
 ---
 
 # Load-test run 2: ramp to 1000 req/s from inside eu-central-1, and the report
@@ -129,6 +141,60 @@ Agreed with the team:
   concentrated on popular assets, which is the regime where load matters
   (regime 2: ~98 % hits, p95 47 ms at 100 req/s). 1000 req/s of pure misses is
   a synthetic worst case, reported as the data path's ceiling.
+
+## Run 2026-09-18 — diagnostic, laptop on a measured network
+
+Exports: `docs/loadtest-results/2026-09-18-{control-before,regime3-wide,control-after}.json`.
+Observer on the box and CloudWatch throughout: 0 gateway 5XX, 0 ClickHouse
+exceptions, ClickHouse median 8 ms, quota counter to `36707/inf`.
+
+| run (2026-09-18, laptop, k6 v2.2.0) | UTC | k6 med | k6 p95 | k6 p99 | gateway p95 | errors |
+|---|---|---|---|---|---|---|
+| control before — 1 asset, cache hits | 09:33–09:34 | 45.4 | 49.4 | 135 | 6 | 0 |
+| **regime 3 — wide pool, 100 req/s × 5 min** | 09:35–09:42 | **70.6** | **127.3** | 176 | 74–85 (last two minutes 38–41) | 0 × 5XX, 67 × 404 |
+| control after — 1 asset, cache hits | 09:43–09:44 | 45.4 | 82.3 | 373 | 6 | 0 |
+
+**1. Yesterday's 464 ms was the client network.** A control on one cached asset
+isolates the path: the gateway answers a hit in ~6 ms, so everything above that
+is network — 45 ms median with a 4 ms tail before the run. With the path clean,
+k6 equals network + gateway at every percentile (70.6 = 40 + 31; 127 ≈ 45 + 80;
+176 ≈ 45 + 130). The run was genuinely miss-only: the gateway counted ~6,000
+`CacheMissCount` and 0 `CacheHitCount` per minute in the main phase.
+
+**2. This is not an evidence run.** (a) The pool was the previous day's —
+1,536 of 4,039 assets answered 404 at setup, leaving 2,503 (still ≫ RATE × TTL,
+so the regime held). `current_prices` keeps assets with a 1m candle in the last
+24 h and roughly a third of that long tail turns over daily: 3,730 assets in
+the window on 09-17 13:56, 3,340 on 09-18 09:36, 2,436 in common. Candle inflow
+was healthy (500–1,200 assets/hour over 48 h, no step). **Regenerate the pool in
+the same command chain as the run.** (b) 67 requests in `phase:main` got 404 as
+assets slid out of the 24 h window mid-run; k6 counts non-2xx as failed, so
+`http_req_failed` crossed 0.1 % and k6 exited 99 with zero server errors. A 404
+for an asset without a price is a correct answer — count it separately in the
+script. (c) A backfill (after the 0282/0286 changes) was running on the shared
+box. (d) The after-control's tail grew (p95 82, p99 373): the network started
+degrading late in the chain, so 127 is slightly pessimistic; ~120 on a fully
+clean path.
+
+**3. Where the gateway's p95 ≈ 80 ms comes from — a ~4 % slow mode, not the
+database.** 90 % of requests clear the gateway in ≤ 37 ms; p95 flips between
+~40 and ~80 depending on whether the slow share is just under or over 5 %.
+
+| suspect | finding | verdict |
+|---|---|---|
+| cold starts | 0 in `phase:main` (18 containers, all warm) | no |
+| idle containers re-dialling ClickHouse (pool idle 8 s) | gaps > 8 s do cost 75–210 ms — but 20 of 26,972 invocations | real, negligible |
+| ClickHouse | p50 8, p95 **10**, p99 37 ms; 0.85 % of queries > 40 ms | no |
+| **Lambda → Caddy → ClickHouse hop** | **4.2 % of invocations > 50 ms on busy, warm containers** (99.6 % arrive < 1 s after the previous one; p99 77 ms in that group) | **yes, unresolved** |
+
+The read path has no timing around connect vs query ([[0249]] owns that gap),
+so the hop cannot be split further from outside. If the slow mode went away the
+gateway's p95 would sit near 40 ms and the laptop's near 85 — under the M3 bar
+even from Poland.
+
+**4. The "every other minute" pattern is on the box.** ClickHouse shows ~115
+`prices_reader` queries > 40 ms in each even minute (09:36, 09:38, 09:40) and
+none in the odd ones. Something runs every two minutes. It moves p99, not p95.
 
 ## Acceptance Criteria
 

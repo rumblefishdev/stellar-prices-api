@@ -448,6 +448,29 @@ from the AWS side and is not a property of the API.
   45 / 81 / 44 / 89 / 49 / 85 ms — something periodic adds ~40 ms every other
   minute.
 
+### Follow-up — 2026-09-18: the client-network reading confirmed
+
+The previous section attributes the 2026-09-17 tail to the path between the
+laptop and the gateway. That was an inference; on 2026-09-18 it was measured.
+Regime 3 was repeated from the same laptop, bracketed by two one-minute
+controls on a single cached asset, where the gateway answers in ~6 ms and
+everything above it is network:
+
+| run (2026-09-18, laptop, k6 v2.2.0)         | UTC         | k6 med   | k6 p95    | k6 p99 | gateway p95                    | errors            |
+| ------------------------------------------- | ----------- | -------- | --------- | ------ | ------------------------------ | ----------------- |
+| control before — 1 asset, cache hits        | 09:33–09:34 | 45.4     | 49.4      | 135    | 6                              | 0                 |
+| **regime 3 — wide pool, 100 req/s × 5 min** | 09:35–09:42 | **70.6** | **127.3** | 176    | 74–85 (last two minutes 38–41) | 0 × 5XX, 67 × 404 |
+| control after — 1 asset, cache hits         | 09:43–09:44 | 45.4     | 82.3      | 373    | 6                              | 0                 |
+
+On a clean path k6 equals network + gateway at every percentile, and the
+miss-only p95 is **~120–127 ms from Poland, ~80 ms at the gateway**. This run
+is diagnostic, not evidence: the pool was a day old (1,536 of 4,039 assets
+404 at setup; 67 more slid out of the 24 h price window mid-run and tripped
+k6's error threshold with zero server errors), and a backfill was running on
+the shared box. The gateway's p95 is set by a ~4 % slow mode (~+60 ms) between
+Lambda and ClickHouse — not the database (p95 10 ms), not cold starts, not
+idle containers. Details in task 0293.
+
 ## Open items
 
 Ordered by urgency, not by AC order.
