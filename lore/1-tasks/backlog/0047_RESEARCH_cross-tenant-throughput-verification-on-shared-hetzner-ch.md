@@ -67,6 +67,17 @@ history:
       verification has not happened. Stays in backlog, unchanged in scope.
       The precondition it was waiting for is now fully satisfied — real combined
       load exists — so this is closer to actionable than it has ever been.
+  - date: 2026-09-18
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      First measured data point, from [[0293]]: with the explorer's live
+      ingestion running, prices-api held 500 req/s of cache-miss reads for five
+      minutes (box load ~11 of 24 cores, ingestion p95 unchanged) and the box
+      collapsed ~30 s after a ramp reached ~900–1000 req/s (load1 247, no
+      exceptions). The explorer's indexer slowed for ~2 min and one ledger was
+      indexed ~11 min late. Measured BEFORE the month-long backfill starting
+      2026-09-21.
 ---
 
 # Cross-tenant throughput verification on shared Hetzner CH
@@ -119,6 +130,28 @@ A failure mode here forces the **sidecar-CH fallback** (Option 4 in
 task 0044's I-note) — prices-api would run its own Hetzner box,
 keeping the shared-S3 / shared-mTLS-CA pattern but separating the
 data plane.
+
+## 📌 First measured data point — 2026-09-18, from [[0293]]
+
+This task asks whether the shared box absorbs both tenants' load. One side of
+it now has numbers — prices-api **reads** against the explorer's **live
+ingestion**, no backfill running:
+
+| prices-api read load (pure cache misses) | box `load1` (24 cores, idle ~4) | ClickHouse med / p95 for prices | explorer ingestion med / p95 |
+|---|---|---|---|
+| 100 req/s | 5–8 | 8 / 9–12 ms | 2 / ~121 ms (unchanged) |
+| 500 req/s, 5 min | ~11, peak 19.7 | 6 / 8–9 ms (40–54 every other minute) | 2 / 121–134 ms |
+| ramp → 1000 req/s | 46 at ~900/s, then **247** | 346–451 / ~1,200 ms | **92 / 1,012 ms**, throughput 270 → 99 queries/min |
+
+Each miss reads ~17.5 k rows / ~1.5 MiB. The ceiling is joint: past ~900 req/s
+both tenants degrade together, with no ClickHouse exception — only queueing.
+The explorer's indexer (reserved concurrency 1) was throttled 181 times, one
+ledger message waited out a 660 s visibility timeout and
+`production-ingestion-backlog-age` paged for 8 minutes. Details, timeline and
+logs: [[0293]], `docs/loadtest-results/2026-09-18-ramp-1000-*`.
+
+Not covered: write-side contention, the explorer's read API (`api_reader` was
+silent during every run), and anything under the backfill starting 2026-09-21.
 
 ## Research plan
 

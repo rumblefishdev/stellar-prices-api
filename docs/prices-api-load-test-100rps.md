@@ -11,6 +11,11 @@
 > **Update 2026-09-17:** the outage's cause was found and fixed (a ClickHouse
 > per-user quota, not load), and regime 3 was **re-run and held** — 0 errors,
 > gateway-measured p95 74 ms. See _Re-run — 2026-09-17_ below.
+>
+> **Update 2026-09-18:** evidence run for Tranche 3 AC 5 and the 500 / 1000 req/s
+> rows. AC scenario p95 **49.0 ms**; 500 req/s of misses held with zero errors;
+> the shared ClickHouse box is the ceiling, between 500 and ~900 req/s. See
+> _Evidence run and the ceiling — 2026-09-18_.
 
 Task [0121](../lore/1-tasks/active/0121_TEST_api-load-test-100rps-report.md) ·
 Tranche 2 AC 2 · script: [`packages/prices-api/loadtest/`](../packages/prices-api/loadtest/README.md)
@@ -469,6 +474,71 @@ is diagnostic, not evidence: the pool was a day old (1,536 of 4,039 assets
 k6's error threshold with zero server errors). The gateway's p95 is set by a ~4 % slow mode (~+60 ms) between
 Lambda and ClickHouse — not the database (p95 10 ms), not cold starts, not
 idle containers. Details in task 0293.
+
+## Evidence run and the ceiling — 2026-09-18
+
+Task [0293](../lore/1-tasks/active/0293_TEST_load-test-ramp-to-1000-rps-from-inside-eu-central-1.md).
+Tranche 3 AC 5 reads _"p95 <100ms at 100 req/s confirmed"_, the usage plan
+named; the Work list asks for results at 100, 500 and 1000 req/s. All runs on
+2026-09-18, k6 v2.2.0 from the operator's laptop in Poland, each bracketed by
+one-minute controls on a single cached asset (the gateway answers a hit in
+~6 ms, so a control measures the network: median ~45 ms, p95 49–65 ms around the
+100 and 500 runs). An observer read ClickHouse, the box's load and gateway
+errors every 30 s. **No backfill was running**; one starts 2026-09-21.
+
+| rate       | scenario                                 | requests (main)     | failed                                 | k6 med / p95 / p99 (laptop, Poland) | gateway p95         | cache hits                 | ClickHouse med / p95                 | box `load1` (24 cores, idle ~4) |
+| ---------- | ---------------------------------------- | ------------------- | -------------------------------------- | ----------------------------------- | ------------------- | -------------------------- | ------------------------------------ | ------------------------------- |
+| 100 req/s  | **AC scenario**, 17 of 20 assets         | 30,001              | 0                                      | 44.7 / **49.0** / 130 ms            | 6 ms                | 98.3 %                     | —                                    | —                               |
+| 100 req/s  | wide pool, 3,463 assets                  | 30,000              | 0                                      | 71.7 / **129.9** / 171 ms           | 45–90 ms per minute | 0 %                        | 8 / 9–12 ms                          | 4.8–7.8                         |
+| 500 req/s  | wide pool, 3,514 assets × 4 key variants | 149,880             | 0                                      | 68.8 / **133.0** / 261 ms           | 87–95 ms            | ~2.6 % (head of main only) | 6 / 8–9 ms, 40–54 every other minute | ~11, peak 19.7                  |
+| 1000 req/s | wide pool, 3,504 assets × 8 key variants | 93,351 before abort | 14,865 (15.9 %) — all Lambda throttles | 637 / 1,730 / 2,700 ms              | 1,392–1,471 ms      | 0 %                        | 451 / 1,203 ms at the worst reading  | **247**                         |
+
+Hit rates are the gateway's own `CacheHitCount` / `CacheMissCount`. Plan
+`prices-production-loadtest-plan` (`i12bsj`): 150 req/s / burst 300 for the
+100 req/s rows, raised to 1200 / 2400 for the 500 and 1000 rows and restored
+afterwards. Exports and observer logs:
+[`loadtest-results/2026-09-18-*`](loadtest-results/).
+
+### Verdict against Tranche 3 AC 5
+
+**Met on the scenario the criterion names**: the 20-asset AC scenario (17
+answered; 3 have no price row) sustained 100 req/s for five minutes at
+**p95 49.0 ms**, zero errors in 30,001 requests, k6 exit 0 — the same shape as
+the Tranche 2 pass, against the tighter bar. That scenario is 98.3 % cache hits
+and the report says so.
+
+The miss-only row is the honest companion, not a substitute: **p95 129.9 ms**
+as seen from Poland, ~45 ms of which is the network, and **45–90 ms per minute
+as measured by the gateway**. Production traffic today is almost entirely
+misses (~4 % hits over 2026-09-04 → 09-16, at 0–1,100 requests a day — a 10 s
+TTL rarely sees the same key twice at that volume); the cache earns its keep
+under volume concentrated on popular assets, which is the regime where load
+matters.
+
+### 500 req/s held; the box is the ceiling below 1000
+
+Five times the load moved p95 by 3 ms: 149,880 requests at 500.00 req/s, zero
+failed, box load ~11 of 24 cores, the explorer's ingestion untouched.
+
+The ramp to 1000 req/s did not hold. `load1` was already 46 at ~900 req/s while
+latency still looked healthy; ~30 s after reaching 1000 the ClickHouse median
+went from 7 ms to 89, then 346, with `load1` at 247. ClickHouse raised no
+exception — it slowed down, Lambda invocations lengthened, and the handler hit
+the temporary 700-slot concurrency cap set for this run: **all 14,865 failed
+requests are Lambda throttles at that cap**. The run was aborted after 1.5
+minutes and the box recovered within two. **The knee is between 500 and ~900
+req/s**; the ramp crossed that range too quickly to place it better. The
+bottleneck is the shared ClickHouse box, not Lambda and not the gateway.
+
+### Collateral
+
+The overload slowed soroban-block-explorer's indexer for about two minutes, and
+one ledger message waited out its queue's 660 s visibility timeout: one ledger
+was indexed ~11 minutes late and `production-ingestion-backlog-age` paged from
+12:56:50 to 13:04:50 UTC. It recovered by itself; DLQ empty, nothing lost.
+**A run above 500 req/s on this box is a run against shared infrastructure and
+needs an agreed window.** Both temporary AWS changes made for these runs (usage
+plan rates, reserved concurrency on the API handler) were reverted the same day.
 
 ## Open items
 

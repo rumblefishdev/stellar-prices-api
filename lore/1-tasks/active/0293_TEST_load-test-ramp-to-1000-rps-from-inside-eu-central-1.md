@@ -48,6 +48,21 @@ history:
       said a backfill was running — it was not; it starts 2026-09-21.) New finding: a
       ~4 % slow mode of ~+60 ms sits between Lambda and ClickHouse — not the
       database, not idle containers, not cold starts.
+  - date: 2026-09-18
+    status: active
+    who: stkrolikiewicz
+    note: >
+      All three rates run the same day, before the backfill starts. 100 req/s
+      evidence run: AC scenario p95 49.0 ms (98.3 % cache hits), miss-only
+      p95 129.9 ms from the laptop and 45–90 at the gateway, zero failures.
+      500 req/s held for 5 min with zero failures (p95 133 ms, box load ~11 of
+      24). The ramp to 1000 found the ceiling: ClickHouse collapsed ~30 s after
+      the ramp reached ~900–1000 req/s, aborted after 1.5 min; the knee is
+      between 500 and ~900. Collateral: the explorer's indexer slowed for ~2 min
+      and one ledger message waited out a 660 s visibility timeout, paging
+      `production-ingestion-backlog-age` for 8 minutes. Decisions: no handler
+      timing instrumentation; laptop-with-controls accepted as the client.
+      Both temporary AWS changes (usage plan, reserved concurrency) reverted.
 ---
 
 # Load-test run 2: ramp to 1000 req/s from inside eu-central-1, and the report
@@ -205,16 +220,115 @@ even from Poland.
 `prices_reader` queries > 40 ms in each even minute (09:36, 09:38, 09:40) and
 none in the odd ones. Something runs every two minutes. It moves p99, not p95.
 
+## Results — 2026-09-18: evidence run, 500 req/s, and the ceiling
+
+All runs from the operator's laptop (k6 v2.2.0), each bracketed by one-minute
+controls on a single cached asset to measure the network; an observer read
+ClickHouse (`prices_reader` and the explorer's `ingestion_writer`), the box's
+`load1` and gateway 5XX every 30 s. Exports and observer logs:
+`docs/loadtest-results/2026-09-18-*`. No backfill was running.
+
+| rate | scenario | requests (main) | failed | k6 med / p95 / p99 (laptop, Poland) | gateway p95 | cache hits | ClickHouse med / p95 | box `load1` (24 cores, idle ~4) |
+|---|---|---|---|---|---|---|---|---|
+| 100 req/s | **AC scenario**, 17 of 20 assets | 30,001 | 0 | 44.7 / **49.0** / 130 ms | 6 ms | 98.3 % | — | — |
+| 100 req/s | wide pool, 3,463 assets | 30,000 | 0 | 71.7 / **129.9** / 171 ms | 45–90 ms per minute | 0 % | 8 / 9–12 ms | 4.8–7.8 |
+| 500 req/s | wide pool, 3,514 assets × 4 key variants | 149,880 | 0 | 68.8 / **133.0** / 261 ms | 87–95 ms | ~2.6 % (head of main only) | 6 / 8–9 ms, 40–54 every other minute | ~11, peak 19.7 |
+| 1000 req/s | wide pool, 3,504 assets × 8 key variants | 93,351 before abort | 14,865 (15.9 %) — all Lambda throttles | 637 / 1,730 / 2,700 ms | 1,392–1,471 ms | 0 % | 451 / 1,203 ms at the worst reading | **247** |
+
+Usage plan `prices-production-loadtest-plan` (`i12bsj`): **150 req/s, burst
+300** for the 100 req/s evidence run (unchanged since 2026-09-03); raised to
+1200 / 2400 / 3 M per month for the 500 and 1000 runs, restored to 150 / 300 /
+1 M afterwards. Controls: p95 49–65 ms before/after the 100 and 500 runs (network
+tail ≤ 20 ms); 93 ms before the 1000 run.
+
+**M3 AC 5 (p95 < 100 ms at 100 req/s, plan named): met on the scenario it
+names** — 49.0 ms, 0 errors, plan at 150 req/s. The miss-only row is reported
+beside it, not instead of it: 129.9 ms from Poland, of which ~45 ms is the
+network, and 45–90 ms per minute measured by the gateway.
+
+### The ceiling
+
+500 req/s of pure misses held for five minutes with zero failed requests; five
+times the load moved p95 by 3 ms. The ramp to 1000 (100 → 1000 over 120 s) did
+not:
+
+| UTC | offered rate | ClickHouse med / p95 | `load1` | explorer ingestion med / p95, queries/min | gateway 5XX |
+|---|---|---|---|---|---|
+| 12:48:41 | ~650/s (ramp) | 6 / 34 ms | 12.6 | 2 / 137 ms, 237 | 0 |
+| 12:49:15 | ~900/s (ramp) | 7 / 57 ms | **45.9** | 2 / 143 ms, 275 | 0 |
+| 12:49:56 | 1000/s for ~30 s | **89 / 1,132 ms** | 141.8 | 6 / 330 ms, 203 | 0 |
+| 12:50:31 | 1000/s | 346 / 1,166 ms | **247.5** | **92 / 1,012 ms, 99** | 0 (6,810 in the next minute) |
+| 12:51:07 | aborted | 451 / 1,203 ms | 174.6 | 4 / 571 ms, 312 | 6,810 |
+| 12:52:11 | — | 8 / 11 ms | 61.1 | 3 / 124 ms, 273 | tail of 8,055 |
+
+ClickHouse raised **no exception** at any point — it slowed down. Slower queries
+lengthen Lambda invocations, and the handler's concurrency went from ~170 to the
+700 cap within a minute; **all 14,865 failed requests are Lambda throttles at
+that cap** (6,209 + 8,656, equal to k6's failures and the gateway's 5XX to the
+unit). k6 was holding over 1,200 connections at the time: without the cap the
+handler would have taken the account's whole 1000-slot pool. The box was back
+to normal within two minutes of the abort.
+
+**The knee is between 500 and ~900 req/s.** The ramp crossed that range in
+~50 s, so it cannot be placed more precisely; at ~900 req/s latency still
+looked healthy while `load1` was already at 46 on 24 cores. A stepped run
+(650 / 800, held) would narrow it. Informational; not needed for M3. The
+bottleneck is the shared ClickHouse box — not Lambda, not the gateway.
+
+### Collateral — recorded because it happened
+
+- The explorer's indexer (reserved concurrency 1) slowed for ~2 minutes: one
+  invocation ran 73.9 s, the next minute had none, 181 throttles against a usual
+  maximum of 10 per hour. It caught up in the following minute (23 invocations).
+- **One ledger message** was received, its invocation throttled, and it stayed
+  invisible for the queue's 660 s visibility timeout. `ApproximateAgeOfOldestMessage`
+  on `production-ledger-ingest` climbed to 659 s and
+  **`production-ingestion-backlog-age` was in ALARM 12:56:50 → 13:04:50 UTC**.
+  The message reprocessed by itself at 13:02; DLQ empty, queue empty, nothing
+  lost, one ledger indexed ~11 minutes late. Nothing was changed on the
+  explorer's side.
+- `prices-production-ledger-processor`: 8 throttles, inside its daily noise.
+  No `prices-production-*` alarm fired.
+- 🔴 The first post-run check looked only at `prices-production-` alarms and
+  reported "no alarm fired". The explorer's page was found by the operator, not
+  by that check. **After a run on shared infrastructure, check every alarm in
+  the account.**
+
+### What changed against the plan above
+
+1. **Client.** Not moved into `eu-central-1` (team decision). The laptop is
+   accepted with its network measured around every run, and every row carries
+   the gateway-measured p95 beside k6's. The 2026-09-17 tail (p95 464 ms) was
+   shown to be the client network: the same run on a clean path gives ~130.
+2. **Two runs, not one ramp**: 500 (held 5 min) and 1000, each with a ramped
+   warm-up from 100. `VARIANTS` multiplies cache keys through `min_volume_usd`
+   (applied in memory after the same ClickHouse query); `aged_out` counts
+   mid-run 404s separately; `gen_pool.mjs` rebuilds the pool in the run's chain.
+3. **No handler timing instrumentation** (operator decision, 2026-09-18). The
+   ~4 % slow mode between Lambda and ClickHouse stays a described, unexplained
+   phenomenon; at 500 req/s it grows to ~10 % in the box's "bad" minutes.
+4. **The backfill** starts 2026-09-21 (est. 22–28 days); every number here is
+   the box without it. A repeat before it ends measures a different box.
+5. **Temporary AWS changes, both reverted the same day**: usage plan rates
+   (above), and `reserved-concurrent-executions = 700` on
+   `prices-production-api-handler` from 12:13 to 12:52 UTC, outside CDK.
+6. The loadtest key used ~600 k of its 1 M monthly quota; a second full ramp
+   does not fit before 2026-10-01.
+
 ## Acceptance Criteria
 
 - [ ] k6 ran from a client inside `eu-central-1`; type, AZ and k6 version recorded
-- [ ] The usage plan for the run is named, with its rate/burst at run time
-- [ ] Hit rate per row is stated, derived from pool size × key variants vs RATE × TTL
-- [ ] The ramp reached 1000 req/s, or the knee is named with the abort reason and the ClickHouse/gateway readings at that step
-- [ ] Zero gateway 5XX and zero ClickHouse exceptions at every step reported as passed
-- [ ] p95 at 100 req/s reported both gateway-measured and client-measured, with the M3 bar (100 ms) beside it
-- [ ] Report committed with the k6 exports for every row, including run 1's
-- [ ] If the knee is shared-box saturation, [[0047]] gets the numbers
+      — *not done, by decision: laptop with before/after network controls and the
+      gateway-measured p95 on every row (k6 v2.2.0, macOS, Poland)*
+- [x] The usage plan for the run is named, with its rate/burst at run time
+- [x] Hit rate per row is stated, derived from pool size × key variants vs RATE × TTL
+      — *and confirmed from the gateway's `CacheHitCount` / `CacheMissCount`*
+- [x] The ramp reached 1000 req/s, or the knee is named with the abort reason and the ClickHouse/gateway readings at that step
+- [x] Zero gateway 5XX and zero ClickHouse exceptions at every step reported as passed
+      — *100 and 500 req/s; 1000 is reported as the ceiling, not as passed*
+- [x] p95 at 100 req/s reported both gateway-measured and client-measured, with the M3 bar (100 ms) beside it
+- [x] Report committed with the k6 exports for every row, including run 1's
+- [x] If the knee is shared-box saturation, [[0047]] gets the numbers
 
 ## Notes
 
