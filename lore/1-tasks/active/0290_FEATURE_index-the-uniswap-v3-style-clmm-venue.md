@@ -50,6 +50,17 @@ history:
       events-backfill prices only registered pools, so phase 3 running before
       the write would silently re-ingest the very gap this task closes. 0286's
       owner must be told — its precondition list predates this venue.
+  - date: 2026-09-21
+    status: active
+    who: okarcz
+    note: >
+      Correction from a teammate's review of 0291: today's dry run used
+      --end 64491946, which was FRIDAY's chain tip, so it scanned nothing after
+      2026-09-18 and its to_write=133 is a 09-18 number. Since the 09-18 08:00
+      UTC seed the registry has had neither a writer nor a working sensor, so
+      pools created since are invisible the same way the original 42 were. The
+      runbook now says to re-run the dry run with a current --end before the
+      write, and to size that window before 0286 phase 3 is planned.
 ---
 
 # Index the Uniswap-v3-style concentrated-liquidity venue
@@ -526,7 +537,26 @@ Every one of the four step-4 conditions held:
 ⚠️ Nothing was written. The registry still has **no** sushiswap rows; the write
 is step 5.
 
-5. **[later, after 0286 phase 1 and 0290's deploy]** drop `--dry-run` to write,
+⛔ **`--end 64491946` was FRIDAY's tip, so this run says nothing about
+2026-09-18 → now.** Raised by a teammate on [[0291]]: since the 09-18 08:00 UTC
+seed the registry has had neither a writer nor a working sensor, so pools
+created in that window are invisible in exactly the way the original 42 were.
+`to_write=133` is therefore a **09-18 number, not a current one**. Before the
+write — and before [[0286]] phase 3 is planned — re-run this dry run with
+`--end` set to the current tip:
+
+```sql
+SELECT max(ledger_sequence) FROM default.soroban_events
+```
+
+and expect **≥ 133**, plus possibly non-zero counts for the other venues. A
+count above 133, or any venue other than `sushiswap`, is the window's size —
+not a defect.
+
+5. **[later, after 0286 phase 1 and 0290's deploy]** ⚠️ **re-run step 3 first**
+   with `--end` at the then-current tip — a dry run from before the deploy does
+   not license the write, because the registry has no writer until that deploy
+   lands. Then drop `--dry-run` to write,
    run the dry run again (it must report `to_write=0`), then verify:
 
    ```sql

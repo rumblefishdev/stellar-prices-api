@@ -73,6 +73,21 @@ history:
       measured: the 08:11:33 deploy stall that blocked this task cost ZERO
       trades, because 0064's durable cursor caught it up. Still blocked on
       0286 for AC 2 and AC 3 — the deploy, not the data.
+  - date: 2026-09-21
+    status: blocked
+    who: okarcz
+    note: >
+      Two additions from a teammate's review, both accepted. (1) 0256 recorded
+      the drop-the-scan decision on 2026-09-21; its removal PR is gated on this
+      task's AC 2 + AC 3 on production, and saying so in 0256 is the trigger.
+      (2) The unattended window: since the 09-18 08:00 UTC seed the registry has
+      neither a writer nor a working sensor — the alarm cannot fire because its
+      counter is in the rolled-back processor — so any pool created since then
+      is exactly where the 42 were, silently. 0282's same-day measurement makes
+      the cost precise: such a pool is INVISIBLE, not under-counted. Noted that
+      0290's 09-21 dry run used Friday's tip as --end, so its to_write=133 says
+      nothing about the window; a dry run to the current tip is owed before
+      0286 phase 3.
 ---
 
 ## 📊 STATUS — 2026-09-18 · ⛔ BLOCKED on [[0286]] · AC 1 DONE on prod
@@ -92,6 +107,39 @@ history:
 - 🔑 Root cause is [[0256]]: the registry's designed maintainer (the
   asset-discovery scan, task 0069) has never run on production. 0291 makes the
   live processor the maintainer, so 0256 can drop the scan without losing it.
+  **[[0256]] recorded that decision on 2026-09-21.** Its removal PR is gated on
+  **this task's AC 2 + AC 3 being met on production** — when they are, say so in
+  0256; that is the trigger.
+
+### 🔴 The unattended window — open since 2026-09-18 08:00 UTC, and growing
+
+Raised by a teammate 2026-09-21. Between the seed and the live-persistence
+deploy the registry has **neither a writer nor a working sensor**:
+
+- the seed was a one-off; nothing has written `pool_registry` since 08:00 UTC
+  on 2026-09-18;
+- the live processor still does not persist what it learns (the code is
+  merged, not deployed);
+- `UnregisteredPoolEvents` **cannot fire** — its counter is in the rolled-back
+  processor, so the alarm sits `OK` on no data (`notBreaching`).
+
+**Any pool created in this window is exactly where the 42 were**, and nothing
+will say so. ⚠️ [[0282]]'s 2026-09-21 measurement makes the cost precise: an
+unregistered pool is **invisible, not under-counted** — live stores *none* of
+its trades. So the window's damage is the full raw trade count of every pool
+created in it, not a fraction.
+
+The runbook only catches this at its Final test (`to_write=0`) — i.e. at deploy
+time, as a surprise. Two changes follow:
+
+1. **Step 3 (`--discover-pools`) must be re-run at deploy time** over the range
+   from 2026-09-18 to the then-current tip. A dry run from before the deploy
+   does not license the write.
+2. **Size the hole now, not at the deploy.** [[0290]]'s dry run on 2026-09-21
+   used `--end 64491946` — **Friday's tip** — so it scanned nothing after
+   09-18 and its `to_write=133` is a 09-18 number. A dry run to the current tip
+   is owed, and its answer is needed **before [[0286]] phase 3** so the
+   re-ingest is not planned against a registry that is already short.
 
 ### What unblocks this
 
