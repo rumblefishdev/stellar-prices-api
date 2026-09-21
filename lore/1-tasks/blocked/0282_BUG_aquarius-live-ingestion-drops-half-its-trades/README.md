@@ -2,7 +2,7 @@
 id: "0282"
 title: "Candle writes are replaced instead of summed whenever a minute bucket spans a reconcile run — Aquarius loses ~50% of its trades daily, and SDEX is affected too"
 type: BUG
-status: active
+status: blocked
 assignee: okarcz
 related_adr: []
 related_tasks: ["0080", "0101", "0100", "0097", "0203"]
@@ -116,11 +116,26 @@ history:
       measured rather than assumed. ⚠️ Generalises: any raw-vs-stored
       measurement spanning a registry seed shows a phantom loss, because raw
       resolves the registry as of now.
+  - date: 2026-09-21
+    status: blocked
+    who: okarcz
+    by: ["0291"]
+    note: >
+      Blocked on 0291. Six of seven criteria are met — criterion 2 was closed
+      this morning with two full days at exactly zero loss. The seventh, live
+      drops becoming observable, is half done (ForcedPartialFlushes is
+      alarmed); its remaining half — an unresolvable pool's swap leaving a
+      trace — is DELEGATED to 0291 AC 3 rather than spawned, because
+      UnregisteredPoolEvents and its alarm already exist and are merely
+      undeployed. The "fold into 0285 or spawn" option lapsed when 0285 was
+      archived today. Also corrected: status row 7 read "not started" for the
+      phoenix shortfall while the criterion below it was already ticked at
+      ~12%. Nothing here can move until the deploy 0286 phase 1 carries.
 ---
 
 # Aquarius live ingestion drops about half of every day's trades
 
-## 📊 STATUS — 2026-09-21 · FIX VERIFIED, two full days at EXACTLY zero loss
+## 📊 STATUS — 2026-09-21 · ⛔ BLOCKED on [[0291]] · FIX VERIFIED, two full days at EXACTLY zero loss
 
 **The live fix is in production and verified.** PR #313 was merged as `2cb5b2b`
 and deployed at **12:04:20 UTC** on 2026-09-17 (Observability, then Compute).
@@ -136,9 +151,9 @@ that settles criterion 2. Details and the hour-by-hour proof are in
 | 2 | Live fix deployed | ✅ 2026-09-17 12:04 UTC |
 | 3 | **Live fix verified: a full day at ~0% loss** | ✅ **09-19 and 09-20 at EXACTLY 0 lost** (26,422 and 20,497, raw = stored); 09-18's 6.6% is [[0291]]'s pre-seed hours, not this defect |
 | 4 | SDEX loss quantified | ✅ **66.3% of SDEX trades lost** (11.35M true → 3.82M stored, two windows) — see [the note](notes/R-sdex-loss-measurement-design.md) |
-| 5 | Live-path drops observable | ◐ forced flush alarmed; unresolved-pool swaps still silent |
+| 5 | Live-path drops observable | ◐ forced flush alarmed; the unresolved-pool half is **delegated to [[0291]] AC 3** — built and alarmed, undeployed. **This is the only thing left in this task.** |
 | 6 | Repair decision | ✅ **decided: [[0286]] phase 3** rebuilds SDEX + AMM; AMM live-era months wait for [[0291]] |
-| 7 | Phoenix shortfall | ⏳ not started |
+| 7 | Phoenix shortfall | ✅ **~12% lost** (≈4,194 true vs 3,675 stored, live era) — folded into the same repair. ⚠️ This row read "not started" until 2026-09-21 while the criterion below was already ticked |
 
 **Next:**
 
@@ -684,10 +699,18 @@ just re-corrupts. That constraint is real; it simply does not apply to
 - [ ] Live-path drops become observable — a dropped swap leaves a trace
       somewhere, rather than nothing at all. ◐ **Half covered by #313:** the one
       path that still loses data after the fix — a forced partial flush — is
-      alarmed (`ForcedPartialFlushes`). ⏳ **Still silent:** a swap from a pool
-      the live path cannot resolve. Only the backfill writes
-      `prices.unresolved_pools`, so live leaves no trace at all. Close to
-      [[0285]]; fold it in there or spawn it — not decided.
+      alarmed (`ForcedPartialFlushes`).
+      ⏳ **The other half — a swap from a pool the live path cannot resolve — is
+      DELEGATED to [[0291]] AC 3, decided 2026-09-21.** Not spawned as a new
+      task, because it is not unbuilt work: `UnregisteredPoolEvents` and its
+      `>= 1` / `NOT_BREACHING` alarm already exist, the alarm is deployed, and
+      the only reason it is silent is that the counter lives in the processor
+      rolled back on 2026-09-18. [[0286]] phase 1 carries it.
+      The earlier "fold it into [[0285]] or spawn it" option lapsed when 0285
+      was closed and archived the same day; 0285's own close-out records the
+      same delegation, so the two agree.
+      **Tick this when 0291 AC 3 is met on production** — same deploy, same
+      day-after check, no separate work.
 - [x] Phoenix's parallel shortfall is measured and either folded in or spawned.
       → ~12% lost (≈4,194 true swaps vs 3,675 stored, live era), via [[0285]]'s
       corrected count; soroswap 43.8%. Folded in: same mechanism, same repair.
