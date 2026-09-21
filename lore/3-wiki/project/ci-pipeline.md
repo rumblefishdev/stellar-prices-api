@@ -80,10 +80,11 @@ in parallel. It costs **~100 s of test time serial vs ~50 s parallel**, measured
 on the workstation (three runs at 99.8–101.2 s) and **96 s in CI** (run
 `35364008161`); about 2 minutes per Rust PR with the container, schema and proxy.
 
-The guard's own tests (`npm run ignored-tests:verify-guard`, `node:test` over
-fixture trees) run in the `typescript` job, which pins Node from `.nvmrc`. When
-the infra Nx `test` target from PR #325 lands, they belong there — a one-line
-follow-up, not a dependency.
+The guard's own tests (`node:test` over fixture trees) run in the `typescript`
+job, which pins Node from `.nvmrc`. Since task 0141 landed they ride its infra
+Nx `test` target, whose glob is `tools/scripts/**/*.test.mjs` — one step, 30
+cases, 12 of them 0141's deploy guards. `npm run ignored-tests:verify-guard`
+runs this half alone by hand.
 
 **Two traps a future editor must not undo:**
 

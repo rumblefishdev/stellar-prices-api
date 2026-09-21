@@ -116,16 +116,13 @@ jobs:
       # per-stack deploy is `--exclusively`). As an Nx target and not a bare
       # step so that `verify:staged` / `verify:push` run it too, on the pinned
       # Node: `node --test <dir>` works on 26 and fails on the 22 CI uses.
+      #
+      # That target's glob is `tools/scripts/**/*.test.mjs`, so since 0141
+      # landed it also covers the guard behind the rust job's integration-test
+      # step (task 0275, decision 13): 30 cases here, 12 + 18. `npm run
+      # ignored-tests:verify-guard` remains for running that half alone by
+      # hand.
       - run: npx nx run-many -t lint build typecheck test
-
-      # The guard behind the rust job's integration-test step (task 0275):
-      # tools/scripts/ignored-tests.sh classifies every `#[ignore]` and derives
-      # what CI must run. Its own tests use throwaway fixture trees, need no
-      # Rust and no ClickHouse, and run here because this job pins Node to
-      # .nvmrc — the file argument is explicit because `node --test <dir>`
-      # fails on Node 22.
-      - name: Test the #[ignore] inventory guard
-        run: npm run ignored-tests:verify-guard
 
       # Cheap counterpart to the rust job's build+verify+synth guard.
       #

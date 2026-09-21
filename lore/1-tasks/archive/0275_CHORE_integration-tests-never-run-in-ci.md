@@ -289,8 +289,11 @@ build on his branches would mean his code, not inherited rot.
     and the summary-line count proves it. `targets` still prints `-p` per
     target for attribution.
 13. **The guard's tests run in the `typescript` job**, not through PR #325's
-    infra Nx `test` target, which is not on `develop`. Move them there once it
-    lands.
+    infra Nx `test` target, which was not on `develop` at the time. **Done
+    2026-09-21:** #325 merged (`a8806bd`), its target's glob is
+    `tools/scripts/**/*.test.mjs`, so it picked these up by itself — 30 cases,
+    12 + 18. The separate CI step is gone; `npm run ignored-tests:verify-guard`
+    stays for running this half by hand.
 14. **`check` also fails an `#[ignore]` outside `packages/*/tests/*_it.rs`**
     and a CH target sharing its name with any other `_it` target — both would
     otherwise escape the derivation silently.
@@ -314,11 +317,9 @@ build on his branches would mean his code, not inherited rot.
 
 ## Future Work
 
-Recorded, not spawned as tasks — both fail loudly in CI when they matter,
+Recorded, not spawned as tasks — it fails loudly in CI when it matters,
 which is the point of this task:
 
 - `rollup_pf_it` rots around 2027-05-06 (fixed 2026 buckets vs the monthly
   MV's 400-day window). CI will go red on it then; the assertion carries a
   comment saying why.
-- Move the guard's `node:test` run into the infra Nx `test` target once PR
-  #325 lands (decision 13).
