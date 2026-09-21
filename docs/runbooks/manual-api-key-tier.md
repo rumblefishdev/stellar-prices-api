@@ -363,7 +363,7 @@ delete a row when its key is deleted, and the last one when the plan goes.
 
 | Customer                           | Plan name                                                          | Plan ID                                               | Key name                                              | Key ID       | Limits                                | Issued     | Issued by      |
 | ---------------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------- | ----------------------------------------------------- | ------------ | ------------------------------------- | ---------- | -------------- |
-| loadtest (internal, task 0121)     | `prices-production-loadtest-plan`                                  | `i12bsj`                                              | `prices-production-loadtest-key-20260819T114230Z`     | `lxrwlyhjm7` | 150 req/s, burst 300, 1,000,000/month | 2026-08-19 | stkrolikiewicz |
+| loadtest (internal, task 0121)     | `prices-production-loadtest-plan`                                  | `i12bsj`                                              | `prices-production-loadtest-key-20260921T070812Z`     | `gc22sbmwa2` | 150 req/s, burst 300, 1,000,000/month | 2026-09-21 | stkrolikiewicz |
 | scf-reviewer (external, task 0128) | `pricing-api-free-production` (CDK-managed, **not** a manual plan) | see SSM `/prices/production/pricing-api-free-plan-id` | `prices-production-scf-reviewer-key-20260909T120021Z` | `l1kqdj0123` | 1 req/s, burst 5, 100,000/month       | 2026-09-09 | okarcz         |
 
 ⚠️ **The `scf-reviewer` row is the one exception to this file's shape:** it is a
