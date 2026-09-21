@@ -13,7 +13,14 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -236,14 +243,18 @@ test('10b: an #[ignore] outside packages/*/tests/*_it.rs fails', () => {
 // The fixture tree derives CH_TESTS=3 over CH_TARGETS=2; each case feeds a
 // synthetic cargo log, so no cargo and no ClickHouse are needed.
 
-function countedTree() {
-  return tree({
+function countedTreeFiles() {
+  return {
     ...crate('alpha'),
     'packages/alpha/tests/store_it.rs': itFile(CH, CH),
     ...crate('beta'),
     'packages/beta/tests/seed_it.rs': itFile(CH),
     'packages/beta/tests/rpc_it.rs': itFile(NET),
-  });
+  };
+}
+
+function countedTree() {
+  return tree(countedTreeFiles());
 }
 
 const result = (passed, failed = 0) =>
@@ -316,4 +327,48 @@ test('16: a Doc-tests summary in the log fails rather than being miscounted', ()
   const r = assertLog([result(2), result(1), '   Doc-tests alpha', result(0)]);
   assert.notEqual(r.code, 0);
   assert.match(r.err, /Doc-tests/);
+});
+
+// ---- `run`: the log path (task 0275, PR #327 review) ----
+//
+// `run` tees the cargo log from inside `cd "$root"` and then reads it back from
+// the caller's directory. A relative IGNORED_TESTS_LOG must name the SAME file
+// in both places — otherwise it reads nothing, or a stale log from an earlier
+// run that happens to pass. `cargo` and `curl` are stubs on PATH, so this needs
+// neither a toolchain nor a ClickHouse.
+
+test('17: a relative IGNORED_TESTS_LOG is written and read as the same file', () => {
+  const root = tree({
+    ...countedTreeFiles(),
+    'docker-compose.yml':
+      'services:\n  clickhouse:\n    image: clickhouse/clickhouse-server:26.3.10.60\n',
+  });
+  const bin = tree({
+    // Answers ch_query by the SQL it is sent (the --data-binary argument).
+    curl:
+      '#!/usr/bin/env bash\n' +
+      'while [[ $# -gt 0 ]]; do [[ $1 == --data-binary ]] && { sql=$2; break; }; shift; done\n' +
+      'case "$sql" in "SELECT 1") echo 1 ;; "SELECT version()") echo 26.3.10.60 ;; "SELECT timezone()") echo UTC ;; esac\n',
+    cargo: `#!/usr/bin/env bash\necho '${result(2)}'\necho '${result(1)}'\n`,
+  });
+  for (const f of ['curl', 'cargo']) chmodSync(join(bin, f), 0o755);
+  const cwd = tree({});
+
+  const r = spawnSync('bash', [SCRIPT, 'run', root], {
+    cwd,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      IGNORED_TESTS_LOG: 'relative.log',
+      CLICKHOUSE_URL: 'http://stub',
+      CLICKHOUSE_PROXY_URL: 'http://stub-proxy',
+    },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /3 passed, 0 failed over 2 target summaries/);
+  assert.ok(
+    existsSync(join(cwd, 'relative.log')),
+    'log is where the caller named it',
+  );
 });

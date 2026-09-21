@@ -388,6 +388,9 @@ cmd_run() {
   done < <(sed -E 's/.* --test //' <<<"$recs" | sort -u)
 
   log="${IGNORED_TESTS_LOG:-$(mktemp "${TMPDIR:-/tmp}/ignored-tests.XXXXXX.log")}"
+  # Absolute before the subshell: `tee` runs after `cd "$root"` and
+  # `cmd_assert` reads from here, so a relative path would name two files.
+  [[ "$log" == /* ]] || log="${PWD}/${log}"
   echo "ignored-tests: log: ${log}"
   echo "ignored-tests: cargo test --workspace ${names[*]} --no-fail-fast -- --ignored --test-threads=1"
   (
