@@ -82,8 +82,8 @@ on the workstation (three runs at 99.8–101.2 s) and **96 s in CI** (run
 
 The guard's own tests (`node:test` over fixture trees) run in the `typescript`
 job, which pins Node from `.nvmrc`. Since task 0141 landed they ride its infra
-Nx `test` target, whose glob is `tools/scripts/**/*.test.mjs` — one step, 30
-cases, 12 of them 0141's deploy guards. `npm run ignored-tests:verify-guard`
+Nx `test` target, whose glob is `tools/scripts/**/*.test.mjs` — one step for
+both suites, 0141's deploy guards and this guard's own cases. `npm run ignored-tests:verify-guard`
 runs this half alone by hand.
 
 **Two traps a future editor must not undo:**

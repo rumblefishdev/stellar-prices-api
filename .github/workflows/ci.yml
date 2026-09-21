@@ -119,7 +119,7 @@ jobs:
       #
       # That target's glob is `tools/scripts/**/*.test.mjs`, so since 0141
       # landed it also covers the guard behind the rust job's integration-test
-      # step (task 0275, decision 13): 30 cases here, 12 + 18. `npm run
+      # step (task 0275, decision 13) — both suites in this one step. `npm run
       # ignored-tests:verify-guard` remains for running that half alone by
       # hand.
       - run: npx nx run-many -t lint build typecheck test

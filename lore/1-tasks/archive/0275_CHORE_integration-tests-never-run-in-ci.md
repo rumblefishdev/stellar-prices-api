@@ -298,8 +298,8 @@ build on his branches would mean his code, not inherited rot.
 13. **The guard's tests run in the `typescript` job**, not through PR #325's
     infra Nx `test` target, which was not on `develop` at the time. **Done
     2026-09-21:** #325 merged (`a8806bd`), its target's glob is
-    `tools/scripts/**/*.test.mjs`, so it picked these up by itself — 30 cases,
-    12 + 18. The separate CI step is gone; `npm run ignored-tests:verify-guard`
+    `tools/scripts/**/*.test.mjs`, so it picked these up by itself — 30 cases then,
+    12 + 18 (31 after the PR review added test 17: 12 + 19). The separate CI step is gone; `npm run ignored-tests:verify-guard`
     stays for running this half by hand.
 14. **`check` also fails an `#[ignore]` outside `packages/*/tests/*_it.rs`**
     and a CH target sharing its name with any other `_it` target — both would
