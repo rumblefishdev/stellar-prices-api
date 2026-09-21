@@ -7,7 +7,7 @@
   "pricingApiFreePlanBurstLimit": 5,
   "pricingApiFreePlanMonthlyQuota": 100000,
   "apiGatewayCacheEnabled": true,
-  "coverageSweepEnabled": false,
+  "coverageSweepEnabled": true,
   "apiBaseUrl": "https://prices-api.sorobanscan.rumblefish.dev",
   "apiDomain": {
     "domainName": "prices-api.sorobanscan.rumblefish.dev",

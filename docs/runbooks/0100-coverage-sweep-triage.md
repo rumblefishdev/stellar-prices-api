@@ -158,7 +158,14 @@ Also look at:
 
 ## 4. Rollout (deploy-gated)
 
-Nothing in this section has been run. Each step names who runs it.
+Each step names who runs it. **Status (2026-09-21):** §4.1 and §4.2 are
+done — BE applied the two grants the same day (0477-style), and every §4.2
+check passed as `prices_writer`: `SHOW GRANTS` lists the two new lines,
+both tables return `0`, `default.transactions` still returns Code 497, and
+`max(ledger_sequence)` reads 47 rows from part metadata (assumption A3
+holds). The full sweep statement as `prices_writer` over the 14-day window
+took ~16 s end to end. `coverageSweepEnabled` is therefore `true`. §4.4
+onwards has not been run.
 
 ### 4.1 The BE request (Adam sends it to BE)
 
@@ -252,11 +259,11 @@ and a CN-map entry.
 
 Preconditions:
 
-- `coverageSweepEnabled` in `infra/envs/production.json`. It ships as
-  **`false`**: the Lambda, the rule (DISABLED) and both alarms deploy, but
-  nothing invokes the probe, so it cannot fail with Code 497 before BE's
-  grants. EventBridge may therefore deploy **before** §4.2. Set it to `true`
-  and redeploy EventBridge only after §4.2 passed.
+- `coverageSweepEnabled` in `infra/envs/production.json` is `true` (§4.2
+  passed on 2026-09-21). It exists so the rule can be switched off durably:
+  with `false` the Lambda, the rule (DISABLED) and both alarms still deploy,
+  but nothing invokes the probe. Use `false` whenever the grants are not
+  verified live (a new environment, a BE change that drops them).
 - `make -C infra diff-production` has been read **in full, for removals too**.
   `--require-approval broadening` prompts only on IAM/security-group widening,
   so it does not prompt on removals.
@@ -295,7 +302,10 @@ aws lambda invoke --function-name prices-production-coverage-sweep-probe /dev/st
 Expect:
 
 - one WARN `unclassified swap emitter` line per contract of the unlisted
-  residual (§3 phase-1 note);
+  residual (§3 phase-1 note). A local dry run of the probe's code on
+  2026-09-21 (window 64,322,610–64,543,788) gave **13 contracts / 911
+  events**, led by `CAS3FL6T…` (`8abc2891`, `POOL / swap`, 727 events), and
+  no unmatched allow-list entry;
 - the INFO `coverage sweep complete` summary;
 - `prices-production-coverage-sweep-unclassified` going to **ALARM** on the ops
   topic within the evaluation window.
@@ -341,6 +351,18 @@ This shows that the sweep would have caught SushiSwap V3 in April 2026.
    subtracts it in Rust. The Rust subtraction of that family is pinned by
    `coverage_sweep_it::the_sushiswap_family_is_reported_without_its_wasm_entry`.
 4. Record the contracts and events in task 0100.
+
+**Run on 2026-09-21** with the probe's own code (`run_sweep`'s SQL and
+`partition`) as `prices_writer`, window 61,926,675–62,147,853: with the two
+`[[wasm]]` entries removed, **32 SushiSwap V3 contracts / 3,125 events**
+come out unclassified, the largest pool (`CCR2CH4G…`, 2,829 events) first of
+41 rows. With the embedded list they are all subtracted. AC7 holds.
+
+The same window surfaced the **Soroswap factory** (`CA4HEQTL…`,
+`SoroswapFactory / new_pair`): its topic contains `swap`, so every new
+Soroswap pair would have paged. It is now a permanent `[[contract]]` entry.
+Other April-only candidates for phase 1: `Swap` (`d4b4976b…`, 462 events),
+`SwappedToVUsd` (`a757a1ed…`, 355) and `tokens_swapped_event`.
 
 ## 6. Related
 
