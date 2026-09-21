@@ -17,7 +17,7 @@ use stellar_xdr::{LedgerCloseMeta, TransactionMeta};
 use tracing::{debug, warn};
 
 use extractors_core::{SorobanEventRow, TaggedValue, Venue, VenueRegistry};
-use ledger_processor::dispatch::dispatch;
+use ledger_processor::dispatch::{PairRegistries, dispatch};
 use phoenix_extractor::PhoenixPoolRegistry;
 use soroswap_extractor::SoroswapPoolRegistry;
 use xdr_parser::extract_events;
@@ -71,6 +71,18 @@ impl Registries {
 
     pub fn pool_count(&self) -> usize {
         self.soroswap.pool_count() + self.phoenix.pool_count() + self.sushiswap.pool_count()
+    }
+
+    /// The two pair-backed registries, wired to their venues by name.
+    ///
+    /// `soroswap` and `sushiswap` are the same type, so this is the ONE place
+    /// the two can be crossed; every dispatch goes through it instead of
+    /// passing them as adjacent positional arguments (task 0290 review).
+    pub fn pair_registries(&self) -> PairRegistries<'_> {
+        PairRegistries {
+            soroswap: &self.soroswap,
+            sushiswap: &self.sushiswap,
+        }
     }
 }
 
@@ -537,13 +549,7 @@ fn classify_amm_groups(
         };
 
         let source = venue.as_source();
-        match dispatch(
-            &rows,
-            &reg.venue,
-            &reg.phoenix,
-            &reg.soroswap,
-            &reg.sushiswap,
-        ) {
+        match dispatch(&rows, &reg.venue, &reg.phoenix, reg.pair_registries()) {
             Ok(trades) => {
                 for t in trades {
                     if let Some(tick) = amm_trade_to_tick(&t, transaction_index, closed_at, assets)
