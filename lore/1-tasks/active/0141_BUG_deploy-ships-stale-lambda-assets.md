@@ -134,9 +134,134 @@ Whichever is chosen:
 
 ## Acceptance Criteria
 
-- [ ] A stale `target/lambda/*` artifact cannot reach production silently —
-      either it is rebuilt automatically or the deploy refuses.
-- [ ] Verified by deliberately staling an artifact and confirming the failure
-      mode is loud.
-- [ ] The 0072 runbook records the Rust-build prerequisite.
-- [ ] The `/health` mock is documented as unusable for post-deploy verification.
+- [x] A stale `target/lambda/*` artifact cannot reach production silently —
+      **rebuilt automatically**: `deploy-production`, `-compute` and
+      `-eventbridge` depend on `make build-lambdas`.
+- [x] Verified by deliberately staling an artifact and confirming the failure
+      mode is loud — four runs on 2026-09-18, see "Proof" below.
+- [x] The 0072 runbook records the Rust-build prerequisite (step 6), and the
+      0132-heal note now says the healing is only correct from a current tree.
+- [x] The `/health` mock is documented as unusable for post-deploy verification
+      — 0072 runbook step 7, `infra/README.md`, and the `build-lambdas` comment
+      in `infra/Makefile`.
+
+## Implementation Notes
+
+- `tools/scripts/build-lambda-assets.sh` — the one `cargo lambda build
+  --release --arm64 --features lambda -p …` invocation, list from
+  `lambda-assets.sh`; prints branch and `git describe --dirty`; ends by running
+  the verifier. CI's two inline steps ("Build Lambda bootstraps", "Verify Lambda
+  artifacts") are replaced by it, so CI and the workstation share one copy.
+- `tools/scripts/verify-lambda-bootstraps.sh` — refuses a bootstrap that is
+  missing, not executable, not an ELF, not aarch64 (`e_machine` at offset 18),
+  or byte-identical to another asset's.
+- `infra/Makefile` — `build-lambdas`; the three targets above depend on it;
+  all five per-stack `deploy-production-*` targets pass `--exclusively`.
+- `tools/scripts/lambda-deploy-guard.test.mjs` — 12 `node:test` tests,
+  registered as the infra project's Nx `test` target (so CI's `nx run-many -t …
+  test` and the `verify:staged` / `verify:push` hooks all run it). The Makefile
+  half reads the deploy targets from the Makefile and the Lambda-packaging
+  stacks from the CDK source, so neither list is hand-maintained. Mutation
+  check: dropping `build-lambdas` from `deploy-production-eventbridge` turns it
+  red by name.
+- Docs: `deploy-ledger-processor.md` steps 1, 2, 4 and the EventBridge snippet
+  now go through `make build-lambdas`; `compute-stack.ts` header.
+
+### Proof (2026-09-18, x86 workstation, rustc 1.97.1 / cargo-lambda 1.9.1, `CARGO_BUILD_JOBS=4`)
+
+| start state | result | wall |
+|---|---|---|
+| artifacts from 2026-09-14 (pre-[[0286]]), `prices-api` overwritten with the 10-byte `#!/bin/sh` | verifier alone: exit 1, `prices-api: bootstrap is not an ELF binary (10 bytes)`. `make build-lambdas`: all rebuilt, 11 verified | 7m42s |
+| nothing changed | cargo `Finished` in 0.24 s, **sha256 of all 11 identical to the previous run** | 1.0 s |
+| stub written over a current `prices-api` | cargo-lambda re-places the bootstrap even though cargo compiled nothing; 11 verified | 1.0 s |
+| `touch packages/prices-api/src/main.rs` | only `prices-api` recompiled; 11 verified | 43 s |
+
+The 2026-09-14 `prices-api` (`d5686b5d…`) differed from the build of today's
+tree (`a0a53fcf…`): a deploy from this machine this morning would have shipped
+pre-0286 code. `make synth-production` passes against the new artifacts.
+
+**Not verified:** a real `cdk deploy --exclusively` against the account — the
+agent cannot run production deploys. The flag exists in the pinned CLI (2.1124.1)
+and was used by hand on 2026-08-12. The first operator deploy is the check. The
+changed CI steps have not run yet either; the PR's own run is that check.
+
+## Design Decisions
+
+### From Plan
+
+1. **Build, do not detect staleness.** Decided with Adam before starting. Cargo
+   owns the input set; a detector would have had to re-derive it (path deps,
+   `Cargo.lock`, two `include_str!`s into `docs/runbooks/`). Measured cost of
+   being wrong about "expensive": 1.0 s when current.
+2. **`--exclusively` on every per-stack target**, not only the ones without a
+   build. A target named after a stack deploys that stack. A dependency that is
+   genuinely missing fails in CloudFormation, loudly; `deploy-production` is the
+   target for "everything".
+
+### Emerged
+
+3. **`deploy-production-eventbridge` is in scope.** The task named Compute only;
+   `eventbridge-stack.ts` packages `asset-discovery` and the scheduled workers
+   from `target/lambda` too.
+4. **CI now runs the same script.** Not asked for. Two copies of the build
+   invocation is the 0077 failure, and the verifier is strictly stronger than the
+   inline `-x` check it replaces.
+5. **Duplicate-binary check.** The 2026-08-12 symptom was "one asset hash for
+   every Lambda". ELF magic already catches the stubs; this catches one *real*
+   binary copied over the rest, which ELF magic cannot.
+6. **A dirty tree is reported, not refused.** Whether to ship uncommitted code
+   is the operator's call; the build line makes it impossible to do unknowingly.
+7. **`diff-production` depends on `build-lambdas` too** — reversed after the
+   code review (below). First left alone, on the grounds that the runbooks say
+   build → diff → deploy. But a diff against stale artifacts that match what is
+   live shows *no Lambda change*, and the deploy then replaces them: the operator
+   approved a different change from the one that ran. `synth-production` is
+   still build-free — it is the cheap template check, and CI builds before it.
+   The ledger-processor runbook's raw `npx cdk diff <stack>` is out of a
+   Makefile's reach; its step 1 is `make build-lambdas` for that reason.
+8. **Tests are `node:test`, no new dependency.** `tools/scripts/` had no tests
+   and `infra/` had no test runner.
+9. **`*_ASSET_DIR` and a foreign cargo target dir are refused**, not resolved.
+   Both make "verified" a statement about files nobody ships. Following the
+   override would mean verifying an arbitrary directory cargo did not just
+   write, which defeats "cargo is the freshness check". No workflow or Makefile
+   sets either; the one runbook line recommending the override is gone.
+
+## Issues Encountered
+
+- **Group build vs single-crate build.** The runbooks told operators to build
+  one crate (`-p prices-ledger-processor`); `build-lambdas` builds all eleven in
+  one invocation, as CI always has. `deploy-ledger-processor.md` already warns
+  that cargo feature unification can make those hash differently. Consequence:
+  **the first `deploy-production-compute` after this lands may show a new S3Key
+  for every Lambda in the stack**, not only the one that changed. After that the
+  build mode is uniform and the hashes are stable (measured above).
+- **The activation commit carried only the move** (`b3afad8`): `git add` was
+  given the old backlog path too, failed on it, and the error was discarded.
+  Fixed forward on `develop` in `1f4d54b`.
+- **Limit of the Makefile test, now fenced:** "which stacks package a Lambda"
+  is read as "which `*-stack.ts` names `target/lambda`". A test asserts every
+  such literal lives in a stack file, so moving them into a shared module turns
+  the suite red instead of blinding it, and every such stack must be matched by
+  a deploy target.
+
+## Code review (2026-09-18, `/code-review` on `e5629f5..765d9df`)
+
+Ten findings; four reproduced here before acting.
+
+| # | finding | outcome |
+|---|---|---|
+| 1 | `node --test tools/scripts/` fails on Node 22 (`.nvmrc`, CI) — a directory argument only works on newer Node; it passed locally on 26 | **fixed** — glob form, verified on 22.22.0 and 26: 12/12. Would have failed this PR's CI |
+| 2 | every asset dir has a `*_ASSET_DIR` env override, so CDK may package a directory the guard never looked at | **fixed** — refused, names read from the CDK source; test added |
+| 3 | `CARGO_TARGET_DIR` / `build.target-dir` sends the fresh build elsewhere while the old `target/lambda/` verifies | **fixed** — refused before building, via `cargo metadata`; test added |
+| 4 | `diff-production` diffs whatever is on disk | **fixed** for `diff-production` (decision 7); `synth-production` deliberately not |
+| 5 | `--exclusively` on `deploy-production-apigateway` silently stops deploying Compute first | **kept** — it is the decision taken with Adam, and "ApiGateway drags Compute along" is the 2026-08-12 finding itself. The cost (two-stack changes need Compute first) is now written at the target and in the runbook |
+| 6 | the branch / dirty line scrolls away; nothing blocks on it | **partly** — re-printed after verification, directly above `cdk deploy`. No confirmation prompt against `origin/develop`: that is a release-policy question, not this bug |
+| 7 | stack detection could go blind; target regex skipped digits/underscores | **fixed** — see "Limit of the Makefile test" above |
+| 8 | tests ran from a bare npm script, outside Nx and the local hooks | **fixed** — infra `test` target, `cache: false`; breaking the Makefile fails `nx test` (checked) |
+| 9 | `make -n` ran at module load; temp dirs leaked | **fixed** — dry-runs happen inside the tests that need them; fixtures removed in `after()` |
+| 10 | stale step names in `lore/3-wiki/project/ci-pipeline.md`; a comment claimed `lambda-assets.sh`'s exit status stops an empty pass, but a process substitution's status is discarded | **fixed** — wiki footnoted, comment corrected. `verify-lambda-assets.sh:41-42` carries the same wrong comment from before this task; its `checked -eq 0` guard is what actually holds. Left as is, noted here |
+
+Known and accepted: with an `*_ASSET_DIR` set the refusal comes from the
+verifier, i.e. *after* the build. Loud, and the rerun after `unset` is a 1 s
+no-op.

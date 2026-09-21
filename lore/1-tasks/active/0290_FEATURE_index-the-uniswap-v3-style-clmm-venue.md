@@ -128,7 +128,14 @@ work, and a `topics_xdr LIKE '%pool_created%'` scan over the whole era exceeds
 among the deployer's earlier batches (`272253DE`, `148CA1A9`, `391D449E`,
 `068104A7`, `CD86E132`, …, one per rehearsal generation).
 
-**✅ DECIDED with the operator 2026-09-18 — seed by pool wasm hash.** A one-off
+✅ **Resolved 2026-09-18 (afternoon)** — see "Every pool is announced by a
+`pool_created`" below: four factory generations, found with a chunked scan on
+`signature = 'pool_created'` (under 1 s per 640k-ledger chunk).
+
+**🗄️ SUPERSEDED the same afternoon — see "✅ DECIDED: discover from
+`pool_created`" below.** Kept for the record:
+
+~~**DECIDED with the operator 2026-09-18 — seed by pool wasm hash.**~~ A one-off
 discovers every pool whose wasm is `003710B3` / `95A8E001`, whichever factory
 generation created it, and live learns new pools from the live factory
 `CD3KRKGD…GLYF` going forward. Rationale: it covers all 99 traded pools without
@@ -142,6 +149,55 @@ factory generation.
 replacement factory would be missed by live, exactly as [[0291]]'s pools were.
 [[0291]]'s `UnregisteredPoolEvents` alarm is the backstop — extend its shape
 matcher to this venue's `swap` so a missed pool is heard, not silent.
+
+### Every pool is announced by a `pool_created` — measured 2026-09-18 (afternoon)
+
+A chunked read of `signature = 'pool_created'` over ledgers 60.0M → 65.1M
+(8 × 640k chunks, each under 1 s; ClickHouse fills `signature` for this event
+because its topic is a Symbol) returns **138 events**:
+
+| emitter (the `sender` field) | wasm | pools | ledgers |
+| --- | --- | --- | --- |
+| `CAGRET7K…APTC` | `FC9B0DF0` | 8 | 60,147,305 → 60,239,179 |
+| `CBBXISWE…K5RI` | `FC9B0DF0` | 6 | 60,286,788 → 60,433,518 |
+| `CCRSMJDI…GZGF` | `FC9B0DF0` | 61 | 60,770,878 → 61,263,178 |
+| `CD3KRKGD…GLYF` (live) | `9F94C577` | 58 | 61,487,379 → 64,116,662 |
+| `CBMBKXI7…Q227` — **not SushiSwap** | `ED0D122C` | 5 | 63,173,214 → 63,173,222 |
+
+All four SushiSwap factories share the SushiSwap deployer
+(`deployer_id = 427269037949309133`); together they announce **133 pools**.
+
+- **Coverage is complete.** All **119** contracts on pool wasms `003710B3` (58)
+  and `95A8E001` (61) are among the 133 — zero on those wasms unannounced.
+- **The other 14 are real SushiSwap pools on older wasms** — `144EF710` (8) and
+  `C1AA54E8` (6), from the two earliest rehearsal factories. Their `swap`
+  payload is the identical shape (`amount0, amount1, liquidity, recipient,
+  sender, sqrt_price_x96, tick`), **143 swaps**, the last at ledger 62,417,110 —
+  dormant. The 88,689 figure above counted only the two newer wasms, so it
+  misses these 143.
+- **A second protocol emits `pool_created`.** One contract, `CBMBKXI7…Q227`
+  (wasm `ED0D122C`, a different deployer), created five fixed-denomination
+  pools with data `{denomination, generation, pool}` and a second topic. No
+  token pair, so `learn_factory`'s arm (which requires `pool_address`,
+  `token0` and `token1`) registers none of them. Pinned by a test.
+
+**✅ DECIDED with the operator 2026-09-18 (afternoon) — discover from
+`pool_created`, not by pool wasm hash.** This replaces the morning's
+wasm-hash decision. That decision rested on "without first identifying the
+dead rehearsal factories"; the factory-event read needs no identification — it
+has no emitter filter, as `learn_factory` has none — and it finds a
+**superset**: the 119 the wasm-hash seed would find, plus the 14 older-wasm
+pools it would miss. It also yields the token pair, which a wasm-hash list
+alone does not. Commit `291c21c` extends `--discover-pools` to `pool_created`;
+the wasm-hash seed was never built and will not be. A
+`--discover-pools --dry-run` over 60,000,000 → tip is expected to report
+**133 new `sushiswap` pools**.
+
+This also shrinks the morning's "future factory" consequence: live learns a
+`pool_created` by shape from **any** emitter, not only `CD3KRKGD…GLYF`, so a
+replacement factory emitting the same event is learned without a code change.
+[[0291]]'s `UnregisteredPoolEvents` alarm remains the backstop for one that
+changes the event.
 
 ### Price comes from the amounts; `sqrt_price_x96` is a free cross-check
 
@@ -237,6 +293,31 @@ Branch `feat/0290_index-the-uniswap-v3-style-clmm-venue`, commit `51a3030`.
 | `pool_created` arm removed from `learn_factory` | `sushiswap_factory_pool_created_learns_the_pair` FAILS ✅ |
 | shape matcher keyed on topic only | the new router test AND the pre-existing `routers_and_unindexed_venues…` both FAIL ✅ |
 
+**`--discover-pools` (commit `291c21c`, `events-backfill/src/discover.rs`).**
+`'pool_created'` added to the read's `signature IN (…)` filter — the only change
+the read needed. Tests: the real-payload test now covers all four venues'
+factory shapes; a new pool is written with venue `sushiswap`; the other
+protocol's real `pool_created` learns nothing. The SQL-pinning test
+`the_read_matches_every_shape_learn_factory_accepts` was updated to the new
+filter text (intentional). `events-backfill` + `prices-ingest-core`: 126 passed,
+0 failed.
+
+**Router test (commit `7021ae2`).**
+`a_routed_sushiswap_trade_prices_once_from_the_pool_not_the_router`
+(`prices-ingest-core/src/soroban.rs`) drives a real routed trade — ledger
+64,481,111, pool `CCR2CH4G…H2MQ` swap at event 4 and router `CDMIM23W…ZCHL`'s
+summary of the same amounts at event 5 — through `process_soroban_event_rows`.
+It requires exactly one `sushiswap` tick, no router in the registry, and no
+missing-pool count; and a router wrongly registered as a SushiSwap pool must
+still add no tick (its data has no `amount0`/`amount1`). Negative controls:
+giving the router pool-shaped data fails the missing-pool assertion, and with
+that assertion removed fails the tick count at `left: 2`. ✅ Both failed.
+
+A router `swap` from an unregistered contract still lands in `out.unresolved`
+(the generic "unknown contract emitted a `swap`" record). That is a record,
+not a failure: the backfill never reads unregistered contracts, and nothing
+trips on it. Left as is and not pinned by the test.
+
 **Modified test:** `routers_and_unindexed_venues_are_not_counted_as_unregistered_pools`
 (`soroban.rs`) previously asserted this venue is NOT counted, with a bare `swap`
 row named `clmm`. That premise is now wrong — we index it. The row was replaced
@@ -261,6 +342,14 @@ weakened: the test still asserts `None` for every row in the list.
   it cannot be used to attribute a pool to its factory. The pool's exact
   `deployed_at_ledger` plus a single-ledger event filter works instead, and is
   how the earlier factory wasm `FC9B0DF0` was found.
+- A **full** scan does not exceed the limit when it filters on `signature`
+  rather than `topics_xdr LIKE`: under 1 s per 640k-ledger chunk.
+- `pool_created` is **not unique to SushiSwap** — see the second protocol under
+  Findings. Matching by shape stays safe only because the arm requires the
+  token pair.
+- Pre-existing, not from this task: `cargo clippy -p events-backfill -- -D
+  warnings` fails on 9 lints inside `prices-ingest-core`, identically without
+  this change; CI does not lint that crate. Lint with `--no-deps`.
 
 ## Acceptance Criteria
 
@@ -272,8 +361,89 @@ weakened: the test still asserts `None` for every row in the list.
       types already share one label). `Venue::Sushiswap` in
       `extractors-core/src/lib.rs`.
 - [ ] Its pools are learned from the factory and survive a cold start.
+      → Code done: live learns from `pool_created` (`51a3030`),
+      `--discover-pools` seeds history from it (`291c21c`, 133 pools measured),
+      `registry_io` persists them. Open: the production dry run, then the write
+      and a cold start — after 0286 phase 1 lifts the Compute deploy freeze.
 - [ ] Live candles for it match a raw count of its pool `swap` events for a full
       day.
-- [ ] Its routers stay unindexed (a test pins it).
+- [x] Its routers stay unindexed (a test pins it). →
+      `a_routed_sushiswap_trade_prices_once_from_the_pool_not_the_router`
+      (`7021ae2`), a real routed transaction, negative-controlled. See
+      Implementation Notes.
 - [ ] History from the first pool is backfilled, or explicitly deferred with a
       reason.
+
+# 📕 RUNBOOK — `--discover-pools` dry run for SushiSwap V3
+
+Read-only: `--dry-run` writes nothing, so it is safe during the Compute deploy
+freeze. The real write only helps once 0290's ledger-processor is deployed
+(after 0286 phase 1), so it waits for that.
+
+**Run identity** is 0291's ([seed-pool-registry.md](../../../docs/runbooks/seed-pool-registry.md),
+"Discover missing pools"): the Hetzner host, ClickHouse `default`,
+`localhost:8123`, a static build.
+
+1. **[local machine, repo root, branch `feat/0290_…`]** build and copy:
+
+   ```bash
+   cargo build --release -p events-backfill --target x86_64-unknown-linux-musl
+   scp -i ~/.ssh/sorban-prod_ed25519 target/x86_64-unknown-linux-musl/release/events-backfill \
+     deploy@168.119.73.161:~/events-backfill-0290
+   ```
+
+   ✅ **Done 2026-09-18** from commit `7021ae2`: the binary is on `ch-prod-01`
+   at `~/events-backfill-0290`. Rebuild and re-copy only if the branch changes.
+
+   A separate file name, so 0291's binary on the host is not overwritten.
+
+2. **[local machine]** fetch the ClickHouse `default` password from Secrets
+   Manager. Prints only its length — it must be **`44`** (`0` → run
+   `aws sso login --profile soroban-admin` and retry):
+
+   ```bash
+   CH_PW=$(aws --profile soroban-admin --region eu-central-1 \
+     secretsmanager get-secret-value \
+     --secret-id soroban/production/operator/env --query SecretString --output text \
+     | sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\?CLICKHOUSE_PASSWORD=[[:space:]]*//p' \
+     | tr -d "\"'" | tr -d '\r' | head -1); echo "${#CH_PW}"
+   ```
+
+3. **[local machine]** run the dry run on the host, the password on **stdin**
+   (never argv, never pasted). It starts at **60,000,000**, not 0291's
+   63,000,000: the first SushiSwap factory event is at ledger 60,147,305.
+   `--end` = the latest ledger in `default.soroban_events` (64,491,946 on
+   2026-09-18; any later value is fine). No tmux needed — about a minute.
+
+   ```bash
+   printf '%s\n' "$CH_PW" | ssh -T -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+     'read -r CH_PW; chmod +x ~/events-backfill-0290; CLICKHOUSE_PASSWORD="$CH_PW" ~/events-backfill-0290 --discover-pools --start 60000000 --end 64491946 --clickhouse-url http://localhost:8123 --dry-run' \
+     2>&1 | tee /tmp/discover-0290-dryrun.log
+   unset CH_PW
+   grep -E "factory events read|DRY RUN|changed|ERROR" /tmp/discover-0290-dryrun.log
+   ```
+
+   ⚠️ **First attempt 2026-09-18 failed harmlessly** with ClickHouse
+   `Code: 194` (`REQUIRED_PASSWORD`): the password was typed into
+   `read -rs` on the host and arrived empty. It stopped at the `SELECT 1`
+   pre-flight — nothing read, nothing written. The stdin route above
+   removes the hand-typed step.
+
+4. **[read the output]** Expected as of 2026-09-18:
+   - one `pool not in prices.pool_registry` line per pool, every one
+     `change="new"`, `venue="sushiswap"`;
+   - then `to_write=133 per_venue={"sushiswap": 133}`.
+   - More than 133 is fine if SushiSwap created pools after 2026-09-18.
+   - ⛔ **Stop and investigate** on any `change="changed"` line (an existing
+     row would be rewritten), or on a venue other than `sushiswap` (the other
+     venues were seeded by 0291 on 2026-09-18 and should report 0).
+   - The other protocol's five token-less `pool_created` events at ledger
+     63.17M must **not** appear.
+
+5. **[later, after 0286 phase 1 and 0290's deploy]** drop `--dry-run` to write,
+   run the dry run again (it must report `to_write=0`), then verify:
+
+   ```sql
+   SELECT venue, count() FROM prices.pool_registry FINAL GROUP BY venue ORDER BY venue;
+   -- expected: sushiswap 133 (or more), other venues unchanged
+   ```
