@@ -88,6 +88,20 @@ history:
       0290's 09-21 dry run used Friday's tip as --end, so its to_write=133 says
       nothing about the window; a dry run to the current tip is owed before
       0286 phase 3.
+  - date: 2026-09-21
+    status: blocked
+    who: okarcz
+    note: >
+      The unattended window is MEASURED and currently EMPTY. Re-running 0290's
+      --discover-pools dry run to the true tip 64,539,364 returns identically
+      candidates=650, to_write=133, per_venue={"sushiswap": 133} — not one new
+      pool of any venue in the 47,418 ledgers since Friday. to_write=133 is
+      therefore a current number and 0286 phase 3 can be planned against it.
+      One sample only, and it expires: the window grows until the deploy and
+      the alarm is still blind, so the pre-write re-run stays mandatory. The
+      fill rate implied (~0.7 pools/day, from the original 42 over ~2 months)
+      argues for waiting on 0286 phase 1 rather than deploying Compute from a
+      divergent branch.
 ---
 
 ## 📊 STATUS — 2026-09-18 · ⛔ BLOCKED on [[0286]] · AC 1 DONE on prod
@@ -135,11 +149,24 @@ time, as a surprise. Two changes follow:
 1. **Step 3 (`--discover-pools`) must be re-run at deploy time** over the range
    from 2026-09-18 to the then-current tip. A dry run from before the deploy
    does not license the write.
-2. **Size the hole now, not at the deploy.** [[0290]]'s dry run on 2026-09-21
-   used `--end 64491946` — **Friday's tip** — so it scanned nothing after
-   09-18 and its `to_write=133` is a 09-18 number. A dry run to the current tip
-   is owed, and its answer is needed **before [[0286]] phase 3** so the
-   re-ingest is not planned against a registry that is already short.
+2. **Size the hole now, not at the deploy.** ✅ **MEASURED 2026-09-21 09:24
+   UTC — the window is EMPTY.** [[0290]]'s first dry run that day used
+   `--end 64491946` (Friday's tip) and so said nothing about the window; re-run
+   to the current tip **64,539,364** it returns *identically*
+   `candidates=650 to_write=133 per_venue={"sushiswap": 133}`. Not one new
+   pool of any venue was created in the 47,418 ledgers (~2.7 days) since. So
+   `to_write=133` is now a **current** number, and [[0286]] phase 3 can be
+   planned against it.
+
+   ⚠️ **This is one sample, and it expires.** The window keeps growing until
+   the deploy, and nothing will announce the pool that fills it — the alarm is
+   still blind. Re-run before the write regardless; an empty window today is
+   not a licence to skip the check later.
+
+   📈 It does say the window fills **slowly**: the original gap was 42 pools
+   accumulated over roughly two months, so ~0.7/day, and zero in 2.7 days is
+   consistent with that. That is an argument for **waiting** for 0286 phase 1
+   rather than deploying Compute from a divergent branch to close it sooner.
 
 ### What unblocks this
 

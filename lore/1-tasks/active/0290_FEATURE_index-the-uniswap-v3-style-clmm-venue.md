@@ -553,6 +553,15 @@ and expect **≥ 133**, plus possibly non-zero counts for the other venues. A
 count above 133, or any venue other than `sushiswap`, is the window's size —
 not a defect.
 
+✅ **DONE 2026-09-21 09:24 UTC — the window is EMPTY.** Re-run to the true tip
+**64,539,364**: `candidates=650 to_write=133 per_venue={"sushiswap": 133}`,
+byte-identical to the 09:58 run. No pool of any venue was created in the 47,418
+ledgers between the two tips. **`to_write=133` is a current number**, and
+[[0286]] phase 3 can be planned against it.
+
+⚠️ Still re-run this before the write — the window grows until the deploy and
+[[0291]]'s alarm cannot announce what fills it.
+
 5. **[later, after 0286 phase 1 and 0290's deploy]** ⚠️ **re-run step 3 first**
    with `--end` at the then-current tip — a dry run from before the deploy does
    not license the write, because the registry has no writer until that deploy
