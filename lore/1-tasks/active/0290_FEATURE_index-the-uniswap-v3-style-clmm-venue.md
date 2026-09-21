@@ -26,6 +26,17 @@ history:
       missing-trades gap from 0285 and is independent of the deploy freeze
       (research + extractor + tests; nothing to deploy until 0286 phase 1
       lands). Start by naming the venue and decoding its swap event.
+  - date: 2026-09-21
+    status: active
+    who: okarcz
+    note: >
+      Production --discover-pools dry run PASSED, from commit 7021ae2 over
+      ledgers 60,000,000 → 64,491,946 in ~54 s: candidates=650, to_write=133,
+      per_venue={"sushiswap": 133}, every pool change="new", ZERO changed and
+      zero other venues. Registry read at entries=770, i.e. 0291's post-seed
+      state. Nothing written — the write and the cold-start check still wait
+      for 0286 phase 1 to lift the Compute deploy freeze. AC 5 (history)
+      remains the one open decision that needs no deploy.
 ---
 
 # Index the Uniswap-v3-style concentrated-liquidity venue
@@ -362,9 +373,12 @@ weakened: the test still asserts `None` for every row in the list.
       `extractors-core/src/lib.rs`.
 - [ ] Its pools are learned from the factory and survive a cold start.
       → Code done: live learns from `pool_created` (`51a3030`),
-      `--discover-pools` seeds history from it (`291c21c`, 133 pools measured),
-      `registry_io` persists them. Open: the production dry run, then the write
-      and a cold start — after 0286 phase 1 lifts the Compute deploy freeze.
+      `--discover-pools` seeds history from it (`291c21c`), `registry_io`
+      persists them. ✅ **Production dry run PASSED 2026-09-21** —
+      `to_write=133 per_venue={"sushiswap": 133}`, every pool `change="new"`,
+      zero `changed`, zero other venues (see the runbook's RESULT). Open: the
+      write and a cold start — both wait for 0286 phase 1 to lift the Compute
+      deploy freeze.
 - [ ] Live candles for it match a raw count of its pool `swap` events for a full
       day.
 - [x] Its routers stay unindexed (a test pins it). →
@@ -439,6 +453,39 @@ freeze. The real write only helps once 0290's ledger-processor is deployed
      venues were seeded by 0291 on 2026-09-18 and should report 0).
    - The other protocol's five token-less `pool_created` events at ledger
      63.17M must **not** appear.
+
+### ✅ RESULT — dry run PASSED 2026-09-21 08:57:15 → 08:58:09 UTC (~54 s)
+
+Range 60,000,000 → 64,491,946, from commit `7021ae2`, as `dev`-side read only.
+
+```
+INFO pre-flight: ClickHouse reachable
+INFO loaded discovered pool registry from ClickHouse entries=770
+INFO discover-pools: factory events read candidates=650 to_write=133 per_venue={"sushiswap": 133}
+INFO discover-pools: DRY RUN — nothing written
+```
+
+Every one of the four step-4 conditions held:
+
+| condition | result |
+| --- | --- |
+| `to_write=133 per_venue={"sushiswap": 133}` | ✅ exactly |
+| every pool `change="new"` | ✅ all 133 |
+| ⛔ any `change="changed"` | ✅ **none** — no existing row would be rewritten |
+| ⛔ any venue but `sushiswap` | ✅ **none** — the other venues report 0, as expected after [[0291]]'s 09-18 seed |
+
+- `entries=770` is [[0291]]'s post-seed registry (728 → 770), so the run read
+  the current state, not a stale one.
+- `candidates=650` against `to_write=133`: the factory emitted 650
+  `pool_created` events over the range and 133 distinct pools survive
+  de-duplication. The other protocol's five token-less events at ledger 63.17M
+  did **not** appear.
+- 133 > the 99 pools that have *traded* — expected, since discovery is by
+  creation, not by volume, and spans every factory generation. This is the
+  coverage the wasm-hash seed would have missed (119).
+
+⚠️ Nothing was written. The registry still has **no** sushiswap rows; the write
+is step 5.
 
 5. **[later, after 0286 phase 1 and 0290's deploy]** drop `--dry-run` to write,
    run the dry run again (it must report `to_write=0`), then verify:
