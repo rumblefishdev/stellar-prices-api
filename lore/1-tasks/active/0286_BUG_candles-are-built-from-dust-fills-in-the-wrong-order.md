@@ -104,6 +104,21 @@ history:
       post-verification fix: a price that rounds to 0 at 14 dp forms no
       price. Operator steps (MV re-CREATE, rollout order, first-week
       measurement, phase 3) remain open.
+  - date: "2026-09-21"
+    status: active
+    who: okarcz
+    note: >
+      Phase-3 operator decisions, recorded from the operator's session and
+      a teammate's M3 analysis (see the "Phase 3 — operator decisions" section).
+      (1) ORDER: oldest-first from ledger 1, as the runbook says — the
+      "Soroban era first" alternative was weighed and dropped. (2) ACCESS:
+      the admin identity the re-ingest needs is the new prices.*-scoped CH
+      user `prices_admin` (BE tasks 0567/0568, PRs #468/#469, live on prod
+      2026-09-21), NOT dev_shared; its cert plus prices_writer's are on the
+      campaign machine. (3) Precondition 9 (0285's reverse question) is
+      answered: live writes nothing for unregistered pools. (4) Phase-1
+      rollout conditions are green (0282 verified 09-19/09-20, #320 merged,
+      55/55 alarms OK); who runs it and when is tomorrow's daily.
 ---
 
 # Candles are built from dust fills in the wrong order
@@ -263,6 +278,76 @@ has no price.
   **unnecessary**: the refill happens inside the re-enrichment; only its
   after-check (`post_run_0228_it`) still runs, on the repaired XLM/USDC
   reference.
+
+### Phase 3 — operator decisions (2026-09-21)
+
+Recorded by the operator after a teammate's M3 analysis (Slack, 2026-09-21)
+and the operator's own session the same day. These refine the phase-3
+section above without changing its rules.
+
+- **Order: oldest-first, from ledger 1** — as the runbook says. The
+  "Soroban era first" alternative (~14 M ledgers, fixes the 0282 gap and
+  every AMM candle first) was weighed and dropped. Reason: the pre-Soroban
+  history is ~79 % of the work and SDEX-only, so it never touches
+  `pool_registry`; running it first gives ~2 weeks of buffer in which
+  [[0290]]'s 133 SushiSwap pools get written and `--discover-pools` is run to
+  the current tip — BEFORE the loop reaches 2024-02. Done the other way
+  round, ~31 Soroban-era months would be rebuilt a second time once the
+  registry is complete. If the registry is still incomplete when the loop
+  reaches 2024-02, the AMM side of those months is deferred consciously,
+  not silently.
+- **Re-ingest is not an M3 criterion.** None of the 9 M3 ACs judges candle
+  correctness, so the M3 claim does not wait for it; the evidence pack
+  declares 0282/0286 as a known issue ("fix merged/deployed, history repair
+  in progress").
+- **Access: the admin identity is `prices_admin`, not `dev_shared`.** The
+  runbook's precondition 7 ("snapshots by the CH admin, `prices_writer`
+  cannot") is met by a new prices.*-scoped XML user on the shared cluster —
+  BE tasks 0567 + 0568 (PRs #468, #469), live on prod 2026-09-21, applied in
+  place (inode kept, hot-reload, no restart). Grants: SELECT/INSERT/ALTER/
+  CREATE TABLE/DROP TABLE/TRUNCATE on `prices.*`; SELECT on `default.*`
+  (the AMM re-ingest reads BE's events) and on `system.parts`,
+  `system.mutations`, `system.columns`, `system.disks`. Cert CN
+  `prices-admin-production`, operator-held, revocable by one CN-map line.
+  The campaign machine (`fishuser-hero`) holds exactly three bundles:
+  `prices-admin-production`, `prices_writer`, `ca.crt` — all three verified
+  live from there (currentUser, CREATE/TRUNCATE/DROP of a probe table in
+  `prices`, `system.disks` read). The phase-3 script therefore runs with
+  `--admin-cert` AND `--reader-cert` = `~/prices-mtls/prices-admin-production`,
+  `--writer-cert ~/prices-mtls/prices_writer`, `--ca ~/prices-mtls/ca.crt`;
+  no `dev_read` cert is needed there (its 30 s / 4 GB profile would not fit
+  the month-wide FINAL sums anyway). Also live: `prices_writer` reads
+  `default.soroban_events` / `default.soroban_contracts` (BE 0569, PR #470)
+  for the weekly coverage sweep.
+- **Precondition 9 is answered** (runbook §1, the [[0285]] reverse
+  question): the live path writes nothing for pools absent from
+  `pool_registry` (operator's 2026-09-21 measurement), so `DROP PARTITION`
+  deletes nothing `events-backfill` cannot rebuild. The runbook can drop the
+  precondition; the script's `--ack-0285` flag records the same fact.
+- **Before the first month, on `fishuser-hero`:** `git pull` and rebuild
+  `sdex-backfill` (and `events-backfill`) from a develop that contains #320
+  — the machine keeps its own checkout, and an old binary would rebuild the
+  history under the OLD definition without a single error.
+- **Phase-1 rollout conditions are green** as of today: [[0282]] verified
+  (09-19 / 09-20 exactly zero loss), #320 merged, 55/55
+  `prices-production-*` alarms OK. Not yet checked: the drift binary and
+  disk headroom on the CH host. Until the schema step has passed, Compute
+  is NOT deployed from develop (the 09-18 incident); queued behind it:
+  [[0291]] AC 2–3, #324 ([[0290]]), #331 (0256).
+- **API impact is unmeasured.** Compute runs on `fishuser-hero`, but the CH
+  box takes the inserts, the per-month pre-rolls, `events-backfill` and the
+  final re-enrichment. The July backfill saw 1–4 API req/day, so there is no
+  signal yet. Proposal: one CloudWatch read of `IntegrationLatency` p95 at
+  the first pre-roll.
+- **M3 review touchpoints:** the phase-1 rollout day lights `mv-drift` by
+  design — not on a review or video-recording day (describe it in the 7-day
+  report if it falls in the window); the end of the re-ingest (TRUNCATE
+  1w/1M, live-era month drops) also not during a review.
+- **Open for the daily (2026-09-22):** who runs the phase-1 rollout and
+  when; who starts the re-ingest on `fishuser-hero` afterwards. Also
+  0296's "start" date and 7-day window (the only clean window before the
+  load tests is 09-10 → 09-16; 1-min metrics for 09-04 → 09-20 get exported
+  before 09-25 regardless).
 
 ## Out of scope
 
