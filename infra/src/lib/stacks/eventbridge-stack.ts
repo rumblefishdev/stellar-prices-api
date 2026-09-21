@@ -288,7 +288,9 @@ export class EventBridgeStack extends cdk.Stack {
       errorAlarmActions: [opsAlarmAction],
       assetDir: ASSET_DISCOVERY_ASSET_DIR,
       // Loads the whole asset registry to seed against it: ~153 MB measured
-      // at 209k assets (2026-09-21), and the registry only grows.
+      // at 209k assets (2026-09-21), and the registry only grows. That load is
+      // what the worker does today, not what the seed needs (~20 identities) —
+      // task 0140 tracks the targeted read; revisit this number with it.
       memorySize: 512,
       // The symbol stage is the long one, bounded in the binary at
       // MAX_CONTRACTS_PER_RUN × RPC_TIMEOUT_SECS = 25 × 5 s; a quiet run

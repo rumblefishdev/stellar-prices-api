@@ -28,8 +28,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         .init();
 
     // Cold start: build the mTLS client (MTLS_SECRET_NAME + CH_DOMAIN), probe
-    // connectivity, and parse the seed once. Failures
-    // here surface as a CloudWatch Init error, not a per-invocation error.
+    // connectivity, and parse the seed once. Failures here surface as a
+    // CloudWatch Init error, not a per-invocation error.
     let client = prices_clickhouse::mtls::client_from_lambda_env("prices").await?;
     let writer = Arc::new(prices_ingest_core::OhlcvWriter::new(client));
     writer.preflight().await?;

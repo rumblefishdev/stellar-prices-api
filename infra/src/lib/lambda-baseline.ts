@@ -355,8 +355,8 @@ export interface WorkerLambda {
  * into a single factory.
  *
  * Returns the `function` and `role` so callers can attach worker-specific
- * permissions afterwards (e.g. asset-discovery grants S3 read on BE's
- * ledger bucket via `role`).
+ * permissions afterwards (e.g. the oracle worker adds its namespaced
+ * `cloudwatch:PutMetricData` statement via `role`).
  */
 export function createWorkerLambda(
   scope: Construct,
