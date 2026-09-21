@@ -101,23 +101,40 @@ history:
       exactly, nothing is over-counted, close is always right. Decision with
       the operator: the repair is 0286 phase 3, not a separate SDEX job.
       0285 also corrected the soroswap/phoenix picture (43.8% / ~12% lost).
+  - date: 2026-09-21
+    status: active
+    who: okarcz
+    note: >
+      Step 8 measured. 2026-09-19 and 2026-09-20 lost EXACTLY zero aquarius
+      trades (26,422 and 20,497, raw = stored on the integer) against a pre-fix
+      baseline of 63.6/60.1/51.8 percent — criterion 2 met, and more strictly
+      than it asks. 2026-09-18 shows 6.6 percent, and an hour-by-hour split
+      proves all 1,575 of it belongs to the 27 aquarius pools 0291 seeded at
+      08:00 UTC that day: lost equals raw_seeded EXACTLY in all eight pre-seed
+      hours, then zero for fifteen hours after. Second finding: the 08:11:33
+      UTC deploy stall cost zero trades — 0064's durable cursor caught it up,
+      measured rather than assumed. ⚠️ Generalises: any raw-vs-stored
+      measurement spanning a registry seed shows a phantom loss, because raw
+      resolves the registry as of now.
 ---
 
 # Aquarius live ingestion drops about half of every day's trades
 
-## 📊 STATUS — 2026-09-17 ~12:15 UTC · FIX DEPLOYED, full-day check owed
+## 📊 STATUS — 2026-09-21 · FIX VERIFIED, two full days at EXACTLY zero loss
 
-**The live fix is in production.** PR #313 was merged as `2cb5b2b` and deployed
-at **12:04:20 UTC** (Observability, then Compute). In the first minutes it
-behaves as designed: each run holds back the unfinished minute, then one run
-writes it whole. No errors, no DLQ, no forced partial flushes. Details in
-§"DEPLOY RUNBOOK — PR #313".
+**The live fix is in production and verified.** PR #313 was merged as `2cb5b2b`
+and deployed at **12:04:20 UTC** on 2026-09-17 (Observability, then Compute).
+Measured 2026-09-21 over three full UTC days, **2026-09-19 and 2026-09-20 lost
+exactly zero trades** — not approximately zero: `raw` and `stored` agree on the
+integer, 26,422 and 20,497. Against a pre-fix baseline of 63.6% / 60.1% / 51.8%
+that settles criterion 2. Details and the hour-by-hour proof are in
+§"DEPLOY RUNBOOK — PR #313" step 8.
 
 | # | work | state |
 | --- | --- | --- |
 | 1 | Mechanism identified | ✅ |
 | 2 | Live fix deployed | ✅ 2026-09-17 12:04 UTC |
-| 3 | **Live fix verified: a full day at ~0% loss** | ⏳ **measure 2026-09-18 on 2026-09-19** (pre-fix baseline 51.8-63.6%/day) |
+| 3 | **Live fix verified: a full day at ~0% loss** | ✅ **09-19 and 09-20 at EXACTLY 0 lost** (26,422 and 20,497, raw = stored); 09-18's 6.6% is [[0291]]'s pre-seed hours, not this defect |
 | 4 | SDEX loss quantified | ✅ **66.3% of SDEX trades lost** (11.35M true → 3.82M stored, two windows) — see [the note](notes/R-sdex-loss-measurement-design.md) |
 | 5 | Live-path drops observable | ◐ forced flush alarmed; unresolved-pool swaps still silent |
 | 6 | Repair decision | ✅ **decided: [[0286]] phase 3** rebuilds SDEX + AMM; AMM live-era months wait for [[0291]] |
@@ -125,7 +142,7 @@ writes it whole. No errors, no DLQ, no forced partial flushes. Details in
 
 **Next:**
 
-1. **2026-09-19:** run step 8 of the runbook for 2026-09-18.
+1. ✅ **Done 2026-09-21:** step 8 measured for 09-18 → 09-20. Criterion 2 met.
 2. **In parallel, now:** SDEX measurement
    ([notes/R-sdex-loss-measurement-design.md](notes/R-sdex-loss-measurement-design.md))
    and [[0285]].
@@ -634,10 +651,14 @@ just re-corrupts. That constraint is real; it simply does not apply to
 
 - [x] **The mechanism is identified** — per-bucket RMT write contention, and
       the pool-set vs sample question is answered: **neither**. See §ROOT CAUSE.
-- [ ] The live path is fixed and verified by the same raw-vs-stored comparison
-      running at ~0% loss for a full day. ◐ **Fixed and deployed 2026-09-17
-      12:04 UTC; the full-day measurement (2026-09-18) is owed on 2026-09-19.**
-      Pre-fix baseline: 63.6% / 60.1% / 51.8% lost on 09-15 / 09-16 / 09-17.
+- [x] The live path is fixed and verified by the same raw-vs-stored comparison
+      running at ~0% loss for a full day. → **MET 2026-09-21, and more strictly
+      than the criterion asks.** Two consecutive full UTC days lost **exactly
+      zero** trades (09-19: 26,422 = 26,422; 09-20: 20,497 = 20,497), against a
+      pre-fix baseline of 63.6% / 60.1% / 51.8% on 09-15 / 09-16 / 09-17.
+      09-18 shows 6.6%, entirely attributable to [[0291]]'s 08:00 UTC seed —
+      every lost trade that day belongs to a pool that was not yet registered
+      when it traded. Hour-by-hour proof in step 8 of the runbook.
 - [x] ⛔ **The "~10% → ~50% growth" question is answered by DISSOLVING it** —
       re-measured 2026-09-15, there was no growth. Every live-processed day is
       ~45-55%; the July ~10% days were written by an accumulating path, and the
@@ -678,14 +699,15 @@ just re-corrupts. That constraint is real; it simply does not apply to
   move aquarius by +27% in its window. 0101 is sequenced behind this decision.
 - The reprice tool is **not** implicated and needs no change — its correctness
   is what made this measurable.
-- ✅ **PR #313 merged (`2cb5b2b`) and deployed 2026-09-17 12:04 UTC.** The
-  full-day verification is owed on 2026-09-19. See §"DEPLOY RUNBOOK — PR #313".
+- ✅ **PR #313 merged (`2cb5b2b`), deployed 2026-09-17 12:04 UTC, and VERIFIED
+  2026-09-21** — two full days at exactly zero loss. See §"DEPLOY RUNBOOK —
+  PR #313" step 8 for the numbers and the hour-by-hour proof.
 - ✅ **The TITLE's "and SDEX is affected too" is now TRUE** — retracted
   2026-09-14 for bad evidence, measured 2026-09-17 at 66.3%. No change needed.
 
 # 📕 DEPLOY RUNBOOK — PR #313
 
-## ✅ DEPLOYED 2026-09-17 — steps 0-7 done, step 8 owed on 2026-09-19
+## ✅ DEPLOYED 2026-09-17, VERIFIED 2026-09-21 — all steps 0-8 done
 
 | | |
 | --- | --- |
@@ -875,6 +897,65 @@ FORMAT PrettyCompact
 `raw` counts `trade` events only from contracts in `prices.pool_registry`,
 which [[0285]] shows does not match what actually trades. So a small residual
 (either sign) after the fix is a registry question, not this defect.
+
+### ✅ RESULT — measured 2026-09-21, range 2026-09-18 → 2026-09-20
+
+| day | raw | stored | lost | % lost |
+| --- | --- | --- | --- | --- |
+| 2026-09-18 | 23,763 | 22,188 | 1,575 | 6.6 |
+| 2026-09-19 | 26,422 | 26,422 | **0** | **0.0** |
+| 2026-09-20 | 20,497 | 20,497 | **0** | **0.0** |
+
+Two consecutive full days at **exactly** zero — `raw` and `stored` agree on the
+integer, which is a stronger result than `pct_lost ≈ 0`. **Criterion 2 is met.**
+
+Three days were measured rather than the one the runbook asks for: 09-19 and
+09-20 were both complete UTC days by then and cost the same query. A single
+clean day could be a quiet day; three consecutive ones cannot.
+
+### 🔑 The 09-18 residual is [[0291]]'s seed, proven hour by hour
+
+0291 seeded 42 pools (27 aquarius) at **08:00 UTC on 2026-09-18**. Because
+`raw` resolves the registry *as it is now*, those pools count for the whole of
+09-18 — but live could not store their trades before it knew they existed.
+
+Splitting 09-18 by hour, with `raw` split by `pool_registry.updated_at`:
+
+| hour (UTC) | raw_all | raw_seeded_0918 | raw_pre_existing | stored | lost |
+| --- | --- | --- | --- | --- | --- |
+| 00 | 523 | 63 | 460 | 460 | 63 |
+| 01 | 569 | 114 | 455 | 455 | 114 |
+| 02 | 837 | 262 | 575 | 575 | 262 |
+| 03 | 2,759 | 834 | 1,925 | 1,925 | 834 |
+| 04 | 552 | 53 | 499 | 499 | 53 |
+| 05 | 430 | 36 | 394 | 394 | 36 |
+| 06 | 702 | 143 | 559 | 559 | 143 |
+| 07 | 501 | 58 | 443 | 443 | 58 |
+| 08 | 474 | 38 | 436 | 462 | 12 |
+| 09-23 | — | — | — | = raw_all | **0 every hour** |
+
+- **`lost` equals `raw_seeded_0918` EXACTLY in all eight pre-seed hours**, and
+  `stored` equals `raw_pre_existing` exactly in the same hours. Every pool live
+  knew about was stored; every pool it did not know about was not.
+- 1,563 across 00-07, plus 12 in the 08:00 transition hour, is **1,575** — the
+  day's entire loss, with nothing left unexplained.
+- From 09:00, `lost = 0` for fifteen straight hours and `stored` now includes
+  the new pools.
+
+So the 6.6% is the registry gap this runbook's own caveat anticipates, not a
+residue of the write-contention defect. ⚠️ It also means **any raw-vs-stored
+measurement spanning a registry seed will show a phantom loss** — resolve the
+registry as of the measured day, or measure only after the seed.
+
+### 🔑 Second finding: the 08:11:33 UTC deploy stall cost ZERO trades
+
+[[0291]] records that the Compute deploy at 08:11:33 UTC stalled live ingest
+for ~6 minutes. It lost nothing. In hour 08 `stored` (462) **exceeds**
+`raw_pre_existing` (436), so every trade from every already-registered pool was
+stored despite the stall, and 26 of the 38 newly-seeded pools' trades were
+captured too. [[0064]]'s durable cursor caught the gap up rather than dropping
+it — which is the behaviour it was built for, now measured. The stall therefore
+does not need to be carried as a caveat on this measurement.
 
 ## Rollback
 

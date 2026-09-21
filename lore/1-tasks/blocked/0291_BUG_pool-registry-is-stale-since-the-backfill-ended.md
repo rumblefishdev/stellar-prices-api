@@ -60,6 +60,19 @@ history:
       hunks). AC 2 + AC 3 close when 0286 phase 1 runs its ingest step; its own
       precondition 1 is 0282's full-day measurement, owed 2026-09-19 — the same
       measurement this task needs for AC 4. Six runbook defects recorded.
+  - date: 2026-09-21
+    status: blocked
+    who: okarcz
+    note: >
+      AC 4 met. Measured 2026-09-18 → 09-20 as dev_read: 09-19 and 09-20 are
+      raw = stored exactly (26,422 and 20,497), so no residue in either
+      direction and the old stored > raw impossibility is gone. 09-18's 6.6
+      percent is this task's own seed seen from the other side — hour by hour,
+      lost equals the newly-seeded pools' raw count EXACTLY in all eight hours
+      before the 08:00 UTC write, then zero for fifteen hours after. Also
+      measured: the 08:11:33 deploy stall that blocked this task cost ZERO
+      trades, because 0064's durable cursor caught it up. Still blocked on
+      0286 for AC 2 and AC 3 — the deploy, not the data.
 ---
 
 ## 📊 STATUS — 2026-09-18 · ⛔ BLOCKED on [[0286]] · AC 1 DONE on prod
@@ -154,12 +167,22 @@ Missing today (live era, see [[0285]]'s note):
       **deployed and live** (Observability was not rolled back). ⛔ the counter
       that feeds it is in the rolled-back processor, so the alarm currently
       reads `OK` on *no data* (`notBreaching`) and cannot fire. Same blocker.
-- [ ] Aquarius raw (registry-joined, all pool wasms) vs stored for a full day
-      after the fix shows no stored > raw residue. → ⏳ **2026-09-19**,
-      unaffected by the blocker: it measures [[0282]]'s fix (deployed
-      2026-09-17 12:04) against the now-complete registry. Expect a small
-      *stored > raw* residue to have DISAPPEARED, since raw previously omitted
-      the 42 unregistered pools.
+- [x] Aquarius raw (registry-joined, all pool wasms) vs stored for a full day
+      after the fix shows no stored > raw residue. → **MET, measured
+      2026-09-21** over 2026-09-18 → 09-20. No residue in either direction:
+      09-19 and 09-20 are `raw = stored` on the integer (26,422 and 20,497).
+      The prediction held — raw no longer omits the 42 pools, so the old
+      *stored > raw* impossibility is gone.
+      🔑 **The seed's effect is visible as a clean boundary.** On 09-18, split
+      by hour and by `pool_registry.updated_at`, `lost` equals the newly-seeded
+      pools' raw count **exactly** in all eight hours before the 08:00 UTC
+      write, then is zero for the fifteen hours after it. That is this task's
+      fix being observed directly, not inferred: 1,563 + 12 = the day's entire
+      1,575 gap. Full table in [[0282]]'s runbook step 8.
+      ⚠️ **Generalises to every future measurement:** `raw` resolves
+      `pool_registry` as of *now*, so any raw-vs-stored window spanning a seed
+      shows a phantom loss for the pre-seed hours. Measure after the seed, or
+      pin the registry to the measured day.
 
 ## Findings — 2026-09-17 (production, `dev_read`)
 

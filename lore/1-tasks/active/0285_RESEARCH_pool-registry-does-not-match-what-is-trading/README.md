@@ -47,6 +47,20 @@ history:
       (34,684 trades) and 10 soroswap pools are missing, and live forgets them
       on every cold start — which answers 0286's precondition 9 with YES.
       Spawned 0290 (new venue) and 0291 (registry refresh).
+  - date: 2026-09-21
+    status: active
+    who: okarcz
+    note: >
+      The last open measurement is answered, alongside 0282's step 8. Live
+      stored NONE of the unregistered pools' trades — zero, not a fraction.
+      On 2026-09-18, hour by hour, lost equals the not-yet-registered pools'
+      raw count EXACTLY in all eight hours before 0291's 08:00 UTC seed, and
+      stored equals the registered pools' count exactly; after the seed, zero
+      loss for fifteen hours. So an unregistered pool is invisible rather than
+      under-counted. Also recorded here as a denominator gotcha: raw resolves
+      pool_registry as of now, so any window spanning a seed shows a phantom
+      loss. 0100 rescoped the same day into the recurring sweep that would
+      have caught 0290's venue without a human going looking.
 ---
 
 # The pool registry does not describe what is actually trading
@@ -64,8 +78,14 @@ Findings in [notes/S-classification-2026-09-17.md](notes/S-classification-2026-0
 - **Registry stale since 2026-07-06** → 22 Aquarius + 10 Soroswap pools
   missing, dropped by live after cold starts → [[0291]]. Must be fixed before
   [[0286]] phase 3 reaches 2026-07.
-- ⏳ Open: how many of the 22 pools' trades live actually stored — needs
-  post-fix data; check alongside [[0282]]'s 2026-09-19 measurement.
+- ✅ **ANSWERED 2026-09-21: live stored NONE of them — zero, not a fraction.**
+  Measured on 2026-09-18, the day [[0291]] seeded them at 08:00 UTC. Split by
+  hour and by `pool_registry.updated_at`, `lost` equals the unregistered pools'
+  raw trade count **exactly** in all eight hours before the write (63, 114,
+  262, 834, 53, 36, 143, 58) and `stored` equals the registered pools' count
+  exactly — then zero loss for the fifteen hours after. So an unregistered pool
+  is not under-counted, it is **invisible**, and the moment it is registered it
+  is complete. Full table in [[0282]]'s runbook step 8.
 
 ## Summary
 
@@ -201,10 +221,18 @@ need opposite treatment.
       denominator in raw-vs-stored measurements, since [[0282]] and [[0101]]
       both rely on it. → **not as-is**: stale since 2026-07-06, and
       `signature` cannot count string-topic venues.
-- [ ] Any follow-up work (a new venue extractor, a registry-refresh mechanism)
+- [x] Any follow-up work (a new venue extractor, a registry-refresh mechanism)
       is spawned as its own task rather than absorbed here. → [[0290]],
-      [[0291]] spawned 2026-09-17. ⏳ Left open for the one measurement still
-      owed (see STATUS).
+      [[0291]] spawned 2026-09-17; [[0100]] rescoped 2026-09-21 from a one-time
+      triage into the recurring coverage sweep that would have caught [[0290]]'s
+      venue on its own. ✅ The measurement this was held open for was taken
+      2026-09-21 — see the STATUS bullet: live stored **none** of the
+      unregistered pools' trades.
+      🔑 **A gotcha this task should own**, since it is about the registry as a
+      denominator: `raw` resolves `pool_registry` as of *now*, so a raw-vs-stored
+      window that spans a seed reports a phantom loss for its pre-seed hours.
+      That is what 09-18's 6.6% is. Measure after a seed, or pin the registry to
+      the measured day.
 
 ## Notes
 
