@@ -43,6 +43,20 @@ history:
       Activated. Sweep query validated on production (dev_read) over the 14
       days to ledger 64,541,178: 9.6 s, 46.6 GB read, 53 unregistered
       emitters in 18 wasm families. Decisions D1–D4 recorded below.
+  - date: "2026-09-21"
+    status: active
+    who: akot
+    note: >
+      Implemented on feat/0100_recurring-coverage-sweep-for-unindexed-venues,
+      PR #332 (8 commits, not merged, not deployed). D5 settled: option A,
+      the probe runs as prices_writer. prices_writer got Code 497 on
+      default.* in the morning; BE added SELECT on default.soroban_events /
+      default.soroban_contracts the same afternoon (0477-style in-place
+      users.d edit) and every read-only check passed (default.transactions
+      still 497). A local dry run of the probe's code against production gave
+      13 unclassified contracts / 911 events; the 2026-04 back-test surfaced
+      SushiSwap V3 (32 contracts, 3,125 events) and the Soroswap factory, now
+      allow-listed. Rule shipped enabled (coverageSweepEnabled=true).
 ---
 
 # A recurring coverage sweep over unregistered swap emitters
@@ -166,6 +180,33 @@ task notes:
   the residual only by a human adding it to the registry or the allow-list.
 - Filter on `topics_xdr` topic[0]/topic[1] of type `sym`/`string`, never
   on `signature` ([[0285]]); an Address strkey can spell `SWAP`.
+- **D5 — identity: option A.** The probe uses the existing ingestion
+  identity (`prices_writer`); BE granted it `SELECT` on
+  `default.soroban_events` and `default.soroban_contracts` only (not
+  `default.*`). Chosen over a dedicated read-only user (option B: new cert,
+  secret, CN-map entry) for a smaller change; the cost is that every
+  ingestion Lambda can now read those two BE tables and the scan shares the
+  `prices_write` quota. A dedicated identity is a later clean-up under
+  [[0258]] — only the secret name in infra changes.
+- **Rule switch.** `coverageSweepEnabled` in `infra/envs/production.json`
+  (`true` since the grants were verified) disables the rule durably;
+  `aws events disable-rule` is undone by the next EventBridge deploy.
+
+## Status (2026-09-21)
+
+- Code: PR #332 — crate `packages/coverage-sweep-probe`, allow-list
+  (6 contract entries incl. the Soroswap factory, 2 SushiSwap V3 wasm
+  entries `until = "0290"`), weekly rule Mon 05:17 UTC, alarms
+  `prices-production-coverage-sweep-unclassified` and `-probe-errors`,
+  runbook `docs/runbooks/0100-coverage-sweep-triage.md`.
+- BE grants: live and verified 2026-09-21 (runbook §4.2).
+- Not yet done: merge, deploy (EventBridge + Observability, runbook §4.4),
+  first run as the AC5 proof (expected: ALARM on 13 contracts / ~911
+  events).
+- Phase-1 residual (current 14 days): `CAS3FL6T…` (`8abc2891`, `POOL/swap`,
+  727 events) plus 12 small emitters; April-only candidates `Swap`
+  (`d4b4976b`, 462), `SwappedToVUsd` (`a757a1ed`, 355),
+  `tokens_swapped_event`.
 
 ## Acceptance Criteria
 
@@ -174,13 +215,19 @@ task notes:
 - [ ] Any genuine AMM pools found are seeded into `pool_registry` and their
       ranges repriced.
 - [ ] A committed allow-list of known-ignorable emitters exists, each entry
-      carrying its reason and originating task.
+      carrying its reason and originating task. (In PR #332, validated by
+      tests; ticks on merge.)
 - [ ] The sweep runs on a schedule and publishes unclassified contract count +
       event volume as metrics.
 - [ ] An alarm fires on a non-zero unclassified volume, and is proven by a
       deliberate test (e.g. removing a known pool from the registry).
 - [ ] Measured baselines established for aquarius and phoenix swap counts (the
       equivalent of Soroswap's 536,319), so their tick counts are verifiable.
-- [ ] A back-test: run the sweep over the 2026-04 window and confirm it would
+- [x] A back-test: run the sweep over the 2026-04 window and confirm it would
       have surfaced SushiSwap V3 as unclassified with its real volume.
-- [ ] The residual has a named owner and a stated cadence.
+      → 2026-09-21, the probe's own code as `prices_writer`, ledgers
+      61,926,675–62,147,853, SushiSwap wasm entries removed: 32 contracts /
+      3,125 events unclassified, largest pool `CCR2CH4G…` (2,829) first
+      (runbook §5).
+- [ ] The residual has a named owner and a stated cadence. (Cadence stated in
+      the runbook §1; owner deliberately `TBD` — to be agreed with the team.)
