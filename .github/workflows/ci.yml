@@ -101,6 +101,14 @@ jobs:
       # obviously missing. The portal changed that: its Vitest suite is the only
       # thing standing between a regression and `/api-tokens/`, and a suite that
       # runs solely on the author's machine guards nothing after the PR is open.
+      #
+      # It also runs the deploy-path guards of task 0141 — the infra project's
+      # `test` target is `tools/scripts/*.test.mjs`: the bootstrap verifier
+      # against stubbed, host-built, missing and duplicated artifacts, and
+      # `infra/Makefile` (every deploy able to ship a Lambda builds first, every
+      # per-stack deploy is `--exclusively`). As an Nx target and not a bare
+      # step so that `verify:staged` / `verify:push` run it too, on the pinned
+      # Node: `node --test <dir>` works on 26 and fails on the 22 CI uses.
       - run: npx nx run-many -t lint build typecheck test
 
       # Cheap counterpart to the rust job's build+verify+synth guard.
@@ -142,7 +150,7 @@ jobs:
       # rustc 1.98.0 (2026-08-18) began passing `-Wl,--fix-cortex-a53-843419`
       # on aarch64-unknown-linux-gnu. Zig's linker rejects it outright
       # ("error: unsupported linker arg"), so every aarch64 link fails and the
-      # `Build Lambda bootstraps` step dies on the first crate that links —
+      # `Build and verify Lambda bootstraps` step dies on the first crate that links —
       # `crc-fast`, pulled in by aws-smithy-checksums. Nothing in this repo
       # changed: PR #227 passed on 1.97.1 and PR #230 failed on 1.98.0 with the
       # identical cargo-lambda 1.9.1 / zig 0.16.0 pair.
@@ -199,59 +207,16 @@ jobs:
       # a bare `cargo lambda build` silently skips these bins and produces
       # only unrelated CLI binaries.
       #
-      # The list is read straight from the script in each step rather than
-      # passed between steps through `$GITHUB_OUTPUT`. The script refuses to
-      # emit an empty list, but that guarantee does not survive a step
-      # boundary: if the producing step were renamed or its id changed, the
-      # consumer's `${{ steps.… }}` would expand to nothing, the loop would
-      # run zero iterations and the guard would report success having checked
-      # nothing. Re-running a grep is cheaper than that failure mode. It also
-      # keeps workflow-expression text out of the shell body entirely.
-      - name: Build Lambda bootstraps
-        shell: bash
-        run: |
-          set -euo pipefail
-          args=()
-          while IFS= read -r name; do
-            [[ -z "$name" ]] && continue
-            args+=(-p "$name")
-          done < <(tools/scripts/lambda-assets.sh)
-          if [[ ${#args[@]} -eq 0 ]]; then
-            echo "::error::resolved zero Lambda assets; refusing to run a no-op build" >&2
-            exit 1
-          fi
-          echo "cargo lambda build --release --arm64 --features lambda ${args[*]}"
-          cargo lambda build --release --arm64 --features lambda "${args[@]}"
-
-      # Assert every bootstrap the CDK app references actually built. A bare
-      # "any bootstrap exists" glob would false-pass on the unrelated CLIs,
-      # so check each expected path explicitly.
-      - name: Verify Lambda artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "=== Lambda bootstrap binaries ==="
-          missing=0
-          checked=0
-          while IFS= read -r name; do
-            [[ -z "$name" ]] && continue
-            checked=$((checked + 1))
-            bin="target/lambda/${name}/bootstrap"
-            if [[ -x "$bin" ]]; then
-              echo "$(sha256sum "$bin") $(stat --format='%s bytes' "$bin")"
-            else
-              echo "::error::missing Lambda bootstrap: $bin"
-              missing=1
-            fi
-          done < <(tools/scripts/lambda-assets.sh)
-          # A loop over an empty list exits 0 having asserted nothing, which
-          # reads as success. Fail instead.
-          if [[ $checked -eq 0 ]]; then
-            echo "::error::verified 0 Lambda bootstraps; the guard passed vacuously" >&2
-            exit 1
-          fi
-          echo "verified ${checked} bootstrap(s)"
-          exit $missing
+      # The invocation and the artifact check live in ONE script, which is
+      # also what `make deploy-production*` runs before it ships a Lambda (task
+      # 0141). The workstation used to have no build step at all, and giving it
+      # a second copy of this one is how the build list and the verify list
+      # drifted in 0077. The script refuses an empty asset list, builds, then refuses
+      # any bootstrap that is missing, not an aarch64 ELF, or byte-identical to
+      # another asset's — a bare "any bootstrap exists" glob would false-pass
+      # on the unrelated CLIs.
+      - name: Build and verify Lambda bootstraps
+        run: tools/scripts/build-lambda-assets.sh
 
       # Final proof that the app the operator deploys actually synthesizes
       # with the assets this job just built. The build+verify steps above
@@ -276,7 +241,7 @@ jobs:
       # minutes today vs 5 ARM plus 1-2 on the synth runner), and does not
       # remove the duplicate TS build either. Closed won't-do; numbers in
       # lore/3-wiki/project/ci-pipeline.md. The real cost here is
-      # `Build Lambda bootstraps` above, at 3m24s = 67% of the job.
+      # `Build and verify Lambda bootstraps` above, at 3m24s = 67% of the job.
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc

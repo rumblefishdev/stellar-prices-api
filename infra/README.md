@@ -181,7 +181,18 @@ make deploy-production-secrets  # single-stack scoped deploy
 ```
 
 Per-stack `deploy-production-{stack}` variants exist for every
-stack in the app — see `infra/Makefile`.
+stack in the app — see `infra/Makefile`. Each passes `--exclusively`: it
+deploys that stack and nothing it depends on.
+
+`make build` compiles the CDK TypeScript only. The Lambda code is whatever is
+in `../target/lambda/<name>/` at synth time, so every target that can ship a
+Lambda (`deploy-production`, `-compute`, `-eventbridge`) — and
+`diff-production`, so the diff is of what would ship — first runs
+`make build-lambdas` — `tools/scripts/build-lambda-assets.sh`, the same build
+CI runs, followed by a check that each bootstrap is a distinct aarch64 ELF
+(task 0141). Deploy through `make`; a raw `npx cdk deploy` ships whatever is on
+disk. And do not read `GET /health` as proof of a deploy: it is a gateway mock
+that never reaches a Lambda.
 
 ## Uploading the real mTLS PEMs
 
