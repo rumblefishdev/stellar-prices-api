@@ -37,6 +37,19 @@ history:
       state. Nothing written — the write and the cold-start check still wait
       for 0286 phase 1 to lift the Compute deploy freeze. AC 5 (history)
       remains the one open decision that needs no deploy.
+  - date: 2026-09-21
+    status: active
+    who: okarcz
+    note: >
+      AC 5 decided with the operator: SushiSwap's ~88.8k swaps of history fold
+      into 0286 phase 3 rather than a separate events-backfill pass. Phase 3
+      re-ingests the same ledgers through the same path, and an earlier pass
+      would be discarded by its DROP PARTITION and would write candles under
+      the pre-0286 rules. ⚠️ Creates a hard ordering: 0286 phase 1 deploy →
+      0290 deploy → the --discover-pools WRITE (133 rows) → 0286 phase 3.
+      events-backfill prices only registered pools, so phase 3 running before
+      the write would silently re-ingest the very gap this task closes. 0286's
+      owner must be told — its precondition list predates this venue.
 ---
 
 # Index the Uniswap-v3-style concentrated-liquidity venue
@@ -385,8 +398,34 @@ weakened: the test still asserts `None` for every row in the list.
       `a_routed_sushiswap_trade_prices_once_from_the_pool_not_the_router`
       (`7021ae2`), a real routed transaction, negative-controlled. See
       Implementation Notes.
-- [ ] History from the first pool is backfilled, or explicitly deferred with a
-      reason.
+- [x] History from the first pool is backfilled, or explicitly deferred with a
+      reason. → **DECIDED with the operator 2026-09-21: folded into [[0286]]
+      phase 3**, not run as a separate pass.
+      **Why:** phase 3 re-ingests the whole chain over the same ledgers through
+      the same `events-backfill` path, so SushiSwap's ~88.8k swaps
+      (2026-01 → now, ledgers 60,770,886 → 64,488,316) come along at no extra
+      cost. A separate pass run earlier would be **thrown away** by phase 3's
+      `DROP PARTITION` + re-ingest, and worse, it would write candles under the
+      *pre-0286* rules — every fill at equal weight, dust included — so its
+      output would disagree with everything phase 3 then produces.
+      **Cost accepted:** no SushiSwap history until phase 3 runs, which waits on
+      0286 phases 1–2 being live and measured.
+
+      ### ⚠️ Sequencing this creates — 0286 phase 3 MUST run last
+
+      `events-backfill` only prices pools that are in `prices.pool_registry`, so
+      the 133 rows must exist **before** phase 3 reaches the SushiSwap era, or
+      phase 3 silently re-ingests the same gap this task exists to close:
+
+      1. [[0286]] phase 1 deploys → the Compute deploy freeze lifts
+      2. 0290's ledger-processor deploys (PR #324)
+      3. the `--discover-pools` **write** runs (runbook step 5) → 133 rows
+      4. **then** [[0286]] phase 3
+
+      🔑 **0286's owner needs to know this** — phase 3's precondition list says
+      "pool registry seeded first ([[0088]])" but predates this venue, and its
+      AMM reconciliation will expect sushiswap volumes that only appear if step
+      3 happened. Same shape as [[0285]] gating phase 3's live-era AMM months.
 
 # 📕 RUNBOOK — `--discover-pools` dry run for SushiSwap V3
 
