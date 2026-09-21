@@ -2,7 +2,7 @@
 id: "0285"
 title: "prices.pool_registry does not match what is actually trading — 72 of 178 swap-emitting contracts are unregistered, and they carry 96.7% of the swap events"
 type: RESEARCH
-status: active
+status: completed
 assignee: okarcz
 related_adr: []
 related_tasks: ["0282", "0101", "0096", "0097", "0099", "0080"]
@@ -61,11 +61,25 @@ history:
       pool_registry as of now, so any window spanning a seed shows a phantom
       loss. 0100 rescoped the same day into the recurring sweep that would
       have caught 0290's venue without a human going looking.
+  - date: 2026-09-21
+    status: completed
+    who: okarcz
+    note: >
+      CLOSED. All 7 criteria met. The last one was answered this morning
+      alongside 0282's step 8: live stored NONE of the unregistered pools'
+      trades — an unregistered pool is INVISIBLE, not under-counted — proven
+      hour by hour against 0291's 08:00 UTC seed, where lost equals the
+      not-yet-registered pools' raw count exactly in all eight hours before it
+      and zero for the fifteen hours after. Criterion 7 closed the same day by
+      rescoping 0100 into a recurring coverage sweep. Three follow-ups spawned
+      and live: 0290, 0291, 0100. Longest-reaching finding: pool_registry is
+      not fit as a raw-vs-stored denominator as-is, which 0282 and 0101 both
+      depend on.
 ---
 
 # The pool registry does not describe what is actually trading
 
-## 📊 STATUS — 2026-09-17 · classified, 6 of 7 criteria met
+## 📊 STATUS — 2026-09-21 · ✅ COMPLETED, all 7 criteria met
 
 Findings in [notes/S-classification-2026-09-17.md](notes/S-classification-2026-09-17.md).
 
@@ -233,6 +247,77 @@ need opposite treatment.
       window that spans a seed reports a phantom loss for its pre-seed hours.
       That is what 09-18's 6.6% is. Measure after a seed, or pin the registry to
       the measured day.
+
+## Implementation Notes
+
+A RESEARCH task, so what it produced is answers, not code. All seven criteria
+are met; the classification is in
+[notes/S-classification-2026-09-17.md](notes/S-classification-2026-09-17.md).
+
+What it settled, in the order it mattered:
+
+1. **The headline was wrong, and why** — 96.7% counted only
+   `signature = 'swap'`, and string-topic venues leave `signature` NULL. The
+   corrected figures are soroswap 51,589 raw vs 28,980 stored (43.8% lost) and
+   phoenix ~4,194 vs 3,675 (~12%).
+2. **Every unregistered emitter is classified** — the Aquarius router
+   (`06F4207B`), a whole unindexed venue (`003710B3`/`95A8E001`), three more
+   routers, and a tail of ≤ 36 events each.
+3. **`pool_registry` is NOT fit as a raw-vs-stored denominator as-is** — stale
+   since 2026-07-06, and `signature` cannot count string-topic venues. This is
+   the finding with the longest reach: [[0282]] and [[0101]] both lean on it.
+4. **An unregistered pool is INVISIBLE, not under-counted** (2026-09-21). Live
+   stores *none* of its trades. Proven hour by hour against [[0291]]'s seed —
+   see the STATUS bullet.
+
+## Design Decisions
+
+### From Plan
+
+1. **Filed as RESEARCH, not BUG.** The two readings — pools we never index vs
+   routers double-counting — have opposite fixes, so classifying had to come
+   before any repair. That judgement held: the answer was *both*, and each half
+   went to a different task.
+
+### Emerged
+
+2. **The stored-exceeds-raw contradiction was treated as an instrument, not an
+   error.** 27,897 stored against 6,942 raw is impossible, so rather than
+   discard it the impossibility was used to find the defect in the measurement
+   — the `signature` column. That is what corrected the headline.
+3. **Follow-ups were spawned rather than absorbed** ([[0290]], [[0291]]), and
+   the task then stayed open only for the one measurement it could not take
+   until the live fix had run. Keeping it open for a single question, instead
+   of closing with a caveat, is what made criterion 7 answerable at all.
+4. **[[0100]] was rescoped rather than left as filed** (2026-09-21). Its
+   one-time triage of 144 emitters became a recurring coverage sweep, because
+   this task is the second time the same question was asked from scratch — and
+   0100's own probe had already found the answer in July.
+
+## Issues Encountered
+
+- **`dev_read`'s hourly 2 TiB quota** was exhausted in under an hour by
+  whole-era scans that parse `topics_xdr` (`Code: 201 QUOTA_EXCEEDED`, resets
+  on the clock hour); single queries also cap at 30 s. Chunk by ~320k ledgers
+  and filter on `signature`/`contract_id` before parsing JSON.
+- **`signature` is NULL for string-topic events**, which is what made the
+  original headline wrong. Any venue-spanning count must not filter on it.
+- **A registry seed inside the measured window fabricates loss.** `raw`
+  resolves `pool_registry` as of *now*, so hours before a seed report the
+  newly-seeded pools as lost. Found on 2026-09-18; see the criterion 7 note.
+
+## Future Work
+
+All spawned; nothing left as prose.
+
+- [[0290]] — index the unindexed venue (SushiSwap V3). Blocked on [[0286]].
+- [[0291]] — make the live processor maintain the registry. Blocked on [[0286]].
+- [[0100]] — rescoped 2026-09-21 into the recurring coverage sweep that would
+  have surfaced 0290's venue without anyone going looking.
+- ⏳ **Not spawned, and deliberately:** [[0282]]'s "a swap from a pool the live
+  path cannot resolve leaves no trace" criterion. It is 0291's
+  `UnregisteredPoolEvents`, which is built and alarmed but not yet deployed —
+  so it belongs to 0291's AC 3, not to a new task.
 
 ## Notes
 

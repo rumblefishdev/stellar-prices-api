@@ -8,7 +8,7 @@ related_adr: []
 related_tasks: ["0285", "0286", "0282"]
 tags: [layer-indexing, priority-medium, effort-medium, amm, ingestion, data-correctness]
 links:
-  - "../active/0285_RESEARCH_pool-registry-does-not-match-what-is-trading/notes/S-classification-2026-09-17.md"
+  - "../archive/0285_RESEARCH_pool-registry-does-not-match-what-is-trading/notes/S-classification-2026-09-17.md"
 history:
   - date: 2026-09-17
     status: backlog

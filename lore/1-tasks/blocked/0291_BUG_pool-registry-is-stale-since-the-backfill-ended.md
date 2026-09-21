@@ -7,7 +7,7 @@ related_adr: []
 related_tasks: ["0285", "0286", "0282", "0078", "0101", "0256", "0069", "0080", "0290"]
 tags: [layer-indexing, priority-high, effort-small, amm, aquarius, soroswap, ingestion, data-correctness, clickhouse]
 links:
-  - "../active/0285_RESEARCH_pool-registry-does-not-match-what-is-trading/notes/S-classification-2026-09-17.md"
+  - "../archive/0285_RESEARCH_pool-registry-does-not-match-what-is-trading/notes/S-classification-2026-09-17.md"
   - "../../../packages/prices-ledger-processor/src/main.rs"
   - "../../../docs/runbooks/seed-pool-registry.md"
   - "https://github.com/rumblefishdev/stellar-prices-api/pull/322"
