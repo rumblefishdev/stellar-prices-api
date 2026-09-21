@@ -2,7 +2,7 @@
 id: "0249"
 title: "The api-handler has no error alarm — and since 0194's review the portal closes itself at cold start with only a log line to say so"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0008"]
 related_tasks: ["0194", "0231"]
 tags: ["priority-high", "effort-small", "observability", "layer-infra", "epic-self-service-onboarding", "milestone-M3"]
@@ -20,6 +20,12 @@ history:
       "fail loudly in `Init Errors`" stance on the portal's cold-start reads
       turned out to be alarmed by nothing; replacing it with "close the
       portal, log, keep `/v1` up" needs the alarm that was always missing.
+  - date: "2026-09-21"
+    status: active
+    who: akot
+    note: >
+      Activated. Scope: api-handler Errors alarm + metric filter/alarm on
+      `portal closed at cold start`, runbook sentence; no deploy.
 ---
 
 # An error alarm for the api-handler, and one for a portal that closed itself
