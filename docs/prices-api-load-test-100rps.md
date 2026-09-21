@@ -58,7 +58,7 @@ cold-start / ClickHouse-side timing needs credentials this machine does not have
 | Region        | `eu-central-1` · stage throttle 200 req/s, burst 400                                                                                                           |
 | Gateway cache | enabled, TTL 10 s on `/price`; key is the path **plus `min_volume_usd`** (task 0122) — this run sends no query string, so the pool size is the only lever here |
 | Usage plan    | `prices-production-loadtest-plan` (`i12bsj`) — 150 req/s, burst 300, 1 M/month                                                                                 |
-| API key       | `prices-production-loadtest-key-20260819T114230Z` ([registry](runbooks/manual-api-key-tier.md))                                                                |
+| API key       | `prices-production-loadtest-key-20260819T114230Z` — rotated out 2026-09-21 (task 0298); its successor is in the [registry](runbooks/manual-api-key-tier.md)    |
 | Generator     | k6 v2.2.0, darwin/arm64, single host                                                                                                                           |
 | Run date      | 2026-09-03, 06:04–06:16 UTC                                                                                                                                    |
 

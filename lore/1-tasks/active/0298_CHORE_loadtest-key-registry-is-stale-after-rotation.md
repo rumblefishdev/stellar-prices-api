@@ -72,8 +72,8 @@ Plan limits unchanged: 150 req/s, burst 300, 1,000,000/month.
 
 ## Acceptance Criteria
 
-- [ ] Registry row(s) for `loadtest` match `aws apigateway get-usage-plan-keys --usage-plan-id i12bsj`
-- [ ] loadtest README names the current key
-- [ ] Old key `lxrwlyhjm7` deleted, or a dated note says why it is kept disabled
-- [ ] `price_load.js` usage comment shows the custom-domain form of `BASE_URL`
-- [ ] The 2026-09-18 report still names the key that run used
+- [x] Registry row(s) for `loadtest` match `aws apigateway get-usage-plan-keys --usage-plan-id i12bsj`
+- [x] loadtest README names the current key
+- [x] Old key `lxrwlyhjm7` deleted — 2026-09-21, read back: `get-api-key` returns `NotFoundException`
+- [x] `price_load.js` usage comment shows the custom-domain form of `BASE_URL`
+- [x] The load-test report still names the key its runs used (one clause added: rotated out, successor in the registry)

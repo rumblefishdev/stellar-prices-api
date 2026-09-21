@@ -43,7 +43,8 @@ by the ingest/current-prices path.
 >
 > **Provisioned for this task (0121):** plan `prices-production-loadtest-plan`
 > (`i12bsj`) at **150 req/s, burst 300, 1 M/month**, key
-> `prices-production-loadtest-key-20260819T114230Z` — see the registry table in
+> `prices-production-loadtest-key-20260921T070812Z` (rotated 2026-09-21, task
+> 0298) — see the registry table in
 > `docs/runbooks/manual-api-key-tier.md`. The stage ceiling
 > (`apiGatewayThrottleRate: 200`, burst 400) sits above the plan, so 100 req/s
 > needs no CDK change. **The report must name the plan the key was on.**
