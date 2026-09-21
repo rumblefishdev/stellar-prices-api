@@ -1181,9 +1181,9 @@ export class ObservabilityStack extends cdk.Stack {
     this.ledgerProcessorErrorAlarm.addAlarmAction(snsAction);
     this.ledgerProcessorErrorAlarm.addOkAction(snsAction);
 
-    // Task 0249 — the api-handler had no `Errors` alarm at all: on
-    // 2026-09-18 it logged 243 `portal closed at cold start` lines and
-    // separately returned 14,865 5xx, and neither paged. This alarm is
+    // Task 0249 — the api-handler had no `Errors` alarm at all. On
+    // 2026-09-02 an init panic (main.rs) failed 7 invocations in one 5-min
+    // window and paged nobody; this alarm would have fired on it. It is
     // hand-rolled like ledgerProcessorErrorAlarm above, so the liveness
     // sentence is written by hand (task 0223) rather than appended by a
     // shared builder.
@@ -1230,6 +1230,13 @@ export class ObservabilityStack extends cdk.Stack {
     // the sentence (main.rs:58-63). Namespace follows this stack's
     // `Prices/<Component>` convention. A metric filter publishes on behalf
     // of CloudWatch Logs and needs no IAM grant.
+    //
+    // The prefix below and the log line in main.rs are tied together by
+    // `tools/scripts/portal-closed-filter-guard.test.mjs` — reword one
+    // without the other and that test fails, instead of the alarm going
+    // quiet. Expect this alarm during a load test: both times it would have
+    // fired so far (2026-09-18, 45 and 198 lines) were bursts of cold starts
+    // throttling the Parameter Store reads — real closures, not noise.
     //
     // Log group imported BY NAME, not by ComputeStack construct reference —
     // ComputeStack creates it (compute-stack.ts:479); a construct reference
@@ -1984,14 +1991,18 @@ export class ObservabilityStack extends cdk.Stack {
     // Namespace/MetricName/Dimensions/Statistic form every other alarm in
     // this stack uses (verified by a synth probe at planning).
     //
-    // On 2026-09-18 the API returned 14,865 5xx — exactly 14,865 Lambda
-    // throttles at 700 concurrency — while AWS/Lambda Errors stayed 0, so
-    // apiHandlerErrorAlarm above could not have caught it. Absolute count,
-    // not a rate: traffic is sometimes 1-7 requests/day and a rate would
-    // flap. Threshold 5 sits above the one 14-day blip (2 on 2026-09-08).
+    // On 2026-09-03 a load run exhausted the ClickHouse read quota and the
+    // API returned 28,853 5xx over ~25 minutes while AWS/Lambda Errors stayed
+    // 0 (the router answered 5xx itself); nobody was paged, and
+    // apiHandlerErrorAlarm above could not have caught it.
+    // Lambda throttles are the other blind spot: task 0293's load test on
+    // 2026-09-18 produced 14,865 5xx that were all throttles, Errors 0.
+    // Absolute count, not a rate: traffic is sometimes 1-7 requests/day and
+    // a rate would flap. Threshold 5 sits above every stray window in the
+    // 35 days read on 2026-09-21 (1, 2 and 4).
     this.api5xxAlarm = new cloudwatch.Alarm(this, 'Api5xxAlarm', {
       alarmName: `prices-${config.envName}-api-5xx`,
-      alarmDescription: `API Gateway returned >= 5 5xx in 5 min (AWS/ApiGateway 5XXError Sum, ApiName + Stage). Covers what prices-${config.envName}-api-handler-errors cannot see: 5xx the router returns itself, and Lambda throttles (on 2026-09-18, 14,865 5xx were exactly 14,865 throttles at 700 concurrency while Errors stayed 0). An absolute count, not a rate, because traffic is sometimes 1-7 requests a day and a rate would flap. 5 sits above the one 14-day blip (2 on 2026-09-08). First check Lambda Throttles / ConcurrentExecutions for prices-${config.envName}-api-handler, then the api-handler logs. The per-invocation Errors alarm stays for a single init crash or panic at low traffic. Task 0249.`,
+      alarmDescription: `API Gateway returned >= 5 5xx in 5 min (AWS/ApiGateway 5XXError Sum, ApiName + Stage). Covers what prices-${config.envName}-api-handler-errors cannot see: 5xx the router returns itself (2026-09-03: a load run exhausted the ClickHouse read quota, 28,853 5xx in ~25 min with Errors at 0, nobody paged), and Lambda throttles. An absolute count, not a rate, because traffic is sometimes 1-7 requests a day and a rate would flap; 5 sits above every stray window seen in 35 days (1, 2 and 4). First check the api-handler logs and ClickHouse latency, then Lambda Throttles / ConcurrentExecutions for prices-${config.envName}-api-handler. An init panic fires this alarm and the Errors alarm together. The per-invocation Errors alarm stays for a single init crash or panic at low traffic. Task 0249.`,
       metric: new cloudwatch.Metric({
         namespace: 'AWS/ApiGateway',
         metricName: '5XXError',

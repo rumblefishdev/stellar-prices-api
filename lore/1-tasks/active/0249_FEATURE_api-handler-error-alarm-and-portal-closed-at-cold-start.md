@@ -146,18 +146,40 @@ dashboard-rendering noise. That makes `DashboardAlarmCount` 55 → 61 live.
 `npm run infra:verify-dashboard`: 61 alarms (52 own + 9 imported). typecheck,
 lint, prettier and `cargo fmt --check` are clean. Nothing was deployed.
 
+**Backtest and local run (2026-09-21).** The three alarms' exact template
+settings were replayed over 35 days of production 5-minute datapoints (see
+Issues Encountered). The api-handler binary built from this branch, run
+locally with a broken portal config, emits the portal-closed line in the
+production shape. The synthesized pattern, through `test-metric-filter`,
+matches it and rejects the healthy run's output, the phrase mid-sentence, a
+flattened (`$.message`) line and plain text. Both alarm dimension sets exist
+as live metrics; the ops topic has a confirmed subscription and delivered
+other `prices-production-*` alarms on 2026-09-18/19. What still needs a
+deploy is the state change and the notification themselves.
+
 ## Issues Encountered
 
-- **The signal had already fired, and nothing saw it.** `filter-log-events`
-  over 30 days: **243** `portal closed at cold start` lines, all on
-  2026-09-18 (SSM reads through the extension returning HTTP 400 for
-  `pricing-api-free-plan-id`, `discord-guild-id` and
-  `min-account-age-minutes`). None since. Both eligibility parameters exist
-  today. This is the case the alarm exists for.
-- **`Errors` alone would have missed that day's outage.** On 2026-09-18
-  14:00 CEST the API returned **14,865 5xx**, exactly the api-handler's
-  **14,865 Lambda Throttles** (concurrency peaked at 700). Lambda `Errors`
-  stayed 0: throttles and router-returned 5xx are not invocation errors.
+- **The portal-closed signal had already fired, and nothing saw it.**
+  `filter-log-events` over 35 days: **243** `portal closed at cold start`
+  lines, all on 2026-09-18, in two 5-minute windows (45 at 11:45 UTC, 198 at
+  12:45 UTC). Both were the ramps of [[0293]]'s load test: bursts of cold
+  starts whose Parameter Store reads came back HTTP 400 through the
+  extension. This is the scenario the task predicted, and they were real
+  closures. None since. **Expect this alarm during a load test.**
+- **`Errors` alone misses the outages that matter.** Read 2026-09-21, 35 days
+  of 5-minute windows:
+  - 2026-09-03: a load run exhausted the ClickHouse read quota; **28,853
+    5xx** over ~25 min, Lambda `Errors` **0**, nobody paged (the 26-minute
+    outage [[0293]] mentions). The 5xx alarm would have fired in 4 windows.
+  - 2026-09-18: [[0293]]'s ramp to 1000 req/s; 14,865 5xx, all Lambda
+    throttles at that run's temporary reserved concurrency of 700 (since
+    removed), `Errors` 0. A controlled test, not an incident, but the same
+    blind spot.
+  - 2026-09-02: an init panic (`main.rs:42`), `Errors` = 7 and 7 × 5xx in one
+    window. The `Errors` alarm would have fired. An init panic fires both
+    alarms.
+  - Stray 5xx windows below the threshold: 1, 2 and 4. No false alarm from
+    any of the three alarms on ordinary days.
   This is why the 5xx alarm was added (Design Decision 5).
 - **`MetricFilter.metric()` defaults to `avg`.** Sum is passed explicitly.
 - **`apiMetric()` sets a `label`, and with a label aws-cdk-lib renders the
@@ -169,8 +191,9 @@ lint, prettier and `cargo fmt --check` are clean. Nothing was deployed.
 
 ### From Plan
 
-1. **Errors threshold 1.** Baseline 0 (0194: 217 invocations / 4 h, and 0
-   every day of the 14 read on 2026-09-21). One router serves every route
+1. **Errors threshold 1.** Baseline 0 (0194: 217 invocations / 4 h; in the
+   35 days read on 2026-09-21 the only non-zero window is the 2026-09-02
+   init panic, which should page). One router serves every route
    group (ADR 0008), so one error is a `/v1` error.
 2. **Pattern keyed on `$.fields.message`, read off a real line.** The
    subscriber is `fmt().json()` without `flatten_event`, and the function
@@ -183,9 +206,9 @@ lint, prettier and `cargo fmt --check` are clean. Nothing was deployed.
 ### Emerged
 
 5. **API Gateway 5xx alarm added (Adam, 2026-09-21).** Not in the task's
-   original scope; the 2026-09-18 throttling proved `Errors` blind to it.
-   Threshold **5**, absolute: the 14-day baseline outside that day was one
-   window with 2 × 5xx (2026-09-08), and traffic is sometimes 1–7
+   original scope; 2026-09-03 and 2026-09-18 proved `Errors` blind to
+   router-returned 5xx and to throttles. Threshold **5**, absolute: the
+   stray windows in 35 days were 1, 2 and 4, and traffic is sometimes 1–7
    requests/day, so a rate would swing on every single error. `Errors ≥ 1`
    stays for a lone init crash or panic.
 6. **Namespace `Prices/ApiHandler`**, not the brief's first guess
@@ -200,6 +223,13 @@ lint, prettier and `cargo fmt --check` are clean. Nothing was deployed.
    OK notification would read as "recovered". The description says so. The
    Errors and 5xx alarms keep their OK actions: their metric keeps flowing
    while the fault lasts.
+10. **A guard test ties the log line to the filter**
+    (`tools/scripts/portal-closed-filter-guard.test.mjs`, Adam, 2026-09-21).
+    Nothing else links `main.rs`'s message to the pattern's prefix, or the
+    un-flattened JSON subscriber to `$.fields.message`; a reword would
+    silence the alarm with every check green. The TypeScript CI job runs the
+    guard, so `packages/prices-api/src/main.rs` was added to that job's path
+    filter, or a main.rs-only PR would skip it.
 
 ## Future Work
 
