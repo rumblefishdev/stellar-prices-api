@@ -82,6 +82,11 @@ async fn main() -> Result<(), lambda_runtime::Error> {
 
             let metrics = unclassified_metrics(&report.unclassified);
             let unclassified_events: u64 = report.unclassified.iter().map(|r| r.events).sum();
+            // Entries that matched nothing this run: informational, candidates
+            // for pruning (an `until` entry after its task shipped). Only the
+            // allow-listed rows can match an entry, so they are enough.
+            let matched: Vec<_> = report.allowlisted.iter().map(|(r, _)| r.clone()).collect();
+            let unmatched_allowlist = allow.unmatched_entries(&matched).join(",");
             // Logged on every run, so "ran and found nothing" can be told
             // apart from "never ran" (there is no liveness alarm).
             tracing::info!(
@@ -92,6 +97,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 allowlisted = report.allowlisted.len(),
                 unclassified = report.unclassified.len(),
                 unclassified_events,
+                unmatched_allowlist = %unmatched_allowlist,
                 "coverage sweep complete"
             );
 

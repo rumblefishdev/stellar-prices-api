@@ -235,6 +235,110 @@ mod tests {
         }
     }
 
+    fn prod_sql() -> String {
+        sweep_sql("default", "prices").unwrap()
+    }
+
+    #[test]
+    fn matches_topic_0_and_topic_1_by_1_based_json_index_of_sym_or_string_type() {
+        let sql = prod_sql();
+        assert!(sql.contains("JSONExtractString(topics_xdr, 1, 'type') IN ('sym', 'string')"));
+        assert!(sql.contains("JSONExtractString(topics_xdr, 2, 'type') IN ('sym', 'string')"));
+        assert!(
+            sql.contains("match(lower(JSONExtractString(topics_xdr, 1, 'value')), 'swap|trade')")
+        );
+        assert!(
+            sql.contains("match(lower(JSONExtractString(topics_xdr, 2, 'value')), 'swap|trade')")
+        );
+        // No index 0: ClickHouse JSON indexes are 1-based.
+        assert!(!sql.contains("topics_xdr, 0,"));
+    }
+
+    #[test]
+    fn never_filters_on_signature() {
+        assert!(!prod_sql().to_lowercase().contains("signature"));
+    }
+
+    #[test]
+    fn bounds_are_typed_server_side_parameters() {
+        let sql = prod_sql();
+        assert!(sql.contains("ledger_sequence BETWEEN {lo:Int64} AND {hi:Int64}"));
+        // `.bind()` would rewrite every `?`; the SQL must carry none.
+        assert!(!sql.contains('?'));
+        // No ledger number is spliced in.
+        assert!(!sql.contains("64320000") && !sql.contains("221178"));
+    }
+
+    #[test]
+    fn lookup_tables_are_read_with_final() {
+        let sql = prod_sql();
+        assert!(sql.contains("FROM default.soroban_contracts FINAL"));
+        assert!(sql.contains("FROM prices.pool_registry FINAL"));
+        assert!(sql.contains("FROM default.soroban_events"));
+    }
+
+    #[test]
+    fn database_qualifiers_follow_the_arguments() {
+        let sql = sweep_sql("be_x", "pr_y").unwrap();
+        assert!(
+            !sql.contains("default.") && !sql.contains("prices."),
+            "{sql}"
+        );
+        assert!(sql.contains("be_x.soroban_events"));
+        assert!(sql.contains("be_x.soroban_contracts"));
+        assert!(sql.contains("pr_y.pool_registry"));
+        assert_eq!(
+            max_ledger_sql("be_x").unwrap(),
+            "SELECT max(ledger_sequence) FROM be_x.soroban_events"
+        );
+    }
+
+    #[test]
+    fn non_identifier_database_names_are_refused() {
+        for (be, pr) in [
+            ("default; SELECT 1", "prices"),
+            ("prices", ""),
+            ("1db", "prices"),
+            ("default", "prices.x"),
+            ("de`fault", "prices"),
+        ] {
+            assert!(
+                matches!(sweep_sql(be, pr), Err(SweepError::InvalidIdentifier(_))),
+                "{be:?}/{pr:?}"
+            );
+        }
+        assert!(matches!(
+            max_ledger_sql("default; DROP"),
+            Err(SweepError::InvalidIdentifier(_))
+        ));
+    }
+
+    #[test]
+    fn select_order_matches_the_row_struct() {
+        // RowBinary is positional: the SELECT list must follow SweepRow.
+        let sql = prod_sql();
+        let select = &sql
+            [sql.rfind("SELECT c.contract_id").unwrap()..sql.find("FROM per_contract").unwrap()];
+        let cols = [
+            "AS strkey",
+            "AS wasm",
+            "AS contract_surrogate",
+            "p.events",
+            "p.txs",
+            "p.first_ledger",
+            "p.last_ledger",
+            "p.top_action",
+            "p.top_shape",
+        ];
+        let pos: Vec<usize> = cols.iter().map(|c| select.find(c).expect(c)).collect();
+        assert!(pos.windows(2).all(|w| w[0] < w[1]), "{select}");
+    }
+
+    #[test]
+    fn window_constant_is_the_measured_14_days() {
+        assert_eq!(SWEEP_WINDOW_LEDGERS, 64_541_178 - 64_320_000);
+    }
+
     #[test]
     fn window_is_inclusive_and_saturates_at_zero() {
         assert_eq!(window(64_541_178), (64_320_000, 64_541_178));
