@@ -445,10 +445,10 @@ mod tests {
 
     #[test]
     fn init_sql_parses_into_statements() {
-        // 1 CREATE DATABASE + 21 CREATE TABLE (assets, asset_metadata, _1m,
+        // 1 CREATE DATABASE + 20 CREATE TABLE (assets, asset_metadata, _1m,
         // _15m, _1h, _4h, _1d, _1w, _1M, current_prices, asset_supply,
         // asset_symbol, oracle_prices, usd_rate, backfill_sdex_ledgers,
-        // backfill_progress, discovery_state, unresolved_pools, pool_registry,
+        // backfill_progress, unresolved_pools, pool_registry,
         // ingest_cursor, enrichment_frontier) + 7 close_usd ALTERs (one per
         // OHLCV grain) + 1 assets.sac_address ALTER (task 0061) + 2
         // backfill_progress ALTERs (earliest_data_available [0073 half → 0053]
@@ -468,8 +468,10 @@ mod tests {
         // prices.current_prices ADD COLUMN IF NOT EXISTS` statements — as_of
         // and price_status — kept one per statement like the method ALTER
         // above, so each is independently re-runnable.)
+        // (−1 = 42: task 0256 removed `discovery_state` with the ledger scan
+        // that was its only reader and writer.)
         let stmts = split_statements(INIT_SQL);
-        assert_eq!(stmts.len(), 43, "got {}", stmts.len());
+        assert_eq!(stmts.len(), 42, "got {}", stmts.len());
     }
 
     /// The single `CREATE TABLE … IF NOT EXISTS <table> (` statement of `sql`.

@@ -50,7 +50,7 @@ seam section.
 | `sdex-backfill`           | operator CLI         | `price_ohlcv_1m` (`sdex` + AMM sources), `assets`, `oracle_prices`, `backfill_progress`, `pool_registry`, `unresolved_pools`, `backfill_sdex_ledgers` | manual, `--mode`/`--start`/`--end`        | ✅           |
 | `prices-ledger-processor` | Lambda / fixture CLI | `price_ohlcv_1m` (all sources), `oracle_prices`, `assets`                                                                                             | SQS doorbell (prod) or `--cursor` (local) | ✅           |
 | `enrichment-worker`       | Lambda / CLI         | `price_ohlcv_1m` (`_usd` cols)                                                                                                                        | scheduled (prod) or CLI (local)           | ✅ prototype |
-| `asset-discovery`         | scheduled Lambda     | `assets`, `discovery_state`                                                                                                                           | EventBridge `rate(1h)`                    | ✅           |
+| `asset-discovery`         | scheduled Lambda     | `assets`, `asset_symbol`                                                                                                                              | EventBridge `rate(1h)`                    | ✅           |
 | `oracle-worker`           | scheduled Lambda     | `oracle_prices`                                                                                                                                       | EventBridge schedule                      | ✅           |
 | `supply-worker`           | scheduled Lambda     | `asset_supply`                                                                                                                                        | EventBridge schedule                      | ✅           |
 | `cleanup-worker`          | scheduled Lambda     | TTL/partition maintenance                                                                                                                             | EventBridge schedule                      | ✅           |
@@ -379,7 +379,7 @@ cargo run -p enrichment-worker --bin enrichment-cli -- \
 `asset-discovery`, `oracle-worker`, `supply-worker`, `cleanup-worker` run
 on EventBridge schedules (see `infra/`), not as operator CLIs — there are
 no ledger ranges to coordinate, so they don't participate in the seam.
-They write disjoint tables (`assets`/`discovery_state`, `oracle_prices`,
+They write disjoint tables (`assets`/`asset_symbol`, `oracle_prices`,
 `asset_supply`, and maintenance respectively). The one cross-writer caveat
 is the **`assets` column clobber (task 0067)**: every writer that upserts
 an asset stamps a fresh `updated_at` and can overwrite columns it doesn't
