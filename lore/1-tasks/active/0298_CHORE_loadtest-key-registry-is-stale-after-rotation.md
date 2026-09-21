@@ -2,7 +2,8 @@
 id: "0298"
 title: "The load-test API key was rotated on 2026-09-21 — the runbook registry and the loadtest README still name the old one"
 type: CHORE
-status: backlog
+status: active
+assignee: stkrolikiewicz
 related_adr: []
 related_tasks: ["0121", "0126", "0293"]
 tags: [layer-docs, priority-low, effort-small, api-keys, loadtest, runbook]
@@ -17,6 +18,13 @@ history:
       Rotation done and verified by read-back the same morning; only the
       documents trail it. Kept out of [[0294]] on purpose — key housekeeping
       does not belong in the Milestone 3 evidence package.
+  - date: 2026-09-21
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated. The AWS half is already closed: old key `lxrwlyhjm7` deleted
+      (get-api-key returns NotFoundException), only `gc22sbmwa2` is on `i12bsj`.
+      Three document edits remain.
 ---
 
 # Load-test key registry is stale after the 2026-09-21 rotation
