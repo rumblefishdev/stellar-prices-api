@@ -34,6 +34,16 @@ history:
       here is recorded below — AC 3 and AC 5 untouched, `discover_window:255`
       still unguarded, and the AC 4 audit found a second live instance in
       `oracle-worker`.
+  - date: 2026-09-21
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Lands with [[0256]]'s removal PR #331. The scan decision is made —
+      deleted, not enabled — so `discover_window:255` is gone, the
+      "precondition" section is settled and AC 3 is moot. One item added from
+      that PR's review: `ensure_seed` still READS the whole registry hourly to
+      check ~20 identities. What remains here is that read and the
+      `oracle-worker` instance.
 ---
 
 # `asset-discovery` re-emits the full asset registry every hour
@@ -168,7 +178,7 @@ accounts for ~84% of the ops channel's traffic. See [[0241]] and [[0226]].
 | caller | shape | verdict |
 |---|---|---|
 | `asset-discovery` `ensure_seed` (`lib.rs:119`) | `write_new_assets` + watermark | **fixed** in 0256 |
-| `asset-discovery` `discover_window` (`lib.rs:255`) | unguarded full `write_assets` | **still defective, dormant** |
+| `asset-discovery` `discover_window` (`lib.rs:255`) | unguarded full `write_assets` | **removed** with the ledger scan — [[0256]], PR #331 |
 | `oracle-worker` (`lib.rs:569`) | full `write_assets` behind `count() > known_before` | **same defect, rarely triggered** |
 | `sdex-backfill` (`sink.rs:109`, `run.rs:278`) | one-shot CLI | correct per `write_assets` docs |
 | `events-backfill` (`run.rs:123`) | one-shot CLI | correct per `write_assets` docs |
@@ -178,31 +188,34 @@ to persist a handful of newly minted ids. Its guard keeps it quiet (no
 occurrences in 24 h of logs), but the shape is wrong and `write_new_assets` with
 a watermark is the fitting remedy, exactly as in the ledger processor.
 
-### ⛔ This task is now a precondition for [[0256]]'s scan decision
+### ✅ Settled by [[0256]]'s scan decision — the call site is gone
 
-`discover_window:255` is untouched. It does not fire only because the scan is
-dead. **Switching the ledger scan on — one of the two decisions [[0256]] must
-settle — would reintroduce the hourly full re-emit that was just removed.**
+[[0256]] decided on 2026-09-21 to **delete** the ledger scan rather than switch
+it on, and PR #331 removes `discover_window` with it. The unguarded
+`write_assets` at `lib.rs:255` no longer exists, so there is nothing left to
+guard in `asset-discovery`, and the precondition this section used to record
+("enable the scan → guard first") has no scenario left to apply to.
 
-So that decision is no longer binary:
-
-- **delete the scan** → this call site goes with it, and most of what remains
-  here disappears; the task drops to the comment fix plus the oracle instance;
-- **enable the scan** → the guard described here is a **precondition**, not a
-  performance nicety, and this task should be raised to `priority-high` and done
-  first.
-
-Priority is deliberately left at `medium` until that decision is made.
+Priority stays at `medium`: what remains is the oracle instance below.
 
 ### What this task still owns
 
-- **AC 3** — the misplaced comment at `lib.rs:256-262` still sits under the
-  unguarded call while describing the guard protecting `write_pool_registry`
-  below it. Untouched. This task called it "half the value"; it is still unpaid.
+- ~~**AC 3**~~ — moot. The misplaced comment at `lib.rs:256-262` sat inside
+  `discover_window` and was deleted with it (PR #331).
 - **AC 5** — `system.part_log` has not been re-measured on production. The
   13:17 UTC log check after today's deploy is a proxy, not this measurement, and
   needs ClickHouse access.
 - **`oracle-worker`** — the second instance found by the AC 4 audit.
+- **The read side of `ensure_seed`** — raised in PR #331's review (okarcz,
+  2026-09-21). Since PR #319 a steady-state run *writes* nothing, but it still
+  *reads* everything: `writer.load_assets()` pulls the whole registry (~209k
+  rows, ~153 MB resident, no `FINAL`) over the AWS→Hetzner hop every hour to
+  check ~20 seed identities. Remedy: a targeted
+  `SELECT … WHERE (asset_code, issuer_address, contract_address) IN (<seed>)`
+  plus `max(asset_id)` for the watermark — or cutting the seed stage, which
+  [[0256]] left open. `eventbridge-stack.ts` sizes the worker's 512 MB on this
+  load and points here. Same shape as [[0226]] (the oracle, every 5 minutes —
+  twelve times as often, so that one first).
 
 ## Acceptance Criteria
 

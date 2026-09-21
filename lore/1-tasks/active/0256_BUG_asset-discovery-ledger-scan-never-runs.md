@@ -556,6 +556,41 @@ through the hooks normally. Making the script portable is a separate task.
 8. **§3.8 of the schema overview kept as a tombstone.** Renumbering would
    touch every later cross-reference for no reader's benefit.
 
+### Review — okarcz, 2026-09-21 (8 findings, all addressed)
+
+No runtime defect found; the draft hold was endorsed. Six findings were stale
+documentation and were fixed as written: the two Asset Discovery rows in
+`docs/prices-api-general-overview.md` (it no longer reads ledgers), the §13
+`pool_registry` writer list and the empty revision-history summary in the
+schema overview, [[0140]]'s audit table (the `discover_window:255` call site is
+gone, its "precondition" section is settled, AC 3 is moot), and a broken
+comment wrap in `main.rs`. Two needed more than the fix asked for:
+
+- **The `createWorkerLambda` doc comment.** The stale S3 example is replaced —
+  but the review's premise that "no caller attaches worker-specific permissions
+  any more" is wrong: six workers still call `role.addToPolicy` (oracle,
+  enrichment, coarse-sweep, both freshness probes, notafter). The comment now
+  cites the oracle's namespaced `PutMetricData` as its living example.
+- **The deleted `register_ledger_assets_preserves_preseeded_pools`.** Re-homing
+  it would have preserved nothing: it passed `&[]`, so `process_ledger` never
+  ran and it only round-tripped `load_pool_rows` → `to_pool_rows`, which
+  `registry_io.rs` already covers. The invariant it was named for is real, so
+  it got a real test instead — `a_preloaded_pool_survives_a_ledger_that_teaches_another`
+  in `prices-ledger-processor/tests/pool_registry_persist.rs`, driving
+  `process_ledger` over a ledger with events but no factory event and then one
+  that teaches a second pool. ⚠️ Two negative controls, both restored
+  byte-identical: rebuilding the registry on every ledger, and rebuilding it
+  only on a ledger that taught nothing (the review's exact scenario). The new
+  test fails under both. So do two of [[0291]]'s existing tests — "nothing
+  would fail" overstated the gap; the coverage was indirect, now it is named.
+
+**Not done here, on purpose:** the review's efficiency point — `ensure_seed`
+still reads the whole registry (~209k rows, ~153 MB) hourly to check ~20
+identities. True, and it predates this PR; a targeted read is new query code
+with its own IT, not part of a removal. Recorded in [[0140]], which the CDK
+memory comment now points at. It also sharpens this task's open question: the
+seed stage is free on writes since PR #319, but not on reads.
+
 ## Acceptance Criteria
 
 - [x] A recorded decision on whether the ledger scan is still needed
