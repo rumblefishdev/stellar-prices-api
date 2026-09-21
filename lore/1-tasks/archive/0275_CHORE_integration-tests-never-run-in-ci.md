@@ -235,9 +235,16 @@ build on his branches would mean his code, not inherited rot.
 - **The baseline was not 19/19 green.** Four targets were red on a fresh
   server (see the triage criterion); two were isolation, one time rot, one a
   missing proxy. None was a product defect.
-- **`rollup_pf_it` will rot around 2027-05-06**: its fixed 2026 buckets leave
-  the monthly MV's 400-day window. Green today; a comment at the assertion
-  says so. Not changed here.
+- **A time bomb reported here was not real.** The first version of this task
+  said `rollup_pf_it` would turn red around 2027-05-06, when its fixed 2026
+  buckets left the monthly MV's 400-day window, and put that warning in the
+  test. That file never touches the MVs: it drives the full-range pre-roll
+  (`schema/preroll.sql`), which has no `now()` bound. PR #327's review took
+  the comment at its word and asked for a `now()`-relative seed; instead the
+  claim was measured on 2026-09-21 — every date shifted to 2015 and to 2037
+  (same calendar as 2026), 9/9 green both times — and the comment now says
+  that. Only the MVs' windows are relative to now, and `rollup_chain_it` /
+  `rollup_append_it` exercise those.
 - **Code review (2026-09-18): 0 critical, 4 warnings, all fixed and proven**
   (commits `c88b2ee`, `eae8b59`, `b9ded2d`) — see decisions 16–18. Of the 7
   info items, IN-01 (a wrong comment about the image pull) and IN-05 (stop
@@ -307,8 +314,12 @@ build on his branches would mean his code, not inherited rot.
     asserted inventory — before 0275 that same mistake turned CI red.
     Proven: an un-ignored `usd_rate_it` fails with `Connection refused`; the
     workspace stays 1121/0.
-17. **Every ClickHouse step is time-bounded** (review WR-01): 5 / 10 / 3 / 20
-    minutes. The ITs set no request timeout and the proxy allows 7200 s; a
+17. **Every ClickHouse step is time-bounded** (review WR-01): start 5, wait 5,
+    schema 10, proxy 5, tests 20 minutes. Start and proxy corrected in PR #327's
+    review: the start step had no bound although the image pull runs in it,
+    and the proxy's 3 was under the script's own 180 s ceiling plus the caddy
+    pull, so a real failure would have been killed before printing its
+    diagnostics. The ITs set no request timeout and the proxy allows 7200 s; a
     hung query would otherwise hold the runner for 360 minutes, and a
     cancelled job skips the `failure()` log dump.
 18. **The proxy's readiness needs a real answer** (review WR-04): checked
@@ -317,9 +328,27 @@ build on his branches would mean his code, not inherited rot.
 
 ## Future Work
 
-Recorded, not spawned as tasks — it fails loudly in CI when it matters,
-which is the point of this task:
+None open.
+19. **`run` makes the log path absolute before it `cd`s** (PR #327 review).
+    `tee` wrote a relative `IGNORED_TESTS_LOG` under the repo root and
+    `cmd_assert` read it from the caller's directory: `no such log`, or a
+    stale log from an earlier run. Test 17 runs `run` with stub `cargo` and
+    `curl` on PATH from a different directory — red before the fix with
+    exactly `no such log: relative.log`, green after. 19 guard tests.
 
-- `rollup_pf_it` rots around 2027-05-06 (fixed 2026 buckets vs the monthly
-  MV's 400-day window). CI will go red on it then; the assertion carries a
-  comment saying why.
+## PR #327 review (2026-09-21)
+
+Four comments, all checked before acting:
+
+| # | comment | outcome |
+|---|---|---|
+| 1 | medium — re-seed `rollup_pf_it` relative to `now()` before it rots | **not a defect**: the rot claim was this task's own error (see Issues Encountered); measured, comment corrected, dates kept |
+| 2 | low — `Start ClickHouse` has no `timeout-minutes` | **fixed**, 5 |
+| 3 | low — the proxy bound (3) is under the script's worst case | **fixed**, 5 |
+| 4 | low — a relative `IGNORED_TESTS_LOG` names two files | **fixed**, decision 19 |
+
+Process note (the task moved to `archive/` on the branch): kept.
+`lore/1-tasks/CLAUDE.md` says the branch carries "the implementation, its
+tests, and the completion entry"; analysis and decisions went to `develop` as
+they were made (activation `7aaee89`). The PR body's "stays `active`" line was
+stale and is updated.

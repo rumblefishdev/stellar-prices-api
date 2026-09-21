@@ -568,12 +568,12 @@ async fn ohlc_ordering_holds_on_every_tier() {
 
     // The month boundary, exactly. April holds the extreme; March does not.
     //
-    // ⚠️ Time bomb, noted by task 0275 and deliberately left alone while green:
-    // these buckets are fixed 2026 literals, but the monthly MV only rolls
-    // `timestamp >= toStartOfInterval(now() - INTERVAL 400 DAY, INTERVAL 1 MONTH)`
-    // (schema/rollups.sql, mirrored in src/rollup_sql.rs). From about
-    // 2027-05-06 the March 2026 bucket falls out of that window and this test
-    // turns red with nothing changed. The fix then is a now()-relative seed.
+    // The fixed 2026 dates do not age: this file drives the FULL-RANGE
+    // pre-roll (schema/preroll.sql, no `now()` bound), not the refreshable
+    // MVs whose windows are relative to now. Checked 2026-09-21 by shifting
+    // every date to 2015 and to 2037 — same calendar, April 1st a Wednesday,
+    // which the week-straddle below depends on — and all 9 tests stayed green.
+    // Keep that calendar if the dates are ever changed.
     let [_, april_high, april_low, _, _, _] = candle(
         &admin,
         db,

@@ -65,8 +65,8 @@ Two further guards sit outside the table. The unit step `cargo test --workspace`
 runs with `CLICKHOUSE_URL=http://127.0.0.1:9`: ClickHouse is already listening on
 the tests' default URL by then, so without it a ClickHouse test that lost its
 `#[ignore]` would pass there quietly and shrink the inventory instead of failing
-as it did before 0275. And the ClickHouse steps carry `timeout-minutes` (5 / 10 /
-3 / 20): the tests set no request timeout and the proxy allows 7200 s, so one hung
+as it did before 0275. And the ClickHouse steps carry `timeout-minutes` (start 5,
+wait 5, schema 10, proxy 5, tests 20): the tests set no request timeout and the proxy allows 7200 s, so one hung
 query would otherwise hold the runner for the 360-minute job default — and a
 cancelled job skips the `failure()` log dump.
 
