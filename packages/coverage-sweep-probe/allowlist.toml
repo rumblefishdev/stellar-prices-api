@@ -56,6 +56,14 @@ wasm = "9677074ae7fce0e8c41747377da02ebf4e1cf06902c60c4fe64ea0ee6aab4545"
 reason = "SushiSwap router; same `swap` topic as its pools, and indexing it double-counts"
 task = "0290"
 
+# --- factories (permanent) ---------------------------------------------------
+
+[[contract]]
+id = "CA4HEQTL2WPEUYKYKCDOHCDNIV4QHNJ7EL4J4NQ6VADP7SYHVRYZ7AW2"
+wasm = "5db738b05d9148128a240b0e2c1cb935c2805192bf98a579421aacda364c8dae"
+reason = "Soroswap factory; its SoroswapFactory/new_pair event matches `swap` but creates pools and trades nothing; learn_factory already registers the pairs it announces"
+task = "0002"
+
 # --- unindexed venue families (temporary, keyed by wasm) ----------------------
 
 [[wasm]]

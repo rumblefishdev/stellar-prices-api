@@ -179,9 +179,22 @@ mod tests {
     #[test]
     fn embedded_list_parses_with_the_seeded_entries() {
         let list = AllowList::embedded().expect("embedded allow-list parses");
-        assert_eq!(list.contract.len(), 5, "{list:?}");
+        assert_eq!(list.contract.len(), 6, "{list:?}");
         assert_eq!(list.wasm.len(), 2, "{list:?}");
         assert!(list.wasm.iter().all(|w| w.until == "0290"));
+    }
+
+    #[test]
+    fn soroswap_factory_is_allow_listed() {
+        // Its `[String("SoroswapFactory"), Symbol("new_pair")]` event matches
+        // the sweep's `swap` filter; without this entry every new Soroswap pair
+        // would page (found by the 2026-04 back-test, task 0100).
+        let list = AllowList::embedded().unwrap();
+        let factory = "CA4HEQTL2WPEUYKYKCDOHCDNIV4QHNJ7EL4J4NQ6VADP7SYHVRYZ7AW2";
+        assert_eq!(
+            list.match_row(factory, None),
+            Some(format!("contract:{factory}"))
+        );
     }
 
     #[test]
@@ -324,6 +337,7 @@ mod tests {
             list.unmatched_entries(&rows),
             vec![
                 "contract:CA7RQDMMV6E53P5EDZA5GPWBZ33AMW2ZNO42XLI2RGRIAP4QXIARUOJQ".to_string(),
+                "contract:CA4HEQTL2WPEUYKYKCDOHCDNIV4QHNJ7EL4J4NQ6VADP7SYHVRYZ7AW2".to_string(),
                 "wasm:95a8e0018530226701ef8d31c7d4c2fe20ed9d7c303a14a70c3d96848ca4fa54".to_string(),
             ]
         );
