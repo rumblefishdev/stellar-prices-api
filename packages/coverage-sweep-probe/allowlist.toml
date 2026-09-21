@@ -1,0 +1,71 @@
+# Coverage sweep allow-list (task 0100, layer 3 of the coverage model).
+#
+# The weekly coverage sweep reports every contract that emits swap- or
+# trade-shaped Soroban events and is NOT in prices.pool_registry. An entry here
+# takes a contract out of that residual on purpose. The sweep itself never
+# registers anything: it only reports. Auto-registering a router would
+# double-count the pool-level trades it wraps.
+#
+# Two entry kinds:
+#
+#   [[contract]]  one contract, permanent. `id` is the C… strkey; `wasm` is
+#                 informational (64 lowercase hex) and does not widen the match.
+#                 For routers, aggregators and other non-AMM emitters.
+#
+#   [[wasm]]      every contract running this wasm hash (64 lowercase hex).
+#                 REQUIRES `until` = the task that removes the entry (normally
+#                 the task that registers the family). A permanent family-wide
+#                 ignore would hide the next pool of a real venue, so a [[wasm]]
+#                 entry without `until` fails validation.
+#
+# Every entry needs a non-empty `reason` and `task`. Unknown keys are rejected.
+#
+# This file is compiled into the Lambda binary (include_str!). An edit is
+# validated by `cargo test -p coverage-sweep-probe` and ships only with an
+# EventBridge-stack deploy. Triage: docs/runbooks/0100-coverage-sweep-triage.md.
+
+# --- routers (permanent) ------------------------------------------------------
+
+[[contract]]
+id = "CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK"
+wasm = "06f4207b0c9ef78cc595e075ded8fa40e73fdb8346e5f9281068a2d4ba1e5037"
+reason = "Aquarius router; its swap summary wraps the pool-level trade, indexing it double-counts"
+task = "0087"
+
+[[contract]]
+id = "CA7RQDMMV6E53P5EDZA5GPWBZ33AMW2ZNO42XLI2RGRIAP4QXIARUOJQ"
+wasm = "06f4207b0c9ef78cc595e075ded8fa40e73fdb8346e5f9281068a2d4ba1e5037"
+reason = "Aquarius router; its swap summary wraps the pool-level trade, indexing it double-counts"
+task = "0087"
+
+[[contract]]
+id = "CAG5LRYQ5JVEUI5TEID72EYOVX44TTUJT5BQR2J6J77FH65PCCFAJDDH"
+wasm = "4c3db3ebd2d6a2ab23de1f622eaabb39501539b4611b68622ec4e47f76c4ba07"
+reason = "Soroswap-style router (SoroswapRouter/swap); indexing it double-counts the pair swaps"
+task = "0285"
+
+[[contract]]
+id = "CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL"
+wasm = "4edd745f5fbf4d103edb55041efb8e6c399f66d43c0b6d38b781e63c432b6c8d"
+reason = "SushiSwap router; same `swap` topic as its pools, and indexing it double-counts"
+task = "0290"
+
+[[contract]]
+id = "CAUF4DFYSX52L2KJ4J7OFW3WDQMEUDVXNB7PG5VIC4VVOA3BCLWXDO2E"
+wasm = "9677074ae7fce0e8c41747377da02ebf4e1cf06902c60c4fe64ea0ee6aab4545"
+reason = "SushiSwap router; same `swap` topic as its pools, and indexing it double-counts"
+task = "0290"
+
+# --- unindexed venue families (temporary, keyed by wasm) ----------------------
+
+[[wasm]]
+hash = "003710b383f9da7d650a7f719a7be479110266427817ebbed61d924505fcd7c7"
+reason = "SushiSwap V3 pools, not yet registered; new pools keep appearing, so this is keyed by wasm"
+task = "0290"
+until = "0290"
+
+[[wasm]]
+hash = "95a8e0018530226701ef8d31c7d4c2fe20ed9d7c303a14a70c3d96848ca4fa54"
+reason = "SushiSwap V3 pools (v2 code), not yet registered; new pools keep appearing, so this is keyed by wasm"
+task = "0290"
+until = "0290"
