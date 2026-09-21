@@ -2,7 +2,7 @@
 id: "0290"
 title: "Index the Uniswap-v3-style concentrated-liquidity venue (factory CD3KRKGD…) — ~8.5k swaps a month we never see"
 type: FEATURE
-status: active
+status: blocked
 assignee: okarcz
 related_adr: []
 related_tasks: ["0285", "0286", "0282"]
@@ -61,6 +61,21 @@ history:
       pools created since are invisible the same way the original 42 were. The
       runbook now says to re-run the dry run with a current --end before the
       write, and to size that window before 0286 phase 3 is planned.
+  - date: 2026-09-21
+    status: blocked
+    who: okarcz
+    by: ["0286"]
+    note: >
+      Moved to blocked at the operator's direction. Everything doable without a
+      production deploy is done: AC 1 (venue named), AC 4 (routers unindexed)
+      and AC 5 (history folds into 0286 phase 3) are met, and AC 2's
+      --discover-pools dry run passed twice today — the second to the true tip
+      64,539,364, confirming to_write=133 is a current number. What remains is
+      the write, the cold start and a full live day, and all three need the
+      Compute deploy freeze lifted, which 0286 phase 1 does. 0286's owner said
+      on 2026-09-21 that phase 1 starts the same day. ⚠️ The ordering recorded
+      under AC 5 still holds: 0286 phase 1 → 0290 deploy → the write → 0286
+      phase 3, because events-backfill prices only registered pools.
 ---
 
 # Index the Uniswap-v3-style concentrated-liquidity venue

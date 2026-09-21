@@ -63,6 +63,7 @@ history:
   - date: 2026-09-21
     status: blocked
     who: okarcz
+    by: ["0286"]
     note: >
       AC 4 met. Measured 2026-09-18 → 09-20 as dev_read: 09-19 and 09-20 are
       raw = stored exactly (26,422 and 20,497), so no residue in either
@@ -76,6 +77,7 @@ history:
   - date: 2026-09-21
     status: blocked
     who: okarcz
+    by: ["0286"]
     note: >
       Two additions from a teammate's review, both accepted. (1) 0256 recorded
       the drop-the-scan decision on 2026-09-21; its removal PR is gated on this
@@ -91,6 +93,7 @@ history:
   - date: 2026-09-21
     status: blocked
     who: okarcz
+    by: ["0286"]
     note: >
       The unattended window is MEASURED and currently EMPTY. Re-running 0290's
       --discover-pools dry run to the true tip 64,539,364 returns identically
@@ -102,6 +105,17 @@ history:
       fill rate implied (~0.7 pools/day, from the original 42 over ~2 months)
       argues for waiting on 0286 phase 1 rather than deploying Compute from a
       divergent branch.
+  - date: 2026-09-21
+    status: blocked
+    who: okarcz
+    by: ["0286"]
+    note: >
+      Blocker restated explicitly at the operator's direction: this task is
+      blocked on 0286, nothing else. AC 1 and AC 4 are met and permanent; AC 2
+      and AC 3 need only the deploy that 0286 phase 1 carries. 0286's owner
+      said on 2026-09-21 that phase 1 starts the same day, so the block is
+      expected to be short. Its own precondition — 0282's full-day measurement
+      — cleared this morning.
 ---
 
 ## 📊 STATUS — 2026-09-18 · ⛔ BLOCKED on [[0286]] · AC 1 DONE on prod
