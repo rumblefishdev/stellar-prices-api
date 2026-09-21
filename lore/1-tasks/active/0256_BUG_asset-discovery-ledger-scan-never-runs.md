@@ -511,12 +511,15 @@ will say so in this task). Net −440 lines.
 
 ⚠️ Not verified: a deploy. Deliberately — see sequencing above.
 
-⚠️ **The pre-commit hook cannot pass on this Mac for any commit touching
-`infra/`.** It runs `infra:test`, and the seven `lambda-assets.sh` tests that
-[[0141]] added (PR #325, merged 2026-09-21) need bash ≥ 4 and GNU `realpath`;
-macOS ships bash 3.2 and neither Homebrew `bash` nor `coreutils` is installed
-here. The Rust, schema and docs commits went through the hook normally; the
-infra commit was held for an operator decision rather than pushed past it.
+⚠️ **On a stock Mac the hooks cannot pass for any commit touching `infra/`,
+nor for any push of a Rust or infra branch.** Both run `infra:test`, and the
+seven `lambda-assets.sh` tests that [[0141]] added (PR #325, merged
+2026-09-21) need bash ≥ 4 (`mapfile`) and GNU `realpath -m`; macOS ships bash
+3.2 and BSD `realpath`. Not bypassed: the operator installed Homebrew `bash`
+5.3 and `coreutils` 9.12, and with
+`PATH="/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:$PATH"`
+the target goes from 5/12 to **12/12**, so the infra commit and the push went
+through the hooks normally. Making the script portable is a separate task.
 
 ### Design decisions
 
