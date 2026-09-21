@@ -1269,7 +1269,7 @@ export class ObservabilityStack extends cdk.Stack {
           statistic: 'Sum',
           period: cdk.Duration.minutes(5),
         }),
-        alarmDescription: `The api-handler logged "portal closed at cold start": a portal source (the Discord OAuth secret, the free-plan id, or an eligibility parameter) failed to load at cold start, so the portal is CLOSED in that execution environment until it is recycled, while /v1 is unaffected. Closure is per execution environment, so /config may answer enabled: false from one environment and true from another. Fix: read the line's error field, which names the failing variable, fix that secret or parameter, then recycle the environments (redeploy, or bump the function configuration). Runbook docs/runbooks/portal-oauth-deploy-prep.md; task 0249.`,
+        alarmDescription: `The api-handler logged "portal closed at cold start": a portal source (the Discord OAuth secret, the free-plan id, or an eligibility parameter) failed to load at cold start, so the portal is CLOSED in that execution environment until it is recycled, while /v1 is unaffected. Closure is per execution environment, so /config may answer enabled: false from one environment and true from another. Fix: read the line's error field, which names the failing variable, fix that secret or parameter, then recycle the environments (redeploy, or bump the function configuration). The alarm returns to OK one period later, silently: OK does NOT mean the portal reopened. Runbook docs/runbooks/portal-oauth-deploy-prep.md; task 0249.`,
         threshold: 1,
         evaluationPeriods: 1,
         datapointsToAlarm: 1,
@@ -1279,8 +1279,11 @@ export class ObservabilityStack extends cdk.Stack {
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       },
     );
+    // Alarm action only, no OK action. The line is logged once, at the cold
+    // start that closed the portal; the next 5-min window is empty, so the
+    // alarm returns to OK while the environment is still closed. An OK
+    // notification would read as "recovered" when nothing was.
     this.apiHandlerPortalClosedAlarm.addAlarmAction(snsAction);
-    this.apiHandlerPortalClosedAlarm.addOkAction(snsAction);
 
     new cdk.CfnOutput(this, 'ApiHandlerPortalClosedAlarmName', {
       value: this.apiHandlerPortalClosedAlarm.alarmName,

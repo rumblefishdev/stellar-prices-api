@@ -194,6 +194,12 @@ lint, prettier and `cargo fmt --check` are clean. Nothing was deployed.
    Adam's approval. `done.md`: docs match reality.
 8. **The pattern is tested with AWS's evaluator, not a local unit test.** A
    hand-written matcher would only test our copy of AWS's syntax.
+9. **Portal-closed alarm has no OK action** (from `/code-review`, Adam,
+   2026-09-21). The line is logged once per closing cold start, so the alarm
+   returns to OK one window later while the environment is still closed; an
+   OK notification would read as "recovered". The description says so. The
+   Errors and 5xx alarms keep their OK actions: their metric keeps flowing
+   while the fault lasts.
 
 ## Future Work
 
