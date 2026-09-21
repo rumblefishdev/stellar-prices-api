@@ -473,6 +473,86 @@ AC 3 are met on production.**
   `workerHealth` (`-no-invocations`, an `impact` sentence, 0222-style
   induction) — but it is not decided, and it does not wait on 0291.
 
+## Removal PR — drafted 2026-09-21, held until 0291 deploys
+
+Branch `fix/0256_remove-dormant-ledger-scan`, opened as a **draft** on purpose:
+it must not merge before [[0291]]'s AC 2 + AC 3 are met on production (Oskar
+will say so in this task). Net −440 lines.
+
+### What it does
+
+- `packages/asset-discovery`: `discover_window`, `register_ledger_assets`,
+  `load_cursor`, `save_cursor`, `DiscoveryStats`, the scan branch and its WARN
+  in `main.rs`, the `S3Fetcher`, `MAX_LEDGERS` / `INITIAL_DISCOVERY_LEDGER`,
+  and the `prices-ledger-processor` dependency (it existed only for the Galexie
+  key scheme and the fetcher trait). `tests/discover_it.rs` moved to `.trash/`.
+  The unguarded `write_assets` at `lib.rs:255` is gone with `discover_window`.
+- `infra/.../eventbridge-stack.ts`: `BUCKET_NAME`, the two ledger-bucket SSM
+  lookups, `ledgerBucket.grantRead(discovery.role)`, the `aws-s3` import, and
+  the "operator activates the ledger scan" comment. The rule description and
+  the `-errors` alarm text now say what the worker does.
+- `packages/prices-clickhouse/schema/init.sql`: the `prices.discovery_state`
+  CREATE is replaced by a tombstone comment; `init_sql_parses_into_statements`
+  expects 40 statements (was 41). Docs: schema overview §3.8 kept as a
+  numbered tombstone (so §3.9+ do not shift), its index rows and ER entity
+  removed, revision-history row added; ingestion runbook's writer table.
+
+### Verified locally (macOS)
+
+| check | result |
+|---|---|
+| `cargo test -p asset-discovery` (default features) | 16 unit tests pass; 7 `#[ignore]` ITs untouched |
+| `cargo clippy -p asset-discovery --features lambda --all-targets --no-deps -D warnings` | clean (the `lambda` feature is the only build of `main.rs`) |
+| `cargo test -p prices-clickhouse --lib init_sql` | both pass at 40 statements |
+| `cargo fmt --check`, `nx format:write` | clean |
+| `nx run-many -t typecheck lint -p infra` | pass |
+| `nx run infra:test` | 7 failures, all `lambda-assets.sh` on bash 3.2 (`mapfile`, `realpath -m`) — pre-existing macOS-only, CI runs them on Linux |
+| `make -C infra synth-production` (synth only) | asset-discovery role has **no `s3:*` action** (only secretsmanager/ssm/xray); env is `CH_DOMAIN, ENV_NAME, MTLS_SECRET_NAME, PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED, RUST_LOG`; no ledger-bucket parameters left in the stack |
+
+⚠️ Not verified: a deploy. Deliberately — see sequencing above.
+
+⚠️ **The pre-commit hook cannot pass on this Mac for any commit touching
+`infra/`.** It runs `infra:test`, and the seven `lambda-assets.sh` tests that
+[[0141]] added (PR #325, merged 2026-09-21) need bash ≥ 4 and GNU `realpath`;
+macOS ships bash 3.2 and neither Homebrew `bash` nor `coreutils` is installed
+here. The Rust, schema and docs commits went through the hook normally; the
+infra commit was held for an operator decision rather than pushed past it.
+
+### Design decisions
+
+#### From plan
+
+1. **Scan removed, not switched on**; removal sequenced after 0291 — the
+   decision section above.
+2. **Seed stage kept.** Undecided in the decision section; the shortest
+   diff leaves it, and it is free since PR #319.
+3. **`prices.discovery_state` retired from `init.sql`**, DROP on production
+   left as an operator step (the file is CREATE-IF-NOT-EXISTS only).
+
+#### Emerged
+
+4. **`STELLAR_NETWORK_PASSPHRASE` removed from the worker's env.** Not in
+   the plan. `git grep` finds no reader in any crate — only the two infra
+   stacks set it — so for this worker it was config for a value nothing
+   reads. `compute-stack.ts` still sets it for the ledger processor;
+   untouched, out of scope.
+5. **Memory and timeout kept at 512 MB / 5 min, with measured reasons in
+   the comments.** Six REPORT lines on 2026-09-21: `Max Memory Used`
+   153–155 MB (the full registry is loaded to seed against it) and ~3 s per
+   run; the symbol stage's bound is 25 × 5 s = 125 s. Lowering either buys
+   nothing and the registry only grows.
+6. **Run-complete log and response lost `seeded`, `scanned`, `to_ledger`,
+   `pools_total`; `assets_total` stays.** `seeded` was the registry size,
+   not rows seeded (misleading since PR #319), and nothing in the repo reads
+   any of these fields (checked: no metric filter, alarm or dashboard).
+7. **`WORKERS_WITHOUT_HEALTH_ALARMS['asset-discovery']` reworded, not
+   removed.** Its reason said the scan "may be removed"; that sentence is
+   printed into the `-errors` alarm description, so it had to stay true. It
+   now says the scan is gone and the liveness question is this task's open
+   decision — the decision itself is not made here.
+8. **§3.8 of the schema overview kept as a tombstone.** Renumbering would
+   touch every later cross-reference for no reader's benefit.
+
 ## Acceptance Criteria
 
 - [x] A recorded decision on whether the ledger scan is still needed
