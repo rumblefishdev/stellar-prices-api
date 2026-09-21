@@ -200,6 +200,3 @@ lint, prettier and `cargo fmt --check` are clean. Nothing was deployed.
 - After deploy: check that `prices-production-api-handler-portal-closed`
   fires on an induced closure, and that none of the three alarms fires over
   a week of ordinary traffic (AC 2 second half, AC 3).
-- The 700-concurrency ceiling that throttled 14,865 requests on 2026-09-18
-  is unexamined: was the ramp intended, and is 700 the right limit? Not
-  spawned yet, pending Adam.
