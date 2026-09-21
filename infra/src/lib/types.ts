@@ -218,6 +218,14 @@ export interface EnvironmentConfig {
      * Daily is ample for a 30-day threshold.
      */
     readonly mtlsNotafterProbe: string;
+    /**
+     * Coverage sweep probe (task 0100, layer 3 of the coverage model). Weekly
+     * sweep over a trailing 14-day ledger window of BE's `soroban_events` for
+     * swap/trade-shaped emitters in neither `prices.pool_registry` nor the
+     * committed allow-list → `Prices/Coverage` `UnclassifiedSwapEvents`.
+     * Weekly and off-peak; not coarse-sweep's minute 30.
+     */
+    readonly coverageSweepProbe: string;
   };
 
   // Ops alarms + notification (consumed by ObservabilityStack — task 0056)
@@ -803,6 +811,7 @@ export function validateConfig(config: EnvironmentConfig): void {
       'backfillFreshnessProbe',
       'rollupFreshnessProbe',
       'mtlsNotafterProbe',
+      'coverageSweepProbe',
     ] as const;
     for (const key of expectedKeys) {
       const value = schedules[key];

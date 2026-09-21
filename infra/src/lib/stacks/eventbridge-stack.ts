@@ -75,6 +75,11 @@ const MTLS_NOTAFTER_PROBE_ASSET_DIR =
   process.env['MTLS_NOTAFTER_PROBE_ASSET_DIR'] ??
   '../target/lambda/mtls-notafter-probe';
 
+/** Cargo-lambda build output for the `coverage-sweep-probe` (task 0100). */
+const COVERAGE_SWEEP_PROBE_ASSET_DIR =
+  process.env['COVERAGE_SWEEP_PROBE_ASSET_DIR'] ??
+  '../target/lambda/coverage-sweep-probe';
+
 export interface EventBridgeStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
 }
@@ -104,6 +109,7 @@ export class EventBridgeStack extends cdk.Stack {
   public readonly backfillFreshnessProbeRule: events.Rule;
   public readonly rollupFreshnessProbeRule: events.Rule;
   public readonly mtlsNotafterProbeRule: events.Rule;
+  public readonly coverageSweepProbeRule: events.Rule;
   public readonly assetDiscoveryFunction: lambda.Function;
   public readonly cleanupFunction: lambda.Function;
   public readonly supplyFunction: lambda.Function;
@@ -113,6 +119,7 @@ export class EventBridgeStack extends cdk.Stack {
   public readonly backfillFreshnessProbeFunction: lambda.Function;
   public readonly rollupFreshnessProbeFunction: lambda.Function;
   public readonly mtlsNotafterProbeFunction: lambda.Function;
+  public readonly coverageSweepProbeFunction: lambda.Function;
 
   constructor(scope: Construct, id: string, props: EventBridgeStackProps) {
     super(scope, id, props);
@@ -234,6 +241,16 @@ export class EventBridgeStack extends cdk.Stack {
         ruleName: `prices-${env}-mtls-notafter-probe`,
         description: `Publishes mTLS cert days-to-NotAfter → Prices/Mtls (${env})`,
         schedule: events.Schedule.expression(schedules.mtlsNotafterProbe),
+      },
+    );
+
+    this.coverageSweepProbeRule = new events.Rule(
+      this,
+      'CoverageSweepProbeRule',
+      {
+        ruleName: `prices-${env}-coverage-sweep-probe`,
+        description: `Weekly sweep of unregistered swap emitters → Prices/Coverage (${env})`,
+        schedule: events.Schedule.expression(schedules.coverageSweepProbe),
       },
     );
 
@@ -898,6 +915,66 @@ export class EventBridgeStack extends cdk.Stack {
       }),
     );
 
+    // -----------------------------------------------------------------
+    // Coverage sweep probe (task 0100, layer 3 of the coverage model) + its
+    // weekly target. Once a week it reads a trailing 14-day window of BE's
+    // `default.soroban_events` for swap/trade-shaped emitters, drops those in
+    // `prices.pool_registry` (SQL) and on the committed allow-list (Rust), logs
+    // every remaining contract and publishes the residual to Prices/Coverage.
+    // It REPORTS ONLY: it never registers anything (auto-registering a router
+    // double-counts the pool trades it wraps).
+    //
+    // Identity (decision D5, option A): the existing ingestion identity
+    // (`prices_writer`) like every other worker here — no new role, secret,
+    // certificate or CN-map entry. It depends on BE adding
+    // `GRANT SELECT ON default.soroban_events` and
+    // `GRANT SELECT ON default.soroban_contracts` to prices_writer; until then
+    // every run fails with Code 497 ACCESS_DENIED and pages via -errors, by
+    // design (docs/runbooks/0100-coverage-sweep-triage.md §4).
+    // -----------------------------------------------------------------
+    const coverageSweep = createWorkerLambda(this, {
+      config,
+      accountId,
+      mtlsSecretName: discoveryMtlsSecretName,
+      idPrefix: 'CoverageSweepProbe',
+      name: 'coverage-sweep-probe',
+      assetDir: COVERAGE_SWEEP_PROBE_ASSET_DIR,
+      memorySize: 256,
+      // Measured on production 2026-09-21: 9.6 s, 218.5 M rows / 46.6 GB read,
+      // 141 MB of server memory. The client bounds every statement at 90 s
+      // (SWEEP_MAX_EXECUTION_SECS), so a slow scan ends as a logged ClickHouse
+      // TIMEOUT_EXCEEDED before this Lambda timeout can kill it silently.
+      timeout: cdk.Duration.minutes(2),
+      secretsExtensionLayer,
+      chDomain,
+      rule: this.coverageSweepProbeRule,
+      alarmDescription: `The weekly coverage sweep did not complete, so prices-${env}-coverage-sweep-unclassified cannot fire. Likely causes: Code 497 before BE grants SELECT on default.soroban_events / default.soroban_contracts to prices_writer; TIMEOUT_EXCEEDED at 90 s; an allow-list that fails validation at cold start. See docs/runbooks/0100-coverage-sweep-triage.md.`,
+      alarmPeriod: cdk.Duration.days(1),
+      errorAlarmActions: [opsAlarmAction],
+      // A 46 GB scan must not be re-driven by Lambda's async retries: the
+      // -errors alarm pages on the first failure anyway (threshold 1).
+      asyncRetryAttempts: 0,
+    });
+    this.coverageSweepProbeFunction = coverageSweep.function;
+
+    // At most one sweep at a time against BE's shared ClickHouse (the
+    // coarse-sweep pattern). A manual invoke during the Monday run is refused
+    // rather than doubled.
+    const coverageSweepCfn = coverageSweep.function.node
+      .defaultChild as lambda.CfnFunction;
+    coverageSweepCfn.reservedConcurrentExecutions = 1;
+
+    coverageSweep.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'PublishCoverageMetrics',
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: { 'cloudwatch:namespace': 'Prices/Coverage' },
+        },
+      }),
+    );
+
     new cdk.CfnOutput(this, 'BackfillFreshnessProbeFunctionName', {
       value: this.backfillFreshnessProbeFunction.functionName,
     });
@@ -906,6 +983,9 @@ export class EventBridgeStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'MtlsNotafterProbeFunctionName', {
       value: this.mtlsNotafterProbeFunction.functionName,
+    });
+    new cdk.CfnOutput(this, 'CoverageSweepProbeFunctionName', {
+      value: this.coverageSweepProbeFunction.functionName,
     });
 
     cdk.Tags.of(this).add('Project', 'stellar-prices-api');

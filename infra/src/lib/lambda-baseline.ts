@@ -145,6 +145,7 @@ export const SCHEDULED_WORKERS = [
   'backfill-freshness-probe',
   'rollup-freshness-probe',
   'mtls-notafter-probe',
+  'coverage-sweep-probe',
 ] as const;
 
 export type ScheduledWorker = (typeof SCHEDULED_WORKERS)[number];
@@ -188,6 +189,8 @@ export const WORKERS_WITHOUT_HEALTH_ALARMS: Readonly<
     'its EventBridge rule is disabled on purpose (task 0200), so zero invocations is the intended state and a liveness alarm would fire forever',
   'asset-discovery':
     "deliberately deferred to task 0256, which is deciding whether the worker's scan stage survives at all — alarming the liveness of a stage that may be removed is not coverage",
+  'coverage-sweep-probe':
+    "it runs weekly (task 0100), and a -no-invocations alarm needs three cadences (21 days), over CloudWatch's 7-day evaluation limit; confirm a run from its Monday 'coverage sweep complete' log line",
 };
 
 /**

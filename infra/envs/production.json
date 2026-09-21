@@ -27,7 +27,8 @@
     "coarseSweep": "cron(30 * * * ? *)",
     "backfillFreshnessProbe": "rate(15 minutes)",
     "rollupFreshnessProbe": "rate(15 minutes)",
-    "mtlsNotafterProbe": "rate(1 day)"
+    "mtlsNotafterProbe": "rate(1 day)",
+    "coverageSweepProbe": "cron(17 5 ? * MON *)"
   },
   "opsAlarms": {
     "sdexPushFreshnessSeconds": 604800,

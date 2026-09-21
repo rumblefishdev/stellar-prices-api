@@ -317,6 +317,11 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly ledgerProcessorForcedPartialFlushAlarm: cloudwatch.Alarm;
   /** Task 0291: live dropped trades from a pool missing from `pool_registry`. */
   public readonly ledgerProcessorUnregisteredPoolAlarm: cloudwatch.Alarm;
+  /**
+   * Task 0100: the weekly coverage sweep found swap/trade emitters in neither
+   * `pool_registry` nor the committed allow-list (layer 3).
+   */
+  public readonly coverageSweepUnclassifiedAlarm: cloudwatch.Alarm;
   /** Live ledger-processor DLQ-depth alarm (task 0056 finding B). Rung 1. */
   public readonly ledgerProcessorDlqAlarm: cloudwatch.Alarm;
   /**
@@ -1247,6 +1252,50 @@ export class ObservabilityStack extends cdk.Stack {
     );
     this.ledgerProcessorUnregisteredPoolAlarm.addAlarmAction(snsAction);
     this.ledgerProcessorUnregisteredPoolAlarm.addOkAction(snsAction);
+
+    // Task 0100 — layer 3 of the coverage model. Layer 2 (the alarm above)
+    // sees only pools shaped like a venue we already index; the weekly coverage
+    // sweep looks at EVERY contract emitting swap/trade-shaped events over a
+    // trailing 14-day window and publishes `UnclassifiedSwapEvents` only when
+    // something is in neither `prices.pool_registry` nor the allow-list — the
+    // SushiSwap V3 case (task 0290), which traded unseen for months.
+    //
+    // One datapoint a week. A 1-day period with 1 of 7 holds it in ALARM for
+    // the week: 7 × 86,400 s = 604,800 s is CloudWatch's Period ×
+    // EvaluationPeriods maximum, and a single 7-day period is not an option
+    // (86,400 s is the period ceiling recorded at the top of this file). Edge:
+    // the old datapoint can leave the window just as the next run publishes, so
+    // a brief OK→ALARM pair is possible while a residual persists — expected,
+    // not a flap to engineer away. While latched, the daily stuck-alarm digest
+    // (task 0214) re-lists it.
+    this.coverageSweepUnclassifiedAlarm = new cloudwatch.Alarm(
+      this,
+      'CoverageSweepUnclassifiedAlarm',
+      {
+        alarmName: `prices-${config.envName}-coverage-sweep-unclassified`,
+        alarmDescription: `Contracts emit swap/trade-shaped Soroban events but are in neither prices.pool_registry nor the committed allow-list (task 0100) — possibly a venue we do not index (the SushiSwap V3 case, task 0290). Each one is a WARN "unclassified swap emitter" line in /aws/lambda/prices-${config.envName}-coverage-sweep-probe. Triage each: register it, open a venue task, or allow-list it with a reason and a task. The probe never registers anything. The alarm stays in ALARM until a weekly run finds nothing. Runbook: docs/runbooks/0100-coverage-sweep-triage.md.`,
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Coverage',
+          metricName: 'UnclassifiedSwapEvents',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Sum',
+          period: cdk.Duration.days(1),
+        }),
+        threshold: 1,
+        evaluationPeriods: 7,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        // Emitted only when something is unclassified: "missing" is healthy.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.coverageSweepUnclassifiedAlarm.addAlarmAction(snsAction);
+    this.coverageSweepUnclassifiedAlarm.addOkAction(snsAction);
+    new cdk.CfnOutput(this, 'CoverageSweepUnclassifiedAlarmName', {
+      value: this.coverageSweepUnclassifiedAlarm.alarmName,
+      description: `Coverage sweep unclassified-swap-emitter alarm for ${config.envName}`,
+    });
 
     // Poison-pill / permanent-failure doorbells: under reportBatchItemFailures a
     // handler that keeps failing one item re-drives it (no Lambda Error) until
