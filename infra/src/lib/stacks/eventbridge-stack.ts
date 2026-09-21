@@ -941,15 +941,20 @@ export class EventBridgeStack extends cdk.Stack {
       assetDir: COVERAGE_SWEEP_PROBE_ASSET_DIR,
       memorySize: 256,
       // Measured on production 2026-09-21: 9.6 s, 218.5 M rows / 46.6 GB read,
-      // 141 MB of server memory. The client bounds every statement at 90 s
-      // (SWEEP_MAX_EXECUTION_SECS), so a slow scan ends as a logged ClickHouse
-      // TIMEOUT_EXCEEDED before this Lambda timeout can kill it silently.
+      // 141 MB of server memory. The client bounds each of the run's two
+      // statements at 50 s (SWEEP_MAX_EXECUTION_SECS; 2 × 50 < 120), so a slow
+      // scan ends as a ClickHouse TIMEOUT_EXCEEDED naming its cause, not as a
+      // Lambda kill with none in the log.
       timeout: cdk.Duration.minutes(2),
       secretsExtensionLayer,
       chDomain,
       rule: this.coverageSweepProbeRule,
-      alarmDescription: `The weekly coverage sweep did not complete, so prices-${env}-coverage-sweep-unclassified cannot fire. Likely causes: Code 497 before BE grants SELECT on default.soroban_events / default.soroban_contracts to prices_writer; TIMEOUT_EXCEEDED at 90 s; an allow-list that fails validation at cold start. See docs/runbooks/0100-coverage-sweep-triage.md.`,
+      alarmDescription: `The weekly coverage sweep did not complete, so prices-${env}-coverage-sweep-unclassified cannot fire. Likely causes: Code 497 before BE grants SELECT on default.soroban_events / default.soroban_contracts to prices_writer; TIMEOUT_EXCEEDED at 50 s; an allow-list that fails validation at cold start. See docs/runbooks/0100-coverage-sweep-triage.md.`,
       alarmPeriod: cdk.Duration.days(1),
+      // 7 × 1 day, 1 datapoint to alarm: a failed Monday run stays in ALARM
+      // until the next Monday run, instead of clearing at the next UTC
+      // midnight a week before anything retries it (review WR-02).
+      alarmEvaluationPeriods: 7,
       errorAlarmActions: [opsAlarmAction],
       // A 46 GB scan must not be re-driven by Lambda's async retries: the
       // -errors alarm pages on the first failure anyway (threshold 1).

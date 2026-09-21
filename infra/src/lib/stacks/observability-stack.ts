@@ -1266,14 +1266,16 @@ export class ObservabilityStack extends cdk.Stack {
     // (86,400 s is the period ceiling recorded at the top of this file). Edge:
     // the old datapoint can leave the window just as the next run publishes, so
     // a brief OK→ALARM pair is possible while a residual persists — expected,
-    // not a flap to engineer away. While latched, the daily stuck-alarm digest
+    // not a flap to engineer away (review WR-06; the runbook tells operators
+    // not to read that OK as resolved). Conversely a probe that stops running
+    // also reads OK after 7 days — the -errors alarm is the backstop (WR-01). While latched, the daily stuck-alarm digest
     // (task 0214) re-lists it.
     this.coverageSweepUnclassifiedAlarm = new cloudwatch.Alarm(
       this,
       'CoverageSweepUnclassifiedAlarm',
       {
         alarmName: `prices-${config.envName}-coverage-sweep-unclassified`,
-        alarmDescription: `Contracts emit swap/trade-shaped Soroban events but are in neither prices.pool_registry nor the committed allow-list (task 0100) — possibly a venue we do not index (the SushiSwap V3 case, task 0290). Each one is a WARN "unclassified swap emitter" line in /aws/lambda/prices-${config.envName}-coverage-sweep-probe. Triage each: register it, open a venue task, or allow-list it with a reason and a task. The probe never registers anything. The alarm stays in ALARM until a weekly run finds nothing. Runbook: docs/runbooks/0100-coverage-sweep-triage.md.`,
+        alarmDescription: `Contracts emit swap/trade-shaped Soroban events but are in neither prices.pool_registry nor the committed allow-list (task 0100) — possibly a venue we do not index (the SushiSwap V3 case, task 0290). Each one is a WARN "unclassified swap emitter" line in /aws/lambda/prices-${config.envName}-coverage-sweep-probe. Triage each: register it, open a venue task, or allow-list it with a reason and a task. The probe never registers anything. It returns to OK 7 days after the last datapoint whatever the cause, so an OK here is NOT proof the residual is gone: check the last run's log and the -errors alarm. Runbook: docs/runbooks/0100-coverage-sweep-triage.md.`,
         metric: new cloudwatch.Metric({
           namespace: 'Prices/Coverage',
           metricName: 'UnclassifiedSwapEvents',

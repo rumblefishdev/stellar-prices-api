@@ -23,7 +23,9 @@ use crate::allowlist::AllowList;
 ///
 /// Measured on production 2026-09-21: the 14 days to ledger 64,541,178 began at
 /// ledger 64,320,000, i.e. 64,541,178 − 64,320,000 = 221,178 ledgers
-/// (≈ 15,798 ledgers/day, ≈ 5.47 s/ledger). A 14-day window over a weekly
+/// (≈ 15,798 ledgers/day, ≈ 5.47 s/ledger). This is the *span*: the window
+/// is inclusive at both ends (`BETWEEN lo AND hi`, exactly as measured), so it
+/// holds 221,179 ledgers. A 14-day window over a weekly
 /// cadence means every week is seen twice, so a run that fails once loses
 /// nothing.
 pub const SWEEP_WINDOW_LEDGERS: i64 = 221_178;
@@ -100,6 +102,13 @@ fn identifier(s: &str) -> Result<&str, SweepError> {
 /// (production: `default`), `prices_db` holds `pool_registry` (production:
 /// `prices`). The ledger bounds are server-side typed parameters `{lo:Int64}`
 /// and `{hi:Int64}`, inclusive; they are never spliced into the text.
+///
+/// A contract BE has not resolved yet (no `soroban_contracts` row) must still
+/// be reported, as `unresolved:<surrogate>`. That relies on the LEFT JOIN miss
+/// reading `''`, which is `join_use_nulls = 0`; under `= 1` the miss is NULL,
+/// `NULL NOT IN (…)` is NULL and the row would vanish silently. Hence both the
+/// `ifNull` and the pinned setting — the statement does not depend on the
+/// session's default (review WR-03).
 pub fn sweep_sql(be_db: &str, prices_db: &str) -> Result<String, SweepError> {
     let be = identifier(be_db)?;
     let pr = identifier(prices_db)?;
@@ -126,14 +135,15 @@ pub fn sweep_sql(be_db: &str, prices_db: &str) -> Result<String, SweepError> {
                topK(1)(concat(topic_types, ' -> ', data_type))[1] AS top_shape \
         FROM ev GROUP BY contract_id \
     ) \
-SELECT c.contract_id AS strkey, lower(hex(c.wasm_hash)) AS wasm, \
+SELECT ifNull(c.contract_id, '') AS strkey, lower(hex(c.wasm_hash)) AS wasm, \
        p.contract_id AS contract_surrogate, \
        p.events, p.txs, p.first_ledger, p.last_ledger, p.top_action, p.top_shape \
 FROM per_contract p \
 LEFT JOIN (SELECT id, contract_id, wasm_hash FROM {be}.soroban_contracts FINAL) c \
        ON c.id = p.contract_id \
-WHERE c.contract_id NOT IN (SELECT contract_id FROM {pr}.pool_registry FINAL) \
-ORDER BY p.events DESC, contract_surrogate"
+WHERE ifNull(c.contract_id, '') NOT IN (SELECT contract_id FROM {pr}.pool_registry FINAL) \
+ORDER BY p.events DESC, contract_surrogate \
+SETTINGS join_use_nulls = 0"
     ))
 }
 
@@ -317,8 +327,8 @@ mod tests {
     fn select_order_matches_the_row_struct() {
         // RowBinary is positional: the SELECT list must follow SweepRow.
         let sql = prod_sql();
-        let select = &sql
-            [sql.rfind("SELECT c.contract_id").unwrap()..sql.find("FROM per_contract").unwrap()];
+        let select = &sql[sql.rfind("SELECT ifNull(c.contract_id").unwrap()
+            ..sql.find("FROM per_contract").unwrap()];
         let cols = [
             "AS strkey",
             "AS wasm",
@@ -332,6 +342,14 @@ mod tests {
         ];
         let pos: Vec<usize> = cols.iter().map(|c| select.find(c).expect(c)).collect();
         assert!(pos.windows(2).all(|w| w[0] < w[1]), "{select}");
+    }
+
+    #[test]
+    fn unresolved_contracts_do_not_depend_on_join_use_nulls() {
+        let sql = prod_sql();
+        assert!(sql.contains("ifNull(c.contract_id, '') AS strkey"));
+        assert!(sql.contains("WHERE ifNull(c.contract_id, '') NOT IN"));
+        assert!(sql.trim_end().ends_with("SETTINGS join_use_nulls = 0"));
     }
 
     #[test]

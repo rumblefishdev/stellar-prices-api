@@ -37,7 +37,8 @@ event wraps the pool-level trade we already index.
 **OWNER: TBD — to be agreed with the team (AC8 open)**
 
 - **Cadence:** every **Monday 05:17 UTC** (`cron(17 5 ? * MON *)`). Each run
-  covers the trailing 221,178 ledgers (≈ 14 days, measured 2026-09-21). With a
+  covers `[max_ledger − 221,178, max_ledger]` inclusive, i.e. 221,179 ledgers
+  (≈ 14 days, measured 2026-09-21). With a
   14-day window on a weekly run, every week is seen twice, so one failed run
   loses nothing.
 - **Service level:** triage a non-zero residual before the next Monday run.
@@ -57,10 +58,13 @@ event wraps the pool-level trade we already index.
 - **One datapoint a week holds the alarm in ALARM for about 7 days.**
   7 × 86,400 s = 604,800 s is CloudWatch's maximum evaluation span.
 - **Weekly boundary:** the old datapoint can leave the window just as the next
-  run publishes. While a residual persists, that can produce a brief OK→ALARM
-  pair of notifications. This is expected, not a flap to fix.
-- **OK means one of two things:** the last run found nothing, **or nothing
-  ran**. Rule out the second with the next two sections.
+  run publishes. While a residual persists, that can produce an OK→ALARM
+  pair of notifications around Monday 05:17 UTC. This is expected, not a flap
+  to fix — and **an OK on this alarm is never, by itself, "resolved"**.
+- **OK means one of three things:** the last run found nothing, the weekly
+  boundary above, **or nothing ran** (the alarm goes back to OK 7 days after
+  its last datapoint, whatever the cause). Rule out the last with the
+  `-errors` alarm and the `coverage sweep complete` log line below.
 
 ### `prices-<env>-coverage-sweep-probe-errors`
 
@@ -70,12 +74,17 @@ The run did not complete. Causes, most likely first:
   on `default.soroban_events` / `default.soroban_contracts` (§4.1). Every run
   fails until they do. That is intended: a swallowed error would publish
   nothing and read green.
-- **`TIMEOUT_EXCEEDED`:** the client bounds every statement at 90 s
-  (`SWEEP_MAX_EXECUTION_SECS`). The Lambda timeout is 120 s. The measured run
-  takes 9.6 s.
+- **`TIMEOUT_EXCEEDED`:** the client bounds each of the run's two statements
+  at 50 s (`SWEEP_MAX_EXECUTION_SECS`; 2 × 50 s < the 120 s Lambda timeout).
+  The measured run takes 9.6 s.
+- **A Lambda timeout** (`Task timed out` in the log, no ClickHouse code):
+  counted in `Errors` like the rest, but with no cause attached.
 - **An allow-list that fails validation at cold start.** This should be
   impossible after `cargo test`, but it fails Init if it happens.
 - **A `PutMetricData` failure.** It is propagated on purpose.
+
+This alarm is 1-day periods, **1 of 7**: a failed Monday run keeps it in
+ALARM until the next Monday run can clear it.
 
 There is **no liveness alarm**. A `-no-invocations` alarm needs three
 cadences, which is 21 days, and CloudWatch evaluates at most 7. To confirm the
@@ -172,7 +181,7 @@ Ready-to-send text:
 > Cost per run, measured 2026-09-21: 218.5 M rows / 46.6 GB read, 9.6 s,
 > 141 MB memory. It runs **once a week**, Monday 05:17 UTC, one statement at a
 > time (reserved concurrency 1, no retries). Each statement is bounded
-> client-side at 90 s (`max_execution_time`).
+> client-side at 50 s (`max_execution_time`).
 >
 > Why: layer-3 coverage (prices-api task 0100). A weekly sweep of swap-shaped
 > events for venues we do not index, after SushiSwap V3 traded unseen for
@@ -293,7 +302,7 @@ This shows that the sweep would have caught SushiSwap V3 in April 2026.
 
    - `lo = 61,926,675` is the first ledger of 2026-04-02 (from task 0286's
      local backfill).
-   - `hi = lo + 221,178`.
+   - `hi = lo + 221,178` (inclusive, so 221,179 ledgers — the probe's window).
 
 3. **Expected:** the `003710b3…` family (SushiSwap V3 pools, task 0290)
    appears among the rows. The SQL does not apply the allow-list; the probe

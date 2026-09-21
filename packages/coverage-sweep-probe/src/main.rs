@@ -36,8 +36,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     // `client_from_lambda_env` already applies `with_readable_errors`. The
     // execution bound is added here because prices_writer's profile carries
     // none (prices-clickhouse `with_execution_bound`): a ClickHouse
-    // TIMEOUT_EXCEEDED is a real, logged error, while a Lambda kill at the
-    // 120 s timeout is not — and 90 s fires first.
+    // TIMEOUT_EXCEEDED names its cause in the log, while a Lambda kill at the
+    // 120 s timeout does not; see SWEEP_MAX_EXECUTION_SECS for the arithmetic.
     let ch = prices_clickhouse::mtls::client_from_lambda_env(PRICES_DATABASE).await?;
     let ch = Arc::new(prices_clickhouse::with_execution_bound(
         ch,

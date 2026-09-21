@@ -309,6 +309,16 @@ export interface WorkerLambdaProps extends BaselineLambdaContext {
   /** Period over which the error alarm sums invocation errors. */
   readonly alarmPeriod: cdk.Duration;
   /**
+   * How many `alarmPeriod`s the `-errors` alarm looks back over, alarming on a
+   * single erroring period (`datapointsToAlarm: 1`). Default 1 — the alarm
+   * clears one period after the failure. A worker that runs far less often
+   * than `alarmPeriod` (the weekly coverage sweep, task 0100) sets this so a
+   * failed run stays in ALARM until the next run can clear it, instead of
+   * flipping to OK at the next period boundary. CloudWatch caps
+   * `period × evaluationPeriods` at 7 days.
+   */
+  readonly alarmEvaluationPeriods?: number;
+  /**
    * Actions wired to the worker's `-errors` alarm (e.g. an ops SNS topic).
    * Optional: the alarm is created either way, but with no action it is inert
    * (transitions to ALARM but notifies no one). Wire an action for any worker
@@ -430,7 +440,10 @@ export function createWorkerLambda(
     ),
     metric: fn.metricErrors({ period: alarmPeriod, statistic: 'Sum' }),
     threshold: 1,
-    evaluationPeriods: 1,
+    evaluationPeriods: props.alarmEvaluationPeriods ?? 1,
+    ...(props.alarmEvaluationPeriods !== undefined && {
+      datapointsToAlarm: 1,
+    }),
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
   // Both directions. Only the ALARM action was wired before, so a worker that

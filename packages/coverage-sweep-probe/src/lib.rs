@@ -38,11 +38,15 @@ pub const BE_DATABASE: &str = "default";
 pub const PRICES_DATABASE: &str = "prices";
 
 /// Client-side `max_execution_time` for every statement, in seconds. The sweep
-/// runs as `prices_writer`, whose profile carries no execution bound; a
-/// ClickHouse `TIMEOUT_EXCEEDED` is a real, logged error, while a Lambda kill
-/// at the 120 s timeout is not. 90 s is under the Lambda timeout and ~9× the
-/// measured 9.6 s.
-pub const SWEEP_MAX_EXECUTION_SECS: u64 = 90;
+/// runs as `prices_writer`, whose profile carries no execution bound.
+///
+/// A run issues two statements (the window's `max(ledger_sequence)`, then the
+/// sweep), each bounded separately, inside the 120 s Lambda timeout — so the
+/// bound must be under half of it for a slow run to end in a ClickHouse
+/// `TIMEOUT_EXCEEDED` (a logged error carrying the CH code) rather than a
+/// Lambda kill (counted in `Errors` too, but with no cause in the log).
+/// 2 × 50 s = 100 s < 120 s; 50 s is ~5× the measured 9.6 s (review WR-05).
+pub const SWEEP_MAX_EXECUTION_SECS: u64 = 50;
 
 /// One datapoint to publish.
 #[derive(Debug, Clone, PartialEq)]
