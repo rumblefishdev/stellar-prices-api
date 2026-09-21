@@ -15,7 +15,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use prices_ingest_core::{AssetRegistry, OhlcvCandle, OracleSample, PoolRegistryRow, Registries};
+use prices_ingest_core::{
+    AssetRegistry, OhlcvCandle, OracleSample, PoolRegistryRow, Registries, process_ledger,
+};
 use prices_ledger_processor::{
     cursor::{Cursor, StubFileCursor},
     galexie_key::ledger_s3_key,
@@ -130,6 +132,17 @@ fn ledger(seq: u64, close_time: u64, with_factory_event: bool) -> Vec<u8> {
 }
 
 fn ledger_with(seq: u64, close_time: u64, events: Vec<ContractEvent>) -> Vec<u8> {
+    let batch = LedgerCloseMetaBatch {
+        start_sequence: seq as u32,
+        end_sequence: seq as u32,
+        ledger_close_metas: vec![lcm_with(seq, close_time, events)].try_into().unwrap(),
+    };
+    let xdr = batch.to_xdr(Limits::none()).unwrap();
+    zstd::encode_all(&xdr[..], 0).unwrap()
+}
+
+/// The same ledger, undecorated — for driving `process_ledger` directly.
+fn lcm_with(seq: u64, close_time: u64, events: Vec<ContractEvent>) -> LedgerCloseMeta {
     let mut v2 = LedgerCloseMetaV2::default();
     v2.ledger_header.header.ledger_seq = seq as u32;
     v2.ledger_header.header.scp_value.close_time = TimePoint(close_time);
@@ -149,13 +162,7 @@ fn ledger_with(seq: u64, close_time: u64, events: Vec<ContractEvent>) -> Vec<u8>
         .try_into()
         .unwrap();
     }
-    let batch = LedgerCloseMetaBatch {
-        start_sequence: seq as u32,
-        end_sequence: seq as u32,
-        ledger_close_metas: vec![LedgerCloseMeta::V2(v2)].try_into().unwrap(),
-    };
-    let xdr = batch.to_xdr(Limits::none()).unwrap();
-    zstd::encode_all(&xdr[..], 0).unwrap()
+    LedgerCloseMeta::V2(v2)
 }
 
 #[derive(Clone, Default)]
@@ -232,6 +239,40 @@ async fn harness(
         registries,
     );
     (reconciler, sink)
+}
+
+/// The cold-start preload (task 0078) and factory learning (this task) both
+/// rest on one invariant: learning a pool ADDS to a preloaded registry, it
+/// never rebuilds it. Task 0256 deleted asset-discovery's
+/// `register_ledger_assets_preserves_preseeded_pools` along with the ledger
+/// scan; that test passed no ledgers, so it never reached `process_ledger`.
+/// This one does.
+#[test]
+fn a_preloaded_pool_survives_a_ledger_that_teaches_another() {
+    let preloaded = PoolRegistryRow {
+        contract_id: strkey([0x77; 32]),
+        venue: "soroswap".to_string(),
+        token0: strkey(TOKEN_0),
+        token1: strkey(TOKEN_1),
+        pool_type: 0,
+        wasm_hash: String::new(),
+    };
+    let mut reg = Registries::new();
+    reg.load_pool_rows(std::slice::from_ref(&preloaded));
+    let mut assets = AssetRegistry::from_existing(Vec::new());
+
+    // A ledger with events but no factory event, then one that teaches a pool:
+    // neither kind of ledger may cost the registry what it was loaded with.
+    let quiet = lcm_with(FIRST, BASE_MINUTE, vec![unregistered_aquarius_trade()]);
+    let teaching = lcm_with(FIRST + 1, BASE_MINUTE + 60, vec![new_pair_event()]);
+    for lcm in [&quiet, &teaching] {
+        let _ = process_ledger(lcm, &mut reg, &mut assets);
+    }
+
+    let rows = reg.to_pool_rows();
+    assert_eq!(rows.len(), 2, "the factory event adds a pool: {rows:?}");
+    assert!(rows.contains(&preloaded), "the preloaded pool must stay");
+    assert!(rows.iter().any(|r| r.contract_id == strkey(PAIR)));
 }
 
 #[tokio::test]
