@@ -313,6 +313,11 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly ledgerProcessorLagAlarm: cloudwatch.Alarm;
   /** Live ledger-processor invocation-error alarm (task 0056 finding B). */
   public readonly ledgerProcessorErrorAlarm: cloudwatch.Alarm;
+  /**
+   * api-handler invocation-error alarm (task 0249). One router serves every
+   * route group (ADR 0008), so this is `/v1`'s error metric.
+   */
+  public readonly apiHandlerErrorAlarm: cloudwatch.Alarm;
   /** Task 0282: the reconcile loop flushed a PARTIAL minute to avoid deadlocking. */
   public readonly ledgerProcessorForcedPartialFlushAlarm: cloudwatch.Alarm;
   /** Task 0291: live dropped trades from a pool missing from `pool_registry`. */
@@ -1163,6 +1168,47 @@ export class ObservabilityStack extends cdk.Stack {
     );
     this.ledgerProcessorErrorAlarm.addAlarmAction(snsAction);
     this.ledgerProcessorErrorAlarm.addOkAction(snsAction);
+
+    // Task 0249 — the api-handler had no `Errors` alarm at all: on
+    // 2026-09-18 it logged 243 `portal closed at cold start` lines and
+    // separately returned 14,865 5xx, and neither paged. This alarm is
+    // hand-rolled like ledgerProcessorErrorAlarm above, so the liveness
+    // sentence is written by hand (task 0223) rather than appended by a
+    // shared builder.
+    //
+    // compute-stack.ts:755 hard-codes the same function name; there is no
+    // exported helper, and importing ComputeStack's function reference would
+    // create a cross-stack reference this stack refuses everywhere else (see
+    // the alarm-strip comment below) — so a name string only.
+    const apiHandlerFnName = `prices-${config.envName}-api-handler`;
+    this.apiHandlerErrorAlarm = new cloudwatch.Alarm(
+      this,
+      'ApiHandlerErrorAlarm',
+      {
+        alarmName: `prices-${config.envName}-api-handler-errors`,
+        alarmDescription: `The api-handler Lambda is failing invocations (AWS/Lambda Errors ≥ 1 over 5 min): an init failure, a panic under a request, or an error returned by the handler. One router serves every route group (ADR 0008), so this is /v1's invocation-error metric — it does NOT count a 5xx the router returns itself or a throttled request, which is prices-${config.envName}-api-5xx instead. Check the api-handler logs (/aws/lambda/prices-${config.envName}-api-handler). ⚠ OK here also means nothing ran: this Lambda has NO liveness alarm — a quiet API legitimately serves no request for hours (1–7 requests on some days), so zero invocations is not a fault (task 0223).`,
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/Lambda',
+          metricName: 'Errors',
+          dimensionsMap: { FunctionName: apiHandlerFnName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.apiHandlerErrorAlarm.addAlarmAction(snsAction);
+    this.apiHandlerErrorAlarm.addOkAction(snsAction);
+
+    new cdk.CfnOutput(this, 'ApiHandlerErrorAlarmName', {
+      value: this.apiHandlerErrorAlarm.alarmName,
+      description: `api-handler invocation-error alarm for ${config.envName}`,
+    });
 
     // Task 0282 — the forced-progress escape hatch fired. The reconcile loop
     // may only write a minute once it has walked PAST the end of it; if the
