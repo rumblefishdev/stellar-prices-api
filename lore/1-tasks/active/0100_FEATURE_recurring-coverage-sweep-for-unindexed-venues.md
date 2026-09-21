@@ -2,7 +2,8 @@
 id: "0100"
 title: "A recurring coverage sweep over unregistered swap emitters — the only layer that catches a venue we have never seen"
 type: FEATURE
-status: backlog
+status: active
+assignee: akot
 related_adr: []
 related_tasks: ["0097", "0079", "0078", "0285", "0290", "0291"]
 tags: [layer-indexing, priority-high, effort-medium, amm, clickhouse, pool-registry, coverage, observability]
@@ -35,6 +36,13 @@ history:
       adjacent hole (known venue, unknown pool) with `UnregisteredPoolEvents`;
       this is the only remaining layer that can catch venue number five.
       The original 144-contract triage survives as phase 1.
+  - date: "2026-09-21"
+    status: active
+    who: akot
+    note: >
+      Activated. Sweep query validated on production (dev_read) over the 14
+      days to ledger 64,541,178: 9.6 s, 46.6 GB read, 53 unregistered
+      emitters in 18 wasm families. Decisions D1–D4 recorded below.
 ---
 
 # A recurring coverage sweep over unregistered swap emitters
@@ -140,6 +148,24 @@ task notes:
 - A non-zero residual is a weekly triage item with a named owner, not a
   dashboard nobody opens. Without this the task re-creates its own two-month
   delay.
+
+## Decisions (2026-09-21)
+
+- **D1** — own crate `packages/coverage-sweep-probe`, own Lambda and
+  EventBridge rule (not a module in `rollup-freshness-probe`: 15-min
+  schedule, 1-min timeout).
+- **D2** — weekly, over a trailing 14-day ledger window (~46 GB read,
+  ~10 s per run, measured).
+- **D3** — alarm on `UnclassifiedSwapEvents >= 1`, `NOT_BREACHING`,
+  published only when non-zero; the evaluation period covers the weekly
+  cadence.
+- **D4** — SushiSwap V3 pools sit on the allow-list temporarily, keyed by
+  wasm (`003710b3…`, `95a8e001…`) with `until = "0290"`; a wasm-wide entry
+  is allowed only with `until`. Its two routers are permanent entries.
+- The sweep **never registers anything** — it reports; a contract leaves
+  the residual only by a human adding it to the registry or the allow-list.
+- Filter on `topics_xdr` topic[0]/topic[1] of type `sym`/`string`, never
+  on `signature` ([[0285]]); an Address strkey can spell `SWAP`.
 
 ## Acceptance Criteria
 
