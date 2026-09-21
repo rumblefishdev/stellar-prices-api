@@ -166,7 +166,11 @@ jobs:
       # `clickhouse-data` volume must NEVER be cached or restored: initdb runs
       # only on an empty data dir, and a warm volume skips init.sql and
       # `CREATE DATABASE prices` while printing `Skipping initialization`.
+      # Bounded like every other ClickHouse step: the image pull happens
+      # here, and a stalled registry pull would otherwise hold the runner for
+      # the 360-minute job default. A cold pull plus `up -d` is well under 5.
       - name: Start ClickHouse
+        timeout-minutes: 5
         run: |
           docker compose version
           docker compose up -d clickhouse
@@ -261,8 +265,11 @@ jobs:
 
       # `execution_bound_error_it` is vacuous without a reverse proxy in the
       # path, as production has (task 0281). Armed, not excluded.
+      # 5, not less: the script's own ceiling is 60 attempts x (2 s curl +
+      # 1 s sleep) = 180 s plus the cold caddy pull, and a step killed before
+      # that ceiling loses the Caddyfile dump and attempt count it prints.
       - name: Start the ClickHouse reverse proxy
-        timeout-minutes: 3
+        timeout-minutes: 5
         run: scripts/ch-proxy-0281.sh up
 
       # One cargo invocation, serial (`--test-threads=1` — several targets
