@@ -806,9 +806,11 @@ export class ComputeStack extends cdk.Stack {
         // is a `502` to the next data-API caller (task 0194's PR review,
         // finding 1; the reasoning is on `AppConfig::load_portal_or_close`).
         // So deploying this ahead of the operator steps ships a portal whose
-        // `/config` says `enabled: false`, not a data-API outage — and nothing
-        // else tells you: the api-handler has no error alarm, so the runbook's
-        // `/config` probe after the deploy is the check. Runbook
+        // `/config` says `enabled: false`, not a data-API outage — and a
+        // closure pages as `prices-${env}-api-handler-portal-closed`
+        // (ObservabilityStack, task 0249), but only once a cold start
+        // happens, so the runbook's `/config` probe after the deploy is
+        // still the check that runs at deploy time. Runbook
         // `portal-oauth-deploy-prep.md` §2, §2a and §5 are the steps; task
         // 0194's audit is what verifies they were run.
         PORTAL_ENABLED: 'true',
