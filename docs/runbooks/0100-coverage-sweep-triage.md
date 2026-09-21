@@ -187,10 +187,30 @@ Ready-to-send text:
 > events for venues we do not index, after SushiSwap V3 traded unseen for
 > months (task 0290). The probe only reads.
 
-The rollout goes through BE's usual `users.d` path
-(`lore/1-tasks/archive/0063_…/notes/G-provisioning-plan.md` §3): a commit in
-the BE repo, then the `--tags app` run that makes ClickHouse hot-load
-`users.d/*.xml`.
+**How BE applies it: NOT a plain `--tags app` deploy.** The precedent is BE
+task **0477** (`soroban-block-explorer`
+`lore/1-tasks/archive/0477_OPS_prices-writer-monitoring-grants.md`, commit
+`4212937e`, PR #399 → release #402), which added `system.mutations` /
+`system.view_refreshes` to the same user. `services.xml` is bind-mounted into
+the ClickHouse container **as a single file**. Ansible writes it by
+write-and-rename (a new inode), so the container keeps reading the old one and
+**a deploy alone silently applies nothing**. A SQL `GRANT` is impossible too,
+because `users_xml` storage is read-only. 0477 therefore:
+
+1. committed the change in the BE repo (`services.xml` and the
+   `prices_writer` row of `docs/architecture/security/clickhouse-rbac.md`);
+2. on the box, `diff`-ed the live file against the new one (only the added
+   lines may differ), kept a backup, and overwrote the mounted file **in place**
+   (`cat new > services.xml`, which keeps the inode; not `sed -i`, `scp` or an
+   editor), checking `stat -c %i` before and after;
+3. checked the config-reload line in the ClickHouse log and
+   `SHOW GRANTS FOR prices_writer`;
+4. merged, so the repo matches the box byte for byte and the next
+   `--tags app` is a no-op.
+
+Rollback is the same in-place overwrite with the backup, then a revert.
+Whether the inode trap still exists is BE's to confirm (0477 left the Ansible
+fix unowned).
 
 ### 4.2 Read-only verification after BE deploys (Adam)
 
@@ -232,7 +252,11 @@ and a CN-map entry.
 
 Preconditions:
 
-- §4.2 passed.
+- `coverageSweepEnabled` in `infra/envs/production.json`. It ships as
+  **`false`**: the Lambda, the rule (DISABLED) and both alarms deploy, but
+  nothing invokes the probe, so it cannot fail with Code 497 before BE's
+  grants. EventBridge may therefore deploy **before** §4.2. Set it to `true`
+  and redeploy EventBridge only after §4.2 passed.
 - `make -C infra diff-production` has been read **in full, for removals too**.
   `--require-approval broadening` prompts only on IAM/security-group widening,
   so it does not prompt on removals.
@@ -241,6 +265,11 @@ Preconditions:
 EventBridge change on develop.** As of 2026-09-21 that includes 0151's
 zero-invariant probe and the 0286 rollout ordering, and each carries its own
 preconditions. Check them before you deploy.
+
+⚠ **Deploying `Prices-production-Observability` likewise ships every other
+undeployed Observability change on develop** (other tasks' alarms and their
+actions). Read its part of the diff with the same care; it is not only this
+task's alarm.
 
 The CleanupRule hazard (task 0200) is guarded at synth by
 `assertCleanupRuleStaysDisabled`, but still read the diff for it.
@@ -276,7 +305,10 @@ event sum, in task 0100.
 
 ### 4.6 Rollback
 
-- Stop the runs: `aws events disable-rule --name prices-production-coverage-sweep-probe`.
+- Stop the runs: set `coverageSweepEnabled` to `false` and redeploy
+  EventBridge. `aws events disable-rule --name prices-production-coverage-sweep-probe`
+  works at once, but the next EventBridge deploy re-enables the rule while the
+  flag is `true`; follow it with the flag change.
 - Or remove the probe completely: revert the task-0100 commits and redeploy
   both stacks.
 - BE's two grants can stay, because they are read-only.

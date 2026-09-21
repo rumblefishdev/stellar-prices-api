@@ -75,6 +75,20 @@ export interface EnvironmentConfig {
    * TTLs are fixed in `ApiGatewayStack` per §2.1.
    */
   readonly apiGatewayCacheEnabled: boolean;
+  /**
+   * Whether the weekly coverage sweep's EventBridge rule is ENABLED (task 0100).
+   *
+   * The probe reads BE's `default.soroban_events` / `default.soroban_contracts`
+   * as `prices_writer`, which needs two SELECT grants only BE can add (their
+   * `users.d` XML). Until those are verified live, keep this `false`: the Lambda,
+   * rule and alarms still deploy, but nothing invokes the probe, so it does not
+   * fail with Code 497 every Monday. Flip to `true` and redeploy EventBridge once
+   * the grants check out (docs/runbooks/0100-coverage-sweep-triage.md §4).
+   *
+   * Config rather than `aws events disable-rule`, because CDK re-enables a rule
+   * on the next deploy of the stack; a flag survives it.
+   */
+  readonly coverageSweepEnabled: boolean;
 
   /**
    * Public base URL of the deployed API, passed to the api-handler as
@@ -614,6 +628,11 @@ export function validateConfig(config: EnvironmentConfig): void {
   ) {
     errors.push(
       `pricingApiFreePlanMonthlyQuota must be a positive integer, got: ${config.pricingApiFreePlanMonthlyQuota}`,
+    );
+  }
+  if (typeof config.coverageSweepEnabled !== 'boolean') {
+    errors.push(
+      `coverageSweepEnabled must be a boolean, got: ${config.coverageSweepEnabled}`,
     );
   }
   if (typeof config.apiGatewayCacheEnabled !== 'boolean') {
