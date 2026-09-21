@@ -163,7 +163,6 @@ dependencies = [
  "lambda_runtime 0.13.0",
  "prices-clickhouse",
  "prices-ingest-core",
- "prices-ledger-processor",
  "reqwest",
  "serde",
  "serde_json",
