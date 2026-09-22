@@ -68,8 +68,20 @@ HubSpot and GTM, has no accounts, and the corporate policy covers it.
      `hello@rumblefish.pl` in the contact form, `hello@rumblefishdev.com`
      only inside the corporate policy's text (the old domain). To revisit
      if the `.pl` and `.dev` boxes turn out not to reach the same people;
-  2. whether IP addresses are in fact recorded (no access logs are
-     configured on the API; the Lambda's execution logs are what exists);
+  2. ~~whether IP addresses are in fact recorded~~ — **measured 2026-09-22:
+     yes, in X-Ray.** Not in the api-handler's CloudWatch logs (a request
+     from this machine to `/api/config` and `/api/auth/me` left START/END
+     lines and nothing else); the API stage has no access logs and no
+     execution logs (`accessLogSettings: null`, `dataTraceEnabled: false`,
+     no `API-Gateway-Execution-Logs_*` group); no WAF on the stage or on
+     CloudFront; the explorer distribution and the bundle bucket log
+     nothing. But `tracingEnabled: true` (M3's X-Ray criterion) puts the
+     client address on every sampled request's API Gateway segment —
+     this machine's address was there for both calls — and X-Ray keeps
+     traces for 30 days (fixed by AWS). Sampling: 1 request/s reservoir
+     plus 5 %. So the draft's hedged sentence is true; the page can say it
+     plainly: "IP addresses are recorded in request traces (AWS X-Ray) for
+     a sample of requests and kept for 30 days";
   3. the "Payments" section describes a paid model the portal does not have
      ("Contact us for commercial plans — no in-app upgrade flow"); keep it
      only if it is wanted ahead of time.
