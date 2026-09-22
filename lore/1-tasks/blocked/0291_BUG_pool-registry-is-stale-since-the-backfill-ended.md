@@ -7,7 +7,7 @@ related_adr: []
 related_tasks: ["0285", "0286", "0282", "0078", "0101", "0256", "0069", "0080", "0290"]
 tags: [layer-indexing, priority-high, effort-small, amm, aquarius, soroswap, ingestion, data-correctness, clickhouse]
 links:
-  - "../active/0285_RESEARCH_pool-registry-does-not-match-what-is-trading/notes/S-classification-2026-09-17.md"
+  - "../archive/0285_RESEARCH_pool-registry-does-not-match-what-is-trading/notes/S-classification-2026-09-17.md"
   - "../../../packages/prices-ledger-processor/src/main.rs"
   - "../../../docs/runbooks/seed-pool-registry.md"
   - "https://github.com/rumblefishdev/stellar-prices-api/pull/322"
@@ -60,6 +60,62 @@ history:
       hunks). AC 2 + AC 3 close when 0286 phase 1 runs its ingest step; its own
       precondition 1 is 0282's full-day measurement, owed 2026-09-19 — the same
       measurement this task needs for AC 4. Six runbook defects recorded.
+  - date: 2026-09-21
+    status: blocked
+    who: okarcz
+    by: ["0286"]
+    note: >
+      AC 4 met. Measured 2026-09-18 → 09-20 as dev_read: 09-19 and 09-20 are
+      raw = stored exactly (26,422 and 20,497), so no residue in either
+      direction and the old stored > raw impossibility is gone. 09-18's 6.6
+      percent is this task's own seed seen from the other side — hour by hour,
+      lost equals the newly-seeded pools' raw count EXACTLY in all eight hours
+      before the 08:00 UTC write, then zero for fifteen hours after. Also
+      measured: the 08:11:33 deploy stall that blocked this task cost ZERO
+      trades, because 0064's durable cursor caught it up. Still blocked on
+      0286 for AC 2 and AC 3 — the deploy, not the data.
+  - date: 2026-09-21
+    status: blocked
+    who: okarcz
+    by: ["0286"]
+    note: >
+      Two additions from a teammate's review, both accepted. (1) 0256 recorded
+      the drop-the-scan decision on 2026-09-21; its removal PR is gated on this
+      task's AC 2 + AC 3 on production, and saying so in 0256 is the trigger.
+      (2) The unattended window: since the 09-18 08:00 UTC seed the registry has
+      neither a writer nor a working sensor — the alarm cannot fire because its
+      counter is in the rolled-back processor — so any pool created since then
+      is exactly where the 42 were, silently. 0282's same-day measurement makes
+      the cost precise: such a pool is INVISIBLE, not under-counted. Noted that
+      0290's 09-21 dry run used Friday's tip as --end, so its to_write=133 says
+      nothing about the window; a dry run to the current tip is owed before
+      0286 phase 3.
+  - date: 2026-09-21
+    status: blocked
+    who: okarcz
+    by: ["0286"]
+    note: >
+      The unattended window is MEASURED and currently EMPTY. Re-running 0290's
+      --discover-pools dry run to the true tip 64,539,364 returns identically
+      candidates=650, to_write=133, per_venue={"sushiswap": 133} — not one new
+      pool of any venue in the 47,418 ledgers since Friday. to_write=133 is
+      therefore a current number and 0286 phase 3 can be planned against it.
+      One sample only, and it expires: the window grows until the deploy and
+      the alarm is still blind, so the pre-write re-run stays mandatory. The
+      fill rate implied (~0.7 pools/day, from the original 42 over ~2 months)
+      argues for waiting on 0286 phase 1 rather than deploying Compute from a
+      divergent branch.
+  - date: 2026-09-21
+    status: blocked
+    who: okarcz
+    by: ["0286"]
+    note: >
+      Blocker restated explicitly at the operator's direction: this task is
+      blocked on 0286, nothing else. AC 1 and AC 4 are met and permanent; AC 2
+      and AC 3 need only the deploy that 0286 phase 1 carries. 0286's owner
+      said on 2026-09-21 that phase 1 starts the same day, so the block is
+      expected to be short. Its own precondition — 0282's full-day measurement
+      — cleared this morning.
 ---
 
 ## 📊 STATUS — 2026-09-18 · ⛔ BLOCKED on [[0286]] · AC 1 DONE on prod
@@ -79,6 +135,52 @@ history:
 - 🔑 Root cause is [[0256]]: the registry's designed maintainer (the
   asset-discovery scan, task 0069) has never run on production. 0291 makes the
   live processor the maintainer, so 0256 can drop the scan without losing it.
+  **[[0256]] recorded that decision on 2026-09-21.** Its removal PR is gated on
+  **this task's AC 2 + AC 3 being met on production** — when they are, say so in
+  0256; that is the trigger.
+
+### 🔴 The unattended window — open since 2026-09-18 08:00 UTC, and growing
+
+Raised by a teammate 2026-09-21. Between the seed and the live-persistence
+deploy the registry has **neither a writer nor a working sensor**:
+
+- the seed was a one-off; nothing has written `pool_registry` since 08:00 UTC
+  on 2026-09-18;
+- the live processor still does not persist what it learns (the code is
+  merged, not deployed);
+- `UnregisteredPoolEvents` **cannot fire** — its counter is in the rolled-back
+  processor, so the alarm sits `OK` on no data (`notBreaching`).
+
+**Any pool created in this window is exactly where the 42 were**, and nothing
+will say so. ⚠️ [[0282]]'s 2026-09-21 measurement makes the cost precise: an
+unregistered pool is **invisible, not under-counted** — live stores *none* of
+its trades. So the window's damage is the full raw trade count of every pool
+created in it, not a fraction.
+
+The runbook only catches this at its Final test (`to_write=0`) — i.e. at deploy
+time, as a surprise. Two changes follow:
+
+1. **Step 3 (`--discover-pools`) must be re-run at deploy time** over the range
+   from 2026-09-18 to the then-current tip. A dry run from before the deploy
+   does not license the write.
+2. **Size the hole now, not at the deploy.** ✅ **MEASURED 2026-09-21 09:24
+   UTC — the window is EMPTY.** [[0290]]'s first dry run that day used
+   `--end 64491946` (Friday's tip) and so said nothing about the window; re-run
+   to the current tip **64,539,364** it returns *identically*
+   `candidates=650 to_write=133 per_venue={"sushiswap": 133}`. Not one new
+   pool of any venue was created in the 47,418 ledgers (~2.7 days) since. So
+   `to_write=133` is now a **current** number, and [[0286]] phase 3 can be
+   planned against it.
+
+   ⚠️ **This is one sample, and it expires.** The window keeps growing until
+   the deploy, and nothing will announce the pool that fills it — the alarm is
+   still blind. Re-run before the write regardless; an empty window today is
+   not a licence to skip the check later.
+
+   📈 It does say the window fills **slowly**: the original gap was 42 pools
+   accumulated over roughly two months, so ~0.7/day, and zero in 2.7 days is
+   consistent with that. That is an argument for **waiting** for 0286 phase 1
+   rather than deploying Compute from a divergent branch to close it sooner.
 
 ### What unblocks this
 
@@ -154,12 +256,22 @@ Missing today (live era, see [[0285]]'s note):
       **deployed and live** (Observability was not rolled back). ⛔ the counter
       that feeds it is in the rolled-back processor, so the alarm currently
       reads `OK` on *no data* (`notBreaching`) and cannot fire. Same blocker.
-- [ ] Aquarius raw (registry-joined, all pool wasms) vs stored for a full day
-      after the fix shows no stored > raw residue. → ⏳ **2026-09-19**,
-      unaffected by the blocker: it measures [[0282]]'s fix (deployed
-      2026-09-17 12:04) against the now-complete registry. Expect a small
-      *stored > raw* residue to have DISAPPEARED, since raw previously omitted
-      the 42 unregistered pools.
+- [x] Aquarius raw (registry-joined, all pool wasms) vs stored for a full day
+      after the fix shows no stored > raw residue. → **MET, measured
+      2026-09-21** over 2026-09-18 → 09-20. No residue in either direction:
+      09-19 and 09-20 are `raw = stored` on the integer (26,422 and 20,497).
+      The prediction held — raw no longer omits the 42 pools, so the old
+      *stored > raw* impossibility is gone.
+      🔑 **The seed's effect is visible as a clean boundary.** On 09-18, split
+      by hour and by `pool_registry.updated_at`, `lost` equals the newly-seeded
+      pools' raw count **exactly** in all eight hours before the 08:00 UTC
+      write, then is zero for the fifteen hours after it. That is this task's
+      fix being observed directly, not inferred: 1,563 + 12 = the day's entire
+      1,575 gap. Full table in [[0282]]'s runbook step 8.
+      ⚠️ **Generalises to every future measurement:** `raw` resolves
+      `pool_registry` as of *now*, so any raw-vs-stored window spanning a seed
+      shows a phantom loss for the pre-seed hours. Measure after the seed, or
+      pin the registry to the measured day.
 
 ## Findings — 2026-09-17 (production, `dev_read`)
 

@@ -2,7 +2,7 @@
 id: "0141"
 title: "make deploy-production-compute ships whatever is in target/lambda/ — no freshness check against the tree"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0072", "0077", "0070", "0132"]
 tags: ["priority-high", "effort-small", "deployment", "footgun", "infra"]
@@ -50,6 +50,24 @@ history:
       set. Scope also takes in `deploy-production-eventbridge`
       (`eventbridge-stack.ts` references `target/lambda` too) and
       `--exclusively` on every per-stack target.
+  - date: "2026-09-22"
+    status: completed
+    who: akot
+    note: >
+      Closed by the operator with the fix on `develop` (PR #325, merged
+      2026-09-21 as `a8806bd`) and BEFORE the first production deploy through
+      it. Delivered: `deploy-production`, `-compute`, `-eventbridge` and
+      `diff-production` depend on `build-lambdas` — cargo rebuilds, then every
+      bootstrap is verified as an aarch64 ELF, which refuses the 10-byte
+      `#!/bin/sh` stubs; `--exclusively` on every per-stack target; `*_ASSET_DIR`
+      and `CARGO_TARGET_DIR` overrides refused before building; 12 Node tests
+      under `nx test infra`; runbook 0072 steps 6–7 and `infra/README.md`
+      corrected. Code review: 10 findings, 9 fixed, 1 kept by decision. All four
+      ACs met on the branch. Not waited for: the first real `--exclusively`
+      Compute deploy — on 2026-09-22 production's `api-handler` and
+      `ledger-processor` still date from 2026-09-18 (pre-#325). That deploy is
+      step G of the 2026-09 rollout (`.planning/rollout-2026-09/ROLLOUT.md`);
+      whoever runs it should see the rebuild for real and note it here.
 ---
 
 # The deploy path ships stale Lambda binaries and reports success

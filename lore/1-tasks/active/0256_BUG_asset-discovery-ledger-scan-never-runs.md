@@ -4,7 +4,7 @@ title: "asset-discovery's ledger scan has never run on production — the worker
 type: BUG
 status: active
 related_adr: []
-related_tasks: ["0210", "0054", "0218", "0223", "0226", "0241", "0140"]
+related_tasks: ["0210", "0054", "0218", "0223", "0226", "0241", "0140", "0291", "0069"]
 tags: [layer-backend, priority-high, effort-small, milestone-M2, ingest, defect]
 milestone: 2
 links:
@@ -78,6 +78,21 @@ history:
       passes with the defect present.
       ⚠️ Scope unchanged: this stops the amplification only. The ledger-scan
       decision and the [[0223]] liveness question are both still open.
+  - date: 2026-09-21
+    status: active
+    who: stkrolikiewicz
+    note: >
+      DECISION RECORDED: the ledger scan is dropped, not switched on. For
+      assets it is redundant (105 runs since 2026-09-17, 0 scanned, 0 rows
+      written, registry still grew 209,247 → 209,529 through ledger-processor).
+      Its one real job — maintaining prices.pool_registry, task 0069 — moves to
+      the live processor in [[0291]]. ⛔ The removal itself is SEQUENCED AFTER
+      0291's live persistence is deployed and verified (its AC 2 + AC 3, blocked
+      on 0286): until then the dormant scan is the only other code that can
+      maintain the registry, and 0291's alarm cannot fire. Criterion 1 ticked;
+      2 not applicable; 3 and 4 wait on 0291. The [[0223]] liveness question is
+      still open and is NOT gated — it can be settled now. See "Decision —
+      drop the ledger scan" below.
 ---
 
 # The ledger scan is dead code in production
@@ -375,10 +390,97 @@ start at **148 MB** and peak at 191 MB — 58–75 % of the 256 MB limit.
 
 [[0241]] is closed on this. [[0226]] is an efficiency task, not an outage fix.
 
+## Decision — drop the ledger scan (2026-09-21)
+
+**The scan is removed, not switched on.** Decided by the operator on 2026-09-21.
+
+### Why it is not needed for assets
+
+The scan would read the same Galexie objects from the same bucket through the
+same `extract_trades` / `process_ledger` pipeline as `ledger-processor`, an hour
+later. By construction it can only find what live already found. Measured on
+production, 2026-09-17 00:00 UTC → 2026-09-21 (105 hourly runs):
+
+| | value |
+|---|---|
+| runs with `scanned > 0` | **0 of 105** |
+| `wrote asset rows` from asset-discovery | **0** |
+| `assets_total` over the same window | 209,247 → **209,529** (+282), all via `ledger-processor` |
+| `pools_total` | 0 in every run |
+| `skipping ledger scan` WARN | still hourly |
+
+Together with the symbol-stage evidence above (two contracts that arrived after
+the scan was already dead were resolved within the hour), nothing in
+`prices.assets` or `prices.asset_symbol` depends on the scan.
+
+### What the scan WAS needed for — and who owns that now
+
+⚠️ The decision had a precondition recorded in the shutdown journal: check
+whether the scan was meant to feed the pool registry (`pools_total` = 0). It
+was. [[0069]] made this scan the designed maintainer of `prices.pool_registry`
+— the periodic persistence the live processor deliberately does not do on its
+hot path. Because the scan never ran, the registry's only writer was the history
+backfill, and [[0291]] measured the cost: 42 pools missing, ~5 % of Aquarius
+trades silently dropped after any cold start.
+
+[[0291]] fixes that at the better place — the live processor persists each pool
+as it learns it, before the cursor passes the factory event — and says so
+itself: *"0291 makes the live processor the maintainer, so 0256 can drop the
+scan without losing it."* An hourly second reader of S3 is strictly worse than
+that: later, costlier (up to 2,000 objects fetched and decoded per run), and it
+would need [[0140]]'s guard first, because `discover_window` still calls the
+unguarded `write_assets` (`lib.rs:255`) and enabling it would bring back the
+hourly 209 k-row re-emit this task just removed.
+
+### ⛔ Sequencing — do not remove the code yet
+
+As of 2026-09-21 [[0291]] is `blocked` on [[0286]]: its one-off seed is on
+production (728 → 770 rows, 2026-09-18 08:00 UTC), its live-persistence half is
+merged but **not deployed**, and its alarm reads `OK` on no data
+(`UnregisteredPoolEvents` has zero datapoints since 2026-09-18, `notBreaching`).
+So right now `pool_registry` has neither a maintainer nor a working sensor, and
+a pool created after 2026-09-18 08:00 UTC is where the 42 were.
+
+The fix for that is 0291's deploy, not reviving the scan. But until that deploy
+is verified, the dormant scan is the only other code able to maintain the
+registry, so it stays in the tree. **The removal PR opens once 0291's AC 2 and
+AC 3 are met on production.**
+
+### What the removal covers
+
+- `packages/asset-discovery`: `discover_window`, `register_ledger_assets`,
+  `load_cursor`, `save_cursor`, `DiscoveryStats`, the scan branch and its WARN
+  in `main.rs`, the `S3Fetcher`, `MAX_LEDGERS` / `INITIAL_DISCOVERY_LEDGER`,
+  and `tests/discover_it.rs`. `lib.rs:255` disappears with it, which settles
+  the asset-discovery half of [[0140]].
+- `infra/src/lib/stacks/eventbridge-stack.ts`: `BUCKET_NAME`, the "operator
+  activates the ledger scan" comment, and `ledgerBucket.grantRead(discovery.role)`
+  — the worker no longer reads S3. `memorySize: 512` and the 5-minute timeout
+  were sized for a catch-up scan and can be revisited.
+- `prices.discovery_state` (`init.sql`, empty on production) and its mentions in
+  `docs/database-schema/database-schema-overview.md` and
+  `docs/runbooks/running-ingestion-components.md`. ⚠️ The `DROP` on production
+  is its own operator step. `docs/scf/milestone-1-evidence.md` is a historical
+  record and stays as written.
+
+### Still open — not decided here
+
+- **The seed stage.** Redundant on the evidence above, and free since PR #319
+  (a steady-state run writes nothing). Cut it with the scan or leave it; either
+  is defensible.
+- **The [[0223]] liveness question.** After the removal this worker is the
+  symbol stage and nothing else. That is real work, so the default answer is
+  `workerHealth` (`-no-invocations`, an `impact` sentence, 0222-style
+  induction) — but it is not decided, and it does not wait on 0291.
+
 ## Acceptance Criteria
 
-- [ ] A recorded decision on whether the ledger scan is still needed
+- [x] A recorded decision on whether the ledger scan is still needed
+      → **dropped**, 2026-09-21. See "Decision — drop the ledger scan".
 - [ ] If kept: `discovery_state` has a cursor and it advances between runs
+      → not applicable: the scan is not kept.
 - [ ] If dropped: the scan path and its config are removed, not left dormant
+      → ⛔ sequenced after [[0291]]'s AC 2 + AC 3 on production.
 - [ ] The permanent WARN is gone — either the scan runs, or the code does not
       pretend it might
+      → goes with the removal above.

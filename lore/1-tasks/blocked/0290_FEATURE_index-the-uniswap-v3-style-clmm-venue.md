@@ -2,13 +2,13 @@
 id: "0290"
 title: "Index the Uniswap-v3-style concentrated-liquidity venue (factory CD3KRKGD…) — ~8.5k swaps a month we never see"
 type: FEATURE
-status: active
+status: blocked
 assignee: okarcz
 related_adr: []
 related_tasks: ["0285", "0286", "0282"]
 tags: [layer-indexing, priority-medium, effort-medium, amm, ingestion, data-correctness]
 links:
-  - "../active/0285_RESEARCH_pool-registry-does-not-match-what-is-trading/notes/S-classification-2026-09-17.md"
+  - "../archive/0285_RESEARCH_pool-registry-does-not-match-what-is-trading/notes/S-classification-2026-09-17.md"
 history:
   - date: 2026-09-17
     status: backlog
@@ -26,6 +26,56 @@ history:
       missing-trades gap from 0285 and is independent of the deploy freeze
       (research + extractor + tests; nothing to deploy until 0286 phase 1
       lands). Start by naming the venue and decoding its swap event.
+  - date: 2026-09-21
+    status: active
+    who: okarcz
+    note: >
+      Production --discover-pools dry run PASSED, from commit 7021ae2 over
+      ledgers 60,000,000 → 64,491,946 in ~54 s: candidates=650, to_write=133,
+      per_venue={"sushiswap": 133}, every pool change="new", ZERO changed and
+      zero other venues. Registry read at entries=770, i.e. 0291's post-seed
+      state. Nothing written — the write and the cold-start check still wait
+      for 0286 phase 1 to lift the Compute deploy freeze. AC 5 (history)
+      remains the one open decision that needs no deploy.
+  - date: 2026-09-21
+    status: active
+    who: okarcz
+    note: >
+      AC 5 decided with the operator: SushiSwap's ~88.8k swaps of history fold
+      into 0286 phase 3 rather than a separate events-backfill pass. Phase 3
+      re-ingests the same ledgers through the same path, and an earlier pass
+      would be discarded by its DROP PARTITION and would write candles under
+      the pre-0286 rules. ⚠️ Creates a hard ordering: 0286 phase 1 deploy →
+      0290 deploy → the --discover-pools WRITE (133 rows) → 0286 phase 3.
+      events-backfill prices only registered pools, so phase 3 running before
+      the write would silently re-ingest the very gap this task closes. 0286's
+      owner must be told — its precondition list predates this venue.
+  - date: 2026-09-21
+    status: active
+    who: okarcz
+    note: >
+      Correction from a teammate's review of 0291: today's dry run used
+      --end 64491946, which was FRIDAY's chain tip, so it scanned nothing after
+      2026-09-18 and its to_write=133 is a 09-18 number. Since the 09-18 08:00
+      UTC seed the registry has had neither a writer nor a working sensor, so
+      pools created since are invisible the same way the original 42 were. The
+      runbook now says to re-run the dry run with a current --end before the
+      write, and to size that window before 0286 phase 3 is planned.
+  - date: 2026-09-21
+    status: blocked
+    who: okarcz
+    by: ["0286"]
+    note: >
+      Moved to blocked at the operator's direction. Everything doable without a
+      production deploy is done: AC 1 (venue named), AC 4 (routers unindexed)
+      and AC 5 (history folds into 0286 phase 3) are met, and AC 2's
+      --discover-pools dry run passed twice today — the second to the true tip
+      64,539,364, confirming to_write=133 is a current number. What remains is
+      the write, the cold start and a full live day, and all three need the
+      Compute deploy freeze lifted, which 0286 phase 1 does. 0286's owner said
+      on 2026-09-21 that phase 1 starts the same day. ⚠️ The ordering recorded
+      under AC 5 still holds: 0286 phase 1 → 0290 deploy → the write → 0286
+      phase 3, because events-backfill prices only registered pools.
 ---
 
 # Index the Uniswap-v3-style concentrated-liquidity venue
@@ -362,17 +412,46 @@ weakened: the test still asserts `None` for every row in the list.
       `extractors-core/src/lib.rs`.
 - [ ] Its pools are learned from the factory and survive a cold start.
       → Code done: live learns from `pool_created` (`51a3030`),
-      `--discover-pools` seeds history from it (`291c21c`, 133 pools measured),
-      `registry_io` persists them. Open: the production dry run, then the write
-      and a cold start — after 0286 phase 1 lifts the Compute deploy freeze.
+      `--discover-pools` seeds history from it (`291c21c`), `registry_io`
+      persists them. ✅ **Production dry run PASSED 2026-09-21** —
+      `to_write=133 per_venue={"sushiswap": 133}`, every pool `change="new"`,
+      zero `changed`, zero other venues (see the runbook's RESULT). Open: the
+      write and a cold start — both wait for 0286 phase 1 to lift the Compute
+      deploy freeze.
 - [ ] Live candles for it match a raw count of its pool `swap` events for a full
       day.
 - [x] Its routers stay unindexed (a test pins it). →
       `a_routed_sushiswap_trade_prices_once_from_the_pool_not_the_router`
       (`7021ae2`), a real routed transaction, negative-controlled. See
       Implementation Notes.
-- [ ] History from the first pool is backfilled, or explicitly deferred with a
-      reason.
+- [x] History from the first pool is backfilled, or explicitly deferred with a
+      reason. → **DECIDED with the operator 2026-09-21: folded into [[0286]]
+      phase 3**, not run as a separate pass.
+      **Why:** phase 3 re-ingests the whole chain over the same ledgers through
+      the same `events-backfill` path, so SushiSwap's ~88.8k swaps
+      (2026-01 → now, ledgers 60,770,886 → 64,488,316) come along at no extra
+      cost. A separate pass run earlier would be **thrown away** by phase 3's
+      `DROP PARTITION` + re-ingest, and worse, it would write candles under the
+      *pre-0286* rules — every fill at equal weight, dust included — so its
+      output would disagree with everything phase 3 then produces.
+      **Cost accepted:** no SushiSwap history until phase 3 runs, which waits on
+      0286 phases 1–2 being live and measured.
+
+      ### ⚠️ Sequencing this creates — 0286 phase 3 MUST run last
+
+      `events-backfill` only prices pools that are in `prices.pool_registry`, so
+      the 133 rows must exist **before** phase 3 reaches the SushiSwap era, or
+      phase 3 silently re-ingests the same gap this task exists to close:
+
+      1. [[0286]] phase 1 deploys → the Compute deploy freeze lifts
+      2. 0290's ledger-processor deploys (PR #324)
+      3. the `--discover-pools` **write** runs (runbook step 5) → 133 rows
+      4. **then** [[0286]] phase 3
+
+      🔑 **0286's owner needs to know this** — phase 3's precondition list says
+      "pool registry seeded first ([[0088]])" but predates this venue, and its
+      AMM reconciliation will expect sushiswap volumes that only appear if step
+      3 happened. Same shape as [[0285]] gating phase 3's live-era AMM months.
 
 # 📕 RUNBOOK — `--discover-pools` dry run for SushiSwap V3
 
@@ -440,7 +519,68 @@ freeze. The real write only helps once 0290's ledger-processor is deployed
    - The other protocol's five token-less `pool_created` events at ledger
      63.17M must **not** appear.
 
-5. **[later, after 0286 phase 1 and 0290's deploy]** drop `--dry-run` to write,
+### ✅ RESULT — dry run PASSED 2026-09-21 08:57:15 → 08:58:09 UTC (~54 s)
+
+Range 60,000,000 → 64,491,946, from commit `7021ae2`, as `dev`-side read only.
+
+```
+INFO pre-flight: ClickHouse reachable
+INFO loaded discovered pool registry from ClickHouse entries=770
+INFO discover-pools: factory events read candidates=650 to_write=133 per_venue={"sushiswap": 133}
+INFO discover-pools: DRY RUN — nothing written
+```
+
+Every one of the four step-4 conditions held:
+
+| condition | result |
+| --- | --- |
+| `to_write=133 per_venue={"sushiswap": 133}` | ✅ exactly |
+| every pool `change="new"` | ✅ all 133 |
+| ⛔ any `change="changed"` | ✅ **none** — no existing row would be rewritten |
+| ⛔ any venue but `sushiswap` | ✅ **none** — the other venues report 0, as expected after [[0291]]'s 09-18 seed |
+
+- `entries=770` is [[0291]]'s post-seed registry (728 → 770), so the run read
+  the current state, not a stale one.
+- `candidates=650` against `to_write=133`: the factory emitted 650
+  `pool_created` events over the range and 133 distinct pools survive
+  de-duplication. The other protocol's five token-less events at ledger 63.17M
+  did **not** appear.
+- 133 > the 99 pools that have *traded* — expected, since discovery is by
+  creation, not by volume, and spans every factory generation. This is the
+  coverage the wasm-hash seed would have missed (119).
+
+⚠️ Nothing was written. The registry still has **no** sushiswap rows; the write
+is step 5.
+
+⛔ **`--end 64491946` was FRIDAY's tip, so this run says nothing about
+2026-09-18 → now.** Raised by a teammate on [[0291]]: since the 09-18 08:00 UTC
+seed the registry has had neither a writer nor a working sensor, so pools
+created in that window are invisible in exactly the way the original 42 were.
+`to_write=133` is therefore a **09-18 number, not a current one**. Before the
+write — and before [[0286]] phase 3 is planned — re-run this dry run with
+`--end` set to the current tip:
+
+```sql
+SELECT max(ledger_sequence) FROM default.soroban_events
+```
+
+and expect **≥ 133**, plus possibly non-zero counts for the other venues. A
+count above 133, or any venue other than `sushiswap`, is the window's size —
+not a defect.
+
+✅ **DONE 2026-09-21 09:24 UTC — the window is EMPTY.** Re-run to the true tip
+**64,539,364**: `candidates=650 to_write=133 per_venue={"sushiswap": 133}`,
+byte-identical to the 09:58 run. No pool of any venue was created in the 47,418
+ledgers between the two tips. **`to_write=133` is a current number**, and
+[[0286]] phase 3 can be planned against it.
+
+⚠️ Still re-run this before the write — the window grows until the deploy and
+[[0291]]'s alarm cannot announce what fills it.
+
+5. **[later, after 0286 phase 1 and 0290's deploy]** ⚠️ **re-run step 3 first**
+   with `--end` at the then-current tip — a dry run from before the deploy does
+   not license the write, because the registry has no writer until that deploy
+   lands. Then drop `--dry-run` to write,
    run the dry run again (it must report `to_write=0`), then verify:
 
    ```sql

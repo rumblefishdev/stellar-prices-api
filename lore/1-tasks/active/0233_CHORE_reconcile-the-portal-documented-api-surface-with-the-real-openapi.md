@@ -2,7 +2,7 @@
 id: "0233"
 title: "Reconcile the portal's documented API surface with the real OpenAPI — paths, example fields, the source name, the placeholder key"
 type: CHORE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0193", "0163", "0195", "0124"]
 tags: [layer-frontend, priority-medium, effort-small, milestone-M3, epic-self-service-onboarding, docs, figma]
@@ -31,6 +31,24 @@ history:
       found when `develop` was merged into [[0193]]'s branch ahead of PR #249.
       The two code comments (`landing/Terminal.tsx`, `quickstart/QuickStart.tsx`)
       and [[0193]]'s three references re-pointed in the same change.
+  - date: "2026-09-22"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated, with [[0163]]. State found: the portal's half was done inside
+      0194 on 2026-08-31 (`QuickStart.tsx` header) — host = `PUBLIC_API_BASE_URL`,
+      placeholder `YOUR_API_KEY`, paths and error bodies read off the live API.
+      A mechanical diff of every rendered path against the live `/api-docs-json`
+      (2026-09-22) finds them all present. Left: the response-field table lacks
+      `method`, which `PriceResponse` now requires; the Authentication verdict
+      boxes still carry the design's `sf_live_…`; the Authentication and
+      Endpoints ledes say every request needs a key while the spec marks
+      `/health` and `/api-docs-json` anonymous (`security: [{}]`; confirmed live,
+      `/health` answers 200 without a key); `Documentation.tsx` still promises
+      "what headers to watch" though the measured 429 carries no `Retry-After`.
+      Figma: the frames describe `api.soroswap.finance` and are not edited —
+      recorded here as stale (AC 4). Still to run: the snippets against
+      production with a free-plan key, and the hostname grep of a fresh bundle.
 ---
 
 # Reconcile the portal's documented API surface with the real OpenAPI

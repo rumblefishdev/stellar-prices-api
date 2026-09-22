@@ -2,7 +2,7 @@
 id: "0163"
 title: "Quickstart guide and example queries, accurate against the live API"
 type: DOCS
-status: backlog
+status: active
 related_adr: ["0010"]
 related_tasks: ["0124", "0156", "0157", "0161", "0162", "0164", "0179", "0184", "0187", "0189", "0192", "0193", "0195"]
 tags: [layer-docs, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, documentation, developer-experience]
@@ -46,6 +46,22 @@ history:
       account-age rules, and — until [[0191]] (which absorbed 0192) ships — the honest answer to "my
       key leaked" is "stop using it and wait for the period to roll over", which
       belongs in the document rather than in a support conversation.
+  - date: "2026-09-22"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated, with [[0233]]. Re-pointed to the world after 0194/0195: there is
+      ONE base URL, the API's own hostname
+      `https://prices-api.sorobanscan.rumblefish.dev` — the CloudFront domain this
+      task named is gone (0184's distribution destroyed by 0195; the execute-api
+      origin answers 403 since 0126). The spec's `servers` block and
+      `PUBLIC_API_BASE_URL` already agree, asserted by `links.spec.ts`. Single
+      source of truth: the portal's quick start page (0193), served at
+      `/api/quick-start`; no markdown copy in `docs/`. Still owed here: the
+      keyless exceptions named (`/health`, `/api-docs-json`), burst 5 and "a
+      cached response still counts" in the limits block, the
+      key-in-a-browser-bundle warning, copyable examples for price, OHLCV, batch
+      and health run against production, and 0157's burst criterion.
 ---
 
 # Quickstart and example queries

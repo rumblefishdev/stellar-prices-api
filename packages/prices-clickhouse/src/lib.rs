@@ -375,6 +375,7 @@ pub(crate) fn split_statements(sql: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use extractors_core::Venue;
 
     /// Task 0215: `max_execution_time = 0` is ClickHouse's spelling of
     /// UNLIMITED, not "no delay". A knob zeroed by a typo, or by an operator
@@ -925,6 +926,56 @@ mod tests {
             "total guarded pre-roll sites — 121 in the 0144 audit, less the \
              twelve maintained ones task 0286 moved to the rate form"
         );
+    }
+
+    /// Every `source IN (...)` in the AMM reprice pre-roll must name EVERY AMM
+    /// venue.
+    ///
+    /// This is the task 0290 defect: `sushiswap` became a candle `source`, the
+    /// pre-roll's three-venue allowlist did not move with it, and the backfill
+    /// would have written history into `price_ohlcv_1m` that never reached the
+    /// coarse tables — invisible to consumers, which read AMM history from
+    /// `_1d`/`_1h`, while `_1m` looked correct. Pinning the filter against
+    /// `Venue` means the next venue breaks this test instead of a backfill.
+    #[test]
+    fn the_amm_preroll_source_filter_names_every_amm_venue() {
+        // Adding a `Venue` variant makes this match non-exhaustive — a compile
+        // error here is the reminder to widen the pre-roll filter as well.
+        let venues = [
+            Venue::Aquarius,
+            Venue::Phoenix,
+            Venue::Soroswap,
+            Venue::Sushiswap,
+        ];
+        for v in &venues {
+            match v {
+                Venue::Aquarius | Venue::Phoenix | Venue::Soroswap | Venue::Sushiswap => {}
+            }
+        }
+
+        let filters: Vec<&str> = PREROLL_AMM_REPRICE_SQL
+            .match_indices("source IN (")
+            .map(|(i, _)| {
+                let rest = &PREROLL_AMM_REPRICE_SQL[i..];
+                let end = rest.find(')').expect("unterminated source IN (...)");
+                &rest[..=end]
+            })
+            .collect();
+
+        assert!(
+            !filters.is_empty(),
+            "no `source IN (...)` found — the scoping this test guards is gone"
+        );
+
+        for filter in &filters {
+            for venue in &venues {
+                let name = venue.as_source();
+                assert!(
+                    filter.contains(&format!("'{name}'")),
+                    "AMM venue '{name}' missing from a pre-roll filter: {filter}"
+                );
+            }
+        }
     }
 
     // ------------------------------------------------------------------

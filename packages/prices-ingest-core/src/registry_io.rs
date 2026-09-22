@@ -61,6 +61,12 @@ impl Registries {
                             }
                         }
                     }
+                    Venue::Sushiswap => {
+                        if let Some(p) = self.sushiswap.lookup(contract_id) {
+                            row.token0 = p.token0.clone();
+                            row.token1 = p.token1.clone();
+                        }
+                    }
                     Venue::Aquarius => {}
                 }
                 row
@@ -97,20 +103,39 @@ impl Registries {
     /// Rehydrate registries from persisted rows (merged into `self`, so a load
     /// can seed a run that then keeps discovering). Rows with an unknown venue
     /// string are skipped.
+    ///
+    /// A pair-backed row (Soroswap, SushiSwap) whose `token0`/`token1` are
+    /// blank registers its VENUE but not its pair. Registering a blank pair
+    /// would be worse than not loading the row at all: `contains()` would
+    /// answer true, `classify_amm_groups` would clear `pair_unresolved`, and
+    /// the pool would be priced against asset `""` instead of being recorded in
+    /// `unresolved_pools`. Leaving the pair out sends it down the
+    /// venue-known-but-unpriced branch, which is exactly what a missing pair
+    /// is. This mirrors the learn side, where a `pool_created` without a token
+    /// pair learns nothing (task 0290 review).
     pub fn load_pool_rows(&mut self, rows: &[PoolRegistryRow]) {
         for row in rows {
             let Some(venue) = Venue::from_source(&row.venue) else {
                 continue;
             };
             self.venue.insert(row.contract_id.clone(), venue.clone());
+            let pair_complete = !row.token0.is_empty() && !row.token1.is_empty();
             match venue {
-                Venue::Soroswap => {
+                Venue::Soroswap if pair_complete => {
                     self.soroswap.register(
                         row.contract_id.clone(),
                         row.token0.clone(),
                         row.token1.clone(),
                     );
                 }
+                Venue::Sushiswap if pair_complete => {
+                    self.sushiswap.register(
+                        row.contract_id.clone(),
+                        row.token0.clone(),
+                        row.token1.clone(),
+                    );
+                }
+                Venue::Soroswap | Venue::Sushiswap => {}
                 Venue::Phoenix => match hex_decode32(&row.wasm_hash) {
                     Some(hash) => self.phoenix.register_with_wasm(
                         row.contract_id.clone(),
@@ -168,9 +193,13 @@ mod tests {
         reg.phoenix
             .register_with_wasm("CPHOENIX".into(), 0, [0xab; 32]);
         reg.venue.insert("CAQUA".into(), Venue::Aquarius);
+        // Task 0290: pair-backed like Soroswap, but its OWN registry.
+        reg.venue.insert("CSUSHI".into(), Venue::Sushiswap);
+        reg.sushiswap
+            .register("CSUSHI".into(), "CSUSHI0".into(), "CSUSHI1".into());
 
         let rows = reg.to_pool_rows();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4);
         // Sorted, stable order.
         assert_eq!(rows[0].contract_id, "CAQUA");
 
@@ -187,7 +216,72 @@ mod tests {
         );
         let ph = loaded.phoenix.lookup("CPHOENIX").expect("phoenix pool");
         assert_eq!(ph.wasm_hash, Some([0xab; 32]));
+
+        // The sushiswap pool round-trips into its own registry, and the two
+        // pair-backed venues stay disjoint (task 0290).
+        assert_eq!(loaded.venue.get("CSUSHI"), Some(&Venue::Sushiswap));
+        let su = loaded.sushiswap.lookup("CSUSHI").expect("sushiswap pair");
+        assert_eq!(
+            (su.token0.as_str(), su.token1.as_str()),
+            ("CSUSHI0", "CSUSHI1")
+        );
+        assert!(!loaded.soroswap.contains("CSUSHI"));
+        assert!(!loaded.sushiswap.contains("CSOROSWAP"));
+
         assert_eq!(loaded.pool_count(), reg.pool_count());
+    }
+
+    #[test]
+    fn a_persisted_pair_row_without_tokens_loads_its_venue_but_no_pair() {
+        // A hand-written or imported row that names a pair-backed venue but
+        // carries blank tokens. Registering it would make `contains()` true and
+        // price the pool against asset "" — it must stay pair-unresolved so
+        // `classify_amm_groups` records it in `unresolved_pools` (task 0290).
+        let rows: Vec<PoolRegistryRow> = ["soroswap", "sushiswap"]
+            .iter()
+            .map(|venue| PoolRegistryRow {
+                contract_id: format!("CBLANK_{venue}"),
+                venue: (*venue).to_string(),
+                token0: String::new(),
+                token1: String::new(),
+                pool_type: 0,
+                wasm_hash: String::new(),
+            })
+            .collect();
+
+        let mut loaded = Registries::new();
+        loaded.load_pool_rows(&rows);
+
+        assert_eq!(
+            loaded.venue.get("CBLANK_soroswap"),
+            Some(&Venue::Soroswap),
+            "the venue is known — only the pair is missing"
+        );
+        assert_eq!(
+            loaded.venue.get("CBLANK_sushiswap"),
+            Some(&Venue::Sushiswap)
+        );
+        assert!(!loaded.soroswap.contains("CBLANK_soroswap"));
+        assert!(!loaded.sushiswap.contains("CBLANK_sushiswap"));
+        assert_eq!(loaded.pool_count(), 0);
+    }
+
+    #[test]
+    fn a_persisted_pair_row_missing_one_token_loads_no_pair_either() {
+        let rows = vec![PoolRegistryRow {
+            contract_id: "CHALFPAIR".into(),
+            venue: "sushiswap".into(),
+            token0: "CTOKEN0".into(),
+            token1: String::new(),
+            pool_type: 0,
+            wasm_hash: String::new(),
+        }];
+
+        let mut loaded = Registries::new();
+        loaded.load_pool_rows(&rows);
+
+        assert_eq!(loaded.venue.get("CHALFPAIR"), Some(&Venue::Sushiswap));
+        assert!(!loaded.sushiswap.contains("CHALFPAIR"));
     }
 
     fn snapshot(reg: &Registries) -> HashMap<String, PoolRegistryRow> {

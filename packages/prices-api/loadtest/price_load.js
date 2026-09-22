@@ -6,7 +6,11 @@
 // — no gateway cache / no Lambda cold start, so a lower bound on prod p95):
 //
 //   k6 run packages/prices-api/loadtest/price_load.js \
-//     -e BASE_URL=https://<api>/<stage> -e API_KEY=<key>
+//     -e BASE_URL=https://<custom-domain> -e API_KEY=<key>
+//
+// BASE_URL is the custom domain with NO stage suffix — its base path mapping is
+// empty, and the execute-api host is disabled (task 0126): every request to it
+// returns 403, which reads as a bad key. See README.md.
 //
 // Knobs (env): RATE (req/s, default 100), DURATION (default 5m), WARMUP
 // (default 30s), ASSET (single-asset mode), ASSETS (path to an id pool),
