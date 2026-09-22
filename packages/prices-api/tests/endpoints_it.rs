@@ -67,10 +67,14 @@ async fn setup(db: &str) -> Client {
         .unwrap();
     admin
         .query(&format!(
+            // Task 0216: asset 1 carries a REAL as_of/price_status pair dated
+            // behind its updated_at; asset 2 stays on the table DEFAULT pair
+            // (the epoch and ''), which the wire must render as ""/"".
             "INSERT INTO {db}.current_prices \
-             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at) VALUES \
-             (1, 0.5, 0.51, 1234.5, '2026-02-10 12:00:30'), \
-             (2, 1.0001, 1.0002, 999999.25, '2026-02-10 12:00:30')"
+             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at, as_of, price_status) \
+             VALUES \
+             (1, 0.5, 0.51, 1234.5, '2026-02-10 12:00:30', '2026-02-10 11:30:00', 'carried'), \
+             (2, 1.0001, 1.0002, 999999.25, '2026-02-10 12:00:30', toDateTime(0), '')"
         ))
         .execute()
         .await
@@ -288,6 +292,28 @@ async fn batch_returns_found_and_not_found() {
     assert_eq!(json["prices"].as_array().unwrap().len(), 2);
     assert_eq!(json["not_found"].as_array().unwrap().len(), 1);
     assert_eq!(json["not_found"][0], format!("FOO:{}", issuer()));
+
+    // Task 0216 — the batch surface reads through its OWN row struct and then
+    // hand-copies into the price response, so it can drift from `/price`
+    // independently. Asserted by value on both arms: native carries a real
+    // pair, USDC the DEFAULT pair that must publish as two empty strings.
+    let by_asset: std::collections::HashMap<&str, &Value> = json["prices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p["asset"].as_str().unwrap(), p))
+        .collect();
+    let native = by_asset["native"];
+    assert_eq!(native["as_of"], "2026-02-10T11:30:00Z");
+    assert_ne!(
+        native["as_of"], native["updated_at"],
+        "the batch surface must publish the price's own time, not the snapshot's"
+    );
+    assert_eq!(native["price_status"], "carried");
+    let usdc = by_asset[format!("USDC:{}", issuer()).as_str()];
+    assert_eq!(usdc["as_of"], "", "the epoch sentinel is never formatted");
+    assert_eq!(usdc["price_status"], "");
+
     teardown(db).await;
 }
 

@@ -55,15 +55,24 @@ async fn setup(db: &str) -> Client {
     // asset 1 carries the task-0072 columns populated (the mv_current_prices
     // shape); asset 2 deliberately leaves them at their table DEFAULTs, so both
     // the pass-through path and the empty-producer path are covered.
+    //
+    // Task 0216: asset 1 also carries a REAL as_of, deliberately 30 minutes
+    // behind its updated_at — the two are both DateTime and adjacent in the
+    // row, so a fixture that dated them alike could not tell a correct
+    // projection from a transposed one. Asset 2 keeps the table DEFAULTs for
+    // both new columns, which is the epoch/'' pair the wire must render as
+    // ""/"".
     admin
         .query(&format!(
             "INSERT INTO {db}.current_prices \
              (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct, \
-              vwap_24h, volume_24h_usd, sources, updated_at, method) VALUES \
+              vwap_24h, volume_24h_usd, sources, updated_at, method, as_of, price_status) \
+             VALUES \
              (1, 0.5, 1.25, -2.5, 7.25, 0.51, 1234.5, \
               '{{\"sdex\":{{\"price\":\"0.5\",\"volume_24h\":\"1000\"}}}}', \
-              '2026-02-10 12:00:30', 'traded'), \
-             (2, 1.0001, 0, 0, 0, 1.0002, 999999.25, '', '2026-02-10 12:00:30', '')"
+              '2026-02-10 12:00:30', 'traded', '2026-02-10 11:30:00', 'carried'), \
+             (2, 1.0001, 0, 0, 0, 1.0002, 999999.25, '', '2026-02-10 12:00:30', '', \
+              toDateTime(0), '')"
         ))
         .execute()
         .await
@@ -151,6 +160,23 @@ async fn price_native_returns_seeded_row() {
         "sources must be parsed from the MV's JSON string into an object"
     );
 
+    // Task 0216 — asserted BY VALUE, not by key presence. This endpoint ends in
+    // `fetch_optional` + `LIMIT 1`, and the RowBinary cursor only notices a
+    // struct/projection mismatch at end of stream, which that path never
+    // reaches: a query whose columns drifted returns a plausible 200 with the
+    // wrong values in it. Checking that the keys exist would pass against
+    // exactly that failure.
+    assert_eq!(
+        json["as_of"], "2026-02-10T11:30:00Z",
+        "as_of must be the price's own time, not the snapshot's"
+    );
+    assert_ne!(
+        json["as_of"], json["updated_at"],
+        "as_of and updated_at are both timestamps of the same type and adjacent \
+         in the row — if they read alike here, a transposition would be invisible"
+    );
+    assert_eq!(json["price_status"], "carried");
+
     teardown(db).await;
 }
 
@@ -169,6 +195,20 @@ async fn price_empty_sources_degrades_to_empty_object() {
     assert_eq!(status, StatusCode::OK, "body={json}");
     assert_eq!(json["sources"], serde_json::json!({}));
     assert!(json["sources"].is_object(), "must be {{}}, not null");
+
+    // Task 0216 — the same row's new columns sit on their table DEFAULTs
+    // (`toDateTime(0)` and `''`), the documented "this row has not been
+    // rewritten by the current snapshot definition yet" state. Both must reach
+    // the wire as the empty string: the epoch is a sentinel, and publishing it
+    // as `1970-01-01T00:00:00Z` would read as a very old price rather than as
+    // no price. Note the price here IS 1.0001 with an empty `method` — the
+    // status is '' because the row was seeded directly, NOT because the price
+    // is missing. Do not "correct" this to `priced`.
+    assert_eq!(
+        json["as_of"], "",
+        "the epoch sentinel must be mapped to the empty string, never formatted"
+    );
+    assert_eq!(json["price_status"], "");
 
     teardown(db).await;
 }

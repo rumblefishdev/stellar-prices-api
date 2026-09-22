@@ -15,8 +15,9 @@ pub struct PriceResponse {
     /// **This value can be older than it looks, and is not age-bounded.** For
     /// an asset that has stopped trading it is simply the last priced close,
     /// up to the 24 h aggregation window old. `updated_at` is the snapshot
-    /// time, **not** the price's age, and no field currently carries that
-    /// age. `"0"` means no priced close exists in the window at all.
+    /// time, **not** the price's age — `as_of` is, and `price_status` says
+    /// whether the price is the asset's newest or a carried one. `"0"` means
+    /// no priced close exists in the window at all.
     ///
     /// Note the deliberate asymmetry with `sources` / `vwap_24h`: those drop a
     /// venue whose last quote is stale, because a per-venue price asserts
@@ -61,6 +62,26 @@ pub struct PriceResponse {
     /// ⚠️ Never read `"oracle"` as "more accurate than traded" — it means the
     /// price came from a rate rather than from this asset's own trades.
     pub method: String,
+    /// The price's OWN timestamp (task 0216): the candle `price_usd` was read
+    /// from, ISO-8601 UTC. `""` when there is no price — the stored value is
+    /// the epoch sentinel and the query maps it, so `1970-01-01T00:00:00Z`
+    /// must never reach the wire.
+    ///
+    /// Bounds `price_usd` alone. `price_xlm` and `market_cap_usd` each combine
+    /// it with a second, independently dated input, so they are no fresher
+    /// than this and may be older.
+    pub as_of: String,
+    /// What kind of price `price_usd` is (task 0216):
+    ///
+    /// * `"priced"` — `as_of` is the asset's newest price-forming candle (a
+    ///   measured rate reads this too).
+    /// * `"carried"` — a real priced close, but a newer price-forming candle
+    ///   has not been priced yet; `as_of` says how far behind it is.
+    /// * `"unpriced"` — `price_usd` is the `"0"` sentinel, `method` is `""`
+    ///   and `as_of` is `""`.
+    /// * `""` — the row predates the snapshot's current definition and has not
+    ///   been rewritten yet. Not a vocabulary word; a deploy-window state.
+    pub price_status: String,
 }
 
 /// Parse the MV's `sources` JSON string into a value for the response.
@@ -183,6 +204,8 @@ impl PriceResponse {
             sources: parse_sources(&row.sources),
             updated_at: row.updated_at,
             method: row.method,
+            as_of: row.as_of,
+            price_status: row.price_status,
         }
     }
 }
@@ -247,6 +270,13 @@ pub struct AssetListItem {
     /// Price provenance; same vocabulary and caveats as
     /// [`PriceResponse::method`].
     pub method: String,
+    /// The price's own timestamp; same semantics and the same `""` sentinel as
+    /// [`PriceResponse::as_of`], including the bound it does NOT place on
+    /// `price_xlm`.
+    pub as_of: String,
+    /// What kind of price this is; same vocabulary as
+    /// [`PriceResponse::price_status`].
+    pub price_status: String,
 }
 
 /// `GET /assets` paginated response.
