@@ -5,7 +5,7 @@ type: FEATURE
 status: active
 assignee: akot
 related_adr: []
-related_tasks: ["0097", "0079", "0078", "0285", "0290", "0291"]
+related_tasks: ["0097", "0079", "0078", "0285", "0290", "0291", "0300"]
 tags: [layer-indexing, priority-high, effort-medium, amm, clickhouse, pool-registry, coverage, observability]
 links:
   - "../../../packages/events-backfill/src/source.rs"
@@ -57,6 +57,16 @@ history:
       13 unclassified contracts / 911 events; the 2026-04 back-test surfaced
       SushiSwap V3 (32 contracts, 3,125 events) and the Soroswap factory, now
       allow-listed. Rule shipped enabled (coverageSweepEnabled=true).
+  - date: "2026-09-22"
+    status: active
+    who: akot
+    note: >
+      Phase 1 started: the 13 unclassified emitters of the 14-day window to
+      64,543,788 classified (section "Phase 1 classification"). One real
+      missing venue — the Comet BLND/USDC pool (Blend backstop, 53,092 swaps
+      since 2024-05-02), spawned as [[0300]] and allow-listed temporarily by
+      wasm until 0300; 12 routers, aggregators and non-AMM contracts
+      allow-listed permanently (PR #332).
 ---
 
 # A recurring coverage sweep over unregistered swap emitters
@@ -203,17 +213,43 @@ task notes:
 - Not yet done: merge, deploy (EventBridge + Observability, runbook §4.4),
   first run as the AC5 proof (expected: ALARM on 13 contracts / ~911
   events).
-- Phase-1 residual (current 14 days): `CAS3FL6T…` (`8abc2891`, `POOL/swap`,
-  727 events) plus 12 small emitters; April-only candidates `Swap`
-  (`d4b4976b`, 462), `SwappedToVUsd` (`a757a1ed`, 355),
-  `tokens_swapped_event`.
+- Phase-1 residual (current 14 days): classified 2026-09-22, see below.
+  Still to classify: the April-only candidates `Swap` (`d4b4976b`, 462),
+  `SwappedToVUsd` (`a757a1ed`, 355), 2× `tokens_swapped_event`, and a few
+  1–2-event emitters (runbook §5).
+
+## Phase 1 classification (2026-09-22, production, `dev_read`)
+
+Window 64,322,610–64,543,788 (the probe's own 14 days). Method as [[0285]]:
+the wasm interface (`default.wasm_interface_metadata`), an event sample, and
+how many of the contract's transactions in the window also hold an event of a
+pool in `prices.pool_registry` ("with pool") — a wrapper around pool swaps
+shows ~all, a venue of its own does not.
+
+| Contract | wasm | Events | What it is | Evidence | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| `CAS3FL6T…` | `8abc2891` | 727 | Comet weighted pool, BLND/USDC — Blend backstop, LP `CPAL` | `init(…weights…)`, `join_pool`/`exit_pool`, `swap_exact_amount_in`; 53,092 swaps since 2024-05-02; with pool 125/412 | **missing venue → [[0300]]**; allow-listed by wasm `until = "0300"` |
+| `CC6QAV7J…` | `91060e9c` | 12 | split-route aggregator | "Execute a swap atomically (single-path or split-order)"; with pool 682/684 | router, allow-list |
+| `CAYP3UWL…` | `5e0bff5a` | 23 | Soroswap Aggregator | adapters, "sets the soroswap_router"; 23/23 | router, allow-list |
+| `CDETNHJC…` | `277444b5` | 15 | router with a pool whitelist | `set_pool_whitelist`, `price_protection`; 15/15 | router, allow-list |
+| `CAVDUEGL…` | `c546a2d0` | 3 | fee-taking split aggregator | `swap_split`, `register_pool`, `fee_ppm`; 3/3 | router, allow-list |
+| `CARVQXFP…` | `43765328` | 8 | fee-taking swap wrapper | `swap_exact_in`, `set_routers`, `set_treasury`; 6/8 (+2 Sushi) | router, allow-list |
+| `CAVNAZFN…` | `3afca103` | 5 | same family, older | same interface without `set_routers`; 5/7 | router, allow-list |
+| `CDE5MFAG…` | `a317f5bd` | 1 | small router | `swap`, `registry`, `fee_policy`; 1/2 | router, allow-list (low confidence) |
+| `CDCNXZHY…` | `cbbb1bde` | 19 | LI.FI swap/bridge | `swap`, `bridge`, `swap_bridge`; 19/57 | aggregator, allow-list |
+| `CDWTSHMD…` | `8110634b` | 63 | USDM0↔USDM1 issuer conversion | "Atomic swap between USDM0 and USDM1", mint/burn against a signed price attestation; 0/63 | not a market, allow-list |
+| `CA5YJ5H2…`, `CBOSXSEZ…` | `4d6abb0d` | 17 + 17 | on-chain order book of tokenised instruments | `new_buy_order`, `best_bid_offer`, order-book phases, halts, price collar; instruments are `u64` ids, no token addresses; 0/88 | non-AMM, not priceable, allow-list |
+| `CBP76I2F…` | `76e60d02` | 1 | lending protocol | `borrow`, `liquidate`, `flash_loan`; a `swap_exact` inside a liquidation; 1/1 | non-AMM, allow-list |
+
+With these entries the current window reads **0 unclassified**.
 
 ## Acceptance Criteria
 
 - [ ] Every currently unregistered swap-shaped emitter is classified, and the
-      classification is recorded here.
+      classification is recorded here. (The 14-day window: done 2026-09-22,
+      13/13. The April-only candidates are still open.)
 - [ ] Any genuine AMM pools found are seeded into `pool_registry` and their
-      ranges repriced.
+      ranges repriced. (Comet BLND/USDC → [[0300]]; SushiSwap V3 → [[0290]].)
 - [ ] A committed allow-list of known-ignorable emitters exists, each entry
       carrying its reason and originating task. (In PR #332, validated by
       tests; ticks on merge.)
