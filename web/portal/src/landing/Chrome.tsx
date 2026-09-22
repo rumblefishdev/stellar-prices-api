@@ -16,9 +16,11 @@ import { color, font } from '../theme/tokens';
 import {
   DASHBOARD_ROUTE,
   DOCS_ROUTE,
+  EXPLORER,
   LANDING,
   LOGIN_ROUTE,
   QUICKSTART_ROUTE,
+  RUMBLEFISH_SITE,
 } from './links';
 import { ArrowBadge, cardBorder } from './primitives';
 
@@ -87,37 +89,49 @@ const menuLinkSx = {
 
 export function Wordmark() {
   return (
-    <Stack direction="row" spacing={0.75} alignItems="center">
-      <Box
-        component="img"
-        src={sorobanScanIcon}
-        // Decorative: the wordmark beside it carries the name, and announcing
-        // the mark as well would say "SorobanScan" twice.
-        alt=""
-        aria-hidden
-        sx={{ height: 19, width: 'auto', display: 'block' }}
-      />
-      <Box
-        component="img"
-        src={sorobanScanWordmark}
-        // The product's name, so it is the `alt` text — not "logo", which tells
-        // a screen-reader user the shape of the thing rather than what it says.
-        alt="SorobanScan"
-        sx={{ height: 24, width: 'auto', display: 'block' }}
-      />
-    </Stack>
+    // A link to the explorer's home, in every bar that carries the mark
+    // (task 0301) — it was two images and led nowhere. Named by the
+    // wordmark's `alt`, so a screen reader hears "SorobanScan", once.
+    <Link
+      href={EXPLORER}
+      sx={{ display: 'inline-flex', textDecoration: 'none' }}
+    >
+      <Stack direction="row" spacing={0.75} alignItems="center">
+        <Box
+          component="img"
+          src={sorobanScanIcon}
+          // Decorative: the wordmark beside it carries the name, and announcing
+          // the mark as well would say "SorobanScan" twice.
+          alt=""
+          aria-hidden
+          sx={{ height: 19, width: 'auto', display: 'block' }}
+        />
+        <Box
+          component="img"
+          src={sorobanScanWordmark}
+          // The product's name, so it is the `alt` text — not "logo", which tells
+          // a screen-reader user the shape of the thing rather than what it says.
+          alt="SorobanScan"
+          sx={{ height: 24, width: 'auto', display: 'block' }}
+        />
+      </Stack>
+    </Link>
   );
 }
 
 /** The footer's mark. Same provenance as the header's. */
 export function RumbleFishMark({ height = 32 }: { height?: number }) {
   return (
-    <Box
-      component="img"
-      src={rumblefishLogo}
-      alt="Rumble Fish — software development"
-      sx={{ height, width: 'auto', display: 'block' }}
-    />
+    // The mark is the company's link, like the `rumblefish.dev` text beside
+    // it in the footer (task 0301). Named by the image's `alt`.
+    <Link href={RUMBLEFISH_SITE} sx={{ display: 'inline-flex' }}>
+      <Box
+        component="img"
+        src={rumblefishLogo}
+        alt="Rumble Fish — software development"
+        sx={{ height, width: 'auto', display: 'block' }}
+      />
+    </Link>
   );
 }
 
@@ -387,7 +401,7 @@ export function Footer({ canOfferKey }: { canOfferKey: boolean }) {
     ...(canOfferKey ? [{ label: 'Dashboard', to: DASHBOARD_ROUTE }] : []),
     { label: 'Status' },
     { label: 'Contact' },
-    { label: 'rumblefish.dev', href: 'https://rumblefish.dev' },
+    { label: 'rumblefish.dev', href: RUMBLEFISH_SITE },
     { label: 'Privacy policy' },
   ];
 

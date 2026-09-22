@@ -1877,6 +1877,14 @@ describe('navigation off the landing page', () => {
     expect(
       screen.getByRole('link', { name: /^sign in$/i }).getAttribute('href'),
     ).toBe('/login');
+    // The wordmark leads to the explorer's home and the footer's mark to
+    // Rumble Fish (task 0301) — both were images that led nowhere.
+    expect(
+      screen.getByRole('link', { name: 'SorobanScan' }).getAttribute('href'),
+    ).toBe('https://sorobanscan.rumblefish.dev/');
+    expect(
+      screen.getByRole('link', { name: /rumble fish/i }).getAttribute('href'),
+    ).toBe('https://rumblefish.dev');
   });
 
   /**

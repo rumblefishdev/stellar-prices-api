@@ -29,6 +29,14 @@ history:
       decision: a mount that had a session and lost it still goes to `/`, so
       signing out ends on the landing page as before. 212 portal tests,
       typecheck, lint green. Open: PR and deploy.
+  - date: "2026-09-22"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Checked on the dev server against the production API: both fixes as
+      described. One more gap from the same walk: the SorobanScan wordmark and
+      the footer's Rumble Fish mark were images without a link; both link out
+      now (explorer home, rumblefish.dev). PR #335.
 ---
 
 # Portal navigation: Quick Start goes to a landing anchor, and a key holder without a session has no way to the dashboard
@@ -66,6 +74,10 @@ arrivals to `/login`, and `/login` forwards an authenticated visitor to
   signed-out visitor goes to `/login` with the query carried along.
 - `app/app.spec.tsx`: the `/dashboard` redirect cases split by cause; the
   navbar test on the quick start reads the new href; a case for "Sign in".
+- `landing/Chrome.tsx`, `landing/links.ts` (added after the local check): the
+  SorobanScan wordmark in every bar links to the explorer's home (`EXPLORER`),
+  the footer's Rumble Fish mark to `rumblefish.dev` — both were images that
+  led nowhere.
 
 ## Acceptance Criteria
 
@@ -75,6 +87,8 @@ arrivals to `/login`, and `/login` forwards an authenticated visitor to
       portal closed it still lands on `/`
 - [x] The signed-out navbar offers "Sign in" whenever it offers "Get API Key",
       and neither when the portal is closed
+- [x] The SorobanScan wordmark opens the explorer's home and the footer's
+      Rumble Fish mark opens rumblefish.dev, in every bar that carries them
 - [x] Portal tests, lint and typecheck green
 
 ## Notes
@@ -101,6 +115,9 @@ arrivals to `/login`, and `/login` forwards an authenticated visitor to
   "Sign in"; the quick start's navbar renders "Quick Start" as
   `/quick-start` and "Sign in" as `/login`; the closed landing offers no
   "Sign in". 212 tests, typecheck and lint green.
+- `Wordmark` and `RumbleFishMark` render an `<a>` around the images, named
+  by the images' `alt`; `EXPLORER` is absolute because under the dev server
+  `/` is nothing, and the footer's text link shares `RUMBLEFISH_SITE`.
 - Not pinned by a test: the phone's drawer (not mounted while closed). It
   maps the same `NAV` and the same `canOfferKey`. The API reference route
   is not exercised separately either: it renders the same
