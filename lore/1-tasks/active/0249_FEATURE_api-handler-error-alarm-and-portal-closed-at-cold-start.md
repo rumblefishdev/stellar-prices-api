@@ -230,6 +230,20 @@ deploy is the state change and the notification themselves.
     silence the alarm with every check green. The TypeScript CI job runs the
     guard, so `packages/prices-api/src/main.rs` was added to that job's path
     filter, or a main.rs-only PR would skip it.
+11. **Review answers (Oskar, 2026-09-22; commit `002bfac`).** (a)
+    ObservabilityStack now `addDependency(compute)`: the metric filter is the
+    stack's first resource created on a Compute-owned one and
+    `fromLogGroupName` emits no dependency. Ordering only, still no
+    `Fn::ImportValue`; the `--exclusively` target gets a Makefile note
+    instead (log group must exist on a fresh env / after a Compute
+    destroy). (b) The guard's search is bounded to the portal-closed
+    filter's own block — the unbounded version passed on a second filter
+    added later in the file (reproduced, now a mutation test). (c) The
+    log-format coupling gets a comment on `ApiHandlerFunction`, not an
+    assertion: AWS documents that JSON format does not re-encode lines that
+    are already JSON, so forbidding `loggingFormat` would block a
+    legitimate change on a premise the docs contradict. Any log-path change
+    is re-proven with `test-metric-filter` on a deployed line.
 
 ## Future Work
 
