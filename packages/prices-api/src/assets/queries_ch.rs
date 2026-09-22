@@ -2948,6 +2948,47 @@ mod tests {
         );
     }
 
+    /// Task 0147 (D-01), the cross-crate half. `views.sql` and `/ohlcv` must
+    /// spell ONE priced predicate, and the only way to check that without a
+    /// ClickHouse is to read both texts from the side that is allowed to see
+    /// both: `prices-api` depends on `prices-clickhouse`, never the reverse.
+    ///
+    /// The views' own per-statement structure is asserted over there
+    /// (`views_sql_every_weighted_surface_spells_the_one_priced_predicate`);
+    /// what this adds is that the literal they floor at is THIS crate's
+    /// `PRECISION_FLOOR` — the same const `usd_projection` renders into
+    /// `convertible`. Two files agreeing with a third is not the same as two
+    /// files agreeing with each other.
+    ///
+    /// The lower bound is four: arm A at both series grains plus both
+    /// `usd_reference` grains, each of which spells the floor at least once.
+    /// It is a bound rather than an equality so that adding the floor to a new
+    /// surface does not fail this test spuriously.
+    #[test]
+    fn the_views_floor_every_weighted_surface_at_this_crates_precision_floor() {
+        let views = prices_clickhouse::VIEWS_SQL;
+        assert!(
+            views.matches(PRECISION_FLOOR).count() >= 4,
+            "arm A and usd_reference, at both grains, must each floor at \
+             `{PRECISION_FLOOR}` — found {} occurrence(s) in views.sql",
+            views.matches(PRECISION_FLOOR).count()
+        );
+        // `/ohlcv`'s USD arm pairs the floor with the price-forming trade
+        // count; so must the views, or one surface admits a bucket of dust the
+        // other refuses.
+        assert!(
+            views.contains("pf_trade_count > 0"),
+            "the views must require a price-forming trade, as `valid` does"
+        );
+        // The pre-0147 spelling must not come back: `close_usd > 0` admits a
+        // 9e-14 close, and filtering on it BEFORE the weighting is what let a
+        // dust print become the whole of a bucket's weight.
+        assert!(
+            !views.contains("WHERE p.close_usd > 0 AND p.volume_base > 0"),
+            "arm A's pre-0147 filter must stay gone"
+        );
+    }
+
     /// The bucket still reports the trading that happened. Volume and count are
     /// summed over EVERY row, dust included — only the prices are filtered, and
     /// a gate that leaked into the volume aggregates would turn a dust-only
