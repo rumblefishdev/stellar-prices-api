@@ -2,7 +2,7 @@
 id: "0163"
 title: "Quickstart guide and example queries, accurate against the live API"
 type: DOCS
-status: active
+status: completed
 related_adr: ["0010"]
 related_tasks: ["0124", "0156", "0157", "0161", "0162", "0164", "0179", "0184", "0187", "0189", "0192", "0193", "0195"]
 tags: [layer-docs, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, documentation, developer-experience]
@@ -75,6 +75,16 @@ history:
       the page does NOT say a cached response counts against the quota. Open:
       the production run with a free-plan key, and the two criteria that wait
       on it.
+  - date: "2026-09-22"
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Shipped: PR #334 merged 13:35 UTC (`bfb7c18d`), portal bundle synced
+      14:02 UTC (`index-DnFlUQMz.js`, `/api/*` invalidation completed). All
+      11 criteria met; 4/4 example queries answered on production at 13:02
+      CEST, after 0286's schema step. `QuickStart.live` with a free-plan key
+      is the check to repeat after every API deploy. [[0164]] repeats the
+      same commands as its end-to-end proof.
 ---
 
 # Quickstart and example queries

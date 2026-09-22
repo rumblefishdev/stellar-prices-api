@@ -2,7 +2,7 @@
 id: "0233"
 title: "Reconcile the portal's documented API surface with the real OpenAPI — paths, example fields, the source name, the placeholder key"
 type: CHORE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0193", "0163", "0195", "0124"]
 tags: [layer-frontend, priority-medium, effort-small, milestone-M3, epic-self-service-onboarding, docs, figma]
@@ -60,6 +60,15 @@ history:
       production bundle grepped: no hostname but ours and the footer's. Open:
       the snippets run against production with a free-plan key
       (`QuickStart.live.spec.tsx`, gated on `PRICES_API_KEY`).
+  - date: "2026-09-22"
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Shipped with [[0163]] in PR #334 (merged 13:35 UTC, bundle synced
+      14:02 UTC). All 4 criteria met: every rendered path is held against
+      `public/openapi.json` by a test, the snippets ran against production
+      4/4, the fresh bundle carries no hostname but ours and the footer's,
+      and the Figma frames are recorded here as stale rather than edited.
 ---
 
 # Reconcile the portal's documented API surface with the real OpenAPI

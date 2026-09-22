@@ -2,7 +2,7 @@
 id: "0301"
 title: "Portal navigation: the navbar's Quick Start goes to a landing anchor, and a key holder without a session has no visible way to the dashboard"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0193", "0195", "0163", "0233"]
 tags: [layer-frontend, priority-medium, effort-small, epic-self-service-onboarding, portal]
@@ -45,6 +45,15 @@ history:
       open rumblefish.dev/contact/ — the sales form, the nearest thing that
       reaches the company. "Privacy policy" waits for [[0303]]; "Status" has
       nowhere to go and no task. Both decided on the channel walk-through.
+  - date: "2026-09-22"
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Shipped: PR #335 merged 13:35 UTC (`093634b0`), bundle synced 14:02
+      UTC. All 6 criteria met. Left without a task, on purpose: "Status"
+      stays text (no status page exists) and the quiet-route gap the OHLCV
+      outage exposed (recorded on [[0163]]) wants a probe or a post-deploy
+      smoke run — to be filed if the team takes it.
 ---
 
 # Portal navigation: Quick Start goes to a landing anchor, and a key holder without a session has no way to the dashboard

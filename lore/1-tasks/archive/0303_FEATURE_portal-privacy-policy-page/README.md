@@ -2,7 +2,7 @@
 id: "0303"
 title: "Publish the Prices API privacy policy as a portal page and link it from the footer — the footer's 'Privacy policy' is dead text and the corporate policy does not describe the portal"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0010"]
 related_tasks: ["0193", "0301", "0159", "0187", "0189", "0157"]
 tags: [layer-frontend, priority-high, effort-small, epic-self-service-onboarding, portal, legal]
@@ -42,6 +42,16 @@ history:
       page carries a version date the draft did not. 216 portal tests,
       typecheck, lint green; production bundle clean. Open: PR, review of
       the text by its owner, deploy.
+  - date: "2026-09-22"
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Shipped: PR #338 merged (`a5fa5f98`), bundle synced 14:02 UTC;
+      `/api/privacy-policy` is live behind the explorer's basic-auth gate,
+      chunk `PrivacyPolicy-DTzXF74o.js`. All 5 criteria met. Not done here:
+      the text's owner has not reviewed the rendered page — the text is the
+      delivered draft byte for byte, so a later edit is a one-file change
+      plus a bump of `POLICY_DATED`.
 ---
 
 # Publish the Prices API privacy policy as a portal page
