@@ -2872,6 +2872,7 @@ name = "prices-clickhouse"
 version = "0.1.0"
 dependencies = [
  "clickhouse",
+ "extractors-core",
  "hyper-rustls 0.27.9",
  "hyper-util",
  "reqwest",

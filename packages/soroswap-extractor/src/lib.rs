@@ -13,6 +13,16 @@
 //! Router / aggregator wrapper `swap` events (simple {amount_in, amount_out})
 //! are dropped upstream (VenueRegistry maps only pool contract_ids) to avoid
 //! double-counting; they carry no token/direction info on their own.
+//!
+//! # Shared with SushiSwap V3 (task 0290)
+//!
+//! SushiSwap V3 pools emit the **same** CLMM shape — `topics = [Symbol("swap")]`,
+//! `data = Map{ amount0, amount1 (signed), liquidity, sqrt_price_x96, tick, … }`
+//! — so they decode through the very same path rather than a second copy of it.
+//! The types below are therefore venue-neutral ([`TokenPair`],
+//! [`PairPoolRegistry`], [`PairSwapExtractor`]); the `Soroswap*` names remain as
+//! aliases so existing call sites keep compiling. Only the `venue` stamped on
+//! the emitted [`TradeRow`] differs, which is why the extractor carries it.
 
 use std::collections::HashMap;
 
@@ -20,32 +30,43 @@ use extractors_core::{
     ExtractError, ExtractResult, SorobanEventRow, SwapExtractor, TaggedValue, TradeRow, Venue,
 };
 
-/// A Soroswap pair's two tokens, in canonical (token0, token1) order as
-/// reported by the factory `new_pair` event.
+/// A pool's two tokens, in the canonical (token0, token1) order its factory
+/// reports — Soroswap's `new_pair`, SushiSwap V3's `pool_created`.
 #[derive(Debug, Clone)]
-pub struct SoroswapPair {
+pub struct TokenPair {
     pub token0: String,
     pub token1: String,
 }
 
-/// pool_address → (token0, token1). Populated from Soroswap factory `new_pair`
-/// events (`[String("SoroswapFactory"), Symbol("new_pair")]`,
-/// data = NewPairEvent{ token_0, token_1, pair, … }).
+/// Back-compat alias — [`TokenPair`] is venue-neutral (task 0290).
+pub type SoroswapPair = TokenPair;
+
+/// pool_address → (token0, token1). Populated from factory events: Soroswap's
+/// `[String("SoroswapFactory"), Symbol("new_pair")]` with
+/// data = NewPairEvent{ token_0, token_1, pair, … }, or SushiSwap V3's
+/// `[Symbol("pool_created")]` with data = { token0, token1, pool_address, … }.
+///
+/// One registry instance holds ONE venue's pools — `Registries` keeps a
+/// separate instance per venue so two venues can never collide on a
+/// contract_id.
 #[derive(Debug, Default)]
-pub struct SoroswapPoolRegistry {
-    pools: HashMap<String, SoroswapPair>,
+pub struct PairPoolRegistry {
+    pools: HashMap<String, TokenPair>,
 }
 
-impl SoroswapPoolRegistry {
+/// Back-compat alias — [`PairPoolRegistry`] is venue-neutral (task 0290).
+pub type SoroswapPoolRegistry = PairPoolRegistry;
+
+impl PairPoolRegistry {
     pub fn new() -> Self {
         Self::default()
     }
 
     pub fn register(&mut self, pair: String, token0: String, token1: String) {
-        self.pools.insert(pair, SoroswapPair { token0, token1 });
+        self.pools.insert(pair, TokenPair { token0, token1 });
     }
 
-    pub fn lookup(&self, pair: &str) -> Option<&SoroswapPair> {
+    pub fn lookup(&self, pair: &str) -> Option<&TokenPair> {
         self.pools.get(pair)
     }
 
@@ -89,14 +110,31 @@ fn swap_action(row: &SorobanEventRow) -> Option<&str> {
     }
 }
 
-/// Extracts Soroswap swaps for a single pool, using its registered token pair.
-pub struct SoroswapPairExtractor<'a> {
-    pub pair: &'a SoroswapPair,
+/// Extracts swaps for a single pool, using its registered token pair.
+///
+/// `venue` is stamped on every emitted [`TradeRow`] and is the ONLY thing that
+/// differs between Soroswap and SushiSwap V3 here — the data shapes are
+/// identical (task 0290).
+pub struct PairSwapExtractor<'a> {
+    pub pair: &'a TokenPair,
+    pub venue: Venue,
 }
 
-impl<'a> SoroswapPairExtractor<'a> {
-    pub fn new(pair: &'a SoroswapPair) -> Self {
-        Self { pair }
+/// Back-compat alias — [`PairSwapExtractor`] is venue-neutral (task 0290).
+pub type SoroswapPairExtractor<'a> = PairSwapExtractor<'a>;
+
+impl<'a> PairSwapExtractor<'a> {
+    /// Soroswap, for the call sites that predate task 0290.
+    pub fn new(pair: &'a TokenPair) -> Self {
+        Self {
+            pair,
+            venue: Venue::Soroswap,
+        }
+    }
+
+    /// The same decode, stamped with an explicit venue.
+    pub fn with_venue(venue: Venue, pair: &'a TokenPair) -> Self {
+        Self { pair, venue }
     }
 
     fn decode_swap(&self, row: &SorobanEventRow) -> Result<TradeRow, ExtractError> {
@@ -171,7 +209,7 @@ impl<'a> SoroswapPairExtractor<'a> {
             .map(String::from);
 
         Ok(TradeRow {
-            venue: Venue::Soroswap,
+            venue: self.venue.clone(),
             contract_id: row.contract_id.clone(),
             transaction_id: row.transaction_id.clone(),
             ledger_sequence: row.ledger_sequence,
@@ -186,7 +224,7 @@ impl<'a> SoroswapPairExtractor<'a> {
     }
 }
 
-impl SwapExtractor for SoroswapPairExtractor<'_> {
+impl SwapExtractor for PairSwapExtractor<'_> {
     fn extract(&self, rows: &[SorobanEventRow]) -> Result<ExtractResult, ExtractError> {
         if rows.is_empty() {
             return Err(ExtractError::InsufficientRows {
