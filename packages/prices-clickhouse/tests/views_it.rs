@@ -2512,9 +2512,17 @@ async fn only_the_dust_print_is_priced_and_the_absolute_floor_withholds_the_buck
 ///
 /// Every row of the bucket is quoted in an asset that is neither the canonical
 /// USDC, native XLM nor the canonical USDT, and that has no `prices.usd_rate`
-/// row of its own. There is no eligible volume, so there is no denominator: the
-/// bucket is absent and the coverage row says `unpriceable` rather than
-/// `pending`, because nothing about enrichment would change it.
+/// row of its own. There is no eligible price-forming volume, so there is no
+/// denominator: the bucket is absent and the coverage row says `unpriceable`
+/// rather than `pending`, because nothing about enrichment would change it.
+///
+/// ⚠️ This is ONE of the two buckets that read `unpriceable` — the NO USD PATH
+/// one, which flips to `pending` retroactively the moment a `usd_rate` row
+/// appears for EXO (ADR 0292). The other is a bucket whose quote IS eligible
+/// but whose every candle is stroop-dust, so `pf_volume` sums to 0: no
+/// `usd_rate` row will ever move that one, only a real fill. The word means
+/// "no price-forming volume we could price", not "no USD path" — see the
+/// coverage header in views.sql.
 ///
 /// ⚠️ The share is the LITERAL 0, never NULL (D-06). BE renders a NULL as a
 /// dash and drops the pool, so a zero denominator must not surface as one —

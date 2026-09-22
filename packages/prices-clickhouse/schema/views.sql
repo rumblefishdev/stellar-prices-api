@@ -246,7 +246,12 @@
 --                        that some pricing tier had actually priced when this
 --                        row was computed — i.e. how much of what traded the
 --                        published close_usd is an average OF.
---                        1 means every eligible unit was priced. A peg-arm row
+--                        1 means every eligible unit was priced.
+--                        ⚠️ The denominator is `eligible OR priced`, never
+--                        `eligible` alone: a PRICED row belongs in it whatever
+--                        its quote leg is, and making that true by
+--                        construction is what keeps the ratio inside [0, 1]
+--                        (see the `rew` note in arm A). A peg-arm row
 --                        publishes a literal 1: its value comes from a measured
 --                        rate, not from traded weight, so there is no
 --                        population for the share to describe.
@@ -302,8 +307,11 @@
 --     hands", which is what a `min_volume_usd`-style floor wants.
 --
 -- The priced predicate itself is `/ohlcv`'s `valid` for the SAME row
--- (queries_ch.rs::usd_projection) — one predicate, spelled once, pinned by
--- `views_sql_every_weighted_surface_spells_the_one_priced_predicate`.
+-- (queries_ch.rs::usd_projection) PLUS a positive price-forming weight
+-- (`p.pf_volume > 0`, tasks 0171/0198 — this surface weights by that column
+-- and `/ohlcv` does not). One rule, spelled once, pinned by
+-- `views_sql_every_weighted_surface_spells_the_one_priced_predicate`. It is
+-- NOT term-for-term `valid`; that extra conjunct is decided by brief D-01.
 --
 -- ### current_price_usd only (task 0072)
 -- These carry SENTINELS, not NULLs — `current_prices`' columns are
@@ -596,10 +604,15 @@ FROM
         if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
         a.contract_address AS contract_address,
         p.timestamp        AS bucket,
-        -- ONE priced predicate (task 0147, D-01). This is `/ohlcv`'s `valid`
-        -- for the SAME row (queries_ch.rs::usd_projection), spelled the same
-        -- way: the shared 1e-12 precision floor on BOTH price columns, a
-        -- price-forming trade, a price-forming weight, and convertibility.
+        -- ONE priced predicate (task 0147, D-01): `/ohlcv`'s `valid` for the
+        -- SAME row (queries_ch.rs::usd_projection) PLUS a positive
+        -- price-forming WEIGHT. The shared terms are the 1e-12 precision floor
+        -- on BOTH price columns, a price-forming trade and convertibility;
+        -- `p.pf_volume > 0` is the extra one (tasks 0171/0198), and it is here
+        -- because this surface WEIGHTS by that column and `/ohlcv` does not —
+        -- a zero-weight row cannot move a weighted mean, but it CAN empty the
+        -- denominator. Decided by brief D-01, so the two are the same rule and
+        -- not the same expression: do not call them identical.
         -- Pinned against prices-api by
         -- views_sql_every_weighted_surface_spells_the_one_priced_predicate.
         (p.close >= toDecimal128('0.000000000001', 14)
@@ -625,6 +638,9 @@ FROM
         -- CAST(asset_kind AS String) exactly as arm B's rate subquery does.
         -- ⚠️ Membership is RETROACTIVE: a bucket stops reading `unpriceable`
         -- the moment a rate appears for its quote leg. Accepted by ADR 0292.
+        -- ⚠️ This flag is the QUOTE-SET half of the denominator only. The
+        -- weight below is `is_priced OR is_eligible`, because a row we DID
+        -- price is eligible whatever its quote leg is — see the note on `rew`.
         (p.quote_asset_id IN
          (
              SELECT e.asset_id
@@ -914,10 +930,20 @@ GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket
 -- convertible volume is most of what traded AND is worth something absolute.
 -- The peg disjunct comes FIRST and is not subject to the gate: arm B's
 -- placeholder has ew = 0 and pw = 0 by construction, so a naive `ew > 0`
--- would delete USDC's fallback row. A peg member that ALSO trades as a base
--- has pw > 0, so the peg disjunct does not fire for it and the gate governs
--- it — and if the gate withholds it, the row is ABSENT rather than falling
--- back to $1, which would be a regression dressed as a fix.
+-- would delete USDC's fallback row. It tests `pw = 0` — NO PRICED WEIGHT —
+-- and not "no traded weight", which splits a peg member that ALSO trades as a
+-- base into two cases:
+--   * base volume PARTLY OR WHOLLY PRICED -> pw > 0, the disjunct does not
+--     fire, the gate governs the bucket, and if the gate withholds it the row
+--     is ABSENT rather than falling back to $1 (a regression dressed as a fix).
+--   * base volume ENTIRELY UNPRICED -> pw = 0, so the disjunct DOES fire and
+--     the bucket publishes the measured rate or the $1 fallback, method 'peg',
+--     share 1 — measured with 100,000 units of eligible unpriced USDC base
+--     volume. Not a regression (pre-0147 that bucket had sum(w) = 0 and took
+--     the same fallback), but the coverage row then reads `priced` while none
+--     of the traded volume was priced. Making those buckets ABSENT instead
+--     means `peg_present = 1 AND ew = 0`; that is a behaviour change, it needs
+--     a decision, and phase 1 deliberately did not take it.
 -- ⚠️ This is the WITHHOLDING rule, not the arithmetic guard. The guard lives
 -- inside the CAST above, because a `nullIf` inside a non-Nullable CAST
 -- publishes Decimal128::MIN or raises code 349 depending on which expression
@@ -1025,10 +1051,15 @@ FROM
         if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
         a.contract_address AS contract_address,
         p.timestamp        AS bucket,
-        -- ONE priced predicate (task 0147, D-01). This is `/ohlcv`'s `valid`
-        -- for the SAME row (queries_ch.rs::usd_projection), spelled the same
-        -- way: the shared 1e-12 precision floor on BOTH price columns, a
-        -- price-forming trade, a price-forming weight, and convertibility.
+        -- ONE priced predicate (task 0147, D-01): `/ohlcv`'s `valid` for the
+        -- SAME row (queries_ch.rs::usd_projection) PLUS a positive
+        -- price-forming WEIGHT. The shared terms are the 1e-12 precision floor
+        -- on BOTH price columns, a price-forming trade and convertibility;
+        -- `p.pf_volume > 0` is the extra one (tasks 0171/0198), and it is here
+        -- because this surface WEIGHTS by that column and `/ohlcv` does not —
+        -- a zero-weight row cannot move a weighted mean, but it CAN empty the
+        -- denominator. Decided by brief D-01, so the two are the same rule and
+        -- not the same expression: do not call them identical.
         -- Pinned against prices-api by
         -- views_sql_every_weighted_surface_spells_the_one_priced_predicate.
         (p.close >= toDecimal128('0.000000000001', 14)
@@ -1054,6 +1085,9 @@ FROM
         -- CAST(asset_kind AS String) exactly as arm B's rate subquery does.
         -- ⚠️ Membership is RETROACTIVE: a bucket stops reading `unpriceable`
         -- the moment a rate appears for its quote leg. Accepted by ADR 0292.
+        -- ⚠️ This flag is the QUOTE-SET half of the denominator only. The
+        -- weight below is `is_priced OR is_eligible`, because a row we DID
+        -- price is eligible whatever its quote leg is — see the note on `rew`.
         (p.quote_asset_id IN
          (
              SELECT e.asset_id
@@ -1343,10 +1377,20 @@ GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket
 -- convertible volume is most of what traded AND is worth something absolute.
 -- The peg disjunct comes FIRST and is not subject to the gate: arm B's
 -- placeholder has ew = 0 and pw = 0 by construction, so a naive `ew > 0`
--- would delete USDC's fallback row. A peg member that ALSO trades as a base
--- has pw > 0, so the peg disjunct does not fire for it and the gate governs
--- it — and if the gate withholds it, the row is ABSENT rather than falling
--- back to $1, which would be a regression dressed as a fix.
+-- would delete USDC's fallback row. It tests `pw = 0` — NO PRICED WEIGHT —
+-- and not "no traded weight", which splits a peg member that ALSO trades as a
+-- base into two cases:
+--   * base volume PARTLY OR WHOLLY PRICED -> pw > 0, the disjunct does not
+--     fire, the gate governs the bucket, and if the gate withholds it the row
+--     is ABSENT rather than falling back to $1 (a regression dressed as a fix).
+--   * base volume ENTIRELY UNPRICED -> pw = 0, so the disjunct DOES fire and
+--     the bucket publishes the measured rate or the $1 fallback, method 'peg',
+--     share 1 — measured with 100,000 units of eligible unpriced USDC base
+--     volume. Not a regression (pre-0147 that bucket had sum(w) = 0 and took
+--     the same fallback), but the coverage row then reads `priced` while none
+--     of the traded volume was priced. Making those buckets ABSENT instead
+--     means `peg_present = 1 AND ew = 0`; that is a behaviour change, it needs
+--     a decision, and phase 1 deliberately did not take it.
 -- ⚠️ This is the WITHHOLDING rule, not the arithmetic guard. The guard lives
 -- inside the CAST above, because a `nullIf` inside a non-Nullable CAST
 -- publishes Decimal128::MIN or raises code 349 depending on which expression
@@ -1367,21 +1411,48 @@ WHERE (peg_present = 1 AND pw = 0)
 -- against, and a status.
 --
 --   status = priced       -- the series publishes this bucket
---          | pending      -- eligible volume exists, but the share or the
---                         --   absolute floor is not met. PENDING ENRICHMENT,
---                         --   not unpriceable: enrich the rest of the bucket
---                         --   and it publishes.
---          | unpriceable  -- no eligible volume at all — every row of the
---                         --   bucket is quoted in an asset we have no USD path
---                         --   for. RETROACTIVE: this flips to `pending` the
---                         --   moment a prices.usd_rate row appears for that
---                         --   quote identity (ADR 0292).
+--          | pending      -- eligible price-forming volume exists, but the
+--                         --   share or the absolute floor is not met. PENDING
+--                         --   ENRICHMENT, not unpriceable: enrich the rest of
+--                         --   the bucket and it publishes.
+--          | unpriceable  -- NO ELIGIBLE PRICE-FORMING VOLUME IN THE BUCKET —
+--                         --   `sum(rew) = 0`, i.e. the pf_volume of every row
+--                         --   we could in principle price sums to zero.
+--                         --   TWO different buckets read this one word:
+--                         --     * NO USD PATH — every row is quoted in an
+--                         --       asset we cannot price. RETROACTIVE: this
+--                         --       one flips to `pending` the moment a
+--                         --       prices.usd_rate row appears for that quote
+--                         --       identity (ADR 0292).
+--                         --     * NO PRICE-FORMING VOLUME — the quote IS
+--                         --       eligible (canonical USDC, even), but every
+--                         --       candle of the bucket is stroop-dust, so
+--                         --       pf_volume sums to 0 and there is no
+--                         --       population for a share to be OF. No
+--                         --       usd_rate row will ever change this verdict;
+--                         --       only a real fill will. Task 0286 created
+--                         --       this class deliberately — post-0286 it is
+--                         --       ordinary, not exotic.
+--                         --   So the word means "nothing here we could price",
+--                         --   NOT "no USD path". Read `pf_volume` on the
+--                         --   candles to tell the two apart; the status word
+--                         --   does not.
 --
 -- ⚠️ A PEG-ARM bucket reads `priced` with `priced_volume_share = 1` and
 -- `priced_volume_usd = 0`. Its value comes from the measured rate (or the $1
 -- fallback), not from traded weight, so there is no traded population for the
 -- share to describe and the gate does not apply to it. Read `method` on the
 -- series view, not the share, to tell those buckets apart.
+--
+-- ⚠️ The peg arm is chosen on `pw = 0` — NO PRICED WEIGHT — not on `ew = 0`,
+-- so a peg member that ALSO trades as a base with its base volume entirely
+-- UNPRICED lands here too: it reads `priced` with share 1 while none of its
+-- traded volume was priced. Measured on 26.3.10.60: 100,000 units of eligible,
+-- entirely-unpriced USDC base volume publishes 1/'peg' and reads
+-- `priced`/share 1 here. Not a regression — pre-0147 that bucket had
+-- sum(w) = 0 and took the same fallback — but the share on such a row is
+-- describing the PEG statement about the identity, not the traded population
+-- beside it. `priced_volume_usd = 0` is the tell.
 --
 -- ⚠️ `priced_volume_share` is never NULL here either (D-06): a bucket with no
 -- eligible volume reads a literal 0, because BE renders a NULL as a dash and
@@ -1432,10 +1503,15 @@ FROM
         if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
         a.contract_address AS contract_address,
         p.timestamp        AS bucket,
-        -- ONE priced predicate (task 0147, D-01). This is `/ohlcv`'s `valid`
-        -- for the SAME row (queries_ch.rs::usd_projection), spelled the same
-        -- way: the shared 1e-12 precision floor on BOTH price columns, a
-        -- price-forming trade, a price-forming weight, and convertibility.
+        -- ONE priced predicate (task 0147, D-01): `/ohlcv`'s `valid` for the
+        -- SAME row (queries_ch.rs::usd_projection) PLUS a positive
+        -- price-forming WEIGHT. The shared terms are the 1e-12 precision floor
+        -- on BOTH price columns, a price-forming trade and convertibility;
+        -- `p.pf_volume > 0` is the extra one (tasks 0171/0198), and it is here
+        -- because this surface WEIGHTS by that column and `/ohlcv` does not —
+        -- a zero-weight row cannot move a weighted mean, but it CAN empty the
+        -- denominator. Decided by brief D-01, so the two are the same rule and
+        -- not the same expression: do not call them identical.
         -- Pinned against prices-api by
         -- views_sql_every_weighted_surface_spells_the_one_priced_predicate.
         (p.close >= toDecimal128('0.000000000001', 14)
@@ -1461,6 +1537,9 @@ FROM
         -- CAST(asset_kind AS String) exactly as arm B's rate subquery does.
         -- ⚠️ Membership is RETROACTIVE: a bucket stops reading `unpriceable`
         -- the moment a rate appears for its quote leg. Accepted by ADR 0292.
+        -- ⚠️ This flag is the QUOTE-SET half of the denominator only. The
+        -- weight below is `is_priced OR is_eligible`, because a row we DID
+        -- price is eligible whatever its quote leg is — see the note on `rew`.
         (p.quote_asset_id IN
          (
              SELECT e.asset_id
@@ -1615,10 +1694,15 @@ FROM
         if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
         a.contract_address AS contract_address,
         p.timestamp        AS bucket,
-        -- ONE priced predicate (task 0147, D-01). This is `/ohlcv`'s `valid`
-        -- for the SAME row (queries_ch.rs::usd_projection), spelled the same
-        -- way: the shared 1e-12 precision floor on BOTH price columns, a
-        -- price-forming trade, a price-forming weight, and convertibility.
+        -- ONE priced predicate (task 0147, D-01): `/ohlcv`'s `valid` for the
+        -- SAME row (queries_ch.rs::usd_projection) PLUS a positive
+        -- price-forming WEIGHT. The shared terms are the 1e-12 precision floor
+        -- on BOTH price columns, a price-forming trade and convertibility;
+        -- `p.pf_volume > 0` is the extra one (tasks 0171/0198), and it is here
+        -- because this surface WEIGHTS by that column and `/ohlcv` does not —
+        -- a zero-weight row cannot move a weighted mean, but it CAN empty the
+        -- denominator. Decided by brief D-01, so the two are the same rule and
+        -- not the same expression: do not call them identical.
         -- Pinned against prices-api by
         -- views_sql_every_weighted_surface_spells_the_one_priced_predicate.
         (p.close >= toDecimal128('0.000000000001', 14)
@@ -1644,6 +1728,9 @@ FROM
         -- CAST(asset_kind AS String) exactly as arm B's rate subquery does.
         -- ⚠️ Membership is RETROACTIVE: a bucket stops reading `unpriceable`
         -- the moment a rate appears for its quote leg. Accepted by ADR 0292.
+        -- ⚠️ This flag is the QUOTE-SET half of the denominator only. The
+        -- weight below is `is_priced OR is_eligible`, because a row we DID
+        -- price is eligible whatever its quote leg is — see the note on `rew`.
         (p.quote_asset_id IN
          (
              SELECT e.asset_id

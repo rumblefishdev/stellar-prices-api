@@ -104,6 +104,39 @@ history:
       PLACEHOLDERS** carrying a phase-2 marker pinned by a test; the task stays
       `active` until phase 2 measures them on prod (≥ 2026-09-29) and the
       rollout runs. The task's PR still waits for #337 (0216).
+  - date: "2026-09-22"
+    status: active
+    who: akot
+    note: >
+      **Phase-1 code review applied** (2 further commits, still local, still
+      not deployed; 8 on the branch). One latent correctness hole and four
+      doc/test gaps. FIXED: the share's denominator now weights on
+      `is_priced OR is_eligible`, so `priced ⊆ eligible` holds BY CONSTRUCTION
+      at both grains and on both surfaces — `is_priced` admits a row on
+      `close_usd != close` for ANY quote while `is_eligible` names a quote set,
+      and without the `OR` a priced row outside that set went into the
+      numerator only (measured on 26.3.10.60: `priced_volume_share = 5000000`
+      in a `Decimal(10, 6)` column, and a fully-priced $5,000 bucket reading
+      `unpriceable`). Unreachable through today's write path; reachable the
+      moment a symbol is tracked without being made eligible (0173's shape).
+      New IT `a_priced_row_outside_the_eligible_quote_set_stays_inside_the_share`
+      (RED before the fix), plus two text tests the review found missing:
+      arm A is now pinned IDENTICAL between each series view and its coverage
+      view (it is spelled four times, nothing compared the copies), and the
+      hand-synced USDT/USDC issuer literals are pinned against the crate consts
+      by value AND by count (0172/0173's class). DOC corrections, no behaviour
+      change: `unpriceable` redefined as "no eligible PRICE-FORMING volume"
+      (the dust-only bucket reads it too, and no `usd_rate` row will ever move
+      that one); the peg-disjunct sentence corrected to the shipped `pw = 0`
+      (a peg member with entirely-unpriced base volume still falls back to the
+      peg and reads `priced`/share 1); the predicate is `/ohlcv`'s `valid` PLUS
+      `pf_volume > 0`, never "identical to" it; guardrails row 80 now quotes
+      the SHIPPED CAST text. Counts after the fixes: **68** `prices-clickhouse`
+      lib, **23** `views_it` `#[ignore]`, 224 `prices-api` lib, 43 `ohlcv_it`
+      `#[ignore]`. Still open and unchanged: both gate constants are phase-2
+      placeholders, nothing is deployed, and `current.sql`'s `src_is_live` /
+      `src_volume` dust counting is **unowned — needs a task** (no follow-up
+      task exists; guardrails row 84 says so rather than pointing at one).
 ---
 
 # Volume-coverage gate for `price_usd_series` / `price_usd_series_1h`
@@ -211,26 +244,55 @@ identity/bucket, and `price_usd_series_coverage` reads
 bucket publishes at **0.00749394** with share `1` and `status = 'priced'`.
 
 ⚠️ 0.00749394, not 0.0065: that is the bucket's volume-weighted mean over its
-now-complete population. The dust print is a real trade and keeps its 0.0764 %
-of the weight, worth +0.001 on the published price. The residual is the point —
-before the gate the same print WAS the price, at 200x the truth.
+now-complete population. The dust print is a real trade and keeps its **0.0763 %**
+of the weight (0.764 / 1000.764 = 0.07634 %), worth +0.001 on the published
+price. The residual is the point — before the gate that same print WAS the
+price: 1.3085 is **201x** the 0.0065 of the leg that carried the volume, and
+**175x** the bucket's own enriched weighted mean of 0.00749394.
 
 ### What shipped
 
 1. **One priced predicate, spelled once.** Arm A and `usd_reference*` use
-   `/ohlcv`'s `valid` for the same row: `close >= 1e-12 AND close_usd >= 1e-12
-   AND pf_trade_count > 0 AND pf_volume > 0`, plus convertibility (quote is the
-   canonical USDC, or `close_usd != close`). `usd_reference*` take the same
-   floor and pf terms minus the USD leg, which they do not read.
+   `/ohlcv`'s `valid` for the same row **plus a positive price-forming weight**:
+   `close >= 1e-12 AND close_usd >= 1e-12 AND pf_trade_count > 0 AND
+   pf_volume > 0`, plus convertibility (quote is the canonical USDC, or
+   `close_usd != close`). `pf_volume > 0` is the term `/ohlcv`'s `valid` does
+   NOT have (decided by brief D-01): these surfaces WEIGHT by that column and
+   `/ohlcv` does not, so a zero-weight row cannot move their mean but can empty
+   their denominator. Same rule, not the same expression — do not call the two
+   identical. `usd_reference*` take the same floor and pf terms minus the USD
+   leg, which they do not read.
 2. **`pf_volume` weights, and the population is explicit.** Arm A no longer
    filters: it reads every candle of the bucket and sums conditionally, so the
    unpriced rows are in the denominator. `priced_volume_share = Σ pf_volume
-   (priced) / Σ pf_volume(eligible)`, appended LAST after `method`, never NULL.
+   (priced) / Σ pf_volume(eligible OR priced)`, appended LAST after `method`,
+   never NULL. The denominator's `OR priced` is what makes `priced ⊆ eligible`
+   true BY CONSTRUCTION: `is_priced` admits a row on `close_usd != close` for
+   any quote while `is_eligible` names a quote set, so without it a priced row
+   outside that set lands in the numerator only and the ratio leaves [0, 1]
+   (measured: 5000000 in a `Decimal(10, 6)` column). Found in review, fixed
+   with a test.
 3. **Publish iff `share >= X` AND `priced_volume_usd >= FLOOR_USD`**, else the
    bucket is ABSENT with a row in `price_usd_series_coverage{,_1h}` saying
    `priced | pending | unpriceable`. Eligibility is computed in the view (no new
    table) and is retroactive per ADR 0292. The peg arm is outside the gate and
    reads `priced` with share 1.
+   ⚠️ **`unpriceable` means "no eligible PRICE-FORMING volume in the bucket"**,
+   which is two different buckets under one word: no USD path for the quote
+   (retroactive — a `usd_rate` row flips it to `pending`), OR an eligible quote
+   whose every candle is stroop-dust, so `pf_volume` sums to 0 and no rate row
+   will ever move it. Post-0286 the second is ordinary, not exotic — it is the
+   class 0286 created. Read `pf_volume` to tell them apart; the status word
+   does not.
+   ⚠️ **The peg disjunct tests `pw = 0` — no PRICED weight — not `ew = 0`.** So
+   a peg member that also trades as a base falls under the gate only when some
+   of that base volume is priced; with its base volume ENTIRELY unpriced it
+   still takes the peg fallback and reads `priced` / share 1 on the coverage
+   view (measured: 100,000 eligible unpriced units). Not a regression — the
+   pre-0147 bucket had `sum(w) = 0` and took the same fallback — but the share
+   on such a row describes the peg statement, not the traded population.
+   Making those absent means `peg_present = 1 AND ew = 0`: a behaviour change,
+   not phase 1's to take.
 
 ### What phase 2 owes
 
