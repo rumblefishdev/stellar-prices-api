@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn embedded_list_parses_with_the_seeded_entries() {
         let list = AllowList::embedded().expect("embedded allow-list parses");
-        assert_eq!(list.contract.len(), 18, "{list:?}");
+        assert_eq!(list.contract.len(), 24, "{list:?}");
         assert_eq!(list.wasm.len(), 3, "{list:?}");
         // Every family-wide entry is temporary and names the task that ends it:
         // SushiSwap V3 (0290) and the Comet BLND/USDC pool (0300).

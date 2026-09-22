@@ -56,6 +56,12 @@ wasm = "9677074ae7fce0e8c41747377da02ebf4e1cf06902c60c4fe64ea0ee6aab4545"
 reason = "SushiSwap router; same `swap` topic as its pools, and indexing it double-counts"
 task = "0290"
 
+[[contract]]
+id = "CD3YDAM5QV235R4PNPJB4J2STZRJGMSB6KR3R2VATKULSLHZNI5KWLPH"
+wasm = "800c5441a63701438301f08125ea0f3c0f0656cbaaa3f6b954f50c09a878a9ac"
+reason = "SushiSwap V3 router, older (init_router, swap_exact_input); its swap repeats the pool's; 1603/1603 txs also hold a SushiSwap V3 pool swap"
+task = "0290"
+
 # --- factories (permanent) ---------------------------------------------------
 
 [[contract]]
@@ -114,7 +120,37 @@ wasm = "cbbb1bde44acab147b7e2eece89350ed37fe79f33c4b8938fba89c2583a6b52f"
 reason = "LI.FI swap/bridge aggregator (lifi_swap); routes through pools, prices nothing itself"
 task = "0100"
 
+[[contract]]
+id = "CAJDT2GIDPCRX7HSTB2U2TBNRL6Y4YDO2ZXMJTCBFCFVWEPLW7RCIZ3F"
+wasm = "6c6224428fdbfd6194d861f5948298183630985eb9dac67646b7bf63b8f793fb"
+reason = "Blend flash-loan bot (exec_op) swapping through the Aquarius router; 30/30 txs also hold a registered pool's swap"
+task = "0100"
+
+[[contract]]
+id = "CCC27LQ43TXGZUTTKFYV2ZLSKX3MMVWCAZDFCEERQHY67C7EQBWB2UKK"
+wasm = "1f7949915027dfc31b649264be5997ad30c9d9052f570cb46ef0b8e2d5323dd8"
+reason = "Blend flash-loan bot (exec_op) swapping through the Aquarius router, older build of CAJDT2GI…; 118/118 txs also hold a registered pool's swap"
+task = "0100"
+
 # --- non-AMM emitters (permanent; phase-1 classification, task 0100) ---------
+
+[[contract]]
+id = "CAYDBAJBA6G2HOZF5IH4MVIXG27FABWYV3UDO5Q2CPOCFUKLXSQAL66S"
+wasm = "d4b4976b4fe214170a21aa11b70274a54877160e05ca88af0f41246956170ff4"
+reason = "USDM1->USDM0 issuer conversion (swap/process_swap burns USDM1, mints USDM0); predecessor of CDWTSHMD…, not a market; 0/462 txs hold a registered pool's swap"
+task = "0100"
+
+[[contract]]
+id = "CAOTMWRKNMV5GWSVOMWCTCM5ZZFEQFUSWNLCZXA2KAXD4YG5A4DIPNFT"
+wasm = "a757a1ed02cb764a3d76d9c6a82fb3ab67fc1e5ccf980966f5a89a0bb280949c"
+reason = "Allbridge Core bridge pool (swap_to_v_usd/swap_from_v_usd): USDC against the virtual cross-chain vUSD, no on-chain pair to price; 0/355 txs hold a registered pool's swap"
+task = "0100"
+
+[[contract]]
+id = "CAE2G5Z77UP7GYPYGFOWFGW7C7J6I4YP2AFGSADRKQY62SYUFLPNFTXL"
+wasm = "a6c1acc6e367e46535733ce8a7320c718616ed42f762cf2f1a0aa77ac6e056f6"
+reason = "Circle CCTP V2 TokenMessengerMinter; swap_minter_config_set is an admin config event, it trades nothing; 0/27 txs hold a registered pool's swap"
+task = "0100"
 
 [[contract]]
 id = "CDWTSHMDQO5NOWVBWMBUKBOXXUIWSQZVRWOOS4WIHOA63WEAGH66SG76"
