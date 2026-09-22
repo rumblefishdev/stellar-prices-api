@@ -251,8 +251,10 @@ the portal is closed** (see `AppConfig::load_portal_oauth`), so creating it does
 not change any behaviour, and forgetting to create it before opening the portal
 closes the portal again at the _next_ cold start — `/config` answers
 `enabled: false` and the api-handler logs `portal closed at cold start` naming
-`PORTAL_OAUTH_SECRET_NAME` — rather than silently serving a broken sign-in
-(`AppConfig::load_portal_or_close`). `/v1` is unaffected either way.
+`PORTAL_OAUTH_SECRET_NAME`, which also pages as
+`prices-production-api-handler-portal-closed` (task 0249) — rather than
+silently serving a broken sign-in (`AppConfig::load_portal_or_close`). `/v1`
+is unaffected either way.
 
 ## 4. Verify locally before opening production
 
@@ -436,9 +438,12 @@ ADR 0008); task 0194's PR review is where that changed, and the reasoning is on
 `AppConfig::load_portal_or_close`. The shape is still "found only at the moment
 of opening", as with the OAuth secret in §3, and the alternative it avoids is
 still a portal with a key button that answers `503` — a closed portal answers
-before any button renders. What it costs: nothing pages on it (the api-handler
-has no error alarm), so the `/config` probe after the deploy is the check, not
-an optional confirmation.
+before any button renders. What it costs: the closure pages as
+`prices-production-api-handler-portal-closed` (task 0249), but only when a
+cold start happens, so the `/config` probe after the deploy stays the check
+that runs _now_, not an optional confirmation; the alarm is what catches a
+closure in a LATER cold start (a throttled Parameter Store read in a
+scale-out).
 
 While the portal is closed the handler reads neither, so nothing here changes
 any behaviour until the flag moves.

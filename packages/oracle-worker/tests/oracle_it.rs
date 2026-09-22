@@ -6,9 +6,13 @@
 //!   cargo test -p oracle-worker --test oracle_it -- --ignored --nocapture
 //!
 //! Override the endpoint with SOROBAN_RPC_URL if the default is rate-limited.
+//!
+//! Recorded in the `#[ignore]` inventory (tools/scripts/ignored-tests.sh) as a
+//! public-network test and deliberately never run by CI: third-party uptime
+//! must not gate a PR, and a developer can fix none of it (task 0275).
 
 #[tokio::test]
-#[ignore = "read-only public network call to Soroban RPC + Reflector"]
+#[ignore = "requires public network — third-party uptime; never gates a PR"]
 async fn fetch_real_xlm_price_from_reflector() {
     let http = reqwest::Client::builder().build().unwrap();
     let rpc = std::env::var("SOROBAN_RPC_URL")

@@ -1,7 +1,8 @@
 //! Task 0286 / ADR 0287 — a real candle, through the real writer, into a real
 //! ClickHouse, read back on all eighteen columns.
 //!
-//!     cargo test -p prices-ingest-core --test candle_write_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p prices-ingest-core --test candle_write_it -- --ignored --test-threads=1
 //!
 //! The property this exists for cannot be seen from either side alone. The
 //! clickhouse crate routes an INSERT by struct field NAME, so a candle column
@@ -84,7 +85,7 @@ fn approx(got: f64, want: f64, what: &str) {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_written_candle_round_trips_every_column_including_the_pf_ones() {
     let db = "it_candle_write";
     let admin = Client::default().with_url(ch_url());

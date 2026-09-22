@@ -55,3 +55,9 @@ rustls-pemfile = { version = "2", optional = true }
 rustls-pki-types = { version = "1", optional = true }
 webpki-roots = { version = "1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json"], optional = true }
+
+[dev-dependencies]
+# Test-only: the AMM pre-roll's `source IN (...)` filter is pinned against the
+# canonical `Venue` list, so a new venue cannot be added without the filter
+# moving with it (task 0290 review).
+extractors-core = { path = "../extractors-core" }

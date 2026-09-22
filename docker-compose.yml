@@ -14,6 +14,12 @@ services:
     environment:
       CLICKHOUSE_DB: prices
       CLICKHOUSE_USER: default
+      # LOAD-BEARING, not a dev convenience: with CLICKHOUSE_USER=default and
+      # no password, this is the only clause in the image's entrypoint that
+      # rewrites the `default` user with `::/0` networks and an empty password,
+      # i.e. reachable from OUTSIDE the container. Delete it and `default` is
+      # confined to the container's loopback — every ClickHouse integration
+      # test (CI, task 0275) fails at connect time.
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     healthcheck:
       test: ['CMD', 'clickhouse-client', '--query', 'SELECT 1']

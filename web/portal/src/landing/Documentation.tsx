@@ -68,11 +68,12 @@ const DOCS: readonly Doc[] = [
   {
     icon: exampleRequestsIcon,
     title: 'Example Requests',
-    body: 'Copy-ready curl commands for every endpoint. Test against the live API from your terminal.',
+    body: 'Copy-ready curl commands for the four calls to make first. Run them against the live API from your terminal.',
     // The reference generates examples from the schemas and deliberately has
     // no "try it" (task 0126 owns that decision). The curl commands this body
-    // promises are the quick start's first request.
-    href: `${QUICKSTART}#first-request`,
+    // promises are the quick start's example queries (task 0163); "every
+    // endpoint" was the frame's line, and the page keeps four.
+    href: `${QUICKSTART}#examples`,
   },
   {
     icon: openApiIcon,
@@ -94,9 +95,10 @@ const DOCS: readonly Doc[] = [
   {
     icon: rateLimitsIcon,
     title: 'Rate Limits',
-    body: 'How throttling works, what headers to watch, and how to handle 429 responses gracefully.',
-    // The reference publishes the 429 response; what to DO about it — the
-    // headers, the backoff — is only written in the quick start.
+    body: 'How throttling works, what a 429 looks like, and how to back off when you get one.',
+    // The reference publishes the 429 response; what to DO about it is only
+    // written in the quick start. "What headers to watch" was the frame's
+    // line: the measured 429 carries no Retry-After (task 0233).
     href: `${QUICKSTART}#rate-limits`,
   },
 ];

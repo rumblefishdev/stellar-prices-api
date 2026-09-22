@@ -1,7 +1,7 @@
 //! APPEND-mode rollup durability test (task 0095).
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p prices-clickhouse --test rollup_append_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p prices-clickhouse --test rollup_append_it -- --ignored --test-threads=1
 //!
 //! This is the test the 0059 full-chain test *structurally could not be*.
 //! `rollup_chain_it.rs` deliberately anchors every row INSIDE the refresh window
@@ -136,7 +136,7 @@ async fn refresh_15m_until(client: &Client, db: &str, probe: &str, want: f64) {
 /// property replace mode violated in prod (task 0090): a replace-mode refresh
 /// swaps the whole target for just the window, deleting the old row.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn append_preserves_pre_rolled_history_outside_window() {
     let db = "it_append_durability";
     let admin = setup(db).await;
@@ -223,7 +223,7 @@ async fn append_preserves_pre_rolled_history_outside_window() {
 /// rolled `_15m` bucket carries the FULL three-minute volume, not a truncated
 /// slice.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn aligned_window_rebuilds_oldest_bucket_complete() {
     let db = "it_append_alignment";
     let admin = setup(db).await;
@@ -276,7 +276,7 @@ async fn aligned_window_rebuilds_oldest_bucket_complete() {
 /// tie-break is not contractual. `sum(version)` strictly increases (one addend
 /// rises), so the corrected row wins deterministically.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn sum_version_wins_early_minute_correction() {
     let db = "it_append_version_tie";
     let admin = setup(db).await;

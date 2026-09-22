@@ -22,30 +22,58 @@ use crate::error::EventsBackfillError;
 
 /// One `soroban_events` row joined to its ledger close time. `topics_xdr` /
 /// `data_xdr` are the typed-JSON SCVal strings BE persists (misnamed — they are
-/// JSON, not XDR). `contract_id` / `transaction_id` are BE's Int64 surrogates;
-/// `contract_id` is mapped back to a `C…` strkey via [`resolve_contract_ids`].
+/// JSON, not XDR). `contract_id` is BE's Int64 surrogate, mapped back to a
+/// `C…` strkey via [`resolve_contract_ids`].
+///
+/// ⚠️ `transaction_id` is NO LONGER BE's surrogate. BE dropped that column from
+/// `soroban_events` on 2026-09-17 (task 0304); the read now SYNTHESISES a
+/// stable per-transaction key from `(ledger_sequence, transaction_index)`,
+/// which is all any consumer needs — `RawSorobanEvent::transaction_id` is
+/// documented as "only a grouping key — any stable per-transaction identifier
+/// works".
 ///
 /// Field order MUST match the `SELECT` column order below — the `Row` derive
 /// binds positionally. `EVENT_ROW_COLUMNS` below pins the two together.
+///
+/// ⚠️ And field WIDTH must match the column's. The client sends bare
+/// `RowBinary` (clickhouse-0.13 `query.rs:88`): no names-and-types header, so
+/// a field narrower or wider than its column is not an error — the cursor
+/// reads the wrong number of bytes and every field after it decodes garbage.
+/// BE widened `event_index` from `Int16` to `UInt32` in the same 2026-09-17
+/// change that moved `application_order` onto the row, which is exactly this.
+/// Every numeric column is therefore projected through an EXPLICIT cast to the
+/// field's type, pinned by `every_numeric_column_off_the_event_row_is_cast`: a
+/// future widening then truncates one visible value instead of shifting the
+/// whole row. Note that `chq` (raw SQL) never exercises RowBinary, so a
+/// production spot check cannot catch a width drift — only the cast can.
 #[derive(Debug, Row, Deserialize)]
 pub struct EventRow {
     pub contract_id: i64,
     pub transaction_id: i64,
     pub ledger_sequence: u32,
-    pub event_index: i16,
+    /// The event's operation within its transaction — a column BE added in the
+    /// same 2026-09-17 change (task 0304). Read because it is part of the fill
+    /// key ADR 0287 D1 defines, and because the same change widened
+    /// `event_index`, which is what a per-OPERATION numbering would need: were
+    /// `event_index` to restart at each operation, `(transaction_id,
+    /// event_index)` alone would collide across two operations of one
+    /// transaction and `run::read_chunk` would drop the second event as an RMT
+    /// double. Keying on the operation too is correct under either numbering.
+    pub operation_index: u16,
+    /// ⚠️ `UInt32` on the server since 2026-09-17, NOT the `Int16` it was
+    /// (task 0304). See the width rule above.
+    pub event_index: u32,
     /// Ledger close time, unix seconds — the candle-minute bucketing key.
     pub closed_at: i64,
     pub topics_xdr: String,
     pub data_xdr: String,
-    /// The transaction's position in its ledger's apply order, from BE's
-    /// `default.transactions` (task 0286 D1). 0 when the join found nothing —
-    /// read it together with `apply_order_found`, never on its own.
+    /// The transaction's position in its ledger's apply order (task 0286 D1),
+    /// read straight off the event row since BE's 2026-09-17 change (task
+    /// 0304). There is no join and therefore no "found" marker any more: the
+    /// column is non-nullable, so every row carries a real value. It is `Int16`
+    /// and a NEGATIVE value is still not a position — see
+    /// `run::resolve_transaction_index`.
     pub application_order: i16,
-    /// 1 when the apply order above came from a real joined row, 0 when the
-    /// transaction could not be resolved. A LEFT join yields the column's type
-    /// DEFAULT, not NULL, for an unmatched row, so a bare 0 in
-    /// `application_order` is ambiguous without this marker.
-    pub apply_order_found: u8,
 }
 
 /// [`EventRow`]'s fields, in order, as the chunk read must alias them. The
@@ -58,12 +86,12 @@ pub(crate) const EVENT_ROW_COLUMNS: [&str; 9] = [
     "contract_id",
     "transaction_id",
     "ledger_sequence",
+    "operation_index",
     "event_index",
     "closed_at",
     "topics_xdr",
     "data_xdr",
     "application_order",
-    "apply_order_found",
 ];
 
 /// Resolve AMM pool `C…` strkeys to BE's Int64 `soroban_contracts.id` surrogates.
@@ -108,25 +136,32 @@ pub async fn resolve_contract_ids(
 
 /// Open a **streaming** cursor over all events emitted by the given AMM contracts
 /// in `[start, end]`, ordered by `(ledger_sequence, application_order,
-/// transaction_id, event_index)` so the run can group them by ledger then
+/// transaction_index, event_index)` so the run can group them by ledger then
 /// transaction with per-tx event order preserved, in the real APPLY order
 /// (task 0286 D1 — `event_index` alone restarts in every transaction). Rows are pulled one at a time (`cursor.next()`), so peak memory is
 /// one ledger's events — not the whole chunk (which, filtered to AMM pools, still
 /// includes Phoenix's 8 events/swap plus reserves/transfers and can be millions
 /// of rows on a dense range).
 ///
-/// All three source tables are ReplacingMergeTree; both joins collapse their
-/// build side to one row per key via `GROUP BY` (`sequence` for `ledgers`, `id`
-/// for `transactions`), and `soroban_events` duplicates (identical
-/// `(contract_id, ledger, tx, event_index)` rows) are removed adjacently in the
-/// run loop — together deduping the RMT doubling without a full-table `FINAL`.
+/// ⚠️ **`application_order` used to come from a `LEFT JOIN default.transactions`
+/// and no longer does** (task 0304). BE put the column on the event row itself
+/// on 2026-09-17 and dropped `soroban_events.transaction_id` in the same change,
+/// which killed the join's `ON` clause outright (`Code: 47`). Removing the join
+/// also removes everything that existed to defend it: the `GROUP BY id` against
+/// a build side with two rows per `id` MULTIPLYING the probe row and repricing a
+/// transaction's events twice (task 0286 CR-01), the `ifNull` null-framing, and
+/// the "apply order not found" fallback. Do not reintroduce it — the column is
+/// right there.
 ///
-/// The `GROUP BY id` is load-bearing, not tidiness: `default.transactions` is
-/// keyed `(ledger_sequence, application_order, id)`, so `FINAL` collapses only
-/// rows that already agree on `application_order`. A LEFT JOIN on a build side
-/// with two rows for one `id` MULTIPLIES the probe row, and every AMM event of
-/// that transaction would be repriced twice — double volume, double trade
-/// count, silently (task 0286 CR-01).
+/// Both source tables are ReplacingMergeTree; the surviving join collapses its
+/// build side to one row per `sequence` via `GROUP BY`, and `soroban_events`
+/// duplicates (identical `(contract_id, ledger, tx, event_index)` rows) are
+/// removed adjacently in the run loop — together deduping the RMT doubling
+/// without a full-table `FINAL`.
+///
+/// `transaction_id` is SYNTHESISED as `ledger_sequence * 100000 +
+/// transaction_index`: BE's surrogate is gone, and every consumer of this field
+/// uses it only to group a transaction's events together.
 ///
 /// The join is a **LEFT** join with `ifNull(closed_at, 0)`: an event whose ledger
 /// is absent from `default.ledgers` still comes back (with `closed_at = 0`) so the
@@ -158,15 +193,16 @@ pub(crate) fn chunk_sql(contract_ids: &[i64], start: u32, end: u32) -> String {
 
     format!(
         "SELECT \
-            e.contract_id AS contract_id, \
-            e.transaction_id AS transaction_id, \
+            toInt64(e.contract_id) AS contract_id, \
+            toInt64(e.ledger_sequence) * 100000 + toInt64(e.transaction_index) \
+                AS transaction_id, \
             toUInt32(e.ledger_sequence) AS ledger_sequence, \
-            e.event_index AS event_index, \
+            toUInt16(e.operation_index) AS operation_index, \
+            toUInt32(e.event_index) AS event_index, \
             ifNull(l.closed_at, 0) AS closed_at, \
             e.topics_xdr AS topics_xdr, \
             e.data_xdr AS data_xdr, \
-            ifNull(t.application_order, 0) AS application_order, \
-            ifNull(t.found, 0) AS apply_order_found \
+            toInt16(e.application_order) AS application_order \
          FROM default.soroban_events e \
          LEFT JOIN ( \
             SELECT sequence, toInt64(min(toUnixTimestamp(closed_at))) AS closed_at \
@@ -174,23 +210,10 @@ pub(crate) fn chunk_sql(contract_ids: &[i64], start: u32, end: u32) -> String {
             WHERE sequence BETWEEN {start} AND {end} \
             GROUP BY sequence \
          ) l ON l.sequence = e.ledger_sequence \
-         LEFT JOIN ( \
-            SELECT id, \
-                   argMin(application_order, ledger_sequence) AS application_order, \
-                   toUInt8(1) AS found \
-            FROM default.transactions FINAL \
-            WHERE ledger_sequence BETWEEN {start} AND {end} \
-              AND id IN ( \
-                 SELECT DISTINCT transaction_id \
-                 FROM default.soroban_events \
-                 WHERE ledger_sequence BETWEEN {start} AND {end} \
-                   AND contract_id IN ({in_list}) \
-              ) \
-            GROUP BY id \
-         ) t ON t.id = e.transaction_id \
          WHERE e.ledger_sequence BETWEEN {start} AND {end} \
            AND e.contract_id IN ({in_list}) \
-         ORDER BY e.ledger_sequence, application_order, e.transaction_id, e.event_index"
+         ORDER BY e.ledger_sequence, e.application_order, e.transaction_index, \
+                  e.operation_index, e.event_index"
     )
 }
 
@@ -280,46 +303,59 @@ mod tests {
         chunk_sql(&[11, 22], 1000, 2000)
     }
 
-    /// Task 0286 D1. BE's `default.transactions` holds the apply order this
-    /// read has to carry; `default.soroban_events` does not. Without the join
-    /// every AMM fill of a ledger looks like it came from transaction 0 and the
-    /// candle closes on whichever event happened to have the highest index.
+    /// Task 0286 D1, as task 0304 left it. The apply order used to come from a
+    /// `LEFT JOIN default.transactions`; BE put it on the event row itself on
+    /// 2026-09-17 and dropped `soroban_events.transaction_id` in the same
+    /// change, which killed the join's `ON` clause (`Code: 47`).
+    ///
+    /// Reintroducing that join would not merely be redundant — it would bring
+    /// back the fan-out of CR-01, the null-framing and the found-marker, all of
+    /// which exist only to defend it. So this test forbids it rather than
+    /// requiring it.
     #[test]
-    fn chunk_sql_joins_the_transactions_apply_order() {
+    fn the_apply_order_comes_off_the_event_row_not_a_join() {
         let sql = sql();
         assert!(
-            sql.contains("LEFT JOIN") && sql.contains("default.transactions FINAL"),
-            "the apply order comes from default.transactions, FINAL (it is a ReplacingMergeTree)"
+            sql.contains("toInt16(e.application_order) AS application_order"),
+            "the apply order is a column on soroban_events since 2026-09-17"
+        );
+        assert!(
+            !sql.contains("default.transactions"),
+            "the transactions join is gone with BE's transaction_id column;              do not bring it back"
+        );
+        assert!(
+            !sql.contains("e.transaction_id"),
+            "soroban_events has no transaction_id column any more (task 0304)"
         );
         assert!(
             !sql.contains("INNER JOIN"),
-            "an unmatched transaction must degrade, never drop the event"
+            "an unmatched ledger must degrade, never drop the event"
         );
     }
 
     /// Task 0286 T-jiv-05. The memory limit is per query, and this file may not
-    /// use `SETTINGS` (readonly, code 164), so the ONLY bound is what the join
-    /// is allowed to read: the chunk's ledgers on both sides, and only the
-    /// transactions that actually emitted one of the chunk's AMM events.
+    /// use `SETTINGS` (readonly, code 164), so the ONLY bound is what the read
+    /// is allowed to touch: the chunk's ledgers on both sides of the surviving
+    /// `ledgers` join, and the chunk's AMM contracts on the probe side.
     #[test]
-    fn the_apply_order_join_is_bounded_on_both_sides() {
+    fn the_read_is_bounded_on_both_sides() {
         let sql = sql();
         let join = sql
-            .split("default.transactions FINAL")
+            .split("FROM default.ledgers")
             .nth(1)
-            .expect("transactions subquery");
-        let join = join.split(") t ON").next().unwrap_or(join);
+            .expect("ledgers subquery");
+        let join = join.split(") l ON").next().unwrap_or(join);
         assert!(
-            join.contains("ledger_sequence BETWEEN 1000 AND 2000"),
-            "the build side must be pruned by the transactions table's leading sort key"
-        );
-        assert!(
-            join.contains("default.soroban_events") && join.contains("contract_id IN (11,22)"),
-            "and restricted to transactions that emitted one of this chunk's AMM events"
+            join.contains("sequence BETWEEN 1000 AND 2000"),
+            "the build side must be pruned by the ledgers table's sort key"
         );
         assert!(
             sql.contains("e.ledger_sequence BETWEEN 1000 AND 2000"),
             "the probe side stays bounded too"
+        );
+        assert!(
+            sql.contains("e.contract_id IN (11,22)"),
+            "and filtered on the numeric contract ids, which prune by the primary index"
         );
     }
 
@@ -346,29 +382,27 @@ mod tests {
         assert_eq!(aliases, EVENT_ROW_COLUMNS.to_vec());
     }
 
-    /// CR-01, and the reason the sibling `ledgers` join is a `GROUP BY`
-    /// aggregate rather than a bare SELECT: a LEFT JOIN whose build side has
-    /// more than one row per key MULTIPLIES the probe row.
+    /// CR-01, which now has one join left to apply to: a LEFT JOIN whose build
+    /// side has more than one row per key MULTIPLIES the probe row, and every
+    /// AMM event of that ledger would be emitted twice, reach the extraction
+    /// seam twice and be dispatched into two ticks — double `volume_base`,
+    /// double `volume_quote`, double `trade_count`, silently. Same failure
+    /// class as task 0282.
     ///
-    /// `default.transactions` is a ReplacingMergeTree whose sort key is
-    /// `(ledger_sequence, application_order, id)`, so `FINAL` collapses only
-    /// rows that already AGREE on `application_order` — two rows for one `id`
-    /// with different apply orders both survive. Every AMM event of that
-    /// transaction would then be emitted twice, reach the extraction seam
-    /// twice, and be dispatched into two ticks: double `volume_base`, double
-    /// `volume_quote`, double `trade_count`, silently. That is the same
-    /// failure class task 0282 is fighting.
+    /// `default.ledgers` is a ReplacingMergeTree, so the `GROUP BY sequence` is
+    /// load-bearing rather than tidiness. (The `default.transactions` half of
+    /// this rule died with the join in task 0304.)
     #[test]
-    fn the_apply_order_join_yields_one_row_per_transaction() {
+    fn the_ledgers_join_yields_one_row_per_sequence() {
         let sql = sql();
         let join = sql
-            .split("default.transactions FINAL")
+            .split("FROM default.ledgers")
             .nth(1)
-            .expect("transactions subquery");
-        let join = join.split(") t ON").next().unwrap_or(join);
+            .expect("ledgers subquery");
+        let join = join.split(") l ON").next().unwrap_or(join);
         assert!(
-            join.contains("GROUP BY id") || join.contains("LIMIT 1 BY id"),
-            "the transactions build side must be collapsed to one row per id, \
+            join.contains("GROUP BY sequence") || join.contains("LIMIT 1 BY sequence"),
+            "the ledgers build side must be collapsed to one row per sequence, \
              or the join fans out and double-counts AMM volume: {join}"
         );
     }
@@ -377,21 +411,24 @@ mod tests {
     /// profile setting this file cannot override (it may not emit `SETTINGS` —
     /// readonly, code 164). Under it an unmatched LEFT JOIN column becomes
     /// `Nullable(...)`, RowBinary prefixes a null byte, and every field from
-    /// `application_order` onward decodes as garbage. The pre-existing
-    /// `ifNull(l.closed_at, 0)` is the record of someone hitting this already.
+    /// that column onward decodes as garbage.
+    ///
+    /// ⚠️ This applies to columns that come from a JOIN. After task 0304 only
+    /// `closed_at` does — `application_order` is projected straight off `e`, so
+    /// null-framing it would be noise, and wrapping a non-nullable column in
+    /// `ifNull` would hide a future schema change rather than surface it.
     #[test]
-    fn the_joined_columns_are_null_framed_like_their_sibling() {
+    fn the_joined_column_is_null_framed() {
         let sql = sql();
-        for projection in [
-            "ifNull(l.closed_at, 0) AS closed_at",
-            "ifNull(t.application_order, 0) AS application_order",
-            "ifNull(t.found, 0) AS apply_order_found",
-        ] {
-            assert!(
-                sql.contains(projection),
-                "every joined column must be null-framed: missing `{projection}`"
-            );
-        }
+        assert!(
+            sql.contains("ifNull(l.closed_at, 0) AS closed_at"),
+            "the one remaining joined column must be null-framed"
+        );
+        assert!(
+            !sql.contains("ifNull(e."),
+            "columns read straight off the event row are not joined and must \
+             not be null-framed — that would mask a dropped column"
+        );
     }
 
     /// The candle's fill order, in the read that feeds it. Grouping in
@@ -403,8 +440,9 @@ mod tests {
         let order_by = sql.rsplit("ORDER BY").next().expect("ORDER BY");
         let positions: Vec<usize> = [
             "e.ledger_sequence",
-            "application_order",
-            "e.transaction_id",
+            "e.application_order",
+            "e.transaction_index",
+            "e.operation_index",
             "e.event_index",
         ]
         .iter()
@@ -416,7 +454,59 @@ mod tests {
         .collect();
         assert!(
             positions.windows(2).all(|w| w[0] < w[1]),
-            "ORDER BY must be ledger, apply order, transaction, event index: {order_by}"
+            "ORDER BY must be ledger, apply order, transaction, operation, \
+             event index: {order_by}"
         );
+    }
+
+    /// Task 0304 CR-02. `EventRow` binds positionally AND by Rust type: the
+    /// client sends bare `RowBinary`, which carries no names-and-types header,
+    /// so a field whose width differs from its column's shifts every field
+    /// after it and decodes garbage — no error, no 500, just wrong candles.
+    /// That is not hypothetical: BE widened `event_index` from `Int16` to
+    /// `UInt32` on 2026-09-17 and the read kept an `i16` field.
+    ///
+    /// So every numeric column off `e` is projected through an explicit cast to
+    /// its field's type. A cast cannot prevent a future widening, but it turns
+    /// one into a truncated value in one column instead of a shifted row — and
+    /// unlike the alias-order contract above, nothing else in the crate can
+    /// catch this: a `chq` spot check runs raw SQL and never frames a row.
+    #[test]
+    fn every_numeric_column_off_the_event_row_is_cast() {
+        let sql = sql();
+        let select = sql
+            .split(" FROM default.soroban_events")
+            .next()
+            .expect("the SELECT");
+
+        for (expr, field) in [
+            ("toInt64(e.contract_id) AS contract_id", "i64"),
+            ("toUInt32(e.ledger_sequence) AS ledger_sequence", "u32"),
+            ("toUInt16(e.operation_index) AS operation_index", "u16"),
+            ("toUInt32(e.event_index) AS event_index", "u32"),
+            ("toInt16(e.application_order) AS application_order", "i16"),
+        ] {
+            assert!(
+                select.contains(expr),
+                "the projection must pin the wire width to EventRow's {field}: \
+                 expected `{expr}` in {select}"
+            );
+        }
+
+        // And no numeric column slips back in bare. A leading space is what
+        // distinguishes a projection (` e.x AS`) from a cast's argument
+        // (`(e.x) AS`), which is the shape the loop above requires.
+        for bare in [
+            " e.contract_id AS",
+            " e.ledger_sequence AS",
+            " e.operation_index AS",
+            " e.event_index AS",
+            " e.application_order AS",
+        ] {
+            assert!(
+                !select.contains(bare),
+                "`{bare}` is an uncast projection — give it an explicit cast: {select}"
+            );
+        }
     }
 }

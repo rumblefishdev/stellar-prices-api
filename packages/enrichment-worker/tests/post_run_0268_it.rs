@@ -80,6 +80,10 @@
 //! `usdc_is_back_at_par_a_few_days_later` exists so the first test cannot be
 //! satisfied by pricing EVERYTHING ~3% low — a uniformly scaled table would pass
 //! the depeg check and fail this one.
+//!
+//! Recorded in the `#[ignore]` inventory (tools/scripts/ignored-tests.sh) as a
+//! production test and deliberately never run by CI: production state must not
+//! gate a PR (task 0275).
 
 use clickhouse::Client;
 
@@ -430,7 +434,7 @@ fn judge(g: &Grain, m: &Measurement, mech: Option<&Mechanism>) -> Option<String>
 /// inside the depeg, and the coarser buckets that contain the day must show the
 /// pass went through them, with no row left at zero. Acceptance criteria 1 and 2.
 #[tokio::test]
-#[ignore = "operator after-check: run against prod AFTER the 0268 re-enrichment pass"]
+#[ignore = "requires production — operator after-check; never gates a PR"]
 async fn native_on_the_depeg_day_is_priced_below_its_usdc_close() {
     let ch = client();
     let mut failures = Vec::new();
@@ -461,7 +465,7 @@ async fn native_on_the_depeg_day_is_priced_below_its_usdc_close() {
 /// implied rate must be ~1.0 — which a table priced uniformly ~3% low could not
 /// satisfy while also passing the test above.
 #[tokio::test]
-#[ignore = "operator after-check: run against prod AFTER the 0268 re-enrichment pass"]
+#[ignore = "requires production — operator after-check; never gates a PR"]
 async fn usdc_is_back_at_par_a_few_days_later() {
     let ch = client();
     let m = measure(&ch, "price_ohlcv_1d", RECOVERED_DAY, RECOVERED_DAY + 86_400).await;

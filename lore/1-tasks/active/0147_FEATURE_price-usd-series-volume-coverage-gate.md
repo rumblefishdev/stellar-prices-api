@@ -2,7 +2,7 @@
 id: "0147"
 title: "Replace price_usd_series*'s close_usd > 0 filter with a volume-coverage gate"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0292", "0287"]
 related_tasks: ["0144", "0118", "0131", "0116", "0146", "0150", "0061", "0151", "0286"]
 tags:
@@ -72,6 +72,19 @@ history:
       The thresholds the prototype used (50 %, 10 units) were invented for the
       demonstration and are NOT a proposal: X is still measured after the 0286
       rollout.
+  - date: "2026-09-22"
+    status: active
+    who: akot
+    note: >
+      Activated. Phase 1 runs from `.planning/BRIEF-0147.md` (binding, written
+      2026-09-22): one priced predicate shared with `/ohlcv`, `pf_volume`
+      weights, gate = `priced_volume_share >= X` (placeholder 0.5) AND
+      `priced_volume_usd >= 100` (0118's `min_volume_usd` default),
+      `priced_volume_share` appended last, `price_usd_series_coverage*` views
+      with `priced | pending | unpriceable`, yXLM RED→GREEN IT on 26.3.10.60.
+      Branch `feat/0147` is STACKED on `feat/0216` (PR #337 still open, both
+      touch `views.sql`); the PR waits for #337. Phase 2 (measure X on prod)
+      after the 0286 week, ≥ 2026-09-29. No deploy in phase 1.
 ---
 
 # Volume-coverage gate for `price_usd_series` / `price_usd_series_1h`

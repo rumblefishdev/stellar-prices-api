@@ -2,8 +2,9 @@
 id: "0216"
 title: "Publish how old the price is, so a consumer can apply its own freshness policy instead of inheriting ours"
 type: FEATURE
-status: backlog
-related_adr: []
+status: active
+assignee: akot
+related_adr: ["0292"]
 related_tasks: ["0135", "0178", "0165", "0151", "0111", "0215"]
 tags: [layer-backend, priority-medium, effort-medium, milestone-M3, clickhouse, api, read-surface]
 milestone: 3
@@ -20,6 +21,21 @@ history:
       completion of that decision is to publish the age rather than blank the
       value. okarcz agreed the bound belongs only in the per-venue pipeline
       and that the age is its own task.
+  - date: "2026-09-22"
+    status: active
+    who: akot
+    note: >
+      Activated. Decisions taken before code: the wire fields are the ones
+      ADR 0292 (decision 5) already named — `as_of` and `price_status`
+      (priced | carried | unpriced) — so this task delivers them instead of
+      [[0147]]; "no price" is `toDateTime(0)` in the table and `""` on the
+      wire (never a published 1970 — the trap 0147 recorded); `as_of` names
+      `price_usd`'s candle, `price_xlm` / `market_cap_usd` get no field of
+      their own and are documented as "no fresher than as_of"; ships inside
+      the prepared 2026-09 rollout (DDL in step B, code in step G).
+      Measured on prod 2026-09-22 08:13 UTC: of 4,342 assets with a price,
+      0 are < 5 min old, 70 are 5-60 min, 1,306 are 1-6 h, 839 are 6-12 h,
+      2,127 are 12-24 h.
 ---
 
 # Publish the price's age

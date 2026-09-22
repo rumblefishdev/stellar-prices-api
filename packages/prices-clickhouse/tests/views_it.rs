@@ -1,8 +1,8 @@
 //! Live-ClickHouse integration test for the read-surface views
 //! (`price_usd_series`, `usd_reference`). Gated `#[ignore]`:
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p prices-clickhouse --test views_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p prices-clickhouse --test views_it -- --ignored --test-threads=1
 //!
 //! Owns an isolated scratch database (the `prices.*` schema + views rewritten
 //! onto the scratch name) and drops it at the end.
@@ -66,7 +66,7 @@ async fn setup_scratch(db: &str) -> Client {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn views_expose_usd_series_and_reference() {
     let db = "it_views_series";
     let client = setup_scratch(db).await;
@@ -372,7 +372,7 @@ async fn views_expose_usd_series_and_reference() {
 /// no-op against prod. Without it the assertion below only proves that applying
 /// `views.sql` twice is harmless.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn views_sql_replaces_an_existing_v1_current_price_usd() {
     let db = "it_views_replace";
     let client = setup_scratch(db).await;
@@ -491,7 +491,7 @@ async fn views_sql_replaces_an_existing_v1_current_price_usd() {
 /// re-running the seed is a no-op that does not reset live progress (task 0051
 /// Step 1). `setup_scratch` already applies `SEED_SQL` once.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn backfill_progress_seed_is_idempotent() {
     let db = "it_backfill_seed";
     let client = setup_scratch(db).await;
@@ -566,7 +566,7 @@ async fn backfill_progress_seed_is_idempotent() {
 /// load-bearing, so a revert to that form fails here rather than as a silent
 /// no-op against prod.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn views_sql_replaces_every_existing_view() {
     let db = "it_views_replace_all";
     let client = setup_scratch(db).await;
@@ -670,7 +670,7 @@ async fn views_sql_replaces_every_existing_view() {
 /// A test asserting "peg asset → exactly 1.0" would have had to be rewritten
 /// here instead of surviving 0168 untouched.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
     let db = "it_views_peg_fill";
     let client = setup_scratch(db).await;
@@ -834,7 +834,7 @@ async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
 /// to survive someone *adding* a peg member that does trade, which is live in
 /// tasks 0173/0196, not hypothetical.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn peg_member_that_also_trades_as_a_base_keeps_its_market_value() {
     let db = "it_views_peg_member_trades";
     let client = setup_scratch(db).await;
@@ -945,7 +945,7 @@ async fn peg_member_that_also_trades_as_a_base_keeps_its_market_value() {
 /// (it depegged in June 2022 and is now priced by measurement, not assumed to
 /// be $1). USDC is now the only peg asset and the only valid subject here.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn peg_asset_with_only_zero_volume_candles_falls_back_instead_of_publishing_garbage() {
     let db = "it_views_peg_zero_vol";
     let client = setup_scratch(db).await;
@@ -1035,7 +1035,7 @@ async fn peg_asset_with_only_zero_volume_candles_falls_back_instead_of_publishin
 /// gets its fallback. Asserting only the first half would pass just as well if
 /// someone deleted arm B entirely, which would re-break task 0165.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usdt_quote_only_gets_no_peg_fallback_but_usdc_still_does() {
     let db = "it_views_0172_usdt_not_pegged";
     let client = setup_scratch(db).await;
@@ -1185,7 +1185,7 @@ async fn usdt_quote_only_gets_no_peg_fallback_but_usdc_still_does() {
 ///      grains legitimately diverge; that case is
 ///      [`a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains`].
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one() {
     let db = "it_views_0168_measured_peg_rate";
     let client = setup_scratch(db).await;
@@ -1412,7 +1412,7 @@ async fn peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one() 
 /// Both grains are checked: the daily and hourly rate subqueries are separate SQL
 /// and a fix applied to one only is this file's recurring defect.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_oracle_row_outranks_an_imported_row_in_the_same_bucket() {
     let db = "it_views_0267_oracle_outranks_external";
     let client = setup_scratch(db).await;
@@ -1601,7 +1601,7 @@ async fn an_oracle_row_outranks_an_imported_row_in_the_same_bucket() {
 /// `1`/'peg'. Without it a regression that forward-filled the previous day's
 /// import across the UTC day boundary would pass.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_usd_series_1h_publishes_the_imported_rate_of_each_hour() {
     let db = "it_views_0267_hourly_import";
     let client = setup_scratch(db).await;
@@ -1749,7 +1749,7 @@ async fn price_usd_series_1h_publishes_the_imported_rate_of_each_hour() {
 /// Written down as EXPECTED so that a future change which "fixes" the divergence
 /// has to delete an assertion rather than merely satisfy a green suite.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains() {
     let db = "it_views_0168_grain_divergence_across_a_gap";
     let client = setup_scratch(db).await;
@@ -1887,7 +1887,7 @@ async fn a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains()
 /// test would be the only thing to notice — and the surface would have
 /// reproduced the `close_usd = 0` defect class, one value meaning two things.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_measured_rate_at_exactly_par_is_labelled_oracle_not_peg() {
     let db = "it_views_0168_par_is_still_measured";
     let client = setup_scratch(db).await;
@@ -2044,7 +2044,7 @@ async fn seed_zero_volume_only_base(client: &Client, db: &str) {
 /// and — the availability half of 0198 — its neighbours FOO and USDC in the
 /// SAME query still publish exactly what they published before.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_zero_volume_only_base_is_absent_and_its_neighbours_still_publish() {
     let db = "it_views_zero_weight_absent";
     let client = setup_scratch(db).await;
@@ -2107,7 +2107,7 @@ async fn a_zero_volume_only_base_is_absent_and_its_neighbours_still_publish() {
 /// therefore change NO published value — this pins that the fix is exactly the
 /// omission of the un-computable group and nothing else.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_zero_volume_candle_beside_a_real_one_changes_nothing() {
     let db = "it_views_zero_weight_mixed";
     let client = setup_scratch(db).await;
@@ -2168,7 +2168,7 @@ async fn a_zero_volume_candle_beside_a_real_one_changes_nothing() {
 /// classification hangs off. It must be absent instead: `no_reference` is a
 /// legitimate §12.3 state, a garbage reference is not.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usd_reference_omits_a_bucket_whose_reference_candles_have_no_volume() {
     let db = "it_views_zero_weight_reference";
     let client = setup_scratch(db).await;

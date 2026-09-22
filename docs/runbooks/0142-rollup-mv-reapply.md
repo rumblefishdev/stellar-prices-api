@@ -126,15 +126,29 @@ timestamp` for the `TO`-table insert routing to work, and that alias
       header of `rollups.sql`.
 
 Then prove the edit locally against the prod-pinned server before it goes near
-the cluster:
+the cluster. CI runs these three — and every other ClickHouse integration test —
+on the PR (task 0275), but a schema edit is worth seeing green before it is
+pushed:
 
 ```bash
-docker compose up -d clickhouse           # 26.3.10.60, the prod pin
+docker compose up -d --wait clickhouse    # 26.3.10.60, the prod pin
+tools/scripts/ignored-tests.sh preflight  # --wait is not readiness: see below
+cargo run -q -p prices-clickhouse --bin prices-clickhouse-init -- --rollups
 cargo test -p prices-clickhouse --lib
-cargo test -p prices-clickhouse --test rollup_drift_it   -- --ignored
-cargo test -p prices-clickhouse --test rollup_append_it  -- --ignored
-cargo test -p prices-clickhouse --test rollup_chain_it   -- --ignored
+cargo test -p prices-clickhouse --test rollup_drift_it   -- --ignored --test-threads=1
+cargo test -p prices-clickhouse --test rollup_append_it  -- --ignored --test-threads=1
+cargo test -p prices-clickhouse --test rollup_chain_it   -- --ignored --test-threads=1
 ```
+
+`preflight` is not optional on a fresh `clickhouse-data` volume. `--wait`
+reports healthy while the image's temporary initdb server — listening only
+inside the container — is still up; it is then killed, and for a moment nothing
+serves the host port. `preflight` retries from the host until it is served, then
+checks `version()` against the pin and `timezone()` is UTC. CI does the same.
+
+Or all of them, exactly as CI does, after the three setup lines above:
+`scripts/ch-proxy-0281.sh up`, then
+`CLICKHOUSE_PROXY_URL=http://localhost:8124 tools/scripts/ignored-tests.sh`.
 
 `rollup_append_it` is the one that matters most here: it places data **outside**
 the refresh window and proves a refresh preserves it. An edit that reintroduces

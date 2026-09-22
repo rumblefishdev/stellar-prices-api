@@ -33,7 +33,7 @@ phase-1 rollout. This runbook assumes everything in it is done and green.
 | 2   | **Task 0282's fix (PR #313) is deployed and checked.** Under ADR 0287 a later dust-only write of a minute REPLACES a priced one outright. #313 does not make writes sum — it ends every live reconcile run on a whole minute, so the live processor no longer writes a minute twice. This run's own second-write paths are the run boundaries of §4a, which is why they must be minute-aligned.                                                                                                                                                                                                                                                                                                                                                              | the ledger-processor on prod is built from `2cb5b2b` or later; task 0282 records the full-day raw-vs-stored check |
 | 3   | **Cleanup is disabled and stays disabled for the WHOLE run** (task 0200). The 02:00 UTC rule drops whole `1m` monthly partitions older than a week — which is every partition this run touches.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | `prices-production-cleanup` reads DISABLED                                                                        |
 | 4   | **`prices.pool_registry` is seeded** for the Soroban era. `events-backfill` reprices only registered AMM contracts; an empty registry silently reprices nothing.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | [`seed-pool-registry.md`](seed-pool-registry.md)                                                                  |
-| 5   | **BE's `default.transactions` covers the range.** It is where `application_order` — the transaction index of fill order (D1) — comes from on the events path. Where it does not reach, the ingest falls back to today's `(transaction_id, event_index)` order with `transaction_index = 0` and WARNs once. Count the coverage BEFORE the run and record the fallback share after it; it is a stated deliverable, not a detail.                                                                                                                                                                                                                                                                                                                               | §6                                                                                                                |
+| 5   | ~~**BE's `default.transactions` covers the range.**~~ **VOID since 2026-09-17 (task 0304).** BE moved `application_order` onto `default.soroban_events` and dropped that table's `transaction_id`, so the events path reads the apply order straight off the event row — there is no join to miss, no coverage to count and no fallback share to record. The only value check left is that a NEGATIVE `application_order` degrades rather than wrapping.                                                                                                                                                                                                                                                                                                     | §6                                                                                                                |
 | 6   | **Disk headroom for the FREEZE snapshots** on the CH host, and for two copies of the month under repair.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | `ssh … 'df -h /var/lib/docker'`                                                                                   |
 | 7   | **The snapshots are taken by the CH ADMIN, not by `prices_writer`.** `prices_writer` does not hold `ALTER FREEZE PARTITION` and **cannot be granted it** (`users.xml` is read-only storage).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | [`repair-coarse-usd-values.md`](repair-coarse-usd-values.md), preconditions                                       |
 | 8   | **Time and bandwidth are budgeted.** ~64 M ledgers, ~5.7 TB downloaded, ~18 days at the measured 178.3 k ledgers/hour on a home line (task 0088: 746 partitions / 689 676 890 rows / 3.13 TB in 12.2 days). On an EC2 in us-east-2 it is hours, not days.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | §3                                                                                                                |
@@ -331,8 +331,11 @@ The AMM side of every month at or after the Soroban activation ledger
 path that carries BE's `application_order` (the D1 transaction index) and the
 full event group per swap.
 
-**First, the coverage precondition** — the join is a LEFT join and a missing row
-is not an error, it is a silent downgrade to `transaction_index = 0`:
+⚠️ **The coverage precondition below is VOID (task 0304).** It existed because
+`application_order` came from a `LEFT JOIN default.transactions`, where a
+missing row was a silent downgrade to `transaction_index = 0`. Since 2026-09-17
+the column is on the event row itself and the join is gone. The query is kept
+for the record; it answers a question nothing asks any more:
 
 ```sql
 -- On the CH host, as `default`. Per month of the range.
@@ -359,18 +362,24 @@ It chunks at 320 k ledgers and keeps the open minute across chunks, so its own
 chunk boundaries are safe; its RUN boundary is not — use the same `START`/`END`
 as the month's SDEX run so both sides share one boundary minute.
 
-**Record the fallback share.** The run WARNs once when the `application_order`
-join is unusable. The deliverable is the number, per month:
+~~**Record the fallback share.**~~ **VOID since 2026-09-17 (task 0304).** The
+deliverable existed because the `application_order` join could be unusable for a
+whole month, leaving that month's AMM fills in the pre-0286
+`(transaction_id, event_index)` order while the run reported success. The join
+is gone: `application_order` is a non-nullable column on every event row, so a
+month cannot be silently ordered the old way any more.
 
-```sql
-SELECT countIf(transaction_index = 0) / count() AS fallback_share
-FROM ( … the chunk's fills … );   -- or the WARN count from the run log
+What survives is the value check. `application_order` is `Int16`, and a negative
+value is not a position — `resolve_transaction_index` degrades it to 0 and counts
+it. The run's last summary line reports it:
+
+```
+negative apply order:      0
 ```
 
-A month whose fallback share is not ~0 has its AMM fills ordered by today's
-`(transaction_id, event_index)` key. That is the pre-0286 order: `open`/`close`
-for those minutes are no better than they were. Say so in the log line rather
-than letting the month pass as repaired.
+**Anything but `0` means those fills ARE in the wrong order and the month is NOT
+repaired** — do not record it as done. The run also emits one WARN, once, naming
+the first ledger and `application_order` it saw.
 
 ---
 

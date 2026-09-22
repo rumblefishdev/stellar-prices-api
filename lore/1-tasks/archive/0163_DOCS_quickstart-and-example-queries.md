@@ -2,7 +2,7 @@
 id: "0163"
 title: "Quickstart guide and example queries, accurate against the live API"
 type: DOCS
-status: backlog
+status: completed
 related_adr: ["0010"]
 related_tasks: ["0124", "0156", "0157", "0161", "0162", "0164", "0179", "0184", "0187", "0189", "0192", "0193", "0195"]
 tags: [layer-docs, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, documentation, developer-experience]
@@ -46,6 +46,45 @@ history:
       account-age rules, and — until [[0191]] (which absorbed 0192) ships — the honest answer to "my
       key leaked" is "stop using it and wait for the period to roll over", which
       belongs in the document rather than in a support conversation.
+  - date: "2026-09-22"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated, with [[0233]]. Re-pointed to the world after 0194/0195: there is
+      ONE base URL, the API's own hostname
+      `https://prices-api.sorobanscan.rumblefish.dev` — the CloudFront domain this
+      task named is gone (0184's distribution destroyed by 0195; the execute-api
+      origin answers 403 since 0126). The spec's `servers` block and
+      `PUBLIC_API_BASE_URL` already agree, asserted by `links.spec.ts`. Single
+      source of truth: the portal's quick start page (0193), served at
+      `/api/quick-start`; no markdown copy in `docs/`. Still owed here: the
+      keyless exceptions named (`/health`, `/api-docs-json`), burst 5 and "a
+      cached response still counts" in the limits block, the
+      key-in-a-browser-bundle warning, copyable examples for price, OHLCV, batch
+      and health run against production, and 0157's burst criterion.
+  - date: "2026-09-22"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Implemented on `docs/0163_quickstart-accurate-against-live-api` with
+      [[0233]]: "Example queries" (price by CODE:ISSUER, OHLCV 7d/1h, POST
+      batch, GET /health) on the quick start, the keyless exceptions, the
+      key-in-a-bundle warning, burst 5 and the measured cache behaviour in the
+      limits block, the account-age half-sentence, the dashboard link's stale
+      comment. One deviation from this task's text recorded under Emerged:
+      the page does NOT say a cached response counts against the quota. Open:
+      the production run with a free-plan key, and the two criteria that wait
+      on it.
+  - date: "2026-09-22"
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Shipped: PR #334 merged 13:35 UTC (`bfb7c18d`), portal bundle synced
+      14:02 UTC (`index-DnFlUQMz.js`, `/api/*` invalidation completed). All
+      11 criteria met; 4/4 example queries answered on production at 13:02
+      CEST, after 0286's schema step. `QuickStart.live` with a free-plan key
+      is the check to repeat after every API deploy. [[0164]] repeats the
+      same commands as its end-to-end proof.
 ---
 
 # Quickstart and example queries
@@ -143,24 +182,24 @@ through all that — not a second copy of it.
 
 ## Acceptance Criteria
 
-- [ ] Quickstart takes a reader from a fresh key to a successful response with
+- [x] Quickstart takes a reader from a fresh key to a successful response with
       one copy-paste
-- [ ] How to get a key is stated before the first `curl`, including Stellar
+- [x] How to get a key is stated before the first `curl`, including Stellar
       Discord membership, with the invite pointing at **`discord.gg/stellardev`**
       and not the `stellar_test` guild
-- [ ] Auth (`x-api-key`, `403` without it) and limits (1 req/s, monthly quota,
+- [x] Auth (`x-api-key`, `403` without it) and limits (1 req/s, monthly quota,
       `429`, cached responses still counted) all stated, **with `/health` and
       `/api-docs-json` named as the keyless exceptions**
-- [ ] Example queries cover current price, OHLCV, batch and health, and every
+- [x] Example queries cover current price, OHLCV, batch and health, and every
       one of them was run against production before publishing
-- [ ] Guidance not to embed the key in a browser bundle
-- [ ] Links to Swagger UI and `/api-docs-json` rather than restating the spec
-- [ ] One documented base URL, and the OpenAPI `servers` block agrees with it —
+- [x] Guidance not to embed the key in a browser bundle
+- [x] Links to Swagger UI and `/api-docs-json` rather than restating the spec
+- [x] One documented base URL, and the OpenAPI `servers` block agrees with it —
       Swagger UI's "Try it out" hits the same origin the quickstart teaches
-- [ ] Reachable from the portal dashboard and from the documented URL
-- [ ] Single source of truth for the text — no second copy to drift
-- [ ] Epic AC 3 satisfied
-- [ ] **The example queries run without hitting the burst limit** — inherited
+- [x] Reachable from the portal dashboard and from the documented URL
+- [x] Single source of truth for the text — no second copy to drift
+- [x] Epic AC 3 satisfied (measured 2026-09-22 13:02 with a free-plan key; [[0164]] repeats it end to end)
+- [x] **The example queries run without hitting the burst limit** — inherited
       from [[0157]] on 2026-08-13, when that task archived. It was 0157's last
       open criterion and 0157 could never close it: the limits were deployed and
       measured, but there was no quickstart to run. Measured groundwork it hands
@@ -178,3 +217,84 @@ through all that — not a second copy of it.
   is what makes that possible.
 - The examples double as the burst-limit argument in [[0157]]: if the quickstart
   page fires two of them in parallel, burst 1 would fail our own documentation.
+
+## Implementation Notes (2026-09-22)
+
+Branch `docs/0163_quickstart-accurate-against-live-api`, shared with [[0233]].
+The single source of truth is the portal's quick start page
+(`web/portal/src/quickstart/QuickStart.tsx`, route `/api/quick-start`, task
+0193); nothing in `docs/` duplicates it.
+
+- **Example queries** — a new section after Endpoints: `EXAMPLES` holds four
+  curl snippets (a credit asset's price by CODE:ISSUER with the full USDC
+  issuer, `/ohlcv?timeframe=7d&granularity=1h` for native, `POST /prices/batch`
+  with two identifiers, `GET /health` with no key). Listed in `SNIPPET_TABLES`
+  (the view/text tie) and in `EXAMPLE_PATHS` (each snippet's URL held against
+  its template, and the template against the spec). The lede says to run them
+  one after another inside a free key's burst of five.
+- **Authentication** names `/health` and `/api-docs-json` as the keyless
+  routes and gains a "Keep the key on your side" card (bearer credential with
+  a quota; call from your own backend).
+- **Prerequisites**: "A Discord account created moments ago is turned away
+  for a short while" — no number, so ADR 0010's SSM value can move without
+  making the page false.
+- **Rate limits**: "up to 5 at once" in the rate figure (`FREE_PLAN_BURST`, a
+  literal — the config probe reports the per-second rate only) and a paragraph
+  on the token bucket and the cache (see Emerged 1).
+- **`QuickStart.live.spec.tsx`**: imports `EXAMPLES`, parses each snippet's
+  copy text as the curl it is and sends it, with `PRICES_API_KEY` in place of
+  the placeholder; holds the 200 body to the fields the spec marks required
+  (read from `public/openapi.json`, so neither the requests nor the field
+  lists are a second copy). Skipped without the key, so CI never runs it.
+  [[0164]] repeats the same commands with a self-service key.
+- The 500 row's advice no longer names a status page: none exists ([[0301]]
+  looked for one), and the sentence was a promise the page could not keep.
+- **`app.tsx`**: the "View quick start" comment claimed `QUICKSTART` still
+  pointed at the OpenAPI document; it has been the route since 0193.
+- Tests: `app.spec.tsx` rail count 10 → 11; `QuickStart.spec.tsx` +12 cases
+  (documented paths, example URLs). Portal: 231 tests, typecheck, lint green.
+
+## Design Decisions
+
+### Emerged
+
+1. **The page does not say a cached response counts against the quota.**
+   This task's Implementation section asserts it ("throttling and quota are
+   evaluated before the gateway cache"). Task 0157's production measurement
+   (2026-08-13) found the opposite ordering — the stage cache is in front of
+   the throttle, a cache hit is never rejected — and could not settle whether a
+   hit spends a bucket token or a quota unit. The page states only what was
+   measured; that bullet of this task is superseded by this note.
+2. **Four examples, not one per endpoint.** Price, OHLCV, batch and health are
+   what the task names; the Endpoints section already unfolds an example
+   response per route, and a curl per route would be the reference again.
+3. **Burst as a literal, not a probe field.** Adding `burst` to the portal's
+   config endpoint is backend work for one number that has not moved since
+   0157; a comment names its source in `infra/envs/production.json`.
+4. **The production run is a test gated on the key, not a CI job**: a
+   free-plan key belongs to a person, and a key in a workflow or a transcript
+   is the incident 0298 just cleaned up after. A first cut was a standalone
+   script with the four requests written out by hand — a second copy of the
+   page that nothing compared; the test runs the copy text itself instead.
+
+**Production run, 2026-09-22 12:16 CEST (the key holder, free-plan key):
+3 of 4.** `price`, `batch` and `health` answered 200 with every required
+field. `ohlcv` (`?timeframe=7d&granularity=1h`) answered **500** — the
+api-handler logged ClickHouse `Code: 47, Unknown expression identifier
+pf_trade_count` in the `price_ohlcv_1h` read. The Lambda deployed on
+2026-09-18 08:11 UTC carries [[0286]]'s phase-1 read path (merged 09-16,
+`8ddc2fa9`) while the CH schema step of that rollout has not run, so the
+whole `/ohlcv` route has answered 500 since that deploy. It went unseen:
+API Gateway counted 0 server errors on 09-19…09-21 and 1 on 09-22 (this
+one) — nobody called the route — and the api-handler had no error alarm
+until [[0249]]'s stack went out today. The page is right; production is
+not. Not recorded on 0286: its owner started the phase-1 rollout the same
+morning, and the schema step went out before this note could.
+
+**Re-run 13:02 CEST, after 0286's schema step (21 `pf_*` columns on the
+seven `price_ohlcv_*` tables): 4 of 4.** `ohlcv` answers 200 with every
+required field. The route had been down from the 09-18 deploy to that step.
+
+Every criterion is met; what remains is the PR and the portal bundle going
+out. `PRICES_API_KEY=… npx vitest run QuickStart.live` in `web/portal` is the
+check to repeat after any API deploy.

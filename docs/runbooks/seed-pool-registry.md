@@ -150,7 +150,7 @@ API returned a contract of an unexpected type — investigate before seeding it.
 
 `events-backfill --discover-pools` reads the AMM factory events in a ledger
 range from BE's `default.soroban_events` (Aquarius `add_pool`, Phoenix `create`,
-Soroswap `new_pair`), runs them through the same `learn_factory` the live
+Soroswap `new_pair`, SushiSwap V3 `pool_created` — task 0290), runs them through the same `learn_factory` the live
 processor uses, and writes **only the pools `prices.pool_registry` does not
 already hold**. No API key, no rewrite of existing rows, no candles. A re-run
 writes nothing.
@@ -183,7 +183,9 @@ scp target/x86_64-unknown-linux-musl/release/events-backfill <prod-host>:~/event
 factories (Phoenix and Soroswap leave `signature` NULL), 2-4 s per 320k-ledger
 chunk on the shared box. As of 2026-09-17 every missing pool was created after
 ledger 63,000,000 (checked per venue over the whole Soroban era), so the
-catch-up only needs `63000000` to the tip.
+catch-up only needs `63000000` to the tip. **Task 0290 is the exception:**
+SushiSwap V3's pools go back to ledger 60,147,305, so its run starts at
+`60000000` — the command is [below](#task-0290--sushiswap-v3s-wider-range).
 
 ```bash
 # On the prod host, under tmux:
@@ -201,6 +203,32 @@ investigate before the write.
 
 Then drop `--dry-run` to write, and run the dry run once more: it must report
 `to_write=0`.
+
+#### Task 0290 — SushiSwap V3's wider range
+
+SushiSwap V3 is the one venue whose pools predate ledger 63,000,000: the first
+`pool_created` is at 60,147,305 and the live factory's pools start at ~61.49M,
+so the 63M catch-up above misses them. Run it over its own range **once**, then
+the 63M catch-up covers it like every other venue:
+
+```bash
+# On the prod host, under tmux:
+read -rs CH_PW
+CLICKHOUSE_PASSWORD="$CH_PW" ~/events-backfill --discover-pools \
+  --start 60000000 --end <TIP> \
+  --clickhouse-url http://localhost:8123 --dry-run
+```
+
+That is ~4.5M ledgers, so ~14 chunks at the default `--chunk-size 320000` and
+2-4 s of `topics_xdr` parsing each — a couple of minutes, well inside a tmux
+session. It reads the same factory events as the run above; only `--start`
+differs.
+
+Expect `per_venue` to carry a `"sushiswap"` entry. The read has **no emitter
+filter**, so it learns every generation's pools, not just the live factory's —
+which is what this wider range is for: 99 SushiSwap pools have traded all-time
+and three of them come from an earlier factory generation that is still trading.
+Confirm with the same `FINAL` count below, then drop `--dry-run` to write.
 
 ### Verify
 
