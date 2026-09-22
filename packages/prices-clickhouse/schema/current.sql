@@ -490,9 +490,10 @@ WITH
     -- median, and that is guarded one CTE up.
     --
     -- ⚠️ Honest consequence: this column can be older than it looks, and
-    -- `updated_at` is the refresh time, not the price's age. No column carries
-    -- that age today; publishing it is a follow-up task and is the real answer
-    -- to "how fresh is this?" — not blanking a price we hold.
+    -- `updated_at` is the refresh time, not the price's age. Since task 0216
+    -- that age is published beside it: `as_of` names the candle this close
+    -- came from and `price_status` says whether a newer one is outstanding —
+    -- the real answer to "how fresh is this?", not blanking a price we hold.
     --
     -- ⚠️ Any future guard here must emit a SENTINEL, never filter the row out.
     -- This MV is REPLACE, not APPEND (unlike the six rollup MVs), so
