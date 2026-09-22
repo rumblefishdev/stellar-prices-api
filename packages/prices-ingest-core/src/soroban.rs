@@ -375,8 +375,11 @@ pub struct RawSorobanEvent {
     pub transaction_id: String,
     /// Position of this event's transaction in the ledger's apply order (task
     /// 0286 D1). The live path takes it from `process_ledger`'s enumeration;
-    /// the events-backfill path joins BE's `default.transactions.application_order`
-    /// and falls back to 0 (counted and warned) when it cannot resolve one.
+    /// the events-backfill path reads BE's `soroban_events.application_order`
+    /// straight off the event row — there is no join and so no "not found"
+    /// state (task 0304). The column is `Int16`, and a NEGATIVE value is not a
+    /// position, so that one case falls back to 0, counted and warned: a run
+    /// reporting any of those has ordered those fills wrong.
     pub transaction_index: u16,
     pub ledger_sequence: u32,
     pub event_index: u32,

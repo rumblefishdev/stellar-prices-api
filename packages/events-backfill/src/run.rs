@@ -200,8 +200,11 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     // of a silent LEFT-JOIN drop.
     let mut ledgers_missing_close: u64 = 0;
     let mut events_missing_close: u64 = 0;
-    // Events whose transaction could not be resolved in BE's default.transactions
-    // and therefore took `transaction_index = 0` (task 0286 D1's fallback).
+    // Events whose `application_order` was NEGATIVE and therefore took
+    // `transaction_index = 0` (task 0286 D1's fallback). Since task 0304 the
+    // column is read straight off the event row, so this is no longer "BE does
+    // not cover this ledger" — it can only be a corrupt or unexpected row, and
+    // any non-zero count means those fills ARE in the wrong order.
     let mut apply_order_fallbacks: u64 = 0;
 
     // Run-level state (persists across chunks): one accumulator per source, one
@@ -225,7 +228,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
         let mut cur_closed_at: i64 = 0;
         let mut cur_missing = false;
         let mut cur_events: Vec<RawSorobanEvent> = Vec::new();
-        let mut last_key: Option<(i64, i64, i16)> = None;
+        let mut last_key: Option<(i64, i64, u16, u32)> = None;
 
         while let Some(r) = cursor.next().await? {
             total_events += 1;
@@ -267,7 +270,20 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                 continue;
             }
 
-            let key = (r.contract_id, r.transaction_id, r.event_index);
+            // The operation is part of the key, not just the event index: BE
+            // added `operation_index` and widened `event_index` in the same
+            // 2026-09-17 change (task 0304), which is what a per-OPERATION
+            // event numbering looks like. If `event_index` does restart at each
+            // operation, then without the operation here two REAL events of one
+            // transaction collide and the second is silently dropped as a
+            // duplicate. Including it is correct under either numbering, since
+            // an RMT double repeats the operation too.
+            let key = (
+                r.contract_id,
+                r.transaction_id,
+                r.operation_index,
+                r.event_index,
+            );
             if last_key == Some(key) {
                 continue; // adjacent RMT double of the same event
             }
@@ -290,9 +306,12 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                     warn!(
                         ledger = r.ledger_sequence,
                         transaction_id = r.transaction_id,
-                        "no apply order in default.transactions for this transaction — its AMM \
-                         events are ordered as transaction 0; verify BE's transactions table \
-                         covers the range (warned once per run, counted in the summary)"
+                        application_order = r.application_order,
+                        "NEGATIVE application_order on soroban_events — not a position, so \
+                         this transaction's AMM events are ordered as transaction 0. These \
+                         fills ARE in the wrong order and the range is NOT repaired; do not \
+                         record the month as done (warned once per run, counted in the \
+                         summary as `negative apply order`)"
                     );
                 }
                 apply_order_fallbacks += 1;
@@ -302,7 +321,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                 transaction_id: r.transaction_id.to_string(),
                 transaction_index,
                 ledger_sequence: r.ledger_sequence,
-                event_index: r.event_index as u32,
+                event_index: r.event_index,
                 topics,
                 data,
             });
@@ -558,7 +577,10 @@ fn print_summary(
     println!("swaps failed dispatch:     {failed_total}");
     // Always printed, 0 included: it is the line that says the fill order in
     // this run came from BE's real apply order rather than from a fallback.
-    println!("events with no apply order:{apply_order_fallbacks}");
+    // Named for what it now measures — a negative `application_order` on the
+    // event row, not a missing join row (task 0304). Non-zero means the range
+    // is not repaired.
+    println!("negative apply order:      {apply_order_fallbacks}");
 }
 
 #[cfg(test)]

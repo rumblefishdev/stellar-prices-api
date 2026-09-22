@@ -34,12 +34,35 @@ use crate::error::EventsBackfillError;
 ///
 /// Field order MUST match the `SELECT` column order below — the `Row` derive
 /// binds positionally. `EVENT_ROW_COLUMNS` below pins the two together.
+///
+/// ⚠️ And field WIDTH must match the column's. The client sends bare
+/// `RowBinary` (clickhouse-0.13 `query.rs:88`): no names-and-types header, so
+/// a field narrower or wider than its column is not an error — the cursor
+/// reads the wrong number of bytes and every field after it decodes garbage.
+/// BE widened `event_index` from `Int16` to `UInt32` in the same 2026-09-17
+/// change that moved `application_order` onto the row, which is exactly this.
+/// Every numeric column is therefore projected through an EXPLICIT cast to the
+/// field's type, pinned by `every_numeric_column_off_the_event_row_is_cast`: a
+/// future widening then truncates one visible value instead of shifting the
+/// whole row. Note that `chq` (raw SQL) never exercises RowBinary, so a
+/// production spot check cannot catch a width drift — only the cast can.
 #[derive(Debug, Row, Deserialize)]
 pub struct EventRow {
     pub contract_id: i64,
     pub transaction_id: i64,
     pub ledger_sequence: u32,
-    pub event_index: i16,
+    /// The event's operation within its transaction — a column BE added in the
+    /// same 2026-09-17 change (task 0304). Read because it is part of the fill
+    /// key ADR 0287 D1 defines, and because the same change widened
+    /// `event_index`, which is what a per-OPERATION numbering would need: were
+    /// `event_index` to restart at each operation, `(transaction_id,
+    /// event_index)` alone would collide across two operations of one
+    /// transaction and `run::read_chunk` would drop the second event as an RMT
+    /// double. Keying on the operation too is correct under either numbering.
+    pub operation_index: u16,
+    /// ⚠️ `UInt32` on the server since 2026-09-17, NOT the `Int16` it was
+    /// (task 0304). See the width rule above.
+    pub event_index: u32,
     /// Ledger close time, unix seconds — the candle-minute bucketing key.
     pub closed_at: i64,
     pub topics_xdr: String,
@@ -59,10 +82,11 @@ pub struct EventRow {
 /// two are pinned to this list by a unit test (task 0286). Test-only: it is a
 /// contract with the `SELECT` in `chunk_sql`, asserted, never read at runtime.
 #[cfg(test)]
-pub(crate) const EVENT_ROW_COLUMNS: [&str; 8] = [
+pub(crate) const EVENT_ROW_COLUMNS: [&str; 9] = [
     "contract_id",
     "transaction_id",
     "ledger_sequence",
+    "operation_index",
     "event_index",
     "closed_at",
     "topics_xdr",
@@ -169,15 +193,16 @@ pub(crate) fn chunk_sql(contract_ids: &[i64], start: u32, end: u32) -> String {
 
     format!(
         "SELECT \
-            e.contract_id AS contract_id, \
+            toInt64(e.contract_id) AS contract_id, \
             toInt64(e.ledger_sequence) * 100000 + toInt64(e.transaction_index) \
                 AS transaction_id, \
             toUInt32(e.ledger_sequence) AS ledger_sequence, \
-            e.event_index AS event_index, \
+            toUInt16(e.operation_index) AS operation_index, \
+            toUInt32(e.event_index) AS event_index, \
             ifNull(l.closed_at, 0) AS closed_at, \
             e.topics_xdr AS topics_xdr, \
             e.data_xdr AS data_xdr, \
-            e.application_order AS application_order \
+            toInt16(e.application_order) AS application_order \
          FROM default.soroban_events e \
          LEFT JOIN ( \
             SELECT sequence, toInt64(min(toUnixTimestamp(closed_at))) AS closed_at \
@@ -187,7 +212,8 @@ pub(crate) fn chunk_sql(contract_ids: &[i64], start: u32, end: u32) -> String {
          ) l ON l.sequence = e.ledger_sequence \
          WHERE e.ledger_sequence BETWEEN {start} AND {end} \
            AND e.contract_id IN ({in_list}) \
-         ORDER BY e.ledger_sequence, e.application_order, e.transaction_index, e.event_index"
+         ORDER BY e.ledger_sequence, e.application_order, e.transaction_index, \
+                  e.operation_index, e.event_index"
     )
 }
 
@@ -290,7 +316,7 @@ mod tests {
     fn the_apply_order_comes_off_the_event_row_not_a_join() {
         let sql = sql();
         assert!(
-            sql.contains("e.application_order AS application_order"),
+            sql.contains("toInt16(e.application_order) AS application_order"),
             "the apply order is a column on soroban_events since 2026-09-17"
         );
         assert!(
@@ -416,6 +442,7 @@ mod tests {
             "e.ledger_sequence",
             "e.application_order",
             "e.transaction_index",
+            "e.operation_index",
             "e.event_index",
         ]
         .iter()
@@ -427,7 +454,59 @@ mod tests {
         .collect();
         assert!(
             positions.windows(2).all(|w| w[0] < w[1]),
-            "ORDER BY must be ledger, apply order, transaction, event index: {order_by}"
+            "ORDER BY must be ledger, apply order, transaction, operation, \
+             event index: {order_by}"
         );
+    }
+
+    /// Task 0304 CR-02. `EventRow` binds positionally AND by Rust type: the
+    /// client sends bare `RowBinary`, which carries no names-and-types header,
+    /// so a field whose width differs from its column's shifts every field
+    /// after it and decodes garbage — no error, no 500, just wrong candles.
+    /// That is not hypothetical: BE widened `event_index` from `Int16` to
+    /// `UInt32` on 2026-09-17 and the read kept an `i16` field.
+    ///
+    /// So every numeric column off `e` is projected through an explicit cast to
+    /// its field's type. A cast cannot prevent a future widening, but it turns
+    /// one into a truncated value in one column instead of a shifted row — and
+    /// unlike the alias-order contract above, nothing else in the crate can
+    /// catch this: a `chq` spot check runs raw SQL and never frames a row.
+    #[test]
+    fn every_numeric_column_off_the_event_row_is_cast() {
+        let sql = sql();
+        let select = sql
+            .split(" FROM default.soroban_events")
+            .next()
+            .expect("the SELECT");
+
+        for (expr, field) in [
+            ("toInt64(e.contract_id) AS contract_id", "i64"),
+            ("toUInt32(e.ledger_sequence) AS ledger_sequence", "u32"),
+            ("toUInt16(e.operation_index) AS operation_index", "u16"),
+            ("toUInt32(e.event_index) AS event_index", "u32"),
+            ("toInt16(e.application_order) AS application_order", "i16"),
+        ] {
+            assert!(
+                select.contains(expr),
+                "the projection must pin the wire width to EventRow's {field}: \
+                 expected `{expr}` in {select}"
+            );
+        }
+
+        // And no numeric column slips back in bare. A leading space is what
+        // distinguishes a projection (` e.x AS`) from a cast's argument
+        // (`(e.x) AS`), which is the shape the loop above requires.
+        for bare in [
+            " e.contract_id AS",
+            " e.ledger_sequence AS",
+            " e.operation_index AS",
+            " e.event_index AS",
+            " e.application_order AS",
+        ] {
+            assert!(
+                !select.contains(bare),
+                "`{bare}` is an uncast projection — give it an explicit cast: {select}"
+            );
+        }
     }
 }

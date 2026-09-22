@@ -371,8 +371,15 @@ month cannot be silently ordered the old way any more.
 
 What survives is the value check. `application_order` is `Int16`, and a negative
 value is not a position — `resolve_transaction_index` degrades it to 0 and counts
-it. If a run reports any such fallback, those fills ARE in the wrong order and
-the month is not repaired; say so in the log line rather than letting it pass.
+it. The run's last summary line reports it:
+
+```
+negative apply order:      0
+```
+
+**Anything but `0` means those fills ARE in the wrong order and the month is NOT
+repaired** — do not record it as done. The run also emits one WARN, once, naming
+the first ledger and `application_order` it saw.
 
 ---
 
