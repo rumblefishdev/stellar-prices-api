@@ -119,6 +119,23 @@ history:
       answered: live writes nothing for unregistered pools. (4) Phase-1
       rollout conditions are green (0282 verified 09-19/09-20, #320 merged,
       55/55 alarms OK); who runs it and when is tomorrow's daily.
+  - date: "2026-09-22"
+    status: active
+    who: okarcz
+    note: >
+      Phase-1 rollout scheduled for TODAY, run end to end by the operator,
+      who also runs phases 2 and 3 (no hand-off). All five phase-1
+      preconditions verified on production this morning and recorded in the
+      "Phase 1 — preconditions verified" section: the drift baseline is
+      CLEAN (six `ok`, APPEND intact, no undeclared writer), the snapshot
+      costs a measured 26.7 GiB against 276 GiB free, and the running
+      ledger-processor is confirmed PRE-#320 — the 09-18 Compute deploy
+      shipped stale assets, so the estate is still internally consistent.
+      Two corrections fall out: since #325 the next Compute deploy really
+      rebuilds, so the schema step is what keeps ingest alive rather than
+      mere ordering hygiene; and prices-api cannot ship in the middle step
+      because it shares the Compute stack with the ingest (runbook fixed,
+      PR #333).
 ---
 
 # Candles are built from dust fills in the wrong order
@@ -278,6 +295,81 @@ has no price.
   **unnecessary**: the refill happens inside the re-enrichment; only its
   after-check (`post_run_0228_it`) still runs, on the repaired XLM/USDC
   reference.
+
+### Phase 1 — preconditions verified, rollout 2026-09-22
+
+Measured on production the morning of the rollout. **The operator runs phase 1
+and every later phase**; the only external dependency left is Adam pushing the
+phase-3 script.
+
+| # | Precondition | State |
+| --- | --- | --- |
+| 1 | 0282's fix deployed, full-day check recorded | ✅ 09-19 and 09-20 at exactly zero |
+| 2 | S2 branch merged | ✅ #320 in `develop` |
+| 3 | Drift binary green before the rollout | ✅ 2026-09-22 10:20 UTC, six `ok` |
+| 4 | 0142 / 0137 alarms known-green | ✅ `mv-drift` OK; APPEND intact on all six |
+| 5 | Disk headroom for the snapshots | ✅ 26.7 GiB needed, 276 GiB free |
+
+**The drift baseline, and why it needed a pre-#320 binary.** `ROLLUPS_SQL` is
+`include_str!`'d, so the tool compares the live views against whichever
+`rollups.sql` its build carried. Built from `develop` it would report DRIFT on
+all six *before the rollout starts*, correctly and uselessly. The baseline was
+therefore taken with a binary built from `d11d20ab^1` (the commit before #320
+merged), cross-compiled `x86_64-unknown-linux-musl` (`static-pie linked` — the
+host's glibc is far older than a current laptop's), `scp`'d to ch-prod-01 and
+run there against `localhost:8123` as `default`, password over ssh stdin. There
+is no path from a laptop: prod's HTTP endpoint is mTLS-only behind Caddy and
+`client()` builds a plaintext client. Result: six `ok`, *"6 rollup MVs in sync
+with rollups.sql, and nothing else in prices writes into their targets"*. No
+`CRITICAL`, which is how APPEND mode is reported, so precondition 4 is settled
+by direct measurement rather than by reading the alarm.
+
+⚠️ `Config::from_env()` defaults to `localhost:8123`, so the same command on a
+machine with a local ClickHouse running checks **dev** and exits 0 looking
+identical to a clean prod result. Read the startup `url=` line before the
+verdict.
+
+**Measured sizes** (2026-09-22 10:00 UTC, `chq`): `1m` 20.05 GiB / 783 M rows;
+coarse tiers `1h` 11.32, `15m` 7.38, `4h` 5.41, `1d` 1.91, `1w` 0.49, `1M` 0.20
+GiB — **26.7 GiB** for the step-4 snapshot of all six, against 276.35 GiB free
+(15.7 %, the `ch-disk-free` alarm firing since 09-21 18:21 UTC on a threshold of
+20 %). The alarm is a percentage on a disk shared with BE, who lost ~175 GiB
+between 09-21 09:36 and 15:36 and are handling it; the absolute headroom is
+ample and phase 1 does not wait for it.
+
+**Incidental finding:** six stale `price_ohlcv_*_bak` tables from **2026-07-17**
+(newest row 13:00 that day) hold **15.6 GiB**. Owner and campaign not
+identified; if that campaign is closed they are free space. Step 4's snapshots
+use the distinct prefix `rollout_0286_bak_*` so the two schemes cannot be
+confused during a rollback.
+
+**The running ingest is PRE-#320, and that is what kept the estate consistent.**
+The live `reconcile run complete` line carries `held_back` and `open_minute`
+(#313) but not `order_book_fills` / `offer_lookup_misses` / `pool_fills`
+(#320), so the 2026-09-18 Compute deploy shipped stale Lambda assets — [[0141]]
+exactly. Two consequences:
+
+- **#325 (merged 09-21) makes the next Compute deploy rebuild for real.** No
+  production component applies `INIT_SQL` (every call site is a test), so the pf
+  columns do not exist on prod; a Compute deploy before the schema step would
+  put the name-routed writer in front of columns that are not there and stop
+  ingestion. The schema step is a hard gate on ingest liveness, not ordering
+  hygiene.
+- **`order_book_fills` on that log line is the cleanest proof step 7 landed.**
+
+**`prices-api` moves to the end of the order.** `api-handler` and
+`ledger-processor` are one CDK stack, so `make deploy-production-compute` ships
+both or neither and the runbook's middle step could not contain the API without
+also shipping the ingest into pre-0286 MVs. Safe because the two mis-orderings
+are not symmetric: a new ingest too early writes a zero `low` across every
+coarse tier and must be rolled back, while a new API too late only prolongs the
+behaviour production already has. Runbook corrected in PR #333; `init.sql` and
+the `rollups.sql` header keep their wording, whose constraint — ingest last — is
+unchanged.
+
+**Rollback amendment.** The runbook's `FREEZE` + `ATTACH PARTITION FROM '/path/'`
+is a syntax error (Code 62) and `prices_admin` has no filesystem access; step 4
+uses backup tables plus `REPLACE PARTITION` instead.
 
 ### Phase 3 — operator decisions (2026-09-21)
 
