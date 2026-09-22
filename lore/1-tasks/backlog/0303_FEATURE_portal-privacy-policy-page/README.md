@@ -62,8 +62,12 @@ HubSpot and GTM, has no accounts, and the corporate policy covers it.
   router link. Any other place the portal names a privacy policy (the
   sign-in card's legal line, if it returns) points at the same route.
 - Before publishing, settle the three things the draft leaves open:
-  1. the contact address — the draft says `hello@rumblefish.pl`, the
-     corporate policy `hello@rumblefishdev.com`; one of them is right;
+  1. ~~the contact address~~ — **decided 2026-09-22: keep the draft's
+     `hello@rumblefish.pl` for now.** rumblefish.dev publishes three
+     addresses: `hello@rumblefish.dev` in every header and footer,
+     `hello@rumblefish.pl` in the contact form, `hello@rumblefishdev.com`
+     only inside the corporate policy's text (the old domain). To revisit
+     if the `.pl` and `.dev` boxes turn out not to reach the same people;
   2. whether IP addresses are in fact recorded (no access logs are
      configured on the API; the Lambda's execution logs are what exists);
   3. the "Payments" section describes a paid model the portal does not have
