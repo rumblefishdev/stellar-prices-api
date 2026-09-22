@@ -67,6 +67,20 @@ history:
       since 2024-05-02), spawned as [[0300]] and allow-listed temporarily by
       wasm until 0300; 12 routers, aggregators and non-AMM contracts
       allow-listed permanently (PR #332).
+  - date: "2026-09-22"
+    status: active
+    who: akot
+    note: >
+      PR #332 reviewed by okarcz (3 inline findings) — all addressed in
+      b66ee59: contract events only (event_type = 1), stale "shipped
+      disabled" comments, and the dev_read note for the manual back-test
+      (read-only refuses a CHANGE of a setting, not an equal value). While
+      re-checking on production, BE task 0541 (commit 350a835c, live
+      2026-09-22) had dropped soroban_events.transaction_id; fixed in
+      3f49901 (a transaction is (ledger_sequence, transaction_index)) with
+      the IT fixture mirroring the new DDL. The April-only residual (6
+      emitters) classified and allow-listed in d1b1eda — no missing venue.
+      Both windows read 0 unclassified on production. AC1 met.
 ---
 
 # A recurring coverage sweep over unregistered swap emitters
@@ -202,22 +216,25 @@ task notes:
   (`true` since the grants were verified) disables the rule durably;
   `aws events disable-rule` is undone by the next EventBridge deploy.
 
-## Status (2026-09-21)
+## Status (2026-09-22)
 
 - Code: PR #332 — crate `packages/coverage-sweep-probe`, allow-list
-  (6 contract entries incl. the Soroswap factory, 2 SushiSwap V3 wasm
-  entries `until = "0290"`), weekly rule Mon 05:17 UTC, alarms
+  (24 contract entries: routers, aggregators, the Soroswap factory and
+  non-AMM emitters; 3 temporary wasm entries — SushiSwap V3 `until = "0290"`,
+  Comet `until = "0300"`), weekly rule Mon 05:17 UTC, alarms
   `prices-production-coverage-sweep-unclassified` and `-probe-errors`,
   runbook `docs/runbooks/0100-coverage-sweep-triage.md`.
 - BE grants: live and verified 2026-09-21 (runbook §4.2).
-- Not yet done: merge, deploy (EventBridge + Observability, runbook §4.4),
-  first run. After the phase-1 allow-list (PR #332, `e4bae2a`) the current
-  window reads 0 unclassified, so the first run publishes nothing; the AC5
-  proof is a synthetic `UnclassifiedSwapEvents = 1` datapoint (runbook §4.5).
-- Phase-1 residual (current 14 days): classified 2026-09-22, see below.
-  Still to classify: the April-only candidates `Swap` (`d4b4976b`, 462),
-  `SwappedToVUsd` (`a757a1ed`, 355), 2× `tokens_swapped_event`, and a few
-  1–2-event emitters (runbook §5).
+- Review (okarcz) addressed; the probe reads BE task 0541's re-keyed
+  `soroban_events` (no `transaction_id` since 2026-09-22). No longer blocked
+  by [[0286]]: its phase 1 went live on 2026-09-22.
+- Not yet done: re-review + merge, deploy (EventBridge + Observability,
+  runbook §4.4), first run. The residual is 0 in both the current and the
+  April window, so the first run publishes nothing; the AC5 proof is a
+  synthetic `UnclassifiedSwapEvents = 1` datapoint (runbook §4.5).
+- The 133 SushiSwap V3 pools are in `pool_registry` since [[0290]]'s
+  `--discover-pools` write, so the query already excludes them; the
+  `until = "0290"` wasm entries go once 0290's live ingest is deployed.
 
 ## Phase 1 classification (2026-09-22, production, `dev_read`)
 
@@ -244,11 +261,29 @@ shows ~all, a venue of its own does not.
 
 With these entries the current window reads **0 unclassified**.
 
+### April-only residual (2026-09-22)
+
+Six emitters seen only in the 2026-04 back-test window (61,926,675–62,147,853),
+same method; transactions identified as `(ledger_sequence, transaction_index)`.
+None is a missing venue.
+
+| Contract | wasm | What it is | Evidence | Verdict |
+| --- | --- | --- | --- | --- |
+| `CAYDBAJB…` | `d4b4976b` | USDM1→USDM0 issuer conversion, predecessor of `CDWTSHMD…` | `swap`/`process_swap` burn USDM1 and mint USDM0 at ~1.0098; stops at 62,267,777 as its successor starts (62,264,883); with pool 0/462 | not a market, allow-list |
+| `CAOTMWRK…` | `a757a1ed` | Allbridge Core bridge pool (USDC) | `swap_to_v_usd`/`swap_from_v_usd`, `set_bridge`: USDC against virtual vUSD, no on-chain pair; 15,911 swaps 2024-04 → 2026-07; 0/355 | bridge, allow-list |
+| `CAJDT2GI…` | `6c622442` | Blend flash-loan bot via the Aquarius router | `exec_op`, `set_aqua_router`, `make_swap_hop`; 30/30 | router, allow-list |
+| `CCC27LQ4…` | `1f794991` | older build of the same bot | same interface; 118/118 over its lifetime | router, allow-list |
+| `CD3YDAM5…` | `800c5441` | a third SushiSwap V3 router | `init_router`, `swap_exact_input*`; 1,603/1,603 txs hold a V3 pool swap | router, allow-list (task 0290) |
+| `CAE2G5Z7…` | `a6c1acc6` | Circle CCTP V2 TokenMessengerMinter | one admin `swap_minter_config_set(USDC)` at deploy; 0/27 | not a market, allow-list |
+
+With these entries the April window also reads **0 unclassified**.
+
 ## Acceptance Criteria
 
-- [ ] Every currently unregistered swap-shaped emitter is classified, and the
-      classification is recorded here. (The 14-day window: done 2026-09-22,
-      13/13. The April-only candidates are still open.)
+- [x] Every currently unregistered swap-shaped emitter is classified, and the
+      classification is recorded here.
+      → 2026-09-22: the 14-day window (13) and the April-only residual (6),
+      tables above; 0 unclassified in both on production.
 - [ ] Any genuine AMM pools found are seeded into `pool_registry` and their
       ranges repriced. (Comet BLND/USDC → [[0300]]; SushiSwap V3 → [[0290]].)
 - [ ] A committed allow-list of known-ignorable emitters exists, each entry
