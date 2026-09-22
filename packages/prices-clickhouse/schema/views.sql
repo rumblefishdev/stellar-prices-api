@@ -670,7 +670,19 @@ FROM
         if(is_priced,   toFloat64(p.close_usd) * toFloat64(p.pf_volume), toFloat64(0)) AS rpv,
         if(is_priced,   toFloat64(p.pf_volume),                          toFloat64(0)) AS rpw,
         if(is_priced,   toFloat64(p.volume_quote_usd),                   toFloat64(0)) AS rpusd,
-        if(is_eligible, toFloat64(p.pf_volume),                          toFloat64(0)) AS rew,
+        -- ⚠️ `is_priced OR is_eligible`, NOT `is_eligible` alone. The priced set
+        -- is not a subset of the eligible one by definition: `is_priced` admits
+        -- a row on `close_usd != close` for ANY quote, while `is_eligible` names
+        -- a QUOTE SET. A row priced against a quote outside that set would land
+        -- in the numerator and not in the denominator, so the share could leave
+        -- [0, 1] entirely (measured on 26.3.10.60: 5000000 published in a
+        -- Decimal(10, 6) column this file documents as [0, 1] — CAST does not
+        -- range-check P, so nothing raises). Not reachable through today's
+        -- write path; made unreachable BY CONSTRUCTION here rather than by a
+        -- clamp, so `priced ⊆ eligible` holds whatever a future writer does.
+        -- Pinned by views_it.rs::
+        -- a_priced_row_outside_the_eligible_quote_set_stays_inside_the_share.
+        if(is_priced OR is_eligible, toFloat64(p.pf_volume),             toFloat64(0)) AS rew,
         toUInt8(0)                                        AS is_peg,
         CAST(0 AS Decimal(38, 14))                        AS peg_rate,
         -- UNION ALL matches arms POSITIONALLY and requires an identical column
@@ -1087,7 +1099,19 @@ FROM
         if(is_priced,   toFloat64(p.close_usd) * toFloat64(p.pf_volume), toFloat64(0)) AS rpv,
         if(is_priced,   toFloat64(p.pf_volume),                          toFloat64(0)) AS rpw,
         if(is_priced,   toFloat64(p.volume_quote_usd),                   toFloat64(0)) AS rpusd,
-        if(is_eligible, toFloat64(p.pf_volume),                          toFloat64(0)) AS rew,
+        -- ⚠️ `is_priced OR is_eligible`, NOT `is_eligible` alone. The priced set
+        -- is not a subset of the eligible one by definition: `is_priced` admits
+        -- a row on `close_usd != close` for ANY quote, while `is_eligible` names
+        -- a QUOTE SET. A row priced against a quote outside that set would land
+        -- in the numerator and not in the denominator, so the share could leave
+        -- [0, 1] entirely (measured on 26.3.10.60: 5000000 published in a
+        -- Decimal(10, 6) column this file documents as [0, 1] — CAST does not
+        -- range-check P, so nothing raises). Not reachable through today's
+        -- write path; made unreachable BY CONSTRUCTION here rather than by a
+        -- clamp, so `priced ⊆ eligible` holds whatever a future writer does.
+        -- Pinned by views_it.rs::
+        -- a_priced_row_outside_the_eligible_quote_set_stays_inside_the_share.
+        if(is_priced OR is_eligible, toFloat64(p.pf_volume),             toFloat64(0)) AS rew,
         toUInt8(0)                                        AS is_peg,
         CAST(0 AS Decimal(38, 14))                        AS peg_rate,
         -- UNION ALL matches arms POSITIONALLY and requires an identical column
@@ -1482,7 +1506,19 @@ FROM
         if(is_priced,   toFloat64(p.close_usd) * toFloat64(p.pf_volume), toFloat64(0)) AS rpv,
         if(is_priced,   toFloat64(p.pf_volume),                          toFloat64(0)) AS rpw,
         if(is_priced,   toFloat64(p.volume_quote_usd),                   toFloat64(0)) AS rpusd,
-        if(is_eligible, toFloat64(p.pf_volume),                          toFloat64(0)) AS rew,
+        -- ⚠️ `is_priced OR is_eligible`, NOT `is_eligible` alone. The priced set
+        -- is not a subset of the eligible one by definition: `is_priced` admits
+        -- a row on `close_usd != close` for ANY quote, while `is_eligible` names
+        -- a QUOTE SET. A row priced against a quote outside that set would land
+        -- in the numerator and not in the denominator, so the share could leave
+        -- [0, 1] entirely (measured on 26.3.10.60: 5000000 published in a
+        -- Decimal(10, 6) column this file documents as [0, 1] — CAST does not
+        -- range-check P, so nothing raises). Not reachable through today's
+        -- write path; made unreachable BY CONSTRUCTION here rather than by a
+        -- clamp, so `priced ⊆ eligible` holds whatever a future writer does.
+        -- Pinned by views_it.rs::
+        -- a_priced_row_outside_the_eligible_quote_set_stays_inside_the_share.
+        if(is_priced OR is_eligible, toFloat64(p.pf_volume),             toFloat64(0)) AS rew,
         toUInt8(0)                                        AS is_peg,
         CAST(0 AS Decimal(38, 14))                        AS peg_rate,
         -- UNION ALL matches arms POSITIONALLY and requires an identical column
@@ -1653,7 +1689,19 @@ FROM
         if(is_priced,   toFloat64(p.close_usd) * toFloat64(p.pf_volume), toFloat64(0)) AS rpv,
         if(is_priced,   toFloat64(p.pf_volume),                          toFloat64(0)) AS rpw,
         if(is_priced,   toFloat64(p.volume_quote_usd),                   toFloat64(0)) AS rpusd,
-        if(is_eligible, toFloat64(p.pf_volume),                          toFloat64(0)) AS rew,
+        -- ⚠️ `is_priced OR is_eligible`, NOT `is_eligible` alone. The priced set
+        -- is not a subset of the eligible one by definition: `is_priced` admits
+        -- a row on `close_usd != close` for ANY quote, while `is_eligible` names
+        -- a QUOTE SET. A row priced against a quote outside that set would land
+        -- in the numerator and not in the denominator, so the share could leave
+        -- [0, 1] entirely (measured on 26.3.10.60: 5000000 published in a
+        -- Decimal(10, 6) column this file documents as [0, 1] — CAST does not
+        -- range-check P, so nothing raises). Not reachable through today's
+        -- write path; made unreachable BY CONSTRUCTION here rather than by a
+        -- clamp, so `priced ⊆ eligible` holds whatever a future writer does.
+        -- Pinned by views_it.rs::
+        -- a_priced_row_outside_the_eligible_quote_set_stays_inside_the_share.
+        if(is_priced OR is_eligible, toFloat64(p.pf_volume),             toFloat64(0)) AS rew,
         toUInt8(0)                                        AS is_peg,
         CAST(0 AS Decimal(38, 14))                        AS peg_rate,
         -- UNION ALL matches arms POSITIONALLY and requires an identical column

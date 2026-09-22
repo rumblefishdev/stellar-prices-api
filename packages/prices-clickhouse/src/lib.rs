@@ -1517,6 +1517,137 @@ mod tests {
         }
     }
 
+    /// The two `price_usd_series_coverage` grain statements, squashed — the
+    /// series views' companions, which must describe the same bucket the same
+    /// way or a consumer gets two answers for one question.
+    fn coverage_grains() -> Vec<(&'static str, String)> {
+        let stmts = split_statements(VIEWS_SQL);
+        let find = |needle: &str| -> String {
+            squash(
+                stmts
+                    .iter()
+                    .find(|s| s.contains(needle))
+                    .unwrap_or_else(|| panic!("no view statement containing `{needle}`")),
+            )
+        };
+        vec![
+            (
+                "price_usd_series_coverage",
+                find("prices.price_usd_series_coverage AS"),
+            ),
+            (
+                "price_usd_series_coverage_1h",
+                find("prices.price_usd_series_coverage_1h AS"),
+            ),
+        ]
+    }
+
+    /// Arm A's executable text for one view statement: the base-leg projection
+    /// through the candle join that closes the arm. Comment-stripped and
+    /// squashed by the caller, so this compares SQL and not layout.
+    fn arm_a(name: &str, stmt: &str) -> String {
+        const START: &str = "SELECT multiIf( a.contract_address";
+        const END: &str = "INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id";
+        let start = stmt
+            .find(START)
+            .unwrap_or_else(|| panic!("{name}: no arm-A base-leg projection (`{START}`)"));
+        let end = stmt
+            .find(END)
+            .unwrap_or_else(|| panic!("{name}: no arm-A candle join (`{END}`)"));
+        assert!(
+            end > start,
+            "{name}: the arm-A candle join precedes its projection — the \
+             markers this helper slices on no longer delimit arm A"
+        );
+        stmt[start..end + END.len()].to_string()
+    }
+
+    /// Task 0147 review SF-04. Arm A is spelled FOUR times — once per series
+    /// grain and once per coverage grain — and the two surfaces' whole job is to
+    /// describe the same bucket. Edit the priced predicate, the eligible set or
+    /// a conditional sum in the series view and forget the coverage view, and
+    /// they disagree about that bucket SILENTLY: no existing test reads both.
+    ///
+    /// That is the precise failure mode task 0165 wrote `series_grains()` to
+    /// prevent between the grains; this closes the same hole between the series
+    /// and its coverage companion. The behavioural half is `#[ignore]` in
+    /// tests/views_it.rs; this runs on every push.
+    #[test]
+    fn views_sql_arm_a_is_identical_between_each_series_view_and_its_coverage_view() {
+        for ((series_name, series), (coverage_name, coverage)) in
+            series_grains().into_iter().zip(coverage_grains())
+        {
+            let series_arm = arm_a(series_name, &series);
+            let coverage_arm = arm_a(coverage_name, &coverage);
+            assert_eq!(
+                series_arm, coverage_arm,
+                "{series_name} and {coverage_name} no longer share ONE arm A. \
+                 The share, the priced predicate and the eligible set must be \
+                 spelled identically in both, or the series publishes a bucket \
+                 the coverage view explains with different arithmetic"
+            );
+        }
+    }
+
+    /// Task 0147 review SF-05. The canonical USDT issuer is a HAND-SYNCED copy
+    /// of [`USDT_ISSUER`] — SQL cannot reference a Rust const — and the file's
+    /// own header says in bold to change it here and in that const together.
+    /// Nothing checked it.
+    ///
+    /// The repo has a measured incident of exactly this class: tasks 0172/0173,
+    /// a rate filed under the wrong issuer, ~7.4x on 44,657 candles across 495
+    /// base assets. The same scan covers [`USDC_ISSUER`], which carried the same
+    /// gap for longer.
+    ///
+    /// Counts are asserted as well as values: a copy DELETED from one of the
+    /// four `eligible_quotes` blocks would silently drop USDT-quoted volume out
+    /// of that grain's coverage denominator, and every surviving literal would
+    /// still be correct.
+    #[test]
+    fn views_sql_hand_synced_issuer_literals_equal_this_crates_consts() {
+        let executable = split_statements(VIEWS_SQL).join(";\n");
+
+        for (code, issuer, expected) in [
+            ("'USDT'", USDT_ISSUER, 4usize),
+            ("'USDC'", USDC_ISSUER, 14usize),
+        ] {
+            assert_eq!(
+                executable.matches(issuer).count(),
+                expected,
+                "views.sql must spell the {code} issuer literal exactly \
+                 {expected} times in EXECUTABLE SQL — a deleted copy drops that \
+                 quote leg out of one surface while every surviving literal \
+                 stays correct"
+            );
+            assert_eq!(
+                executable.matches(code).count(),
+                expected,
+                "every {code} asset-code literal is paired with an issuer \
+                 literal, so the two counts must match"
+            );
+
+            for (at, _) in executable.match_indices(code) {
+                // The issuer always follows its asset code within the same
+                // predicate; bound the window so a MISSING issuer cannot be
+                // satisfied by the next block's.
+                let window = &executable[at..executable.len().min(at + 200)];
+                let key = "issuer_address = '";
+                let from = window.find(key).unwrap_or_else(|| {
+                    panic!("views.sql: a {code} literal with no issuer_address beside it: {window}")
+                }) + key.len();
+                let len = window[from..]
+                    .find('\'')
+                    .unwrap_or_else(|| panic!("views.sql: unterminated issuer literal: {window}"));
+                assert_eq!(
+                    &window[from..from + len],
+                    issuer,
+                    "views.sql spells a {code} issuer that is not this crate's \
+                     const — the views and the writer have diverged (0172/0173)"
+                );
+            }
+        }
+    }
+
     /// Task 0267 decision C. An IMPORTED measurement (`method = 'external'`)
     /// is evidence of the same standing as a polled one and must be readable
     /// by both grains — otherwise the loaded USDC history is written and never

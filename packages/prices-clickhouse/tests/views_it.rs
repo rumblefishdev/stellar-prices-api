@@ -2867,3 +2867,138 @@ async fn usd_reference_ignores_sub_floor_and_dust_only_rows_at_both_grains() {
         .await
         .unwrap();
 }
+
+/// Task 0147 review SF-01 — a PRICED row is always inside the share's
+/// denominator, whatever its quote leg is.
+///
+/// `is_priced` admits a row on `close_usd != close` for ANY quote; `is_eligible`
+/// names a QUOTE SET. The two are therefore not nested by definition, and before
+/// this fix a row that was priced against a quote outside the eligible set went
+/// into the numerator and not into the denominator. Measured on 26.3.10.60 with
+/// exactly this fixture: `priced_volume_share = 5000000` in a `Decimal(10, 6)`
+/// column `views.sql` documents as `[0, 1]` (CAST does not range-check `P`, so
+/// nothing raised), and a fully-priced $5,000 bucket read `unpriceable` beside
+/// `priced_volume_usd = 5000`.
+///
+/// `rew` now weights on `is_priced OR is_eligible`, so `priced ⊆ eligible` holds
+/// BY CONSTRUCTION — the share cannot leave `[0, 1]` no matter what a future
+/// writer puts in `close_usd`. Unreachable through today's write path
+/// (`TRACKED_SYMBOLS` and the enrichment identities are all eligible quotes);
+/// reachable the moment a symbol is tracked without being made eligible, which
+/// is task 0173's shape.
+///
+/// FOO holds the priced-but-ineligible row BESIDE a dust-sized eligible unpriced
+/// one — the combination that produced the 5000000. BAR holds the ineligible
+/// priced row ALONE — the combination that produced `unpriceable` with a priced
+/// USD volume. Both grains, both JIT modes.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_priced_row_outside_the_eligible_quote_set_stays_inside_the_share() {
+    let db = "it_views_0147_priced_not_eligible";
+    let client = setup_scratch(db).await;
+
+    // 20 = EXO: an ordinary credit asset, in neither the three eligible
+    // literals nor `prices.usd_rate`. 2 = USDC is the canonical eligible quote.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','',''), \
+             (11,'BAR','classic','GBAR','',''), \
+             (20,'EXO','classic','GEXO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    for tbl in ["price_ohlcv_1d", "price_ohlcv_1h"] {
+        client
+            .query(&format!(
+                "INSERT INTO {db}.{tbl} \
+                 (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+                  pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
+                 (1620000000,10,20,'sdex', 9,9,9,9, 500,4500,5000,2.5,9,7, 7,500,4500, 1), \
+                 (1620000000,10,2,'soroswap', 9,9,9,9, 0.0001,0.0009,0,0,9,1, 1,0.0001,0.0009, 1), \
+                 (1620000000,11,20,'sdex', 9,9,9,9, 500,4500,5000,2.5,9,7, 7,500,4500, 1)"
+            ))
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    for (series, coverage) in [
+        ("price_usd_series", "price_usd_series_coverage"),
+        ("price_usd_series_1h", "price_usd_series_coverage_1h"),
+    ] {
+        for jit in JIT_MODES {
+            let rows: Vec<(String, f64, f64, String)> = client
+                .query(&format!(
+                    "SELECT asset_code, toFloat64(priced_volume_share), \
+                            toFloat64(priced_volume_usd), status \
+                     FROM {db}.{coverage} WHERE asset_code IN ('FOO','BAR') \
+                     ORDER BY asset_code{jit}"
+                ))
+                .fetch_all::<(String, f64, f64, String)>()
+                .await
+                .unwrap_or_else(|e| panic!("{coverage}{jit} must not raise: {e}"));
+            assert_eq!(rows.len(), 2, "{coverage}{jit}: one row per identity");
+
+            for (code, share, usd, status) in &rows {
+                assert!(
+                    (0.0..=1.0).contains(share),
+                    "{coverage}{jit}: {code}'s share must stay inside the \
+                     [0, 1] this column is declared as — got {share}, which is \
+                     what a priced row outside the eligible quote set does to a \
+                     denominator that does not contain it"
+                );
+                assert_eq!(
+                    usd, &5000.0,
+                    "{coverage}{jit}: {code}'s priced USD volume is the \
+                     ineligible-quoted row's own 5000"
+                );
+                assert_eq!(
+                    status, "priced",
+                    "{coverage}{jit}: {code} is FULLY priced — every unit that \
+                     formed a price has a close_usd. `unpriceable` beside a \
+                     priced_volume_usd of 5000 is the contradiction this fixes"
+                );
+            }
+
+            let (foo_share, bar_share) = (rows[1].1, rows[0].1);
+            assert!(
+                foo_share > 0.99,
+                "{coverage}{jit}: FOO's 0.0001 eligible unpriced unit against \
+                 500 priced ones is a share just under 1, got {foo_share}"
+            );
+            assert_eq!(
+                bar_share, 1.0,
+                "{coverage}{jit}: BAR's only row is priced, so its share is \
+                 exactly 1 — the priced weight IS the eligible weight"
+            );
+
+            let published: Vec<(String, f64)> = client
+                .query(&format!(
+                    "SELECT asset_code, toFloat64(close_usd) FROM {db}.{series} \
+                     WHERE asset_code IN ('FOO','BAR') ORDER BY asset_code{jit}"
+                ))
+                .fetch_all::<(String, f64)>()
+                .await
+                .unwrap_or_else(|e| panic!("{series}{jit} must not raise: {e}"));
+            assert_eq!(
+                published,
+                vec![("BAR".to_string(), 2.5), ("FOO".to_string(), 2.5)],
+                "{series}{jit}: a bucket whose price-forming volume is entirely \
+                 priced must be PUBLISHED at that price — withholding a \
+                 fully-priced $5,000 bucket because its quote leg is not in a \
+                 literal set is the same defect seen from the other side"
+            );
+        }
+    }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
