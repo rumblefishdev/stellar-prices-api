@@ -24,6 +24,39 @@ commands run" warning all apply unchanged. This runbook is the ORDER around it,
 plus the two things 0142 does not cover: the FREEZE before the first re-CREATE,
 and the month's rebuild.
 
+## 0. Where these commands run
+
+Two places, and mixing them up is the first way to lose an hour.
+
+**ClickHouse statements** run from `fishuser-hero`, which is the only machine
+holding the `prices_admin` bundle. `prices_reader` and `dev_read` are
+`readonly = 1` and cannot ALTER, DROP or TRUNCATE anything below. Open a tmux
+session — steps 2, 4, 5, 6 and 8 all run in the same shell — and define the
+helper once:
+
+```bash
+ssh fishuser-hero
+tmux new -s rollout0286
+cd ~/stellar-prices-api && git checkout develop && git pull
+chadmin() { curl -sS --cert ~/prices-mtls/prices-admin-production.crt \
+  --key ~/prices-mtls/prices-admin-production.key --cacert ~/prices-mtls/ca.crt \
+  "https://ch.sorobanscan.rumblefish.dev/" --data-binary "$1"; }
+chadmin "SELECT currentUser(), version() FORMAT TSVWithNames"
+```
+
+The last line must print `prices_admin`. ⚠️ `chadmin` is a shell function, so a
+second tmux pane does not have it — paste the definition again there.
+
+⚠️ **`prices_admin` cannot read `system.view_refreshes`** (`Code: 497`), which is
+exactly the table you want between a `DROP VIEW` and its `CREATE`. Use the
+`dev_read` cert for that one query, or watch the target table advance instead.
+
+**CDK deploys** run from a local checkout of this repo, **on `develop`**:
+`make deploy-production-*` builds from the working tree, so the branch you are
+standing on is the code that reaches production. Always `make diff-production`
+first and read it for REMOVALS — `--require-approval broadening` prompts on IAM
+widening only, never on a resource being deleted or replaced.
+
 ## 1. Preconditions
 
 | #   | Precondition                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Check                                                                                                                                                     |
@@ -394,7 +427,8 @@ statement rather than editing the SQL, which is rendered from
 `src/rollup_sql.rs` and pinned to it by a unit test:
 
 ```bash
-curl -sS --cert "$ADMIN_CERT.crt" --key "$ADMIN_CERT.key" --cacert "$PRICES_CA" \
+curl -sS --cert ~/prices-mtls/prices-admin-production.crt \
+  --key ~/prices-mtls/prices-admin-production.key --cacert ~/prices-mtls/ca.crt \
   "https://ch.sorobanscan.rumblefish.dev/?max_partitions_per_insert_block=1000" \
   --data-binary "$(sed -n '/^INSERT INTO prices.price_ohlcv_1M/,$p' \
                     packages/prices-clickhouse/schema/preroll.sql)"
