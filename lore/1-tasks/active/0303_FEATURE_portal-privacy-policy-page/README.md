@@ -2,7 +2,7 @@
 id: "0303"
 title: "Publish the Prices API privacy policy as a portal page and link it from the footer — the footer's 'Privacy policy' is dead text and the corporate policy does not describe the portal"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0010"]
 related_tasks: ["0193", "0301", "0159", "0187", "0189", "0157"]
 tags: [layer-frontend, priority-high, effort-small, epic-self-service-onboarding, portal, legal]
@@ -22,6 +22,14 @@ history:
       username, API key, usage, logs). The page is the portal's, at
       `/api/privacy-policy`, because the portal is what collects the data and the
       draft itself says the policy is published "through the portal".
+  - date: "2026-09-22"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated with the three open points decided the same day: the
+      contact address stays `hello@rumblefish.pl` for now, IP addresses are
+      recorded in X-Ray for 30 days (measured, sentence to be plain), the
+      Payments section stays. Route `/privacy-policy`.
 ---
 
 # Publish the Prices API privacy policy as a portal page
@@ -82,9 +90,10 @@ HubSpot and GTM, has no accounts, and the corporate policy covers it.
      plus 5 %. So the draft's hedged sentence is true; the page can say it
      plainly: "IP addresses are recorded in request traces (AWS X-Ray) for
      a sample of requests and kept for 30 days";
-  3. the "Payments" section describes a paid model the portal does not have
-     ("Contact us for commercial plans — no in-app upgrade flow"); keep it
-     only if it is wanted ahead of time.
+  3. ~~the "Payments" section~~ — **decided 2026-09-22: it stays**, written
+     ahead of a paid model the portal does not have yet ("Contact us for
+     commercial plans — no in-app upgrade flow"); the section is hedged with
+     "may" throughout, so it is not false today.
 - Who approved the text, and when — recorded here before the page ships.
 
 ## Acceptance Criteria
