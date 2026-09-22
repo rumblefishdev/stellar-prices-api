@@ -92,6 +92,29 @@ history:
       price_it, list_it, openapi, 214 portal), the known pre-existing
       endpoints_it backfill_status failure aside; bundle regenerated; nothing
       deployed.
+  - date: "2026-09-22"
+    status: active
+    who: akot
+    note: >
+      Human review of PR #337 (three findings), one commit. The `now()` upper
+      bound is now on EVERY 24h window in `current.sql` — the `xlm_usd`
+      scalar, `per_source` and both `vol_all` legs joined `base_tip` and the
+      oracle arm — so a future-stamped candle can no longer split a row
+      against itself, pricing `sources`/`vwap_24h`/`volume_24h_usd` from a
+      candle `as_of` does not name; `ref_7d`'s [7d, 5d] band is deliberately
+      untouched. `as_of`'s `""` is no longer documented as "no price" alone:
+      the table DEFAULT makes it `""` beside a real price between the ALTER
+      and the MV re-CREATE, so "no price" is `as_of == ""` AND `price_status
+      == "unpriced"`, now stated in both OpenAPI triples, both DTO docstrings,
+      the sentinel table and the BE contract note. And the three API
+      projections gained the CI order guard the MV already had: a unit test
+      compares each SELECT's projected names, in order, against
+      `Row::COLUMN_NAMES` (10 / 16 / 13) — a `method`/`as_of` transposition
+      was previously a plausible 200, not an error. Both RED proofs captured
+      (`current_mv_it.rs:1395` volume 2500 vs 1500; `queries_ch.rs:2244` the
+      transposed sequence, with the epoch-guard test still passing beside it).
+      All suites green bar the known pre-existing endpoints_it
+      backfill_status; bundle regenerated; nothing deployed.
 ---
 
 # Publish the price's age
@@ -515,3 +538,77 @@ were answered with text and the semantics kept, one was declined. One commit.
   first verdict), and its sentinel table already states that epoch means "no
   price" and must be read as absent, never as an age. Changing it would break
   every existing BE reader to restate something already documented.
+
+### Human review round (PR #337, 2026-09-22)
+
+The first human read of the branch. Three findings, all applied, one commit.
+Two of the three were about a claim the code made that was true only of the
+part of the code the reviewer had been reading.
+
+- **#1 applied — the `now()` upper bound is on EVERY window, not just the tip.**
+  The second review round bounded `base_tip`'s `WHERE` and the oracle arm and
+  stopped there. The reviewer found the other four windows still bounded from
+  below only: the `xlm_usd` scalar, `per_source`, and both legs of `vol_all`.
+  A candle stamped ahead of the wall clock therefore split the row against
+  itself — `price_usd` and `as_of` from the last past candle while
+  `sources.<venue>.price` and `vwap_24h` came from the future one,
+  `volume_24h_usd` counted its volume, `price_xlm` stopped being 1 for XLM
+  against its own close, and `src_is_live` held a venue live forever on the
+  strength of one bad stamp. Before this task BOTH sides read the same candle
+  set because NEITHER was bounded; bounding one of them is what made them
+  disagree. All four now carry `AND timestamp <= now()`. `ref_7d` is left
+  alone deliberately: its window is `[7d, 5d]`, wholly below `now()` already.
+  The guard test's invariants did not move — 5 guarded aggregates, one
+  `INTERVAL 2 HOUR`, no `argMax(close_usd`. `base_tip`'s comment no longer
+  claims the bound is local to the tip; it names every window that carries it
+  and says why a tip-only bound is the wrong shape.
+  `a_future_dated_candle_does_not_date_as_of_ahead_of_now` grew the fixture
+  the reviewer's list implies — XLM priced as a base leg at 0.40 (past) /
+  0.60 (future), and a `soroswap` venue that stopped quoting 3 h ago and then
+  emitted one future-stamped candle — and asserts BY VALUE that
+  `sources.sdex.price` and `vwap_24h` are 2.00, `volume_24h_usd` is 1,500 and
+  not 3,000, `soroswap` is absent from `sources`, XLM's own `price_xlm` is 1
+  and FUT's is 5. Removing any single bound now turns it red.
+- **#2 applied — the `""` rule was false in the deploy window.** Between the
+  ALTER that adds `as_of` and the re-CREATE of the view, the old MV keeps
+  refreshing in REPLACE mode and every row takes the table DEFAULT, so the
+  epoch guard maps `as_of` to `""` beside a real price. `price_status`
+  documented its own `""` for exactly that window; `as_of` claimed `""` meant
+  "no price at all", full stop. Both `as_of` description triples, both DTO
+  docstrings and the BE contract note now say `""` has two causes and that
+  `price_status` is what tells them apart — "no price" is `as_of == ""` AND
+  `price_status == "unpriced"`, never an empty `as_of` alone. The same
+  sentence went into `views.sql`'s sentinel table, which made the identical
+  claim about the stored epoch (not in the review, same defect). Bundle
+  regenerated and `nx format`-ed.
+- **#3 applied — a CI-enforced ORDER guard on the three API projections.**
+  The reviewer's point: transposing `c.method AS method` with `{AS_OF_SQL}`
+  passed every check on the branch. Three adjacent `String` columns decoded
+  positionally by RowBinary, and `/price` ends in `fetch_optional` + `LIMIT 1`
+  so the leftover-bytes check never runs — the endpoint returns a plausible
+  200 with the age published as the provenance. The MV had
+  `current_sql_to_clause_and_select_project_the_same_columns_in_the_same_order`
+  for the same failure one level down; the API had nothing.
+  `every_current_price_projection_matches_its_row_struct_order` (unit, no
+  ClickHouse) now extracts each builder's projected column names in order at
+  paren-depth 0 — the alias after a depth-0 ` AS `, else the bare dotted name,
+  so `a.asset_code` reads `asset_code` and
+  `if(a.asset_code != '', a.asset_code, sym.symbol) AS asset_code` is one item
+  — and compares the sequence to `Row::COLUMN_NAMES`, which
+  `clickhouse-derive` 0.2.0 fills in struct-field order (verified in the
+  registry source) and which IS the decode order. Lengths asserted
+  non-vacuously: 10 / 16 / 13. The listing's `{sort_key_expr}` placeholder is
+  built with a concrete sort.
+
+**RED proofs.** #1: `AND timestamp <= now()` removed from `vol_all`'s base
+leg → `current_mv_it.rs:1395`, `volume_24h_usd must exclude the future candles
+(1500, not 3000) — got 2500`. #3: `c.method AS method` transposed with
+`{AS_OF_SQL}` in `current_price_sql` → `queries_ch.rs:2244`, `left:
+[… "updated_at", "as_of", "method", "price_status"]`, `right: [… "updated_at",
+"method", "as_of", "price_status"]` — with
+`every_current_price_query_guards_as_of_against_the_epoch` still PASSING in the
+same run, which is the reviewer's finding restated as output. Both restored and
+re-run green.
+
+**Counts unchanged.** `AssetListRow` is 16 columns (15 published + `sort_key`),
+not the 15 the review brief guessed; verified against the struct.

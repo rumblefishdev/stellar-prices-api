@@ -67,6 +67,16 @@ pub struct PriceResponse {
     /// the epoch sentinel and the query maps it, so `1970-01-01T00:00:00Z`
     /// must never reach the wire.
     ///
+    /// ⚠️ `""` is NOT by itself "no price". It also appears, briefly, on a row
+    /// the snapshot's current definition has not rewritten yet — between the
+    /// ALTER that adds this column and the re-CREATE of the view, the old
+    /// definition keeps refreshing in REPLACE mode and every row takes the
+    /// table DEFAULT (the epoch), which this query maps to `""` beside a real
+    /// price. `price_status` is `""` in exactly that window and `"unpriced"` in
+    /// the real no-price case, so "no price" is `as_of == ""` AND
+    /// `price_status == "unpriced"` — the same deploy-window state
+    /// `price_status` documents below.
+    ///
     /// Bounds `price_usd` alone. `price_xlm` divides it by an XLM/USD close
     /// dated independently, so it is no fresher than this and may be older.
     /// (This DTO publishes no `market_cap_usd`; the same reasoning applies to
@@ -290,7 +300,9 @@ pub struct AssetListItem {
     /// [`PriceResponse::method`].
     pub method: String,
     /// The price's own timestamp; same semantics and the same `""` sentinel as
-    /// [`PriceResponse::as_of`]. It bounds `price_usd` on this row alone.
+    /// [`PriceResponse::as_of`] — including the deploy-window case where `""`
+    /// sits beside a real price and `price_status` is `""` too. It bounds
+    /// `price_usd` on this row alone.
     pub as_of: String,
     /// What kind of price this is; same vocabulary as
     /// [`PriceResponse::price_status`].

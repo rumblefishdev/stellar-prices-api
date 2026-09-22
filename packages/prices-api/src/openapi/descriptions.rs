@@ -184,7 +184,10 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "as_of",
         "The time the price itself is from: the timestamp of the trading minute `price_usd` \
          was read from, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `\"\"` when there is no price \
-         at all. Same meaning as `PriceResponse.as_of`.",
+         at all, and also — briefly, after a schema change — on a row the current snapshot \
+         definition has not rewritten yet, where `price_status` is `\"\"` as well. \"No \
+         price\" is an empty `as_of` together with a `price_status` of `unpriced`. Same \
+         meaning as `PriceResponse.as_of`.",
     ),
     (
         "AssetListItem",
@@ -586,9 +589,14 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          that runs hourly, so an `as_of` up to about an hour behind `updated_at` — and a \
          `price_status` of `carried` — is the ORDINARY state of an actively traded asset, \
          not a fault. A freshness threshold tighter than that cadence rejects the whole \
-         market.\n\n`\"\"` means there is no price at all \
-         (`price_usd` is `\"0\"`). An epoch timestamp is never published for that \
-         case.\n\nIt bounds `price_usd` only. `price_xlm` divides it by an XLM/USD close \
+         market.\n\n`\"\"` means one of two things, and `price_status` tells them apart. \
+         Almost always there is no price at all: `price_usd` is `\"0\"` and `price_status` \
+         is `unpriced`. An epoch timestamp is never published for that case. The other is \
+         brief and follows a schema change: a row the current snapshot definition has not \
+         rewritten yet carries neither value, so `as_of` is `\"\"` beside a real price and \
+         `price_status` is `\"\"` too. Read \"no price\" as `as_of` empty AND `price_status` \
+         `unpriced`, never as an empty `as_of` on its own.\n\nIt bounds `price_usd` only. \
+         `price_xlm` divides it by an XLM/USD close \
          dated independently, so it is no fresher than `as_of` and may be older.",
     ),
     (

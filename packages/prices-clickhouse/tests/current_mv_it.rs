@@ -1214,13 +1214,23 @@ fn insert_pair_pf(
 /// side of `now()`. `insert_pair`/`insert_pair_pf` can only date a candle in the
 /// past; `ts_literal` is a `'YYYY-MM-DD HH:MM:SS'` string the caller has already
 /// read back from the server, so the fixture and the assertion agree on the
-/// exact value even if the clock ticks between them.
-fn insert_pair_at(db: &str, base: u32, quote: u32, close_usd: &str, ts_literal: &str) -> String {
+/// exact value even if the clock ticks between them. `source` is explicit here
+/// because the upper bound has to be proven on the PER-VENUE pipeline too, and
+/// that needs two venues on one asset. Volume is a fixed $500 per candle, above
+/// the §5.5 threshold, so neither venue is erased before the liveness rule runs.
+fn insert_pair_at(
+    db: &str,
+    base: u32,
+    quote: u32,
+    close_usd: &str,
+    ts_literal: &str,
+    source: &str,
+) -> String {
     format!(
         "INSERT INTO {db}.price_ohlcv_1m \
          (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
           volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
-         VALUES ('{ts_literal}', {base}, {quote}, 'sdex', {close_usd}, {close_usd}, \
+         VALUES ('{ts_literal}', {base}, {quote}, '{source}', {close_usd}, {close_usd}, \
           {close_usd}, {close_usd}, 50, 500, 500, {close_usd}, {close_usd}, 1, 1)"
     )
 }
@@ -1230,13 +1240,22 @@ fn insert_pair_at(db: &str, base: u32, quote: u32, close_usd: &str, ts_literal: 
 /// value no freshness threshold handles the way its author meant it to. A
 /// candle stamped after the wall clock is a data defect (bucket timestamps are
 /// ledger close times), but the window's own lower-only bound made it a
-/// publishable one, so the tip is bounded above — ONCE, in its WHERE, the way
-/// the oracle arm bounds its reading. That single bound is what this test
-/// pins: the future candle is outside the tip for EVERY aggregate of it, so it
-/// neither prices the asset nor dates it. A bound applied only inside the
-/// `as_of` aggregate would pass the age assertion below while publishing the
-/// future candle's price beside an older age — which is why the price is
-/// asserted here by value too.
+/// publishable one, so the window is bounded above.
+///
+/// The bound is on EVERY 24h window in the MV, not on the tip alone, and that
+/// is what this test pins — by value, column by column. Bounding the tip only
+/// would pass an `as_of`/`price_usd` assertion while splitting the row against
+/// itself everywhere else: `sources.<venue>.price` and `vwap_24h` drawn from
+/// the future candle the age does not name, `volume_24h_usd` counting its
+/// volume, `price_xlm` no longer 1 for XLM against its own close, and a venue
+/// that stopped quoting hours ago held live forever on the strength of one
+/// future stamp. Each of those is asserted below, so removing any single
+/// `timestamp <= now()` from `current.sql` turns this test red.
+///
+/// Fixture: `sdex` quotes FUT at 2.00 five minutes ago and 3.00 in the future;
+/// XLM carries its own base candles at 0.40 (past) and 0.60 (future); and
+/// `soroswap` quotes FUT at 9.00 three hours ago — outside CARRY_BOUND, so it
+/// is dead — then emits one future-stamped candle.
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
@@ -1256,19 +1275,36 @@ async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
         .fetch_one()
         .await
         .expect("future timestamp");
+    // Older than CARRY_BOUND (2h), so `soroswap` is unambiguously dead unless
+    // its future-stamped candle is allowed to speak for it.
+    let stale: String = admin
+        .query("SELECT toString(toStartOfMinute(now() - INTERVAL 3 HOUR))")
+        .fetch_one()
+        .await
+        .expect("stale timestamp");
 
     for q in [
         insert_asset(db, 1, "XLM", ""),
         insert_asset(db, 12, "FUT", "GFUT"),
-        insert_pair_at(db, 12, 1, "2.00", &past),
+        insert_pair_at(db, 12, 1, "2.00", &past, "sdex"),
         // A DIFFERENT price on the future candle: if the bound ever moves back
         // inside the `as_of` aggregate alone, price_usd reads 3.0 here and the
         // assertion below says so.
-        insert_pair_at(db, 12, 1, "3.00", &future),
+        insert_pair_at(db, 12, 1, "3.00", &future, "sdex"),
+        // XLM priced as a BASE leg, so the `xlm_usd` scalar has something to
+        // read and `price_xlm` is a real quotient instead of the 0 sentinel.
+        // Two closes again, so an unbounded scalar is visible as a number.
+        insert_pair_at(db, 1, 12, "0.40", &past, "sdex"),
+        insert_pair_at(db, 1, 12, "0.60", &future, "sdex"),
+        // A venue that stopped quoting three hours ago and then emitted one
+        // future-stamped candle. `per_source`'s liveness test is a `max` over
+        // the same window, so an unbounded one reads it as live forever.
+        insert_pair_at(db, 12, 1, "9.00", &stale, "soroswap"),
+        insert_pair_at(db, 12, 1, "9.00", &future, "soroswap"),
     ] {
         admin.query(&q).execute().await.expect("fixture");
     }
-    refresh(&admin, db, 1).await;
+    refresh(&admin, db, 2).await;
 
     // BY VALUE, not `<= now()`: the latter passes on any timestamp the MV
     // happens to pick, including one that silently dropped the newest real
@@ -1294,6 +1330,108 @@ async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
         status_of(&admin, db, 12).await,
         "priced",
         "tip_at is bounded the same way, so a future candle cannot make a live price `carried`"
+    );
+
+    // ── the rest of the row, which a tip-only bound would leave disagreeing ──
+    // Each assertion below names a column the review found still reading the
+    // future candle while `price_usd`/`as_of` no longer did.
+
+    // per_source: the venue's own price must be the past close, not the future
+    // one, or `sources` publishes a price the age beside it does not describe.
+    let src_price = scalar_f64(
+        &admin,
+        &format!(
+            "SELECT toFloat64OrZero(JSONExtractString(sources, 'sdex', 'price')) \
+             FROM {db}.current_prices FINAL WHERE asset_id = 12"
+        ),
+    )
+    .await;
+    assert!(
+        (src_price - 2.0).abs() < 1e-9,
+        "sources.sdex.price must be the past close 2.00 that as_of names — got {src_price}"
+    );
+
+    // vwap_24h weights the surviving venues, so it inherits per_source's bound.
+    // One kept venue at 2.00 → exactly 2.00.
+    let vwap = scalar_f64(
+        &admin,
+        &format!("SELECT toFloat64(vwap_24h) FROM {db}.current_prices FINAL WHERE asset_id = 12"),
+    )
+    .await;
+    assert!(
+        (vwap - 2.0).abs() < 1e-9,
+        "vwap_24h must weight the past close only — got {vwap}"
+    );
+
+    // src_is_live is a `max(timestamp)` over the same window. Unbounded, the
+    // dead venue's future stamp keeps it live and it survives into `sources`.
+    let srcs: String = admin
+        .query(&format!(
+            "SELECT sources FROM {db}.current_prices FINAL WHERE asset_id = 12"
+        ))
+        .fetch_one()
+        .await
+        .expect("sources");
+    assert!(
+        srcs.contains("sdex"),
+        "the live venue must survive — got {srcs}"
+    );
+    assert!(
+        !srcs.contains("soroswap"),
+        "a venue last quoting 3h ago is dead; one future-stamped candle must not \
+         make it live beside a live venue — got {srcs}"
+    );
+
+    // volume_24h_usd sums BOTH legs over the same window: $500 from sdex's past
+    // candle, $500 from soroswap's stale one, $500 from XLM's past candle
+    // counted on its quote leg (FUT) = $1,500. Every future candle is excluded.
+    let vol = scalar_f64(
+        &admin,
+        &format!(
+            "SELECT toFloat64(volume_24h_usd) FROM {db}.current_prices FINAL WHERE asset_id = 12"
+        ),
+    )
+    .await;
+    assert!(
+        (vol - 1_500.0).abs() < 1e-6,
+        "volume_24h_usd must exclude the future candles (1500, not 3000) — got {vol}"
+    );
+
+    // The xlm_usd scalar is its own window. Unbounded it reads 0.60 while XLM's
+    // own price_usd reads 0.40, and XLM stops being worth 1 XLM.
+    let xlm_price = scalar_f64(
+        &admin,
+        &format!("SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = 1"),
+    )
+    .await;
+    assert!(
+        (xlm_price - 0.40).abs() < 1e-9,
+        "XLM's own price_usd must be the past close 0.40 — got {xlm_price}"
+    );
+    assert_eq!(
+        as_of_of(&admin, db, 1).await,
+        past,
+        "XLM is dated from its own past candle too"
+    );
+    let xlm_in_xlm = scalar_f64(
+        &admin,
+        &format!("SELECT toFloat64(price_xlm) FROM {db}.current_prices FINAL WHERE asset_id = 1"),
+    )
+    .await;
+    assert!(
+        (xlm_in_xlm - 1.0).abs() < 1e-9,
+        "XLM divided by the XLM/USD close is 1 by construction, and stays 1 only \
+         while both sides read the same candle set — got {xlm_in_xlm}"
+    );
+    // The same scalar, seen from a second asset: 2.00 / 0.40 = 5.
+    let fut_in_xlm = scalar_f64(
+        &admin,
+        &format!("SELECT toFloat64(price_xlm) FROM {db}.current_prices FINAL WHERE asset_id = 12"),
+    )
+    .await;
+    assert!(
+        (fut_in_xlm - 5.0).abs() < 1e-9,
+        "price_xlm must be 2.00 / 0.40 = 5 — got {fut_in_xlm}"
     );
 
     teardown(db).await;

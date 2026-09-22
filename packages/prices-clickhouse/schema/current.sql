@@ -190,6 +190,7 @@ WITH
                   LIMIT 1
               )
           AND timestamp >= now() - INTERVAL 24 HOUR
+          AND timestamp <= now()
     ) AS xlm_usd,
 
     -- ── Task 0178: the canonical-USDC identity and its measured USD rate ─────
@@ -301,6 +302,7 @@ WITH
             sum(volume_quote_usd)             AS src_volume
         FROM prices.price_ohlcv_1m FINAL
         WHERE timestamp >= now() - INTERVAL 24 HOUR
+          AND timestamp <= now()
         GROUP BY asset_id, source
     ),
 
@@ -517,23 +519,33 @@ WITH
             argMinIf(close_usd, timestamp, close_usd > 0) AS open_24h,
             toUInt8(0)                        AS is_oracle,
             -- as_of is price_usd's OWN timestamp — the same close_usd > 0
-            -- predicate as the argMaxIf above. The window is bounded ONCE, in
-            -- the WHERE below, so every aggregate of the tip sees exactly the
-            -- same candle set: as_of therefore always names the candle
-            -- price_usd was read from, and an empty age on the wire is exactly
-            -- a `0` price, never a priced row with a blank age beside it.
+            -- predicate as the argMaxIf above, over the same candle set, so
+            -- as_of always names the candle price_usd was read from and an
+            -- empty age on the wire is exactly a `0` price, never a priced row
+            -- with a blank age beside it.
             -- tip_at is the newest candle that HAS a price to wait for:
             -- pf_trade_count (task 0286), not trade_count, so a dust-only
             -- minute does not make a real price read `carried`. Pre-0286 rows
             -- default pf_trade_count to trade_count, so this reads the same on
             -- either era (task 0216).
-            -- A candle stamped after the wall clock is a data defect, and the
-            -- upper bound puts it OUTSIDE the tip entirely rather than half in
-            -- it: it cannot price the asset, cannot date it and cannot make a
-            -- live price read `carried`. as_of is the field a consumer
-            -- subtracts from now(), so it must never run ahead of updated_at
-            -- and publish a negative age; the oracle arm bounds its own
-            -- reading with the same `timestamp <= now()`.
+            --
+            -- ⚠️ `timestamp <= now()` IS NOT LOCAL TO THIS CTE. A candle
+            -- stamped after the wall clock is a data defect, and EVERY 24h
+            -- window in this file carries the same upper bound — the xlm_usd
+            -- scalar, the oracle rate scalar, per_source, both legs of vol_all
+            -- and the WHERE below — so all of them read ONE candle set. The
+            -- bound cannot be applied to the tip alone: a future-stamped
+            -- candle would then split the row against itself, price_usd and
+            -- as_of drawn from the last past candle while sources.<v>.price,
+            -- vwap_24h and volume_24h_usd already counted the future one,
+            -- price_xlm stopped being 1 for XLM itself, and src_is_live held a
+            -- venue live forever on the strength of one bad stamp. Before
+            -- task 0216 both sides saw the same candles because NEITHER was
+            -- bounded; they must stay in step now that one of them is. The
+            -- only window deliberately left alone is ref_7d's [7d, 5d] band,
+            -- which is wholly below now() already. as_of is the field a
+            -- consumer subtracts from now(), so it must never run ahead of
+            -- updated_at and publish a negative age.
             maxIf(timestamp, close_usd > 0)      AS as_of,
             maxIf(timestamp, pf_trade_count > 0) AS tip_at
         FROM prices.price_ohlcv_1m FINAL
@@ -620,10 +632,12 @@ WITH
             SELECT asset_id AS asset_id, volume_quote_usd AS volume_quote_usd
             FROM prices.price_ohlcv_1m FINAL
             WHERE timestamp >= now() - INTERVAL 24 HOUR
+              AND timestamp <= now()
             UNION ALL
             SELECT quote_asset_id AS asset_id, volume_quote_usd AS volume_quote_usd
             FROM prices.price_ohlcv_1m FINAL
             WHERE timestamp >= now() - INTERVAL 24 HOUR
+              AND timestamp <= now()
         )
         GROUP BY asset_id
     )

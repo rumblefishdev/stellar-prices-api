@@ -2104,6 +2104,171 @@ mod tests {
         );
     }
 
+    /// The projected column NAMES of a SELECT, in order: the alias after a
+    /// paren-depth-0 ` AS `, or the bare (possibly table-qualified) column name
+    /// when the projection carries none — `a.asset_code` is `asset_code`.
+    ///
+    /// Deliberately crude, like `aliases_of` above: a real SQL parser would be
+    /// a dependency and a second thing to trust. It tracks paren depth and
+    /// single-quoted strings, which is all these three projections need — every
+    /// comma and every ` AS ` inside a function call or a literal is invisible
+    /// to it, so `if(a.asset_code != '', a.asset_code, sym.symbol) AS
+    /// asset_code` is ONE item named `asset_code`.
+    fn projected_columns(sql: &str) -> Vec<String> {
+        let body = sql
+            .strip_prefix("SELECT ")
+            .expect("a current-price projection starts with SELECT");
+        let chars: Vec<char> = body.chars().collect();
+        let mut items: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut depth = 0i32;
+        let mut in_str = false;
+        let mut i = 0usize;
+        while i < chars.len() {
+            let c = chars[i];
+            if in_str {
+                cur.push(c);
+                if c == '\'' {
+                    in_str = false;
+                }
+                i += 1;
+                continue;
+            }
+            // The top-level FROM ends the projection. Only at depth 0, and only
+            // on a word boundary, so a column called `from_*` cannot end it.
+            if depth == 0
+                && chars[i..].starts_with(&['F', 'R', 'O', 'M', ' '])
+                && cur.chars().next_back().is_none_or(char::is_whitespace)
+            {
+                break;
+            }
+            match c {
+                '\'' => in_str = true,
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    items.push(std::mem::take(&mut cur));
+                    i += 1;
+                    continue;
+                }
+                _ => {}
+            }
+            cur.push(c);
+            i += 1;
+        }
+        items.push(cur);
+        items.iter().map(|item| output_name_of(item)).collect()
+    }
+
+    /// One projection item's output name: the identifier after its LAST
+    /// paren-depth-0 ` AS `, else the item itself with any table qualifier
+    /// stripped.
+    fn output_name_of(item: &str) -> String {
+        let chars: Vec<char> = item.trim().chars().collect();
+        let mut depth = 0i32;
+        let mut in_str = false;
+        let mut alias_at: Option<usize> = None;
+        let mut i = 0usize;
+        while i < chars.len() {
+            let c = chars[i];
+            if in_str {
+                if c == '\'' {
+                    in_str = false;
+                }
+                i += 1;
+                continue;
+            }
+            match c {
+                '\'' => in_str = true,
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {
+                    if depth == 0 && chars[i..].starts_with(&[' ', 'A', 'S', ' ']) {
+                        alias_at = Some(i + 4);
+                    }
+                }
+            }
+            i += 1;
+        }
+        let name: String = match alias_at {
+            Some(at) => chars[at..].iter().collect(),
+            None => chars.iter().collect(),
+        };
+        name.trim()
+            .rsplit('.')
+            .next()
+            .expect("rsplit always yields one element")
+            .to_string()
+    }
+
+    /// 🔴 The API-side twin of
+    /// `current_sql_to_clause_and_select_project_the_same_columns_in_the_same_order`
+    /// (prices-clickhouse), and it exists for the same reason one level down.
+    ///
+    /// `clickhouse::Row` decodes RowBinary POSITIONALLY: the server sends values
+    /// in the SELECT's order and serde fills the struct's fields in declaration
+    /// order, with no names on the wire to disagree. Transposing two adjacent
+    /// `String` columns — `c.method AS method` and the `as_of` guard, say — is
+    /// therefore not an error anywhere. The types still line up, every existing
+    /// assertion still passes, and `/price` ends in `fetch_optional` + `LIMIT 1`
+    /// so RowBinary's leftover-bytes check never even runs. The endpoint returns
+    /// a plausible 200 with the age published as the provenance and the
+    /// provenance as the age.
+    ///
+    /// `Row::COLUMN_NAMES` is filled by the derive in struct-field order, so it
+    /// IS the decode order, read from the struct rather than restated here —
+    /// adding a field to one side alone fails this test rather than drifting.
+    #[test]
+    fn every_current_price_projection_matches_its_row_struct_order() {
+        use clickhouse::Row;
+
+        let list = list_assets_sql(
+            // A concrete sort, because the listing's last projection item is a
+            // `{sort_key_expr} AS sort_key` placeholder.
+            "toString(c.price_usd)",
+            "toFloat64(c.price_usd)",
+            "DESC",
+            "",
+            51,
+        );
+        let price = current_price_sql("a.contract_address = ?");
+        let batch = current_prices_batch_sql("(a.contract_address = ?)");
+
+        for (what, sql, expected) in [
+            ("list_assets", &list, AssetListRow::COLUMN_NAMES),
+            ("current_price", &price, CurrentPriceRow::COLUMN_NAMES),
+            ("current_prices_batch", &batch, BatchPriceRow::COLUMN_NAMES),
+        ] {
+            let projected = projected_columns(sql);
+            let expected: Vec<String> = expected.iter().map(|s| (*s).to_string()).collect();
+            assert_eq!(
+                projected, expected,
+                "{what}'s SELECT must project exactly the Row struct's fields, in the \
+                 struct's order — RowBinary decodes positionally, so a transposition \
+                 here is a wrong answer, not an error. SQL: {sql}"
+            );
+        }
+
+        // Non-vacuous: an empty or truncated parse would compare equal to an
+        // empty expectation, and a Row whose derive stopped filling
+        // COLUMN_NAMES would make every assertion above trivially true.
+        assert_eq!(
+            CurrentPriceRow::COLUMN_NAMES.len(),
+            10,
+            "CurrentPriceRow is 10 columns; update this count WITH the struct"
+        );
+        assert_eq!(
+            AssetListRow::COLUMN_NAMES.len(),
+            16,
+            "AssetListRow is 15 published columns plus the sort_key cursor payload"
+        );
+        assert_eq!(
+            BatchPriceRow::COLUMN_NAMES.len(),
+            13,
+            "BatchPriceRow is CurrentPriceRow's 10 plus the three identity columns"
+        );
+    }
+
     #[test]
     fn identity_where_native_is_literal_no_binds() {
         let (sql, binds) = identity_where(&AssetIdentifier::Native);

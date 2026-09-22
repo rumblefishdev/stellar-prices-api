@@ -285,6 +285,11 @@
 --                    as ABSENT, never as an age. It is written deliberately
 --                    whenever price_usd is the 0 sentinel, so it is a decision,
 --                    not an artefact of an empty aggregate.
+--                    It is NOT by itself "no price", though: the epoch is also
+--                    this column's table DEFAULT, so a row the current MV has
+--                    not rewritten yet carries it beside a real price — see
+--                    price_status's '' below, which is the same window. Read
+--                    "no price" as as_of = epoch AND price_status = 'unpriced'.
 --                    price_xlm divides price_usd by an XLM/USD close dated
 --                    independently and market_cap_usd multiplies it by a supply
 --                    figure with its own fetch time, so both are no fresher
