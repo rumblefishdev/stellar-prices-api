@@ -1210,6 +1210,76 @@ fn insert_pair_pf(
     )
 }
 
+/// A candle at an EXPLICIT timestamp, for the fixtures that need one on either
+/// side of `now()`. `insert_pair`/`insert_pair_pf` can only date a candle in the
+/// past; `ts_literal` is a `'YYYY-MM-DD HH:MM:SS'` string the caller has already
+/// read back from the server, so the fixture and the assertion agree on the
+/// exact value even if the clock ticks between them.
+fn insert_pair_at(db: &str, base: u32, quote: u32, close_usd: &str, ts_literal: &str) -> String {
+    format!(
+        "INSERT INTO {db}.price_ohlcv_1m \
+         (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+          volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+         VALUES ('{ts_literal}', {base}, {quote}, 'sdex', {close_usd}, {close_usd}, \
+          {close_usd}, {close_usd}, 50, 500, 500, {close_usd}, {close_usd}, 1, 1)"
+    )
+}
+
+/// `as_of` is the field the published contract tells consumers to subtract from
+/// `now()`, so it must never be dated in the future: a negative age is the one
+/// value no freshness threshold handles the way its author meant it to. A
+/// candle stamped after the wall clock is a data defect (bucket timestamps are
+/// ledger close times), but the window's own lower-only bound made it a
+/// publishable one, so the tip is bounded above the way the oracle arm already
+/// is. `price_usd` keeps its unbounded argMaxIf deliberately — this change is
+/// about the age field, and nothing here moves the price.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
+    let db = "it_current_mv_0216_future";
+    let admin = setup(db).await;
+
+    // Both literals are read back from the server ONCE, so the assertion below
+    // compares against the exact string the fixture inserted rather than
+    // re-deriving it from a clock that has moved on.
+    let past: String = admin
+        .query("SELECT toString(toStartOfMinute(now() - INTERVAL 5 MINUTE))")
+        .fetch_one()
+        .await
+        .expect("past timestamp");
+    let future: String = admin
+        .query("SELECT toString(toStartOfMinute(now() + INTERVAL 10 MINUTE))")
+        .fetch_one()
+        .await
+        .expect("future timestamp");
+
+    for q in [
+        insert_asset(db, 1, "XLM", ""),
+        insert_asset(db, 12, "FUT", "GFUT"),
+        insert_pair_at(db, 12, 1, "2.00", &past),
+        insert_pair_at(db, 12, 1, "2.00", &future),
+    ] {
+        admin.query(&q).execute().await.expect("fixture");
+    }
+    refresh(&admin, db, 1).await;
+
+    // BY VALUE, not `<= now()`: the latter passes on any timestamp the MV
+    // happens to pick, including one that silently dropped the newest real
+    // candle. This says which candle as_of must name.
+    assert_eq!(
+        as_of_of(&admin, db, 12).await,
+        past,
+        "as_of must name the newest candle at or before now(), not the future-dated one"
+    );
+    assert_eq!(
+        status_of(&admin, db, 12).await,
+        "priced",
+        "tip_at is bounded the same way, so a future candle cannot make a live price `carried`"
+    );
+
+    teardown(db).await;
+}
+
 /// The headline defect: canonical USDC never trades as a BASE leg, so every
 /// base-keyed aggregate skipped it and `/price` returned 404. It must now
 /// publish a row, priced from the measured rate rather than a $1 placeholder,

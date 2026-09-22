@@ -68,13 +68,24 @@ async fn setup(db: &str) -> Client {
     admin
         .query(&format!(
             // Task 0216: asset 1 carries a REAL as_of/price_status pair dated
-            // behind its updated_at; asset 2 stays on the table DEFAULT pair
-            // (the epoch and ''), which the wire must render as ""/"".
+            // behind its updated_at.
             "INSERT INTO {db}.current_prices \
              (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at, as_of, price_status) \
              VALUES \
-             (1, 0.5, 0.51, 1234.5, '2026-02-10 12:00:30', '2026-02-10 11:30:00', 'carried'), \
-             (2, 1.0001, 1.0002, 999999.25, '2026-02-10 12:00:30', toDateTime(0), '')"
+             (1, 0.5, 0.51, 1234.5, '2026-02-10 12:00:30', '2026-02-10 11:30:00', 'carried')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            // Asset 2 names neither new column, so it really takes the table
+            // DEFAULT pair (the epoch and ''), which the wire must render as
+            // ""/"" — not a hand-written copy of those values.
+            "INSERT INTO {db}.current_prices \
+             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at) \
+             VALUES \
+             (2, 1.0001, 1.0002, 999999.25, '2026-02-10 12:00:30')"
         ))
         .execute()
         .await

@@ -58,16 +58,26 @@ async fn setup(db: &str) -> Client {
         .query(&format!(
             // Task 0216: asset 2 carries a REAL as_of/price_status pair, dated
             // half an hour behind updated_at so a transposition of the two
-            // DateTime columns cannot hide. Every other row is given the table
-            // DEFAULT pair explicitly — the epoch and '' — which is the shape
-            // the wire must render as ""/"".
+            // DateTime columns cannot hide.
             "INSERT INTO {db}.current_prices \
              (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at, as_of, price_status) \
              VALUES \
-             (1, 0.5, 0.5, 1000, '2026-02-10 12:00:00', toDateTime(0), ''), \
-             (2, 1.0, 1.0, 3000, '2026-02-10 12:00:00', '2026-02-10 11:30:00', 'carried'), \
-             (3, 2.0, 2.0, 2000, '2026-02-10 12:00:00', toDateTime(0), ''), \
-             (4, 9.0, 9.0, 500,  '2026-02-10 12:00:00', toDateTime(0), '')"
+             (2, 1.0, 1.0, 3000, '2026-02-10 12:00:00', '2026-02-10 11:30:00', 'carried')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            // The other three rows name neither new column, so they really
+            // take the table DEFAULTs (the epoch and ''), which is the shape
+            // the wire must render as ""/"" — not a hand-written copy of it.
+            "INSERT INTO {db}.current_prices \
+             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at) \
+             VALUES \
+             (1, 0.5, 0.5, 1000, '2026-02-10 12:00:00'), \
+             (3, 2.0, 2.0, 2000, '2026-02-10 12:00:00'), \
+             (4, 9.0, 9.0, 500,  '2026-02-10 12:00:00')"
         ))
         .execute()
         .await

@@ -15,6 +15,15 @@
 -- vwap_24h / market_cap_usd = 0 for every asset. Apply this MV only once
 -- enrichment is live, otherwise current_prices serves all-zero rows.
 --
+-- ⚠️ DEPENDS ON prices.price_ohlcv_1m.pf_trade_count (task 0286), read by
+-- base_tip below. This file is DROP VIEW + CREATE MATERIALIZED VIEW: on a
+-- database that has not run 0286's schema step the DROP succeeds and the
+-- CREATE fails with `Code: 47 … Unknown expression or function identifier
+-- 'pf_trade_count'`, leaving current_prices with NO writer at all — REPLACE
+-- mode, every asset frozen on its last row. Apply 0286's ALTERs first:
+-- init.sql does on a fresh apply; on prod that is rollout step B, before
+-- step E re-creates this view.
+--
 -- ⚠️ REDEPLOY MECHANICS (task 0068 → 0072): a refreshable MV's definition is
 -- FIXED AT CREATE TIME. Changing this SELECT requires DROP VIEW + re-CREATE —
 -- an ALTER does not take. No backfill/migration is needed: the MV fully
@@ -29,10 +38,12 @@
 -- EVERY new column must be added to BOTH the TO(...) list and the SELECT, in
 -- matching order.
 --
--- Columns (0072 completed the original ten; 0178 appends `method` for eleven):
+-- Columns (0072 completed the original ten; 0178 appends `method` for eleven;
+-- 0216 appends `as_of` and `price_status` for thirteen):
 --   price_usd       — latest PRICED close in the 24h window (argMaxIf, 0135);
 --                     NOT age-bounded — see the unfiltered CTE for why. The
---                     per-venue pipeline IS bounded, but conditionally: see 1b
+--                     per-venue pipeline IS bounded, but conditionally: see 1b.
+--                     `as_of` below carries this close's own timestamp
 --   price_xlm       — price_usd re-expressed in XLM (÷ the XLM/USD close)
 --   change_24h_pct  — vs the oldest close inside the 24h window
 --   change_7d_pct   — vs the oldest priced close in the [7d, 5d] band of
@@ -47,6 +58,11 @@
 --   sources         — JSON per-source {price, volume_24h}; sources excluded by
 --                     min_volume_usd or outlier detection are ABSENT from the
 --                     object (general-overview §3.3)
+--   as_of           — the timestamp of the candle price_usd was read from,
+--                     bounded above at now(); toDateTime(0) when there is no
+--                     price, which consumers must read as absent (0216)
+--   price_status    — 'priced' / 'carried' / 'unpriced'; '' only on a row the
+--                     MV has not rewritten since the column was added (0216)
 --
 -- ── Numeric strategy ────────────────────────────────────────────────────────
 -- Decimal×Decimal widens scale past Decimal(38,14)'s budget (14+14=28 scale
@@ -507,15 +523,23 @@ WITH
             argMaxIf(close_usd, timestamp, close_usd > 0) AS price_usd,
             argMinIf(close_usd, timestamp, close_usd > 0) AS open_24h,
             toUInt8(0)                        AS is_oracle,
-            -- as_of is price_usd's OWN timestamp — same predicate as the
-            -- argMaxIf above, so the two can never name different candles.
+            -- as_of is price_usd's OWN timestamp — the same close_usd > 0
+            -- predicate as the argMaxIf above, so the two name the same candle
+            -- for every window a real ingest can produce.
             -- tip_at is the newest candle that HAS a price to wait for:
             -- pf_trade_count (task 0286), not trade_count, so a dust-only
             -- minute does not make a real price read `carried`. Pre-0286 rows
             -- default pf_trade_count to trade_count, so this reads the same on
             -- either era (task 0216).
-            maxIf(timestamp, close_usd > 0)   AS as_of,
-            maxIf(timestamp, pf_trade_count > 0) AS tip_at
+            -- Both are bounded above at now(): a candle stamped after the wall
+            -- clock is a data defect, and as_of is the freshness field a
+            -- consumer subtracts from now(), so it must never run ahead of
+            -- updated_at and publish a negative age (the oracle arm below
+            -- already bounds timestamp <= now() for the same reason). On such
+            -- a row — and only there — as_of names an older candle than
+            -- price_usd's: price_usd is deliberately left exactly as it was.
+            maxIf(timestamp, close_usd > 0 AND timestamp <= now())      AS as_of,
+            maxIf(timestamp, pf_trade_count > 0 AND timestamp <= now()) AS tip_at
         FROM prices.price_ohlcv_1m FINAL
         WHERE timestamp >= now() - INTERVAL 24 HOUR
         GROUP BY asset_id

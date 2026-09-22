@@ -67,14 +67,16 @@ pub struct PriceResponse {
     /// the epoch sentinel and the query maps it, so `1970-01-01T00:00:00Z`
     /// must never reach the wire.
     ///
-    /// Bounds `price_usd` alone. `price_xlm` and `market_cap_usd` each combine
-    /// it with a second, independently dated input, so they are no fresher
-    /// than this and may be older.
+    /// Bounds `price_usd` alone. `price_xlm` divides it by an XLM/USD close
+    /// dated independently, so it is no fresher than this and may be older.
+    /// (This DTO publishes no `market_cap_usd`; the same reasoning applies to
+    /// it on the surfaces that do.)
     pub as_of: String,
     /// What kind of price `price_usd` is (task 0216):
     ///
-    /// * `"priced"` — `as_of` is the asset's newest price-forming candle (a
-    ///   measured rate reads this too).
+    /// * `"priced"` — nothing newer is outstanding: `as_of` is the newest
+    ///   price-forming candle in the window, or no newer price-forming candle
+    ///   exists (a measured rate reads this too).
     /// * `"carried"` — a real priced close, but a newer price-forming candle
     ///   has not been priced yet; `as_of` says how far behind it is.
     /// * `"unpriced"` — `price_usd` is the `"0"` sentinel, `method` is `""`
@@ -271,8 +273,7 @@ pub struct AssetListItem {
     /// [`PriceResponse::method`].
     pub method: String,
     /// The price's own timestamp; same semantics and the same `""` sentinel as
-    /// [`PriceResponse::as_of`], including the bound it does NOT place on
-    /// `price_xlm`.
+    /// [`PriceResponse::as_of`]. It bounds `price_usd` on this row alone.
     pub as_of: String,
     /// What kind of price this is; same vocabulary as
     /// [`PriceResponse::price_status`].

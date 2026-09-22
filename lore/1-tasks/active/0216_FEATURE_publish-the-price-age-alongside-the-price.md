@@ -53,6 +53,23 @@ history:
       clock) left alone. Still open: the prod before/after snapshot and the BE
       hand-off, both scripted in .planning/rollout-2026-09/ (uncommitted).
       Nothing deployed; no DDL ran on prod.
+  - date: "2026-09-22"
+    status: active
+    who: akot
+    note: >
+      Code review (0 blockers, 7 warnings) addressed in one commit. One
+      behavioural fix: `as_of` and `tip_at` are now bounded above at `now()`,
+      so a future-dated candle can no longer publish a negative age — pinned
+      by a new IT proven RED, with `price_usd` left exactly as it was. The
+      other six were shipped prose or a fixture that claimed a path it did not
+      take: two OpenAPI texts named fields their schema does not have, two
+      `pub async fn`s had lost their doc comments to the SQL-builder
+      extraction, `current.sql`'s own column inventory still said "eleven" and
+      its DEPLOY ORDER block never recorded the 0286 `pf_trade_count`
+      dependency, all three API fixtures wrote the table DEFAULTs by hand
+      instead of taking them, and the portal's hand-written /price walkthrough
+      still called `updated_at` the price's age. Five INFO items recorded and
+      deliberately left. Bundle regenerated; still nothing deployed.
 ---
 
 # Publish the price's age
@@ -342,3 +359,73 @@ Restored byte-for-byte; re-run green (`1 passed`).
   `INTERVAL 2 HOUR` still appears exactly once, and the new scalar uses
   `max(timestamp)` — never `argMax(close_usd`, which that test panics on as a
   literal substring.
+
+### Review round (2026-09-22, `260922-ftd-REVIEW.md` — 0 blockers, 7 warnings)
+
+All seven fixed in one commit. Only WR-06 changed behaviour; the rest were
+prose that shipped, a doc comment that migrated, or a fixture that claimed a
+path it no longer took.
+
+- **WR-01 — two published `as_of` texts named fields their schema does not
+  have.** `PriceResponse.as_of` keeps the `price_xlm` clause (that DTO has
+  `price_xlm`) and drops `market_cap_usd`, which it never published;
+  `AssetListItem.as_of` and `.price_status` drop both and become one-line
+  definitions plus "Same meaning as `PriceResponse.…`", the convention
+  `AssetListItem.method` two entries away already used. Same correction in the
+  two `dto.rs` docstrings. All four literals rewrapped in the file's `\`-
+  continued style (IN-02 came along for free).
+- **WR-02 — the SQL-builder extraction left two `pub async fn`s undocumented.**
+  `list_assets`'s sort-policy doc moved back off `list_assets_sql`, and
+  `current_prices_batch`'s "what it does" line back off
+  `current_prices_batch_sql`. Each helper keeps only its own text.
+- **WR-03 — `current.sql`'s column inventory still said "eleven".** Now
+  thirteen, with an `as_of` and a `price_status` line in the same voice, two
+  lines below the positional-insert warning whose whole subject is that list.
+  `price_usd`'s entry now points at `as_of` for the age.
+- **WR-04 — the new `pf_trade_count` dependency was nowhere in the DEPLOY
+  ORDER header.** Added: this file is DROP + CREATE, so on a database without
+  0286's `pf_*` columns the DROP succeeds and the CREATE fails with `Code: 47`,
+  leaving `current_prices` with no writer; apply 0286's ALTERs first (`init.sql`
+  does on a fresh apply; on prod that is step B, before step E).
+- **WR-05 — `price_it.rs` asset 2 claimed the table-DEFAULT path while naming
+  both columns explicitly.** Split into a second INSERT whose column list stops
+  at `method`, so the row really takes `toDateTime(0)` / `''`. The same
+  claim-vs-INSERT mismatch was in `list_it.rs` (assets 1/3/4) and
+  `endpoints_it.rs` (asset 2) and was aligned the same way: every one of the
+  three surfaces now has at least one row on the real DEFAULT path, and the
+  by-value `""`/`""` wire assertions are unchanged.
+- **WR-06 — `as_of` inherited `base_tip`'s lower-only window, so a future-dated
+  candle published a negative age.** Both new aggregates are now
+  `maxIf(timestamp, … AND timestamp <= now())`, matching the bound the oracle
+  arm already carried. `argMaxIf`/`argMinIf` and the CTE's `WHERE` are
+  untouched, so `price_usd` is exactly what it was (decision D-09) — which
+  means that on such a defective row, and only there, `as_of` names an older
+  candle than `price_usd`; the CTE comment now says so rather than claiming the
+  two can never differ. Pinned by a new IT,
+  `a_future_dated_candle_does_not_date_as_of_ahead_of_now`, which seeds a
+  priced candle at `now() + 10 min` beside one at `now() - 5 min` and asserts
+  `as_of` BY VALUE against the past one (a `<= now()` assertion would pass on
+  any timestamp the MV happened to pick). Proven RED: with the bound removed it
+  fails `left: "…10:56:00", right: "…10:41:00"`. The guard test's counts did
+  not move — 5 guarded aggregates, one `INTERVAL 2 HOUR`, no `argMax(close_usd`.
+- **WR-07 — the portal's hand-written `/price` walkthrough still called
+  `updated_at` "when this price was last computed".** Corrected in
+  `QuickStart.tsx` to "when this snapshot row was last refreshed — not the age
+  of the price", and `as_of` / `price_status` added to both the `RESPONSE_FIELDS`
+  table and `Endpoints.tsx`'s sample. `portal:typecheck`, `portal:lint` and the
+  213 portal unit tests (which tie each rendered value to the string its Copy
+  button writes) are green.
+- **INFO-1 wording, taken with WR-01.** `priced` no longer overstates: it is
+  "nothing newer is outstanding: `as_of` is the newest price-forming minute in
+  the window, or no newer price-forming minute exists" — the no-price-forming-
+  candle-at-all case reads `priced` too, and the text now admits it.
+
+Left as they are, deliberately: `AS_OF_SQL`'s `pub(crate)` reach and its unstated
+`current_prices AS c` alias assumption (IN-03); the `updated_at` formatter still
+copy-pasted across the three builders (IN-04); the TZ-dependent
+`"1970-01-01 00:00:00"` string in `current_mv_it` (IN-05 — CI and the local
+26.3.10.60 are both UTC); the order test's paren-depth scan not tracking quotes
+(IN-06 — the `len() == 13` assert is what turns a desync into a loud failure);
+and `insert_pair_pf` leaving `pf_volume` on its DEFAULT beside
+`pf_trade_count = 0` (IN-07 — `current.sql` reads neither column). None of them
+changes what ships; each is a line in the review for whoever touches these next.

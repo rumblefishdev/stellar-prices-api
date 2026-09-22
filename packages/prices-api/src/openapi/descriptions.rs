@@ -182,7 +182,9 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "AssetListItem",
         "as_of",
-        "The time the price itself is from: the timestamp of the trading minute `price_usd` was read from, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`). For an asset priced from a rate it is that rate reading's own time.\n\nThis is the field to apply a freshness policy to. `updated_at` tells you when this snapshot was last refreshed, which happens every minute for every asset regardless of whether its price moved — so it is never a measure of how old a price is.\n\n`\"\"` means there is no price at all (`price_usd` is `\"0\"`). An epoch timestamp is never published for that case.\n\nIt bounds `price_usd` only. `price_xlm` divides it by an XLM/USD close dated independently, and `market_cap_usd` multiplies it by a circulating-supply figure fetched on its own schedule, so both are no fresher than `as_of` and may be older.",
+        "The time the price itself is from: the timestamp of the trading minute `price_usd` \
+         was read from, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `\"\"` when there is no price \
+         at all. Same meaning as `PriceResponse.as_of`.",
     ),
     (
         "AssetListItem",
@@ -221,7 +223,9 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "AssetListItem",
         "price_status",
-        "What kind of price `price_usd` is:\n\n* `priced` — `as_of` is the asset's newest price-forming minute; nothing newer is outstanding. Prices taken from a rate read this too.\n* `carried` — a real priced close, but a newer price-forming minute has not been priced yet. The price is genuine and stale; `as_of` says by how much.\n* `unpriced` — no priced trade in the window, so `price_usd` is `\"0\"`, `method` is `\"\"` and `as_of` is `\"\"`.\n* `\"\"` — this row predates the current snapshot definition and has not been rewritten yet. Not one of the three words above; it can only appear briefly after a schema change.\n\nA minute that traded only dust does not make a price `carried`: `carried` means a price is outstanding, and a dust-only minute forms no price.",
+        "What kind of price `price_usd` is: `priced`, `carried` or `unpriced` (`\"\"` on a \
+         row the current snapshot definition has not rewritten yet). Same meaning as \
+         `PriceResponse.price_status`.",
     ),
     (
         "AssetListItem",
@@ -573,7 +577,15 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "PriceResponse",
         "as_of",
-        "The time the price itself is from: the timestamp of the trading minute `price_usd` was read from, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`). For an asset priced from a rate it is that rate reading's own time.\n\nThis is the field to apply a freshness policy to. `updated_at` tells you when this snapshot was last refreshed, which happens every minute for every asset regardless of whether its price moved — so it is never a measure of how old a price is.\n\n`\"\"` means there is no price at all (`price_usd` is `\"0\"`). An epoch timestamp is never published for that case.\n\nIt bounds `price_usd` only. `price_xlm` divides it by an XLM/USD close dated independently, and `market_cap_usd` multiplies it by a circulating-supply figure fetched on its own schedule, so both are no fresher than `as_of` and may be older.",
+        "The time the price itself is from: the timestamp of the trading minute `price_usd` \
+         was read from, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`). For an asset priced from a \
+         rate it is that rate reading's own time.\n\nThis is the field to apply a freshness \
+         policy to. `updated_at` tells you when this snapshot was last refreshed, which \
+         happens every minute for every asset regardless of whether its price moved — so it \
+         is never a measure of how old a price is.\n\n`\"\"` means there is no price at all \
+         (`price_usd` is `\"0\"`). An epoch timestamp is never published for that \
+         case.\n\nIt bounds `price_usd` only. `price_xlm` divides it by an XLM/USD close \
+         dated independently, so it is no fresher than `as_of` and may be older.",
     ),
     (
         "PriceResponse",
@@ -594,7 +606,16 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "PriceResponse",
         "price_status",
-        "What kind of price `price_usd` is:\n\n* `priced` — `as_of` is the asset's newest price-forming minute; nothing newer is outstanding. Prices taken from a rate read this too.\n* `carried` — a real priced close, but a newer price-forming minute has not been priced yet. The price is genuine and stale; `as_of` says by how much.\n* `unpriced` — no priced trade in the window, so `price_usd` is `\"0\"`, `method` is `\"\"` and `as_of` is `\"\"`.\n* `\"\"` — this row predates the current snapshot definition and has not been rewritten yet. Not one of the three words above; it can only appear briefly after a schema change.\n\nA minute that traded only dust does not make a price `carried`: `carried` means a price is outstanding, and a dust-only minute forms no price.",
+        "What kind of price `price_usd` is:\n\n* `priced` — nothing newer is outstanding: \
+         `as_of` is the newest price-forming minute in the window, or no newer price-forming \
+         minute exists. Prices taken from a rate read this too.\n* `carried` — a real priced \
+         close, but a newer price-forming minute has not been priced yet. The price is \
+         genuine and stale; `as_of` says by how much.\n* `unpriced` — no priced trade in the \
+         window, so `price_usd` is `\"0\"`, `method` is `\"\"` and `as_of` is `\"\"`.\n* \
+         `\"\"` — this row predates the current snapshot definition and has not been \
+         rewritten yet. Not one of the three words above; it can only appear briefly after a \
+         schema change.\n\nA minute that traded only dust does not make a price `carried`: \
+         `carried` means a price is outstanding, and a dust-only minute forms no price.",
     ),
     (
         "PriceResponse",

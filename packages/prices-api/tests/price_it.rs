@@ -59,9 +59,7 @@ async fn setup(db: &str) -> Client {
     // Task 0216: asset 1 also carries a REAL as_of, deliberately 30 minutes
     // behind its updated_at — the two are both DateTime and adjacent in the
     // row, so a fixture that dated them alike could not tell a correct
-    // projection from a transposed one. Asset 2 keeps the table DEFAULTs for
-    // both new columns, which is the epoch/'' pair the wire must render as
-    // ""/"".
+    // projection from a transposed one.
     admin
         .query(&format!(
             "INSERT INTO {db}.current_prices \
@@ -70,9 +68,24 @@ async fn setup(db: &str) -> Client {
              VALUES \
              (1, 0.5, 1.25, -2.5, 7.25, 0.51, 1234.5, \
               '{{\"sdex\":{{\"price\":\"0.5\",\"volume_24h\":\"1000\"}}}}', \
-              '2026-02-10 12:00:30', 'traded', '2026-02-10 11:30:00', 'carried'), \
-             (2, 1.0001, 0, 0, 0, 1.0002, 999999.25, '', '2026-02-10 12:00:30', '', \
-              toDateTime(0), '')"
+              '2026-02-10 12:00:30', 'traded', '2026-02-10 11:30:00', 'carried')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // Asset 2 is inserted WITHOUT as_of and price_status, so the row really
+    // takes the table DEFAULTs (`toDateTime(0)` / `''`) rather than a
+    // hand-written copy of them. That is the epoch/'' pair the wire must
+    // render as ""/"", and this is the fixture that would notice an init.sql
+    // edit changing either DEFAULT (`DEFAULT now()` on as_of is the plausible
+    // one).
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.current_prices \
+             (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct, \
+              vwap_24h, volume_24h_usd, sources, updated_at, method) \
+             VALUES \
+             (2, 1.0001, 0, 0, 0, 1.0002, 999999.25, '', '2026-02-10 12:00:30', '')"
         ))
         .execute()
         .await

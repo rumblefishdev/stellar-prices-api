@@ -173,9 +173,6 @@ pub struct ListArgs {
     pub fetch_limit: u64,
 }
 
-/// Listing query (overview §4.1 / §3.3 CH idiom: `ORDER BY` + `LIMIT` on the
-/// merged `current_prices`, keyset cursor on `(sort, asset_id)`). Numeric sorts
-/// compare via `toFloat64` (asset_id breaks ties); `code` sorts lexically.
 /// The `GET /assets` listing SELECT. Split out of [`list_assets`] so the
 /// projection is reachable from a unit test without a ClickHouse client — the
 /// epoch guard's absence is otherwise invisible until it reaches a consumer.
@@ -218,6 +215,9 @@ fn list_assets_sql(
     )
 }
 
+/// Listing query (overview §4.1 / §3.3 CH idiom: `ORDER BY` + `LIMIT` on the
+/// merged `current_prices`, keyset cursor on `(sort, asset_id)`). Numeric sorts
+/// compare via `toFloat64` (asset_id breaks ties); `code` sorts lexically.
 pub async fn list_assets(
     ch: &Client,
     args: ListArgs,
@@ -395,7 +395,6 @@ impl BatchPriceRow {
     }
 }
 
-/// Fetch current prices for many assets in ONE query (vs. a per-asset N+1 loop).
 /// The `POST /prices/batch` SELECT, split out for the same reason as
 /// [`list_assets_sql`]. Kept in lockstep with [`current_price_sql`] so `/price`
 /// and `/prices/batch` cannot drift.
@@ -418,6 +417,8 @@ fn current_prices_batch_sql(where_clause: &str) -> String {
     )
 }
 
+/// Fetch current prices for many assets in ONE query (vs. a per-asset N+1 loop).
+///
 /// The identity predicates are OR-ed; positional binds are collected in clause
 /// order. Returns one row per matched asset — callers map back via [`IdentKey`]
 /// and treat absent identifiers as not-found.
