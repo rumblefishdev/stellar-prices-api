@@ -179,3 +179,22 @@ export const DASHBOARD_ROUTE = '/dashboard';
  * them. Same basename treatment as {@link QUICKSTART}.
  */
 export const LANDING = `${ROUTER_BASENAME}/`;
+
+/**
+ * The block explorer's home — where the SorobanScan wordmark in every bar
+ * leads (task 0301): the portal is one page of SorobanScan, and the mark is
+ * how a visitor gets back to the rest of it. Absolute, not `/`: on the shared
+ * host the root is the explorer's, but under the dev server `/` is nothing.
+ */
+export const EXPLORER = 'https://sorobanscan.rumblefish.dev/';
+
+/** Rumble Fish's own site — the footer's mark and its text link. */
+export const RUMBLEFISH_SITE = 'https://rumblefish.dev';
+
+/**
+ * Rumble Fish's contact page — the footer's "Contact" and the refusal card's
+ * "contact support" (task 0301). A sales form rather than a support desk, and
+ * the nearest thing that reaches the company; the card's other word, "status
+ * page", still has nowhere to go.
+ */
+export const RUMBLEFISH_CONTACT = 'https://www.rumblefish.dev/contact/';

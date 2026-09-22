@@ -19,6 +19,32 @@ history:
       on `/api/docs` lands on `/api/#get-started`, and the footer's
       "Dashboard" bounces a visitor without a session back to the landing
       page.
+  - date: "2026-09-22"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Implemented on `fix/0301_portal-navigation`: "Quick Start" is the
+      route in the bar and the phone's menu, "Sign in" sits beside "Get API
+      Key", `/dashboard` without a session goes to `/login`. One emerged
+      decision: a mount that had a session and lost it still goes to `/`, so
+      signing out ends on the landing page as before. 212 portal tests,
+      typecheck, lint green. Open: PR and deploy.
+  - date: "2026-09-22"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Checked on the dev server against the production API: both fixes as
+      described. One more gap from the same walk: the SorobanScan wordmark and
+      the footer's Rumble Fish mark were images without a link; both link out
+      now (explorer home, rumblefish.dev). PR #335.
+  - date: "2026-09-22"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      "Contact" in the footer and "contact support" on the refusal card now
+      open rumblefish.dev/contact/ — the sales form, the nearest thing that
+      reaches the company. "Privacy policy" waits for [[0303]]; "Status" has
+      nowhere to go and no task. Both decided on the channel walk-through.
 ---
 
 # Portal navigation: Quick Start goes to a landing anchor, and a key holder without a session has no way to the dashboard
@@ -56,16 +82,29 @@ arrivals to `/login`, and `/login` forwards an authenticated visitor to
   signed-out visitor goes to `/login` with the query carried along.
 - `app/app.spec.tsx`: the `/dashboard` redirect cases split by cause; the
   navbar test on the quick start reads the new href; a case for "Sign in".
+- `landing/Chrome.tsx`, `landing/links.ts` (added after the local check): the
+  SorobanScan wordmark in every bar links to the explorer's home (`EXPLORER`),
+  the footer's Rumble Fish mark to `rumblefish.dev` — both were images that
+  led nowhere.
+- `landing/Chrome.tsx`, `app/app.tsx`: the footer's "Contact" and the refusal
+  card's "contact support" open `rumblefish.dev/contact/`
+  (`RUMBLEFISH_CONTACT`) — the company's contact form, decided 2026-09-22.
+  "Status" and "status page" stay text (no status page exists, and no task
+  for one); "Privacy policy" stays text until [[0303]] lands.
 
 ## Acceptance Criteria
 
-- [ ] On `/api/docs` and `/api/quick-start`, signed out, "Quick Start" in the
+- [x] On `/api/docs` and `/api/quick-start`, signed out, "Quick Start" in the
       navbar and in the mobile menu opens `/api/quick-start`
-- [ ] `/dashboard` without a session, portal open, lands on `/login`; with the
+- [x] `/dashboard` without a session, portal open, lands on `/login`; with the
       portal closed it still lands on `/`
-- [ ] The signed-out navbar offers "Sign in" whenever it offers "Get API Key",
+- [x] The signed-out navbar offers "Sign in" whenever it offers "Get API Key",
       and neither when the portal is closed
-- [ ] Portal tests, lint and typecheck green
+- [x] The SorobanScan wordmark opens the explorer's home and the footer's
+      Rumble Fish mark opens rumblefish.dev, in every bar that carries them
+- [x] "Contact" in the footer and "contact support" on the refusal card open
+      the company's contact page; "Status" and "Privacy policy" remain text
+- [x] Portal tests, lint and typecheck green
 
 ## Notes
 
@@ -74,3 +113,41 @@ arrivals to `/login`, and `/login` forwards an authenticated visitor to
   — would break the promise the hero and the frame make to a first-time
   visitor, and the dashboard navbar already has no such button because its
   visitor has a key.
+
+## Implementation Notes (2026-09-22)
+
+- `landing/Chrome.tsx`: `NAV` is a union of anchor and route entries. "Quick
+  Start" is `QUICKSTART_ROUTE` through `RouterLink` in the bar and in the
+  phone's drawer; the two anchors keep the `LANDING` prefix off the landing
+  page. "Sign in" (`LOGIN_ROUTE`) sits beside "Get API Key" in both places,
+  under the same `canOfferKey`. The link styles moved to `navLinkSx` /
+  `menuLinkSx` so the two branches share them.
+- `app/app.tsx`, `DashboardRoute`: a closed portal still goes to `/`; no
+  session goes to `/login` with the query; a mount that has seen a session
+  and lost it goes to `/` (see Emerged 1).
+- `app/app.spec.tsx`: `/dashboard` without a session lands on `/login` with
+  the login card; with the portal closed it lands on `/` and offers no
+  "Sign in"; the quick start's navbar renders "Quick Start" as
+  `/quick-start` and "Sign in" as `/login`; the closed landing offers no
+  "Sign in". 212 tests, typecheck and lint green.
+- `Wordmark` and `RumbleFishMark` render an `<a>` around the images, named
+  by the images' `alt`; `EXPLORER` is absolute because under the dev server
+  `/` is nothing, and the footer's text link shares `RUMBLEFISH_SITE`.
+- Not pinned by a test: the phone's drawer (not mounted while closed). It
+  maps the same `NAV` and the same `canOfferKey`. The API reference route
+  is not exercised separately either: it renders the same
+  `<Navbar inPage={false}>` as the quick start.
+
+## Design Decisions
+
+### Emerged
+
+1. **Sign-out is told apart by a ref, not by a session flag or a navigate
+   call.** The sign-out test's contract predates this task: signing out ends
+   on the landing page "with its way back in, not the 'you are not signed
+   in' line". A `hadSession` ref in `DashboardRoute` keeps that in three
+   lines; a promise-returning `onSignOut` that navigates on success would
+   have touched the `Gate` type and four call sites for the same outcome.
+2. **"Sign in" is added, "Get API Key" is not relabelled** — the frame's
+   promise to a first-time visitor stays, and the returning visitor gets a
+   word for what they want (also in Notes above).
