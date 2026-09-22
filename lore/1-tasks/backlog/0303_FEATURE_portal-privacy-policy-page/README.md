@@ -20,7 +20,7 @@ history:
       rumblefish.dev describes the marketing site (HubSpot, GA, pixel,
       recruitment) and none of what the portal processes (Discord id and
       username, API key, usage, logs). The page is the portal's, at
-      `/api/privacy`, because the portal is what collects the data and the
+      `/api/privacy-policy`, because the portal is what collects the data and the
       draft itself says the policy is published "through the portal".
 ---
 
@@ -51,9 +51,11 @@ HubSpot and GTM, has no accounts, and the corporate policy covers it.
 
 ## Implementation
 
-- A route `/privacy` in the portal (served at `/api/privacy`), the same
-  `DocPage` shape as the API reference and the quick start, rendering the
-  policy's headings and text. One source of truth for the text in the repo;
+- A route `/privacy-policy` in the portal (served at `/api/privacy-policy`,
+  no trailing slash — the portal's routes have none), the same `DocPage`
+  shape as the API reference and the quick start, rendering the policy's
+  headings and text. The name matches the explorer's footer and the
+  corporate site (`/privacy-policy/`), decided 2026-09-22. One source of truth for the text in the repo;
   the draft in `sources/` is the input, not the rendered copy.
 - `landing/links.ts`: a `PRIVACY_ROUTE` / `PRIVACY` pair like the quick
   start's; `landing/Chrome.tsx`: the footer's "Privacy policy" becomes a
@@ -71,7 +73,7 @@ HubSpot and GTM, has no accounts, and the corporate policy covers it.
 
 ## Acceptance Criteria
 
-- [ ] `/api/privacy` renders the approved policy, reachable from the
+- [ ] `/api/privacy-policy` renders the approved policy, reachable from the
       footer's "Privacy policy" on every page that has the footer
 - [ ] The three open points above are decided and the text matches the
       decision (address, IP, payments)
