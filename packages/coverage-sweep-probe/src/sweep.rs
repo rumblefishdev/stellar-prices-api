@@ -16,6 +16,12 @@
 //!   (`GAA574…SWAPN…`), which pulled SAC `transfer`/`mint` events into a first
 //!   draft;
 //! - ClickHouse JSON indexes are 1-based: index 1 is topic[0].
+//! - a transaction is `(ledger_sequence, transaction_index)`. BE task 0541
+//!   (commit `350a835c`, live on production 2026-09-22) re-keyed the table on
+//!   stellar-rpc's event id `(ledger_sequence, transaction_index,
+//!   operation_index, event_index)` and dropped the `transaction_id` surrogate;
+//!   `event_index` now counts within the OPERATION, so it identifies nothing
+//!   on its own.
 //! - only CONTRACT events (`event_type = 1`): BE's table can also hold system
 //!   (0) and diagnostic (2) events, and a diagnostic `fn_return` carries the
 //!   invoked function's name at topic[1] — a call to `swap` on a contract that
@@ -120,7 +126,7 @@ pub fn sweep_sql(be_db: &str, prices_db: &str) -> Result<String, SweepError> {
     Ok(format!(
         "WITH \
     ev AS ( \
-        SELECT contract_id, ledger_sequence, transaction_id, \
+        SELECT contract_id, ledger_sequence, transaction_index, \
                JSONExtractString(topics_xdr, 1, 'value') AS t0, \
                JSONExtractString(topics_xdr, 2, 'value') AS t1, \
                arrayStringConcat(arrayMap(x -> JSONExtractString(x, 'type'), \
@@ -135,7 +141,7 @@ pub fn sweep_sql(be_db: &str, prices_db: &str) -> Result<String, SweepError> {
                 AND match(lower(JSONExtractString(topics_xdr, 2, 'value')), 'swap|trade'))) \
     ), \
     per_contract AS ( \
-        SELECT contract_id, count() AS events, uniqExact(transaction_id) AS txs, \
+        SELECT contract_id, count() AS events, uniqExact(ledger_sequence, transaction_index) AS txs, \
                min(ledger_sequence) AS first_ledger, max(ledger_sequence) AS last_ledger, \
                topK(1)(concat(t0, ' / ', left(t1, 20)))[1] AS top_action, \
                topK(1)(concat(topic_types, ' -> ', data_type))[1] AS top_shape \
@@ -268,6 +274,15 @@ mod tests {
         );
         // No index 0: ClickHouse JSON indexes are 1-based.
         assert!(!sql.contains("topics_xdr, 0,"));
+    }
+
+    #[test]
+    fn a_transaction_is_its_ledger_and_position() {
+        // BE 0541 dropped `transaction_id`; a transaction is identified by its
+        // ledger and its index within it.
+        let sql = prod_sql();
+        assert!(sql.contains("uniqExact(ledger_sequence, transaction_index) AS txs"));
+        assert!(!sql.contains("transaction_id"), "{sql}");
     }
 
     #[test]

@@ -64,8 +64,10 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// DROP/CREATE `cov_it_<case>_be` (BE's two tables, DDL mirrored from BE
-    /// @129ab5d1 `crates/db-clickhouse/schema/init.sql`) and
+    /// DROP/CREATE `cov_it_<case>_be` (BE's two tables, DDL mirrored from BE's
+    /// `crates/db-clickhouse/schema/init.sql`: `soroban_events` as re-keyed by
+    /// BE task 0541 (@1c3f0603, live on production 2026-09-22),
+    /// `soroban_contracts` as of @129ab5d1, the columns the sweep reads) and
     /// `cov_it_<case>_prices` (`pool_registry` from our `init.sql`).
     async fn new(case: &str) -> Self {
         let f = Fixture {
@@ -82,18 +84,20 @@ impl Fixture {
             &a,
             &format!(
                 "CREATE TABLE {}.soroban_events (
-                    contract_id     Int64,
-                    transaction_id  Int64,
-                    ledger_sequence Int64,
-                    event_index     Int16,
-                    event_type      Int16,
-                    signature       LowCardinality(Nullable(String)),
-                    topics_xdr      String CODEC(ZSTD(3)),
-                    data_xdr        String CODEC(ZSTD(3))
+                    contract_id        Int64,
+                    ledger_sequence    Int64,
+                    transaction_index  UInt32,
+                    operation_index    UInt16,
+                    event_index        UInt32,
+                    application_order  Int16,
+                    event_type         Int16,
+                    signature          LowCardinality(Nullable(String)),
+                    topics_xdr         String CODEC(ZSTD(3)),
+                    data_xdr           String CODEC(ZSTD(3))
                 )
                 ENGINE = ReplacingMergeTree
                 PARTITION BY intDiv(ledger_sequence, 500000)
-                ORDER BY (contract_id, ledger_sequence, transaction_id, event_index)",
+                ORDER BY (contract_id, ledger_sequence, transaction_index, operation_index, event_index)",
                 f.be
             ),
         )
@@ -138,8 +142,9 @@ impl Fixture {
         f
     }
 
-    /// One event of contract surrogate `id` at `ledger` (tx id = ledger·10 +
-    /// `tx`, so transactions differ across ledgers).
+    /// One event of contract surrogate `id` at `ledger`, in the transaction at
+    /// position `tx` of that ledger (BE 0541: a transaction is
+    /// `(ledger_sequence, transaction_index)`).
     async fn event(&self, id: i64, ledger: i64, tx: i64, topics: &str) {
         self.event_of_type(id, ledger, tx, topics, 1).await;
     }
@@ -150,10 +155,9 @@ impl Fixture {
             &admin(),
             &format!(
                 "INSERT INTO {}.soroban_events \
-                 (contract_id, transaction_id, ledger_sequence, event_index, event_type, signature, topics_xdr, data_xdr) \
-                 VALUES ({id}, {}, {ledger}, 0, {event_type}, NULL, '{topics}', '{DATA_MAP}')",
+                 (contract_id, ledger_sequence, transaction_index, operation_index, event_index, application_order, event_type, signature, topics_xdr, data_xdr) \
+                 VALUES ({id}, {ledger}, {tx}, 0, 0, {tx}, {event_type}, NULL, '{topics}', '{DATA_MAP}')",
                 self.be,
-                ledger * 10 + tx
             ),
         )
         .await;
