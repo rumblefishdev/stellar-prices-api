@@ -61,26 +61,39 @@ to stop the rollout without leaving the estate half-migrated.
 ## 2. Order, and why it is not negotiable
 
 ```
-schema  →  enrichment + coarse sweep + prices-api  →  MV re-CREATE  →  ingest LAST
+schema  →  enrichment + coarse sweep  →  MV re-CREATE  →  ingest + prices-api LAST
 ```
 
 The same statement is in `packages/prices-clickhouse/schema/init.sql` and in the
-header of `schema/rollups.sql`; this is the operational reading of it.
+header of `schema/rollups.sql`, which put the API in the middle step with the
+enrichment; this is the operational reading of it, and it moves the API to the
+end. ⚠️ **`api-handler` and `ledger-processor` are the SAME CDK stack**
+(`Prices-production-Compute`), so `make deploy-production-compute` ships both or
+neither — the middle step cannot include the API without also shipping the
+ingest into pre-0286 MVs. See the fourth bullet.
 
 - **Schema first.** Everything else refers to the three pf columns. The
   migration is idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` per table,
   and the DEFAULT expressions (`pf_trade_count DEFAULT trade_count`, and so on)
   give every pre-existing row the pre-0286 meaning — every fill formed price —
   which is exactly what history should keep saying until phase 3.
-- **Enrichment, the coarse sweep and prices-api before the MVs.** Pre-0286
-  enrichment re-inserts a candle with a FIFTEEN-column list. A named list that
-  omits a column is not an error: ClickHouse fills it from its DEFAULT, so
+- **Enrichment and the coarse sweep before the MVs.** Pre-0286 enrichment
+  re-inserts a candle with a FIFTEEN-column list. A named list that omits a
+  column is not an error: ClickHouse fills it from its DEFAULT, so
   `pf_trade_count` silently becomes `trade_count` and a dust-only minute comes
   back claiming to be fully price-forming. That corruption is invisible and
   lands on whatever rows the pass happens to touch.
 - **The ingest LAST.** A pre-0286 MV meeting a post-0286 ingest reads a
   dust-only minute's `low = 0` with `min(low)` and writes a zero `low` across
   the whole coarse bucket, on every tier above it.
+- **The API goes with the ingest, at the end** — not because it wants to be
+  there, but because it has no choice: one stack, one deploy. The two
+  mis-orderings are not symmetric, which is what makes this safe. A new ingest
+  too early CORRUPTS: the zero `low` above has to be rolled back. A new API too
+  late costs NOTHING: `/ohlcv` keeps the behaviour it has in production today,
+  dust prices included, until the deploy lands. So deploy `Compute` exactly
+  once, at the end. Between the MV re-CREATE and that deploy the read and the
+  write side are both pre-0286 and stay consistent with each other.
 
 Between the MV re-CREATE and the ingest deploy nothing is written in the new
 shape, so the window between them is safe to keep open as long as you like.
