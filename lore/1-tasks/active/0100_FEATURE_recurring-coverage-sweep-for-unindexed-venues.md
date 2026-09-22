@@ -211,8 +211,9 @@ task notes:
   runbook `docs/runbooks/0100-coverage-sweep-triage.md`.
 - BE grants: live and verified 2026-09-21 (runbook §4.2).
 - Not yet done: merge, deploy (EventBridge + Observability, runbook §4.4),
-  first run as the AC5 proof (expected: ALARM on 13 contracts / ~911
-  events).
+  first run. After the phase-1 allow-list (PR #332, `e4bae2a`) the current
+  window reads 0 unclassified, so the first run publishes nothing; the AC5
+  proof is a synthetic `UnclassifiedSwapEvents = 1` datapoint (runbook §4.5).
 - Phase-1 residual (current 14 days): classified 2026-09-22, see below.
   Still to classify: the April-only candidates `Swap` (`d4b4976b`, 462),
   `SwappedToVUsd` (`a757a1ed`, 355), 2× `tokens_swapped_event`, and a few
