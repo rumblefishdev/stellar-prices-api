@@ -919,6 +919,46 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         "the carried venue must appear in sources at its priced close, got {lag_srcs}"
     );
 
+    // ── 0216: the age of that carry, and the word for it ───────────────────
+    // Both 7 ZER and 11 LAG are the same shape — a real priced close plus a
+    // NEWER price-forming candle nobody has priced yet — which is exactly what
+    // `carried` names. `as_of` must date the priced close, NOT the newest
+    // candle: reporting the latter would say the price is a minute old when it
+    // is half an hour old, which is the whole defect this column removes.
+    let candle_ts = |expr: &str, id: u32| {
+        format!(
+            "SELECT toString({expr}) FROM {db}.price_ohlcv_1m FINAL \
+             WHERE asset_id = {id} AND timestamp >= now() - INTERVAL 24 HOUR"
+        )
+    };
+    for id in [7_u32, 11] {
+        let priced_ts: String = admin
+            .query(&candle_ts("maxIf(timestamp, close_usd > 0)", id))
+            .fetch_one()
+            .await
+            .unwrap_or_else(|e| panic!("priced ts for {id}: {e}"));
+        let newest_ts: String = admin
+            .query(&candle_ts("max(timestamp)", id))
+            .fetch_one()
+            .await
+            .unwrap_or_else(|e| panic!("newest ts for {id}: {e}"));
+        let as_of = as_of_of(&admin, db, id).await;
+        assert_eq!(
+            as_of, priced_ts,
+            "asset {id}: as_of must be the timestamp of the candle price_usd was read from"
+        );
+        assert_ne!(
+            as_of, newest_ts,
+            "asset {id}: as_of must NOT be the newest candle — that candle has no price yet, \
+             and equality here would mean the column is max(timestamp) in disguise"
+        );
+        assert_eq!(
+            status_of(&admin, db, id).await,
+            "carried",
+            "asset {id}: a priced close older than a price-forming candle is `carried`"
+        );
+    }
+
     // ── 0135 x §5.5: the mask arms over a population WITH a carried price ──
     // Three sources, aquarius carried (1.01 from 50 min ago, tip un-enriched).
     // All three sit within 2% of the median, so arming must keep all three —
@@ -1124,6 +1164,52 @@ async fn method_of(admin: &Client, db: &str, asset: u32) -> String {
         .unwrap_or_else(|e| panic!("method for {asset}: {e}"))
 }
 
+async fn status_of(admin: &Client, db: &str, asset: u32) -> String {
+    admin
+        .query(&format!(
+            "SELECT price_status FROM {db}.current_prices FINAL WHERE asset_id = {asset}"
+        ))
+        .fetch_one::<String>()
+        .await
+        .unwrap_or_else(|e| panic!("price_status for {asset}: {e}"))
+}
+
+/// `as_of` as a string, so the epoch sentinel is readable in a failure message
+/// rather than arriving as an integer nobody recognises.
+async fn as_of_of(admin: &Client, db: &str, asset: u32) -> String {
+    admin
+        .query(&format!(
+            "SELECT toString(as_of) FROM {db}.current_prices FINAL WHERE asset_id = {asset}"
+        ))
+        .fetch_one::<String>()
+        .await
+        .unwrap_or_else(|e| panic!("as_of for {asset}: {e}"))
+}
+
+/// A candle `mins` minutes old with `pf_trade_count` named EXPLICITLY — the
+/// only fixture path in this file that can reach 0. Every other insert helper
+/// here stops the column list at `version`, so `pf_trade_count` takes its
+/// DEFAULT (= `trade_count` = 1) and every fixture candle is price-forming.
+fn insert_pair_pf(
+    db: &str,
+    base: u32,
+    quote: u32,
+    close_usd: &str,
+    vol_usd: &str,
+    mins: i64,
+    pf_trade_count: u32,
+) -> String {
+    format!(
+        "INSERT INTO {db}.price_ohlcv_1m \
+         (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+          volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version, \
+          pf_trade_count) \
+         VALUES (now() - INTERVAL {mins} MINUTE, {base}, {quote}, 'sdex', {close_usd}, \
+          {close_usd}, {close_usd}, {close_usd}, 50, {vol_usd}, {vol_usd}, {close_usd}, \
+          {close_usd}, 1, 1, {pf_trade_count})"
+    )
+}
+
 /// The headline defect: canonical USDC never trades as a BASE leg, so every
 /// base-keyed aggregate skipped it and `/price` returned 404. It must now
 /// publish a row, priced from the measured rate rather than a $1 placeholder,
@@ -1154,6 +1240,29 @@ async fn usdc_publishes_a_row_from_the_measured_rate_and_is_tagged_oracle() {
         "USDC must carry the MEASURED rate, not a $1 placeholder — got {price}"
     );
     assert_eq!(method_of(&admin, db, 2).await, "oracle");
+
+    // Task 0216 — the oracle arm dates itself from the reading it published,
+    // not from the refresh. `as_of` = `tip_at` there by construction, which is
+    // what puts every oracle row in the `priced` branch without the status
+    // expression ever keying on `is_oracle` (the 0178 lesson).
+    let rate_ts: String = admin
+        .query(&format!(
+            "SELECT toString(max(timestamp)) FROM {db}.usd_rate FINAL \
+             WHERE asset_code = 'USDC' AND method = 'oracle'"
+        ))
+        .fetch_one()
+        .await
+        .expect("rate timestamp");
+    assert_eq!(
+        as_of_of(&admin, db, 2).await,
+        rate_ts,
+        "as_of must be the measured rate's OWN timestamp"
+    );
+    assert_eq!(
+        status_of(&admin, db, 2).await,
+        "priced",
+        "a measured rate is the newest thing there is to wait for here"
+    );
 
     // Volume counts the quote leg: 10,000 + 2,000. Base-only summed an empty
     // set and published 0, which is the bug.
@@ -1357,6 +1466,69 @@ async fn an_unpriced_asset_carries_the_empty_sentinel_not_traded() {
         method_of(&admin, db, 5).await,
         "",
         "no method applies to a missing price"
+    );
+
+    // Task 0216 — the same window, read for its age and its kind. `maxIf` over
+    // a window with no priced candle returns the DateTime DEFAULT rather than
+    // NULL, so without the MV's `if(price_usd > 0, …)` guard this row would
+    // carry 1970-01-01 by ACCIDENT and be indistinguishable from a deliberate
+    // sentinel. The guard makes the epoch a decision; the API maps exactly this
+    // value to "".
+    assert_eq!(
+        as_of_of(&admin, db, 5).await,
+        "1970-01-01 00:00:00",
+        "no priced candle → as_of is the epoch sentinel, never an age"
+    );
+    assert_eq!(
+        status_of(&admin, db, 5).await,
+        "unpriced",
+        "price_usd is the 0 sentinel, so the status word is `unpriced`"
+    );
+
+    teardown(db).await;
+}
+
+/// A dust-only newest minute must NOT flip a real price to `carried`. `carried`
+/// means the reader is waiting for a price that a newer candle ought to have
+/// and does not — but a minute whose only fills were stroop dust has no price
+/// to wait for (task 0286 leaves such a bucket without a close at all). Keying
+/// `carried` on `trade_count`, or on "any newer candle", would label every such
+/// asset stale forever.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn a_dust_only_newest_minute_does_not_make_a_price_read_carried() {
+    let db = "it_current_mv_0216_dust";
+    let admin = setup(db).await;
+
+    for q in [
+        insert_asset(db, 1, "XLM", ""),
+        insert_asset(db, 9, "DST", "GDST"),
+        insert_asset(db, 10, "WAI", "GWAI"),
+        // 9 DST — a real priced close, then a newest minute that traded only
+        // dust: trade_count = 1 (a fill DID happen) but pf_trade_count = 0, so
+        // none of it was price-forming and the bucket carries no close.
+        insert_pair_pf(db, 9, 1, "2.00", "500", 30, 1),
+        insert_pair_pf(db, 9, 1, "0", "0", 1, 0),
+        // 10 WAI — the control, and the reason this test cannot pass vacuously:
+        // the SAME shape with a PRICE-FORMING newest minute that has not been
+        // enriched yet. That one IS a price the reader is waiting for.
+        insert_pair_pf(db, 10, 1, "2.00", "500", 30, 1),
+        insert_pair_pf(db, 10, 1, "0", "0", 1, 1),
+    ] {
+        admin.query(&q).execute().await.expect("fixture");
+    }
+    refresh(&admin, db, 2).await;
+
+    assert_eq!(
+        status_of(&admin, db, 9).await,
+        "priced",
+        "a dust-only newest minute has no price to wait for — the asset is priced, not carried"
+    );
+    assert_eq!(
+        status_of(&admin, db, 10).await,
+        "carried",
+        "control: a price-forming newest minute with no close yet IS `carried` — if this \
+         also read `priced`, the assertion above would prove nothing"
     );
 
     teardown(db).await;

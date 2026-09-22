@@ -435,7 +435,7 @@ async fn views_sql_replaces_an_existing_v1_current_price_usd() {
         columns().await.len(),
         6,
         "CREATE VIEW IF NOT EXISTS must NOT redefine an existing view — if this \
-         reports 14, the OR REPLACE form is no longer load-bearing and the \
+         reports 16, the OR REPLACE form is no longer load-bearing and the \
          comment in views.sql is wrong"
     );
 
@@ -444,10 +444,11 @@ async fn views_sql_replaces_an_existing_v1_current_price_usd() {
         .await
         .unwrap();
     let after = columns().await;
-    // 14 since task 0178 appended `method`; 13 before it, 6 in v1.
+    // 16 since task 0216 appended `as_of` and `price_status`; 14 since 0178
+    // appended `method`; 13 before it, 6 in v1.
     assert_eq!(
         after.len(),
-        14,
+        16,
         "views.sql must replace the v1 view, got {after:?}"
     );
     for col in [
