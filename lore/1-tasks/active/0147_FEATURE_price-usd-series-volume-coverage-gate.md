@@ -90,16 +90,17 @@ history:
     who: akot
     note: >
       **Phase 1 landed on `feat/0147_price-usd-series-volume-coverage-gate`** —
-      5 commits, local only, NOT pushed and NOT deployed anywhere. Shipped: one
+      6 commits, local only, NOT pushed and NOT deployed anywhere. Shipped: one
       priced predicate shared with `/ohlcv`, `pf_volume` weights at every
       weighted surface, `priced_volume_share` appended LAST (7 → 8 columns on
       both series grains), the publish gate, `price_usd_series_coverage{,_1h}`
       (6 → 8 views), and the same floor + pf terms on `usd_reference*`. The
       yXLM case is RED→GREEN on ClickHouse 26.3.10.60 with the RED output
       captured verbatim (see Implementation Notes). Test counts: 66 lib, 22
-      `views_it` `#[ignore]` (17 pre-existing, every assertion unmodified —
-      only fixture `volume_quote_usd` was raised), 43 `ohlcv_it` `#[ignore]`,
-      1122 workspace. **Both `X = 0.5` and `FLOOR_USD = 100` ship as
+      `views_it` `#[ignore]` (16 pre-existing + 6 new; every pre-existing
+      assertion byte-identical — only fixture `volume_quote_usd` was raised),
+      224 `prices-api` lib, 43 `ohlcv_it` `#[ignore]`, 12 `openapi`, and 1,127
+      passing across `cargo test --workspace`. **Both `X = 0.5` and `FLOOR_USD = 100` ship as
       PLACEHOLDERS** carrying a phase-2 marker pinned by a test; the task stays
       `active` until phase 2 measures them on prod (≥ 2026-09-29) and the
       rollout runs. The task's PR still waits for #337 (0216).
@@ -180,7 +181,7 @@ where the **base table's own rows** are unpriced, which no rollup fix can reach.
 
 ## Implementation Notes (phase 1)
 
-Branch `feat/0147_price-usd-series-volume-coverage-gate`, 5 commits, local only.
+Branch `feat/0147_price-usd-series-volume-coverage-gate`, 6 commits, local only.
 Nothing deployed; both gate constants are placeholders. See
 `.planning/quick/260922-kdo-0147-phase-1-volume-coverage-gate-priced/` for the
 brief, plan and summary, and `.planning/CONTRACT-0147-be.md` for the note to BE.
