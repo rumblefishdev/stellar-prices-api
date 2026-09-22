@@ -14,6 +14,23 @@ history:
     status: backlog
     who: okarcz
     note: "Spawned from 0114 future work — the last 0114 AC; belongs in 0088's step-3 pre-roll flow, which hasn't run yet."
+  - date: "2026-09-22"
+    status: backlog
+    who: akot
+    note: >
+      **Use [[0147]]'s definition of `priced_volume_share` — do not invent a
+      third.** 0147 phase 1 shipped it on `price_usd_series{,_1h}`
+      (`packages/prices-clickhouse/schema/views.sql`): a candle counts as PRICED
+      iff `close >= 1e-12 AND close_usd >= 1e-12 AND pf_trade_count > 0 AND
+      pf_volume > 0` plus convertibility (the quote is the canonical USDC, or
+      `close_usd != close`) — byte-for-byte `/ohlcv`'s `valid` for the same row
+      — and the share is `Σ pf_volume(priced) / Σ pf_volume(eligible)`, weighted
+      on `pf_volume` and never on `volume_base`. "Eligible" is the quote-asset
+      set 0147 computes in the view. The coverage this task gates on is the same
+      quantity by a different name, and 0118's `min_volume_usd` is the third
+      site; one predicate or none. ⚠️ 0147's two constants (`X = 0.5`,
+      `FLOOR_USD = 100`) are PLACEHOLDERS until its phase 2 measures them — take
+      the definition now, take the numbers after that.
 ---
 
 # 0088 step-3 pre-roll: gate/warn when 1m USD coverage is below a threshold

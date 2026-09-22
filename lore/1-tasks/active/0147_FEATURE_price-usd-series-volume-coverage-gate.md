@@ -85,6 +85,24 @@ history:
       Branch `feat/0147` is STACKED on `feat/0216` (PR #337 still open, both
       touch `views.sql`); the PR waits for #337. Phase 2 (measure X on prod)
       after the 0286 week, ≥ 2026-09-29. No deploy in phase 1.
+  - date: "2026-09-22"
+    status: active
+    who: akot
+    note: >
+      **Phase 1 landed on `feat/0147_price-usd-series-volume-coverage-gate`** —
+      5 commits, local only, NOT pushed and NOT deployed anywhere. Shipped: one
+      priced predicate shared with `/ohlcv`, `pf_volume` weights at every
+      weighted surface, `priced_volume_share` appended LAST (7 → 8 columns on
+      both series grains), the publish gate, `price_usd_series_coverage{,_1h}`
+      (6 → 8 views), and the same floor + pf terms on `usd_reference*`. The
+      yXLM case is RED→GREEN on ClickHouse 26.3.10.60 with the RED output
+      captured verbatim (see Implementation Notes). Test counts: 66 lib, 22
+      `views_it` `#[ignore]` (17 pre-existing, every assertion unmodified —
+      only fixture `volume_quote_usd` was raised), 43 `ohlcv_it` `#[ignore]`,
+      1122 workspace. **Both `X = 0.5` and `FLOOR_USD = 100` ship as
+      PLACEHOLDERS** carrying a phase-2 marker pinned by a test; the task stays
+      `active` until phase 2 measures them on prod (≥ 2026-09-29) and the
+      rollout runs. The task's PR still waits for #337 (0216).
 ---
 
 # Volume-coverage gate for `price_usd_series` / `price_usd_series_1h`
@@ -160,18 +178,108 @@ masquerades as a good value.
 chain. This gate covers the case
 where the **base table's own rows** are unpriced, which no rollup fix can reach.
 
+## Implementation Notes (phase 1)
+
+Branch `feat/0147_price-usd-series-volume-coverage-gate`, 5 commits, local only.
+Nothing deployed; both gate constants are placeholders. See
+`.planning/quick/260922-kdo-0147-phase-1-volume-coverage-gate-priced/` for the
+brief, plan and summary, and `.planning/CONTRACT-0147-be.md` for the note to BE.
+
+### The RED proof, verbatim
+
+Test `a_dust_print_cannot_price_a_bucket_whose_volume_is_unpriced` was written
+FIRST and run against the UNCHANGED `views.sql` on the local ClickHouse
+26.3.10.60. Fixture: one 0.764-unit print priced at 1.3085 beside 1000 unpriced
+units of the same identity in the same daily bucket.
+
+```
+thread 'a_dust_print_cannot_price_a_bucket_whose_volume_is_unpriced' panicked at
+packages/prices-clickhouse/tests/views_it.rs:2318:9:
+price_usd_series SETTINGS compile_expressions = 0: the only priced row in this
+bucket is a 0.764-unit print holding 0.0763 % of its eligible volume, so the
+bucket must be WITHHELD — got [("FOO", 1.3085)] (1.3085 is the dust print's own
+price, BE's 7.7x yXLM defect)
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out
+```
+
+GREEN, same fixture, after the gate: `price_usd_series` has **no row** for that
+identity/bucket, and `price_usd_series_coverage` reads
+`priced_volume_share = 0.000763`, `priced_volume_usd = 1`, `status = 'pending'`
+— in **both** JIT modes. Enrich the 1000 units at their true 0.0065 and the
+bucket publishes at **0.00749394** with share `1` and `status = 'priced'`.
+
+⚠️ 0.00749394, not 0.0065: that is the bucket's volume-weighted mean over its
+now-complete population. The dust print is a real trade and keeps its 0.0764 %
+of the weight, worth +0.001 on the published price. The residual is the point —
+before the gate the same print WAS the price, at 200x the truth.
+
+### What shipped
+
+1. **One priced predicate, spelled once.** Arm A and `usd_reference*` use
+   `/ohlcv`'s `valid` for the same row: `close >= 1e-12 AND close_usd >= 1e-12
+   AND pf_trade_count > 0 AND pf_volume > 0`, plus convertibility (quote is the
+   canonical USDC, or `close_usd != close`). `usd_reference*` take the same
+   floor and pf terms minus the USD leg, which they do not read.
+2. **`pf_volume` weights, and the population is explicit.** Arm A no longer
+   filters: it reads every candle of the bucket and sums conditionally, so the
+   unpriced rows are in the denominator. `priced_volume_share = Σ pf_volume
+   (priced) / Σ pf_volume(eligible)`, appended LAST after `method`, never NULL.
+3. **Publish iff `share >= X` AND `priced_volume_usd >= FLOOR_USD`**, else the
+   bucket is ABSENT with a row in `price_usd_series_coverage{,_1h}` saying
+   `priced | pending | unpriceable`. Eligibility is computed in the view (no new
+   table) and is retroactive per ADR 0292. The peg arm is outside the gate and
+   reads `priced` with share 1.
+
+### What phase 2 owes
+
+**Both `X = 0.5` and `FLOOR_USD = 100` are PLACEHOLDERS**, each carrying
+`-- ⚠️ PLACEHOLDER, measured in phase 2` beside it in the `views.sql` header and
+pinned by `views_sql_marks_both_gate_constants_as_phase_2_placeholders`.
+
+`FLOOR_USD` is a placeholder too, and that is an amendment made during planning
+on evidence from our own code: `current.sql:130-150` records that 0118's
+identical 100 USD, applied UNCONDITIONALLY over a 24 h window, would have
+blanked **2,960 of 3,068 priced assets (96.5 %)** on prod 2026-08-27 — which is
+why 0118 made its threshold conditional on a clearing sibling. 0147's floor is
+per BUCKET (per hour at `_1h`, ~$2.4k/day) and has no sibling notion, so it is
+strictly harsher. 100 is cited for PROVENANCE, not as a measurement.
+
+Phase 2, after the 0286 measurement week (≥ 2026-09-29): run the
+`priced_volume_share` and `priced_volume_usd` histograms on prod over a 7-day
+window, **per grain**, read-only via `dev_read` and with **no script committed
+to develop**; pick X where the bimodal mass between the peaks is smallest;
+record how many buckets X withholds against how many the floor does; replace
+both constants, drop both markers, and record the distribution in the view
+header and here. Rollout (`.planning/rollout-2026-09/ROLLOUT-0147.md`) waits for
+that.
+
 ## Acceptance Criteria
 
-- [ ] Neither view can return a bucket whose published price rests on a
+- [x] Neither view can return a bucket whose published price rests on a
       negligible share of that bucket's volume — regression test on CH
       **26.3.10.60** reproducing BE's yXLM case.
-- [ ] A fully unpriceable bucket is absent; a *pending* bucket is
+      → `a_dust_print_cannot_price_a_bucket_whose_volume_is_unpriced` (RED
+      captured above), `only_the_dust_print_is_priced_and_the_absolute_floor_withholds_the_bucket`,
+      `the_gate_and_the_coverage_view_behave_the_same_at_the_hourly_grain`.
+- [x] A fully unpriceable bucket is absent; a *pending* bucket is
       distinguishable from a *priced* one — not conflated.
+      → `price_usd_series_coverage{,_1h}`'s `status`;
+      `a_bucket_quoted_only_in_an_ineligible_asset_reads_unpriceable_with_a_zero_share`.
 - [ ] X justified against query C's measured distribution, recorded in the
-      header.
-- [ ] `priced_volume_share` exposed to consumers. **Confirmed as wanted by the
+      header. **OPEN — owned by phase 2** (≥ 2026-09-29, after the 0286
+      measurement week). X ships as a marked placeholder until then, and
+      nothing is deployed on it.
+- [x] `priced_volume_share` exposed to consumers. **Confirmed as wanted by the
       only consumer** — BE, 2026-08-06: *"please do expose the coverage share,
       we'll set our own bar on it."* Not optional; ship it with the gate.
       → `0144/notes/S-be-0199-response-received.md`
-- [ ] Threshold definition reconciled with [[0118]] and [[0131]].
-- [ ] BE told the gate has shipped and what X is.
+- [x] Threshold definition reconciled with [[0118]] and [[0131]].
+      → `FLOOR_USD` cites 0118 by name AND carries 0118's own 96.5 %
+      measurement in the `views.sql` header, which is why it is a placeholder
+      too; [[0131]] has a history note pointing at this definition; the
+      guardrails inventory rows 79-82 are closed against their tests.
+- [ ] BE told the gate has shipped and what X is. **OPEN — owned by Adam**,
+      who sends `.planning/CONTRACT-0147-be.md` (written, deliberately not
+      committed) after phase 2 fixes the numbers. Sending it now would give BE
+      two values that are about to move.
