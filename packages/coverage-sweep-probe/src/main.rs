@@ -12,10 +12,11 @@
 //! `ingestion` mTLS identity, i.e. ClickHouse user `prices_writer`, like every
 //! other scheduled worker. That user needs two grants from BE —
 //! `SELECT ON default.soroban_events` and `SELECT ON default.soroban_contracts`
-//! (docs/runbooks/0100-coverage-sweep-triage.md §4.1). Until they land every
-//! run fails with Code 497 ACCESS_DENIED and pages through the probe's
-//! `-errors` alarm. That is intended: a swallowed error would publish nothing,
-//! and the NOT_BREACHING unclassified alarm would read green forever.
+//! (docs/runbooks/0100-coverage-sweep-triage.md §4.1). BE applied them on
+//! 2026-09-21 (verified live as `prices_writer`, runbook §4.2). If they are
+//! ever lost, every run fails with Code 497 ACCESS_DENIED and pages through the
+//! probe's `-errors` alarm. That is intended: a swallowed error would publish
+//! nothing, and the NOT_BREACHING unclassified alarm would read green forever.
 
 #[cfg(feature = "lambda")]
 #[tokio::main]

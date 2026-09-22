@@ -141,12 +141,17 @@ impl Fixture {
     /// One event of contract surrogate `id` at `ledger` (tx id = ledger·10 +
     /// `tx`, so transactions differ across ledgers).
     async fn event(&self, id: i64, ledger: i64, tx: i64, topics: &str) {
+        self.event_of_type(id, ledger, tx, topics, 1).await;
+    }
+
+    /// Same, with BE's `event_type` (0 system, 1 contract, 2 diagnostic).
+    async fn event_of_type(&self, id: i64, ledger: i64, tx: i64, topics: &str, event_type: i16) {
         exec(
             &admin(),
             &format!(
                 "INSERT INTO {}.soroban_events \
                  (contract_id, transaction_id, ledger_sequence, event_index, event_type, signature, topics_xdr, data_xdr) \
-                 VALUES ({id}, {}, {ledger}, 0, 1, NULL, '{topics}', '{DATA_MAP}')",
+                 VALUES ({id}, {}, {ledger}, 0, {event_type}, NULL, '{topics}', '{DATA_MAP}')",
                 self.be,
                 ledger * 10 + tx
             ),
@@ -336,6 +341,32 @@ async fn an_address_topic_spelling_swap_is_not_reported() {
         .sweep_as_writer(&AllowList::embedded().unwrap(), true)
         .await;
     let report = result.expect("sweep runs");
+    assert_eq!(ids(&report.unclassified), vec![control]);
+    assert_eq!(report.rows_total, 1);
+    f.drop().await;
+}
+
+/// (1b) Only contract events count. A diagnostic `fn_return` names the invoked
+/// function at topic[1], so a call to `swap` on a contract that emits no swap
+/// event must not be reported (review of PR #332; BE's table may store type 2).
+#[tokio::test]
+#[ignore = "requires ClickHouse (local 26.3.10.60; cargo test -- --ignored)"]
+async fn a_diagnostic_event_naming_swap_is_not_reported() {
+    let f = Fixture::new("diag").await;
+    let (caller, control) = (strkey(12), strkey(13));
+    f.contract(12, &caller, None).await;
+    f.contract(13, &control, Some(COMET_LIKE_WASM)).await;
+    let fn_return = r#"[{"type":"sym","value":"fn_return"},{"type":"sym","value":"swap"}]"#;
+    for i in 0..3 {
+        f.event_of_type(12, 2_100_000 + i, 0, fn_return, 2).await;
+        f.event_of_type(12, 2_100_000 + i, 1, SWAP, 0).await;
+    }
+    f.events(13, 2_100_000, 1, POOL_SWAP).await;
+
+    let report = f
+        .sweep_as_writer(&AllowList::embedded().unwrap(), true)
+        .await
+        .expect("sweep runs");
     assert_eq!(ids(&report.unclassified), vec![control]);
     assert_eq!(report.rows_total, 1);
     f.drop().await;

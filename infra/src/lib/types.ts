@@ -80,10 +80,12 @@ export interface EnvironmentConfig {
    *
    * The probe reads BE's `default.soroban_events` / `default.soroban_contracts`
    * as `prices_writer`, which needs two SELECT grants only BE can add (their
-   * `users.d` XML). Until those are verified live, keep this `false`: the Lambda,
-   * rule and alarms still deploy, but nothing invokes the probe, so it does not
-   * fail with Code 497 every Monday. Flip to `true` and redeploy EventBridge once
-   * the grants check out (docs/runbooks/0100-coverage-sweep-triage.md §4).
+   * `users.d` XML). Production is `true`: BE applied them on 2026-09-21 and they
+   * were verified live the same day as `prices_writer` (`SHOW GRANTS`, reads on
+   * both tables, `default.transactions` still Code 497 — runbook §4.2). Set it
+   * `false` wherever the grants are not verified live (a new environment, a BE
+   * change that drops them): the Lambda, rule and alarms still deploy, but
+   * nothing invokes the probe, so it does not fail with Code 497 every Monday.
    *
    * Config rather than `aws events disable-rule`, because CDK re-enables a rule
    * on the next deploy of the stack; a flag survives it.

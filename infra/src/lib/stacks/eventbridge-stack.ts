@@ -251,8 +251,9 @@ export class EventBridgeStack extends cdk.Stack {
         ruleName: `prices-${env}-coverage-sweep-probe`,
         description: `Weekly sweep of unregistered swap emitters → Prices/Coverage (${env})`,
         schedule: events.Schedule.expression(schedules.coverageSweepProbe),
-        // OFF until BE's two SELECT grants to prices_writer are verified live
-        // (task 0100; see EnvironmentConfig.coverageSweepEnabled).
+        // Durable on/off switch (task 0100; see
+        // EnvironmentConfig.coverageSweepEnabled): ON in production since BE's
+        // two SELECT grants to prices_writer were verified live on 2026-09-21.
         enabled: config.coverageSweepEnabled,
       },
     );

@@ -9,6 +9,11 @@
 //!   --data-binary @query.sql
 //! ```
 //!
+//! It runs as the read-only `dev_read`: the trailing `SETTINGS join_use_nulls = 0`
+//! equals that user's current value, and read-only mode refuses only a CHANGE
+//! (checked 2026-09-22; `= 1` fails with Code 164). If it ever returns 164,
+//! drop that line for the manual run — the query's `ifNull` keeps the same rows.
+//!
 //! The bounds are the server-side typed parameters `{lo:Int64}`/`{hi:Int64}`,
 //! passed as `param_lo`/`param_hi`. The SQL does not apply the allow-list (the
 //! probe subtracts it in Rust), so allow-listed families appear in the output.

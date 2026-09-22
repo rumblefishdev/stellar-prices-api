@@ -359,6 +359,15 @@ This shows that the sweep would have caught SushiSwap V3 in April 2026.
      local backfill).
    - `hi = lo + 221,178` (inclusive, so 221,179 ledgers — the probe's window).
 
+   It runs as `dev_read` although that user is `readonly = 1` and the
+   statement ends in `SETTINGS join_use_nulls = 0`: read-only mode refuses a
+   CHANGE of a setting, not a value equal to the current one (checked
+   2026-09-22 — `= 0` runs, `= 1` fails with Code 164 `READONLY`). If it ever
+   fails with Code 164, delete that last `SETTINGS` line for the manual run:
+   the `ifNull(…)` in the statement already keeps unresolved contracts at the
+   default `join_use_nulls = 0`. Do not switch to a write certificate for a
+   read (runbook 0151, "Where these commands run").
+
 3. **Expected:** the `003710b3…` family (SushiSwap V3 pools, task 0290)
    appears among the rows. The SQL does not apply the allow-list; the probe
    subtracts it in Rust. The Rust subtraction of that family is pinned by

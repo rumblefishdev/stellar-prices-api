@@ -16,6 +16,11 @@
 //!   (`GAA574…SWAPN…`), which pulled SAC `transfer`/`mint` events into a first
 //!   draft;
 //! - ClickHouse JSON indexes are 1-based: index 1 is topic[0].
+//! - only CONTRACT events (`event_type = 1`): BE's table can also hold system
+//!   (0) and diagnostic (2) events, and a diagnostic `fn_return` carries the
+//!   invoked function's name at topic[1] — a call to `swap` on a contract that
+//!   emits no swap would otherwise match (review of PR #332). Measured
+//!   2026-09-21: every matching row was type 1, so this changes no result.
 
 use crate::allowlist::AllowList;
 
@@ -123,6 +128,7 @@ pub fn sweep_sql(be_db: &str, prices_db: &str) -> Result<String, SweepError> {
                JSONExtractString(data_xdr, 'type') AS data_type \
         FROM {be}.soroban_events \
         WHERE ledger_sequence BETWEEN {{lo:Int64}} AND {{hi:Int64}} \
+          AND event_type = 1 \
           AND ((JSONExtractString(topics_xdr, 1, 'type') IN ('sym', 'string') \
                 AND match(lower(JSONExtractString(topics_xdr, 1, 'value')), 'swap|trade')) \
             OR (JSONExtractString(topics_xdr, 2, 'type') IN ('sym', 'string') \
@@ -262,6 +268,13 @@ mod tests {
         );
         // No index 0: ClickHouse JSON indexes are 1-based.
         assert!(!sql.contains("topics_xdr, 0,"));
+    }
+
+    #[test]
+    fn reads_contract_events_only() {
+        // A diagnostic `fn_return` names the invoked function at topic[1];
+        // without this a call to `swap` would count as a swap event.
+        assert!(prod_sql().contains("AND event_type = 1"));
     }
 
     #[test]
