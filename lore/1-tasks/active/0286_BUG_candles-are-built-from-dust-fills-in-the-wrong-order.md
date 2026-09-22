@@ -136,6 +136,22 @@ history:
       mere ordering hygiene; and prices-api cannot ship in the middle step
       because it shares the Compute stack with the ingest (runbook fixed,
       PR #333).
+  - date: "2026-09-22"
+    status: active
+    who: okarcz
+    note: >
+      PHASE 1 ROLLED OUT on production, all eight steps, 10:35–11:58 UTC —
+      see "Phase 1 — rollout executed". 21 pf columns; enrichment + coarse
+      sweep at 10:44; six backup tables; five MVs re-created; the month
+      rebuilt from the DAY, which closed a 21.7 M-trade boundary error;
+      ingest + API at 11:58. Verified: 0 OHLC-order violations on all seven
+      tiers, MvDriftCount back to 0, MvDriftCritical 0 throughout,
+      `order_book_fills`/`offer_lookup_misses = 0` on the live reconcile
+      line. Four things in the runbook had never been exercised at
+      production scale and are written up under "Issues Encountered";
+      [[0302]] spawned for the generator-level fix. Phase-1 AC 10 (the
+      first-week measurement) is now the only open phase-1 item and the
+      measurement clock starts 2026-09-22 12:00 UTC.
 ---
 
 # Candles are built from dust fills in the wrong order
@@ -371,6 +387,40 @@ unchanged.
 is a syntax error (Code 62) and `prices_admin` has no filesystem access; step 4
 uses backup tables plus `REPLACE PARTITION` instead.
 
+### Phase 1 — rollout executed (2026-09-22, 10:35–11:58 UTC)
+
+Run end to end by the operator. Order as amended: schema → enrichment +
+coarse sweep → snapshots → five MVs fine-to-coarse → month → **ingest + API
+last, one Compute deploy**.
+
+| step | result |
+| --- | --- |
+| 2 schema | 21 pf columns on all seven tables, positions 16–18 after `version`; a 2026-04-02 `1d` row reads `pf_trade_count = trade_count`, `pf_volume = volume_base` — history keeps its pre-0286 meaning |
+| 3 enrichment + coarse sweep | `deploy-production-eventbridge` 10:44:26; nine Lambdas in that stack moved from their 09-15/16 builds |
+| 4 snapshots | `prices.rollout_0286_bak_{15m,1h,4h,1d,1w,1M}`, ~27 GiB; `count() FINAL` over March 2023 matches the source exactly on all six |
+| 5 MVs | five re-created fine-to-coarse, each `Scheduled` with no exception before the next; all six **APPEND** |
+| 6 month | **+2 911 rows, +21 729 828 trades**; `sum(trade_count)` now EXACTLY equals the day tier's 2 866 797 026, where the week-fed month was short by that amount |
+| 7 ingest + API | `deploy-production-compute` 11:58:22 |
+| 8 verification | 0 OHLC-order violations on 1m/15m/1h/4h/1d/1w/1M; `MvDriftCount` 7 → 3 → 1 → **0** at 11:52; `MvDriftCritical` 0 throughout |
+
+**The month's 21.7 M trades were never lost, only misfiled.** Before the
+TRUNCATE, two checks settled it: every series `price_ohlcv_1M` held existed
+somewhere in `price_ohlcv_1d` (`series_lost = 0`), and the day tier already
+carried MORE trades in total than the month claimed. A week belongs wholly to
+the month it STARTS in, so a week spanning 31 Aug → 6 Sep filed six September
+days under August. Rebuilding from the day put them back, and the exact
+equality with the day tier afterwards is the proof.
+
+**The first live run on the new ingest** (12:00:06) reported
+`order_book_fills = 233`, `offer_lookup_misses = 0`, `pool_fills = 473` —
+every order-book fill priced from its resting offer (phase 2's D2), first
+try, no errors.
+
+**`order_book_fills` on the `reconcile run complete` line is the cheapest
+proof of which build is live.** Before the deploy the line carried only
+`held_back`/`open_minute` (#313); the three offer fields arrive with #320.
+That is how the 2026-09-18 stale-asset deploy was identified this morning.
+
 ### Phase 3 — operator decisions (2026-09-21)
 
 Recorded by the operator after a teammate's M3 analysis (Slack, 2026-09-21)
@@ -510,9 +560,14 @@ Phase 1:
 - [x] ADR accepted for the meaning of `open`/`close`/`high`/`low` —
       ADR 0287, 2026-09-15, amended 2026-09-16 (first/last price-forming
       fill, no carry-forward, no settle pass).
-- [ ] Six MVs re-created with APPEND + `sum(version)` + aligned windows
+- [x] Six MVs re-created with APPEND + `sum(version)` + aligned windows
       verified, per-MV freshness recovered ([[0142]]'s re-apply checklist), the
       rollout run in the deploy order above with the ingest last.
+      → 2026-09-22, see "Phase 1 — rollout executed": five re-created plus
+      `mv_ohlcv_1d_to_1M` new, all six APPEND, every one `Scheduled` with no
+      exception, `MvDriftCount` back to 0 at 11:52, `MvDriftCritical` 0
+      throughout. The API shipped with the ingest, not before the MVs — one
+      CDK stack (PR #333).
 - [ ] Measured on the first week of new data: residual high/low bias vs
       Bitstamp on XLM, share of minutes with `pf_trade_count = 0` by source
       (a Soroban token with 0–3 decimals may never form price under the
@@ -661,6 +716,53 @@ price-forming 1m close on all 14 393 pairs; 10.5 % of SDEX minutes have
     the re-ingest applies.
 
 ## Issues Encountered
+
+### Found during the 2026-09-22 production rollout
+
+Four steps of `docs/runbooks/0286-candle-definitions-rollout.md` had never been
+exercised at production scale. None cost data; all four cost time mid-rollout.
+
+- **§5b gate 1 cannot run on production.** `groupUniqArray` per month plus
+  `arrayFilter(x -> NOT has(series_1d, x), series_1M)` is an O(n²) array scan
+  that cannot spill: `Code: 241 … would use 15.12 GiB … maximum: 7.45 GiB`. The
+  runbook's own note says it was *"Measured on the local 26.3.10.60 pin: both
+  statements return 0 rows against the verification database (2 months, 16 054
+  1M rows)"* — 131 months and ~2.5 M series-months is a different query. It was
+  replaced on the day by a `UNION ALL` + `GROUP BY` over the two tiers testing
+  `max(tier='M') = 1 AND max(tier='d') = 0`, which groups (and spills) instead
+  of allocating. Runbook fix in PR #333.
+- **The full-range 1M pre-roll exceeds `max_partitions_per_insert_block`.**
+  `Code: 252 … Too many partitions for single INSERT block (more than 100)` —
+  the table is partitioned `toYYYYMM` and the statement writes ~131 months in
+  one block. Resolved by passing `?max_partitions_per_insert_block=1000` as a
+  URL parameter rather than editing the generated SQL, which is pinned to
+  `rollup_sql.rs` by a unit test. ⚠️ Phase 3's per-month pre-rolls are bounded
+  and never approach the cap; only the full-range variant does. [[0302]] carries
+  the generator-level fix.
+- **`prices_admin` cannot read `system.view_refreshes`** (`Code: 497`), which is
+  the one table an operator wants between a `DROP VIEW` and its `CREATE`. BE
+  tasks 0567/0568 granted `system.{columns,disks,parts,mutations}` but not this.
+  Worked around through the `dev_read` cert — itself unreliable that morning,
+  see below. Worth one line in `services.xml`.
+- **The ADR 0292 zero-invariant probe fires on legacy sub-resolution rows.**
+  `prices-production-zero-invariant-1` went ALARM at 10:51 with 4 violations, all
+  condition (c) — `pf_trade_count > 0` with `close = 0`. They are pre-deploy
+  rows (2026-09-21 02:34 / 15:04 / 15:06, 2026-09-22 06:59), each a single fill
+  of ~10⁹ base units for ~10⁻⁶ quote, i.e. a price near 6.5e-16 that stores as 0
+  in `Decimal(38,14)`. Design decision 8 makes exactly this non-price-forming,
+  so the NEW ingest cannot produce more — but the DEFAULT migration makes the
+  OLD rows claim `pf_trade_count = trade_count`. The probe's window is 48 h of
+  bucket time, so it self-clears after 2026-09-24 07:00. Deliberately NOT
+  repaired: the rows are genuinely of the shape the ADR excludes, phase 3
+  rewrites them, and a mutation on the live 1m table hours after a rollout is
+  the worse trade.
+
+**Also observed, not ours:** `dev_read` exhausted its 2 TiB/hour read quota in
+both the 09:00 and 10:00 windows, unprompted by anything in this rollout, making
+the `chq` path unusable for stretches of the morning. `prices-production-ch-disk-free`
+has been in ALARM since 2026-09-21 18:21 (15.7 % free); BE lost ~175 GiB between
+09-21 09:36 and 15:36 and owns the remedy. Phase 1 needed a measured 26.7 GiB and
+did not wait for it.
 
 - **Name-routed writer** (clickhouse 0.13): a struct omitting a column
   silently takes its DEFAULT, and `pf_trade_count DEFAULT trade_count`
