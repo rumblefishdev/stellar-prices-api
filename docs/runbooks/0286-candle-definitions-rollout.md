@@ -100,6 +100,29 @@ shape, so the window between them is safe to keep open as long as you like.
 
 ## 3. FREEZE the coarse partitions before the first re-CREATE
 
+> ⚠️ **What was actually used on 2026-09-22, and why.** This section and its
+> rollback in section 6 need filesystem access to the ClickHouse host —
+> `shadow/` listings, `ATTACH PARTITION … FROM '/path/'` — which the
+> `prices_admin` identity does not have, and whose `ATTACH … FROM` form is a
+> syntax error (`Code: 62`) besides. The rollout took the snapshots as plain
+> backup tables instead, which any writer identity can do and which
+> `REPLACE PARTITION` restores from:
+>
+> ```sql
+> CREATE TABLE prices.rollout_0286_bak_15m AS prices.price_ohlcv_15m;
+> INSERT INTO prices.rollout_0286_bak_15m SELECT * FROM prices.price_ohlcv_15m;
+> ```
+>
+> Repeat per tier (`15m`, `1h`, `4h`, `1d`, `1w`, `1M`), ~27 GiB in total,
+> ~20 minutes. ⚠️ Verify them with `count() FINAL` over a CLOSED month
+> (March 2023 was used) — **not** with a raw `count()`. Both tables are
+> `ReplacingMergeTree(version)`, the live one carries unmerged duplicates from
+> every MV refresh and the fresh copy collapses them promptly, so `bak < src`
+> on a raw count is correct and means nothing. The live tiers are also appended
+> continuously while the copy runs, so the two can never be equal anyway.
+> Keep the `rollout_0286_bak_*` prefix distinct from any older `*_bak` tables
+> on the box.
+
 The rollback in section 6 is `DROP PARTITION` + `ATTACH PARTITION FROM`, which
 needs the snapshots to exist BEFORE anything writes in the new shape. Freeze
 every coarse partition the six MV windows cover — the widest window is 400 days,
@@ -168,6 +191,14 @@ mv_ohlcv_1m_to_15m → mv_ohlcv_15m_to_1h → mv_ohlcv_1h_to_4h
 → mv_ohlcv_4h_to_1d → mv_ohlcv_1d_to_1w
 ```
 
+⚠️ **`prices_admin` cannot read `system.view_refreshes`** (`Code: 497`), which
+is the one table you want between a `DROP VIEW` and its `CREATE`. BE tasks
+0567/0568 granted `system.{columns,disks,parts,mutations}` and not this one, so
+the per-MV checkpoint needs another identity — the `dev_read` cert works, at the
+cost of its 2 TiB/hour quota, which was exhausted twice on the morning of
+2026-09-22. The grant-free fallback is to watch the target table advance:
+`SELECT max(timestamp) FROM prices.price_ohlcv_15m`.
+
 Fine to coarse so each MV is re-created only once its own source is already
 correct. Every re-created body must keep the task 0095 invariants — `APPEND`,
 `sum(version)`, a bucket-ALIGNED window — and the statements in
@@ -221,28 +252,33 @@ permanently. The two gates below therefore compare the SETS of
 
 **Gate 1 — every series the month holds must exist in the days.**
 
+⚠️ **Do not use `groupUniqArray` + `arrayFilter` here.** The obvious spelling of
+this gate — collect each month's series into an array on both sides, then
+`arrayFilter(x -> NOT has(series_1d, x), series_1M)` — is an O(n²) array scan
+that cannot spill to disk. On production (131 months, ~2.5 M series-months) it
+asks for **15.12 GiB against a 7.45 GiB limit** and dies with `Code: 241`, with
+`price_ohlcv_1M` about to be truncated. Measured 2026-09-22. Group instead:
+
 ```sql
-SELECT
-    m.month,
-    m.rows_1M,
-    length(m.series_1M) AS series_1M,
-    length(d.series_1d) AS series_1d,
-    length(arrayFilter(x -> NOT has(d.series_1d, x), m.series_1M)) AS missing,
-    arraySlice(arrayFilter(x -> NOT has(d.series_1d, x), m.series_1M), 1, 5) AS missing_sample
+SELECT month, count() AS missing_series
 FROM (
-    SELECT toStartOfMonth(timestamp) AS month,
-           count() AS rows_1M,
-           groupUniqArray((asset_id, quote_asset_id, source)) AS series_1M
-    FROM prices.price_ohlcv_1M FINAL GROUP BY month
-) AS m
-LEFT JOIN (
-    SELECT toStartOfMonth(timestamp) AS month,
-           groupUniqArray((asset_id, quote_asset_id, source)) AS series_1d
-    FROM prices.price_ohlcv_1d FINAL GROUP BY month
-) AS d USING (month)
-WHERE missing > 0
-ORDER BY m.month;
+    SELECT toStartOfMonth(timestamp) AS month, asset_id, quote_asset_id, source,
+           max(tier = 'M') AS in_1M, max(tier = 'd') AS in_1d
+    FROM (
+        SELECT timestamp, asset_id, quote_asset_id, source, 'M' AS tier
+        FROM prices.price_ohlcv_1M FINAL
+        UNION ALL
+        SELECT timestamp, asset_id, quote_asset_id, source, 'd' AS tier
+        FROM prices.price_ohlcv_1d FINAL
+    )
+    GROUP BY month, asset_id, quote_asset_id, source
+)
+WHERE in_1M = 1 AND in_1d = 0
+GROUP BY month ORDER BY month;
 ```
+
+Same question — a series the month holds that the days do not — as a `GROUP BY`
+over both tiers, which spills rather than allocating.
 
 A month with no 1d rows at all joins to an empty array, so every one of its
 series comes back in `missing` — the "no 1d" case needs no clause of its own.
@@ -286,11 +322,46 @@ rows, so a series whose days no longer carry the trades its month claims is a
 series the re-roll would shrink. `days` and `days_in_month` are reported beside
 it because they are what an operator reads to see WHICH days went missing.
 
-Measured on the local 26.3.10.60 pin, 2026-09-17: both statements parse and
-return **0 rows** against the verification database (2 months, 16 054 1M rows).
-The old per-month rule flagged that same April for "2 of 30 days" — noise from
-series that traded once — while asking nothing about whether any series was
-actually missing.
+⚠️ **Both statements were only ever measured small.** On the local 26.3.10.60
+pin, 2026-09-17, they parsed and returned 0 rows against a verification database
+of **2 months and 16 054 1M rows**. That is not evidence they run on production,
+and gate 1 in its original form did not — see the warning above. The old
+per-month rule flagged that same April for "2 of 30 days" — noise from series
+that traded once — while asking nothing about whether any series was actually
+missing.
+
+⚠️ **A non-empty gate is not automatically data loss.** On 2026-09-22 gate 1
+returned thousands of series across ~40 months, and every one of them was the
+bug this step exists to fix: the week-fed month filed a straddling week's trades
+under the month the week STARTED in, so a series that only traded in the first
+days of September appears under August in `1M` and legitimately has no August
+row in `1d`. Two cheap checks separate that from real loss, and both must hold
+before truncating:
+
+```sql
+-- A. no series may be absent from the day tier ENTIRELY. Must be 0.
+SELECT count() AS series_lost
+FROM (
+    SELECT asset_id, quote_asset_id, source,
+           max(tier = 'M') AS in_M, max(tier = 'd') AS in_d
+    FROM (
+        SELECT asset_id, quote_asset_id, source, 'M' AS tier FROM prices.price_ohlcv_1M FINAL
+        UNION ALL
+        SELECT asset_id, quote_asset_id, source, 'd' AS tier FROM prices.price_ohlcv_1d FINAL
+    )
+    GROUP BY asset_id, quote_asset_id, source
+)
+WHERE in_M = 1 AND in_d = 0;
+
+-- B. the days must already hold at least what the months claim. trades_1d >= trades_1M.
+SELECT (SELECT sum(trade_count) FROM prices.price_ohlcv_1M FINAL) AS trades_1M,
+       (SELECT sum(trade_count) FROM prices.price_ohlcv_1d FINAL) AS trades_1d;
+```
+
+If A is 0 and B holds, the rebuild can only relocate trades into the months they
+happened in. On 2026-09-22 it did exactly that: **+2 911 rows, +21 729 828
+trades**, and `price_ohlcv_1M` afterwards totalled precisely the day tier's
+2 866 797 026 where the week-fed table had been short by that amount.
 
 **Zero rows from BOTH, or STOP.** A non-empty result means `price_ohlcv_1d` does
 not cover some month the 1M table holds — not for every series, or not for every
@@ -314,6 +385,25 @@ TRUNCATE TABLE prices.price_ohlcv_1M;
 Then run the 1M statement of `schema/preroll.sql` (the last one — full range,
 `FROM prices.price_ohlcv_1d AS t FINAL`). It names all eighteen columns and
 projects the pf aggregates, so the rebuilt months mean what the days mean.
+
+⚠️ **It will not run as generated.** `price_ohlcv_*` is partitioned `toYYYYMM`,
+the statement writes ~131 months in one INSERT block, and ClickHouse caps a
+block at `max_partitions_per_insert_block = 100`:
+`Code: 252 … Too many partitions for single INSERT block`. Raise it for this one
+statement rather than editing the SQL, which is rendered from
+`src/rollup_sql.rs` and pinned to it by a unit test:
+
+```bash
+curl -sS --cert "$ADMIN_CERT.crt" --key "$ADMIN_CERT.key" --cacert "$PRICES_CA" \
+  "https://ch.sorobanscan.rumblefish.dev/?max_partitions_per_insert_block=1000" \
+  --data-binary "$(sed -n '/^INSERT INTO prices.price_ohlcv_1M/,$p' \
+                    packages/prices-clickhouse/schema/preroll.sql)"
+```
+
+131 monthly partitions on a table is well inside ClickHouse's own "under
+1000..10000" guidance — the cap is on one insert _block_, not on the table. The
+generator-level fix is task 0302. Phase 3's per-month pre-rolls are bounded and
+never approach the cap.
 
 **5d. Create the new view**, the last statement of `schema/rollups.sql`:
 `mv_ohlcv_1d_to_1M`, `REFRESH EVERY 1 DAY APPEND`, 400-day window aligned to the
