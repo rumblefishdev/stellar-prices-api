@@ -179,9 +179,36 @@ mod tests {
     #[test]
     fn embedded_list_parses_with_the_seeded_entries() {
         let list = AllowList::embedded().expect("embedded allow-list parses");
-        assert_eq!(list.contract.len(), 6, "{list:?}");
-        assert_eq!(list.wasm.len(), 2, "{list:?}");
-        assert!(list.wasm.iter().all(|w| w.until == "0290"));
+        assert_eq!(list.contract.len(), 18, "{list:?}");
+        assert_eq!(list.wasm.len(), 3, "{list:?}");
+        // Every family-wide entry is temporary and names the task that ends it:
+        // SushiSwap V3 (0290) and the Comet BLND/USDC pool (0300).
+        assert!(
+            list.wasm
+                .iter()
+                .all(|w| w.until == "0290" || w.until == "0300"),
+            "{list:?}"
+        );
+    }
+
+    #[test]
+    fn comet_pool_family_is_allow_listed_until_0300() {
+        // Phase-1 classification (task 0100): the Comet BLND/USDC pool is a real
+        // venue we do not index yet; its family waits for task 0300.
+        let list = AllowList::embedded().unwrap();
+        let comet = "8abc28913035c07411ed5d134e6bfeab4723d97ddd4d1a22a0605d35c94d1a36";
+        assert_eq!(
+            list.match_row(
+                "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM",
+                Some(comet)
+            ),
+            Some(format!("wasm:{comet}"))
+        );
+        assert!(
+            list.wasm
+                .iter()
+                .any(|w| w.hash == comet && w.until == "0300")
+        );
     }
 
     #[test]
@@ -333,13 +360,30 @@ mod tests {
             ),
             row("CSOMEPOOL", Some(SUSHI_V3)),
         ];
+        let unmatched = list.unmatched_entries(&rows);
+        // The five entries the rows hit are never reported...
+        for hit in [
+            format!("contract:{AQUARIUS_ROUTER}"),
+            "contract:CAG5LRYQ5JVEUI5TEID72EYOVX44TTUJT5BQR2J6J77FH65PCCFAJDDH".to_string(),
+            "contract:CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL".to_string(),
+            "contract:CAUF4DFYSX52L2KJ4J7OFW3WDQMEUDVXNB7PG5VIC4VVOA3BCLWXDO2E".to_string(),
+            format!("wasm:{SUSHI_V3}"),
+        ] {
+            assert!(!unmatched.contains(&hit), "{hit} reported: {unmatched:?}");
+        }
+        // ...and every other entry is, contracts and wasm families alike.
         assert_eq!(
-            list.unmatched_entries(&rows),
-            vec![
-                "contract:CA7RQDMMV6E53P5EDZA5GPWBZ33AMW2ZNO42XLI2RGRIAP4QXIARUOJQ".to_string(),
-                "contract:CA4HEQTL2WPEUYKYKCDOHCDNIV4QHNJ7EL4J4NQ6VADP7SYHVRYZ7AW2".to_string(),
-                "wasm:95a8e0018530226701ef8d31c7d4c2fe20ed9d7c303a14a70c3d96848ca4fa54".to_string(),
-            ]
+            unmatched.len(),
+            list.contract.len() + list.wasm.len() - 5,
+            "{unmatched:?}"
         );
+        for missed in [
+            "contract:CA7RQDMMV6E53P5EDZA5GPWBZ33AMW2ZNO42XLI2RGRIAP4QXIARUOJQ",
+            "contract:CA4HEQTL2WPEUYKYKCDOHCDNIV4QHNJ7EL4J4NQ6VADP7SYHVRYZ7AW2",
+            "wasm:95a8e0018530226701ef8d31c7d4c2fe20ed9d7c303a14a70c3d96848ca4fa54",
+            "wasm:8abc28913035c07411ed5d134e6bfeab4723d97ddd4d1a22a0605d35c94d1a36",
+        ] {
+            assert!(unmatched.iter().any(|u| u == missed), "{missed} missing");
+        }
     }
 }

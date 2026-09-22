@@ -299,19 +299,32 @@ Invoke the probe once by hand rather than waiting for Monday:
 aws lambda invoke --function-name prices-production-coverage-sweep-probe /dev/stdout
 ```
 
-Expect:
+Expect, since the phase-1 classification (2026-09-22) allow-listed the whole
+14-day residual:
 
-- one WARN `unclassified swap emitter` line per contract of the unlisted
-  residual (§3 phase-1 note). A local dry run of the probe's code on
-  2026-09-21 (window 64,322,610–64,543,788) gave **13 contracts / 911
-  events**, led by `CAS3FL6T…` (`8abc2891`, `POOL / swap`, 727 events), and
-  no unmatched allow-list entry;
-- the INFO `coverage sweep complete` summary;
-- `prices-production-coverage-sweep-unclassified` going to **ALARM** on the ops
-  topic within the evaluation window.
+- the INFO `coverage sweep complete` summary with `unclassified = 0`,
+  `rows` ≈ 54, `allowlisted` = `rows`; a local dry run of the probe's code on
+  2026-09-22 (window 64,334,366–64,555,544) read exactly that;
+- **no** WARN line and **no** datapoint — the metric is published only when
+  non-zero, so `prices-production-coverage-sweep-unclassified` stays OK;
+- `unmatched_allowlist` listing the entries nothing hit this fortnight
+  (routers that did not trade, the Soroswap factory without a new pair) —
+  informational, not a fault.
 
-That ALARM is the end-to-end proof. Record it, with the contract count and
-event sum, in task 0100.
+**The deliberate proof of the alarm path** is therefore a synthetic
+datapoint, not a real residual:
+
+```bash
+aws cloudwatch put-metric-data --namespace Prices/Coverage \
+  --metric-name UnclassifiedSwapEvents --dimensions Environment=production --value 1
+```
+
+Within ~one period `prices-production-coverage-sweep-unclassified` goes to
+**ALARM** and the ops topic delivers it (Slack). It returns to OK by itself 7
+days after that datapoint (§2). That proves metric → alarm → notification;
+the probe's own half — computing a non-zero residual — is proven by the
+local dry runs (13 contracts / 911 events before the classification) and by
+`coverage_sweep_it`. Record both in task 0100.
 
 ### 4.6 Rollback
 
