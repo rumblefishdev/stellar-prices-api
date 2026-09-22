@@ -200,8 +200,11 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     // of a silent LEFT-JOIN drop.
     let mut ledgers_missing_close: u64 = 0;
     let mut events_missing_close: u64 = 0;
-    // Events whose transaction could not be resolved in BE's default.transactions
-    // and therefore took `transaction_index = 0` (task 0286 D1's fallback).
+    // Events whose `application_order` was NEGATIVE and therefore took
+    // `transaction_index = 0` (task 0286 D1's fallback). Since task 0304 the
+    // column is read straight off the event row, so this is no longer "BE does
+    // not cover this ledger" — it can only be a corrupt or unexpected row, and
+    // any non-zero count means those fills ARE in the wrong order.
     let mut apply_order_fallbacks: u64 = 0;
 
     // Run-level state (persists across chunks): one accumulator per source, one
@@ -225,7 +228,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
         let mut cur_closed_at: i64 = 0;
         let mut cur_missing = false;
         let mut cur_events: Vec<RawSorobanEvent> = Vec::new();
-        let mut last_key: Option<(i64, i64, i16)> = None;
+        let mut last_key: Option<(i64, i64, u16, u32)> = None;
 
         while let Some(r) = cursor.next().await? {
             total_events += 1;
@@ -267,7 +270,20 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                 continue;
             }
 
-            let key = (r.contract_id, r.transaction_id, r.event_index);
+            // The operation is part of the key, not just the event index: BE
+            // added `operation_index` and widened `event_index` in the same
+            // 2026-09-17 change (task 0304), which is what a per-OPERATION
+            // event numbering looks like. If `event_index` does restart at each
+            // operation, then without the operation here two REAL events of one
+            // transaction collide and the second is silently dropped as a
+            // duplicate. Including it is correct under either numbering, since
+            // an RMT double repeats the operation too.
+            let key = (
+                r.contract_id,
+                r.transaction_id,
+                r.operation_index,
+                r.event_index,
+            );
             if last_key == Some(key) {
                 continue; // adjacent RMT double of the same event
             }
@@ -279,8 +295,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
             // drop one event, never abort the run.
             let topics = serde_json::from_str::<Value>(&r.topics_xdr).unwrap_or(Value::Null);
             let data = serde_json::from_str::<Value>(&r.data_xdr).unwrap_or(Value::Null);
-            let (transaction_index, used_fallback) =
-                resolve_transaction_index(r.application_order, r.apply_order_found);
+            let (transaction_index, used_fallback) = resolve_transaction_index(r.application_order);
             if used_fallback {
                 // Degraded but VISIBLE, the same shape as the missing-close
                 // counters above: one warning for the whole run so a chunk of
@@ -291,9 +306,12 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                     warn!(
                         ledger = r.ledger_sequence,
                         transaction_id = r.transaction_id,
-                        "no apply order in default.transactions for this transaction — its AMM \
-                         events are ordered as transaction 0; verify BE's transactions table \
-                         covers the range (warned once per run, counted in the summary)"
+                        application_order = r.application_order,
+                        "NEGATIVE application_order on soroban_events — not a position, so \
+                         this transaction's AMM events are ordered as transaction 0. These \
+                         fills ARE in the wrong order and the range is NOT repaired; do not \
+                         record the month as done (warned once per run, counted in the \
+                         summary as `negative apply order`)"
                     );
                 }
                 apply_order_fallbacks += 1;
@@ -303,7 +321,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                 transaction_id: r.transaction_id.to_string(),
                 transaction_index,
                 ledger_sequence: r.ledger_sequence,
-                event_index: r.event_index as u32,
+                event_index: r.event_index,
                 topics,
                 data,
             });
@@ -508,21 +526,18 @@ fn aggregate_unresolved(raw: &[UnresolvedPoolSwap], reg: &Registries) -> Vec<Unr
     out
 }
 
-/// Map one streamed row's join result onto the fill key's `transaction_index`
-/// (task 0286 D1). Returns the index and whether the FALLBACK was taken.
+/// Map one streamed row's `application_order` onto the fill key's
+/// `transaction_index` (task 0286 D1). Returns the index and whether the
+/// FALLBACK was taken.
 ///
-/// The marker, not the value, decides: a LEFT join hands an unmatched row the
-/// column's type DEFAULT rather than NULL, so `application_order = 0` on its
-/// own cannot tell "the first transaction of the ledger" from "BE's
-/// `default.transactions` does not cover this ledger". A negative order is not
-/// a position either — it can only come from a corrupt or unexpected row — so
-/// it degrades the same way instead of wrapping into a huge `u16`.
-///
-/// No local fixture exercises the fallback end to end: it needs BE's
-/// ClickHouse, which no test in this repo may reach. It is covered at the
-/// SQL-text level (`source::chunk_sql` tests) and at the mapping level (below).
-pub(crate) fn resolve_transaction_index(application_order: i16, found: u8) -> (u16, bool) {
-    if found == 0 || application_order < 0 {
+/// ⚠️ The `found` marker is gone with the join (task 0304): `application_order`
+/// is now a non-nullable column on the event row, so "BE does not cover this
+/// ledger" is no longer a state this can be in. What remains is the value
+/// check. The column is `Int16`, and a NEGATIVE order is not a position — it
+/// can only come from a corrupt or unexpected row — so it degrades to 0 and
+/// reports the fallback instead of wrapping into a huge `u16`.
+pub(crate) fn resolve_transaction_index(application_order: i16) -> (u16, bool) {
+    if application_order < 0 {
         return (0, true);
     }
     (application_order as u16, false)
@@ -562,7 +577,10 @@ fn print_summary(
     println!("swaps failed dispatch:     {failed_total}");
     // Always printed, 0 included: it is the line that says the fill order in
     // this run came from BE's real apply order rather than from a fallback.
-    println!("events with no apply order:{apply_order_fallbacks}");
+    // Named for what it now measures — a negative `application_order` on the
+    // event row, not a missing join row (task 0304). Non-zero means the range
+    // is not repaired.
+    println!("negative apply order:      {apply_order_fallbacks}");
 }
 
 #[cfg(test)]
@@ -706,32 +724,32 @@ mod tests {
         );
     }
 
-    /// Task 0286 D1's fallback. BE's `default.transactions` is the only source
-    /// of the apply order; a transaction it does not cover must not stop the
-    /// reprice, but it must not be indistinguishable from a resolved one
-    /// either. A LEFT join gives an unmatched row the column's type DEFAULT (0,
-    /// not NULL), so the found-marker — not the value — is what decides.
+    /// Task 0286 D1's fallback, as it stands after task 0304 removed the join.
+    /// `application_order` is now a non-nullable column on the event row, so
+    /// "BE does not cover this transaction" is no longer reachable and the
+    /// found-marker is gone. The VALUE check is what survives, and it is the
+    /// one that was always about corruption rather than coverage.
     #[test]
-    fn an_unresolved_transaction_falls_back_to_zero_and_is_counted() {
+    fn a_negative_apply_order_falls_back_to_zero_and_is_counted() {
         assert_eq!(
-            resolve_transaction_index(7, 1),
+            resolve_transaction_index(7),
             (7, false),
-            "a joined row uses BE's application_order and counts no fallback"
+            "a real application_order is the transaction index, no fallback"
         );
         assert_eq!(
-            resolve_transaction_index(0, 0),
-            (0, true),
-            "no joined row: order as transaction 0, and say so"
+            resolve_transaction_index(0),
+            (0, false),
+            "transaction 0 of a ledger is a POSITION, not a fallback — the              ambiguity that made this need a marker died with the join"
         );
         assert_eq!(
-            resolve_transaction_index(9, 0),
-            (0, true),
-            "a leftover value without the marker is not an apply order"
-        );
-        assert_eq!(
-            resolve_transaction_index(-1, 1),
+            resolve_transaction_index(-1),
             (0, true),
             "a negative application_order cannot be a position; degrade, do not wrap"
+        );
+        assert_eq!(
+            resolve_transaction_index(i16::MIN),
+            (0, true),
+            "the whole negative range degrades, not just -1"
         );
     }
 }

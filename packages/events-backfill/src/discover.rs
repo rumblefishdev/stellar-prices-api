@@ -66,7 +66,7 @@ pub(crate) fn factory_events_sql(start: u32, end: u32) -> String {
                 OR (signature IS NULL \
                     AND (JSONExtractString(topics_xdr, 1, 'value') IN ('add_pool', 'create') \
                          OR JSONExtractString(topics_xdr, 2, 'value') = 'new_pair'))) \
-         ORDER BY ledger_sequence, transaction_id, event_index"
+         ORDER BY ledger_sequence, transaction_index, event_index"
     )
 }
 
