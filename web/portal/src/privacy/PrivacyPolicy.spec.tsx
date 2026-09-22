@@ -28,15 +28,22 @@ describe('the privacy policy text', () => {
   });
 
   it('keeps every bullet and sub-heading of the document', () => {
+    // Literal counts from the delivered draft, not derived from the file:
+    // a count read off the same file passed while Prettier had rewritten
+    // every `*` into a `-` the reader did not know, and the page showed
+    // 79 paragraphs beginning with "- ". These change only when the text
+    // does, which is when somebody should look.
     const blocks = POLICY.sections.flatMap((s) => s.blocks);
     const bullets = blocks.reduce(
       (n, b) => n + (b.kind === 'ul' ? b.items.length : 0),
       0,
     );
-    expect(bullets).toBe((policyMd.match(/^\s*\* /gm) ?? []).length);
-    expect(blocks.filter((b) => b.kind === 'h3')).toHaveLength(
-      (policyMd.match(/^### /gm) ?? []).length,
-    );
+    expect(bullets).toBe(79);
+    expect(blocks.filter((b) => b.kind === 'h3')).toHaveLength(3);
+    // And no list marker survives as text.
+    const texts = blocks.flatMap((b) => (b.kind === 'ul' ? b.items : [b.text]));
+    expect(texts.filter((t) => /^[-*] /.test(t))).toEqual([]);
+    expect(policyMd.length).toBeGreaterThan(10_000);
   });
 });
 

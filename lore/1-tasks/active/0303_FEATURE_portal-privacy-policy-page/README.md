@@ -159,6 +159,24 @@ because both change the footer and `links.ts`; merge #335 first.
 - **Bundle**: fresh production build; the policy is its own chunk; no
   hostname but ours and the footer's, no tracking script.
 
+## Issues Encountered
+
+- **Prettier rewrote the policy on the first commit.** lint-staged formats
+  every staged non-Rust file, and Prettier's Markdown style turns `*`
+  bullets into `-`. The reader knew only `*`, so the page showed 79
+  paragraphs beginning with "- " — and the spec did not notice, because it
+  counted bullets off the same reformatted file. Three fixes: the file is
+  in `.prettierignore` (reviewed legal text is never reformatted, so it
+  stays byte for byte the delivered draft), the reader accepts `-` too, and
+  the spec pins the draft's literal counts (79 bullets, 3 sub-headings) and
+  asserts no marker survives as text. Found by looking at the page on the
+  dev server, not by the tests — the lesson is in the spec's comment.
+- **The rail clipped four section titles.** `Toc`'s top-level entries were
+  `white-space: nowrap` at desktop width; the reference's and the quick
+  start's labels are short, the policy's are not ("Transfers Outside the
+  European Economic Area"). Top-level entries wrap now, like nested ones;
+  the other two pages look the same because their labels fit.
+
 ## Design Decisions
 
 ### From Plan

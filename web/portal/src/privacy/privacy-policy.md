@@ -15,9 +15,9 @@ Filipa Eisenberga 11/3
 
 You may contact Us regarding the processing of your personal data:
 
-- by mail at the address indicated above;
-- by phone: \+48 601 265 364;
-- by e-mail: **hello@rumblefish.pl**.
+* by mail at the address indicated above;  
+* by phone: \+48 601 265 364;  
+* by e-mail: **hello@rumblefish.pl**.
 
 Additional general information about how Rumble Fish processes personal data is available in the Rumble Fish Privacy Policy.
 
@@ -33,10 +33,10 @@ We request the Discord OAuth permissions necessary to provide the Service, inclu
 
 Through this process, We may process:
 
-- your Discord account ID;
-- your Discord username;
-- information necessary to verify your membership in the Stellar Developers Discord server; and
-- information necessary to verify the age of your Discord account.
+* your Discord account ID;  
+* your Discord username;  
+* information necessary to verify your membership in the Stellar Developers Discord server; and  
+* information necessary to verify the age of your Discord account.
 
 Your membership in the Stellar Developers Discord server and the age of your Discord account are checked when you request an API key. This information is used for verification and anti-abuse purposes and is not retained by Us as part of your user record after the verification is completed.
 
@@ -48,11 +48,11 @@ Your Discord username is used for display and session purposes and may be tempor
 
 When an API key is issued, We may process and store information including:
 
-- your API key or information identifying the API key;
-- your Discord account ID associated with the API key;
-- the status of the API key, including whether it is active, disabled or revoked;
-- dates associated with the creation, disabling or management of the API key; and
-- information about the use of the API key, including monthly usage counters.
+* your API key or information identifying the API key;  
+* your Discord account ID associated with the API key;  
+* the status of the API key, including whether it is active, disabled or revoked;  
+* dates associated with the creation, disabling or management of the API key; and  
+* information about the use of the API key, including monthly usage counters.
 
 This information constitutes Our operational record of users authorized to access the Service.
 
@@ -62,13 +62,13 @@ When you use the Service, Our technical infrastructure may generate and process 
 
 Such information may include:
 
-- request identifiers;
-- timestamps;
-- application and infrastructure logs;
-- error and diagnostic information;
-- information concerning API requests and responses;
-- security-related information; and
-- IP addresses or similar network information where such information is processed or recorded by the infrastructure used to provide the Service.
+* request identifiers;  
+* timestamps;  
+* application and infrastructure logs;  
+* error and diagnostic information;  
+* information concerning API requests and responses;  
+* security-related information; and  
+* IP addresses or similar network information where such information is processed or recorded by the infrastructure used to provide the Service.
 
 We do not use this technical information to create advertising profiles or track users for marketing purposes.
 
@@ -76,26 +76,26 @@ We do not use this technical information to create advertising profiles or track
 
 We process personal data in connection with the Service for the following purposes:
 
-- authenticating users;
-- verifying eligibility to obtain an API key;
-- issuing, maintaining, disabling and revoking API keys;
-- providing and operating the Service;
-- measuring and enforcing applicable API usage limits;
-- preventing fraud, abuse, unauthorized access and circumvention of Service restrictions;
-- maintaining the security, stability and availability of the Service;
-- identifying, investigating and resolving errors and technical issues;
-- communicating with users regarding the Service where necessary;
-- processing payments and managing paid access, if applicable;
-- complying with Our legal obligations;
-- maintaining appropriate records and backups; and
-- establishing, exercising or defending legal claims.
+* authenticating users;  
+* verifying eligibility to obtain an API key;  
+* issuing, maintaining, disabling and revoking API keys;  
+* providing and operating the Service;  
+* measuring and enforcing applicable API usage limits;  
+* preventing fraud, abuse, unauthorized access and circumvention of Service restrictions;  
+* maintaining the security, stability and availability of the Service;  
+* identifying, investigating and resolving errors and technical issues;  
+* communicating with users regarding the Service where necessary;  
+* processing payments and managing paid access, if applicable;  
+* complying with Our legal obligations;  
+* maintaining appropriate records and backups; and  
+* establishing, exercising or defending legal claims.
 
 Depending on the particular processing activity, the legal basis for processing your personal data may be:
 
-- the performance of a contract with you or taking steps at your request before entering into a contract;
-- Our legitimate interests as a data controller, in particular Our interests in operating and securing the Service, preventing fraud and abuse, enforcing usage restrictions, diagnosing technical issues and protecting Our legal rights;
-- compliance with a legal obligation to which We are subject; or
-- your consent, where applicable.
+* the performance of a contract with you or taking steps at your request before entering into a contract;  
+* Our legitimate interests as a data controller, in particular Our interests in operating and securing the Service, preventing fraud and abuse, enforcing usage restrictions, diagnosing technical issues and protecting Our legal rights;  
+* compliance with a legal obligation to which We are subject; or  
+* your consent, where applicable.
 
 Where processing is based on Our legitimate interests, We take into account your interests, rights and freedoms when determining whether such processing is appropriate.
 
@@ -105,8 +105,8 @@ Access to the Service may be subject to eligibility requirements intended to pro
 
 When you request an API key, We may use information obtained through Discord to verify requirements such as:
 
-- membership in the Stellar Developers Discord server; and
-- the age of your Discord account.
+* membership in the Stellar Developers Discord server; and  
+* the age of your Discord account.
 
 These checks are performed at the time you request an API key.
 
@@ -118,10 +118,10 @@ The **Prices API for the Stellar ecosystem** portal uses a session cookie that i
 
 The session cookie:
 
-- is an essential cookie used to maintain your authenticated session;
-- is configured as `HttpOnly`;
-- uses the `SameSite=Lax` setting; and
-- expires after 24 hours.
+* is an essential cookie used to maintain your authenticated session;  
+* is configured as `HttpOnly`;  
+* uses the `SameSite=Lax` setting; and  
+* expires after 24 hours.
 
 The cookie may contain or be associated with information necessary to maintain your authenticated session, including your Discord account ID and username.
 
@@ -139,13 +139,13 @@ If you use a paid feature, We may process personal data necessary to arrange, pr
 
 Depending on the payment model implemented, such information may include:
 
-- identification and contact information;
-- billing information;
-- information concerning your subscription or purchased service;
-- transaction identifiers;
-- payment status;
-- invoices and accounting information; and
-- other information necessary to administer payments and comply with legal or accounting obligations.
+* identification and contact information;  
+* billing information;  
+* information concerning your subscription or purchased service;  
+* transaction identifiers;  
+* payment status;  
+* invoices and accounting information; and  
+* other information necessary to administer payments and comply with legal or accounting obligations.
 
 Payments may be processed by third-party payment service providers. Where We use such providers, We may provide them with information necessary to initiate, process, verify or manage a payment.
 
@@ -155,10 +155,10 @@ A payment service provider may process certain information as Our processor or a
 
 The legal basis for processing personal data in connection with payments may include:
 
-- performance of a contract with you;
-- taking steps at your request before entering into a contract;
-- compliance with legal, tax and accounting obligations; and
-- Our legitimate interests, including preventing payment fraud, handling payment-related inquiries and establishing, exercising or defending legal claims.
+* performance of a contract with you;  
+* taking steps at your request before entering into a contract;  
+* compliance with legal, tax and accounting obligations; and  
+* Our legitimate interests, including preventing payment fraud, handling payment-related inquiries and establishing, exercising or defending legal claims.
 
 If specific payment providers are introduced, additional information regarding such providers and their processing of personal data may be provided through this Privacy Policy or during the payment process.
 
@@ -170,9 +170,9 @@ In particular, We use **Amazon Web Services (AWS)** to host and operate technica
 
 The infrastructure used for the Service may include services such as:
 
-- Amazon API Gateway;
-- AWS Lambda; and
-- Amazon CloudWatch.
+* Amazon API Gateway;  
+* AWS Lambda; and  
+* Amazon CloudWatch.
 
 The relevant Service infrastructure is hosted primarily in the AWS `eu-central-1` region (Frankfurt, Germany).
 
@@ -184,9 +184,9 @@ When you authenticate using Discord, Discord processes information in accordance
 
 Personal data may also be disclosed:
 
-- to professional advisers, such as legal, accounting or security service providers, where necessary;
-- to competent public authorities where required by applicable law; or
-- to other service providers where necessary to operate, maintain or protect the Service.
+* to professional advisers, such as legal, accounting or security service providers, where necessary;  
+* to competent public authorities where required by applicable law; or  
+* to other service providers where necessary to operate, maintain or protect the Service.
 
 Where We engage processors, We require personal data to be processed in accordance with applicable data protection requirements and appropriate contractual arrangements.
 
@@ -206,11 +206,11 @@ We retain personal data only for as long as necessary for the purposes for which
 
 In particular:
 
-- the session cookie expires after **24 hours**;
-- application and technical logs maintained by Us are generally retained for up to **30 days**;
-- information used solely to verify Discord server membership and Discord account age is checked when an API key is requested and is not retained as part of your user record after the verification;
-- information relating to an active API key may be retained for as long as the API key remains active;
-- when an API key is disabled or revoked, the associated record may remain in Our systems for a reasonable period where necessary for security, abuse prevention, record-keeping, legal compliance or the establishment, exercise or defence of legal claims.
+* the session cookie expires after **24 hours**;  
+* application and technical logs maintained by Us are generally retained for up to **30 days**;  
+* information used solely to verify Discord server membership and Discord account age is checked when an API key is requested and is not retained as part of your user record after the verification;  
+* information relating to an active API key may be retained for as long as the API key remains active;  
+* when an API key is disabled or revoked, the associated record may remain in Our systems for a reasonable period where necessary for security, abuse prevention, record-keeping, legal compliance or the establishment, exercise or defence of legal claims.
 
 Revoking or disabling an API key does not necessarily result in the immediate deletion of the associated user record.
 
@@ -228,9 +228,9 @@ Requests may be submitted to:
 
 Where applicable, processing such a request may involve:
 
-- disabling or revoking your API key;
-- deleting the user record associated with your Discord account ID from Our active API key registry; and
-- deleting or anonymizing other personal data that We are no longer required or entitled to retain.
+* disabling or revoking your API key;  
+* deleting the user record associated with your Discord account ID from Our active API key registry; and  
+* deleting or anonymizing other personal data that We are no longer required or entitled to retain.
 
 Certain information may continue to be retained where this is necessary to comply with applicable law, protect the Service against fraud or abuse, maintain security records, or establish, exercise or defend legal claims.
 
@@ -240,14 +240,14 @@ Deletion of information associated with your API key may result in loss of acces
 
 Subject to the conditions and limitations provided by applicable data protection law, you may have the right to:
 
-- access your personal data and obtain a copy of it;
-- request rectification of inaccurate or incomplete personal data;
-- request deletion of your personal data;
-- request restriction of the processing of your personal data;
-- object to processing based on Our legitimate interests;
-- withdraw your consent at any time where processing is based on consent, without affecting the lawfulness of processing carried out before withdrawal;
-- receive personal data you have provided to Us in a structured, commonly used and machine-readable format and, where applicable, transmit that data to another controller; and
-- lodge a complaint with a competent supervisory authority.
+* access your personal data and obtain a copy of it;  
+* request rectification of inaccurate or incomplete personal data;  
+* request deletion of your personal data;  
+* request restriction of the processing of your personal data;  
+* object to processing based on Our legitimate interests;  
+* withdraw your consent at any time where processing is based on consent, without affecting the lawfulness of processing carried out before withdrawal;  
+* receive personal data you have provided to Us in a structured, commonly used and machine-readable format and, where applicable, transmit that data to another controller; and  
+* lodge a complaint with a competent supervisory authority.
 
 To exercise any of these rights, please contact Us at:
 
@@ -287,10 +287,10 @@ No method of transmitting or storing information is completely secure. According
 
 We may update this Privacy Policy from time to time, including where:
 
-- the functionality of the Service changes;
-- new service providers or payment providers are introduced;
-- Our data processing practices change; or
-- changes are necessary to comply with applicable legal requirements.
+* the functionality of the Service changes;  
+* new service providers or payment providers are introduced;  
+* Our data processing practices change; or  
+* changes are necessary to comply with applicable legal requirements.
 
 The current version of this Privacy Policy will be made available through the **Prices API for the Stellar ecosystem** portal or another appropriate location.
 
@@ -306,3 +306,4 @@ Filipa Eisenberga 11/3
 
 Phone: \+48 601 265 364  
 E-mail: **hello@rumblefish.pl**
+

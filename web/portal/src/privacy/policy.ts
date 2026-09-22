@@ -2,7 +2,7 @@
  * The privacy policy's text is `privacy-policy.md`, kept as the document that
  * was reviewed rather than retyped into JSX — a diff of the file is a diff of
  * the policy. This reads it back. It is not a Markdown parser: the policy
- * uses `#`/`##`/`###` headings, paragraphs, `*` bullets, `**bold**`, `` `code` ``
+ * uses `#`/`##`/`###` headings, paragraphs, `*` (or `-`) bullets, `**bold**`, `` `code` ``
  * and backslash escapes (`1\.`, `\+48`), and that is all this understands. A
  * construct it does not know renders as its literal text, which the spec
  * would show.
@@ -80,7 +80,8 @@ export function parsePolicy(md: string): Policy {
       flush();
       current()?.blocks.push({ kind: 'h3', text: heading(line.slice(4)) });
     } else {
-      const bullet = /^\s*\*\s+(.*)$/.exec(line);
+      // `*` as the draft writes them, `-` as Prettier would rewrite them.
+      const bullet = /^\s*[*-]\s+(.*)$/.exec(line);
       if (bullet) {
         if (para.length) flush();
         list.push(clean(bullet[1]));
