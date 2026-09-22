@@ -4371,6 +4371,12 @@ function LoginRoute({ gate }: { gate: Gate }) {
  * landing page, which is the one journey this route exists to complete.
  */
 function DashboardRoute({ gate }: { gate: Gate }) {
+  const location = useLocation();
+  // Whether THIS mount has seen a session. Losing one is a sign-out, and a
+  // sign-out ends on the landing page — not on a sign-in card that reads as
+  // "you are not signed in" to somebody who just asked for exactly that.
+  const hadSession = useRef(false);
+  if (gate.authenticated) hadSession.current = true;
   if (gate.probe.state === 'loading' || (gate.open && !gate.settled)) {
     return (
       <LoginSection full>
@@ -4425,8 +4431,22 @@ function DashboardRoute({ gate }: { gate: Gate }) {
     );
   }
 
-  if (!gate.open || !gate.authenticated) {
+  // A closed portal has no dashboard to offer, so the landing page, which
+  // says so, is the answer. A signed-out visitor is a different case: they
+  // are one sign-in away, and `/login` forwards them back here once it has a
+  // session. Both used to go to `/`, which sent a key holder in a fresh
+  // browser from the footer's "Dashboard" straight back to the page they had
+  // clicked from (task 0301). The query rides along, as `RootRoute` forwards
+  // it: `?issue=…` is read here, and a bounce would have dropped it.
+  if (!gate.open) {
     return <Navigate to="/" replace />;
+  }
+  if (!gate.authenticated) {
+    return hadSession.current ? (
+      <Navigate to="/" replace />
+    ) : (
+      <Navigate to={`/login${location.search}`} replace />
+    );
   }
 
   const rateLimit =
