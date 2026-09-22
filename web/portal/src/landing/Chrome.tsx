@@ -19,6 +19,7 @@ import {
   EXPLORER,
   LANDING,
   LOGIN_ROUTE,
+  PRIVACY_POLICY_ROUTE,
   QUICKSTART_ROUTE,
   RUMBLEFISH_CONTACT,
   RUMBLEFISH_SITE,
@@ -28,12 +29,11 @@ import { ArrowBadge, cardBorder } from './primitives';
 /**
  * The navbar and the footer.
  *
- * The labels are the design's, read off the exported frame. Two of the
- * footer's six — `Status` and `Privacy policy` — name destinations that do
- * not exist yet (no status page anywhere; the policy is task 0303), so they
- * are rendered as text until somebody supplies a URL: a footer link to a 404
- * is worse than one that is plainly not wired. `Contact` got its URL in
- * task 0301.
+ * The labels are the design's, read off the exported frame. One of the
+ * footer's six — `Status` — names a destination that does not exist (no
+ * status page anywhere), so it is rendered as text until somebody supplies a
+ * URL: a footer link to a 404 is worse than one that is plainly not wired.
+ * `Contact` got its URL in task 0301, `Privacy policy` its page in 0303.
  */
 
 /**
@@ -404,7 +404,7 @@ export function Footer({ canOfferKey }: { canOfferKey: boolean }) {
     { label: 'Status' },
     { label: 'Contact', href: RUMBLEFISH_CONTACT },
     { label: 'rumblefish.dev', href: RUMBLEFISH_SITE },
-    { label: 'Privacy policy' },
+    { label: 'Privacy policy', to: PRIVACY_POLICY_ROUTE },
   ];
 
   return (

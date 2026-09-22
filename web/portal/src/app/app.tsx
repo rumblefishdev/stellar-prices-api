@@ -4560,6 +4560,9 @@ function QuickStartRoute({ gate }: { gate: Gate }) {
  * chunk; the split is for the landing page's sake, not the reference's.
  */
 const ApiReference = lazy(() => import('../docs/ApiReference'));
+// The policy's text rides in its own chunk, like the reference: a visitor who
+// never opens it never downloads it.
+const PrivacyPolicy = lazy(() => import('../privacy/PrivacyPolicy'));
 
 /**
  * `/docs` — the API reference, the live OpenAPI document rendered in the
@@ -4602,6 +4605,41 @@ function DocsRoute({ gate }: { gate: Gate }) {
   );
 }
 
+/** The privacy policy (task 0303): the same chrome rule as the reference. */
+function PrivacyPolicyRoute({ gate }: { gate: Gate }) {
+  const signedIn = gate.open && gate.authenticated;
+  const username = signedIn
+    ? (gate.session as { state: 'ok'; session: PortalSession }).session.username
+    : undefined;
+
+  return (
+    <>
+      {signedIn ? (
+        <DashboardNavbar
+          username={username}
+          onSignOut={gate.onSignOut}
+          current="privacy-policy"
+        />
+      ) : (
+        <Navbar canOfferKey={gate.open} inPage={false} />
+      )}
+      <Suspense
+        fallback={
+          <Stack alignItems="center" sx={{ py: 12 }} aria-busy="true">
+            <CircularProgress
+              size={28}
+              aria-label="Loading the privacy policy"
+            />
+          </Stack>
+        }
+      >
+        <PrivacyPolicy />
+      </Suspense>
+      <Footer canOfferKey={signedIn} />
+    </>
+  );
+}
+
 export function App() {
   const probe = useConfigProbe();
   const open = probe.state === 'ok' && probe.config.enabled;
@@ -4624,6 +4662,10 @@ export function App() {
       <Route path="/dashboard" element={<DashboardRoute gate={gate} />} />
       <Route path="/quick-start" element={<QuickStartRoute gate={gate} />} />
       <Route path="/docs" element={<DocsRoute gate={gate} />} />
+      <Route
+        path="/privacy-policy"
+        element={<PrivacyPolicyRoute gate={gate} />}
+      />
       {/* Anything else is a URL this app never minted. On the shared host
           every extensionless path under `/api/` boots this bundle (the
           explorer's routing function rewrites it to `/api/index.html`), so
