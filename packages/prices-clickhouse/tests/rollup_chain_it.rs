@@ -1,7 +1,7 @@
 //! Full-chain rollup version-propagation integration test (task 0059).
 //!
-//!     docker compose up -d clickhouse
-//!     cargo test -p prices-clickhouse --test rollup_chain_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p prices-clickhouse --test rollup_chain_it -- --ignored --test-threads=1
 //!
 //! Exercises the REAL shipped refreshable-MV chain (`schema/rollups.sql`,
 //! landed by task 0051) end-to-end across every granularity `_1m → _15m → _1h
@@ -212,7 +212,7 @@ async fn assert_bucket(
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn enrichment_propagates_through_full_rollup_chain() {
     let db = "it_rollup_chain";
     let admin = Client::default().with_url(ch_url());
@@ -322,7 +322,7 @@ async fn enrichment_propagates_through_full_rollup_chain() {
 /// first-open / last-close at EVERY grain (the bug task 0059's full-chain test
 /// surfaced: the `AS timestamp` bucket alias shadowing the source column).
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn preroll_reaggregates_full_chain_ohlc_correctly() {
     let db = "it_preroll_chain";
     let admin = Client::default().with_url(ch_url());

@@ -1,8 +1,8 @@
 //! Live-ClickHouse integration test for `GET /v1/assets/{id}/price`. Gated
 //! `#[ignore]` (matches the `prices-clickhouse` integration tests):
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p prices-api --test price_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p prices-api --test price_it -- --ignored --test-threads=1
 //!
 //! Each test owns an isolated scratch database (the `prices.*` schema rewritten
 //! onto the scratch name) and drops it at the end. The handler's SQL uses
@@ -125,7 +125,7 @@ fn approx(v: &serde_json::Value, expected: f64) {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_native_returns_seeded_row() {
     let db = "it_price_native_0040";
     let client = setup(db).await;
@@ -159,7 +159,7 @@ async fn price_native_returns_seeded_row() {
 /// also the live shape for an exotic-quote asset, where no source has a
 /// USD-priceable close (~62% of candles per task 0114).
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_empty_sources_degrades_to_empty_object() {
     let db = "it_price_empty_sources_0072";
     let client = setup(db).await;
@@ -174,7 +174,7 @@ async fn price_empty_sources_degrades_to_empty_object() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_classic_resolves_by_code_and_issuer() {
     let db = "it_price_classic_0040";
     let client = setup(db).await;
@@ -188,7 +188,7 @@ async fn price_classic_resolves_by_code_and_issuer() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_unknown_asset_is_404() {
     let db = "it_price_unknown_0040";
     let client = setup(db).await;
@@ -210,7 +210,7 @@ async fn price_unknown_asset_is_404() {
 /// strict filter finds nothing to drop. `min_volume_usd_cuts_an_all_dust_asset`
 /// below covers the asset where the two differ.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_min_volume_override_narrows_sources_and_reweights() {
     let db = "it_price_min_volume_0118";
     let client = setup(db).await;
@@ -313,7 +313,7 @@ async fn price_min_volume_override_narrows_sources_and_reweights() {
 /// fixed the handler treated `<= 100` as a pass-through and did exactly that,
 /// while `100.01` emptied the object — a cliff at the documented default.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_min_volume_cuts_an_all_dust_asset_at_the_system_default() {
     let db = "it_price_min_volume_dust_0118";
     let client = setup(db).await;
@@ -379,7 +379,7 @@ async fn price_min_volume_cuts_an_all_dust_asset_at_the_system_default() {
 /// consumer cannot tell a measured 1.0000 from a filled one, which is the whole
 /// reason it exists.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn price_surfaces_the_provenance_method() {
     let db = "it_price_method_0178";
     let client = setup(db).await;
