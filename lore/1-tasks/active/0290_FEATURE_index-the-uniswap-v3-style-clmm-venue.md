@@ -2,7 +2,7 @@
 id: "0290"
 title: "Index the Uniswap-v3-style concentrated-liquidity venue (factory CD3KRKGD…) — ~8.5k swaps a month we never see"
 type: FEATURE
-status: blocked
+status: active
 assignee: okarcz
 related_adr: []
 related_tasks: ["0285", "0286", "0282"]
@@ -76,6 +76,20 @@ history:
       on 2026-09-21 that phase 1 starts the same day. ⚠️ The ordering recorded
       under AC 5 still holds: 0286 phase 1 → 0290 deploy → the write → 0286
       phase 3, because events-backfill prices only registered pools.
+  - date: 2026-09-22
+    status: active
+    who: okarcz
+    note: >
+      UNBLOCKED and largely landed. 0286 phase 1 rolled out this morning, the
+      Compute freeze lifted, PR #324 merged (7110aa8f). The seed then failed on
+      a break that was not ours — BE dropped
+      `default.soroban_events.transaction_id` on 2026-09-17, killing every
+      events-backfill read with `Code: 47`; see [[0304]] and PR #339. After that
+      fix the write went through: **133 SushiSwap pools persisted, registry 770
+      → 903, every pool with a resolved token pair**, and the 14:40:53 Compute
+      deploy's cold start loaded all 903 eight seconds later. AC 2 and AC 4 are
+      now met on production. Only AC 3 remains — a full live day, checkable
+      2026-09-23.
 ---
 
 # Index the Uniswap-v3-style concentrated-liquidity venue
@@ -410,20 +424,32 @@ weakened: the test still asserts `None` for every row in the list.
       spells it, and unversioned like every other source (Aquarius's three pool
       types already share one label). `Venue::Sushiswap` in
       `extractors-core/src/lib.rs`.
-- [ ] Its pools are learned from the factory and survive a cold start.
+- [x] Its pools are learned from the factory and survive a cold start.
       → Code done: live learns from `pool_created` (`51a3030`),
       `--discover-pools` seeds history from it (`291c21c`), `registry_io`
-      persists them. ✅ **Production dry run PASSED 2026-09-21** —
+      persists them. ✅ **WRITTEN ON PRODUCTION 2026-09-22 13:53 UTC**:
       `to_write=133 per_venue={"sushiswap": 133}`, every pool `change="new"`,
-      zero `changed`, zero other venues (see the runbook's RESULT). Open: the
-      write and a cold start — both wait for 0286 phase 1 to lift the Compute
-      deploy freeze.
+      `written=133`; the re-run reports `to_write=0`. `prices.pool_registry`
+      went **770 → 903**, and `sushiswap` shows **133 pools / 133 with a
+      resolved `token0`+`token1`** — none falls through to
+      `prices.unresolved_pools`. ✅ **Cold start 2026-09-22 14:41:01 UTC**:
+      `loaded discovered pool registry from ClickHouse entries=903`, eight
+      seconds after the 14:40:53 Compute deploy. Learned, persisted, survived a
+      restart.
 - [ ] Live candles for it match a raw count of its pool `swap` events for a full
-      day.
+      day. → Clock starts at the 2026-09-22 14:40:53 UTC deploy; checkable
+      2026-09-23. ⚠️ The count must join `default.soroban_events.contract_id`
+      (an Int64 surrogate) through `default.soroban_contracts.id` — comparing
+      the strkey directly returns zero and reads like total loss
+      ([[soroban-events-gotchas]]). SushiSwap trades ~13 times an hour, so a
+      short window proves nothing either way; use a whole UTC day.
 - [x] Its routers stay unindexed (a test pins it). →
       `a_routed_sushiswap_trade_prices_once_from_the_pool_not_the_router`
       (`7021ae2`), a real routed transaction, negative-controlled. See
-      Implementation Notes.
+      Implementation Notes. ✅ **Confirmed on the live registry 2026-09-22**
+      after the seed: neither router (`CAUF4DFY…DO2E`, `CDMIM23W…ZCHL`) nor the
+      factory (`CD3KRKGD…GLYF`) is in `prices.pool_registry` — the seed learns
+      pools from `pool_created`, and a router never emits one.
 - [x] History from the first pool is backfilled, or explicitly deferred with a
       reason. → **DECIDED with the operator 2026-09-21: folded into [[0286]]
       phase 3**, not run as a separate pass.
