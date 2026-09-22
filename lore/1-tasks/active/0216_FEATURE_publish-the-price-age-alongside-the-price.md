@@ -36,6 +36,23 @@ history:
       Measured on prod 2026-09-22 08:13 UTC: of 4,342 assets with a price,
       0 are < 5 min old, 70 are 5-60 min, 1,306 are 1-6 h, 839 are 6-12 h,
       2,127 are 12-24 h.
+  - date: "2026-09-22"
+    status: active
+    who: akot
+    note: >
+      Implemented on feat/0216. Three commits, 17 tracked files: the two
+      columns run end to end through current_prices, mv_current_prices,
+      current_price_usd, the three read queries, both DTOs and the published
+      OpenAPI. Two traps each pinned by a test that runs in CI and each proven
+      RED — the TO(...)-vs-SELECT order test (a contains check cannot see a
+      same-type transposition, and that kind is SILENT on 26.3.10.60) and the
+      epoch guard shared by all three query strings. 62 + 223 unit tests and
+      the current_mv_it / views_it / price_it / list_it / endpoints_it
+      #[ignore] suites all green against the local 26.3.10.60; one pre-existing
+      endpoints_it failure (backfill_status, a fixture that rots with the
+      clock) left alone. Still open: the prod before/after snapshot and the BE
+      hand-off, both scripted in .planning/rollout-2026-09/ (uncommitted).
+      Nothing deployed; no DDL ran on prod.
 ---
 
 # Publish the price's age
@@ -101,12 +118,227 @@ conversation.
 
 ## Acceptance Criteria
 
-- [ ] `/price` and `/assets` expose the price's own timestamp, distinct from
+- [x] `/price` and `/assets` expose the price's own timestamp, distinct from
       `updated_at`, and the published OpenAPI descriptions say which is which
-- [ ] `price_xlm`'s reported age is the older of its two inputs — or the
-      opposite choice is recorded with its reasoning
-- [ ] `views.sql`'s sentinel table documents the new column for BE
+      — `POST /prices/batch` too, and both `updated_at` texts now say in so
+      many words that they are the refresh time and `as_of` is the price's own
+- [x] `price_xlm`'s reported age is the older of its two inputs — or the
+      opposite choice is recorded with its reasoning (decision 5 below: the
+      opposite choice, with the older bound reaching the reader by
+      construction)
+- [x] `views.sql`'s sentinel table documents the new column for BE — both
+      columns, including the epoch rule and the `''` not-yet-rewritten state
 - [ ] Adding the column changes no existing value — verified by comparing a
       full `current_prices` snapshot before and after
-- [ ] The `TO(...)` list and the SELECT projection are asserted to match in a
+      — **in repo: done.** Every pre-existing assertion in `current_mv_it` is
+      green UNMODIFIED, including the whole 0072 column-set test. **On prod:
+      open** — the before/after snapshot runs on rollout day, scripted in
+      `.planning/rollout-2026-09/13-0216-snapshot-before.sh` and
+      `62-0216-snapshot-diff.sh`
+- [x] The `TO(...)` list and the SELECT projection are asserted to match in a
       test, so the positional-insert trap cannot recur silently
+
+Not an acceptance box, but outstanding: the API contract hand-off to the docs
+owner (0233/0163) is written as `.planning/CONTRACT-0216-api.md` (uncommitted)
+and is Adam's to send. The task stays `active` until the rollout runs.
+
+## Implementation Notes
+
+Three commits on `feat/0216_publish-the-price-age-alongside-the-price`, cut
+from `b359d58`. Nothing deployed, no DDL on prod.
+
+**`feat(lore-0216): carry as_of and price_status through ClickHouse`** —
+`schema/init.sql` (the two columns in `CREATE TABLE`, plus two idempotent
+`ALTER TABLE … ADD COLUMN IF NOT EXISTS` statements with a comment block in
+the `method` block's voice); `schema/current.sql` (a `usdc_as_of` scalar
+copying `usdc_rate`'s WHERE verbatim, `maxIf(timestamp, close_usd > 0) AS
+as_of` and `maxIf(timestamp, pf_trade_count > 0) AS tip_at` in `base_tip`,
+both carried through both arms of `unfiltered`, the two guarded projections,
+and the 13-name `TO(...)` list); `schema/views.sql` (two sentinel-table
+entries and the `current_price_usd` forwarding); `src/lib.rs` (the order test,
+statement count 41 → 43, the forwarding list 9 → 12 names);
+`tests/current_mv_it.rs` (`status_of` / `as_of_of` helpers, an `insert_pair_pf`
+helper, the unpriced / carried / oracle / dust-only assertions);
+`tests/views_it.rs` (14 → 16 view columns).
+
+**`feat(lore-0216): publish as_of and price_status on the price surfaces`** —
+`queries_ch.rs` (the shared `AS_OF_SQL` epoch guard, three pure SQL builders,
+the three `Row` structs, the guard unit test); `dto.rs` (both DTOs and
+`from_row`); `assets/handlers.rs` and `batch/handlers.rs` (the two hand-built
+literals); `openapi/descriptions.rs` (four new triples, four rewritten texts);
+`tests/{price_it,list_it,endpoints_it}.rs` (wire assertions by VALUE on both
+the real and the DEFAULT arm); `web/portal/public/openapi.json` (regenerated).
+
+**`docs(lore-0216): …`** — this file and the guardrails inventory.
+
+### RED proof (a) — transpose the two new names in the `TO(...)` list only
+
+`as_of, price_status` → `price_status, as_of` in `current.sql`'s `TO(...)`,
+nothing else touched.
+`cargo test -p prices-clickhouse --lib current_sql_to_clause`:
+
+```
+running 1 test
+test tests::current_sql_to_clause_and_select_project_the_same_columns_in_the_same_order ... FAILED
+
+---- tests::current_sql_to_clause_and_select_project_the_same_columns_in_the_same_order stdout ----
+
+thread 'tests::current_sql_to_clause_and_select_project_the_same_columns_in_the_same_order' (727685) panicked at packages/prices-clickhouse/src/lib.rs:766:9:
+assertion `left == right` failed: the TO(...) list and the final SELECT disagree.
+  TO:     ["asset_id", "price_usd", "price_xlm", "change_24h_pct", "change_7d_pct", "volume_24h_usd", "market_cap_usd", "vwap_24h", "sources", "updated_at", "method", "price_status", "as_of"]
+  SELECT: ["asset_id", "price_usd", "price_xlm", "change_24h_pct", "change_7d_pct", "volume_24h_usd", "market_cap_usd", "vwap_24h", "sources", "updated_at", "method", "as_of", "price_status"]
+A same-type transposition here (as_of/updated_at, price_status/method) is accepted by ClickHouse WITHOUT an error and publishes the refresh time as the price's age.
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.00s
+```
+
+Restored byte-for-byte; re-run green (`1 passed`). Note this particular
+transposition is `DateTime` ↔ `LowCardinality(String)` and would ALSO have
+thrown `CANNOT_PARSE_DATETIME` at refresh time. The transposition the test
+exists for — `as_of` ↔ `updated_at`, or `price_status` ↔ `method`, both
+same-type — throws nothing at all and was measured silent on 26.3.10.60.
+
+### RED proof (b) — drop the epoch guard from one of the three query strings
+
+`current_price_sql`'s `{AS_OF_SQL}` replaced by a plain
+`formatDateTime(c.as_of, …) AS as_of`.
+`cargo test -p prices-api --lib every_current_price_query_guards_as_of`:
+
+```
+running 1 test
+test assets::queries_ch::tests::every_current_price_query_guards_as_of_against_the_epoch ... FAILED
+
+---- assets::queries_ch::tests::every_current_price_query_guards_as_of_against_the_epoch stdout ----
+
+thread 'assets::queries_ch::tests::every_current_price_query_guards_as_of_against_the_epoch' (739125) panicked at packages/prices-api/src/assets/queries_ch.rs:2083:13:
+current_price must project as_of through the shared epoch guard, got: SELECT toString(c.price_usd) AS price_usd, … c.method AS method, formatDateTime(c.as_of, '%Y-%m-%dT%H:%i:%SZ') AS as_of, c.price_status AS price_status FROM current_prices AS c FINAL INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id WHERE a.contract_address = ? LIMIT 1
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 222 filtered out; finished in 0.00s
+```
+
+Restored byte-for-byte; re-run green (`1 passed`).
+
+### Verification run
+
+`cargo fmt --all -- --check` clean · `cargo check --workspace` clean ·
+`prices-clickhouse` unit 62 passed · `prices-api` unit 223 passed ·
+`current_mv_it --ignored` 9 passed · `views_it --ignored` 16 passed ·
+`price_it --ignored` 7 passed · `list_it --ignored` 10 passed ·
+`endpoints_it --ignored` 9 passed / 1 failed
+(`backfill_status_maps_both_streams` — pre-existing, see Issues) ·
+`npm run openapi:verify-bundled` exit 0.
+
+## Design Decisions
+
+### From Plan
+
+1. **Two columns, appended LAST, `as_of` then `price_status`** — in the table,
+   the `TO(...)` list, the SELECT, all three `Row` structs, all three query
+   strings, both DTOs, `current_price_usd` and the batch hand-copy. The one
+   place "last" is not literal is `AssetListRow`, where `sort_key` (the cursor
+   payload, not a published column) stays last and the two new fields go
+   before it.
+2. **`as_of` is `price_usd`'s own timestamp** — `maxIf(timestamp, close_usd >
+   0)`, the SAME predicate `price_usd`'s `argMaxIf` uses, so the two can never
+   name different candles. The oracle arm takes the rate reading's own time
+   from a new scalar under a VERBATIM copy of `usdc_rate`'s WHERE.
+3. **The 1970 trap.** `maxIf` over a window with no priced candle returns the
+   DateTime default, not NULL. The MV forces `toDateTime(0)` whenever
+   `price_usd <= 0` so the epoch is a decision rather than an accident, and
+   one shared const maps exactly that value to `""` in all three queries.
+   Pinned by a CI unit test, an MV IT and two wire ITs.
+4. **`price_status` vocabulary**, keyed on values and never on `is_oracle`:
+   `unpriced` when `price_usd <= 0`, `carried` when `as_of < tip_at`, else
+   `priced`. `tip_at` is `maxIf(timestamp, pf_trade_count > 0)` — a dust-only
+   minute forms no price, so it must not make a real price read stale.
+5. **No separate age for `price_xlm` / `market_cap_usd`** — the recorded
+   answer to this task's own "older of the two" question, and the opposite of
+   the position in "Design questions" above. A second field would itself be a
+   quotient of two dates, and would have to be recomputed for every derived
+   column ever added. Instead the descriptions state the bound: both divide or
+   multiply `price_usd` by an independently dated input, so both are no
+   fresher than `as_of` and may be older. The reader gets the older bound by
+   construction, with one field instead of three.
+6. **The order-comparing positional test** replaces the `contains` check,
+   which could not see order. It parses both sequences out of
+   `split_statements(CURRENT_SQL)[1]` and asserts equality plus length 13.
+7. **Descriptions** — four new integrator-voice triples and four rewritten
+   texts; no task or ADR citation in anything published.
+8. **`views.sql`** — both columns in the BE sentinel table, forwarded by
+   `current_price_usd`, and the forwarding test's list extended from 9 names
+   to 12 (it had never included `method`).
+9. **Snapshot acceptance** — no existing assertion was modified or loosened.
+10. **Guardrails inventory** — two new reader rows, and this task's `◐` status
+    cells closed.
+11. **No deploy, no DDL on prod, no `cdk`.**
+
+### Emerged
+
+12. **The three SQL strings became pure builder functions.** They were built
+    inside `async fn`s taking a `&Client` and so were unreachable from a unit
+    test — the guard could only have been checked by a test that needs a
+    database, which is exactly the test CI does not run. `list_assets_sql`,
+    `current_price_sql` and `current_prices_batch_sql` are plain
+    `fn(…) -> String`, mirroring `usd_method_expr`, which this repo already
+    unit-tests that way. Rejected: `include_str!` over the module's own source
+    (no precedent here, and it breaks on any refactor).
+13. **`insert_pair_pf` rather than a dust-only-specific helper.** The dust
+    fixture needs a control — a price-forming newest minute that DOES read
+    `carried` — or a status expression stuck on `priced` would pass it. One
+    helper taking `pf_trade_count` explicitly builds both arms; an
+    `insert_pair_dust` hard-coding 0 would have needed a twin.
+14. **Parsing approach for the order test** (explicitly left to discretion):
+    the `TO` list is the substring between `TO prices.current_prices` and the
+    first `)`, asserted to be followed by `AS`; the projection is every
+    `AS <ident>` at paren depth 0 between the last depth-0 `SELECT` and
+    `FROM unfiltered AS u`, each asserted to be followed by `,` or the end.
+    `split_statements` has already stripped every comment, which is what makes
+    a depth scan tractable; the string literals in the projection
+    (`'LowCardinality(String)'`, `'Map(String, Map(String, String))'`) carry
+    balanced parens, so they do not disturb the depth count.
+15. **The listing and batch fixtures now seed the new columns explicitly.**
+    The plan expected the table DEFAULTs to cover it, but `AssetListRow` and
+    `BatchPriceRow` are separate structs read by separate queries, and a
+    fixture where every row carries the DEFAULT pair cannot tell a working
+    projection from one that returns `''` for everything. One row per fixture
+    carries a real pair dated 30 minutes behind `updated_at`; the rest carry
+    the epoch/`''` pair, written explicitly to the same bytes the DEFAULT
+    would produce.
+16. **`descriptions.rs` placement is strictly alphabetical** — `price_status`
+    before `price_usd`, matching the file's convention rather than the plan's
+    parenthetical ("between `price_usd` and `sources`"). No test enforces
+    order either way.
+17. **The guardrails row for `current_price_usd` / `/price` / `/assets` was
+    closed too**, not only the `current.sql` row the plan named. Its `◐` cell
+    read "`price_status` + `as_of` — ADR 0292 §5", which is this task; leaving
+    it open would have left the file asserting a gap that no longer exists.
+
+## Issues Encountered
+
+- **`init_sql_parses_into_statements` and `views_it`'s column count are
+  outside the brief's test list.** Two more ALTERs make the `init.sql`
+  statement count 41 → 43, and `current_price_usd` gaining two columns makes
+  `views_sql_replaces_an_existing_v1_current_price_usd` count 16 rather than
+  14. Both updated with their comments. `views_it`'s `#[ignore]` suite was
+  added to the verification list; it was not in it.
+
+- **`web/portal/public/openapi.json` is tracked and CI asserts it matches the
+  extracted document** (`npm run openapi:verify-bundled`, ci.yml). The brief
+  said "nothing else changes"; this is a required consequence of adding two
+  DTO fields, not scope creep, and it ships in the same commit as the DTOs.
+  `web/portal/src/api/generated.ts` is untracked and was left alone.
+
+- **`endpoints_it::backfill_status_maps_both_streams` fails, and did before
+  this task.** It asserts `sdex.status == "running"` against a fixture whose
+  `last_push_at` is a hard-coded `2026-06-15 11:30:00`; today the handler
+  correctly calls that `stalled`. Confirmed pre-existing by running the test
+  against `b359d58`'s copy of the file, where it fails identically. Out of
+  scope here and NOT fixed — the fixture rots with wall-clock time and wants a
+  relative timestamp, which is somebody's call, not a side effect of this
+  task.
+
+- **The `5` in `current_sql_uses_no_unguarded_argmax_on_close_usd` did not
+  move**, as predicted: `maxIf(timestamp, …)` matches neither counted prefix.
+  `INTERVAL 2 HOUR` still appears exactly once, and the new scalar uses
+  `max(timestamp)` — never `argMax(close_usd`, which that test panics on as a
+  literal substring.
