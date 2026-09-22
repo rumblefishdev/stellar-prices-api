@@ -2226,3 +2226,189 @@ async fn usd_reference_omits_a_bucket_whose_reference_candles_have_no_volume() {
         .await
         .unwrap();
 }
+
+// ----------------------------------------------------------------------
+// Task 0147 — the priced-volume coverage gate.
+//
+// Arm A used to filter `close_usd > 0` BEFORE the weighted average, so
+// whichever rows enrichment happened to reach became 100 % of the weight. BE
+// measured the consequence on yXLM (2026-08-04 13:00): a single 0.764-unit
+// print at 1.3085 was the only enriched row in the bucket, and the view
+// published 1.3085 against a true ~0.170 — a 7.7x overstatement in the column
+// they multiply into TVL.
+//
+// The POPULATION was wrong, not the arithmetic. The unpriced rows are real
+// trades and belong in the denominator, so the fix makes the population
+// explicit: `priced_volume_share` is published on every row, and a bucket whose
+// priced volume does not clear the gate is ABSENT — with a row in
+// `price_usd_series_coverage{,_1h}` that says why.
+//
+// ⚠️ The fixtures below carry `volume_quote_usd` values scaled to clear
+// `FLOOR_USD` (a PLACEHOLDER 100 until task 0147 phase 2 measures it). The
+// floor itself is exercised by
+// `only_the_dust_print_is_priced_and_the_absolute_floor_withholds_the_bucket`;
+// every other 0147 test is about the SHARE, so its fixture must clear the floor
+// or it would prove nothing.
+// ----------------------------------------------------------------------
+
+/// Task 0147 (a) — BE's yXLM case, RED→GREEN.
+///
+/// One 0.764-unit print is priced at 1.3085 beside 1000 unpriced units of the
+/// same identity in the same bucket. Before the gate the view published 1.3085,
+/// the dust print's own price, because the unpriced 99.92 % of the bucket was
+/// filtered out before the weighting. After it the bucket is WITHHELD, and
+/// `price_usd_series_coverage` reports `pending` with the share that explains
+/// the withholding. Enrich the 1000 units at their true 0.0065 and the bucket
+/// publishes — the gate withholds a bucket, it never deletes an identity.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_dust_print_cannot_price_a_bucket_whose_volume_is_unpriced() {
+    let db = "it_views_0147_dust_share";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // ⚠️ The pf columns are named EXPLICITLY. The 15-column idiom the rest of
+    // this file uses lets them fall back to their init.sql DEFAULTs
+    // (`pf_volume` = `volume_base`, `pf_trade_count` = `trade_count`), which is
+    // right for an ordinary fixture and silently destroys a dust one.
+    //
+    // sdex: the enriched dust print — 0.764 units at 1.3085, ~1 USD changed hands.
+    // soroswap: 1000 units at a true 0.0065 that enrichment has NOT reached
+    //           (`close_usd` = 0, and `volume_quote_usd` = 0 with it — the same
+    //           pass writes both).
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
+             (1620000000,10,2,'sdex',     1.3085,1.3085,1.3085,1.3085, 0.764,1.0,1.0,1.3085,1.3085,1, 1,0.764,1.0, 1), \
+             (1620000000,10,2,'soroswap', 0.0065,0.0065,0.0065,0.0065, 1000,6.5,0,0,0.0065,1,        1,1000,6.5, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let approx = |a: f64, b: f64| (a - b).abs() < 1e-6;
+
+    // --- WITHHELD ---------------------------------------------------------
+    // Both JIT modes: the withheld group reaches the outer CAST with a priced
+    // weight of 0.764 and an eligible weight of 1000.764, and a group made only
+    // of unpriced rows reaches it with NO priced weight at all — the 0171/0198
+    // zero-denominator hazard, re-armed by arm A no longer filtering.
+    for jit in JIT_MODES {
+        let published: Vec<(String, f64)> = client
+            .query(&format!(
+                "SELECT asset_code, toFloat64(close_usd) FROM {db}.price_usd_series \
+                 WHERE asset_code = 'FOO'{jit}"
+            ))
+            .fetch_all::<(String, f64)>()
+            .await
+            .unwrap_or_else(|e| panic!("price_usd_series{jit} must not raise: {e}"));
+        assert!(
+            published.is_empty(),
+            "price_usd_series{jit}: the only priced row in this bucket is a \
+             0.764-unit print holding 0.0763 % of its eligible volume, so the \
+             bucket must be WITHHELD — got {published:?} (1.3085 is the dust \
+             print's own price, BE's 7.7x yXLM defect)"
+        );
+    }
+
+    // ...and the coverage view says WHY it is missing, rather than leaving a
+    // withheld bucket indistinguishable from one that never traded.
+    for jit in JIT_MODES {
+        let cov: Vec<(f64, f64, String)> = client
+            .query(&format!(
+                "SELECT toFloat64(priced_volume_share), toFloat64(priced_volume_usd), status \
+                 FROM {db}.price_usd_series_coverage WHERE asset_code = 'FOO'{jit}"
+            ))
+            .fetch_all::<(f64, f64, String)>()
+            .await
+            .unwrap_or_else(|e| panic!("price_usd_series_coverage{jit} must not raise: {e}"));
+        assert_eq!(cov.len(), 1, "exactly one coverage row for (FOO, bucket)");
+        assert!(
+            approx(cov[0].0, 0.000763),
+            "coverage share = 0.764 / 1000.764 published as Decimal(10,6), got {}",
+            cov[0].0
+        );
+        assert!(
+            approx(cov[0].1, 1.0),
+            "priced_volume_usd is the PRICED leg's volume_quote_usd, got {}",
+            cov[0].1
+        );
+        assert_eq!(
+            cov[0].2, "pending",
+            "eligible volume exists and the share is short — `pending`, not `unpriceable`"
+        );
+    }
+
+    // --- ENRICHED ---------------------------------------------------------
+    // The same row, re-inserted at a higher `version` with its true price. Its
+    // `volume_quote_usd` arrives with `close_usd` (one enrichment pass writes
+    // both) and is scaled to clear the placeholder floor — see the block comment.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
+             (1620000000,10,2,'soroswap', 0.0065,0.0065,0.0065,0.0065, 1000,6.5,650,0.0065,0.0065,1, 1,1000,6.5, 2)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let (close, method, share): (f64, String, f64) = client
+        .query(&format!(
+            "SELECT toFloat64(close_usd), method, toFloat64(priced_volume_share) \
+             FROM {db}.price_usd_series WHERE asset_code = 'FOO'"
+        ))
+        .fetch_one::<(f64, String, f64)>()
+        .await
+        .unwrap();
+    // The bucket's volume-weighted mean over its NOW-COMPLETE population:
+    // (1.3085 x 0.764 + 0.0065 x 1000) / 1000.764. The dust print is a real
+    // trade and keeps its weight — 0.0764 % of the bucket, worth +0.001 on the
+    // published price. That residual is the point: before the gate the same
+    // print WAS the price.
+    assert!(
+        approx(close, 0.00749394),
+        "the enriched bucket publishes its weighted mean, got {close}"
+    );
+    assert_eq!(method, "traded");
+    assert!(
+        approx(share, 1.0),
+        "every eligible unit is priced now, got {share}"
+    );
+
+    let (cshare, cusd, cstatus): (f64, f64, String) = client
+        .query(&format!(
+            "SELECT toFloat64(priced_volume_share), toFloat64(priced_volume_usd), status \
+             FROM {db}.price_usd_series_coverage WHERE asset_code = 'FOO'"
+        ))
+        .fetch_one::<(f64, f64, String)>()
+        .await
+        .unwrap();
+    assert!(approx(cshare, 1.0), "coverage share, got {cshare}");
+    assert!(
+        approx(cusd, 651.0),
+        "1 USD priced + 650 USD enriched, got {cusd}"
+    );
+    assert_eq!(cstatus, "priced");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
