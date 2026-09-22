@@ -4,7 +4,7 @@
 //! The reprice reads only the events of contracts already in the registry, so it
 //! can never find a pool the registry is missing. This mode reads the factory
 //! events themselves — Aquarius `add_pool`, Phoenix `create`, Soroswap
-//! `new_pair` — and runs them through the same `learn_factory` the live
+//! `new_pair`, SushiSwap V3 `pool_created` (task 0290) — and runs them through the same `learn_factory` the live
 //! processor uses, so a row written here is the row live would have learned.
 //! Only rows not already in the table are written; a re-run writes nothing.
 //!
@@ -38,8 +38,11 @@ pub struct FactoryEventRow {
 /// The factory-event read for `[start, end]`, as text.
 ///
 /// Filters are a superset of what `learn_factory` accepts. BE fills `signature`
-/// only when topic[0] is a Symbol, and two of the three factories use Strings:
+/// only when topic[0] is a Symbol, and two of the four factories use Strings:
 /// - Aquarius `add_pool`: Symbol topics, so `signature = 'add_pool'`;
+/// - SushiSwap V3 `pool_created`: Symbol topics, so `signature = 'pool_created'`
+///   (checked on production 2026-09-18). Every factory generation emits it, and
+///   with no emitter filter one read learns the pools of all four;
 /// - Phoenix `create`/`liquidity_pool`: **String** topics, so `signature` is NULL
 ///   — a `signature`-only filter finds none of the 20 Phoenix pools;
 /// - Soroswap `SoroswapFactory`/`new_pair`: String topics, the action in topic[1].
@@ -59,11 +62,11 @@ pub(crate) fn factory_events_sql(start: u32, end: u32) -> String {
             data_xdr \
          FROM default.soroban_events \
          WHERE ledger_sequence BETWEEN {start} AND {end} \
-           AND (signature IN ('add_pool', 'create') \
+           AND (signature IN ('add_pool', 'create', 'pool_created') \
                 OR (signature IS NULL \
                     AND (JSONExtractString(topics_xdr, 1, 'value') IN ('add_pool', 'create') \
                          OR JSONExtractString(topics_xdr, 2, 'value') = 'new_pair'))) \
-         ORDER BY ledger_sequence, transaction_id, event_index"
+         ORDER BY ledger_sequence, transaction_index, event_index"
     )
 }
 
@@ -179,12 +182,17 @@ mod tests {
     const CREATE_DATA: &str =
         r#"{"type":"address","value":"CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX"}"#;
 
+    // SushiSwap V3's live factory `CD3KRKGD…GLYF`, ledger 64,116,662.
+    const POOL_CREATED_TOPICS: &str = r#"[{"type":"sym","value":"pool_created"}]"#;
+    const POOL_CREATED_DATA: &str = r#"{"type":"map","value":[{"key":{"type":"sym","value":"fee"},"value":{"type":"u32","value":500}},{"key":{"type":"sym","value":"pool_address"},"value":{"type":"address","value":"CBVHBZSZOS6KRDJ4D44FU2YLIENOVSSLM3UGKW6XQMVIFUAMWIWCVH2U"}},{"key":{"type":"sym","value":"sender"},"value":{"type":"address","value":"CD3KRKGDRVWPXVB3VXLUMQKMX6XZ6Q2H334IVZD4XXNAMKSRVQL5GLYF"}},{"key":{"type":"sym","value":"tick_spacing"},"value":{"type":"i32","value":10}},{"key":{"type":"sym","value":"token0"},"value":{"type":"address","value":"CBSJZEIO5C7KC2SF3MKSNXXJSW5G3VTNBX4ATMKUI3B2MR4JKM4R26YF"}},{"key":{"type":"sym","value":"token1"},"value":{"type":"address","value":"CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}]}"#;
+
     #[test]
-    fn learns_all_three_factory_shapes_from_real_payloads() {
+    fn learns_all_four_factory_shapes_from_real_payloads() {
         let mut reg = Registries::new();
         learn_from_row(&row(NEW_PAIR_TOPICS, NEW_PAIR_DATA), &mut reg);
         learn_from_row(&row(ADD_POOL_TOPICS, ADD_POOL_DATA), &mut reg);
         learn_from_row(&row(CREATE_TOPICS, CREATE_DATA), &mut reg);
+        learn_from_row(&row(POOL_CREATED_TOPICS, POOL_CREATED_DATA), &mut reg);
 
         let pair = "CAZ4Z273BBAAFL5NYNQJKEMZDQBRCPKAS4GOXDUFXPSE56M4ONBJUOVD";
         assert_eq!(reg.venue.get(pair), Some(&Venue::Soroswap));
@@ -207,6 +215,45 @@ mod tests {
                 .get("CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX"),
             Some(&Venue::Phoenix)
         );
+        let pool = "CBVHBZSZOS6KRDJ4D44FU2YLIENOVSSLM3UGKW6XQMVIFUAMWIWCVH2U";
+        assert_eq!(reg.venue.get(pool), Some(&Venue::Sushiswap));
+        let p = reg.sushiswap.lookup(pool).expect("pool tokens learned");
+        assert_eq!(
+            p.token0,
+            "CBSJZEIO5C7KC2SF3MKSNXXJSW5G3VTNBX4ATMKUI3B2MR4JKM4R26YF"
+        );
+        assert_eq!(
+            p.token1,
+            "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
+        );
+    }
+
+    /// Another protocol also emits `pool_created` (emitter `CBMBKXI7…Q227`,
+    /// wasm `ED0D122C`, ledger 63,173,214): fixed-denomination pools with no
+    /// token pair. The read selects it, so the learner must refuse it — a
+    /// pool registered with empty tokens would price against asset "".
+    #[test]
+    fn a_pool_created_without_a_token_pair_learns_nothing() {
+        let topics = r#"[{"type":"sym","value":"pool_created"},{"type":"address","value":"CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA"}]"#;
+        let data = r#"{"type":"map","value":[{"key":{"type":"sym","value":"denomination"},"value":{"type":"i128","value":"1000000"}},{"key":{"type":"sym","value":"generation"},"value":{"type":"u32","value":0}},{"key":{"type":"sym","value":"pool"},"value":{"type":"address","value":"CC2SYHPYVRQ24IS6BQVA5WUYWDR3GK46W5ADY2UASC2D4IH6J5AXSEQ5"}}]}"#;
+        let mut reg = Registries::new();
+        learn_from_row(&row(topics, data), &mut reg);
+        assert!(reg.venue.is_empty());
+    }
+
+    #[test]
+    fn a_new_sushiswap_pool_is_written_as_sushiswap() {
+        let mut reg = Registries::new();
+        let persisted = snapshot(&reg);
+        learn_from_row(&row(POOL_CREATED_TOPICS, POOL_CREATED_DATA), &mut reg);
+
+        let rows = reg.pool_rows_unpersisted(&persisted);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].contract_id,
+            "CBVHBZSZOS6KRDJ4D44FU2YLIENOVSSLM3UGKW6XQMVIFUAMWIWCVH2U"
+        );
+        assert_eq!(rows[0].venue, "sushiswap");
     }
 
     #[test]
@@ -248,7 +295,7 @@ mod tests {
         let sql = factory_events_sql(63_000_000, 63_319_999);
         assert!(sql.contains("ledger_sequence BETWEEN 63000000 AND 63319999"));
         let sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(sql.contains("signature IN ('add_pool', 'create')"));
+        assert!(sql.contains("signature IN ('add_pool', 'create', 'pool_created')"));
         // String-topic factories leave `signature` NULL: Phoenix's action is in
         // topic[0], Soroswap's in topic[1] (1-based indexes 1 and 2).
         assert!(sql.contains(

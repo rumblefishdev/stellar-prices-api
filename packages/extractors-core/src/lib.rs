@@ -5,6 +5,13 @@ pub enum Venue {
     Soroswap,
     Aquarius,
     Phoenix,
+    /// SushiSwap V3 — a Uniswap-v3-style concentrated-liquidity venue (task
+    /// 0290). Its pool `swap` carries signed `amount0`/`amount1`, the CLMM
+    /// shape the `soroswap-extractor` crate already decodes, and it resolves
+    /// its tokens through that crate's pair registry exactly as
+    /// [`Venue::Soroswap`] does — a separate instance, so the two venues never
+    /// share a `contract_id`.
+    Sushiswap,
 }
 
 impl Venue {
@@ -15,6 +22,7 @@ impl Venue {
             Venue::Soroswap => "soroswap",
             Venue::Aquarius => "aquarius",
             Venue::Phoenix => "phoenix",
+            Venue::Sushiswap => "sushiswap",
         }
     }
 
@@ -25,6 +33,7 @@ impl Venue {
             "soroswap" => Some(Venue::Soroswap),
             "aquarius" => Some(Venue::Aquarius),
             "phoenix" => Some(Venue::Phoenix),
+            "sushiswap" => Some(Venue::Sushiswap),
             _ => None,
         }
     }

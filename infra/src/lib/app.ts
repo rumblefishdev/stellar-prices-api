@@ -66,11 +66,21 @@ export function createApp({ config }: CreateAppOptions): void {
   // rule.addTarget()).
   new EventBridgeStack(app, `${prefix}-EventBridge`, { env, config });
 
-  // ObservabilityStack is independent of every other stack at the
-  // skeleton stage. Task 0056 attaches widgets/alarms that reference
-  // ComputeStack log groups and ApiGatewayStack metrics; the
-  // cross-stack dependency arrives then.
-  new ObservabilityStack(app, `${prefix}-Observability`, { env, config });
+  // ObservabilityStack carries no CloudFormation reference to any other
+  // stack: alarms key on function names, queue names and log-group names
+  // as plain strings, so it stays deployable on its own. One of its
+  // resources still needs another stack's resource to EXIST: the
+  // portal-closed metric filter (task 0249) is created on the api-handler
+  // log group ComputeStack owns, and `fromLogGroupName` emits no
+  // dependency for it. `addDependency` orders Compute first under
+  // `deploy --all` without adding a reference; the `--exclusively` target
+  // (`make deploy-production-observability`) has to find the log group
+  // already there — see the note on that target.
+  const observability = new ObservabilityStack(app, `${prefix}-Observability`, {
+    env,
+    config,
+  });
+  observability.addDependency(compute);
 
   app.synth();
 }

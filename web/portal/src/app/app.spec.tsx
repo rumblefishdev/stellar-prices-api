@@ -298,14 +298,34 @@ describe('routes', () => {
     await waitFor(() => expect(lastPath).toBe('/dashboard'));
   });
 
-  it('sends a visitor with no session away from the dashboard', async () => {
+  it('sends a visitor with no session from the dashboard to the sign-in', async () => {
+    // To `/login`, not to the landing page: a key holder in a fresh browser
+    // who clicked the footer's "Dashboard" used to be bounced to the page
+    // they came from with no explanation (task 0301). The sign-in forwards
+    // them back here once it has a session.
     openAndSignedOut();
     renderAt('/dashboard');
 
-    await waitFor(() => expect(lastPath).toBe('/'));
+    await waitFor(() => expect(lastPath).toBe('/login'));
+    expect(await screen.findByTestId('login-card')).toBeTruthy();
     // By heading, not by text: the landing page's Self-Service section says
     // "…your API key is ready immediately", which a loose text match hits.
     expect(screen.queryByRole('heading', { name: /^api key$/i })).toBeNull();
+  });
+
+  it('sends a visitor away from the dashboard while the portal is closed', async () => {
+    // A closed portal has no sign-in to offer either, so this one still
+    // lands on the landing page — which says the portal is closed — and
+    // that page offers no "Sign in" any more than it offers a key.
+    stubRoutes({
+      [CONFIG_URL]: () => ({ json: async () => ({ enabled: false }) }),
+      [ME_URL]: () => ({ json: async () => ({ authenticated: false }) }),
+    });
+    renderAt('/dashboard');
+
+    await waitFor(() => expect(lastPath).toBe('/'));
+    await screen.findByText(/not yet available/i);
+    expect(screen.queryByRole('link', { name: /^sign in$/i })).toBeNull();
   });
 
   it('waits for the session before deciding about the dashboard', async () => {
@@ -468,6 +488,23 @@ describe('routes', () => {
     expect(screen.queryByRole('navigation', { name: 'Dashboard' })).toBeNull();
   });
 
+  it('serves the privacy policy under the landing bar, with the footer pointing at it', async () => {
+    openAndSignedOut();
+    renderAt('/privacy-policy');
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: /privacy policy/i }),
+    ).toBeTruthy();
+    expect(screen.getByRole('navigation', { name: 'Primary' })).toBeTruthy();
+    expect(screen.queryByRole('navigation', { name: 'Dashboard' })).toBeNull();
+    const footer = within(screen.getByRole('navigation', { name: 'Footer' }));
+    expect(
+      footer
+        .getByRole('link', { name: /^privacy policy$/i })
+        .getAttribute('href'),
+    ).toBe('/privacy-policy');
+  });
+
   it('marks the section the quick start opens on in its rail', async () => {
     openAndSignedOut();
     renderAt('/quick-start');
@@ -477,7 +514,8 @@ describe('routes', () => {
       screen.getByRole('navigation', { name: 'On this page' }),
     );
     const entries = rail.getAllByRole('link');
-    expect(entries).toHaveLength(10);
+    // The ten frame sections plus "Example queries" (task 0163).
+    expect(entries).toHaveLength(11);
     // Unscrolled, the rail points at the first section rather than at
     // nothing — the frame underlines `Prerequisites` for the same reason.
     expect(entries[0].getAttribute('aria-current')).toBe('location');
@@ -1848,6 +1886,35 @@ describe('navigation off the landing page', () => {
     expect(
       screen.getByRole('link', { name: /^faq$/i }).getAttribute('href'),
     ).toBe(`${ROUTER_BASENAME}/#faq`);
+    // "Quick Start" is the page, not the `#get-started` anchor it used to be
+    // (task 0301) — a router link, so no basename under this MemoryRouter.
+    expect(
+      screen.getByRole('link', { name: /^quick start$/i }).getAttribute('href'),
+    ).toBe('/quick-start');
+    // And the way in for a visitor who already holds a key.
+    expect(
+      screen.getByRole('link', { name: /^sign in$/i }).getAttribute('href'),
+    ).toBe('/login');
+    // The wordmark leads to the explorer's home and the footer's mark to
+    // Rumble Fish (task 0301) — both were images that led nowhere.
+    expect(
+      screen.getByRole('link', { name: 'SorobanScan' }).getAttribute('href'),
+    ).toBe('https://sorobanscan.rumblefish.dev/');
+    expect(
+      screen.getByRole('link', { name: /rumble fish/i }).getAttribute('href'),
+    ).toBe('https://rumblefish.dev');
+    // "Contact" reaches the company's contact page (task 0301) and "Privacy
+    // policy" the portal's own page (task 0303); "Status" stays text until a
+    // status page exists.
+    expect(
+      screen.getByRole('link', { name: /^contact$/i }).getAttribute('href'),
+    ).toBe('https://www.rumblefish.dev/contact/');
+    expect(screen.queryByRole('link', { name: /^status$/i })).toBeNull();
+    expect(
+      screen
+        .getByRole('link', { name: /^privacy policy$/i })
+        .getAttribute('href'),
+    ).toBe('/privacy-policy');
   });
 
   /**
@@ -2197,6 +2264,7 @@ describe('the API key', () => {
     expect(portalPanel().queryAllByRole('button')).toHaveLength(0);
     expect(portalPanel().queryAllByRole('link')).toHaveLength(0);
     expect(screen.queryByRole('link', { name: /get api key/i })).toBeNull();
+    expect(screen.queryByRole('link', { name: /^sign in$/i })).toBeNull();
   });
 
   // -------------------------------------------------------------------------

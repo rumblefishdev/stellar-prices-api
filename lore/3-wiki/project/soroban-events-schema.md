@@ -23,30 +23,49 @@ Then run the queries below against `localhost:8123` (user `default`, password `c
 
 ## Table schema
 
+> ⚠️ **BE altered this table on 2026-09-17 11:49:23** (task 0304). The columns
+> below are the measured live set. `transaction_id` was **dropped**;
+> `transaction_index`, `operation_index` and `application_order` were added and
+> `event_index` was **widened `Int16` → `UInt32`**. Everything below the
+> "Signature distribution" heading was captured before the alter and still
+> describes the old shape.
+>
+> **Pick consumer column types from this list.** `packages/events-backfill`
+> frames rows as bare `RowBinary` — no names-and-types header — so a field
+> narrower than its column does not error, it shifts every field after it and
+> decodes garbage.
+
 ```sql
 CREATE TABLE default.soroban_events (
-    contract_id      Int64,
-    transaction_id   Int64,
-    ledger_sequence  Int64,
-    event_index      Int16,
-    event_type       Int16,
-    signature        LowCardinality(Nullable(String)),
-    topics_xdr       String CODEC(ZSTD(3)),
-    data_xdr         String CODEC(ZSTD(3))
+    contract_id       Int64,
+    ledger_sequence   Int64,
+    transaction_index UInt32,
+    operation_index   UInt16,
+    event_index       UInt32,
+    application_order Int16,
+    event_type        Int16,
+    signature         LowCardinality(Nullable(String)),
+    topics_xdr        String CODEC(ZSTD(3)),
+    data_xdr          String CODEC(ZSTD(3))
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY intDiv(ledger_sequence, 500000)
-ORDER BY (contract_id, ledger_sequence, transaction_id, event_index)
+ORDER BY (contract_id, ledger_sequence, transaction_index, event_index)
+-- ⚠️ codecs and sort key NOT re-measured after the alter; the old sort key
+-- named transaction_id, so it must have changed. Confirm with
+-- `SHOW CREATE TABLE default.soroban_events` before relying on either.
 ```
 
 ### Gotchas
 
 - **`topics_xdr` / `data_xdr` are NOT raw XDR.** Despite the column name, the values are JSON-encoded SCVal trees (the same shape the Soroban RPC `/getEvents` returns when `xdrFormat=json`). The names are historical. Parse them with a JSON parser, not `xdr::ScVal::from_xdr`.
 - **`contract_id` is an Int64 internal ID**, not the `C…` strkey address. Resolve via `JOIN soroban_contracts c ON c.id = e.contract_id` → `c.contract_id` is the strkey.
-- **`transaction_id` is an Int64 internal ID.** Resolve to the 32-byte hash via `JOIN transactions t ON t.id = e.transaction_id` → `t.hash` is `FixedString(32)`; wrap in `hex(t.hash)` for the canonical uppercase hex form.
+- **There is no `transaction_id` any more** (dropped 2026-09-17). A transaction is identified within its ledger by `transaction_index`, so `(ledger_sequence, transaction_index)` is the grouping key — that is what `events-backfill` synthesises. There is no longer a column to join `default.transactions` on, so the 32-byte hash is not reachable from an event row alone.
+- **`application_order` is the transaction's position in the ledger's apply order**, on the event row itself (it replaced the `default.transactions` join). It is `Int16`: a NEGATIVE value is not a position but a corrupt row, and consumers must degrade rather than wrap it into a `u16`.
+- **`event_index` is `UInt32` and `operation_index` is a separate column.** Whether `event_index` is numbered per transaction or restarts per operation has NOT been re-measured since the alter — key on `(transaction_index, operation_index, event_index)` so it does not matter.
 - **`signature`** is derived from topic 0 only when topic 0 is `{"type":"sym","value":"…"}`. If topic 0 is a `string` (or any other SCVal type), `signature` is `NULL` even though the event is well-formed. See [Null-signature events](#null-signature-events) below.
 - **`event_type`** is always `1` (contract event) in the backfilled range. Other types (system, diagnostic) are not stored.
-- The engine is `ReplacingMergeTree` keyed by `(contract_id, ledger_sequence, transaction_id, event_index)`. Duplicate rows within a partition collapse on merge. Use `FINAL` or de-dupe in the query if you need point-in-time consistency before merges run.
+- The engine is `ReplacingMergeTree`. Its key named `transaction_id` before the alter and has not been re-measured since (see the note above the schema). Duplicate rows within a partition collapse on merge — use `FINAL` or de-dupe in the query if you need point-in-time consistency before merges run. `events-backfill` de-dupes adjacent rows on `(contract_id, transaction_id, operation_index, event_index)` rather than paying for `FINAL`.
 
 ## Signature distribution (full backfill window)
 
@@ -248,26 +267,30 @@ SELECT
   e.event_index,
   c.contract_id    AS contract_addr,
   c.is_sac,
-  hex(t.hash)      AS tx_hash,
+  e.transaction_index,
+  e.operation_index,
+  e.application_order,
   e.signature,
   e.topics_xdr,
   e.data_xdr
 FROM soroban_events e
 LEFT JOIN soroban_contracts c ON c.id = e.contract_id
-LEFT JOIN transactions      t ON t.id = e.transaction_id
 WHERE e.signature = 'swap'
-ORDER BY e.ledger_sequence, e.transaction_id, e.event_index
+ORDER BY e.ledger_sequence, e.transaction_index, e.operation_index, e.event_index
 LIMIT 5
 FORMAT JSONEachRow;
 ```
 
 ### All AMM events for one tx (trade + update_reserves + transfer)
 
+Since the 2026-09-17 alter a transaction is `(ledger_sequence,
+transaction_index)` — there is no id to look up from a hash, so start from a
+ledger and pick the transaction out of it.
+
 ```sql
-WITH (
-  SELECT id FROM transactions WHERE hex(hash) = '2964A4F2FE7A9A484EEC60DD2A60A3B99F36EACF123F83E00423325AAA1287E2'
-) AS tx_id
 SELECT
+  e.transaction_index,
+  e.operation_index,
   e.event_index,
   c.contract_id AS contract_addr,
   e.signature,
@@ -275,8 +298,8 @@ SELECT
   e.data_xdr
 FROM soroban_events e
 LEFT JOIN soroban_contracts c ON c.id = e.contract_id
-WHERE e.transaction_id = tx_id
-ORDER BY e.event_index
+WHERE e.ledger_sequence = <LEDGER> AND e.transaction_index = <TX_INDEX>
+ORDER BY e.operation_index, e.event_index
 FORMAT JSONEachRow;
 ```
 

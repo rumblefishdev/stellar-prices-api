@@ -13,17 +13,27 @@ import { useState } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 
 import { color, font } from '../theme/tokens';
-import { DASHBOARD_ROUTE, DOCS_ROUTE, LANDING, LOGIN_ROUTE } from './links';
+import {
+  DASHBOARD_ROUTE,
+  DOCS_ROUTE,
+  EXPLORER,
+  LANDING,
+  LOGIN_ROUTE,
+  PRIVACY_POLICY_ROUTE,
+  QUICKSTART_ROUTE,
+  RUMBLEFISH_CONTACT,
+  RUMBLEFISH_SITE,
+} from './links';
 import { ArrowBadge, cardBorder } from './primitives';
 
 /**
  * The navbar and the footer.
  *
- * The labels are the design's, read off the exported frame. Two of the
- * footer's six point outside this repo — `Status` and `Contact` name
- * destinations that do not exist yet, so they are rendered as text until
- * somebody supplies a URL: a footer link to a 404 is worse than one that is
- * plainly not wired.
+ * The labels are the design's, read off the exported frame. One of the
+ * footer's six — `Status` — names a destination that does not exist (no
+ * status page anywhere), so it is rendered as text until somebody supplies a
+ * URL: a footer link to a 404 is worse than one that is plainly not wired.
+ * `Contact` got its URL in task 0301, `Privacy policy` its page in 0303.
  */
 
 /**
@@ -39,49 +49,91 @@ import rumblefishLogo from '../assets/rumblefish-logo.svg';
 import sorobanScanIcon from '../assets/sorobanscan-icon.svg';
 import sorobanScanWordmark from '../assets/sorobanscan-wordmark.svg';
 
-/** In-page destinations, in the order the sections appear. */
-const NAV = [
+/**
+ * The bar's three links: two in-page destinations, in the order the sections
+ * appear, and one route. "Quick Start" was the `#get-started` anchor — right
+ * while the four-step section was all the name could mean, and wrong once
+ * the page of that name existed (task 0193): a visitor on the API reference
+ * who clicked it landed on the landing page's marketing section (task 0301).
+ */
+const NAV: readonly (
+  | { label: string; href: string; to?: undefined }
+  | { label: string; to: string; href?: undefined }
+)[] = [
   { label: 'Features', href: '#features' },
-  // In-page, not the OpenAPI document: "Quick Start" names the four-step
-  // section that gets a visitor from nothing to a key, and sending it out to
-  // a JSON file would be a link that answers a different question.
-  { label: 'Quick Start', href: '#get-started' },
+  { label: 'Quick Start', to: QUICKSTART_ROUTE },
   { label: 'FAQ', href: '#faq' },
-] as const;
+];
+
+/**
+ * The bar's secondary links. Muted until hovered: beside a yellow CTA they
+ * should not compete with it, which is what the design does by giving them
+ * no colour of their own. Hidden on a phone, where the menu carries them.
+ */
+const navLinkSx = {
+  display: { xs: 'none', sm: 'inline' },
+  color: color.text.secondary,
+  fontFamily: font.secondary,
+  fontSize: '0.875rem',
+  fontWeight: 500,
+  '&:hover': { color: color.text.primary },
+} as const;
+
+/** The same links stacked in the phone's menu, at a size a thumb can hit. */
+const menuLinkSx = {
+  py: 1.5,
+  color: color.text.primary,
+  fontFamily: font.secondary,
+  fontSize: '1.125rem',
+  fontWeight: 500,
+  textDecoration: 'none',
+} as const;
 
 export function Wordmark() {
   return (
-    <Stack direction="row" spacing={0.75} alignItems="center">
-      <Box
-        component="img"
-        src={sorobanScanIcon}
-        // Decorative: the wordmark beside it carries the name, and announcing
-        // the mark as well would say "SorobanScan" twice.
-        alt=""
-        aria-hidden
-        sx={{ height: 19, width: 'auto', display: 'block' }}
-      />
-      <Box
-        component="img"
-        src={sorobanScanWordmark}
-        // The product's name, so it is the `alt` text — not "logo", which tells
-        // a screen-reader user the shape of the thing rather than what it says.
-        alt="SorobanScan"
-        sx={{ height: 24, width: 'auto', display: 'block' }}
-      />
-    </Stack>
+    // A link to the explorer's home, in every bar that carries the mark
+    // (task 0301) — it was two images and led nowhere. Named by the
+    // wordmark's `alt`, so a screen reader hears "SorobanScan", once.
+    <Link
+      href={EXPLORER}
+      sx={{ display: 'inline-flex', textDecoration: 'none' }}
+    >
+      <Stack direction="row" spacing={0.75} alignItems="center">
+        <Box
+          component="img"
+          src={sorobanScanIcon}
+          // Decorative: the wordmark beside it carries the name, and announcing
+          // the mark as well would say "SorobanScan" twice.
+          alt=""
+          aria-hidden
+          sx={{ height: 19, width: 'auto', display: 'block' }}
+        />
+        <Box
+          component="img"
+          src={sorobanScanWordmark}
+          // The product's name, so it is the `alt` text — not "logo", which tells
+          // a screen-reader user the shape of the thing rather than what it says.
+          alt="SorobanScan"
+          sx={{ height: 24, width: 'auto', display: 'block' }}
+        />
+      </Stack>
+    </Link>
   );
 }
 
 /** The footer's mark. Same provenance as the header's. */
 export function RumbleFishMark({ height = 32 }: { height?: number }) {
   return (
-    <Box
-      component="img"
-      src={rumblefishLogo}
-      alt="Rumble Fish — software development"
-      sx={{ height, width: 'auto', display: 'block' }}
-    />
+    // The mark is the company's link, like the `rumblefish.dev` text beside
+    // it in the footer (task 0301). Named by the image's `alt`.
+    <Link href={RUMBLEFISH_SITE} sx={{ display: 'inline-flex' }}>
+      <Box
+        component="img"
+        src={rumblefishLogo}
+        alt="Rumble Fish — software development"
+        sx={{ height, width: 'auto', display: 'block' }}
+      />
+    </Link>
   );
 }
 
@@ -91,10 +143,10 @@ export function Navbar({
    * Whether the in-page sections the links name are on THIS page.
    *
    * ⚠️ The quick start renders this same bar for a signed-out visitor, and its
-   * sections are `prerequisites`…`next` — none of `#features`, `#get-started`
-   * or `#faq` exists there, so all three links did nothing at all when
-   * clicked. Off the landing page they become links back to it, at the same
-   * anchors, which is where those sections actually are.
+   * sections are `prerequisites`…`next` — neither `#features` nor `#faq`
+   * exists there, so the anchor links did nothing at all when clicked. Off
+   * the landing page they become links back to it, at the same anchors,
+   * which is where those sections actually are.
    */
   inPage = true,
 }: {
@@ -128,25 +180,32 @@ export function Navbar({
         >
           <Wordmark />
           <Stack direction="row" alignItems="center" spacing={{ xs: 1, sm: 2 }}>
-            {NAV.map(({ label, href: anchor }) => (
-              <Link
-                key={label}
-                href={navHref(anchor)}
-                // Muted until hovered: three secondary links beside a yellow
-                // CTA should not compete with it, which is what the design
-                // does by giving them no colour of their own.
-                sx={{
-                  display: { xs: 'none', sm: 'inline' },
-                  color: color.text.secondary,
-                  fontFamily: font.secondary,
-                  fontSize: '0.875rem',
-                  fontWeight: 500,
-                  '&:hover': { color: color.text.primary },
-                }}
-              >
-                {label}
+            {NAV.map((item) =>
+              item.to !== undefined ? (
+                <Link
+                  key={item.label}
+                  component={RouterLink}
+                  to={item.to}
+                  sx={navLinkSx}
+                >
+                  {item.label}
+                </Link>
+              ) : (
+                <Link key={item.label} href={navHref(item.href)} sx={navLinkSx}>
+                  {item.label}
+                </Link>
+              ),
+            )}
+            {/* A key holder in a fresh browser has a key and no session, and
+                "Get API Key" reads as "make one". The word for what they want
+                is here (task 0301); the button keeps the frame's promise to a
+                first-time visitor. Same route: `/login` signs in and forwards
+                to the dashboard. */}
+            {canOfferKey && (
+              <Link component={RouterLink} to={LOGIN_ROUTE} sx={navLinkSx}>
+                Sign in
               </Link>
-            ))}
+            )}
             {/* Same rule as the hero's: no offer until the probe says the
                 portal is open. See `LandingPage`. */}
             {canOfferKey && (
@@ -190,7 +249,7 @@ export function Navbar({
 
 /**
  * The phone's navigation: a menu button in the bar, and a panel that drops
- * from the top with the three in-page links and the call to action.
+ * from the top with the bar's links, "Sign in" and the call to action.
  *
  * Below `sm` the bar hides its links (there is no room for three beside the
  * wordmark) and, without this, hid the only way to reach a section other
@@ -275,23 +334,38 @@ function MobileMenu({
             spacing={0.5}
             sx={{ pt: 1, pb: 3 }}
           >
-            {NAV.map(({ label, href: anchor }) => (
+            {NAV.map((item) =>
+              item.to !== undefined ? (
+                <Link
+                  key={item.label}
+                  component={RouterLink}
+                  to={item.to}
+                  onClick={close}
+                  sx={menuLinkSx}
+                >
+                  {item.label}
+                </Link>
+              ) : (
+                <Link
+                  key={item.label}
+                  href={navHref(item.href)}
+                  onClick={close}
+                  sx={menuLinkSx}
+                >
+                  {item.label}
+                </Link>
+              ),
+            )}
+            {canOfferKey && (
               <Link
-                key={label}
-                href={navHref(anchor)}
+                component={RouterLink}
+                to={LOGIN_ROUTE}
                 onClick={close}
-                sx={{
-                  py: 1.5,
-                  color: color.text.primary,
-                  fontFamily: font.secondary,
-                  fontSize: '1.125rem',
-                  fontWeight: 500,
-                  textDecoration: 'none',
-                }}
+                sx={menuLinkSx}
               >
-                {label}
+                Sign in
               </Link>
-            ))}
+            )}
             {canOfferKey && (
               <Button
                 variant="contained"
@@ -328,9 +402,9 @@ export function Footer({ canOfferKey }: { canOfferKey: boolean }) {
     // the page already goes through `RouterLink`; this one did not.
     ...(canOfferKey ? [{ label: 'Dashboard', to: DASHBOARD_ROUTE }] : []),
     { label: 'Status' },
-    { label: 'Contact' },
-    { label: 'rumblefish.dev', href: 'https://rumblefish.dev' },
-    { label: 'Privacy policy' },
+    { label: 'Contact', href: RUMBLEFISH_CONTACT },
+    { label: 'rumblefish.dev', href: RUMBLEFISH_SITE },
+    { label: 'Privacy policy', to: PRIVACY_POLICY_ROUTE },
   ];
 
   return (

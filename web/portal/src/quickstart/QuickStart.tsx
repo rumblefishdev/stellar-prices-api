@@ -59,7 +59,7 @@ import { panelBorder } from '../landing/DashboardPanel';
  */
 
 const BASE_URL = PUBLIC_API_BASE_URL;
-const PLACEHOLDER_KEY = 'YOUR_API_KEY';
+export const PLACEHOLDER_KEY = 'YOUR_API_KEY';
 
 /** The sections, in page order. Doubles as the left-hand table of contents. */
 const SECTIONS = [
@@ -69,6 +69,7 @@ const SECTIONS = [
   { id: 'first-request', label: 'First request' },
   { id: 'response', label: 'Understanding the response' },
   { id: 'endpoints', label: 'Endpoints' },
+  { id: 'examples', label: 'Example queries' },
   { id: 'errors', label: 'Error handling' },
   { id: 'rate-limits', label: 'Rate limits' },
   { id: 'sdk', label: 'SDK examples' },
@@ -432,6 +433,16 @@ export const RESPONSE_FIELDS: readonly {
     dot: STR,
     meaning: 'priced, carried or unpriced — what kind of price this is',
   },
+  {
+    // `PriceResponse` requires it, and the table went without it until task
+    // 0233's diff of this page against `/api-docs-json` (2026-09-22).
+    key: 'method',
+    value: <Tok c={STR}>&quot;traded&quot;</Tok>,
+    raw: '"traded"',
+    dot: STR,
+    meaning:
+      "How price_usd was obtained: traded (this asset's own trades) or oracle (an oracle rate, currently USDC only); empty when no priced trade fell in the window",
+  },
 ];
 
 export const RESPONSE_TEXT = `{\n${RESPONSE_FIELDS.map(
@@ -651,7 +662,9 @@ const ERROR_CODES: readonly {
     status: 500,
     tone: 'muted',
     when: 'Server error — temporary issue on our side',
-    fix: 'Retry with exponential backoff. Check the status page for incidents.',
+    // No status page exists (task 0301 looked); a sentence that names one
+    // is a promise the page cannot keep.
+    fix: 'Retry with exponential backoff.',
   },
 ];
 
@@ -674,6 +687,13 @@ const ERROR_CODES: readonly {
  * 100 000 requests. The page does not show a body it has not seen.
  */
 const RATE_LIMIT_BODY = `// HTTP 429 Too Many Requests\n// x-amzn-errortype: TooManyRequestsException\n{\n  "message": "Too Many Requests"\n}`;
+
+/**
+ * The free plan's burst — `pricingApiFreePlanBurstLimit` in
+ * `infra/envs/production.json`. A literal because the portal's config probe
+ * reports the per-second rate only; the plan has not moved since task 0157.
+ */
+const FREE_PLAN_BURST = 5;
 
 const SDK_LANGS = [
   { key: 'js', label: 'JavaScript' },
@@ -787,6 +807,99 @@ const SDK_TITLE: Record<SdkLang, string> = {
 };
 
 /**
+ * The four calls to make first (task 0163): a credit asset by CODE:ISSUER,
+ * candles over a window, several prices in one request, and the keyless
+ * liveness probe. Each is meant to run as it stands once the key is real, so
+ * nothing is elided — the USDC issuer is the full G… address — and the page
+ * lists them in the order to run them: one after another, inside a free key's
+ * burst of five. `QuickStart.live.spec.tsx` runs each snippet's copy text
+ * against production, gated on `PRICES_API_KEY`; task 0164 repeats the same
+ * commands as its end-to-end check.
+ */
+const USDC = 'USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
+
+/** `/health` sits at the API's root, outside the versioned base. */
+const HEALTH_URL = `${BASE_URL.replace(/\/v1$/, '')}/health`;
+
+type ExampleKey = 'price' | 'ohlcv' | 'batch' | 'health';
+/** Page order — also the order to run them in. */
+const EXAMPLE_KEYS: readonly ExampleKey[] = [
+  'price',
+  'ohlcv',
+  'batch',
+  'health',
+];
+
+/**
+ * The path template each example calls — for `QuickStart.spec.tsx`, which
+ * holds the snippet's URL against it and finds it in the OpenAPI document.
+ */
+export const EXAMPLE_PATHS: Record<ExampleKey, string> = {
+  price: '/v1/assets/{id}/price',
+  ohlcv: '/v1/assets/{id}/ohlcv',
+  batch: '/v1/prices/batch',
+  health: '/health',
+};
+
+const EXAMPLE_TITLE: Record<ExampleKey, string> = {
+  price: 'GET /assets/{id}/price — one credit asset, by CODE:ISSUER',
+  ohlcv: 'GET /assets/{id}/ohlcv — hourly candles for the last 7 days',
+  batch: 'POST /prices/batch — several prices in one request',
+  health: 'GET /health — no key needed',
+};
+
+export const EXAMPLES: Record<ExampleKey, Snippet> = {
+  price: {
+    text: `curl "${BASE_URL}/assets/${USDC}/price" \\\n  -H "x-api-key: ${PLACEHOLDER_KEY}"`,
+    view: (
+      <>
+        <Tok c={MUTED}>curl </Tok>
+        <Tok c={NUM}>{`"${BASE_URL}/assets/${USDC}/price"`}</Tok>
+        {' \\\n  -H '}
+        <Tok c={STR}>&quot;x-api-key: {PLACEHOLDER_KEY}&quot;</Tok>
+      </>
+    ),
+  },
+  ohlcv: {
+    text: `curl "${BASE_URL}/assets/native/ohlcv?timeframe=7d&granularity=1h" \\\n  -H "x-api-key: ${PLACEHOLDER_KEY}"`,
+    view: (
+      <>
+        <Tok c={MUTED}>curl </Tok>
+        <Tok c={NUM}>
+          {`"${BASE_URL}/assets/native/ohlcv?timeframe=7d&granularity=1h"`}
+        </Tok>
+        {' \\\n  -H '}
+        <Tok c={STR}>&quot;x-api-key: {PLACEHOLDER_KEY}&quot;</Tok>
+      </>
+    ),
+  },
+  batch: {
+    text: `curl -X POST "${BASE_URL}/prices/batch" \\\n  -H "x-api-key: ${PLACEHOLDER_KEY}" \\\n  -H "content-type: application/json" \\\n  -d '{"assets": ["native", "${USDC}"]}'`,
+    view: (
+      <>
+        <Tok c={MUTED}>curl -X POST </Tok>
+        <Tok c={NUM}>{`"${BASE_URL}/prices/batch"`}</Tok>
+        {' \\\n  -H '}
+        <Tok c={STR}>&quot;x-api-key: {PLACEHOLDER_KEY}&quot;</Tok>
+        {' \\\n  -H '}
+        <Tok c={STR}>&quot;content-type: application/json&quot;</Tok>
+        {' \\\n  -d '}
+        <Tok c={STR}>{`'{"assets": ["native", "${USDC}"]}'`}</Tok>
+      </>
+    ),
+  },
+  health: {
+    text: `curl -i "${HEALTH_URL}"`,
+    view: (
+      <>
+        <Tok c={MUTED}>curl -i </Tok>
+        <Tok c={NUM}>{`"${HEALTH_URL}"`}</Tok>
+      </>
+    ),
+  },
+};
+
+/**
  * Every `Snippet` on this page, for the drift test — see the note on `Snippet`.
  *
  * Exported for the spec alone. A new snippet table that is not listed here is
@@ -795,8 +908,19 @@ const SDK_TITLE: Record<SdkLang, string> = {
  */
 export const SNIPPET_TABLES: Record<string, Record<string, Snippet>> = {
   FIRST_REQUEST,
+  EXAMPLES,
   SDK,
 };
+
+/**
+ * Every path this page names — the endpoint list and the examples — for
+ * `QuickStart.spec.tsx` to find in the committed OpenAPI document. Task 0233's
+ * first criterion, as a test rather than a one-off diff.
+ */
+export const DOCUMENTED_PATHS: readonly string[] = [
+  ...ENDPOINTS.map((e) => `/v1${e.path}`),
+  ...Object.values(EXAMPLE_PATHS),
+];
 
 /* -------------------------------------------------------------------------- */
 /* Sections                                                                   */
@@ -818,7 +942,8 @@ function Prerequisites() {
           >
             Stellar Discord server
           </Link>
-          .
+          . A Discord account created moments ago is turned away for a short
+          while.
         </>
       ),
     },
@@ -905,7 +1030,7 @@ function Authentication() {
     <DocSection
       id="authentication"
       title="Authentication"
-      lede="Every request must include your API key in the x-api-key header. There is no other authentication method."
+      lede="Every /v1 request must include your API key in the x-api-key header. There is no other authentication method. Two routes take no key at all: /health and /api-docs-json."
     >
       <DocCard title="Required header">
         <Stack spacing={2} sx={{ p: 2 }}>
@@ -917,14 +1042,27 @@ function Authentication() {
               gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' },
             }}
           >
+            {/* The page's placeholder, not the frame's `sf_live_…` — the
+                design's shape for a key, not one this API issues (task 0233). */}
             <Verdict tone="ok" label="Correct">
-              -H &quot;x-api-key: sf_live_k8mN...&quot;
+              -H &quot;x-api-key: {PLACEHOLDER_KEY}&quot;
             </Verdict>
             <Verdict tone="bad" label="Wrong — returns 403">
-              -H &quot;Authorization: Bearer sf_live...&quot;
+              -H &quot;Authorization: Bearer {PLACEHOLDER_KEY}&quot;
             </Verdict>
           </Box>
         </Stack>
+      </DocCard>
+      {/* One paragraph the frame does not have (task 0163): the portal's
+          audience includes frontend developers, and the key is a bearer
+          credential with a quota on it. */}
+      <DocCard title="Keep the key on your side">
+        <Typography variant="body1" sx={{ p: 2, color: color.text.tertiary }}>
+          The key is a bearer credential with a monthly quota attached: whoever
+          reads it can spend it. Do not ship it in a browser bundle or a mobile
+          app — call the API from your own backend and pass on only what your
+          page needs.
+        </Typography>
       </DocCard>
     </DocSection>
   );
@@ -1115,7 +1253,7 @@ function Endpoints() {
     <DocSection
       id="endpoints"
       title="Endpoints"
-      lede="All endpoints require the x-api-key header. Click any endpoint to see an example response."
+      lede="Every endpoint here lives under /v1 and takes the x-api-key header. Click any endpoint to see an example response."
     >
       <Stack spacing={1.5}>
         {ENDPOINTS.map(({ method, path, summary, example }) => {
@@ -1207,6 +1345,31 @@ function Endpoints() {
             </Box>
           );
         })}
+      </Stack>
+    </DocSection>
+  );
+}
+
+function Examples() {
+  return (
+    <DocSection
+      id="examples"
+      title="Example queries"
+      lede="The four calls to make first, each one runnable as it stands once the key is yours. Run them one after another: a free key allows a burst of five requests, then one per second."
+    >
+      <Stack spacing={2}>
+        {EXAMPLE_KEYS.map((k) => (
+          <DocCard
+            key={k}
+            title={EXAMPLE_TITLE[k]}
+            copy={{
+              text: EXAMPLES[k].text,
+              label: `${EXAMPLE_TITLE[k]} example`,
+            }}
+          >
+            <Code>{EXAMPLES[k].view}</Code>
+          </DocCard>
+        ))}
       </Stack>
     </DocSection>
   );
@@ -1324,7 +1487,7 @@ function RateLimits({ rateLimit }: { rateLimit?: number }) {
       label: 'Rate limit',
       value: String(perSecond),
       unit: 'req / second',
-      note: `${perSecond * 60} requests per minute`,
+      note: `${perSecond * 60} requests per minute, up to ${FREE_PLAN_BURST} at once`,
     },
     {
       label: 'Monthly quota',
@@ -1398,6 +1561,16 @@ function RateLimits({ rateLimit }: { rateLimit?: number }) {
           </Stack>
         ))}
       </Box>
+      {/* What task 0157 measured on the production plan: a cache miss meets
+          the 1 req/s bucket at once, and a cache hit is never rejected at any
+          rate it could produce. Whether a hit still spends a bucket token or a
+          quota unit was NOT settled by that run, so the page says only what
+          was seen. */}
+      <Typography variant="body1" sx={{ color: color.text.tertiary }}>
+        The per-second limit is a token bucket: up to {FREE_PLAN_BURST} requests
+        may go out at once, then one per second. A response the gateway serves
+        from its cache is never throttled.
+      </Typography>
       <Typography
         variant="body1"
         sx={{
@@ -1555,6 +1728,7 @@ export function QuickStart({ rateLimit }: { rateLimit?: number }) {
       <FirstRequest />
       <Response />
       <Endpoints />
+      <Examples />
       <Errors />
       <RateLimits rateLimit={rateLimit} />
       <Sdk />

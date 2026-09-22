@@ -3,6 +3,7 @@ import * as chatbot from 'aws-cdk-lib/aws-chatbot';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cw_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
@@ -10,6 +11,7 @@ import type { Construct } from 'constructs';
 
 import type { EnvironmentConfig } from '../types.js';
 import {
+  lambdaLogGroupName,
   workerErrorAlarmName,
   workerFunctionName,
   SCHEDULED_WORKERS,
@@ -313,6 +315,21 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly ledgerProcessorLagAlarm: cloudwatch.Alarm;
   /** Live ledger-processor invocation-error alarm (task 0056 finding B). */
   public readonly ledgerProcessorErrorAlarm: cloudwatch.Alarm;
+  /**
+   * api-handler invocation-error alarm (task 0249). One router serves every
+   * route group (ADR 0008), so this is `/v1`'s error metric.
+   */
+  public readonly apiHandlerErrorAlarm: cloudwatch.Alarm;
+  /**
+   * api-handler `portal closed at cold start` alarm (task 0249): the portal
+   * is closed in that execution environment.
+   */
+  public readonly apiHandlerPortalClosedAlarm: cloudwatch.Alarm;
+  /**
+   * API Gateway 5xx alarm (task 0249): counts router-returned 5xx and Lambda
+   * throttles, which AWS/Lambda `Errors` does not.
+   */
+  public readonly api5xxAlarm: cloudwatch.Alarm;
   /** Task 0282: the reconcile loop flushed a PARTIAL minute to avoid deadlocking. */
   public readonly ledgerProcessorForcedPartialFlushAlarm: cloudwatch.Alarm;
   /** Task 0291: live dropped trades from a pool missing from `pool_registry`. */
@@ -1164,6 +1181,122 @@ export class ObservabilityStack extends cdk.Stack {
     this.ledgerProcessorErrorAlarm.addAlarmAction(snsAction);
     this.ledgerProcessorErrorAlarm.addOkAction(snsAction);
 
+    // Task 0249 — the api-handler had no `Errors` alarm at all. On
+    // 2026-09-02 an init panic (main.rs) failed 7 invocations in one 5-min
+    // window and paged nobody; this alarm would have fired on it. It is
+    // hand-rolled like ledgerProcessorErrorAlarm above, so the liveness
+    // sentence is written by hand (task 0223) rather than appended by a
+    // shared builder.
+    //
+    // compute-stack.ts:755 hard-codes the same function name; there is no
+    // exported helper, and importing ComputeStack's function reference would
+    // create a cross-stack reference this stack refuses everywhere else (see
+    // the alarm-strip comment below) — so a name string only.
+    const apiHandlerFnName = `prices-${config.envName}-api-handler`;
+    this.apiHandlerErrorAlarm = new cloudwatch.Alarm(
+      this,
+      'ApiHandlerErrorAlarm',
+      {
+        alarmName: `prices-${config.envName}-api-handler-errors`,
+        alarmDescription: `The api-handler Lambda is failing invocations (AWS/Lambda Errors ≥ 1 over 5 min): an init failure, a panic under a request, or an error returned by the handler. One router serves every route group (ADR 0008), so this is /v1's invocation-error metric — it does NOT count a 5xx the router returns itself or a throttled request, which is prices-${config.envName}-api-5xx instead. Check the api-handler logs (/aws/lambda/prices-${config.envName}-api-handler). ⚠ OK here also means nothing ran: this Lambda has NO liveness alarm — a quiet API legitimately serves no request for hours (1–7 requests on some days), so zero invocations is not a fault (task 0223).`,
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/Lambda',
+          metricName: 'Errors',
+          dimensionsMap: { FunctionName: apiHandlerFnName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.apiHandlerErrorAlarm.addAlarmAction(snsAction);
+    this.apiHandlerErrorAlarm.addOkAction(snsAction);
+
+    new cdk.CfnOutput(this, 'ApiHandlerErrorAlarmName', {
+      value: this.apiHandlerErrorAlarm.alarmName,
+      description: `api-handler invocation-error alarm for ${config.envName}`,
+    });
+
+    // Task 0249 — the portal-closed signal. `main.rs` uses
+    // `tracing_subscriber::fmt().json()` without `flatten_event`, and the
+    // Lambda Text log format passes the line through raw, so the key is
+    // `$.fields.message` — confirmed against a real 2026-09-18 production
+    // line. The prefix wildcard keeps the match independent of the rest of
+    // the sentence (main.rs:58-63). Namespace follows this stack's
+    // `Prices/<Component>` convention. A metric filter publishes on behalf
+    // of CloudWatch Logs and needs no IAM grant.
+    //
+    // The prefix below and the log line in main.rs are tied together by
+    // `tools/scripts/portal-closed-filter-guard.test.mjs` — reword one
+    // without the other and that test fails, instead of the alarm going
+    // quiet. Expect this alarm during a load test: both times it would have
+    // fired so far (2026-09-18, 45 and 198 lines) were bursts of cold starts
+    // throttling the Parameter Store reads — real closures, not noise.
+    //
+    // Log group imported BY NAME, not by ComputeStack construct reference —
+    // ComputeStack creates it (compute-stack.ts:479); a construct reference
+    // would couple the two stacks, which this stack's header already
+    // anticipated this exact use to avoid. The log group must exist before
+    // this stack deploys (Compute first — the existing deploy order).
+    const apiHandlerLogGroup = logs.LogGroup.fromLogGroupName(
+      this,
+      'ApiHandlerLogGroup',
+      lambdaLogGroupName(config.envName, 'api-handler'),
+    );
+    const portalClosedFilter = new logs.MetricFilter(
+      this,
+      'ApiHandlerPortalClosedFilter',
+      {
+        logGroup: apiHandlerLogGroup,
+        filterPattern: logs.FilterPattern.stringValue(
+          '$.fields.message',
+          '=',
+          'portal closed at cold start*',
+        ),
+        metricNamespace: 'Prices/ApiHandler',
+        metricName: 'PortalClosedAtColdStart',
+        metricValue: '1',
+        // No defaultValue: missing data must stay missing, so the alarm
+        // below reads OK on a quiet log group rather than a false zero.
+      },
+    );
+    this.apiHandlerPortalClosedAlarm = new cloudwatch.Alarm(
+      this,
+      'ApiHandlerPortalClosedAlarm',
+      {
+        alarmName: `prices-${config.envName}-api-handler-portal-closed`,
+        // MetricFilter.metric() defaults to statistic 'avg'; pass Sum
+        // explicitly (RESEARCH §2).
+        metric: portalClosedFilter.metric({
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        alarmDescription: `The api-handler logged "portal closed at cold start": a portal source (the Discord OAuth secret, the free-plan id, or an eligibility parameter) failed to load at cold start, so the portal is CLOSED in that execution environment until it is recycled, while /v1 is unaffected. Closure is per execution environment, so /config may answer enabled: false from one environment and true from another. Fix: read the line's error field, which names the failing variable, fix that secret or parameter, then recycle the environments (redeploy, or bump the function configuration). The alarm returns to OK one period later, silently: OK does NOT mean the portal reopened. Runbook docs/runbooks/portal-oauth-deploy-prep.md; task 0249.`,
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        // Missing = no closure logged = OK.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    // Alarm action only, no OK action. The line is logged once, at the cold
+    // start that closed the portal; the next 5-min window is empty, so the
+    // alarm returns to OK while the environment is still closed. An OK
+    // notification would read as "recovered" when nothing was.
+    this.apiHandlerPortalClosedAlarm.addAlarmAction(snsAction);
+
+    new cdk.CfnOutput(this, 'ApiHandlerPortalClosedAlarmName', {
+      value: this.apiHandlerPortalClosedAlarm.alarmName,
+      description: `api-handler portal-closed-at-cold-start alarm for ${config.envName}`,
+    });
+
     // Task 0282 — the forced-progress escape hatch fired. The reconcile loop
     // may only write a minute once it has walked PAST the end of it; if the
     // whole iteration budget is spent inside ONE minute it can never do so, and
@@ -1846,6 +1979,51 @@ export class ObservabilityStack extends cdk.Stack {
         label,
         period: cdk.Duration.minutes(5),
       });
+
+    // Task 0249 / Adam 2026-09-21. Lives inside this widget-helper block only
+    // to reuse `apiDims` (the same dimensions object `apiMetric` uses, not a
+    // second copy) — it MUST stay above the strip walk below (`findAll()`)
+    // or the strip silently shrinks.
+    //
+    // Deliberately NOT `apiMetric('5XXError', 'Sum', '5xx')`: `apiMetric`
+    // sets a `label`, and aws-cdk-lib 2.257.0 renders a labeled metric's
+    // alarm as a one-entry `Metrics` math array instead of the plain
+    // Namespace/MetricName/Dimensions/Statistic form every other alarm in
+    // this stack uses (verified by a synth probe at planning).
+    //
+    // On 2026-09-03 a load run exhausted the ClickHouse read quota and the
+    // API returned 28,853 5xx over ~25 minutes while AWS/Lambda Errors stayed
+    // 0 (the router answered 5xx itself); nobody was paged, and
+    // apiHandlerErrorAlarm above could not have caught it.
+    // Lambda throttles are the other blind spot: task 0293's load test on
+    // 2026-09-18 produced 14,865 5xx that were all throttles, Errors 0.
+    // Absolute count, not a rate: traffic is sometimes 1-7 requests/day and
+    // a rate would flap. Threshold 5 sits above every stray window in the
+    // 35 days read on 2026-09-21 (1, 2 and 4).
+    this.api5xxAlarm = new cloudwatch.Alarm(this, 'Api5xxAlarm', {
+      alarmName: `prices-${config.envName}-api-5xx`,
+      alarmDescription: `API Gateway returned >= 5 5xx in 5 min (AWS/ApiGateway 5XXError Sum, ApiName + Stage). Covers what prices-${config.envName}-api-handler-errors cannot see: 5xx the router returns itself (2026-09-03: a load run exhausted the ClickHouse read quota, 28,853 5xx in ~25 min with Errors at 0, nobody paged), and Lambda throttles. An absolute count, not a rate, because traffic is sometimes 1-7 requests a day and a rate would flap; 5 sits above every stray window seen in 35 days (1, 2 and 4). First check the api-handler logs and ClickHouse latency, then Lambda Throttles / ConcurrentExecutions for prices-${config.envName}-api-handler. An init panic fires this alarm and the Errors alarm together. The per-invocation Errors alarm stays for a single init crash or panic at low traffic. Task 0249.`,
+      metric: new cloudwatch.Metric({
+        namespace: 'AWS/ApiGateway',
+        metricName: '5XXError',
+        dimensionsMap: apiDims,
+        statistic: 'Sum',
+        period: cdk.Duration.minutes(5),
+      }),
+      threshold: 5,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    this.api5xxAlarm.addAlarmAction(snsAction);
+    this.api5xxAlarm.addOkAction(snsAction);
+
+    new cdk.CfnOutput(this, 'Api5xxAlarmName', {
+      value: this.api5xxAlarm.alarmName,
+      description: `API Gateway 5xx alarm for ${config.envName}`,
+    });
 
     const chWriteLatency = (statistic: string): cloudwatch.Metric =>
       new cloudwatch.Metric({

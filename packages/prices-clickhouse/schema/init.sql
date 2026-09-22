@@ -649,10 +649,14 @@ SETTINGS index_granularity = 8192;
 -- output of the in-window registry so a partial re-backfill (a mid-history
 -- window) or the live processor can LOAD it instead of re-deriving from Soroban
 -- activation (this inverts task 0069: registry-as-output, not required-input).
--- venue = 'soroswap' | 'phoenix' | 'aquarius'. token0/token1 are the Soroswap
--- pair tokens (needed because a Soroswap swap event omits them); pool_type /
--- wasm_hash are Phoenix pool details; both default empty for venues that don't
--- use them. ReplacingMergeTree(updated_at) on contract_id collapses re-runs;
+-- venue = 'soroswap' | 'phoenix' | 'aquarius' | 'sushiswap' (task 0290).
+-- token0/token1 are the pair tokens of the two pair-backed venues — Soroswap
+-- (from `new_pair`) and SushiSwap V3 (from `pool_created`) — needed because
+-- their swap events omit them; pool_type / wasm_hash are Phoenix pool details;
+-- both default empty for venues that don't use them. A pair-backed row with
+-- blank tokens does NOT resolve: it loads its venue only, and the pool is
+-- reported in `prices.unresolved_pools` rather than priced against an empty
+-- asset. ReplacingMergeTree(updated_at) on contract_id collapses re-runs;
 -- read with FINAL.
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS prices.pool_registry (

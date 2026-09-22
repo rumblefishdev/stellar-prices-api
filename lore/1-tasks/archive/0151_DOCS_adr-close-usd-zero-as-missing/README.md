@@ -2,7 +2,7 @@
 id: "0151"
 title: "ADR: close_usd's zero-as-missing sentinel is what makes the whole 0144 bug class expressible"
 type: DOCS
-status: active
+status: completed
 assignee: akot
 related_adr: ["0287", "0292"]
 related_tasks: ["0144", "0135", "0146", "0147", "0148", "0149", "0138", "0154", "0111", "0286", "0167"]
@@ -193,6 +193,25 @@ history:
       all five enrichment statements pass `close` and `pf_trade_count` through
       unchanged. `ch_enrich_it` re-run on the branch AFTER merging `develop`:
       58/58. Stale counts fixed (the PR adds nine ITs, not six).
+  - date: "2026-09-22"
+    status: completed
+    who: akot
+    note: >
+      Closed by the operator with the ADR and its guardrails on `develop`
+      (PR #323, merged 2026-09-18 as `7c0aa8f`). Delivered: ADR 0292 (six
+      verdicts accepted 2026-09-17, six alternatives recorded), the guardrail
+      enumeration in `docs/database-schema/close-usd-zero-guardrails.md` with
+      seven guard tests each seen RED first, the three-invariant zero-invariant
+      scan in `rollup-freshness-probe` with its alarms and runbook, the
+      `views.sql` header corrected, `init.sql`'s column comment and [[0144]]
+      cross-linked; nine ITs added, `ch_enrich_it` 58/58 after merging
+      `develop`. All seven ACs met. Not waited for: the probe's first production
+      datapoint — `CandleZeroInvariantViolations` had none on 2026-09-22, because
+      the check ships with the Observability/EventBridge step of the 2026-09
+      rollout, after [[0286]]'s schema step (`.planning/rollout-2026-09/ROLLOUT.md`
+      step H records where to verify it). The two ⛔ rows the guardrail doc marks
+      **unowned** (review findings WR-01 and WR-07, both predating this task)
+      stay unowned by decision — no follow-up task spawned.
 ---
 
 # ADR — `close_usd` zero-as-missing

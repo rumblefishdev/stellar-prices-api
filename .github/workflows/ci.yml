@@ -60,6 +60,13 @@ jobs:
               # the thing both jobs depend on is the one file CI never
               # exercises.
               - 'tools/scripts/**'
+              # The ClickHouse integration tests (task 0275) run against the
+              # server this file pins, and one of them needs the reverse proxy
+              # in scripts/. Without these, a PR that bumps the pin or breaks
+              # the proxy runs no job at all, and the thing the tests depend on
+              # is the one file CI never exercises.
+              - 'docker-compose.yml'
+              - 'scripts/**'
             typescript:
               - 'libs/**'
               - 'infra/**'
@@ -75,6 +82,11 @@ jobs:
               - 'nx.json'
               - '.github/workflows/ci.yml'
               - 'tools/scripts/**'
+              # The portal-closed alarm's metric filter matches a log line this
+              # file writes (task 0249). The guard that ties the two together
+              # is `tools/scripts/portal-closed-filter-guard.test.mjs`, run by
+              # this job — so a PR that only rewords the line must run it.
+              - 'packages/prices-api/src/main.rs'
 
   typescript:
     name: TypeScript (lint, build, typecheck, test)
@@ -109,6 +121,12 @@ jobs:
       # per-stack deploy is `--exclusively`). As an Nx target and not a bare
       # step so that `verify:staged` / `verify:push` run it too, on the pinned
       # Node: `node --test <dir>` works on 26 and fails on the 22 CI uses.
+      #
+      # That target's glob is `tools/scripts/**/*.test.mjs`, so since 0141
+      # landed it also covers the guard behind the rust job's integration-test
+      # step (task 0275, decision 13) — both suites in this one step. `npm run
+      # ignored-tests:verify-guard` remains for running that half alone by
+      # hand.
       - run: npx nx run-many -t lint build typecheck test
 
       # Cheap counterpart to the rust job's build+verify+synth guard.
@@ -144,6 +162,29 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
+
+      # ClickHouse for the integration-test step after `cargo test` (task
+      # 0275), started this early so the container's startup and its own
+      # initdb overlap the toolchain install and the compile below (the image
+      # pull itself happens inside this step). The pin is
+      # docker-compose.yml's — one copy, asserted by `preflight` later. The
+      # `clickhouse-data` volume must NEVER be cached or restored: initdb runs
+      # only on an empty data dir, and a warm volume skips init.sql and
+      # `CREATE DATABASE prices` while printing `Skipping initialization`.
+      # Bounded like every other ClickHouse step: the image pull happens
+      # here, and a stalled registry pull would otherwise hold the runner for
+      # the 360-minute job default. A cold pull plus `up -d` is well under 5.
+      - name: Start ClickHouse
+        timeout-minutes: 5
+        run: |
+          docker compose version
+          docker compose up -d clickhouse
+
+      # Cheap and database-free, so a bare or unknown `#[ignore]` reason, a
+      # mixed-class test target or an empty inventory fails the build before
+      # anything expensive starts. See the script's header.
+      - name: 'Classify #[ignore]d tests'
+        run: tools/scripts/ignored-tests.sh check
 
       # PINNED, and the pin is the whole point — see the cargo-lambda step.
       #
@@ -188,7 +229,83 @@ jobs:
       # `--all-targets` also lints the crate's tests; `enrichment-worker` was on
       # no clippy list at all before this (tasks 0267/0268).
       - run: cargo clippy -p enrichment-worker --features aws-mtls --all-targets --no-deps -- -D warnings
+      # ClickHouse is already listening on the tests' default URL
+      # (localhost:8123) by now. Point this step at a closed port so a
+      # ClickHouse test that loses its `#[ignore]` fails HERE, as it did
+      # before 0275, instead of passing quietly and shrinking the inventory
+      # the integration step asserts.
       - run: cargo test --workspace
+        env:
+          CLICKHOUSE_URL: http://127.0.0.1:9
+
+      # ---- ClickHouse integration tests (task 0275) ----
+      #
+      # Every `#[ignore = "requires ClickHouse …"]` test in the workspace, run
+      # here because the test binaries were just compiled. Until 0275 none of
+      # them ran in CI, so a guard such as 0215's pivot-set test could not fail
+      # the build. The set is derived, the count is asserted: see
+      # tools/scripts/ignored-tests.sh. No `continue-on-error`, ever.
+      #
+      # `--wait` alone is not readiness: the image runs initdb against a
+      # temporary server on the container's loopback, which satisfies the
+      # in-container healthcheck, and then kills it. `preflight` therefore
+      # retries from the host before asserting version() equals the
+      # docker-compose.yml pin and timezone() is UTC. `--wait-timeout` turns
+      # a server that never gets healthy into a failure instead of a hang.
+      - name: Wait for ClickHouse and assert its version
+        timeout-minutes: 5
+        env:
+          CLICKHOUSE_URL: http://localhost:8123
+        run: |
+          docker compose up -d --wait --wait-timeout 120 clickhouse
+          tools/scripts/ignored-tests.sh preflight
+
+      # The mounted init.sql creates the database but not the rollup MVs; the
+      # init binary is the one complete, idempotent bootstrap.
+      - name: Apply the ClickHouse schema
+        timeout-minutes: 10
+        env:
+          CLICKHOUSE_URL: http://localhost:8123
+        run: cargo run -q -p prices-clickhouse --bin prices-clickhouse-init -- --rollups
+
+      # `execution_bound_error_it` is vacuous without a reverse proxy in the
+      # path, as production has (task 0281). Armed, not excluded.
+      # 5, not less: the script's own ceiling is 60 attempts x (2 s curl +
+      # 1 s sleep) = 180 s plus the cold caddy pull, and a step killed before
+      # that ceiling loses the Caddyfile dump and attempt count it prints.
+      - name: Start the ClickHouse reverse proxy
+        timeout-minutes: 5
+        run: scripts/ch-proxy-0281.sh up
+
+      # One cargo invocation, serial (`--test-threads=1` — several targets
+      # share the `prices` database), red unless every derived test passed
+      # and every target printed a summary. Same command as on a workstation.
+      # Bounded: the ITs set no request timeout and the proxy allows 7200 s,
+      # so one hung query would otherwise hold the runner for the 360-minute
+      # job default — and a cancelled job skips the `failure()` log dump.
+      # Measured ~100 s of test time serially (2026-09-18).
+      - name: ClickHouse integration tests
+        timeout-minutes: 20
+        env:
+          CLICKHOUSE_URL: http://localhost:8123
+          CLICKHOUSE_PROXY_URL: http://localhost:8124
+        run: tools/scripts/ignored-tests.sh run
+
+      # The image's entrypoint echoes every decision it makes (user setup,
+      # initdb, `Skipping initialization`), so a red run is diagnosed here.
+      - name: ClickHouse and proxy logs
+        if: failure()
+        run: |
+          docker compose ps || true
+          docker compose logs clickhouse | tail -n 200 || true
+          docker logs ch-proxy-0281 2>&1 | tail -n 50 || true
+
+      # Free the runner (4 CPU / 8 GB) before the release Lambda build.
+      - name: Stop ClickHouse and the proxy
+        if: always()
+        run: |
+          scripts/ch-proxy-0281.sh down || true
+          docker compose down -v || true
 
       # The set of Lambda assets is DERIVED from the CDK source rather than
       # hand-listed here. Three hand-maintained copies (build list, verify

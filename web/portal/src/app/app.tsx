@@ -80,6 +80,7 @@ import SyncProblemRoundedIcon from '@mui/icons-material/SyncProblemRounded';
 import {
   LOGIN_ANCHOR,
   QUICKSTART,
+  RUMBLEFISH_CONTACT,
   STELLAR_DISCORD_INVITE,
   STELLAR_DISCORD_SERVER,
 } from '../landing/links';
@@ -1284,20 +1285,21 @@ function SwitchAccountDialog({
  * The refusal card's footer — the frame's "If this keeps happening, contact
  * support or check our status page."
  *
- * ⚠️ **The frame underlines both as links; here they are plain text**, and
- * that is [`Legal`]'s rule applied rather than an omission: neither a support
- * destination nor a status page exists in this build (`landing/links.ts` holds
- * every off-page destination the portal names, and neither is among them). A
- * link to a placeholder is a promise the page cannot keep, and it is a worse
- * failure here than on the legal line — this sentence is read by somebody
- * already stuck. Give this component the two URLs when they exist and the
- * words become links without moving.
+ * ⚠️ **The frame underlines both as links; "contact support" is one, "status
+ * page" is plain text**, and that is [`Legal`]'s rule applied rather than an
+ * omission: no status page exists in this build (`landing/links.ts` holds
+ * every off-page destination the portal names, and none is one). A link to a
+ * placeholder is a promise the page cannot keep, and it is a worse failure
+ * here than on the legal line — this sentence is read by somebody already
+ * stuck. "contact support" got its URL in task 0301 (`RUMBLEFISH_CONTACT`);
+ * give the other word its URL when one exists and it becomes a link without
+ * moving.
  */
 function KeepsHappening() {
   return (
     <Typography variant="body2" sx={{ color: color.text.tertiary }}>
       If this keeps happening,{' '}
-      <Box component="span" sx={UNDERLINED}>
+      <Box component="a" href={RUMBLEFISH_CONTACT} sx={UNDERLINED}>
         contact support
       </Box>{' '}
       or check our{' '}
@@ -1313,14 +1315,14 @@ function KeepsHappening() {
  * The frame's underline on a footer's named destinations — the OAuth error
  * card's "contact support" and "status page".
  *
- * ⚠️ **Underlined at Adam's instruction (2026-08-26), and still `<span>` and
- * not `<a>`**, because neither destination exists in this build —
- * `landing/links.ts` holds every off-page target the portal names and neither
- * a support address nor a status page is among them. The rule this follows:
- * a link to a placeholder is a promise the page cannot keep. The two are
- * therefore drawn as the frame draws them and are not clickable, which is a
- * known and deliberate mismatch — swap the `<span>`s for `<a>`s the day the
- * URLs land and nothing else moves. (The legal footer that used to share
+ * ⚠️ **Underlined at Adam's instruction (2026-08-26). "contact support" is an
+ * `<a>` since task 0301 (`RUMBLEFISH_CONTACT`); "status page" is still a
+ * `<span>`**, because no status page exists in this build —
+ * `landing/links.ts` holds every off-page target the portal names and none is
+ * one. The rule this follows: a link to a placeholder is a promise the page
+ * cannot keep. The status page is therefore drawn as the frame draws it and
+ * is not clickable, a known and deliberate mismatch — swap the `<span>` for
+ * an `<a>` the day the URL lands and nothing else moves. (The legal footer that used to share
  * this rule is no longer rendered at all — see the note below `UNDERLINED`.)
  */
 const UNDERLINED = {
@@ -3031,9 +3033,8 @@ function ApiKey({
                     Copy key
                   </button>
                   {/* The frame's second control, and a link because it leaves
-                      the page. Task 0163 has not landed, so `QUICKSTART` is
-                      still the OpenAPI document — one constant, one diff when
-                      it does. */}
+                      the page — the quick start route (task 0193), whose
+                      example queries are task 0163's. */}
                   <a href={QUICKSTART} data-variant="quiet">
                     View quick start
                     <ArrowBadge variant="onLight" />
@@ -4371,6 +4372,12 @@ function LoginRoute({ gate }: { gate: Gate }) {
  * landing page, which is the one journey this route exists to complete.
  */
 function DashboardRoute({ gate }: { gate: Gate }) {
+  const location = useLocation();
+  // Whether THIS mount has seen a session. Losing one is a sign-out, and a
+  // sign-out ends on the landing page — not on a sign-in card that reads as
+  // "you are not signed in" to somebody who just asked for exactly that.
+  const hadSession = useRef(false);
+  if (gate.authenticated) hadSession.current = true;
   if (gate.probe.state === 'loading' || (gate.open && !gate.settled)) {
     return (
       <LoginSection full>
@@ -4425,8 +4432,22 @@ function DashboardRoute({ gate }: { gate: Gate }) {
     );
   }
 
-  if (!gate.open || !gate.authenticated) {
+  // A closed portal has no dashboard to offer, so the landing page, which
+  // says so, is the answer. A signed-out visitor is a different case: they
+  // are one sign-in away, and `/login` forwards them back here once it has a
+  // session. Both used to go to `/`, which sent a key holder in a fresh
+  // browser from the footer's "Dashboard" straight back to the page they had
+  // clicked from (task 0301). The query rides along, as `RootRoute` forwards
+  // it: `?issue=…` is read here, and a bounce would have dropped it.
+  if (!gate.open) {
     return <Navigate to="/" replace />;
+  }
+  if (!gate.authenticated) {
+    return hadSession.current ? (
+      <Navigate to="/" replace />
+    ) : (
+      <Navigate to={`/login${location.search}`} replace />
+    );
   }
 
   const rateLimit =
@@ -4538,6 +4559,9 @@ function QuickStartRoute({ gate }: { gate: Gate }) {
  * chunk; the split is for the landing page's sake, not the reference's.
  */
 const ApiReference = lazy(() => import('../docs/ApiReference'));
+// The policy's text rides in its own chunk, like the reference: a visitor who
+// never opens it never downloads it.
+const PrivacyPolicy = lazy(() => import('../privacy/PrivacyPolicy'));
 
 /**
  * `/docs` — the API reference, the live OpenAPI document rendered in the
@@ -4580,6 +4604,41 @@ function DocsRoute({ gate }: { gate: Gate }) {
   );
 }
 
+/** The privacy policy (task 0303): the same chrome rule as the reference. */
+function PrivacyPolicyRoute({ gate }: { gate: Gate }) {
+  const signedIn = gate.open && gate.authenticated;
+  const username = signedIn
+    ? (gate.session as { state: 'ok'; session: PortalSession }).session.username
+    : undefined;
+
+  return (
+    <>
+      {signedIn ? (
+        <DashboardNavbar
+          username={username}
+          onSignOut={gate.onSignOut}
+          current="privacy-policy"
+        />
+      ) : (
+        <Navbar canOfferKey={gate.open} inPage={false} />
+      )}
+      <Suspense
+        fallback={
+          <Stack alignItems="center" sx={{ py: 12 }} aria-busy="true">
+            <CircularProgress
+              size={28}
+              aria-label="Loading the privacy policy"
+            />
+          </Stack>
+        }
+      >
+        <PrivacyPolicy />
+      </Suspense>
+      <Footer canOfferKey={signedIn} />
+    </>
+  );
+}
+
 export function App() {
   const probe = useConfigProbe();
   const open = probe.state === 'ok' && probe.config.enabled;
@@ -4602,6 +4661,10 @@ export function App() {
       <Route path="/dashboard" element={<DashboardRoute gate={gate} />} />
       <Route path="/quick-start" element={<QuickStartRoute gate={gate} />} />
       <Route path="/docs" element={<DocsRoute gate={gate} />} />
+      <Route
+        path="/privacy-policy"
+        element={<PrivacyPolicyRoute gate={gate} />}
+      />
       {/* Anything else is a URL this app never minted. On the shared host
           every extensionless path under `/api/` boots this bundle (the
           explorer's routing function rewrites it to `/api/index.html`), so

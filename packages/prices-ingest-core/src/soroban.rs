@@ -17,7 +17,7 @@ use stellar_xdr::{LedgerCloseMeta, TransactionMeta};
 use tracing::{debug, warn};
 
 use extractors_core::{SorobanEventRow, TaggedValue, Venue, VenueRegistry};
-use ledger_processor::dispatch::dispatch;
+use ledger_processor::dispatch::{PairRegistries, dispatch};
 use phoenix_extractor::PhoenixPoolRegistry;
 use soroswap_extractor::SoroswapPoolRegistry;
 use xdr_parser::extract_events;
@@ -47,6 +47,10 @@ pub struct Registries {
     pub venue: VenueRegistry,
     pub phoenix: PhoenixPoolRegistry,
     pub soroswap: SoroswapPoolRegistry,
+    /// SushiSwap V3 pools (task 0290). Same type as `soroswap` — both are
+    /// pair-backed — but a SEPARATE instance, so a contract_id can never
+    /// resolve to the other venue's tokens.
+    pub sushiswap: SoroswapPoolRegistry,
 }
 
 impl Default for Registries {
@@ -55,6 +59,7 @@ impl Default for Registries {
             venue: VenueRegistry::new(),
             phoenix: PhoenixPoolRegistry::new(),
             soroswap: SoroswapPoolRegistry::new(),
+            sushiswap: SoroswapPoolRegistry::new(),
         }
     }
 }
@@ -65,7 +70,19 @@ impl Registries {
     }
 
     pub fn pool_count(&self) -> usize {
-        self.soroswap.pool_count() + self.phoenix.pool_count()
+        self.soroswap.pool_count() + self.phoenix.pool_count() + self.sushiswap.pool_count()
+    }
+
+    /// The two pair-backed registries, wired to their venues by name.
+    ///
+    /// `soroswap` and `sushiswap` are the same type, so this is the ONE place
+    /// the two can be crossed; every dispatch goes through it instead of
+    /// passing them as adjacent positional arguments (task 0290 review).
+    pub fn pair_registries(&self) -> PairRegistries<'_> {
+        PairRegistries {
+            soroswap: &self.soroswap,
+            sushiswap: &self.sushiswap,
+        }
     }
 }
 
@@ -358,8 +375,11 @@ pub struct RawSorobanEvent {
     pub transaction_id: String,
     /// Position of this event's transaction in the ledger's apply order (task
     /// 0286 D1). The live path takes it from `process_ledger`'s enumeration;
-    /// the events-backfill path joins BE's `default.transactions.application_order`
-    /// and falls back to 0 (counted and warned) when it cannot resolve one.
+    /// the events-backfill path reads BE's `soroban_events.application_order`
+    /// straight off the event row — there is no join and so no "not found"
+    /// state (task 0304). The column is `Int16`, and a NEGATIVE value is not a
+    /// position, so that one case falls back to 0, counted and warned: a run
+    /// reporting any of those has ordered those fills wrong.
     pub transaction_index: u16,
     pub ledger_sequence: u32,
     pub event_index: u32,
@@ -532,7 +552,7 @@ fn classify_amm_groups(
         };
 
         let source = venue.as_source();
-        match dispatch(&rows, &reg.venue, &reg.phoenix, &reg.soroswap) {
+        match dispatch(&rows, &reg.venue, &reg.phoenix, reg.pair_registries()) {
             Ok(trades) => {
                 for t in trades {
                     if let Some(tick) = amm_trade_to_tick(&t, transaction_index, closed_at, assets)
@@ -569,7 +589,14 @@ fn classify_amm_groups(
         // deliberately not recorded here. Inferring the gap from "no tick" would
         // flood `unresolved_pools` with false positives on healthy pools and
         // grow the run's in-memory `unresolved` unboundedly.
-        if matches!(venue, Venue::Soroswap) && !reg.soroswap.contains(&contract_id) {
+        let pair_unresolved = match venue {
+            Venue::Soroswap => !reg.soroswap.contains(&contract_id),
+            // SushiSwap is pair-backed too (task 0290), so the same miss is
+            // possible and must be just as loud.
+            Venue::Sushiswap => !reg.sushiswap.contains(&contract_id),
+            Venue::Aquarius | Venue::Phoenix => false,
+        };
+        if pair_unresolved {
             if let Some(rec) = unresolved_from_swaps(contract_id, &swaps, ledger_seq) {
                 out.unresolved.push(rec);
             }
@@ -606,9 +633,18 @@ fn unresolved_from_swaps(
 /// - Phoenix XYK swap: a group of `[String("swap"), String(<field>)]` rows, of
 ///   which exactly one carries `sell_token`, so that row stands for the swap.
 ///
-/// The router `swap` summaries (Aquarius, Soroswap) and the unindexed
-/// Uniswap-v3-style venue (task 0290) match none of these, so on a complete
-/// registry this counts nothing.
+/// - SushiSwap V3 pool `swap`: `[Symbol("swap")]` **with `amount0`/`amount1` in
+///   the data** (task 0290).
+///
+/// The router `swap` summaries match none of these, so on a complete registry
+/// this counts nothing.
+///
+/// ⚠️ The SushiSwap arm CANNOT key on the topic alone: its two routers
+/// (`CDMIM23W…`, `CAUF4DFY…`) emit the identical `[Symbol("swap")]` topic and
+/// differ only in the data — `{ amount_in, amount_out }` against the pool's
+/// `{ amount0, amount1, liquidity, sqrt_price_x96, tick }`. Matching the topic
+/// alone would count every router swap as a missing pool, which is the
+/// double-counting shape task 0285 warned about.
 fn unregistered_pool_venue(row: &SorobanEventRow) -> Option<Venue> {
     let t0 = row.topics.first().and_then(|t| t.as_str())?;
     let is_address = |i: usize| row.topics.get(i).and_then(|t| t.as_address()).is_some();
@@ -616,7 +652,21 @@ fn unregistered_pool_venue(row: &SorobanEventRow) -> Option<Venue> {
         "trade" if is_address(1) && is_address(2) => Some(Venue::Aquarius),
         "SoroswapPair" if topic_str(row, 1) == Some("swap") => Some(Venue::Soroswap),
         "swap" if topic_str(row, 1) == Some("sell_token") => Some(Venue::Phoenix),
+        // Ordered after Phoenix's `swap`: both start at the same topic, and
+        // Phoenix's is decided by topic[1] before the data is consulted.
+        "swap" if has_data_key(row, "amount0") && has_data_key(row, "amount1") => {
+            Some(Venue::Sushiswap)
+        }
         _ => None,
+    }
+}
+
+/// Whether the event's data map carries `key`. Used to tell a CLMM pool `swap`
+/// from a router `swap` that shares its topic shape.
+fn has_data_key(row: &SorobanEventRow, key: &str) -> bool {
+    match &row.data {
+        TaggedValue::Map(m) => m.iter().any(|(k, _)| k.as_str() == Some(key)),
+        _ => false,
     }
 }
 
@@ -705,6 +755,31 @@ fn learn_factory(topics: &Value, data: &Value, reg: &mut Registries) {
             {
                 reg.soroswap.register(pair.clone(), t0, t1);
                 reg.venue.insert(pair, Venue::Soroswap);
+            }
+        }
+        return;
+    }
+
+    // SushiSwap V3 factory: [Symbol("pool_created")], data
+    // { fee, pool_address, sender, tick_spacing, token0, token1 } (task 0290).
+    //
+    // Matched by SHAPE, like every arm here — no factory address is hardcoded —
+    // which is what makes all four deployed factory generations (three on wasm
+    // FC9B0DF0, the live one on 9F94C577) register through this one arm. All
+    // three addresses are required, so a differently-shaped `pool_created` from
+    // some other protocol cannot register a pool with empty tokens.
+    if sig0 == Some("pool_created") {
+        if let TaggedValue::Map(m) = json_to_tagged(data) {
+            let get = |k: &str| {
+                m.iter()
+                    .find(|(key, _)| key.as_str() == Some(k))
+                    .and_then(|(_, v)| v.as_address().map(String::from))
+            };
+            if let (Some(pool), Some(t0), Some(t1)) =
+                (get("pool_address"), get("token0"), get("token1"))
+            {
+                reg.sushiswap.register(pool.clone(), t0, t1);
+                reg.venue.insert(pool, Venue::Sushiswap);
             }
         }
     }
@@ -920,6 +995,67 @@ mod tests {
         ]);
         assert_eq!(signature(&topics), Some("SoroswapFactory"));
         assert_eq!(topic_symbol(&topics, 1), Some("new_pair"));
+    }
+
+    /// Task 0290. The SushiSwap V3 factory's `pool_created` carries the token
+    /// pair in the EVENT, so a pool is learned exactly like a Soroswap
+    /// `new_pair` — no contract-storage read.
+    ///
+    /// Payload is a real production event from the live factory
+    /// `CD3KRKGD…GLYF` at ledger 64,116,662. Because `learn_factory` matches on
+    /// SHAPE and never on a factory address, this one arm also covers the three
+    /// earlier factory generations (wasm `FC9B0DF0`) whose pools still trade.
+    #[test]
+    fn sushiswap_factory_pool_created_learns_the_pair() {
+        let topics = json!([{"type":"sym","value":"pool_created"}]);
+        let data = json!({"type":"map","value":[
+            {"key":{"type":"sym","value":"fee"},"value":{"type":"u32","value":500}},
+            {"key":{"type":"sym","value":"pool_address"},
+             "value":{"type":"address","value":"CBVHBZSZOS6KRDJ4D44FU2YLIENOVSSLM3UGKW6XQMVIFUAMWIWCVH2U"}},
+            {"key":{"type":"sym","value":"sender"},
+             "value":{"type":"address","value":"CD3KRKGDRVWPXVB3VXLUMQKMX6XZ6Q2H334IVZD4XXNAMKSRVQL5GLYF"}},
+            {"key":{"type":"sym","value":"tick_spacing"},"value":{"type":"i32","value":10}},
+            {"key":{"type":"sym","value":"token0"},
+             "value":{"type":"address","value":"CBSJZEIO5C7KC2SF3MKSNXXJSW5G3VTNBX4ATMKUI3B2MR4JKM4R26YF"}},
+            {"key":{"type":"sym","value":"token1"},
+             "value":{"type":"address","value":"CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}
+        ]});
+
+        let mut reg = Registries::new();
+        learn_factory(&topics, &data, &mut reg);
+
+        let pool = "CBVHBZSZOS6KRDJ4D44FU2YLIENOVSSLM3UGKW6XQMVIFUAMWIWCVH2U";
+        assert_eq!(reg.venue.get(pool), Some(&Venue::Sushiswap));
+        let pair = reg.sushiswap.lookup(pool).expect("pair registered");
+        assert_eq!(
+            pair.token0,
+            "CBSJZEIO5C7KC2SF3MKSNXXJSW5G3VTNBX4ATMKUI3B2MR4JKM4R26YF"
+        );
+        assert_eq!(
+            pair.token1,
+            "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
+        );
+        // It must not leak into the Soroswap registry — separate instances.
+        assert!(!reg.soroswap.contains(pool));
+    }
+
+    /// A `pool_created` missing an address registers nothing, rather than a
+    /// pool with empty tokens that would later price against asset "".
+    #[test]
+    fn sushiswap_pool_created_without_tokens_registers_nothing() {
+        let topics = json!([{"type":"sym","value":"pool_created"}]);
+        let data = json!({"type":"map","value":[
+            {"key":{"type":"sym","value":"pool_address"},
+             "value":{"type":"address","value":"CBVHBZSZOS6KRDJ4D44FU2YLIENOVSSLM3UGKW6XQMVIFUAMWIWCVH2U"}},
+            {"key":{"type":"sym","value":"token0"},
+             "value":{"type":"address","value":"CBSJZEIO5C7KC2SF3MKSNXXJSW5G3VTNBX4ATMKUI3B2MR4JKM4R26YF"}}
+        ]});
+
+        let mut reg = Registries::new();
+        learn_factory(&topics, &data, &mut reg);
+
+        assert_eq!(reg.pool_count(), 0);
+        assert!(reg.venue.is_empty());
     }
 
     #[test]
@@ -1181,7 +1317,29 @@ mod tests {
             ],
             0,
         );
-        // The Uniswap-v3-style venue (task 0290): a bare `swap` with map data.
+        // ⚠️ A SushiSwap V3 ROUTER (task 0290): the SAME bare `swap` topic its
+        // pools use, told apart only by the data — routers carry
+        // `amount_in`/`amount_out`, pools carry `amount0`/`amount1`. Counting
+        // this would double-count every routed swap alongside the pool swap it
+        // wraps, which is the hazard task 0285 flagged.
+        let sushiswap_router = SorobanEventRow {
+            data: TaggedValue::Map(vec![
+                (
+                    TaggedValue::Symbol("amount_in".into()),
+                    TaggedValue::I128(2_539_492_571),
+                ),
+                (
+                    TaggedValue::Symbol("amount_out".into()),
+                    TaggedValue::I128(13_410_007_617),
+                ),
+            ]),
+            ..event(
+                "CAUF4DFYSX52L2KJ4J7OFW3WDQMEUDVXNB7PG5VIC4VVOA3BCLWXDO2E",
+                vec![TaggedValue::Symbol("swap".into())],
+                0,
+            )
+        };
+        // A bare `swap` carrying no amounts at all resolves to nothing either.
         let clmm = event("CCLMM", vec![TaggedValue::Symbol("swap".into())], 0);
         // A `trade` whose topics are not token addresses.
         let other_trade = event(
@@ -1202,12 +1360,74 @@ mod tests {
         for row in [
             aquarius_router,
             soroswap_router,
+            sushiswap_router,
             clmm,
             other_trade,
             odd_swap,
         ] {
             assert_eq!(unregistered_pool_venue(&row), None, "{:?}", row.topics);
         }
+    }
+
+    /// The counterpart of the row above: the SushiSwap V3 POOL shape, which
+    /// shares the router's `[Symbol("swap")]` topic and is distinguished only
+    /// by `amount0`/`amount1`, must be counted (task 0290).
+    ///
+    /// Payload is a real production event — pool
+    /// `CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ` (XLM/USDC) at
+    /// ledger 64,488,316.
+    #[test]
+    fn a_sushiswap_pool_swap_is_counted_but_its_router_twin_is_not() {
+        let pool_swap = SorobanEventRow {
+            data: TaggedValue::Map(vec![
+                (
+                    TaggedValue::Symbol("amount0".into()),
+                    TaggedValue::I128(-10_002_738_052),
+                ),
+                (
+                    TaggedValue::Symbol("amount1".into()),
+                    TaggedValue::I128(1_886_660_000),
+                ),
+                (
+                    TaggedValue::Symbol("liquidity".into()),
+                    TaggedValue::I128(22_083_689_118_901),
+                ),
+            ]),
+            ..event(
+                "CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ",
+                vec![TaggedValue::Symbol("swap".into())],
+                0,
+            )
+        };
+        assert_eq!(
+            unregistered_pool_venue(&pool_swap),
+            Some(Venue::Sushiswap),
+            "a pool swap carrying amount0/amount1 must be counted"
+        );
+
+        // Same topic, router data — must stay uncounted.
+        let router_swap = SorobanEventRow {
+            data: TaggedValue::Map(vec![
+                (
+                    TaggedValue::Symbol("amount_in".into()),
+                    TaggedValue::I128(2_539_492_571),
+                ),
+                (
+                    TaggedValue::Symbol("amount_out".into()),
+                    TaggedValue::I128(13_410_007_617),
+                ),
+            ]),
+            ..event(
+                "CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL",
+                vec![TaggedValue::Symbol("swap".into())],
+                0,
+            )
+        };
+        assert_eq!(
+            unregistered_pool_venue(&router_swap),
+            None,
+            "the router shares the topic and must NOT be counted"
+        );
     }
 
     #[test]
@@ -1539,6 +1759,110 @@ mod tests {
         );
         assert_eq!(out.amm_ticks[0].0, "soroswap", "tick tagged soroswap");
         assert!(out.unresolved.is_empty(), "a priced pool is not unresolved");
+    }
+
+    /// Task 0290, acceptance criterion "its routers stay unindexed". A routed
+    /// SushiSwap trade emits TWO `[Symbol("swap")]` events in one transaction:
+    /// the pool's, and the router's summary of the same trade. Only the pool's
+    /// may become a tick, or every routed trade is counted twice.
+    ///
+    /// Real production transaction, ledger 64,481,111: pool `CCR2CH4G…H2MQ`
+    /// (XLM/USDC) at event 4, router `CDMIM23W…ZCHL` at event 5 carrying the
+    /// same amounts as `amount_in`/`amount_out`.
+    #[test]
+    fn a_routed_sushiswap_trade_prices_once_from_the_pool_not_the_router() {
+        const SEQ: u32 = 64_481_111;
+        const CLOSED_AT: i64 = 1_700_000_000;
+        const POOL: &str = "CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ";
+        const ROUTER: &str = "CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL";
+        const XLM: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const USDC: &str = "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75";
+
+        let event = |contract_id: &str, event_index: u32, data: Value| RawSorobanEvent {
+            contract_id: contract_id.to_string(),
+            transaction_id: "4737599797939127393".to_string(),
+            transaction_index: 0,
+            ledger_sequence: SEQ,
+            event_index,
+            topics: json!([{"type":"sym","value":"swap"}]),
+            data,
+        };
+        let pool_swap = event(
+            POOL,
+            4,
+            json!({"type":"map","value":[
+                {"key":{"type":"sym","value":"amount0"},"value":{"type":"i128","value":"10951822930"}},
+                {"key":{"type":"sym","value":"amount1"},"value":{"type":"i128","value":"-2000561352"}},
+                {"key":{"type":"sym","value":"liquidity"},"value":{"type":"u128","value":"22083689118901"}},
+                {"key":{"type":"sym","value":"recipient"},"value":{"type":"address","value":"GCBYPF2OVPSZ7NJSXIOINCBMOSMY7I6KOWHPZV36OH4OH5R2A63DKUKY"}},
+                {"key":{"type":"sym","value":"sender"},"value":{"type":"address","value":"GCBYPF2OVPSZ7NJSXIOINCBMOSMY7I6KOWHPZV36OH4OH5R2A63DKUKY"}},
+                {"key":{"type":"sym","value":"sqrt_price_x96"},"value":{"type":"u256","value":"00000000000000000000000000000000000000006d911cd1319d4706470e4080"}},
+                {"key":{"type":"sym","value":"tick"},"value":{"type":"i32","value":-16974}}
+            ]}),
+        );
+        let router_swap = event(
+            ROUTER,
+            5,
+            json!({"type":"map","value":[
+                {"key":{"type":"sym","value":"amount_in"},"value":{"type":"i128","value":"10951822930"}},
+                {"key":{"type":"sym","value":"amount_out"},"value":{"type":"i128","value":"2000561352"}},
+                {"key":{"type":"sym","value":"recipient"},"value":{"type":"address","value":"GCBYPF2OVPSZ7NJSXIOINCBMOSMY7I6KOWHPZV36OH4OH5R2A63DKUKY"}}
+            ]}),
+        );
+
+        let registry = || {
+            let mut reg = Registries::new();
+            reg.venue.insert(POOL.to_string(), Venue::Sushiswap);
+            reg.sushiswap
+                .register(POOL.to_string(), XLM.to_string(), USDC.to_string());
+            reg
+        };
+
+        // As in production: the pool is registered, the router is not.
+        let mut reg = registry();
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        process_soroban_event_rows(
+            SEQ,
+            CLOSED_AT,
+            &[pool_swap.clone(), router_swap.clone()],
+            &mut reg,
+            &mut assets,
+            &mut out,
+        );
+        assert_eq!(out.amm_ticks.len(), 1, "one routed trade, one tick");
+        assert_eq!(out.amm_ticks[0].0, "sushiswap");
+        assert!(
+            !reg.venue.contains_key(ROUTER),
+            "nothing in a routed trade may register the router"
+        );
+        assert_eq!(
+            out.unregistered_pool_events,
+            Vec::<(&str, u32)>::new(),
+            "the router's swap is not a missing pool"
+        );
+
+        // Second line of defence: even a router wrongly registered as a
+        // SushiSwap pool prices nothing, because its summary has no
+        // amount0/amount1 to decode.
+        let mut reg = registry();
+        reg.venue.insert(ROUTER.to_string(), Venue::Sushiswap);
+        reg.sushiswap
+            .register(ROUTER.to_string(), XLM.to_string(), USDC.to_string());
+        let mut out = LedgerSoroban::default();
+        process_soroban_event_rows(
+            SEQ,
+            CLOSED_AT,
+            &[pool_swap, router_swap],
+            &mut reg,
+            &mut assets,
+            &mut out,
+        );
+        assert_eq!(
+            out.amm_ticks.len(),
+            1,
+            "a registered router must still add no tick"
+        );
     }
 
     #[test]

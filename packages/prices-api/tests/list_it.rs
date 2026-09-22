@@ -1,8 +1,8 @@
 //! Live-ClickHouse integration tests for `GET /v1/assets` (listing). Gated
 //! `#[ignore]`:
 //!
-//!   docker compose up -d clickhouse
-//!   cargo test -p prices-api --test list_it -- --ignored
+//!   tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!   cargo test -p prices-api --test list_it -- --ignored --test-threads=1
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -197,7 +197,7 @@ async fn get(client: Client, uri: &str) -> (StatusCode, Value) {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn default_sort_volume_desc_paginates() {
     let db = "it_list_paginate_0040";
     let client = setup(db).await;
@@ -246,7 +246,7 @@ async fn default_sort_volume_desc_paginates() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn filter_by_type() {
     let db = "it_list_filter_0040";
     let client = setup(db).await;
@@ -263,7 +263,7 @@ async fn filter_by_type() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn search_prefix() {
     let db = "it_list_search_0040";
     let client = setup(db).await;
@@ -275,7 +275,7 @@ async fn search_prefix() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn invalid_sort_is_400() {
     let db = "it_list_badsort_0040";
     let client = setup(db).await;
@@ -292,7 +292,7 @@ async fn invalid_sort_is_400() {
 /// boundary (see [`setup_n`]), so a broken `(sort_col, asset_id)` tie-break would
 /// surface here as a dropped or repeated row.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn keyset_pagination_250_rows_no_dup_no_skip() {
     let db = "it_list_paginate_250_0074";
     let _ = setup_n(db, 250).await;
@@ -362,7 +362,7 @@ async fn seed_symbol(db: &str, contract: &str, symbol: &str) {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn listing_composes_soroban_symbol_into_asset_code() {
     // The stored `assets` row keeps `asset_code = ''` — writing the symbol there
     // would create a SECOND row, because that column is part of the table's sort
@@ -382,7 +382,7 @@ async fn listing_composes_soroban_symbol_into_asset_code() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn listing_leaves_unresolved_soroban_code_empty() {
     // No `asset_symbol` row: the LEFT JOIN misses and the field stays `""`,
     // which is the pre-0210 behaviour every existing consumer sees.
@@ -396,7 +396,7 @@ async fn listing_leaves_unresolved_soroban_code_empty() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn listing_reads_the_sentinel_row_as_an_empty_code() {
     // An empty `symbol` is the sentinel the resolver writes for a contract that
     // exposes no usable `symbol()`. It must read back as `""` — indistinguishable
@@ -412,7 +412,7 @@ async fn listing_reads_the_sentinel_row_as_an_empty_code() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn classic_codes_are_untouched_by_the_symbol_join() {
     // Classic and native rows have `contract_address = ''` and miss the join
     // entirely; the `if(a.asset_code != '', …)` branch short-circuits for them
@@ -434,7 +434,7 @@ async fn classic_codes_are_untouched_by_the_symbol_join() {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn search_and_sort_still_read_the_raw_column() {
     // Deliberate scope boundary, not an oversight: `?search=` is
     // `startsWith(a.asset_code, ?)` and `sort=code` orders on `a.asset_code`,

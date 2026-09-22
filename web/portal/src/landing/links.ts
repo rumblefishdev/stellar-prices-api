@@ -118,6 +118,15 @@ export const QUICKSTART_ROUTE = '/quick-start';
 export const QUICKSTART = `${ROUTER_BASENAME}${QUICKSTART_ROUTE}`;
 
 /**
+ * The privacy policy — a page of this app (task 0303), rendered from
+ * `src/privacy/privacy-policy.md`, at the name the explorer's footer and the
+ * corporate site use for theirs. A ROUTE like the quick start; `PRIVACY_POLICY`
+ * is the same place as an absolute href.
+ */
+export const PRIVACY_POLICY_ROUTE = '/privacy-policy';
+export const PRIVACY_POLICY = `${ROUTER_BASENAME}${PRIVACY_POLICY_ROUTE}`;
+
+/**
  * The official Stellar Discord — **Stellar Developers**, and no other server
  * (Adam, 2026-09-02). This snowflake is the guild the backend's membership
  * gate checks: it is the value of the SSM parameter
@@ -179,3 +188,22 @@ export const DASHBOARD_ROUTE = '/dashboard';
  * them. Same basename treatment as {@link QUICKSTART}.
  */
 export const LANDING = `${ROUTER_BASENAME}/`;
+
+/**
+ * The block explorer's home — where the SorobanScan wordmark in every bar
+ * leads (task 0301): the portal is one page of SorobanScan, and the mark is
+ * how a visitor gets back to the rest of it. Absolute, not `/`: on the shared
+ * host the root is the explorer's, but under the dev server `/` is nothing.
+ */
+export const EXPLORER = 'https://sorobanscan.rumblefish.dev/';
+
+/** Rumble Fish's own site — the footer's mark and its text link. */
+export const RUMBLEFISH_SITE = 'https://rumblefish.dev';
+
+/**
+ * Rumble Fish's contact page — the footer's "Contact" and the refusal card's
+ * "contact support" (task 0301). A sales form rather than a support desk, and
+ * the nearest thing that reaches the company; the card's other word, "status
+ * page", still has nowhere to go.
+ */
+export const RUMBLEFISH_CONTACT = 'https://www.rumblefish.dev/contact/';

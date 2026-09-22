@@ -333,8 +333,12 @@ impl AppConfig {
     ///   is 40 TPS for the whole account. A burst of cold starts — the ramp of
     ///   a load test — is three SSM reads per environment against that budget,
     ///   and a throttled one was a `502` on the data API.
-    /// - **Nobody is paged by `Init Errors`.** The api-handler has no alarm on
-    ///   `Errors` at all; the "loud" failure was loud only to whoever probed.
+    /// - **Nobody was paged by `Init Errors`.** When this was written the
+    ///   api-handler had no alarm on `Errors` at all, so the "loud" failure
+    ///   was loud only to whoever probed. The api-handler now has
+    ///   `prices-${env}-api-handler-errors`, and the closure this function
+    ///   produces instead pages as `prices-${env}-api-handler-portal-closed`
+    ///   (task 0249).
     ///
     /// So on any error the portal is closed *in this execution environment* —
     /// the flag cleared and all three sources dropped, which restores every

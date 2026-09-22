@@ -1,6 +1,7 @@
 //! Task 0286 / ADR 0287 — the pf-column migration, against a real ClickHouse.
 //!
-//!     cargo test -p prices-clickhouse --test candle_migration_it -- --ignored
+//!     tools/scripts/ignored-tests.sh   # all of them: CI runs exactly this on every Rust PR
+//!     cargo test -p prices-clickhouse --test candle_migration_it -- --ignored --test-threads=1
 //!
 //! `init.sql` is applied to databases that already hold billions of pre-0286
 //! candle rows. The three price-forming columns are added with DEFAULT
@@ -87,7 +88,7 @@ async fn pf_row(client: &Client, db: &str, table: &str) -> (u32, f64, f64) {
 }
 
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn pf_columns_migrate_every_candle_table_and_preserve_old_rows() {
     let db = "it_candle_migration";
     let admin = Client::default().with_url(ch_url());
