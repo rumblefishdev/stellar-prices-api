@@ -26,6 +26,16 @@ history:
     note: >
       Activated. Scope: api-handler Errors alarm + metric filter/alarm on
       `portal closed at cold start`, runbook sentence; no deploy.
+  - date: "2026-09-21"
+    status: active
+    who: akot
+    note: >
+      Implemented on feat/0249 (1fc7128, e67673d, 67f8d49; not pushed): three
+      alarms: api-handler Errors ≥1, portal-closed metric filter ≥1, API
+      5xx ≥5, added after 2026-09-18 showed 14,865 throttled 5xx with
+      Errors = 0. Plus runbook and 2 comments. Pattern proven by
+      test-metric-filter; diff additions-only. Stays active: AC2 "fires" and
+      AC3 need a deploy.
 ---
 
 # An error alarm for the api-handler, and one for a portal that closed itself
@@ -84,10 +94,159 @@ Nothing reads it. This task makes both signals page.
 
 ## Acceptance Criteria
 
-- [ ] An `Errors` alarm exists on the api-handler in the synthesized
+- [x] An `Errors` alarm exists on the api-handler in the synthesized
       Observability template, and `cdk diff` shows only additions.
+      (`prices-production-api-handler-errors`; diff: 7 `[+]`, plus the derived
+      `DashboardBody` / `DashboardAlarmCount` changes — see Implementation Notes.)
 - [ ] The metric filter matches a real `portal closed at cold start` line
       (proved by a log-insights query over an induced one, or by a unit test
       on the pattern against a captured line), and the alarm fires on it.
-- [ ] Neither alarm fires over a week of ordinary traffic.
-- [ ] The runbook's "nothing pages on it" sentence is updated.
+      **Match half done** — `aws logs test-metric-filter` over real production
+      lines, and `filter-log-events` with the same pattern returned 243 real
+      lines. **"Fires on it" open**: needs a deploy.
+- [ ] Neither alarm fires over a week of ordinary traffic. (Open — needs a
+      deploy and a week.)
+- [x] The runbook's "nothing pages on it" sentence is updated.
+
+## Implementation Notes
+
+Branch `feat/0249_api-handler-error-alarm-and-portal-closed-at-cold-start`
+from `develop` @ `49be685`; three commits, four files (+185 / −10):
+
+- `1fc7128` feat — `prices-${env}-api-handler-errors`: `AWS/Lambda Errors`,
+  `FunctionName=prices-${env}-api-handler`, Sum / 5 min, `≥ 1`, 1/1,
+  missing = OK, alarm + OK action on the ops topic, output
+  `ApiHandlerErrorAlarmName`. Same shape as `ledgerProcessorErrorAlarm`.
+- `e67673d` feat — `AWS::Logs::MetricFilter` on
+  `/aws/lambda/prices-${env}-api-handler` (imported by name, no cross-stack
+  reference), pattern `{ $.fields.message = "portal closed at cold start*" }`,
+  metric `Prices/ApiHandler` / `PortalClosedAtColdStart` = 1 (no default);
+  alarm `prices-${env}-api-handler-portal-closed` (Sum / 5 min, `≥ 1`,
+  missing = OK). Plus `prices-${env}-api-5xx`: `AWS/ApiGateway 5XXError` on
+  the dashboard's `apiDims` (ApiName + Stage), Sum / 5 min, `≥ 5`. Outputs
+  `ApiHandlerPortalClosedAlarmName`, `Api5xxAlarmName`.
+- `67f8d49` docs — runbook `portal-oauth-deploy-prep.md` §3 and §5; the
+  now-false "no error alarm" comments in `compute-stack.ts` (PORTAL_ENABLED
+  block) and `config.rs` (`load_portal_or_close` doc).
+
+**Pattern proof.** `aws logs test-metric-filter` with the pattern exactly as
+synthesized, over four real production lines — the portal-closed ERROR, an
+unrelated ERROR (`clickhouse query failed`), a same-prefix WARN
+(`portal sign-in callback rejected`) and an `INIT_START` platform line —
+returns `matches[].eventNumber == [1]`. Re-run independently by the verifier.
+There is no local CloudWatch-pattern evaluator and no CDK test runner in
+infra, so AWS's own evaluator is the test; nothing is committed for it.
+
+**Diffs.** Offline `cdk diff` against the `49be685` synth: `[+]` 3 alarms,
+1 MetricFilter, 3 outputs; `[~]` `DashboardBody` (3 ARNs join the strip) and
+`DashboardAlarmCount` 58 → 61; no `[-]`. The live diff against production
+also shows lines from before this change: 0151's three
+`ZeroInvariantAlarmCount*` alarms (merged, never deployed) and
+dashboard-rendering noise. That makes `DashboardAlarmCount` 55 → 61 live.
+`npm run infra:verify-dashboard`: 61 alarms (52 own + 9 imported). typecheck,
+lint, prettier and `cargo fmt --check` are clean. Nothing was deployed.
+
+**Backtest and local run (2026-09-21).** The three alarms' exact template
+settings were replayed over 35 days of production 5-minute datapoints (see
+Issues Encountered). The api-handler binary built from this branch, run
+locally with a broken portal config, emits the portal-closed line in the
+production shape. The synthesized pattern, through `test-metric-filter`,
+matches it and rejects the healthy run's output, the phrase mid-sentence, a
+flattened (`$.message`) line and plain text. Both alarm dimension sets exist
+as live metrics; the ops topic has a confirmed subscription and delivered
+other `prices-production-*` alarms on 2026-09-18/19. What still needs a
+deploy is the state change and the notification themselves.
+
+## Issues Encountered
+
+- **The portal-closed signal had already fired, and nothing saw it.**
+  `filter-log-events` over 35 days: **243** `portal closed at cold start`
+  lines, all on 2026-09-18, in two 5-minute windows (45 at 11:45 UTC, 198 at
+  12:45 UTC). Both were the ramps of [[0293]]'s load test: bursts of cold
+  starts whose Parameter Store reads came back HTTP 400 through the
+  extension. This is the scenario the task predicted, and they were real
+  closures. None since. **Expect this alarm during a load test.**
+- **`Errors` alone misses the outages that matter.** Read 2026-09-21, 35 days
+  of 5-minute windows:
+  - 2026-09-03: a load run exhausted the ClickHouse read quota; **28,853
+    5xx** over ~25 min, Lambda `Errors` **0**, nobody paged (the 26-minute
+    outage [[0293]] mentions). The 5xx alarm would have fired in 4 windows.
+  - 2026-09-18: [[0293]]'s ramp to 1000 req/s; 14,865 5xx, all Lambda
+    throttles at that run's temporary reserved concurrency of 700 (since
+    removed), `Errors` 0. A controlled test, not an incident, but the same
+    blind spot.
+  - 2026-09-02: an init panic (`main.rs:42`), `Errors` = 7 and 7 × 5xx in one
+    window. The `Errors` alarm would have fired. An init panic fires both
+    alarms.
+  - Stray 5xx windows below the threshold: 1, 2 and 4. No false alarm from
+    any of the three alarms on ordinary days.
+  This is why the 5xx alarm was added (Design Decision 5).
+- **`MetricFilter.metric()` defaults to `avg`.** Sum is passed explicitly.
+- **`apiMetric()` sets a `label`, and with a label aws-cdk-lib renders the
+  alarm as a one-entry metric-math array.** The 5xx alarm builds its own
+  `cloudwatch.Metric` on the shared `apiDims`, so it keeps the plain
+  single-metric form every other alarm uses.
+
+## Design Decisions
+
+### From Plan
+
+1. **Errors threshold 1.** Baseline 0 (0194: 217 invocations / 4 h; in the
+   35 days read on 2026-09-21 the only non-zero window is the 2026-09-02
+   init panic, which should page). One router serves every route
+   group (ADR 0008), so one error is a `/v1` error.
+2. **Pattern keyed on `$.fields.message`, read off a real line.** The
+   subscriber is `fmt().json()` without `flatten_event`, and the function
+   logs in Text format, so the raw JSON is the event.
+3. **Log group imported by name.** No CFN reference to ComputeStack. The
+   observability stack stays independently deployable.
+4. **Missing data = OK** on all three alarms. A quiet log group publishes
+   nothing (no `defaultValue`), and that is not a breach.
+
+### Emerged
+
+5. **API Gateway 5xx alarm added (Adam, 2026-09-21).** Not in the task's
+   original scope; 2026-09-03 and 2026-09-18 proved `Errors` blind to
+   router-returned 5xx and to throttles. Threshold **5**, absolute: the
+   stray windows in 35 days were 1, 2 and 4, and traffic is sometimes 1–7
+   requests/day, so a rate would swing on every single error. `Errors ≥ 1`
+   stays for a lone init crash or panic.
+6. **Namespace `Prices/ApiHandler`**, not the brief's first guess
+   `StellarPrices/…`. Every custom metric in the stack is `Prices/<Component>`.
+7. **Two stale comments fixed** (`compute-stack.ts`, `config.rs`) with
+   Adam's approval. `done.md`: docs match reality.
+8. **The pattern is tested with AWS's evaluator, not a local unit test.** A
+   hand-written matcher would only test our copy of AWS's syntax.
+9. **Portal-closed alarm has no OK action** (from `/code-review`, Adam,
+   2026-09-21). The line is logged once per closing cold start, so the alarm
+   returns to OK one window later while the environment is still closed; an
+   OK notification would read as "recovered". The description says so. The
+   Errors and 5xx alarms keep their OK actions: their metric keeps flowing
+   while the fault lasts.
+10. **A guard test ties the log line to the filter**
+    (`tools/scripts/portal-closed-filter-guard.test.mjs`, Adam, 2026-09-21).
+    Nothing else links `main.rs`'s message to the pattern's prefix, or the
+    un-flattened JSON subscriber to `$.fields.message`; a reword would
+    silence the alarm with every check green. The TypeScript CI job runs the
+    guard, so `packages/prices-api/src/main.rs` was added to that job's path
+    filter, or a main.rs-only PR would skip it.
+11. **Review answers (Oskar, 2026-09-22; commit `002bfac`).** (a)
+    ObservabilityStack now `addDependency(compute)`: the metric filter is the
+    stack's first resource created on a Compute-owned one and
+    `fromLogGroupName` emits no dependency. Ordering only, still no
+    `Fn::ImportValue`; the `--exclusively` target gets a Makefile note
+    instead (log group must exist on a fresh env / after a Compute
+    destroy). (b) The guard's search is bounded to the portal-closed
+    filter's own block — the unbounded version passed on a second filter
+    added later in the file (reproduced, now a mutation test). (c) The
+    log-format coupling gets a comment on `ApiHandlerFunction`, not an
+    assertion: AWS documents that JSON format does not re-encode lines that
+    are already JSON, so forbidding `loggingFormat` would block a
+    legitimate change on a premise the docs contradict. Any log-path change
+    is re-proven with `test-metric-filter` on a deployed line.
+
+## Future Work
+
+- After deploy: check that `prices-production-api-handler-portal-closed`
+  fires on an induced closure, and that none of the three alarms fires over
+  a week of ordinary traffic (AC 2 second half, AC 3).
