@@ -639,7 +639,9 @@ const ERROR_CODES: readonly {
     status: 500,
     tone: 'muted',
     when: 'Server error — temporary issue on our side',
-    fix: 'Retry with exponential backoff. Check the status page for incidents.',
+    // No status page exists (task 0301 looked); a sentence that names one
+    // is a promise the page cannot keep.
+    fix: 'Retry with exponential backoff.',
   },
 ];
 

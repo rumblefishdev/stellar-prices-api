@@ -237,6 +237,8 @@ The single source of truth is the portal's quick start page
   (read from `public/openapi.json`, so neither the requests nor the field
   lists are a second copy). Skipped without the key, so CI never runs it.
   [[0164]] repeats the same commands with a self-service key.
+- The 500 row's advice no longer names a status page: none exists ([[0301]]
+  looked for one), and the sentence was a promise the page could not keep.
 - **`app.tsx`**: the "View quick start" comment claimed `QUICKSTART` still
   pointed at the OpenAPI document; it has been the route since 0193.
 - Tests: `app.spec.tsx` rail count 10 → 11; `QuickStart.spec.tsx` +12 cases
