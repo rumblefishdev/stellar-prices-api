@@ -582,7 +582,11 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          rate it is that rate reading's own time.\n\nThis is the field to apply a freshness \
          policy to. `updated_at` tells you when this snapshot was last refreshed, which \
          happens every minute for every asset regardless of whether its price moved — so it \
-         is never a measure of how old a price is.\n\n`\"\"` means there is no price at all \
+         is never a measure of how old a price is.\n\nUSD values are computed by a pass \
+         that runs hourly, so an `as_of` up to about an hour behind `updated_at` — and a \
+         `price_status` of `carried` — is the ORDINARY state of an actively traded asset, \
+         not a fault. A freshness threshold tighter than that cadence rejects the whole \
+         market.\n\n`\"\"` means there is no price at all \
          (`price_usd` is `\"0\"`). An epoch timestamp is never published for that \
          case.\n\nIt bounds `price_usd` only. `price_xlm` divides it by an XLM/USD close \
          dated independently, so it is no fresher than `as_of` and may be older.",
@@ -615,7 +619,13 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          `\"\"` — this row predates the current snapshot definition and has not been \
          rewritten yet. Not one of the three words above; it can only appear briefly after a \
          schema change.\n\nA minute that traded only dust does not make a price `carried`: \
-         `carried` means a price is outstanding, and a dust-only minute forms no price.",
+         `carried` means a price is outstanding, and a dust-only minute forms no \
+         price.\n\nUSD values are computed by a pass that runs hourly, so `carried` for up \
+         to about an hour after a trade is the ORDINARY state of an actively traded asset, \
+         not a fault. A freshness threshold tighter than that cadence rejects the whole \
+         market.\n\n`carried` also covers the case where the newer trade happened on a pair \
+         with no USD conversion path. Then no newer USD price is coming at all, and `as_of` \
+         is the newest minute that could be converted.",
     ),
     (
         "PriceResponse",

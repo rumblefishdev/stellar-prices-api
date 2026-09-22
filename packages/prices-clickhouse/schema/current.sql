@@ -219,9 +219,17 @@ WITH
         LIMIT 1
     ) AS usdc_asset_id,
 
-    -- The rate itself: ASOF at-or-before `now()`, never averaged (task 0167's
-    -- resolution rule), and REFUSED past a staleness window — an unbounded
-    -- forward-fill would present a three-day-old reading as the live price.
+    -- The reading itself, as ONE tuple: `.1` is the rate, `.2` is the time of
+    -- the reading it was taken from (task 0216). ASOF at-or-before `now()`,
+    -- never averaged (task 0167's resolution rule), and REFUSED past a
+    -- staleness window — an unbounded forward-fill would present a three-day-old
+    -- reading as the live price.
+    --
+    -- One subquery, not two: a separate timestamp scalar would need its own
+    -- copy of the WHERE below, and two copies can drift. A set even slightly
+    -- wider or narrower than the rate's would date a rate this MV never
+    -- published — here the rate and its age are aggregates of the same rows by
+    -- construction, so there is nothing to keep in step.
     --
     -- `method = 'oracle'` selects a MEASURED reading. usd_rate keys on
     -- (identity, timestamp, method) precisely so a 0154 'pivot' row cannot
@@ -229,11 +237,12 @@ WITH
     -- chooses measured or nothing.
     --
     -- 24 HOUR matches this MV's own window. If the oracle goes quiet for longer
-    -- the scalar is 0, `usdc_tip` emits NO ROW, and behaviour degrades to
-    -- exactly what it is today (USDC absent from the table) rather than to a
-    -- confident zero. Absent is honest; 0 tagged 'oracle' would not be.
+    -- the tuple is (0, 1970-01-01 00:00:00), `usdc_tip` emits NO ROW on the
+    -- `.1 > 0` guard below, and behaviour degrades to exactly what it is today
+    -- (USDC absent from the table) rather than to a confident zero. Absent is
+    -- honest; 0 tagged 'oracle' would not be, and neither would a 1970 age.
     (
-        SELECT argMax(usd_rate, timestamp)
+        SELECT (argMax(usd_rate, timestamp), max(timestamp))
         FROM prices.usd_rate FINAL
         WHERE asset_kind = 'credit'
           AND asset_code = 'USDC'
@@ -242,24 +251,7 @@ WITH
           AND method = 'oracle'
           AND timestamp <= now()
           AND timestamp >= now() - INTERVAL 24 HOUR
-    ) AS usdc_rate,
-
-    -- The same reading's own timestamp (task 0216) — `as_of` for the oracle arm.
-    -- The WHERE is a VERBATIM copy of the one above and must stay that way: a
-    -- scalar that selected over a wider or narrower set than `usdc_rate` would
-    -- date a rate this MV never published. Same window, same allowlist, same
-    -- method; only the head differs.
-    (
-        SELECT max(timestamp)
-        FROM prices.usd_rate FINAL
-        WHERE asset_kind = 'credit'
-          AND asset_code = 'USDC'
-          AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
-          AND contract_address = ''
-          AND method = 'oracle'
-          AND timestamp <= now()
-          AND timestamp >= now() - INTERVAL 24 HOUR
-    ) AS usdc_as_of,
+    ) AS usdc_reading,
 
     -- Level 1 — one row per (asset, source) over the trailing 24h.
     --
@@ -524,24 +516,28 @@ WITH
             argMinIf(close_usd, timestamp, close_usd > 0) AS open_24h,
             toUInt8(0)                        AS is_oracle,
             -- as_of is price_usd's OWN timestamp — the same close_usd > 0
-            -- predicate as the argMaxIf above, so the two name the same candle
-            -- for every window a real ingest can produce.
+            -- predicate as the argMaxIf above. The window is bounded ONCE, in
+            -- the WHERE below, so every aggregate of the tip sees exactly the
+            -- same candle set: as_of therefore always names the candle
+            -- price_usd was read from, and an empty age on the wire is exactly
+            -- a `0` price, never a priced row with a blank age beside it.
             -- tip_at is the newest candle that HAS a price to wait for:
             -- pf_trade_count (task 0286), not trade_count, so a dust-only
             -- minute does not make a real price read `carried`. Pre-0286 rows
             -- default pf_trade_count to trade_count, so this reads the same on
             -- either era (task 0216).
-            -- Both are bounded above at now(): a candle stamped after the wall
-            -- clock is a data defect, and as_of is the freshness field a
-            -- consumer subtracts from now(), so it must never run ahead of
-            -- updated_at and publish a negative age (the oracle arm below
-            -- already bounds timestamp <= now() for the same reason). On such
-            -- a row — and only there — as_of names an older candle than
-            -- price_usd's: price_usd is deliberately left exactly as it was.
-            maxIf(timestamp, close_usd > 0 AND timestamp <= now())      AS as_of,
-            maxIf(timestamp, pf_trade_count > 0 AND timestamp <= now()) AS tip_at
+            -- A candle stamped after the wall clock is a data defect, and the
+            -- upper bound puts it OUTSIDE the tip entirely rather than half in
+            -- it: it cannot price the asset, cannot date it and cannot make a
+            -- live price read `carried`. as_of is the field a consumer
+            -- subtracts from now(), so it must never run ahead of updated_at
+            -- and publish a negative age; the oracle arm bounds its own
+            -- reading with the same `timestamp <= now()`.
+            maxIf(timestamp, close_usd > 0)      AS as_of,
+            maxIf(timestamp, pf_trade_count > 0) AS tip_at
         FROM prices.price_ohlcv_1m FINAL
         WHERE timestamp >= now() - INTERVAL 24 HOUR
+          AND timestamp <= now()
         GROUP BY asset_id
     ),
 
@@ -554,7 +550,7 @@ WITH
     -- existing nullIf guard to the documented 0 sentinel, which is the whole
     -- point — a fabricated `change_24h_pct` beside a real price would be a new
     -- instance of the -100% defect task 0138 removed. NEVER set this to
-    -- `usdc_rate` to make the arithmetic "work": that publishes a measured 0%
+    -- the measured rate to make the arithmetic "work": that publishes a 0%
     -- change that was never measured.
     --
     -- The NOT IN guard keeps this arm mutually exclusive with base_tip. USDC
@@ -565,17 +561,17 @@ WITH
     usdc_tip AS (
         SELECT
             usdc_asset_id                     AS asset_id,
-            usdc_rate                         AS price_usd,
+            usdc_reading.1                    AS price_usd,
             toDecimal128(0, 14)               AS open_24h,
             toUInt8(1)                        AS is_oracle,
             -- as_of = tip_at for this arm (task 0216): the rate reading IS the
             -- newest thing there is to wait for here, so every oracle row falls
             -- into the `priced` branch WITHOUT the status expression having to
             -- key on is_oracle.
-            usdc_as_of                        AS as_of,
-            usdc_as_of                        AS tip_at
+            usdc_reading.2                    AS as_of,
+            usdc_reading.2                    AS tip_at
         WHERE usdc_asset_id > 0
-          AND usdc_rate > 0
+          AND usdc_reading.1 > 0
           AND usdc_asset_id NOT IN (SELECT asset_id FROM base_tip)
     ),
 

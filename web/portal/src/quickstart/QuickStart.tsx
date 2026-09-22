@@ -411,6 +411,14 @@ export const RESPONSE_FIELDS: readonly {
       'When this snapshot row was last refreshed (ISO 8601, UTC) — not the age of the price',
   },
   {
+    key: 'method',
+    value: <Tok c={STR}>&quot;traded&quot;</Tok>,
+    raw: '"traded"',
+    dot: STR,
+    meaning:
+      'How the price was obtained: traded, oracle, or empty when unavailable',
+  },
+  {
     key: 'as_of',
     value: <Tok c={STR}>&quot;2026-08-31T12:16:00Z&quot;</Tok>,
     raw: '"2026-08-31T12:16:00Z"',

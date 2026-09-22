@@ -70,6 +70,28 @@ history:
       instead of taking them, and the portal's hand-written /price walkthrough
       still called `updated_at` the price's age. Five INFO items recorded and
       deliberately left. Bundle regenerated; still nothing deployed.
+  - date: "2026-09-22"
+    status: active
+    who: akot
+    note: >
+      Second review round (an independent /code-review of the same branch),
+      one commit. The tip is now bounded above ONCE, in `base_tip`'s WHERE,
+      instead of inside the two `maxIf` predicates: a future-stamped candle is
+      outside the whole tip, so `as_of` always names the candle `price_usd`
+      came from and cannot name an older one. The oracle rate and its own
+      timestamp became ONE tuple scalar under one WHERE, so the two can no
+      longer be selected over different sets. `method` was missing from both
+      portal /price samples and is now between `updated_at` and `as_of`, in
+      wire order. The two "the age looks wrong" findings were answered with
+      text, not code: the hourly enrichment cadence makes `carried` and an
+      `as_of` about an hour behind `updated_at` the ORDINARY state of a traded
+      asset, and `carried` also covers a newer trade on a pair with no USD
+      conversion path — both now said in the published descriptions, the DTO
+      docstrings, the sentinel table and the BE contract note. The sentinel
+      proposal was declined. All suites green (62 + 223 unit, current_mv_it,
+      price_it, list_it, openapi, 214 portal), the known pre-existing
+      endpoints_it backfill_status failure aside; bundle regenerated; nothing
+      deployed.
 ---
 
 # Publish the price's age
@@ -429,3 +451,67 @@ copy-pasted across the three builders (IN-04); the TZ-dependent
 and `insert_pair_pf` leaving `pf_volume` on its DEFAULT beside
 `pf_trade_count = 0` (IN-07 — `current.sql` reads neither column). None of them
 changes what ships; each is a line in the review for whoever touches these next.
+
+### Second review round (`/code-review`, 2026-09-22)
+
+A second, independent review of the same branch. Three items changed code, two
+were answered with text and the semantics kept, one was declined. One commit.
+
+- **#3 applied — the tip is bounded ONCE.** `AND timestamp <= now()` moved out
+  of the two `maxIf` predicates and into `base_tip`'s own `WHERE`, so the
+  aggregates read `maxIf(timestamp, close_usd > 0)` /
+  `maxIf(timestamp, pf_trade_count > 0)` again. The first round's bound made a
+  future-stamped candle invisible to `as_of` but still visible to `price_usd`,
+  which published a price the age field did not name; now every aggregate of
+  the tip sees the same candle set, `as_of` always names `price_usd`'s candle,
+  and `""` on the wire is exactly `price_usd = "0"`. A future-stamped candle is
+  a data defect and is simply outside the tip — the oracle arm bounds
+  `timestamp <= now()` the same way. The IT
+  `a_future_dated_candle_does_not_date_as_of_ahead_of_now` now prices the
+  future candle at 3.0 against the past one's 2.0 and asserts all three of
+  `price_usd == 2.0`, `as_of == past` and `price_status == "priced"` — a bound
+  back inside the `as_of` aggregate alone would publish 3.0 beside the older
+  age and is caught by value. Proven RED again with the `WHERE` bound removed:
+  `current_mv_it.rs:1276`, `left: "2026-09-22 11:44:00"`, `right:
+  "2026-09-22 11:29:00"`. The guard test's counts did not move — 5 guarded
+  aggregates, one `INTERVAL 2 HOUR`, no `argMax(close_usd`.
+- **#4 applied — one USDC scalar, not two.** `usdc_rate` and `usdc_as_of` are
+  now a single `usdc_reading` tuple,
+  `(argMax(usd_rate, timestamp), max(timestamp))` under the one unchanged
+  `WHERE`; `usdc_reading.1` / `.2` replace the two names in `usdc_tip`'s
+  `price_usd` / `as_of` / `tip_at` and in the `> 0` guard. The "VERBATIM copy …
+  must stay that way" comment is gone: with one subquery there is no second
+  `WHERE` to keep in step. Verified on the local 26.3.10.60 that a tuple scalar
+  over no matching row yields `(0, 1970-01-01 00:00:00)`, and the "no oracle
+  reading" case now has an assertion —
+  `the_oracle_allowlist_is_usdc_only_and_never_repegs_stellar_usdt` seeds the
+  canonical USDC identity with no rate and asserts the arm emits NO row, so the
+  `.1 > 0` guard is what keeps a 1970-dated zero tagged `oracle` off the wire.
+- **#5 applied — `method` was missing from both portal `/price` samples.**
+  Added to `QuickStart.tsx`'s `RESPONSE_FIELDS` and `Endpoints.tsx`'s sample
+  between `updated_at` and `as_of` (wire order), value `"traded"`, glossed "How
+  the price was obtained: traded, oracle, or empty when unavailable".
+  `QuickStart.spec.tsx` needed no change — it derives its key list from
+  `RESPONSE_FIELDS` rather than pinning one.
+- **#1 and #2 answered by text; the semantics are unchanged and deliberate.**
+  Both findings read a `carried` status and an `as_of` about an hour behind
+  `updated_at` as a defect. It is not: `as_of` is the age of the USD PRICE, and
+  USD values are computed by a pass that runs hourly, so that is what an
+  actively traded asset looks like (the prod measurement in this task's history
+  says the same in numbers — 0 of 4,342 assets under 5 minutes old). Shortening
+  the enrichment cycle is a pipeline change and its own task, not a rename of
+  this field. Nor can `carried` be split into "stale" and "unconvertible": the
+  second case is a newer trade on a pair with no USD conversion path, and
+  whether a quote HAS such a path is not data this snapshot holds — that is
+  [[0147]]'s. So both cases are now stated, in the published `PriceResponse`
+  `as_of` / `price_status` descriptions, the two `dto.rs` docstrings, the
+  `views.sql` sentinel table and the BE contract note: the cadence makes
+  `carried` ordinary rather than a fault, a freshness threshold tighter than it
+  rejects the whole market, and `carried` may also mean no newer USD price is
+  coming at all.
+- **#6 declined — the view keeps its sentinels.** The proposal was to turn the
+  epoch / `''` sentinels into NULLs at the `current_price_usd` boundary. That
+  view's contract is non-nullable columns with documented sentinels (ADR 0292's
+  first verdict), and its sentinel table already states that epoch means "no
+  price" and must be read as absent, never as an age. Changing it would break
+  every existing BE reader to restate something already documented.

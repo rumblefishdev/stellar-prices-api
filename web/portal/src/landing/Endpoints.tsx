@@ -223,6 +223,7 @@ function ExampleResponse() {
             {tok(KEY, '"soroswap"')}: {'{…} },\n'}
             {tok(KEY, '"updated_at"')}: {tok(STR, '"2026-08-31T12:22:00Z"')},
             {'\n'}
+            {tok(KEY, '"method"')}: {tok(STR, '"traded"')},{'\n'}
             {tok(KEY, '"as_of"')}: {tok(STR, '"2026-08-31T12:16:00Z"')},{'\n'}
             {tok(KEY, '"price_status"')}: {tok(STR, '"carried"')}
             {'\n}'}

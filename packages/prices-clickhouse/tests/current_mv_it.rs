@@ -1230,9 +1230,13 @@ fn insert_pair_at(db: &str, base: u32, quote: u32, close_usd: &str, ts_literal: 
 /// value no freshness threshold handles the way its author meant it to. A
 /// candle stamped after the wall clock is a data defect (bucket timestamps are
 /// ledger close times), but the window's own lower-only bound made it a
-/// publishable one, so the tip is bounded above the way the oracle arm already
-/// is. `price_usd` keeps its unbounded argMaxIf deliberately — this change is
-/// about the age field, and nothing here moves the price.
+/// publishable one, so the tip is bounded above — ONCE, in its WHERE, the way
+/// the oracle arm bounds its reading. That single bound is what this test
+/// pins: the future candle is outside the tip for EVERY aggregate of it, so it
+/// neither prices the asset nor dates it. A bound applied only inside the
+/// `as_of` aggregate would pass the age assertion below while publishing the
+/// future candle's price beside an older age — which is why the price is
+/// asserted here by value too.
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
@@ -1257,7 +1261,10 @@ async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
         insert_asset(db, 1, "XLM", ""),
         insert_asset(db, 12, "FUT", "GFUT"),
         insert_pair_at(db, 12, 1, "2.00", &past),
-        insert_pair_at(db, 12, 1, "2.00", &future),
+        // A DIFFERENT price on the future candle: if the bound ever moves back
+        // inside the `as_of` aggregate alone, price_usd reads 3.0 here and the
+        // assertion below says so.
+        insert_pair_at(db, 12, 1, "3.00", &future),
     ] {
         admin.query(&q).execute().await.expect("fixture");
     }
@@ -1270,6 +1277,18 @@ async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
         as_of_of(&admin, db, 12).await,
         past,
         "as_of must name the newest candle at or before now(), not the future-dated one"
+    );
+    // The whole tip, not only the age: the future candle's 3.00 must be
+    // invisible to price_usd as well, or as_of would name a candle the
+    // published price did not come from.
+    let price = scalar_f64(
+        &admin,
+        &format!("SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = 12"),
+    )
+    .await;
+    assert!(
+        (price - 2.0).abs() < 1e-9,
+        "price_usd must come from the same candle as_of names (the past one, 2.00) — got {price}"
     );
     assert_eq!(
         status_of(&admin, db, 12).await,
@@ -1383,6 +1402,10 @@ async fn the_oracle_allowlist_is_usdc_only_and_never_repegs_stellar_usdt() {
     for q in [
         insert_asset(db, 1, "XLM", ""),
         insert_asset(db, 3, "USDT", USDT_ISSUER),
+        // The canonical USDC identity IS resolvable here — it simply has no
+        // oracle reading. That is the "no rate" half of the tuple scalar
+        // (task 0216), asserted below.
+        insert_asset(db, 2, "USDC", USDC_ISSUER),
         // USDT trades as a base at its real, depegged value.
         insert_pair(db, 3, 1, "0.13", "65"),
         // The trap: a par rate filed under the depegged issuer's identity.
@@ -1404,6 +1427,24 @@ async fn the_oracle_allowlist_is_usdc_only_and_never_repegs_stellar_usdt() {
         "traded",
         "a market-priced asset is 'traded'; tagging it 'oracle' would assert \
          authority this price does not have"
+    );
+
+    // Task 0216 — the rate and its own timestamp are read as ONE tuple, and
+    // with no matching reading that tuple is (0, 1970-01-01 00:00:00). The
+    // `.1 > 0` guard must still stand the oracle arm down: USDC's identity
+    // resolves here, so a row would be a 0 price dated 1970 wearing the
+    // 'oracle' label — the exact "confident zero" the arm exists to refuse.
+    let usdc_rows: u64 = admin
+        .query(&format!(
+            "SELECT count() FROM {db}.current_prices FINAL WHERE asset_id = 2"
+        ))
+        .fetch_one()
+        .await
+        .expect("count usdc rows");
+    assert_eq!(
+        usdc_rows, 0,
+        "with no oracle reading the synthesised arm must emit NO row; absent \
+         is honest, a 1970-dated zero tagged 'oracle' is not"
     );
 
     teardown(db).await;

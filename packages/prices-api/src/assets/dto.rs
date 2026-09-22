@@ -71,6 +71,13 @@ pub struct PriceResponse {
     /// dated independently, so it is no fresher than this and may be older.
     /// (This DTO publishes no `market_cap_usd`; the same reasoning applies to
     /// it on the surfaces that do.)
+    ///
+    /// ⚠️ USD values are computed by a pass that runs HOURLY, so an `as_of` up
+    /// to about an hour behind `updated_at` — and a `price_status` of
+    /// `"carried"` — is the ORDINARY state of an actively traded asset, not a
+    /// fault. A freshness threshold tighter than that cadence rejects the whole
+    /// market. Shortening the enrichment cycle is its own task; this field only
+    /// reports the cadence honestly.
     pub as_of: String,
     /// What kind of price `price_usd` is (task 0216):
     ///
@@ -83,6 +90,16 @@ pub struct PriceResponse {
     ///   and `as_of` is `""`.
     /// * `""` — the row predates the snapshot's current definition and has not
     ///   been rewritten yet. Not a vocabulary word; a deploy-window state.
+    ///
+    /// `"carried"` is the ORDINARY state of an actively traded asset for up to
+    /// about an hour, because USD values are computed by an hourly pass — a
+    /// freshness threshold tighter than that cadence rejects the whole market.
+    ///
+    /// It also covers a newer trade that happened on a pair with NO USD
+    /// conversion path: there no newer USD price is coming at all, and `as_of`
+    /// is the newest minute that could be converted. The two cases are not
+    /// distinguishable here — "does this quote have a conversion path" is not
+    /// data this snapshot holds (task 0147).
     pub price_status: String,
 }
 

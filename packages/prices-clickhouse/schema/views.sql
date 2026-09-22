@@ -289,12 +289,20 @@
 --                    independently and market_cap_usd multiplies it by a supply
 --                    figure with its own fetch time, so both are no fresher
 --                    than as_of and may be older. as_of bounds price_usd only.
+--                    USD values are computed by an HOURLY pass, so an as_of up
+--                    to about an hour behind updated_at is the ordinary state
+--                    of an actively traded asset, not a fault.
 --   price_status     LowCardinality(String). priced | carried | unpriced.
 --                    priced = as_of IS the asset's newest price-forming candle
 --                    in the window (every measured-rate row reads this too).
 --                    carried = a real priced close, but a newer price-forming
 --                    candle has not been priced yet — the price is real and
---                    stale, and as_of says how stale.
+--                    stale, and as_of says how stale. On the hourly enrichment
+--                    cadence that is the ordinary state of an actively traded
+--                    asset for up to about an hour; it also covers a newer
+--                    trade on a pair with NO USD conversion path, where no
+--                    newer USD price is coming at all and as_of is the newest
+--                    convertible minute.
 --                    unpriced = price_usd is the 0 sentinel; method is '' for
 --                    the same reason and as_of is the epoch.
 --                    '' = a row the current MV has not rewritten yet (table
