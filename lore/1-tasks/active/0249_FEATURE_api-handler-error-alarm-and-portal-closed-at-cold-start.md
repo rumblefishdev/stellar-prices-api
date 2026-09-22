@@ -36,6 +36,19 @@ history:
       Errors = 0. Plus runbook and 2 comments. Pattern proven by
       test-metric-filter; diff additions-only. Stays active: AC2 "fires" and
       AC3 need a deploy.
+  - date: "2026-09-22"
+    status: active
+    who: akot
+    note: >
+      Merged (PR #330, 15421e3) and deployed to production at 12:08 CEST via
+      `make deploy-production-observability` (27 s, additions only; 0151's
+      three zero-invariant alarms rode along). 61 alarms live, all six new
+      ones in OK, the metric filter created with the exact pattern, and the
+      INSUFFICIENT_DATA → OK transitions delivered to the ops topic. A
+      forced ALARM on portal-closed (set-alarm-state) delivered too and the
+      alarm returned to OK silently, as designed. AC 1 and AC 4 confirmed
+      live; the induced-closure half of AC 2 and the quiet week (AC 3, until
+      2026-09-29) remain.
 ---
 
 # An error alarm for the api-handler, and one for a portal that closed itself
@@ -103,9 +116,12 @@ Nothing reads it. This task makes both signals page.
       on the pattern against a captured line), and the alarm fires on it.
       **Match half done** — `aws logs test-metric-filter` over real production
       lines, and `filter-log-events` with the same pattern returned 243 real
-      lines. **"Fires on it" open**: needs a deploy.
-- [ ] Neither alarm fires over a week of ordinary traffic. (Open — needs a
-      deploy and a week.)
+      lines. **Delivery proven live 2026-09-22**: `set-alarm-state` to ALARM
+      executed the SNS action, and the alarm went back to OK without an OK
+      notification. **Still open**: a real closure driving the filter →
+      metric → ALARM path end to end (induced, or the next load test).
+- [ ] Neither alarm fires over a week of ordinary traffic. (Deployed
+      2026-09-22 12:08 CEST; the week runs to 2026-09-29.)
 - [x] The runbook's "nothing pages on it" sentence is updated.
 
 ## Implementation Notes
@@ -247,6 +263,7 @@ deploy is the state change and the notification themselves.
 
 ## Future Work
 
-- After deploy: check that `prices-production-api-handler-portal-closed`
-  fires on an induced closure, and that none of the three alarms fires over
-  a week of ordinary traffic (AC 2 second half, AC 3).
+- Check that `prices-production-api-handler-portal-closed` fires on a real
+  closure (induced, or the next load test's cold-start burst), and that none
+  of the three alarms fires over the week to 2026-09-29 (AC 2 second half,
+  AC 3). Then close.
