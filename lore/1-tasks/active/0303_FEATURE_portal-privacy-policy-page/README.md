@@ -30,6 +30,18 @@ history:
       contact address stays `hello@rumblefish.pl` for now, IP addresses are
       recorded in X-Ray for 30 days (measured, sentence to be plain), the
       Payments section stays. Route `/privacy-policy`.
+  - date: "2026-09-22"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Implemented on `feat/0303_portal-privacy-policy-page`, stacked on
+      `fix/0301_portal-navigation` (both edit the footer and `links.ts`):
+      the reviewed document kept as `web/portal/src/privacy/privacy-policy.md`,
+      read by a small parser for the constructs it uses, rendered at
+      `/privacy-policy` in the doc-page shape, linked from the footer. The
+      page carries a version date the draft did not. 216 portal tests,
+      typecheck, lint green; production bundle clean. Open: PR, review of
+      the text by its owner, deploy.
 ---
 
 # Publish the Prices API privacy policy as a portal page
@@ -98,15 +110,15 @@ HubSpot and GTM, has no accounts, and the corporate policy covers it.
 
 ## Acceptance Criteria
 
-- [ ] `/api/privacy-policy` renders the approved policy, reachable from the
+- [x] `/api/privacy-policy` renders the approved policy, reachable from the
       footer's "Privacy policy" on every page that has the footer
-- [ ] The three open points above are decided and the text matches the
+- [x] The three open points above are decided and the text matches the
       decision (address, IP, payments)
-- [ ] Every factual statement in the page matches the code: scopes, cookie
+- [x] Every factual statement in the page matches the code: scopes, cookie
       attributes and lifetime, log retention, what revoke does
-- [ ] No hostname other than ours and no tracking script in the bundle
+- [x] No hostname other than ours and no tracking script in the bundle
       (the criterion [[0233]] already holds)
-- [ ] The explorer's footer keeps the corporate policy; nothing there changes
+- [x] The explorer's footer keeps the corporate policy; nothing there changes
 
 ## Notes
 
@@ -115,3 +127,76 @@ HubSpot and GTM, has no accounts, and the corporate policy covers it.
 - The corporate policy names `www.rumblefishdev.com` as "the Website", so
   the explorer's link to it carries a small scope gap of its own; out of
   scope here, noted for whoever owns that page.
+
+## Implementation Notes (2026-09-22)
+
+Branch `feat/0303_portal-privacy-policy-page`, stacked on [[0301]]'s branch
+because both change the footer and `links.ts`; merge #335 first.
+
+- **Text**: `web/portal/src/privacy/privacy-policy.md` is the delivered draft
+  byte for byte (also in `sources/` here as the input). It is imported with
+  Vite's `?raw` and read by `privacy/policy.ts` — not a Markdown parser, a
+  reader for what the document uses: `#`/`##`/`###` headings wrapped in
+  `**`, paragraphs, `*` bullets, `**bold**`, `` `code` ``, backslash
+  escapes (`1\.`, `\+48`) and the address block's hard line breaks.
+  Anything else would render as its literal text, and the spec would show
+  it.
+- **Page**: `privacy/PrivacyPolicy.tsx`, lazy like the API reference, in the
+  `DocPage` shape: the document's two opening paragraphs are the page lede,
+  each section's first paragraph is its lede under the heading, the rail
+  lists the sixteen sections. `Version of 22 September 2026` above the
+  title (`POLICY_DATED`).
+- **Route**: `/privacy-policy` in `app.tsx` (`PrivacyPolicyRoute`, same
+  chrome rule as `/docs`); `PRIVACY_POLICY_ROUTE` / `PRIVACY_POLICY` in
+  `links.ts`; the footer's "Privacy policy" is a router link; the dashboard
+  bar accepts `current="privacy-policy"` and underlines nothing there.
+- **Tests**: `privacy/PrivacyPolicy.spec.tsx` — sixteen numbered sections in
+  order, unique ids, no notation left, every bullet and sub-heading of the
+  source kept, the page renders each section as a heading with a rail
+  entry and `**`/`` ` `` as `<strong>`/`<code>`; `app.spec.tsx` — the route
+  under the landing bar and the footer link. 216 tests, typecheck and lint
+  green.
+- **Bundle**: fresh production build; the policy is its own chunk; no
+  hostname but ours and the footer's, no tracking script.
+
+## Issues Encountered
+
+- **Prettier rewrote the policy on the first commit.** lint-staged formats
+  every staged non-Rust file, and Prettier's Markdown style turns `*`
+  bullets into `-`. The reader knew only `*`, so the page showed 79
+  paragraphs beginning with "- " — and the spec did not notice, because it
+  counted bullets off the same reformatted file. Three fixes: the file is
+  in `.prettierignore` (reviewed legal text is never reformatted, so it
+  stays byte for byte the delivered draft), the reader accepts `-` too, and
+  the spec pins the draft's literal counts (79 bullets, 3 sub-headings) and
+  asserts no marker survives as text. Found by looking at the page on the
+  dev server, not by the tests — the lesson is in the spec's comment.
+- **The rail clipped four section titles.** `Toc`'s top-level entries were
+  `white-space: nowrap` at desktop width; the reference's and the quick
+  start's labels are short, the policy's are not ("Transfers Outside the
+  European Economic Area"). Top-level entries wrap now, like nested ones;
+  the other two pages look the same because their labels fit.
+
+## Design Decisions
+
+### From Plan
+
+1. **The document stays a `.md` file and the page reads it.** A diff of the
+   file is a diff of the policy, which is what a reviewer of legal text
+   needs; a retyping into JSX would drift and could not be diffed against
+   the delivered version.
+
+### Emerged
+
+2. **A small reader instead of a Markdown dependency.** No Markdown library
+   is in the workspace; the document uses six constructs; the reader is
+   ~80 lines with a spec that counts the source's bullets and sub-headings.
+   A library would also turn any HTML in a future edit into markup on a
+   public page; the reader renders unknown notation as text.
+3. **A version date on the page.** The draft carries none; a policy that
+   cannot say which version a visitor read is a gap of its own.
+   `POLICY_DATED` is a constant beside the import, to bump with every edit
+   of the file.
+4. **The explorer keeps the corporate policy.** This text says the portal
+   sets no analytics cookies, which is false of the explorer (HubSpot, GTM);
+   one document for the host would need a second part, out of scope here.

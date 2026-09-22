@@ -118,6 +118,15 @@ export const QUICKSTART_ROUTE = '/quick-start';
 export const QUICKSTART = `${ROUTER_BASENAME}${QUICKSTART_ROUTE}`;
 
 /**
+ * The privacy policy — a page of this app (task 0303), rendered from
+ * `src/privacy/privacy-policy.md`, at the name the explorer's footer and the
+ * corporate site use for theirs. A ROUTE like the quick start; `PRIVACY_POLICY`
+ * is the same place as an absolute href.
+ */
+export const PRIVACY_POLICY_ROUTE = '/privacy-policy';
+export const PRIVACY_POLICY = `${ROUTER_BASENAME}${PRIVACY_POLICY_ROUTE}`;
+
+/**
  * The official Stellar Discord — **Stellar Developers**, and no other server
  * (Adam, 2026-09-02). This snowflake is the guild the backend's membership
  * gate checks: it is the value of the SSM parameter

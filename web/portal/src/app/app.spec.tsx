@@ -488,6 +488,23 @@ describe('routes', () => {
     expect(screen.queryByRole('navigation', { name: 'Dashboard' })).toBeNull();
   });
 
+  it('serves the privacy policy under the landing bar, with the footer pointing at it', async () => {
+    openAndSignedOut();
+    renderAt('/privacy-policy');
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: /privacy policy/i }),
+    ).toBeTruthy();
+    expect(screen.getByRole('navigation', { name: 'Primary' })).toBeTruthy();
+    expect(screen.queryByRole('navigation', { name: 'Dashboard' })).toBeNull();
+    const footer = within(screen.getByRole('navigation', { name: 'Footer' }));
+    expect(
+      footer
+        .getByRole('link', { name: /^privacy policy$/i })
+        .getAttribute('href'),
+    ).toBe('/privacy-policy');
+  });
+
   it('marks the section the quick start opens on in its rail', async () => {
     openAndSignedOut();
     renderAt('/quick-start');
@@ -1886,15 +1903,18 @@ describe('navigation off the landing page', () => {
     expect(
       screen.getByRole('link', { name: /rumble fish/i }).getAttribute('href'),
     ).toBe('https://rumblefish.dev');
-    // "Contact" reaches the company's contact page (task 0301); "Status" and
-    // "Privacy policy" stay text until a status page and task 0303 exist.
+    // "Contact" reaches the company's contact page (task 0301) and "Privacy
+    // policy" the portal's own page (task 0303); "Status" stays text until a
+    // status page exists.
     expect(
       screen.getByRole('link', { name: /^contact$/i }).getAttribute('href'),
     ).toBe('https://www.rumblefish.dev/contact/');
     expect(screen.queryByRole('link', { name: /^status$/i })).toBeNull();
     expect(
-      screen.queryByRole('link', { name: /^privacy policy$/i }),
-    ).toBeNull();
+      screen
+        .getByRole('link', { name: /^privacy policy$/i })
+        .getAttribute('href'),
+    ).toBe('/privacy-policy');
   });
 
   /**
