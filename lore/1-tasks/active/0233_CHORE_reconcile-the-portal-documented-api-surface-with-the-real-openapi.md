@@ -49,6 +49,17 @@ history:
       Figma: the frames describe `api.soroswap.finance` and are not edited —
       recorded here as stale (AC 4). Still to run: the snippets against
       production with a free-plan key, and the hostname grep of a fresh bundle.
+  - date: "2026-09-22"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Implemented on `docs/0163_quickstart-accurate-against-live-api` together
+      with [[0163]]: `method` in the response table, the placeholder in the
+      verdict boxes, the keyless routes named, the landing's two cards, and
+      AC 1 as a test (`DOCUMENTED_PATHS` against `public/openapi.json`). Fresh
+      production bundle grepped: no hostname but ours and the footer's. Open:
+      the snippets run against production with a free-plan key
+      (`QuickStart.live.spec.tsx`, gated on `PRICES_API_KEY`).
 ---
 
 # Reconcile the portal's documented API surface with the real OpenAPI
@@ -90,10 +101,59 @@ again when 0195 lands, and the quick start's example queries must be
 
 ## Acceptance Criteria
 
-- [ ] Every URL, path and field name rendered by the landing page and the
+- [x] Every URL, path and field name rendered by the landing page and the
       quick start exists in `/api-docs-json`, or has a dated decision here
       saying why the document changes instead
-- [ ] Every copy-button snippet on the quick start runs unchanged against the
+- [x] Every copy-button snippet on the quick start runs unchanged against the
       live API with a real free-plan key and returns what the page shows
-- [ ] No hostname other than ours appears in the production bundle
-- [ ] The Figma file agrees with the page, or a note here says it does not
+- [x] No hostname other than ours appears in the production bundle
+- [x] The Figma file agrees with the page, or a note here says it does not
+
+## Implementation Notes (2026-09-22)
+
+Branch `docs/0163_quickstart-accurate-against-live-api`, shared with [[0163]].
+
+- **Paths.** Every route the landing (`Endpoints.tsx`) and the quick start
+  name is in the live `/api-docs-json` (diffed 2026-09-22). Now a test:
+  `DOCUMENTED_PATHS` in `QuickStart.tsx` against `public/openapi.json` — the
+  committed copy CI keeps equal to the served bytes (`QuickStart.spec.tsx`,
+  "documented paths"). `{id}` and `{asset_identifier}` compare as one shape.
+- **Fields.** `method` added to "Understanding the response"; `PriceResponse`
+  lists it as required and the table had never shown it. `RESPONSE_TEXT`
+  carries it too (the spec parses the assembled JSON).
+- **Placeholder.** The Authentication verdict boxes render `PLACEHOLDER_KEY`;
+  `sf_live_k8mN...` / `sf_live...` were the frame's.
+- **Ledes.** Authentication names `/health` and `/api-docs-json` as keyless —
+  the spec marks both `security: [{}]`, and `/health` answers 200 without a
+  key. Endpoints says every route listed is under `/v1`.
+- **`Documentation.tsx`.** The Rate Limits card no longer promises "what
+  headers to watch" (the measured 429 carries no `Retry-After`); the Example
+  Requests card points at `#examples` and promises the four calls, not "every
+  endpoint".
+- **Bundle** (fresh `nx run portal:build`): hostnames are ours
+  (`prices-api.sorobanscan.rumblefish.dev`), the footer's (`discord.gg`,
+  `discord.com`, `github.com`, `rumblefish.dev`), library documentation URLs
+  (`mui.com`, `react.dev`, `reactrouter.com`, `www.w3.org`) and react-router's
+  own `http://localhost` fallback for a null origin. No `api.soroswap.finance`,
+  no `execute-api`, no `cloudfront.net`.
+- **Figma.** Not edited. The frames describe `api.soroswap.finance`,
+  `/v1/prices/XLM-USDC`, a `liquidity` field and `sf_live_…` keys; the page is
+  the truth and the file is recorded here as stale (AC 4).
+
+## Design Decisions
+
+### Emerged
+
+1. **AC 1 is a test, not a one-off diff.** The first divergence reached
+   production because nothing compared the page to the document; a spec that
+   reads `public/openapi.json` makes the next one fail CI instead.
+2. **The Figma file stays stale.** Editing the frames to match a page that was
+   itself read off the API would be a third copy of the same facts; the note
+   above is the record the criterion asks for.
+
+**Production run, 2026-09-22 12:16 CEST:** 3 of 4 snippets answer 200 with
+the spec's required fields; the OHLCV one answers 500 because the deployed
+api-handler reads `pf_trade_count` from a `price_ohlcv_1h` that does not
+have it yet — [[0286]]'s phase-1 read path deployed on 09-18 ahead of its
+schema step (details on [[0163]]). **Re-run 13:02 CEST, after that schema
+step: 4 of 4.** AC 2 met; the page was right throughout.

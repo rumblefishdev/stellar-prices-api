@@ -3031,9 +3031,8 @@ function ApiKey({
                     Copy key
                   </button>
                   {/* The frame's second control, and a link because it leaves
-                      the page. Task 0163 has not landed, so `QUICKSTART` is
-                      still the OpenAPI document — one constant, one diff when
-                      it does. */}
+                      the page — the quick start route (task 0193), whose
+                      example queries are task 0163's. */}
                   <a href={QUICKSTART} data-variant="quiet">
                     View quick start
                     <ArrowBadge variant="onLight" />
