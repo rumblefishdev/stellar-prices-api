@@ -412,12 +412,14 @@ export const RESPONSE_FIELDS: readonly {
       'When this snapshot row was last refreshed (ISO 8601, UTC) — not the age of the price',
   },
   {
+    // `PriceResponse` requires it, and the table went without it until task
+    // 0233's diff of this page against `/api-docs-json` (2026-09-22).
     key: 'method',
     value: <Tok c={STR}>&quot;traded&quot;</Tok>,
     raw: '"traded"',
     dot: STR,
     meaning:
-      'How the price was obtained: traded, oracle, or empty when unavailable',
+      "How price_usd was obtained: traded (this asset's own trades) or oracle (an oracle rate, currently USDC only); empty when no priced trade fell in the window",
   },
   {
     key: 'as_of',
@@ -432,16 +434,6 @@ export const RESPONSE_FIELDS: readonly {
     raw: '"carried"',
     dot: STR,
     meaning: 'priced, carried or unpriced — what kind of price this is',
-  },
-  {
-    // `PriceResponse` requires it, and the table went without it until task
-    // 0233's diff of this page against `/api-docs-json` (2026-09-22).
-    key: 'method',
-    value: <Tok c={STR}>&quot;traded&quot;</Tok>,
-    raw: '"traded"',
-    dot: STR,
-    meaning:
-      "How price_usd was obtained: traded (this asset's own trades) or oracle (an oracle rate, currently USDC only); empty when no priced trade fell in the window",
   },
 ];
 
