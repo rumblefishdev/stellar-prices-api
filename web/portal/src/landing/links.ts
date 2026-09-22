@@ -190,3 +190,11 @@ export const EXPLORER = 'https://sorobanscan.rumblefish.dev/';
 
 /** Rumble Fish's own site — the footer's mark and its text link. */
 export const RUMBLEFISH_SITE = 'https://rumblefish.dev';
+
+/**
+ * Rumble Fish's contact page — the footer's "Contact" and the refusal card's
+ * "contact support" (task 0301). A sales form rather than a support desk, and
+ * the nearest thing that reaches the company; the card's other word, "status
+ * page", still has nowhere to go.
+ */
+export const RUMBLEFISH_CONTACT = 'https://www.rumblefish.dev/contact/';

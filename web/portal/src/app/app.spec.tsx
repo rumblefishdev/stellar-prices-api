@@ -1885,6 +1885,15 @@ describe('navigation off the landing page', () => {
     expect(
       screen.getByRole('link', { name: /rumble fish/i }).getAttribute('href'),
     ).toBe('https://rumblefish.dev');
+    // "Contact" reaches the company's contact page (task 0301); "Status" and
+    // "Privacy policy" stay text until a status page and task 0303 exist.
+    expect(
+      screen.getByRole('link', { name: /^contact$/i }).getAttribute('href'),
+    ).toBe('https://www.rumblefish.dev/contact/');
+    expect(screen.queryByRole('link', { name: /^status$/i })).toBeNull();
+    expect(
+      screen.queryByRole('link', { name: /^privacy policy$/i }),
+    ).toBeNull();
   });
 
   /**

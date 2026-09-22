@@ -37,6 +37,14 @@ history:
       described. One more gap from the same walk: the SorobanScan wordmark and
       the footer's Rumble Fish mark were images without a link; both link out
       now (explorer home, rumblefish.dev). PR #335.
+  - date: "2026-09-22"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      "Contact" in the footer and "contact support" on the refusal card now
+      open rumblefish.dev/contact/ — the sales form, the nearest thing that
+      reaches the company. "Privacy policy" waits for [[0303]]; "Status" has
+      nowhere to go and no task. Both decided on the channel walk-through.
 ---
 
 # Portal navigation: Quick Start goes to a landing anchor, and a key holder without a session has no way to the dashboard
@@ -78,6 +86,11 @@ arrivals to `/login`, and `/login` forwards an authenticated visitor to
   SorobanScan wordmark in every bar links to the explorer's home (`EXPLORER`),
   the footer's Rumble Fish mark to `rumblefish.dev` — both were images that
   led nowhere.
+- `landing/Chrome.tsx`, `app/app.tsx`: the footer's "Contact" and the refusal
+  card's "contact support" open `rumblefish.dev/contact/`
+  (`RUMBLEFISH_CONTACT`) — the company's contact form, decided 2026-09-22.
+  "Status" and "status page" stay text (no status page exists, and no task
+  for one); "Privacy policy" stays text until [[0303]] lands.
 
 ## Acceptance Criteria
 
@@ -89,6 +102,8 @@ arrivals to `/login`, and `/login` forwards an authenticated visitor to
       and neither when the portal is closed
 - [x] The SorobanScan wordmark opens the explorer's home and the footer's
       Rumble Fish mark opens rumblefish.dev, in every bar that carries them
+- [x] "Contact" in the footer and "contact support" on the refusal card open
+      the company's contact page; "Status" and "Privacy policy" remain text
 - [x] Portal tests, lint and typecheck green
 
 ## Notes
