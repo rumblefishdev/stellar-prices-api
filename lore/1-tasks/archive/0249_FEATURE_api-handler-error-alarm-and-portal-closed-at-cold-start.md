@@ -2,7 +2,7 @@
 id: "0249"
 title: "The api-handler has no error alarm — and since 0194's review the portal closes itself at cold start with only a log line to say so"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0008"]
 related_tasks: ["0194", "0231"]
 tags: ["priority-high", "effort-small", "observability", "layer-infra", "epic-self-service-onboarding", "milestone-M3"]
@@ -49,6 +49,19 @@ history:
       alarm returned to OK silently, as designed. AC 1 and AC 4 confirmed
       live; the induced-closure half of AC 2 and the quiet week (AC 3, until
       2026-09-29) remain.
+  - date: "2026-09-22"
+    status: completed
+    who: akot
+    note: >
+      Closed by the operator the same day as the deploy. Delivered: three
+      alarms (api-handler Errors ≥ 1, portal-closed metric filter ≥ 1, API
+      5xx ≥ 5), outputs, dashboard strip 55 → 61, runbook and two comment
+      fixes, a guard test tying the log line to the filter, and a stack
+      dependency on Compute. 4 files + 1 test, 8 commits on the branch,
+      PR #330 (one review, 3 low findings, all answered). Live on production
+      since 12:08 CEST; delivery proven by a forced ALARM seen on Slack by
+      the team. Not waited for: the week of quiet traffic and a real
+      closure through the filter — see Acceptance Criteria.
 ---
 
 # An error alarm for the api-handler, and one for a portal that closed itself
@@ -111,17 +124,22 @@ Nothing reads it. This task makes both signals page.
       Observability template, and `cdk diff` shows only additions.
       (`prices-production-api-handler-errors`; diff: 7 `[+]`, plus the derived
       `DashboardBody` / `DashboardAlarmCount` changes — see Implementation Notes.)
-- [ ] The metric filter matches a real `portal closed at cold start` line
+- [x] The metric filter matches a real `portal closed at cold start` line
       (proved by a log-insights query over an induced one, or by a unit test
       on the pattern against a captured line), and the alarm fires on it.
       **Match half done** — `aws logs test-metric-filter` over real production
       lines, and `filter-log-events` with the same pattern returned 243 real
       lines. **Delivery proven live 2026-09-22**: `set-alarm-state` to ALARM
       executed the SNS action, and the alarm went back to OK without an OK
-      notification. **Still open**: a real closure driving the filter →
-      metric → ALARM path end to end (induced, or the next load test).
-- [ ] Neither alarm fires over a week of ordinary traffic. (Deployed
-      2026-09-22 12:08 CEST; the week runs to 2026-09-29.)
+      notification. **Accepted without** a real closure driving the filter →
+      metric → ALARM path end to end (operator's call, 2026-09-22): the
+      next load test's cold-start burst will exercise it, as 2026-09-18 did.
+- [ ] Neither alarm fires over a week of ordinary traffic. **Not waited
+      for** — closed on the day of the deploy (operator's call). In its
+      place: a 63-day backtest of the exact thresholds over production
+      5-minute datapoints (Issues Encountered) found no window that would
+      have fired outside a real incident or a load test. If one of the three
+      fires falsely before 2026-09-29, reopen here.
 - [x] The runbook's "nothing pages on it" sentence is updated.
 
 ## Implementation Notes
@@ -263,7 +281,7 @@ deploy is the state change and the notification themselves.
 
 ## Future Work
 
-- Check that `prices-production-api-handler-portal-closed` fires on a real
-  closure (induced, or the next load test's cold-start burst), and that none
-  of the three alarms fires over the week to 2026-09-29 (AC 2 second half,
-  AC 3). Then close.
+- Watch the three alarms' history to 2026-09-29; the next load test is
+  expected to fire `api-5xx` and `api-handler-portal-closed` legitimately
+  and is the first end-to-end exercise of the filter. Not spawned as a task:
+  it is a calendar check, not work.
