@@ -477,7 +477,8 @@ describe('routes', () => {
       screen.getByRole('navigation', { name: 'On this page' }),
     );
     const entries = rail.getAllByRole('link');
-    expect(entries).toHaveLength(10);
+    // The ten frame sections plus "Example queries" (task 0163).
+    expect(entries).toHaveLength(11);
     // Unscrolled, the rail points at the first section rather than at
     // nothing — the frame underlines `Prerequisites` for the same reason.
     expect(entries[0].getAttribute('aria-current')).toBe('location');
