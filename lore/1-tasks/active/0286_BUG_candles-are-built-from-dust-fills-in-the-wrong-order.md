@@ -416,6 +416,24 @@ equality with the day tier afterwards is the proof.
 every order-book fill priced from its resting offer (phase 2's D2), first
 try, no errors.
 
+**Post-deploy verification, 12:58 UTC** (runbook §8c/§8d, first hour of live
+traffic through the new ingest):
+
+- `pf_trade_count != trade_count` on **426 of 8 081** 1m rows. Non-zero is the
+  pass: zero would mean the column was taking its DEFAULT and the migration had
+  silently half-landed.
+- **389 dust-only minutes** (`trade_count > 0`, `pf_trade_count = 0`) — real
+  volume, not one price-forming fill. The remaining 37 are mixed minutes.
+- By source: sdex 387/7 731 = **5.01 %**, aquarius 2/314 = 0.64 %, soroswap
+  0/35, phoenix 0/1.
+- `prices-production-mv-drift` returned to **OK at ~12:22**, `MvDriftCount` 0
+  since 12:01.
+
+⚠️ The 5.01 % SDEX share is ONE HOUR and does not settle AC 10. The local
+end-to-end run on the 2026-04-02 ledgers measured 10.5 % of SDEX minutes
+non-price-forming; a single hour against a full day of a different era is not a
+like-for-like comparison, and the week's measurement is what decides the number.
+
 **`order_book_fills` on the `reconcile run complete` line is the cheapest
 proof of which build is live.** Before the deploy the line carried only
 `held_back`/`open_minute` (#313); the three offer fields arrive with #320.
