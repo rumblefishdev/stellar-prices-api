@@ -32,11 +32,23 @@ const mainSource = readFileSync(
   'utf8',
 );
 
-// `FilterPattern.stringValue('<key>', '=', '<prefix>*')` on the portal-closed
-// filter → { key, prefix }, or undefined when it is not a prefix match.
+// The portal-closed filter's own options object — from its construct id to
+// the `);` that closes `new logs.MetricFilter(`. Searching inside that block
+// only: an unbounded search would run on to the FIRST `stringValue(...)`
+// anywhere later in the file, so a second filter added after this one could
+// stand in for it and the guard would pass on the wrong filter.
+const portalClosedFilterBlock = (source) => {
+  const block = source.match(
+    /new logs\.MetricFilter\(\s*this,\s*'ApiHandlerPortalClosedFilter',([\s\S]*?)\n\s*\);/,
+  );
+  return block ? block[1] : undefined;
+};
+
+// `FilterPattern.stringValue('<key>', '=', '<prefix>*')` inside that block →
+// { key, prefix }, or undefined when the filter is not a prefix match on a key.
 const portalClosedFilter = (source) => {
-  const filter = source.match(
-    /'ApiHandlerPortalClosedFilter'[\s\S]*?FilterPattern\.stringValue\(\s*'([^']+)',\s*'='\s*,\s*'([^']+)\*',?\s*\)/,
+  const filter = portalClosedFilterBlock(source)?.match(
+    /FilterPattern\.stringValue\(\s*'([^']+)',\s*'='\s*,\s*'([^']+)\*',?\s*\)/,
   );
   return filter ? { key: filter[1], prefix: filter[2] } : undefined;
 };
@@ -105,4 +117,21 @@ test('a flattened subscriber is refused', () => {
 
   assert.notEqual(flattened, mainSource);
   assert.equal(subscriberPutsMessageUnderFields(flattened), false);
+});
+
+test('a second filter later in the file cannot stand in for the portal-closed one', () => {
+  // The portal-closed filter moves off `stringValue`; another filter with the
+  // right pattern is added after it. The alarm now matches nothing.
+  const swapped = stackSource
+    .replace(
+      /filterPattern: logs\.FilterPattern\.stringValue\(\s*'\$\.fields\.message',\s*'=',\s*'portal closed at cold start\*',\s*\)/,
+      'filterPattern: logs.FilterPattern.literal(\'{ $.message = "portal closed at cold start*" }\')',
+    )
+    .replace(
+      'this.apiHandlerPortalClosedAlarm = new cloudwatch.Alarm(',
+      "new logs.MetricFilter(this, 'OtherFilter', { logGroup: apiHandlerLogGroup, filterPattern: logs.FilterPattern.stringValue('$.fields.message', '=', 'portal closed at cold start*'), metricNamespace: 'X', metricName: 'Y' });\nthis.apiHandlerPortalClosedAlarm = new cloudwatch.Alarm(",
+    );
+
+  assert.notEqual(swapped, stackSource);
+  assert.equal(portalClosedFilter(swapped), undefined);
 });

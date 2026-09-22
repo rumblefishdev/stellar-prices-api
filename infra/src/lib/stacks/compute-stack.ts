@@ -749,6 +749,15 @@ export class ComputeStack extends cdk.Stack {
     // doc's 100 req/s). `reservedConcurrentExecutions` is the optional SLO escape
     // hatch (only set when configured). API Gateway grants invoke via the
     // integration's resource policy (no role-cycle, unlike the SQS ESM above).
+    //
+    // No `loggingFormat`: the function logs in Lambda's Text format, so each
+    // JSON line the tracing subscriber writes reaches CloudWatch untouched,
+    // and ObservabilityStack's portal-closed metric filter (task 0249)
+    // matches it on `$.fields.message`. AWS documents that JSON format does
+    // not re-encode lines that are already JSON, so switching would likely
+    // still match — but that is a claim, not a measurement: after ANY change
+    // to how this function's logs reach CloudWatch, re-prove the filter with
+    // `aws logs test-metric-filter` on a line the deployed function wrote.
     const apiHandler = config.apiHandler;
     this.apiHandlerFunction = new lambda.Function(this, 'ApiHandlerFunction', {
       ...pricesLambdaDefaults, // ARM64 + PROVIDED_AL2023 (ADR 0006/0007)
