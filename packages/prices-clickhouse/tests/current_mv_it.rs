@@ -1257,7 +1257,7 @@ fn insert_pair_at(
 /// `soroswap` quotes FUT at 9.00 three hours ago — outside CARRY_BOUND, so it
 /// is dead — then emits one future-stamped candle.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
     let db = "it_current_mv_0216_future";
     let admin = setup(db).await;
@@ -1744,7 +1744,7 @@ async fn an_unpriced_asset_carries_the_empty_sentinel_not_traded() {
 /// `carried` on `trade_count`, or on "any newer candle", would label every such
 /// asset stale forever.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_dust_only_newest_minute_does_not_make_a_price_read_carried() {
     let db = "it_current_mv_0216_dust";
     let admin = setup(db).await;
