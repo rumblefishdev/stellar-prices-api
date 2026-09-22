@@ -53,9 +53,19 @@
 -- backfill + enrichment crates). SQL cannot reference a Rust const, so this
 -- literal is a hand-synced copy — if the canonical address ever changes, update
 -- it here AND in that const together, or the views and the writer diverge.
--- `prices_clickhouse::USDT_ISSUER` is NO LONGER referenced by these views —
--- task 0172 removed USDT from the peg-fill arm (see below). The const still
--- exists for the writer paths; do not re-add it here.
+-- `prices_clickhouse::USDT_ISSUER` IS referenced by these views again, by ONE
+-- thing and one only: task 0147's `eligible_quotes` set, which names the
+-- canonical USDT identity as a quote leg we can in principle price in USD. It
+-- is a hand-synced copy under exactly the same rule as the USDC literal above —
+-- change it here AND in that const together, or the views and the writer
+-- diverge.
+-- ⚠️ It is NOT back in the PEG-FILL arm and must never be. Task 0172 removed it
+-- from there because the canonical Stellar USDT depegged in June 2022 and
+-- trades at ~$0.13, so a $1 placeholder overstated close_usd by ~7.4x on
+-- 44,657 candles across 495 base assets (see below). Being an ELIGIBLE QUOTE
+-- says only "a USDT-quoted candle's volume belongs in the coverage
+-- denominator"; it makes no claim about USDT's own price and creates no row
+-- for it.
 --
 -- ## Peg assets cannot be priced as a base — the peg-fill arm (task 0165)
 -- USDC is our top-preference QUOTE, so canonicalisation makes it the quote on
@@ -230,6 +240,71 @@
 --   Anything decoding POSITIONALLY off `SELECT *` gets an extra column; pin an
 --   explicit column list.
 --
+-- ### price_usd_series* only — `priced_volume_share` (task 0147, APPENDED LAST)
+--   priced_volume_share  Decimal(10, 6) in [0, 1]. The fraction of the
+--                        bucket's ELIGIBLE price-forming volume (`pf_volume`)
+--                        that some pricing tier had actually priced when this
+--                        row was computed — i.e. how much of what traded the
+--                        published close_usd is an average OF.
+--                        1 means every eligible unit was priced. A peg-arm row
+--                        publishes a literal 1: its value comes from a measured
+--                        rate, not from traded weight, so there is no
+--                        population for the share to describe.
+--   ⚠️ NEVER NULL. BE renders a NULL as a dash and drops the pool, so the
+--   division is guarded with an `if`, never a `nullIf` (which a non-Nullable
+--   CAST turns into Decimal128::MIN or code 349 anyway — see below).
+--   ⚠️ This is an APPENDED column: arity changed, order did not. `method` is
+--   still seventh; this is eighth. Anything decoding POSITIONALLY off
+--   `SELECT *` gets one more column than it did — pin an explicit column list.
+--
+-- ### THE COVERAGE GATE (task 0147) — what is published, and what is withheld
+-- Until 2026-09 arm A filtered `close_usd > 0` BEFORE the weighted average, so
+-- whichever rows enrichment happened to have reached became 100 % of the
+-- weight. Measured by BE on yXLM, 2026-08-04 13:00: a single 0.764-unit print
+-- at 1.3085 was the only enriched row in the bucket and this view published
+-- 1.3085 against a true ~0.170 — a 7.7x overstatement in the column they
+-- multiply into TVL. The arithmetic was right; the POPULATION was wrong.
+--
+-- A bucket is now published only when BOTH hold:
+--   priced_volume_share >= X            -- most of what traded is priced
+--   priced_volume_usd   >= FLOOR_USD    -- and it is worth something absolute
+-- where `priced_volume_usd = sumIf(volume_quote_usd, priced)`. A bucket that
+-- fails either is ABSENT — the value-or-absent contract is unchanged — and
+-- `price_usd_series_coverage{,_1h}` says which of the two it failed.
+--
+--   X         = 0.5    -- ⚠️ PLACEHOLDER, measured in phase 2
+--   FLOOR_USD = 100    -- ⚠️ PLACEHOLDER, measured in phase 2
+--
+-- ⚠️ BOTH constants are UNMEASURED and NOTHING may be deployed on them. They
+-- are pinned by `views_sql_marks_both_gate_constants_as_phase_2_placeholders`
+-- in src/lib.rs, which fails if a marker is removed without the value moving.
+-- Phase 2 measures the `priced_volume_share` and `priced_volume_usd`
+-- distributions on prod over a 7-day post-0286 window, PER GRAIN, and replaces
+-- both.
+--
+-- ⚠️ Why FLOOR_USD is a placeholder too, and why 100 is not a measurement.
+-- 100 USD is the number task 0118 uses for `min_volume_usd` in current.sql, and
+-- it is cited here for PROVENANCE only — it carries none of 0118's measured
+-- safety, because 0118's threshold is CONDITIONAL and this one is not.
+-- current.sql:130-150 records the measurement: applied UNCONDITIONALLY over a
+-- 24 h window on prod 2026-08-27, that same 100 USD would have blanked 2,960
+-- of 3,068 priced assets (96.5 %; ~85 % of the table has a max per-venue 24 h
+-- volume of <= $1), which is why 0118 made its threshold conditional on a
+-- clearing sibling. 0147's floor is PER BUCKET — per HOUR at the _1h grain,
+-- i.e. ~$2.4k/day — and has no sibling notion, so it is strictly harsher.
+-- Measure its blast radius per grain before it goes anywhere near prod.
+--
+-- ⚠️ Two caveats about `volume_quote_usd`, which the floor is read from:
+--   * It is summed over EVERY fill, not just the price-forming subset — task
+--     0286 added no `pf_volume_quote_usd`. So a row's dust volume is counted
+--     in the floor alongside its real volume. Accepted approximation.
+--   * It is denominated on the QUOTE leg, so the floor reads "USD that changed
+--     hands", which is what a `min_volume_usd`-style floor wants.
+--
+-- The priced predicate itself is `/ohlcv`'s `valid` for the SAME row
+-- (queries_ch.rs::usd_projection) — one predicate, spelled once, pinned by
+-- `views_sql_every_weighted_surface_spells_the_one_priced_predicate`.
+--
 -- ### current_price_usd only (task 0072)
 -- These carry SENTINELS, not NULLs — `current_prices`' columns are
 -- non-nullable, so "unavailable" and a real value share a type and can only be
@@ -334,26 +409,46 @@
 CREATE OR REPLACE VIEW prices.usd_reference AS
 SELECT
     p.timestamp AS bucket,
-    CAST(sum(toFloat64(p.close) * toFloat64(p.volume_base)) / nullIf(sum(toFloat64(p.volume_base)), 0) AS Decimal(38, 14)) AS xlm_usd
+    CAST(sum(toFloat64(p.close) * toFloat64(p.pf_volume)) / nullIf(sum(toFloat64(p.pf_volume)), 0) AS Decimal(38, 14)) AS xlm_usd
 FROM prices.price_ohlcv_1d AS p FINAL
 INNER JOIN prices.assets AS base  FINAL ON base.asset_id  = p.asset_id
 INNER JOIN prices.assets AS quote FINAL ON quote.asset_id = p.quote_asset_id
 WHERE base.asset_code = 'XLM' AND base.issuer_address = '' AND base.contract_address = ''
   AND quote.asset_code = 'USDC'
   AND quote.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
-  AND p.close > 0 AND p.volume_base > 0
+  -- Task 0147, D-01 — the SAME priced predicate the series arm A spells, minus
+  -- the close_usd half: this surface reads `close` (always present from the
+  -- backfill) and is independent of enrichment timing, so there is no USD leg
+  -- to floor and no convertibility to test. What it does inherit is the
+  -- precision floor, the price-forming trade count and the price-forming
+  -- weight.
+  -- ⚠️ `pf_volume > 0` is the 0171 guard and is NOT optional: the CAST below
+  -- still divides by the weight, and a bucket whose only XLM/USDC candles
+  -- carry no weight must be ABSENT (`no_reference`), never a sentinel.
+  AND p.close >= toDecimal128('0.000000000001', 14)
+  AND p.pf_trade_count > 0
+  AND p.pf_volume > 0
 GROUP BY p.timestamp;
 
 ----------------------------------------------------------------------
 -- prices.price_usd_series — one USD close per (natural identity, day bucket).
 -- The cross-source/cross-quote collapse: volume-weighted close_usd over every
 -- candle of the asset in the bucket (ADR 0004 per-source rows merge at read
--- time). Arm A emits only priced rows that carry weight (close_usd > 0 AND
--- volume_base > 0) — status 'ok'; misses are absent and classified by the
--- reader against usd_reference (see header). A zero-volume candle is dead
--- weight in a weighted average (v = 0, w = 0), so requiring volume changes no
--- published value — it only stops a group made ONLY of such candles from
--- forming, which is the tasks 0171/0198 case below.
+-- time). Arm A reads EVERY candle of the bucket, priced or not, and weights the
+-- mean on the PRICED subset while counting the ELIGIBLE one — the denominator
+-- of `priced_volume_share`. Misses are absent and classified by the reader
+-- against usd_reference (see header); since task 0147 a bucket can also be
+-- absent because the gate withheld it, and `price_usd_series_coverage` is where
+-- a consumer reads which.
+--
+-- ⚠️ Until 2026-09 arm A applied `WHERE close_usd > 0 AND volume_base > 0`,
+-- which removed the unpriced rows BEFORE the weighting and is what let a dust
+-- print become the whole of a bucket's weight (task 0147; the gate section in
+-- the file header carries the measurement). The positive-weight half of that
+-- predicate survives inside the priced condition as `pf_volume > 0` — see the
+-- tasks 0171/0198 note below, which is why it is not optional — but the
+-- price half is gone: a zero-`close_usd` row is now counted, unpriced, in the
+-- denominator, which is the entire point.
 --
 -- ⚠️ ARM B IS NOT SUBJECT TO THAT PREDICATE, which changes the read-time status
 -- contract for peg identities. A peg asset gets its fallback row in any bucket
@@ -421,9 +516,13 @@ GROUP BY p.timestamp;
 -- pre-existing (the historical view carried the identical expression). BE
 -- decided 2026-08-11: OMIT THE ROW — "misses are absent" is the contract their
 -- whole read path assumes, and a published sentinel is a magic constant every
--- consumer must know forever. Arm A therefore requires `volume_base > 0`, so
--- a zero-weight group never forms and the CAST never sees NULL; the peg
--- placeholder (w = 0 by construction) is untouched because it lives in arm B.
+-- consumer must know forever. Arm A therefore admits weight only from a row
+-- with `pf_volume > 0`; task 0147 moved that from a `WHERE` into the priced
+-- condition of a conditional sum, so a zero-weight group CAN now form — and
+-- the guard moved with it, INSIDE the CAST's argument
+-- (`if(sum(rpw) > 0, sum(rpv) / sum(rpw), 0)`), with the outer `WHERE` gate
+-- withholding the row on top. The peg placeholder (rpw = 0 by construction) is
+-- untouched because it lives in arm B and the gate's first disjunct is its.
 -- Task 0198 recorded the same case as RAISING CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN
 -- (code 349). BOTH readings are right on 26.3.10.60; the expression JIT picks
 -- one. Interpreted, the CAST raises 349 and the WHOLE query fails. Once
@@ -441,10 +540,21 @@ SELECT
     issuer_address,
     contract_address,
     bucket,
-    if(max(is_peg) = 1 AND sum(w) = 0,
+    close_usd,
+    method,
+    priced_volume_share
+FROM
+(
+SELECT
+    asset_kind,
+    asset_code,
+    issuer_address,
+    contract_address,
+    bucket,
+    if(max(is_peg) = 1 AND sum(rpw) = 0,
        if(max(peg_rate) > 0, max(peg_rate), CAST(1 AS Decimal(38, 14))),
-       CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))) AS close_usd,
-    CAST(if(max(is_peg) = 1 AND sum(w) = 0,
+       CAST(if(sum(rpw) > 0, sum(rpv) / sum(rpw), toFloat64(0)) AS Decimal(38, 14))) AS close_usd,
+    CAST(if(max(is_peg) = 1 AND sum(rpw) = 0,
             -- Three-way since task 0267, because a measured rate can now arrive
             -- from two provenances. ⚠️ The PEG DISCRIMINATOR STAYS FIRST and
             -- stays `max(peg_rate) <= 0`: arm B's join_use_nulls note explains
@@ -457,7 +567,23 @@ SELECT
             -- from: 2 = 'oracle', 1 = 'external'. See arm B for why the rank is
             -- numeric rather than a max() over the method string.
             multiIf(max(peg_rate) <= 0, 'peg', max(rate_rank) = 2, 'oracle', 'external'),
-            'traded') AS LowCardinality(String)) AS method
+            'traded') AS LowCardinality(String)) AS method,
+    -- Task 0147, D-05 — APPENDED LAST, after `method`. Arity changes, order
+    -- does not; see the JOIN interop contract above for what that costs a
+    -- consumer decoding positionally off `SELECT *`.
+    -- ⚠️ NEVER NULL (D-06). BE renders a NULL as a dash and drops the pool, so
+    -- the guard is an `if`, not a `nullIf`: a peg-arm bucket publishes a
+    -- literal 1 (it has no traded weight to be short of), and the division is
+    -- guarded INSIDE the CAST's argument.
+    CAST(if(max(is_peg) = 1 AND sum(rpw) = 0,
+            toFloat64(1),
+            if(sum(rew) > 0, sum(rpw) / sum(rew), toFloat64(0))) AS Decimal(10, 6)) AS priced_volume_share,
+    -- The gate's inputs, consumed by the outer WHERE and projected away there.
+    max(is_peg) AS peg_present,
+    sum(rpv)    AS pv,
+    sum(rpw)    AS pw,
+    sum(rpusd)  AS pusd,
+    sum(rew)    AS ew
 FROM
 (
     -- Arm A — every priced candle, keyed on the BASE leg.
@@ -470,8 +596,81 @@ FROM
         if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
         a.contract_address AS contract_address,
         p.timestamp        AS bucket,
-        toFloat64(p.close_usd) * toFloat64(p.volume_base) AS v,
-        toFloat64(p.volume_base)                          AS w,
+        -- ONE priced predicate (task 0147, D-01). This is `/ohlcv`'s `valid`
+        -- for the SAME row (queries_ch.rs::usd_projection), spelled the same
+        -- way: the shared 1e-12 precision floor on BOTH price columns, a
+        -- price-forming trade, a price-forming weight, and convertibility.
+        -- Pinned against prices-api by
+        -- views_sql_every_weighted_surface_spells_the_one_priced_predicate.
+        (p.close >= toDecimal128('0.000000000001', 14)
+            AND p.close_usd >= toDecimal128('0.000000000001', 14)
+            AND p.pf_trade_count > 0
+            AND p.pf_volume > 0
+            AND (p.quote_asset_id IN
+                 (
+                     SELECT u.asset_id
+                     FROM prices.assets AS u FINAL
+                     WHERE u.asset_code = 'USDC'
+                       AND u.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+                       AND u.contract_address = ''
+                 )
+                 OR p.close_usd != p.close))                AS is_priced,
+        -- ELIGIBLE (task 0147, D-02) — computed here, no new table. The
+        -- denominator of the coverage share is every unit traded against a
+        -- quote we could IN PRINCIPLE price in USD: the canonical USDC, native
+        -- XLM and the canonical USDT identities, plus every asset that has a
+        -- row in prices.usd_rate under ANY method.
+        -- ⚠️ usd_rate keys on the NATURAL IDENTITY, never on asset_id, so this
+        -- is a four-column identity join and the usd_rate side needs
+        -- CAST(asset_kind AS String) exactly as arm B's rate subquery does.
+        -- ⚠️ Membership is RETROACTIVE: a bucket stops reading `unpriceable`
+        -- the moment a rate appears for its quote leg. Accepted by ADR 0292.
+        (p.quote_asset_id IN
+         (
+             SELECT e.asset_id
+             FROM prices.assets AS e FINAL
+             WHERE (e.asset_code = 'USDC' AND e.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN' AND e.contract_address = '')
+                OR (e.asset_code = 'XLM'  AND e.issuer_address = '' AND e.contract_address = '')
+                OR (e.asset_code = 'USDT' AND e.issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V' AND e.contract_address = '')
+             UNION ALL
+             SELECT ei.asset_id
+             FROM
+             (
+                 SELECT
+                     ea.asset_id AS asset_id,
+                     multiIf(
+                         ea.contract_address != '', 'contract',
+                         ea.asset_code = 'XLM' AND ea.issuer_address = '', 'native',
+                         'credit') AS asset_kind,
+                     if(ea.contract_address != '', '', ea.asset_code)     AS asset_code,
+                     if(ea.contract_address != '', '', ea.issuer_address) AS issuer_address,
+                     ea.contract_address AS contract_address
+                 FROM prices.assets AS ea FINAL
+             ) AS ei
+             INNER JOIN
+             (
+                 SELECT DISTINCT
+                     CAST(asset_kind AS String) AS asset_kind,
+                     asset_code,
+                     issuer_address,
+                     contract_address
+                 FROM prices.usd_rate FINAL
+             ) AS er
+                 ON  er.asset_kind       = ei.asset_kind
+                 AND er.asset_code       = ei.asset_code
+                 AND er.issuer_address   = ei.issuer_address
+                 AND er.contract_address = ei.contract_address
+         ))                                                 AS is_eligible,
+        -- Conditional sums, NOT a WHERE (task 0147). The unpriced rows are real
+        -- trades and belong in the denominator — filtering them out before the
+        -- weighting is exactly what let a 0.764-unit dust print become the
+        -- whole of a bucket's weight.
+        -- ⚠️ toFloat64 PER ROW before multiplying: Decimal x Decimal / Decimal
+        -- raises code 407 (DECIMAL_OVERFLOW) on 26.3.10.60, measured twice.
+        if(is_priced,   toFloat64(p.close_usd) * toFloat64(p.pf_volume), toFloat64(0)) AS rpv,
+        if(is_priced,   toFloat64(p.pf_volume),                          toFloat64(0)) AS rpw,
+        if(is_priced,   toFloat64(p.volume_quote_usd),                   toFloat64(0)) AS rpusd,
+        if(is_eligible, toFloat64(p.pf_volume),                          toFloat64(0)) AS rew,
         toUInt8(0)                                        AS is_peg,
         CAST(0 AS Decimal(38, 14))                        AS peg_rate,
         -- UNION ALL matches arms POSITIONALLY and requires an identical column
@@ -479,7 +678,6 @@ FROM
         toUInt8(0)                                        AS rate_rank
     FROM prices.price_ohlcv_1d AS p FINAL
     INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
-    WHERE p.close_usd > 0 AND p.volume_base > 0
 
     UNION ALL
 
@@ -500,8 +698,12 @@ FROM
         b.issuer_address,
         b.contract_address,
         b.bucket,
-        toFloat64(0) AS v,
-        toFloat64(0) AS w,
+        toUInt8(0)   AS is_priced,
+        toUInt8(0)   AS is_eligible,
+        toFloat64(0) AS rpv,
+        toFloat64(0) AS rpw,
+        toFloat64(0) AS rpusd,
+        toFloat64(0) AS rew,
         toUInt8(1)   AS is_peg,
         -- 0 = "no measured rate for this identity in this bucket" -> the $1
         -- fallback, flagged method = 'peg'. ⚠️ NOT NULL: prod runs
@@ -694,7 +896,22 @@ FROM
         AND r.contract_address = b.contract_address
         AND r.bucket           = b.bucket
 )
-GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
+GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket
+)
+-- THE GATE (task 0147, D-04). A bucket is published only when its priced,
+-- convertible volume is most of what traded AND is worth something absolute.
+-- The peg disjunct comes FIRST and is not subject to the gate: arm B's
+-- placeholder has ew = 0 and pw = 0 by construction, so a naive `ew > 0`
+-- would delete USDC's fallback row. A peg member that ALSO trades as a base
+-- has pw > 0, so the peg disjunct does not fire for it and the gate governs
+-- it — and if the gate withholds it, the row is ABSENT rather than falling
+-- back to $1, which would be a regression dressed as a fix.
+-- ⚠️ This is the WITHHOLDING rule, not the arithmetic guard. The guard lives
+-- inside the CAST above, because a `nullIf` inside a non-Nullable CAST
+-- publishes Decimal128::MIN or raises code 349 depending on which expression
+-- JIT the server picked. Write both.
+WHERE (peg_present = 1 AND pw = 0)
+   OR (ew > 0 AND pw > 0 AND pw / ew >= 0.5 AND pusd >= 100);
 
 ----------------------------------------------------------------------
 -- Hourly-grain variants — identical shape/semantics to the daily views above,
@@ -708,14 +925,25 @@ GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
 CREATE OR REPLACE VIEW prices.usd_reference_1h AS
 SELECT
     p.timestamp AS bucket,
-    CAST(sum(toFloat64(p.close) * toFloat64(p.volume_base)) / nullIf(sum(toFloat64(p.volume_base)), 0) AS Decimal(38, 14)) AS xlm_usd
+    CAST(sum(toFloat64(p.close) * toFloat64(p.pf_volume)) / nullIf(sum(toFloat64(p.pf_volume)), 0) AS Decimal(38, 14)) AS xlm_usd
 FROM prices.price_ohlcv_1h AS p FINAL
 INNER JOIN prices.assets AS base  FINAL ON base.asset_id  = p.asset_id
 INNER JOIN prices.assets AS quote FINAL ON quote.asset_id = p.quote_asset_id
 WHERE base.asset_code = 'XLM' AND base.issuer_address = '' AND base.contract_address = ''
   AND quote.asset_code = 'USDC'
   AND quote.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
-  AND p.close > 0 AND p.volume_base > 0
+  -- Task 0147, D-01 — the SAME priced predicate the series arm A spells, minus
+  -- the close_usd half: this surface reads `close` (always present from the
+  -- backfill) and is independent of enrichment timing, so there is no USD leg
+  -- to floor and no convertibility to test. What it does inherit is the
+  -- precision floor, the price-forming trade count and the price-forming
+  -- weight.
+  -- ⚠️ `pf_volume > 0` is the 0171 guard and is NOT optional: the CAST below
+  -- still divides by the weight, and a bucket whose only XLM/USDC candles
+  -- carry no weight must be ABSENT (`no_reference`), never a sentinel.
+  AND p.close >= toDecimal128('0.000000000001', 14)
+  AND p.pf_trade_count > 0
+  AND p.pf_volume > 0
 GROUP BY p.timestamp;
 
 -- Peg-fill arm mirrors price_usd_series exactly (task 0165) — same two arms,
@@ -730,10 +958,21 @@ SELECT
     issuer_address,
     contract_address,
     bucket,
-    if(max(is_peg) = 1 AND sum(w) = 0,
+    close_usd,
+    method,
+    priced_volume_share
+FROM
+(
+SELECT
+    asset_kind,
+    asset_code,
+    issuer_address,
+    contract_address,
+    bucket,
+    if(max(is_peg) = 1 AND sum(rpw) = 0,
        if(max(peg_rate) > 0, max(peg_rate), CAST(1 AS Decimal(38, 14))),
-       CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))) AS close_usd,
-    CAST(if(max(is_peg) = 1 AND sum(w) = 0,
+       CAST(if(sum(rpw) > 0, sum(rpv) / sum(rpw), toFloat64(0)) AS Decimal(38, 14))) AS close_usd,
+    CAST(if(max(is_peg) = 1 AND sum(rpw) = 0,
             -- Three-way since task 0267, because a measured rate can now arrive
             -- from two provenances. ⚠️ The PEG DISCRIMINATOR STAYS FIRST and
             -- stays `max(peg_rate) <= 0`: arm B's join_use_nulls note explains
@@ -746,7 +985,23 @@ SELECT
             -- from: 2 = 'oracle', 1 = 'external'. See arm B for why the rank is
             -- numeric rather than a max() over the method string.
             multiIf(max(peg_rate) <= 0, 'peg', max(rate_rank) = 2, 'oracle', 'external'),
-            'traded') AS LowCardinality(String)) AS method
+            'traded') AS LowCardinality(String)) AS method,
+    -- Task 0147, D-05 — APPENDED LAST, after `method`. Arity changes, order
+    -- does not; see the JOIN interop contract above for what that costs a
+    -- consumer decoding positionally off `SELECT *`.
+    -- ⚠️ NEVER NULL (D-06). BE renders a NULL as a dash and drops the pool, so
+    -- the guard is an `if`, not a `nullIf`: a peg-arm bucket publishes a
+    -- literal 1 (it has no traded weight to be short of), and the division is
+    -- guarded INSIDE the CAST's argument.
+    CAST(if(max(is_peg) = 1 AND sum(rpw) = 0,
+            toFloat64(1),
+            if(sum(rew) > 0, sum(rpw) / sum(rew), toFloat64(0))) AS Decimal(10, 6)) AS priced_volume_share,
+    -- The gate's inputs, consumed by the outer WHERE and projected away there.
+    max(is_peg) AS peg_present,
+    sum(rpv)    AS pv,
+    sum(rpw)    AS pw,
+    sum(rpusd)  AS pusd,
+    sum(rew)    AS ew
 FROM
 (
     SELECT
@@ -758,8 +1013,81 @@ FROM
         if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
         a.contract_address AS contract_address,
         p.timestamp        AS bucket,
-        toFloat64(p.close_usd) * toFloat64(p.volume_base) AS v,
-        toFloat64(p.volume_base)                          AS w,
+        -- ONE priced predicate (task 0147, D-01). This is `/ohlcv`'s `valid`
+        -- for the SAME row (queries_ch.rs::usd_projection), spelled the same
+        -- way: the shared 1e-12 precision floor on BOTH price columns, a
+        -- price-forming trade, a price-forming weight, and convertibility.
+        -- Pinned against prices-api by
+        -- views_sql_every_weighted_surface_spells_the_one_priced_predicate.
+        (p.close >= toDecimal128('0.000000000001', 14)
+            AND p.close_usd >= toDecimal128('0.000000000001', 14)
+            AND p.pf_trade_count > 0
+            AND p.pf_volume > 0
+            AND (p.quote_asset_id IN
+                 (
+                     SELECT u.asset_id
+                     FROM prices.assets AS u FINAL
+                     WHERE u.asset_code = 'USDC'
+                       AND u.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+                       AND u.contract_address = ''
+                 )
+                 OR p.close_usd != p.close))                AS is_priced,
+        -- ELIGIBLE (task 0147, D-02) — computed here, no new table. The
+        -- denominator of the coverage share is every unit traded against a
+        -- quote we could IN PRINCIPLE price in USD: the canonical USDC, native
+        -- XLM and the canonical USDT identities, plus every asset that has a
+        -- row in prices.usd_rate under ANY method.
+        -- ⚠️ usd_rate keys on the NATURAL IDENTITY, never on asset_id, so this
+        -- is a four-column identity join and the usd_rate side needs
+        -- CAST(asset_kind AS String) exactly as arm B's rate subquery does.
+        -- ⚠️ Membership is RETROACTIVE: a bucket stops reading `unpriceable`
+        -- the moment a rate appears for its quote leg. Accepted by ADR 0292.
+        (p.quote_asset_id IN
+         (
+             SELECT e.asset_id
+             FROM prices.assets AS e FINAL
+             WHERE (e.asset_code = 'USDC' AND e.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN' AND e.contract_address = '')
+                OR (e.asset_code = 'XLM'  AND e.issuer_address = '' AND e.contract_address = '')
+                OR (e.asset_code = 'USDT' AND e.issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V' AND e.contract_address = '')
+             UNION ALL
+             SELECT ei.asset_id
+             FROM
+             (
+                 SELECT
+                     ea.asset_id AS asset_id,
+                     multiIf(
+                         ea.contract_address != '', 'contract',
+                         ea.asset_code = 'XLM' AND ea.issuer_address = '', 'native',
+                         'credit') AS asset_kind,
+                     if(ea.contract_address != '', '', ea.asset_code)     AS asset_code,
+                     if(ea.contract_address != '', '', ea.issuer_address) AS issuer_address,
+                     ea.contract_address AS contract_address
+                 FROM prices.assets AS ea FINAL
+             ) AS ei
+             INNER JOIN
+             (
+                 SELECT DISTINCT
+                     CAST(asset_kind AS String) AS asset_kind,
+                     asset_code,
+                     issuer_address,
+                     contract_address
+                 FROM prices.usd_rate FINAL
+             ) AS er
+                 ON  er.asset_kind       = ei.asset_kind
+                 AND er.asset_code       = ei.asset_code
+                 AND er.issuer_address   = ei.issuer_address
+                 AND er.contract_address = ei.contract_address
+         ))                                                 AS is_eligible,
+        -- Conditional sums, NOT a WHERE (task 0147). The unpriced rows are real
+        -- trades and belong in the denominator — filtering them out before the
+        -- weighting is exactly what let a 0.764-unit dust print become the
+        -- whole of a bucket's weight.
+        -- ⚠️ toFloat64 PER ROW before multiplying: Decimal x Decimal / Decimal
+        -- raises code 407 (DECIMAL_OVERFLOW) on 26.3.10.60, measured twice.
+        if(is_priced,   toFloat64(p.close_usd) * toFloat64(p.pf_volume), toFloat64(0)) AS rpv,
+        if(is_priced,   toFloat64(p.pf_volume),                          toFloat64(0)) AS rpw,
+        if(is_priced,   toFloat64(p.volume_quote_usd),                   toFloat64(0)) AS rpusd,
+        if(is_eligible, toFloat64(p.pf_volume),                          toFloat64(0)) AS rew,
         toUInt8(0)                                        AS is_peg,
         CAST(0 AS Decimal(38, 14))                        AS peg_rate,
         -- UNION ALL matches arms POSITIONALLY and requires an identical column
@@ -767,7 +1095,6 @@ FROM
         toUInt8(0)                                        AS rate_rank
     FROM prices.price_ohlcv_1h AS p FINAL
     INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
-    WHERE p.close_usd > 0 AND p.volume_base > 0
 
     UNION ALL
 
@@ -788,8 +1115,12 @@ FROM
         b.issuer_address,
         b.contract_address,
         b.bucket,
-        toFloat64(0) AS v,
-        toFloat64(0) AS w,
+        toUInt8(0)   AS is_priced,
+        toUInt8(0)   AS is_eligible,
+        toFloat64(0) AS rpv,
+        toFloat64(0) AS rpw,
+        toFloat64(0) AS rpusd,
+        toFloat64(0) AS rew,
         toUInt8(1)   AS is_peg,
         -- 0 = "no measured rate for this identity in this bucket" -> the $1
         -- fallback, flagged method = 'peg'. ⚠️ NOT NULL: prod runs
@@ -981,6 +1312,401 @@ FROM
         AND r.issuer_address   = b.issuer_address
         AND r.contract_address = b.contract_address
         AND r.bucket           = b.bucket
+)
+GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket
+)
+-- THE GATE (task 0147, D-04). A bucket is published only when its priced,
+-- convertible volume is most of what traded AND is worth something absolute.
+-- The peg disjunct comes FIRST and is not subject to the gate: arm B's
+-- placeholder has ew = 0 and pw = 0 by construction, so a naive `ew > 0`
+-- would delete USDC's fallback row. A peg member that ALSO trades as a base
+-- has pw > 0, so the peg disjunct does not fire for it and the gate governs
+-- it — and if the gate withholds it, the row is ABSENT rather than falling
+-- back to $1, which would be a regression dressed as a fix.
+-- ⚠️ This is the WITHHOLDING rule, not the arithmetic guard. The guard lives
+-- inside the CAST above, because a `nullIf` inside a non-Nullable CAST
+-- publishes Decimal128::MIN or raises code 349 depending on which expression
+-- JIT the server picked. Write both.
+WHERE (peg_present = 1 AND pw = 0)
+   OR (ew > 0 AND pw > 0 AND pw / ew >= 0.5 AND pusd >= 100);
+
+
+----------------------------------------------------------------------
+-- prices.price_usd_series_coverage{,_1h} — why a bucket is not published
+-- (task 0147, D-05).
+--
+-- The series views keep their value-or-absent contract, so a bucket the gate
+-- withholds is simply MISSING — indistinguishable, on that surface alone, from
+-- an asset that never traded. These views close that: one row per (natural
+-- identity, bucket) the candles hold, carrying the same `priced_volume_share`
+-- the series publishes, the priced USD volume the absolute floor is compared
+-- against, and a status.
+--
+--   status = priced       -- the series publishes this bucket
+--          | pending      -- eligible volume exists, but the share or the
+--                         --   absolute floor is not met. PENDING ENRICHMENT,
+--                         --   not unpriceable: enrich the rest of the bucket
+--                         --   and it publishes.
+--          | unpriceable  -- no eligible volume at all — every row of the
+--                         --   bucket is quoted in an asset we have no USD path
+--                         --   for. RETROACTIVE: this flips to `pending` the
+--                         --   moment a prices.usd_rate row appears for that
+--                         --   quote identity (ADR 0292).
+--
+-- ⚠️ A PEG-ARM bucket reads `priced` with `priced_volume_share = 1` and
+-- `priced_volume_usd = 0`. Its value comes from the measured rate (or the $1
+-- fallback), not from traded weight, so there is no traded population for the
+-- share to describe and the gate does not apply to it. Read `method` on the
+-- series view, not the share, to tell those buckets apart.
+--
+-- ⚠️ `priced_volume_share` is never NULL here either (D-06): a bucket with no
+-- eligible volume reads a literal 0, because BE renders a NULL as a dash and
+-- drops the pool.
+--
+-- ⚠️ These views must never name `prices.price_usd_series` in executable SQL —
+-- `series_grains()` in src/lib.rs takes the FIRST statement containing that
+-- substring, and would silently start asserting against a coverage body.
+----------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW prices.price_usd_series_coverage AS
+SELECT
+    asset_kind,
+    asset_code,
+    issuer_address,
+    contract_address,
+    bucket,
+    -- The share and its numerator's USD value, for EVERY (identity, bucket) the
+    -- candles hold — published or not. The same expression the series view
+    -- publishes, so the two cannot disagree about a bucket they both describe.
+    CAST(if(max(is_peg) = 1 AND sum(rpw) = 0,
+            toFloat64(1),
+            if(sum(rew) > 0, sum(rpw) / sum(rew), toFloat64(0))) AS Decimal(10, 6)) AS priced_volume_share,
+    CAST(sum(rpusd) AS Decimal(38, 14)) AS priced_volume_usd,
+    -- The peg discriminator comes FIRST, for the same reason it does in the
+    -- series' `method`: an arm-B bucket has no eligible weight at all, so the
+    -- `ew = 0` arm below would otherwise call a peg fill `unpriceable`.
+    -- A peg-arm bucket reads `priced` with share 1 — it has no traded weight to
+    -- be short of, and its value does not come from candles.
+    -- The third arm restates the outer gate of the series view. It divides by
+    -- `sum(rew)` only after the `sum(rew) = 0` arm has taken that case, and a
+    -- Float64 division by zero yields inf/nan rather than raising — nothing
+    -- here casts that into a Decimal.
+    CAST(multiIf(max(is_peg) = 1 AND sum(rpw) = 0, 'priced',
+                 sum(rew) = 0, 'unpriceable',
+                 sum(rpw) > 0 AND sum(rpw) / sum(rew) >= 0.5 AND sum(rpusd) >= 100, 'priced',
+                 'pending') AS LowCardinality(String)) AS status
+FROM
+(
+    -- Arm A — every candle of the bucket, keyed on the BASE leg, priced or not.
+    -- Shared VERBATIM with the series view: one predicate, spelled once.
+    SELECT
+        multiIf(
+            a.contract_address != '', 'contract',
+            a.asset_code = 'XLM' AND a.issuer_address = '', 'native',
+            'credit') AS asset_kind,
+        if(a.contract_address != '', '', a.asset_code)     AS asset_code,
+        if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
+        a.contract_address AS contract_address,
+        p.timestamp        AS bucket,
+        -- ONE priced predicate (task 0147, D-01). This is `/ohlcv`'s `valid`
+        -- for the SAME row (queries_ch.rs::usd_projection), spelled the same
+        -- way: the shared 1e-12 precision floor on BOTH price columns, a
+        -- price-forming trade, a price-forming weight, and convertibility.
+        -- Pinned against prices-api by
+        -- views_sql_every_weighted_surface_spells_the_one_priced_predicate.
+        (p.close >= toDecimal128('0.000000000001', 14)
+            AND p.close_usd >= toDecimal128('0.000000000001', 14)
+            AND p.pf_trade_count > 0
+            AND p.pf_volume > 0
+            AND (p.quote_asset_id IN
+                 (
+                     SELECT u.asset_id
+                     FROM prices.assets AS u FINAL
+                     WHERE u.asset_code = 'USDC'
+                       AND u.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+                       AND u.contract_address = ''
+                 )
+                 OR p.close_usd != p.close))                AS is_priced,
+        -- ELIGIBLE (task 0147, D-02) — computed here, no new table. The
+        -- denominator of the coverage share is every unit traded against a
+        -- quote we could IN PRINCIPLE price in USD: the canonical USDC, native
+        -- XLM and the canonical USDT identities, plus every asset that has a
+        -- row in prices.usd_rate under ANY method.
+        -- ⚠️ usd_rate keys on the NATURAL IDENTITY, never on asset_id, so this
+        -- is a four-column identity join and the usd_rate side needs
+        -- CAST(asset_kind AS String) exactly as arm B's rate subquery does.
+        -- ⚠️ Membership is RETROACTIVE: a bucket stops reading `unpriceable`
+        -- the moment a rate appears for its quote leg. Accepted by ADR 0292.
+        (p.quote_asset_id IN
+         (
+             SELECT e.asset_id
+             FROM prices.assets AS e FINAL
+             WHERE (e.asset_code = 'USDC' AND e.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN' AND e.contract_address = '')
+                OR (e.asset_code = 'XLM'  AND e.issuer_address = '' AND e.contract_address = '')
+                OR (e.asset_code = 'USDT' AND e.issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V' AND e.contract_address = '')
+             UNION ALL
+             SELECT ei.asset_id
+             FROM
+             (
+                 SELECT
+                     ea.asset_id AS asset_id,
+                     multiIf(
+                         ea.contract_address != '', 'contract',
+                         ea.asset_code = 'XLM' AND ea.issuer_address = '', 'native',
+                         'credit') AS asset_kind,
+                     if(ea.contract_address != '', '', ea.asset_code)     AS asset_code,
+                     if(ea.contract_address != '', '', ea.issuer_address) AS issuer_address,
+                     ea.contract_address AS contract_address
+                 FROM prices.assets AS ea FINAL
+             ) AS ei
+             INNER JOIN
+             (
+                 SELECT DISTINCT
+                     CAST(asset_kind AS String) AS asset_kind,
+                     asset_code,
+                     issuer_address,
+                     contract_address
+                 FROM prices.usd_rate FINAL
+             ) AS er
+                 ON  er.asset_kind       = ei.asset_kind
+                 AND er.asset_code       = ei.asset_code
+                 AND er.issuer_address   = ei.issuer_address
+                 AND er.contract_address = ei.contract_address
+         ))                                                 AS is_eligible,
+        -- Conditional sums, NOT a WHERE (task 0147). The unpriced rows are real
+        -- trades and belong in the denominator — filtering them out before the
+        -- weighting is exactly what let a 0.764-unit dust print become the
+        -- whole of a bucket's weight.
+        -- ⚠️ toFloat64 PER ROW before multiplying: Decimal x Decimal / Decimal
+        -- raises code 407 (DECIMAL_OVERFLOW) on 26.3.10.60, measured twice.
+        if(is_priced,   toFloat64(p.close_usd) * toFloat64(p.pf_volume), toFloat64(0)) AS rpv,
+        if(is_priced,   toFloat64(p.pf_volume),                          toFloat64(0)) AS rpw,
+        if(is_priced,   toFloat64(p.volume_quote_usd),                   toFloat64(0)) AS rpusd,
+        if(is_eligible, toFloat64(p.pf_volume),                          toFloat64(0)) AS rew,
+        toUInt8(0)                                        AS is_peg,
+        CAST(0 AS Decimal(38, 14))                        AS peg_rate,
+        -- UNION ALL matches arms POSITIONALLY and requires an identical column
+        -- count, so this placeholder is structural, not decoration (task 0267).
+        toUInt8(0)                                        AS rate_rank
+    FROM prices.price_ohlcv_1d AS p FINAL
+    INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
+
+    UNION ALL
+
+    -- Arm B — the same zero-weight peg placeholder the series view unions in,
+    -- minus the rate join: coverage reports WHETHER a bucket is priced, never
+    -- at what. `peg_rate` and `rate_rank` are structural — UNION ALL matches
+    -- its arms positionally, and arm A above is shared verbatim with the
+    -- series view.
+    SELECT
+        b.asset_kind,
+        b.asset_code,
+        b.issuer_address,
+        b.contract_address,
+        b.bucket,
+        toUInt8(0)   AS is_priced,
+        toUInt8(0)   AS is_eligible,
+        toFloat64(0) AS rpv,
+        toFloat64(0) AS rpw,
+        toFloat64(0) AS rpusd,
+        toFloat64(0) AS rew,
+        toUInt8(1)   AS is_peg,
+        CAST(0 AS Decimal(38, 14)) AS peg_rate,
+        toUInt8(0)   AS rate_rank
+    FROM
+    (
+        SELECT
+            multiIf(
+                q.contract_address != '', 'contract',
+                q.asset_code = 'XLM' AND q.issuer_address = '', 'native',
+                'credit') AS asset_kind,
+            if(q.contract_address != '', '', q.asset_code)     AS asset_code,
+            if(q.contract_address != '', '', q.issuer_address) AS issuer_address,
+            q.contract_address AS contract_address,
+            p.timestamp        AS bucket
+        FROM prices.price_ohlcv_1d AS p FINAL
+        INNER JOIN prices.assets AS q FINAL ON q.asset_id = p.quote_asset_id
+        WHERE q.contract_address = ''
+          -- USDC only. USDT was removed here by task 0172: the canonical Stellar
+          -- USDT depegged in June 2022 and trades at ~$0.13, so the $1 placeholder
+          -- published a 7.4x overstatement. It is priced by measurement instead.
+          -- ⚠️ THIS PREDICATE IS THE PEG SET. The rate join below follows
+          -- whatever identity passes it, so adding a member here is a claim that
+          -- the oracle prices THAT ISSUER — see the fence at the top of this file
+          -- and `peg_identities_is_exactly_canonical_usdc` (oracle-worker).
+          AND (q.asset_code = 'USDC' AND q.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN')
+    ) AS b
+)
+GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
+
+CREATE OR REPLACE VIEW prices.price_usd_series_coverage_1h AS
+SELECT
+    asset_kind,
+    asset_code,
+    issuer_address,
+    contract_address,
+    bucket,
+    -- The share and its numerator's USD value, for EVERY (identity, bucket) the
+    -- candles hold — published or not. The same expression the series view
+    -- publishes, so the two cannot disagree about a bucket they both describe.
+    CAST(if(max(is_peg) = 1 AND sum(rpw) = 0,
+            toFloat64(1),
+            if(sum(rew) > 0, sum(rpw) / sum(rew), toFloat64(0))) AS Decimal(10, 6)) AS priced_volume_share,
+    CAST(sum(rpusd) AS Decimal(38, 14)) AS priced_volume_usd,
+    -- The peg discriminator comes FIRST, for the same reason it does in the
+    -- series' `method`: an arm-B bucket has no eligible weight at all, so the
+    -- `ew = 0` arm below would otherwise call a peg fill `unpriceable`.
+    -- A peg-arm bucket reads `priced` with share 1 — it has no traded weight to
+    -- be short of, and its value does not come from candles.
+    -- The third arm restates the outer gate of the series view. It divides by
+    -- `sum(rew)` only after the `sum(rew) = 0` arm has taken that case, and a
+    -- Float64 division by zero yields inf/nan rather than raising — nothing
+    -- here casts that into a Decimal.
+    CAST(multiIf(max(is_peg) = 1 AND sum(rpw) = 0, 'priced',
+                 sum(rew) = 0, 'unpriceable',
+                 sum(rpw) > 0 AND sum(rpw) / sum(rew) >= 0.5 AND sum(rpusd) >= 100, 'priced',
+                 'pending') AS LowCardinality(String)) AS status
+FROM
+(
+    -- Arm A — every candle of the bucket, keyed on the BASE leg, priced or not.
+    -- Shared VERBATIM with the series view: one predicate, spelled once.
+    SELECT
+        multiIf(
+            a.contract_address != '', 'contract',
+            a.asset_code = 'XLM' AND a.issuer_address = '', 'native',
+            'credit') AS asset_kind,
+        if(a.contract_address != '', '', a.asset_code)     AS asset_code,
+        if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
+        a.contract_address AS contract_address,
+        p.timestamp        AS bucket,
+        -- ONE priced predicate (task 0147, D-01). This is `/ohlcv`'s `valid`
+        -- for the SAME row (queries_ch.rs::usd_projection), spelled the same
+        -- way: the shared 1e-12 precision floor on BOTH price columns, a
+        -- price-forming trade, a price-forming weight, and convertibility.
+        -- Pinned against prices-api by
+        -- views_sql_every_weighted_surface_spells_the_one_priced_predicate.
+        (p.close >= toDecimal128('0.000000000001', 14)
+            AND p.close_usd >= toDecimal128('0.000000000001', 14)
+            AND p.pf_trade_count > 0
+            AND p.pf_volume > 0
+            AND (p.quote_asset_id IN
+                 (
+                     SELECT u.asset_id
+                     FROM prices.assets AS u FINAL
+                     WHERE u.asset_code = 'USDC'
+                       AND u.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+                       AND u.contract_address = ''
+                 )
+                 OR p.close_usd != p.close))                AS is_priced,
+        -- ELIGIBLE (task 0147, D-02) — computed here, no new table. The
+        -- denominator of the coverage share is every unit traded against a
+        -- quote we could IN PRINCIPLE price in USD: the canonical USDC, native
+        -- XLM and the canonical USDT identities, plus every asset that has a
+        -- row in prices.usd_rate under ANY method.
+        -- ⚠️ usd_rate keys on the NATURAL IDENTITY, never on asset_id, so this
+        -- is a four-column identity join and the usd_rate side needs
+        -- CAST(asset_kind AS String) exactly as arm B's rate subquery does.
+        -- ⚠️ Membership is RETROACTIVE: a bucket stops reading `unpriceable`
+        -- the moment a rate appears for its quote leg. Accepted by ADR 0292.
+        (p.quote_asset_id IN
+         (
+             SELECT e.asset_id
+             FROM prices.assets AS e FINAL
+             WHERE (e.asset_code = 'USDC' AND e.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN' AND e.contract_address = '')
+                OR (e.asset_code = 'XLM'  AND e.issuer_address = '' AND e.contract_address = '')
+                OR (e.asset_code = 'USDT' AND e.issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V' AND e.contract_address = '')
+             UNION ALL
+             SELECT ei.asset_id
+             FROM
+             (
+                 SELECT
+                     ea.asset_id AS asset_id,
+                     multiIf(
+                         ea.contract_address != '', 'contract',
+                         ea.asset_code = 'XLM' AND ea.issuer_address = '', 'native',
+                         'credit') AS asset_kind,
+                     if(ea.contract_address != '', '', ea.asset_code)     AS asset_code,
+                     if(ea.contract_address != '', '', ea.issuer_address) AS issuer_address,
+                     ea.contract_address AS contract_address
+                 FROM prices.assets AS ea FINAL
+             ) AS ei
+             INNER JOIN
+             (
+                 SELECT DISTINCT
+                     CAST(asset_kind AS String) AS asset_kind,
+                     asset_code,
+                     issuer_address,
+                     contract_address
+                 FROM prices.usd_rate FINAL
+             ) AS er
+                 ON  er.asset_kind       = ei.asset_kind
+                 AND er.asset_code       = ei.asset_code
+                 AND er.issuer_address   = ei.issuer_address
+                 AND er.contract_address = ei.contract_address
+         ))                                                 AS is_eligible,
+        -- Conditional sums, NOT a WHERE (task 0147). The unpriced rows are real
+        -- trades and belong in the denominator — filtering them out before the
+        -- weighting is exactly what let a 0.764-unit dust print become the
+        -- whole of a bucket's weight.
+        -- ⚠️ toFloat64 PER ROW before multiplying: Decimal x Decimal / Decimal
+        -- raises code 407 (DECIMAL_OVERFLOW) on 26.3.10.60, measured twice.
+        if(is_priced,   toFloat64(p.close_usd) * toFloat64(p.pf_volume), toFloat64(0)) AS rpv,
+        if(is_priced,   toFloat64(p.pf_volume),                          toFloat64(0)) AS rpw,
+        if(is_priced,   toFloat64(p.volume_quote_usd),                   toFloat64(0)) AS rpusd,
+        if(is_eligible, toFloat64(p.pf_volume),                          toFloat64(0)) AS rew,
+        toUInt8(0)                                        AS is_peg,
+        CAST(0 AS Decimal(38, 14))                        AS peg_rate,
+        -- UNION ALL matches arms POSITIONALLY and requires an identical column
+        -- count, so this placeholder is structural, not decoration (task 0267).
+        toUInt8(0)                                        AS rate_rank
+    FROM prices.price_ohlcv_1h AS p FINAL
+    INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
+
+    UNION ALL
+
+    -- Arm B — the same zero-weight peg placeholder the series view unions in,
+    -- minus the rate join: coverage reports WHETHER a bucket is priced, never
+    -- at what. `peg_rate` and `rate_rank` are structural — UNION ALL matches
+    -- its arms positionally, and arm A above is shared verbatim with the
+    -- series view.
+    SELECT
+        b.asset_kind,
+        b.asset_code,
+        b.issuer_address,
+        b.contract_address,
+        b.bucket,
+        toUInt8(0)   AS is_priced,
+        toUInt8(0)   AS is_eligible,
+        toFloat64(0) AS rpv,
+        toFloat64(0) AS rpw,
+        toFloat64(0) AS rpusd,
+        toFloat64(0) AS rew,
+        toUInt8(1)   AS is_peg,
+        CAST(0 AS Decimal(38, 14)) AS peg_rate,
+        toUInt8(0)   AS rate_rank
+    FROM
+    (
+        SELECT
+            multiIf(
+                q.contract_address != '', 'contract',
+                q.asset_code = 'XLM' AND q.issuer_address = '', 'native',
+                'credit') AS asset_kind,
+            if(q.contract_address != '', '', q.asset_code)     AS asset_code,
+            if(q.contract_address != '', '', q.issuer_address) AS issuer_address,
+            q.contract_address AS contract_address,
+            p.timestamp        AS bucket
+        FROM prices.price_ohlcv_1h AS p FINAL
+        INNER JOIN prices.assets AS q FINAL ON q.asset_id = p.quote_asset_id
+        WHERE q.contract_address = ''
+          -- USDC only. USDT was removed here by task 0172: the canonical Stellar
+          -- USDT depegged in June 2022 and trades at ~$0.13, so the $1 placeholder
+          -- published a 7.4x overstatement. It is priced by measurement instead.
+          -- ⚠️ THIS PREDICATE IS THE PEG SET. The rate join below follows
+          -- whatever identity passes it, so adding a member here is a claim that
+          -- the oracle prices THAT ISSUER — see the fence at the top of this file
+          -- and `peg_identities_is_exactly_canonical_usdc` (oracle-worker).
+          AND (q.asset_code = 'USDC' AND q.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN')
+    ) AS b
 )
 GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
 

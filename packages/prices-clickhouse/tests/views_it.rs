@@ -95,9 +95,9 @@ async fn views_expose_usd_series_and_reference() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
              (1620000000, 1, 2,'sdex',    0.30,0.30,0.30,0.30, 1000,300,300,0.30,0.30,1,1), \
-             (1620000000,10, 2,'sdex',    5,5,5,5,             10, 50, 50, 5,   5,   1,1), \
-             (1620000000,10, 1,'phoenix', 16.6667,16.6667,16.6667,16.6667, 5,83,25,5,16.6667,1,1), \
-             (1620000000,30, 2,'soroswap',2,2,2,2,             3,  6,  6,  2,   2,   1,1), \
+             (1620000000,10, 2,'sdex',    5,5,5,5,             10, 50, 500, 5,   5,   1,1), \
+             (1620000000,10, 1,'phoenix', 16.6667,16.6667,16.6667,16.6667, 5,83,250,5,16.6667,1,1), \
+             (1620000000,30, 2,'soroswap',2,2,2,2,             3,  6,  600,  2,   2,   1,1), \
              (1620000000,10,20,'sdex',    9,9,9,9,             1,  9,  0,  0,   9,   1,1)"
         ))
         .execute()
@@ -219,8 +219,8 @@ async fn views_expose_usd_series_and_reference() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1620003600, 1, 2,'sdex', 0.31,0.31,0.31,0.31, 100,31,31,0.31,0.31,1,1), \
-             (1620007200, 1, 2,'sdex', 0.32,0.32,0.32,0.32, 100,32,32,0.32,0.32,1,1)"
+             (1620003600, 1, 2,'sdex', 0.31,0.31,0.31,0.31, 100,31,310,0.31,0.31,1,1), \
+             (1620007200, 1, 2,'sdex', 0.32,0.32,0.32,0.32, 100,32,320,0.32,0.32,1,1)"
         ))
         .execute()
         .await
@@ -560,8 +560,9 @@ async fn backfill_progress_seed_is_idempotent() {
 /// `setup_scratch` builds on a freshly-created database, so every other
 /// assertion in this file lands on a target with no pre-existing view and would
 /// pass identically under the old `CREATE VIEW IF NOT EXISTS` form. This test
-/// rewinds all six views to a one-column stub first and re-applies, which is the
-/// actual production upgrade path — ch-prod-01 already holds all six.
+/// rewinds every view to a one-column stub first and re-applies, which is the
+/// actual production upgrade path — ch-prod-01 already holds the six that
+/// predate task 0147.
 ///
 /// The `IF NOT EXISTS` half is the control: it pins *why* the statement form is
 /// load-bearing, so a revert to that form fails here rather than as a silent
@@ -578,6 +579,8 @@ async fn views_sql_replaces_every_existing_view() {
         ("price_usd_series", "close_usd"),
         ("usd_reference_1h", "xlm_usd"),
         ("price_usd_series_1h", "close_usd"),
+        ("price_usd_series_coverage", "status"),
+        ("price_usd_series_coverage_1h", "status"),
         ("identity_by_contract", "contract"),
         ("current_price_usd", "vwap_24h"),
     ];
@@ -625,7 +628,7 @@ async fn views_sql_replaces_every_existing_view() {
         );
     }
 
-    // The shipped form replaces all six in place.
+    // The shipped form replaces every one of them in place.
     prices_clickhouse::apply_sql(&client, &rewrite(prices_clickhouse::VIEWS_SQL, db))
         .await
         .unwrap();
@@ -708,10 +711,10 @@ async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1620000000,10, 2,'sdex', 5,5,5,5,             10, 50, 50, 5,    5,    1,1), \
+             (1620000000,10, 2,'sdex', 5,5,5,5,             10, 50, 500, 5,    5,    1,1), \
              (1620000000, 1, 2,'sdex', 0.30,0.30,0.30,0.30, 1000,300,300,0.30,0.30, 1,1), \
-             (1620000000, 3, 2,'sdex', 0.97,0.97,0.97,0.97, 100, 97, 97, 0.97, 0.97, 1,1), \
-             (1620000000,10, 3,'sdex', 5.15,5.15,5.15,5.15, 4,  20.6,20.6,5,  5.15, 1,1)"
+             (1620000000, 3, 2,'sdex', 0.97,0.97,0.97,0.97, 100, 97, 970, 0.97, 0.97, 1,1), \
+             (1620000000,10, 3,'sdex', 5.15,5.15,5.15,5.15, 4,  20.6,206,5,  5.15, 1,1)"
         ))
         .execute()
         .await
@@ -861,8 +864,8 @@ async fn peg_member_that_also_trades_as_a_base_keeps_its_market_value() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1620000000,10, 2,'sdex', 5,5,5,5,             10, 50,  50,  5,    5,    1,1), \
-             (1620000000, 2, 1,'sdex', 3.2,3.2,3.2,3.2,     50, 160, 52,  1.04, 3.2,  1,1)"
+             (1620000000,10, 2,'sdex', 5,5,5,5,             10, 50,  500,  5,    5,    1,1), \
+             (1620000000, 2, 1,'sdex', 3.2,3.2,3.2,3.2,     50, 160, 520,  1.04, 3.2,  1,1)"
         ))
         .execute()
         .await
@@ -973,7 +976,7 @@ async fn peg_asset_with_only_zero_volume_candles_falls_back_instead_of_publishin
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
              (1620000000, 2,10,'sdex', 0.97,0.97,0.97,0.97, 0,0,0,0.97,0.97,1,1), \
-             (1620000000,10, 2,'sdex', 5,5,5,5,                7,35,35,5,5,1,1)"
+             (1620000000,10, 2,'sdex', 5,5,5,5,                7,35,350,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1061,8 +1064,8 @@ async fn usdt_quote_only_gets_no_peg_fallback_but_usdc_still_does() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1620000000,10, 2,'sdex', 5,5,5,5,             10,50,  50,  5,5,   1,1), \
-             (1620000000,10, 3,'sdex', 5.15,5.15,5.15,5.15,  4,20.6,20.6,5,5.15,1,1)"
+             (1620000000,10, 2,'sdex', 5,5,5,5,             10,50,  500,  5,5,   1,1), \
+             (1620000000,10, 3,'sdex', 5.15,5.15,5.15,5.15,  4,20.6,206,5,5.15,1,1)"
         ))
         .execute()
         .await
@@ -1219,9 +1222,9 @@ async fn peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one() 
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-03-01 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2026-08-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2026-03-01 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2026-08-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1243,8 +1246,8 @@ async fn peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one() 
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-10 09:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2026-08-10 23:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2026-08-10 09:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2026-08-10 23:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1442,7 +1445,7 @@ async fn an_oracle_row_outranks_an_imported_row_in_the_same_bucket() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1452,7 +1455,7 @@ async fn an_oracle_row_outranks_an_imported_row_in_the_same_bucket() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-10 23:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2026-08-10 23:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1522,7 +1525,7 @@ async fn an_oracle_row_outranks_an_imported_row_in_the_same_bucket() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1626,10 +1629,10 @@ async fn price_usd_series_1h_publishes_the_imported_rate_of_each_hour() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2023-03-11 07:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2023-03-11 23:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2023-03-12 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2023-03-11 07:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2023-03-11 23:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2023-03-12 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1694,7 +1697,7 @@ async fn price_usd_series_1h_publishes_the_imported_rate_of_each_hour() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1775,7 +1778,7 @@ async fn a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains()
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-12 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2026-08-12 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1788,8 +1791,8 @@ async fn a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains()
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-12 09:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2026-08-12 23:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2026-08-12 09:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2026-08-12 23:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1910,8 +1913,8 @@ async fn a_measured_rate_at_exactly_par_is_labelled_oracle_not_peg() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2026-08-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2026-08-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -2028,7 +2031,7 @@ async fn seed_zero_volume_only_base(client: &Client, db: &str) {
                 "INSERT INTO {db}.{tbl} \
                  (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
                   volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-                 (1620000000,10, 2,'sdex', 5,5,5,5,           7,35,35,5,5,1,1), \
+                 (1620000000,10, 2,'sdex', 5,5,5,5,           7,35,350,5,5,1,1), \
                  (1620000000,11,10,'sdex', 0.5,0.5,0.5,0.5,   0,0,0,0.5,0.5,1,1)"
             ))
             .execute()
@@ -2039,6 +2042,14 @@ async fn seed_zero_volume_only_base(client: &Client, db: &str) {
 
 /// Tasks 0171 / 0198 — the non-peg zero-volume case, at both grains, in
 /// both JIT modes.
+///
+/// ⚠️ Since task 0147 this fixture is absent for TWO independent reasons, and
+/// the test still proves the 0198 one. BAR trades only against FOO, which is
+/// not an eligible quote (not USDC / XLM / USDT and with no prices.usd_rate
+/// row), so BAR's bucket now also has NO eligible volume — `ew = 0`, coverage
+/// `unpriceable`. That is a different mechanism from the zero-weight group this
+/// test was written for; what it pins either way is that BAR is ABSENT and that
+/// nothing raises or publishes a sentinel in either JIT mode.
 ///
 /// Before the fix BAR published Decimal128::MIN as `traded` (compiled) or the
 /// query raised code 349 (interpreted). After it BAR is absent in both modes,
@@ -2131,7 +2142,7 @@ async fn a_zero_volume_candle_beside_a_real_one_changes_nothing() {
                 "INSERT INTO {db}.{tbl} \
                  (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
                   volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-                 (1620000000,10,2,'sdex',    5,5,5,5, 7,35,35,5,5,1,1), \
+                 (1620000000,10,2,'sdex',    5,5,5,5, 7,35,350,5,5,1,1), \
                  (1620000000,10,2,'soroswap',4,4,4,4, 0,0,0,4,4,1,1)"
             ))
             .execute()
