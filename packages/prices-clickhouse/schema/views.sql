@@ -283,6 +283,11 @@
 -- ⚠️ BOTH constants are UNMEASURED and NOTHING may be deployed on them. They
 -- are pinned by `views_sql_marks_both_gate_constants_as_phase_2_placeholders`
 -- in src/lib.rs, which fails if a marker is removed without the value moving.
+-- Each value is spelled in FOUR executable places — the publish WHERE of both
+-- series grains and the `priced` branch of both coverage grains' `status` — and
+-- `views_sql_gate_constants_agree_between_the_header_the_gates_and_the_coverage_status`
+-- pins all four to THIS header. Phase 2 edits the two lines above; that test
+-- then names every copy still carrying the old value.
 -- Phase 2 measures the `priced_volume_share` and `priced_volume_usd`
 -- distributions on prod over a 7-day post-0286 window, PER GRAIN, and replaces
 -- both.

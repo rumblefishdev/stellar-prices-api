@@ -1364,6 +1364,22 @@ mod tests {
                  a bucket's weight — it must not come back"
             );
         }
+        // The convertibility term is `/ohlcv`'s too, but only the series views
+        // carry it: `usd_reference*` read the XLM/USDC `close` and no USD leg.
+        // Without it a row whose enrichment copied `close` into `close_usd`
+        // unconverted (a non-USDC quote) would count as priced (review N-04).
+        for (name, stmt) in series_grains() {
+            assert!(
+                stmt.contains("AND (p.quote_asset_id IN ( SELECT u.asset_id"),
+                "{name}: a row quoted in canonical USDC must be priced as-is \
+                 (task 0147 D-01's convertibility term)"
+            );
+            assert!(
+                stmt.contains("OR p.close_usd != p.close)) AS is_priced"),
+                "{name}: any other quote is priced only once `close_usd` was \
+                 converted away from `close` (task 0147 D-01's convertibility term)"
+            );
+        }
     }
 
     /// Task 0147 (D-04, R-07) — the two gate constants ship as PLACEHOLDERS.
@@ -1416,6 +1432,65 @@ mod tests {
                 stmt.contains("pusd >= 100"),
                 "{name}: FLOOR_USD must be a literal in the gate"
             );
+        }
+    }
+
+    /// The value of a gate constant as the `views.sql` header states it, e.g.
+    /// `--   X         = 0.5    -- …` → `"0.5"`. Exactly one such line each.
+    fn header_constant(name: &str) -> String {
+        let prefix = format!("-- {name} = ");
+        let lines: Vec<String> = VIEWS_SQL
+            .lines()
+            .map(squash)
+            .filter(|l| l.starts_with(&prefix))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "the views.sql header must state `{name}` exactly once, got {lines:?}"
+        );
+        lines[0][prefix.len()..]
+            .split_whitespace()
+            .next()
+            .unwrap_or_else(|| panic!("`{name}` has no value in the header: {lines:?}"))
+            .to_string()
+    }
+
+    /// Task 0147 — the gate's two constants are spelled in FOUR places: the
+    /// publish `WHERE` of each series grain and the `priced` branch of each
+    /// coverage grain's `status`. A view cannot read a settings table, so
+    /// nothing but this test keeps the four in step with the header. Phase 2
+    /// changes both values once: edit the header, and this names every copy
+    /// still carrying the old one. A coverage copy left behind would report
+    /// `priced` for a bucket the series withholds, or `pending` for one it
+    /// publishes — two answers to one question.
+    #[test]
+    fn views_sql_gate_constants_agree_between_the_header_the_gates_and_the_coverage_status() {
+        let x = header_constant("X");
+        let floor = header_constant("FLOOR_USD");
+        for (name, stmt) in series_grains() {
+            for token in [format!("pw / ew >= {x} "), format!("pusd >= {floor})")] {
+                assert_eq!(
+                    stmt.matches(&token).count(),
+                    1,
+                    "{name}: the publish gate must spell `{token}` once, as the \
+                     views.sql header states (X = {x}, FLOOR_USD = {floor})"
+                );
+            }
+        }
+        for (name, stmt) in coverage_grains() {
+            for token in [
+                format!("sum(rpw) / sum(rew) >= {x} "),
+                format!("sum(rpusd) >= {floor},"),
+            ] {
+                assert_eq!(
+                    stmt.matches(&token).count(),
+                    1,
+                    "{name}: the `priced` status must spell `{token}` once, as \
+                     the views.sql header and the series gate do (X = {x}, \
+                     FLOOR_USD = {floor})"
+                );
+            }
         }
     }
 
