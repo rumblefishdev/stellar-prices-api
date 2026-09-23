@@ -28,10 +28,24 @@
             }
           },
           "429": {
-            "description": "Rate limit exceeded"
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           },
           "500": {
-            "description": "The API description could not be served"
+            "description": "The API description could not be served",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           }
         },
         "security": [{}]
@@ -45,10 +59,24 @@
         "operationId": "health",
         "responses": {
           "200": {
-            "description": "The API is up"
+            "description": "The API is up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
           },
           "429": {
-            "description": "Rate limit exceeded"
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           }
         },
         "security": [{}]
@@ -73,7 +101,7 @@
           {
             "name": "search",
             "in": "query",
-            "description": "Case-sensitive prefix match on the asset code, 1 to 64 bytes; an empty value is treated as absent. Soroban assets whose code is not yet resolved are not matched",
+            "description": "Case-sensitive prefix match on a classic asset's code, 1 to 64 bytes; an empty value is treated as absent. Soroban tokens are never matched, even when `asset_code` shows their symbol; list them with `type=soroban`",
             "required": false,
             "schema": {
               "type": "string",
@@ -84,7 +112,7 @@
           {
             "name": "sort",
             "in": "query",
-            "description": "Sort column (default `volume_24h`): `price`, `volume_24h`, `change_24h` or `code`",
+            "description": "Sort column (default `volume_24h`): `price`, `volume_24h`, `change_24h` or `code`. `code` orders classic assets by their code, byte by byte; Soroban tokens sort as an empty code, so they come first with `order=asc`, in no defined order among themselves",
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/SortCol"
@@ -154,7 +182,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid `x-api-key` (`unauthorized`)",
+            "description": "Missing or invalid `x-api-key` (`unauthorized`), from the service's own key check. Not on the production host: there the gateway rejects the request first, with `403`",
             "content": {
               "application/json": {
                 "schema": {
@@ -164,10 +192,24 @@
             }
           },
           "403": {
-            "description": "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"
+            "description": "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API. The body is the gateway's `{\"message\": \"Forbidden\"}`, not an `ErrorEnvelope`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           },
           "429": {
-            "description": "Per-key rate limit or monthly quota exceeded"
+            "description": "Per-key rate limit or monthly quota exceeded. The body is the gateway's `{\"message\": …}`, with no `Retry-After`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           },
           "500": {
             "description": "Database or upstream failure (`db_error`)",
@@ -192,7 +234,7 @@
           {
             "name": "asset_identifier",
             "in": "path",
-            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract",
+            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract addresses, which as a rule answer `404`",
             "required": true,
             "schema": {
               "type": "string"
@@ -221,7 +263,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid `x-api-key` (`unauthorized`)",
+            "description": "Missing or invalid `x-api-key` (`unauthorized`), from the service's own key check. Not on the production host: there the gateway rejects the request first, with `403`",
             "content": {
               "application/json": {
                 "schema": {
@@ -231,7 +273,14 @@
             }
           },
           "403": {
-            "description": "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"
+            "description": "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API. The body is the gateway's `{\"message\": \"Forbidden\"}`, not an `ErrorEnvelope`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           },
           "404": {
             "description": "Unknown asset (`not_found`)",
@@ -244,7 +293,14 @@
             }
           },
           "429": {
-            "description": "Per-key rate limit or monthly quota exceeded"
+            "description": "Per-key rate limit or monthly quota exceeded. The body is the gateway's `{\"message\": …}`, with no `Retry-After`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           },
           "500": {
             "description": "Database or upstream failure (`db_error`)",
@@ -269,7 +325,7 @@
           {
             "name": "asset_identifier",
             "in": "path",
-            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract",
+            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract addresses, which as a rule answer `404`",
             "required": true,
             "schema": {
               "type": "string"
@@ -343,7 +399,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid `x-api-key` (`unauthorized`)",
+            "description": "Missing or invalid `x-api-key` (`unauthorized`), from the service's own key check. Not on the production host: there the gateway rejects the request first, with `403`",
             "content": {
               "application/json": {
                 "schema": {
@@ -353,7 +409,14 @@
             }
           },
           "403": {
-            "description": "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"
+            "description": "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API. The body is the gateway's `{\"message\": \"Forbidden\"}`, not an `ErrorEnvelope`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           },
           "404": {
             "description": "Unknown asset (`not_found`)",
@@ -366,7 +429,14 @@
             }
           },
           "429": {
-            "description": "Per-key rate limit or monthly quota exceeded"
+            "description": "Per-key rate limit or monthly quota exceeded. The body is the gateway's `{\"message\": …}`, with no `Retry-After`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           },
           "500": {
             "description": "Database or upstream failure (`db_error`)",
@@ -401,7 +471,7 @@
           {
             "name": "asset_identifier",
             "in": "path",
-            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract",
+            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract addresses, which as a rule answer `404`",
             "required": true,
             "schema": {
               "type": "string"
@@ -441,7 +511,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid `x-api-key` (`unauthorized`)",
+            "description": "Missing or invalid `x-api-key` (`unauthorized`), from the service's own key check. Not on the production host: there the gateway rejects the request first, with `403`",
             "content": {
               "application/json": {
                 "schema": {
@@ -451,7 +521,14 @@
             }
           },
           "403": {
-            "description": "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"
+            "description": "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API. The body is the gateway's `{\"message\": \"Forbidden\"}`, not an `ErrorEnvelope`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           },
           "404": {
             "description": "No current price for the asset: unknown, or not priced yet (`not_found`)",
@@ -464,7 +541,14 @@
             }
           },
           "429": {
-            "description": "Per-key rate limit or monthly quota exceeded"
+            "description": "Per-key rate limit or monthly quota exceeded. The body is the gateway's `{\"message\": …}`, with no `Retry-After`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           },
           "500": {
             "description": "Database or upstream failure (`db_error`)",
@@ -497,7 +581,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid `x-api-key` (`unauthorized`)",
+            "description": "Missing or invalid `x-api-key` (`unauthorized`), from the service's own key check. Not on the production host: there the gateway rejects the request first, with `403`",
             "content": {
               "application/json": {
                 "schema": {
@@ -507,10 +591,24 @@
             }
           },
           "403": {
-            "description": "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"
+            "description": "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API. The body is the gateway's `{\"message\": \"Forbidden\"}`, not an `ErrorEnvelope`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           },
           "429": {
-            "description": "Per-key rate limit or monthly quota exceeded"
+            "description": "Per-key rate limit or monthly quota exceeded. The body is the gateway's `{\"message\": …}`, with no `Retry-After`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           },
           "500": {
             "description": "Database or upstream failure (`db_error`)",
@@ -535,7 +633,7 @@
           {
             "name": "asset_identifier",
             "in": "path",
-            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract",
+            "description": "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract addresses, which as a rule answer `404`",
             "required": true,
             "schema": {
               "type": "string"
@@ -564,7 +662,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid `x-api-key` (`unauthorized`)",
+            "description": "Missing or invalid `x-api-key` (`unauthorized`), from the service's own key check. Not on the production host: there the gateway rejects the request first, with `403`",
             "content": {
               "application/json": {
                 "schema": {
@@ -574,7 +672,14 @@
             }
           },
           "403": {
-            "description": "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"
+            "description": "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API. The body is the gateway's `{\"message\": \"Forbidden\"}`, not an `ErrorEnvelope`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           },
           "404": {
             "description": "Unknown asset (`not_found`)",
@@ -587,7 +692,14 @@
             }
           },
           "429": {
-            "description": "Per-key rate limit or monthly quota exceeded"
+            "description": "Per-key rate limit or monthly quota exceeded. The body is the gateway's `{\"message\": …}`, with no `Retry-After`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           },
           "500": {
             "description": "Database or upstream failure (`db_error`)",
@@ -640,7 +752,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid `x-api-key` (`unauthorized`)",
+            "description": "Missing or invalid `x-api-key` (`unauthorized`), from the service's own key check. Not on the production host: there the gateway rejects the request first, with `403`",
             "content": {
               "application/json": {
                 "schema": {
@@ -650,10 +762,24 @@
             }
           },
           "403": {
-            "description": "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"
+            "description": "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API. The body is the gateway's `{\"message\": \"Forbidden\"}`, not an `ErrorEnvelope`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           },
           "429": {
-            "description": "Per-key rate limit or monthly quota exceeded"
+            "description": "Per-key rate limit or monthly quota exceeded. The body is the gateway's `{\"message\": …}`, with no `Retry-After`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayMessage"
+                }
+              }
+            }
           },
           "500": {
             "description": "Database or upstream failure (`db_error`)",
@@ -676,21 +802,25 @@
         "description": "Progress of the one-shot Soroban AMM import.",
         "required": ["status"],
         "properties": {
-          "completed_at": {
-            "type": ["string", "null"],
-            "description": "Time the import finished, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `null` while it is still running."
-          },
-          "earliest_data_available": {
-            "type": ["string", "null"],
-            "description": "Timestamp of the oldest candle this stream has written so far, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `null` until the first."
+          "status": {
+            "type": "string",
+            "description": "`running`, `paused`, `completed`, `error`, or `stalled`. `stalled` is derived at read time, not stored: a stream still recorded as `running` whose last push is more than 7 days old is reported as `stalled`, because nothing writes a terminal state when a run is killed. `paused` is the normal resting state of a finished run that stopped at its planned end rather than at the chain tip.",
+            "example": "paused"
           },
           "last_push_at": {
             "type": ["string", "null"],
-            "description": "Time of the most recent successful write, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `null` before the first."
+            "description": "Time of the most recent successful write, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `null` before the first.",
+            "example": "2026-07-14T17:54:24Z"
           },
-          "status": {
-            "type": "string",
-            "description": "`running`, `paused`, `completed`, `error`, or `stalled`. `stalled` is derived at read time, not stored: a stream still recorded as `running` whose last push is more than 7 days old is reported as `stalled`, because nothing writes a terminal state when a run is killed. `paused` is the normal resting state of a finished run that stopped at its planned end rather than at the chain tip."
+          "completed_at": {
+            "type": ["string", "null"],
+            "description": "Time the import finished, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `null` while it is still running.",
+            "example": null
+          },
+          "earliest_data_available": {
+            "type": ["string", "null"],
+            "description": "Timestamp of the oldest candle this stream has written so far, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `null` until the first.",
+            "example": "2024-03-08T19:00:00Z"
           }
         }
       },
@@ -709,31 +839,38 @@
         "properties": {
           "asset": {
             "type": "string",
-            "description": "The asset as requested, in canonical form: `native`, `CODE:ISSUER` or a contract address."
+            "description": "The asset as requested, in canonical form: `native`, `CODE:ISSUER` or a contract address.",
+            "example": "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
           },
           "asset_kind": {
             "type": "string",
-            "description": "`native` (XLM), `credit` (a classic issued asset) or `contract` (a Soroban token or SAC)."
+            "description": "`native` (XLM), `credit` (a classic issued asset) or `contract` (a Soroban token).",
+            "example": "credit"
           },
           "code": {
             "type": "string",
-            "description": "Asset code of a classic asset; `\"\"` for `native` and `contract`."
-          },
-          "contract": {
-            "type": "string",
-            "description": "Contract address (`C…`) of a Soroban asset; `\"\"` otherwise."
-          },
-          "home_domain": {
-            "type": "string",
-            "description": "The issuer's home domain (SEP-1); `\"\"` when unknown."
-          },
-          "is_active": {
-            "type": "boolean",
-            "description": "Whether the asset is currently marked active in the registry."
+            "description": "Display code: `XLM` for `native`, the asset code for `credit`, the token's own `symbol()` for `contract` — `\"\"` until that symbol is resolved. Not an identifier: codes are not unique, and a token's symbol is whatever its contract declares.",
+            "example": "USDC"
           },
           "issuer": {
             "type": "string",
-            "description": "Issuer public key (`G…`) of a classic asset; `\"\"` otherwise."
+            "description": "Issuer public key (`G…`) of a classic asset; `\"\"` otherwise.",
+            "example": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+          },
+          "contract": {
+            "type": "string",
+            "description": "Contract address (`C…`) of a Soroban asset; `\"\"` otherwise.",
+            "example": ""
+          },
+          "home_domain": {
+            "type": "string",
+            "description": "The issuer's home domain (SEP-1). Not populated yet: `\"\"` for every asset today.",
+            "example": ""
+          },
+          "is_active": {
+            "type": "boolean",
+            "description": "Whether the asset is currently marked active in the registry.",
+            "example": true
           }
         }
       },
@@ -758,55 +895,83 @@
         "properties": {
           "asset_code": {
             "type": "string",
-            "description": "Asset code; `XLM` for the native asset. Empty for a Soroban asset whose token symbol has not been resolved yet."
+            "description": "Asset code; `XLM` for the native asset. Empty for a Soroban asset whose token symbol has not been resolved yet.",
+            "example": "AQUA"
           },
           "asset_type": {
             "type": "string",
-            "description": "`classic` (including the native asset) or `soroban` — the vocabulary of the `type` filter."
-          },
-          "change_24h_pct": {
-            "type": "string",
-            "description": "Percentage change of `price_usd` against the oldest priced close in the trailing 24-hour window; `\"0\"` without a baseline."
-          },
-          "change_7d_pct": {
-            "type": "string",
-            "description": "Percentage change of `price_usd` against the oldest priced close between 7 and 5 days ago; `\"0\"` when there is no baseline in that band."
-          },
-          "contract_address": {
-            "type": "string",
-            "description": "Contract address (`C…`) of a Soroban asset; `\"\"` otherwise."
-          },
-          "home_domain": {
-            "type": "string",
-            "description": "The issuer's home domain (SEP-1); `\"\"` when unknown."
+            "description": "`classic` (including the native asset) or `soroban` — the vocabulary of the `type` filter.",
+            "example": "classic"
           },
           "issuer_address": {
             "type": "string",
-            "description": "Issuer public key (`G…`) of a classic asset; `\"\"` for the native asset and for Soroban assets."
+            "description": "Issuer public key (`G…`) of a classic asset; `\"\"` for the native asset and for Soroban assets.",
+            "example": "GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA"
           },
-          "method": {
+          "contract_address": {
             "type": "string",
-            "description": "How `price_usd` was obtained: `traded`, `oracle` or `\"\"` (unavailable). Same meaning as `PriceResponse.method`."
+            "description": "Contract address (`C…`) of a Soroban asset; `\"\"` otherwise.",
+            "example": ""
+          },
+          "home_domain": {
+            "type": "string",
+            "description": "The issuer's home domain (SEP-1). Not populated yet: `\"\"` for every asset today.",
+            "example": ""
           },
           "price_usd": {
             "type": "string",
-            "description": "Latest USD price for the asset; `\"0\"` when none is available. Same meaning as `PriceResponse.price_usd`, including the `method` it is attributed to and the decimal-string form and its precision rationale."
+            "description": "Latest USD price for the asset; `\"0\"` when none is available. Same meaning as `PriceResponse.price_usd`, including the `method` it is attributed to and the decimal-string form and its precision rationale.",
+            "example": "0.00037300596178"
           },
-          "sources": {
-            "type": "object",
-            "description": "Per-venue breakdown, same shape and rules as `PriceResponse.sources`, including the `min_volume_usd` override."
-          },
-          "updated_at": {
+          "change_24h_pct": {
             "type": "string",
-            "description": "Time of the snapshot, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`)."
+            "description": "Percentage change of `price_usd` against the oldest priced close in the trailing 24-hour window; `\"0\"` without a baseline.",
+            "example": "2.124"
+          },
+          "change_7d_pct": {
+            "type": "string",
+            "description": "Percentage change of `price_usd` against the oldest priced close between 7 and 5 days ago; `\"0\"` when there is no baseline in that band.",
+            "example": "11.997"
           },
           "volume_24h_usd": {
             "type": "string",
-            "description": "Trailing 24-hour USD volume across all venues — a total, never filtered."
+            "description": "Trailing 24-hour USD volume of every trade the asset took part in, on either side of the pair, across all venues — a total, never filtered. Same meaning as `PriceResponse.volume_24h_usd`, and likewise larger than the sum of `sources`.",
+            "example": "479235.22108659319489"
           },
           "vwap_24h": {
             "type": "string",
-            "description": "Trailing 24-hour volume-weighted average USD price across venues, with the volume threshold and the outlier filter applied. Same meaning as `PriceResponse.vwap_24h`."
+            "description": "Trailing 24-hour volume-weighted average USD price across venues, with the volume threshold and the outlier filter applied. Same meaning as `PriceResponse.vwap_24h`.",
+            "example": "0.00037306538294"
+          },
+          "sources": {
+            "type": "object",
+            "description": "Per-venue breakdown, same shape and rules as `PriceResponse.sources`, including the `min_volume_usd` override.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SourceQuote"
+            },
+            "propertyNames": {
+              "type": "string"
+            },
+            "example": {
+              "aquarius": {
+                "price": "0.00037307545161",
+                "volume_24h": "409795.80206351425926"
+              },
+              "sdex": {
+                "price": "0.00037300596178",
+                "volume_24h": "69438.16887823331656"
+              }
+            }
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "Time of the snapshot, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`).",
+            "example": "2026-09-23T08:08:00Z"
+          },
+          "method": {
+            "type": "string",
+            "description": "How `price_usd` was obtained: `traded`, `oracle` or `\"\"` (unavailable). Same meaning as `PriceResponse.method`.",
+            "example": "traded"
           }
         }
       },
@@ -815,10 +980,6 @@
         "description": "One page of the asset listing.",
         "required": ["data", "has_more"],
         "properties": {
-          "cursor": {
-            "type": ["string", "null"],
-            "description": "Opaque cursor for the next page; `null` on the last page. Pass it as `cursor` with the same `sort` and `order`."
-          },
           "data": {
             "type": "array",
             "items": {
@@ -826,9 +987,15 @@
             },
             "description": "The page's rows, in the requested order."
           },
+          "cursor": {
+            "type": ["string", "null"],
+            "description": "Opaque cursor for the next page; `null` on the last page. Pass it as `cursor` with the same `sort` and `order`.",
+            "example": "eyJ2IjoiMTU3MC45MDI4NTIwMDAxNzU5MyIsImlkIjo4N30"
+          },
           "has_more": {
             "type": "boolean",
-            "description": "Whether a further page exists."
+            "description": "Whether a further page exists.",
+            "example": true
           }
         }
       },
@@ -841,6 +1008,7 @@
             "type": "integer",
             "format": "int64",
             "description": "Current ledger sequence of the network, from the live ingest cursor, which advances every batch. Falls back to the SDEX stream's `target_ledger` only while that cursor is unset, and is `0` when neither is available. It was previously read from `target_ledger` alone, which is not a chain tip: the backfill rewrites that column when it pushes, so it freezes when the backfill stops.",
+            "example": 64573020,
             "maximum": 4294967295,
             "minimum": 0
           },
@@ -886,6 +1054,10 @@
               "type": "string"
             },
             "description": "Asset identifiers — `native`, `CODE:ISSUER` or a contract address — 1 to 100 of them. A duplicated identifier is answered each time.",
+            "example": [
+              "native",
+              "FOO:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+            ],
             "maxItems": 100,
             "minItems": 1
           }
@@ -896,19 +1068,22 @@
         "description": "Response of `POST /prices/batch`.",
         "required": ["prices", "not_found"],
         "properties": {
-          "not_found": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Identifiers with no current price, in canonical form and in the order of the request."
-          },
           "prices": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/PriceResponse"
             },
             "description": "Current prices for the assets that have one, in the order of the request."
+          },
+          "not_found": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Identifiers with no current price, in canonical form and in the order of the request.",
+            "example": [
+              "FOO:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+            ]
           }
         }
       },
@@ -922,100 +1097,147 @@
           "trade_count"
         ],
         "properties": {
-          "close": {
-            "type": ["string", "null"],
-            "description": "Closing price of the bucket, in `base_currency`: the LAST price-forming trade of this bucket, never one carried over from an earlier one. `null` when the bucket has no price — see `pf_trade_count`. Exact in USD mode — the other price fields are scaled, see `derived`."
-          },
-          "close_divergent": {
-            "type": ["boolean", "null"],
-            "description": "Whether `close` sits more than 1% away from `pf_vwap`. The close is a SINGLE trade — the last one that formed a price — while `pf_vwap` is the whole bucket's price-forming mean, so a wide gap marks a thin or one-sided bucket rather than an error: the close is still what it last traded at, and a poor summary of what it is worth. Prefer `pf_vwap` when ranking or valuing, and `close` when charting the last price.\n\n`null` when either value is `null` — nothing was compared, which is not the same as the two agreeing."
-          },
-          "derived": {
-            "type": ["boolean", "null"],
-            "description": "Whether `open`, `high`, `low` and `vwap` were derived by scaling rather than measured. Normally `close` is exact and the other price fields are scaled from the quote-asset values with one rate per bucket, so the true USD high may have occurred at a different moment than the quote-asset high. For USDC, which has no trades of its own, every price field comes from the rate and `derived` is `true`.\n\n`null` when the price fields are `null`, and always `null` for `base_currency=XLM`."
-          },
-          "high": {
-            "type": ["string", "null"],
-            "description": "Highest price among this bucket's price-forming trades, in `base_currency`; `null` when the bucket has no price — see `pf_trade_count`."
-          },
-          "low": {
-            "type": ["string", "null"],
-            "description": "Lowest price among this bucket's price-forming trades, in `base_currency`; `null` when the bucket has no price — see `pf_trade_count`."
-          },
-          "method": {
-            "type": ["string", "null"],
-            "description": "Where the USD rate behind this bucket came from:\n\n* `assumed-par` — nothing was measured; the literal 1.0 supplied the value, i.e. USDC was taken at 1 USD.\n* `external` — an imported, measured USDC/USD series supplied the rate.\n* `oracle` — a measured Reflector reading supplied the rate.\n* `traded` — priced through a reference asset's own trades.\n* `peg` — only on the synthesized USDC self-series (`GET /assets/USDC:<issuer>/ohlcv`): no measured USDC/USD observation covered the bucket, so the $1 fallback was rendered. Never appears on a quote leg — there the same situation is `assumed-par`.\n\nEach value names the INPUT the rate came from, so `assumed-par` and `external` are never interchangeable: one is an assumption, the other a measurement that may sit percent off par.\n\nOn the USDC self-series a bucket that holds both a Reflector reading and an imported one reports `oracle`: a measured poll outranks an imported rate outright, whichever was observed first. Observation time only breaks ties between rows of the same kind. The imported series is loaded at HOURLY grain, so an hourly request over an imported day reports `external` — and that hour's own measured rate — for each of its twenty-four hours; on 2023-03-11 the 07:00 bucket reports the trough rather than the day's close. Where only a daily row exists for a day, that one row prices every bucket of its UTC day at every `granularity`, so an imported day mixes the two only where the oracle epoch falls inside it (2026-03-11): a bucket that extends past 14:00 UTC that day is not priced from the imported series, which ends at 13:00. The self-series carries the rate row's own `method`, so a measured rate that reads exactly 1.0 is `external` there.\n\nOn a quote leg the label is reconstructed at read time — the candle rows carry no provenance column — so one case is deliberately not separated: a bucket reading exactly 1.0 reports `assumed-par` whether the dollar was assumed or a measured rate happened to land on it. The two leave an identical row and carry the same number, so the label is the conservative one; `external` is reported only for a bucket whose value was actually scaled by an imported rate.\n\n`null` in three cases: when the price fields are `null`; always for `base_currency=XLM`, where nothing is converted; and for a USDC-quoted bucket below the oracle epoch that carries a converted rate no imported series covers — nothing can attribute it, and a label would be a claim."
+          "timestamp": {
+            "type": "string",
+            "description": "Bucket start, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`).",
+            "example": "2026-09-22T08:15:00Z"
           },
           "open": {
             "type": ["string", "null"],
-            "description": "Opening price of the bucket, in `base_currency`: the FIRST price-forming trade of this bucket. `null` when the bucket has no price — see `pf_trade_count`."
+            "description": "Opening price of the bucket, in `base_currency`: the FIRST price-forming trade of this bucket. `null` when the bucket has no price — see `pf_trade_count`.",
+            "example": "0.21155612364244"
           },
-          "pf_trade_count": {
-            "type": ["integer", "null"],
-            "format": "int64",
-            "description": "How many of the bucket's trades formed its price.\n\nA trade's price is the ratio of the two integer amounts exchanged, so a trade of a few of the smallest representable units prints an exact small fraction — 1/17, 5/34 — that is arithmetically correct and can sit hundreds of percent off the market. Those trades are not price-forming, and `open`, `high`, `low` and `close` are taken only from the ones that are. Neither is a trade whose price falls below 0.000000000001 — one hundred times the smallest value the price fields can hold, below which a stored price is rounding noise rather than a measurement. The same floor applies at every `interval`.\n\n`0` is a real answer and the one worth acting on: the bucket traded, its `volume_base` and `trade_count` are reported, and it has NO price — every price field is `null` rather than carrying a dust print. Always at most `trade_count`; `null` only on the synthesized USDC self-series (`GET /assets/USDC:<issuer>/ohlcv`), which is built from rate observations and has no trades to count.",
-            "minimum": 0
-          },
-          "pf_vwap": {
+          "high": {
             "type": ["string", "null"],
-            "description": "Volume-weighted average price of the bucket's price-forming trades, in `base_currency` — `vwap` with the dust left out, and the value `close_divergent` compares `close` against.\n\nDenominated exactly like `close` and bounded by the published `low` and `high`, so the response stays self-consistent. `null` when the bucket has no price-forming volume, and on the synthesized USDC self-series. Never `0`."
+            "description": "Highest price among this bucket's price-forming trades, in `base_currency`; `null` when the bucket has no price — see `pf_trade_count`.",
+            "example": "0.21336358305927"
           },
-          "quality": {
+          "low": {
             "type": ["string", "null"],
-            "description": "How confident the imported series is in that day's observation. Present only alongside `source`, i.e. only on the synthesized USDC self-series (`GET /assets/USDC:<issuer>/ohlcv`) for buckets whose `method` is `external`; `null` on every other asset, on the `peg` fallback, and whenever the price fields are `null`.\n\n* `measured` — a real observation from the primary feed.\n* `measured-disputed` — observed, but a cross-check against a second independent source disagreed by more than the composer's spread tolerance. The number is real; treat it as less certain than a plain `measured` day and prefer not to alert on it alone.\n* `fallback` — the primary feed had nothing for that day, so the secondary source supplied it. Still an observation, and far better than assuming $1, but a different instrument on a different venue.\n\nA day with no quality is not a day of unknown quality — the field simply does not apply outside the imported series."
+            "description": "Lowest price among this bucket's price-forming trades, in `base_currency`; `null` when the bucket has no price — see `pf_trade_count`.",
+            "example": "0.21019557835832"
           },
-          "source": {
+          "close": {
             "type": ["string", "null"],
-            "description": "Which outside USD series the imported rate came from: `chainlink` or `bitstamp`.\n\nPresent only on the synthesized USDC self-series (`GET /assets/USDC:<issuer>/ohlcv`), and there only for buckets whose `method` is `external`. It is `null` on every other asset — not because those candles lack provenance, but because the stored candles carry no column to report it from — `null` on an `oracle` bucket (a poll has no outside series, even where an outranked import shares the bucket), `null` on the `peg` fallback, where no series was consulted at all, and whenever the price fields are `null`. Never the empty string."
+            "description": "Closing price of the bucket, in `base_currency`: the LAST price-forming trade of this bucket, never one carried over from an earlier one. `null` when the bucket has no price — see `pf_trade_count`. Exact in USD mode — the other price fields are scaled, see `derived`.",
+            "example": "0.2104557806765"
           },
-          "timestamp": {
+          "volume_base": {
             "type": "string",
-            "description": "Bucket start, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`)."
+            "description": "Volume in units of the asset — the base side of each trade, over EVERY trade in the bucket including the ones too small to form a price. It is therefore a complete activity figure and not a price-quality signal: `pf_trade_count` is the one to read for that, and a bucket that traded only in such amounts reports its volume here with no price at all.\n\nVolume is undistorted by those trades — they carry almost none — which is why it stays unfiltered where the price fields do not.",
+            "example": "256744.7651102"
+          },
+          "volume_quote_usd": {
+            "type": "string",
+            "description": "USD volume of the bucket, summed over the trades that have a USD value. A trade not yet priced counts in `volume_base` and `trade_count` but not here, so this is the USD volume that can be accounted for, not the bucket's total restated in USD.",
+            "example": "54161.26730887106528"
+          },
+          "vwap": {
+            "type": ["string", "null"],
+            "description": "Volume-weighted average price of the bucket, in `base_currency`, over the trades it holds — including the ones too small to form a price. `pf_vwap` is the same mean with those left out. `null` when the bucket has no price.\n\nWHICH trades it weighs depends on the denomination, so the two can differ on a bucket that holds a source with no usable price. With `base_currency=XLM` it is every row of the bucket, as stored. With `USD` it is every row that has a usable rate to convert it with — a row whose own price is below the precision floor, or that has no USD value yet, cannot be restated in USD and is left out of the mean rather than counted at zero.\n\nBounded by the published `low` and `high` so the response stays self-consistent. Those come from the price-forming trades only, so on a bucket where the trades that formed no price carry most of the volume the raw mean falls outside that range and the value reported is the nearer bound. Compare it with `pf_vwap` when the difference matters.",
+            "example": "0.2109568287069"
           },
           "trade_count": {
             "type": "integer",
             "format": "int64",
             "description": "Number of trades in the bucket. The documented maximum, 2^53 − 1, is the largest integer JSON carries exactly — a transport limit, not a domain one.",
+            "example": 666,
             "maximum": 9007199254740991,
             "minimum": 0
           },
-          "volume_base": {
-            "type": "string",
-            "description": "Volume in units of the asset — the base side of each trade, over EVERY trade in the bucket including the ones too small to form a price. It is therefore a complete activity figure and not a price-quality signal: `pf_trade_count` is the one to read for that, and a bucket that traded only in such amounts reports its volume here with no price at all.\n\nVolume is undistorted by those trades — they carry almost none — which is why it stays unfiltered where the price fields do not."
-          },
-          "volume_quote_usd": {
-            "type": "string",
-            "description": "USD volume of the bucket, summed over the trades that have a USD value. A trade not yet priced counts in `volume_base` and `trade_count` but not here, so this is the USD volume that can be accounted for, not the bucket's total restated in USD."
-          },
-          "vwap": {
+          "method": {
             "type": ["string", "null"],
-            "description": "Volume-weighted average price of the bucket, in `base_currency`, over the trades it holds — including the ones too small to form a price. `pf_vwap` is the same mean with those left out. `null` when the bucket has no price.\n\nWHICH trades it weighs depends on the denomination, so the two can differ on a bucket that holds a source with no usable price. With `base_currency=XLM` it is every row of the bucket, as stored. With `USD` it is every row that has a usable rate to convert it with — a row whose own price is below the precision floor, or that has no USD value yet, cannot be restated in USD and is left out of the mean rather than counted at zero.\n\nBounded by the published `low` and `high` so the response stays self-consistent. Those come from the price-forming trades only, so on a bucket where the trades that formed no price carry most of the volume the raw mean falls outside that range and the value reported is the nearer bound. Compare it with `pf_vwap` when the difference matters."
+            "description": "Where the USD rate behind this bucket came from:\n\n* `assumed-par` — nothing was measured; the literal 1.0 supplied the value, i.e. USDC was taken at 1 USD.\n* `external` — an imported, measured USDC/USD series supplied the rate.\n* `oracle` — a measured Reflector reading supplied the rate.\n* `traded` — priced through a reference asset's own trades.\n* `peg` — only on the synthesized USDC self-series (`GET /assets/USDC:<issuer>/ohlcv`): no measured USDC/USD observation covered the bucket, so the $1 fallback was rendered. Never appears on a quote leg — there the same situation is `assumed-par`.\n\nEach value names the INPUT the rate came from, so `assumed-par` and `external` are never interchangeable: one is an assumption, the other a measurement that may sit percent off par.\n\nOn the USDC self-series a bucket that holds both a Reflector reading and an imported one reports `oracle`: a measured poll outranks an imported rate outright, whichever was observed first. Observation time only breaks ties between rows of the same kind. The imported series is loaded at HOURLY grain, so an hourly request over an imported day reports `external` — and that hour's own measured rate — for each of its twenty-four hours; on 2023-03-11 the 07:00 bucket reports the trough rather than the day's close. Where only a daily row exists for a day, that one row prices every bucket of its UTC day at every `granularity`, so an imported day mixes the two only where the oracle epoch falls inside it (2026-03-11): a bucket that extends past 14:00 UTC that day is not priced from the imported series, which ends at 13:00. The self-series carries the rate row's own `method`, so a measured rate that reads exactly 1.0 is `external` there.\n\nOn a quote leg the label is reconstructed at read time — the candle rows carry no provenance column — so one case is deliberately not separated: a bucket reading exactly 1.0 reports `assumed-par` whether the dollar was assumed or a measured rate happened to land on it. The two leave an identical row and carry the same number, so the label is the conservative one; `external` is reported only for a bucket whose value was actually scaled by an imported rate.\n\n`null` in three cases: when the price fields are `null`; always for `base_currency=XLM`, where nothing is converted; and for a USDC-quoted bucket below the oracle epoch that carries a converted rate no imported series covers — nothing can attribute it, and a label would be a claim.",
+            "example": "oracle"
+          },
+          "derived": {
+            "type": ["boolean", "null"],
+            "description": "Whether `open`, `high`, `low` and `vwap` were derived by scaling rather than measured. Normally `close` is exact and the other price fields are scaled from the quote-asset values with one rate per bucket, so the true USD high may have occurred at a different moment than the quote-asset high. For USDC, which has no trades of its own, every price field comes from the rate and `derived` is `true`.\n\n`null` when the price fields are `null`, and always `null` for `base_currency=XLM`.",
+            "example": true
+          },
+          "pf_trade_count": {
+            "type": ["integer", "null"],
+            "format": "int64",
+            "description": "How many of the bucket's trades formed its price.\n\nA trade's price is the ratio of the two integer amounts exchanged, so a trade of a few of the smallest representable units prints an exact small fraction — 1/17, 5/34 — that is arithmetically correct and can sit hundreds of percent off the market. Those trades are not price-forming, and `open`, `high`, `low` and `close` are taken only from the ones that are. Neither is a trade whose price falls below 0.000000000001 — one hundred times the smallest value the price fields can hold, below which a stored price is rounding noise rather than a measurement. The same floor applies at every `interval`.\n\n`0` is a real answer and the one worth acting on: the bucket traded, its `volume_base` and `trade_count` are reported, and it has NO price — every price field is `null` rather than carrying a dust print. Always at most `trade_count`; `null` only on the synthesized USDC self-series (`GET /assets/USDC:<issuer>/ohlcv`), which is built from rate observations and has no trades to count.",
+            "example": 666,
+            "minimum": 0
+          },
+          "pf_vwap": {
+            "type": ["string", "null"],
+            "description": "Volume-weighted average price of the bucket's price-forming trades, in `base_currency` — `vwap` with the dust left out, and the value `close_divergent` compares `close` against.\n\nDenominated exactly like `close` and bounded by the published `low` and `high`, so the response stays self-consistent. `null` when the bucket has no price-forming volume, and on the synthesized USDC self-series. Never `0`.",
+            "example": "0.21095682870692"
+          },
+          "close_divergent": {
+            "type": ["boolean", "null"],
+            "description": "Whether `close` sits more than 1% away from `pf_vwap`. The close is a SINGLE trade — the last one that formed a price — while `pf_vwap` is the whole bucket's price-forming mean, so a wide gap marks a thin or one-sided bucket rather than an error: the close is still what it last traded at, and a poor summary of what it is worth. Prefer `pf_vwap` when ranking or valuing, and `close` when charting the last price.\n\n`null` when either value is `null` — nothing was compared, which is not the same as the two agreeing.",
+            "example": false
+          },
+          "source": {
+            "type": ["string", "null"],
+            "description": "Which outside USD series the imported rate came from: `chainlink` or `bitstamp`.\n\nPresent only on the synthesized USDC self-series (`GET /assets/USDC:<issuer>/ohlcv`), and there only for buckets whose `method` is `external`. It is `null` on every other asset — not because those candles lack provenance, but because the stored candles carry no column to report it from — `null` on an `oracle` bucket (a poll has no outside series, even where an outranked import shares the bucket), `null` on the `peg` fallback, where no series was consulted at all, and whenever the price fields are `null`. Never the empty string.",
+            "example": null
+          },
+          "quality": {
+            "type": ["string", "null"],
+            "description": "How confident the imported series is in that day's observation. Present only alongside `source`, i.e. only on the synthesized USDC self-series (`GET /assets/USDC:<issuer>/ohlcv`) for buckets whose `method` is `external`; `null` on every other asset, on the `peg` fallback, and whenever the price fields are `null`.\n\n* `measured` — a real observation from the primary feed.\n* `measured-disputed` — observed, but a cross-check against a second independent source disagreed by more than the composer's spread tolerance. The number is real; treat it as less certain than a plain `measured` day and prefer not to alert on it alone.\n* `fallback` — the primary feed had nothing for that day, so the secondary source supplied it. Still an observation, and far better than assuming $1, but a different instrument on a different venue.\n\nA day with no quality is not a day of unknown quality — the field simply does not apply outside the imported series.",
+            "example": null
           }
         }
       },
       "ErrorEnvelope": {
         "type": "object",
-        "description": "The body of every error response. `code` is stable and meant for programs; `message` is for people and its wording may change.",
+        "description": "The body of every error the API itself returns. `code` is stable and meant for programs; `message` is for people and its wording may change. Responses the API Gateway writes on the API's behalf — `403` for a missing or unknown key, `429` when throttled — carry a `GatewayMessage` instead.",
         "required": ["code", "message"],
         "properties": {
           "code": {
             "type": "string",
             "description": "Machine-readable error code: `invalid_id`, `invalid_query`, `invalid_body`, `not_found`, `unauthorized`, `db_error` or `quote_unavailable`.",
-            "example": "invalid_id"
-          },
-          "details": {
-            "description": "Optional structured context; omitted when absent."
+            "example": "not_found"
           },
           "message": {
             "type": "string",
-            "description": "Human-readable explanation; the wording may change."
+            "description": "Human-readable explanation; the wording may change.",
+            "example": "unknown asset"
+          },
+          "details": {
+            "description": "Optional structured context; omitted when absent."
+          }
+        }
+      },
+      "GatewayMessage": {
+        "type": "object",
+        "description": "The body API Gateway answers with when it handles a request itself: `403` for a missing, unknown or disabled `x-api-key`, `429` when throttled, and some `5xx`. It has no `code`.",
+        "required": ["message"],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "The gateway's own text, for example `Forbidden` or `Too Many Requests`. A `403` reading `Missing Authentication Token` means the path does not exist, not that the key is wrong.",
+            "example": "Forbidden"
           }
         }
       },
       "Granularity": {
         "type": "string",
         "description": "Candle bucket size. Case-sensitive: `1m` is one minute, `1M` one month.",
-        "enum": ["1m", "15m", "1h", "4h", "1d", "1w", "1M"]
+        "enum": ["1m", "15m", "1h", "4h", "1d", "1w", "1M"],
+        "example": "15m"
+      },
+      "HealthStatus": {
+        "type": "object",
+        "description": "Body of `GET /health`, answered at the edge.",
+        "required": ["status", "stack"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "`ok` whenever the API is up.",
+            "example": "ok"
+          },
+          "stack": {
+            "type": "string",
+            "description": "The deployment that answered.",
+            "example": "prices-production"
+          }
+        }
       },
       "OhlcvResponse": {
         "type": "object",
@@ -1024,15 +1246,20 @@
         "properties": {
           "asset": {
             "type": "string",
-            "description": "The asset as requested, in canonical form: `native`, `CODE:ISSUER` or a contract address."
+            "description": "The asset as requested, in canonical form: `native`, `CODE:ISSUER` or a contract address.",
+            "example": "native"
+          },
+          "granularity": {
+            "$ref": "#/components/schemas/Granularity",
+            "description": "The bucket size actually used — the request's `granularity`, or the one selected from the window."
+          },
+          "base_currency": {
+            "$ref": "#/components/schemas/BaseCurrency",
+            "description": "`USD` or `XLM` — the currency the candles are expressed in."
           },
           "backfill_note": {
             "type": ["string", "null"],
             "description": "Present only for `timeframe=all` while the historical backfill is still running: names the earliest date available so far and points to `GET /backfill/status`."
-          },
-          "base_currency": {
-            "type": "string",
-            "description": "`USD` or `XLM` — the currency the candles are expressed in."
           },
           "data": {
             "type": "array",
@@ -1040,10 +1267,6 @@
               "$ref": "#/components/schemas/Candle"
             },
             "description": "The candles, in ascending time order."
-          },
-          "granularity": {
-            "type": "string",
-            "description": "The bucket size actually used — the request's `granularity`, or the one selected from the window."
           }
         }
       },
@@ -1054,15 +1277,18 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "Oracle name, for example `reflector`."
+            "description": "Oracle name, for example `reflector`.",
+            "example": "reflector"
           },
           "price_usd": {
             "type": "string",
-            "description": "Latest USD price reported by the oracle, as a decimal string."
+            "description": "Latest USD price reported by the oracle, as a decimal string.",
+            "example": "0.2180727167089"
           },
           "updated_at": {
             "type": "string",
-            "description": "Time of that reading, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`)."
+            "description": "Time of that reading, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`).",
+            "example": "2026-09-23T08:05:00Z"
           }
         }
       },
@@ -1073,7 +1299,8 @@
         "properties": {
           "asset": {
             "type": "string",
-            "description": "The asset as requested, in canonical form: `native`, `CODE:ISSUER` or a contract address."
+            "description": "The asset as requested, in canonical form: `native`, `CODE:ISSUER` or a contract address.",
+            "example": "native"
           },
           "oracles": {
             "type": "array",
@@ -1106,39 +1333,75 @@
         "properties": {
           "asset": {
             "type": "string",
-            "description": "The asset as requested, in canonical form: `native`, `CODE:ISSUER` or a contract address."
-          },
-          "change_24h_pct": {
-            "type": "string",
-            "description": "Percentage change of `price_usd` against the oldest priced close in the trailing 24-hour window. `\"0\"` when there is no baseline to compare against."
-          },
-          "method": {
-            "type": "string",
-            "description": "How `price_usd` was obtained:\n\n* `traded` — aggregated from the asset's own trades.\n* `oracle` — taken from an oracle rate, for an asset that never trades as the base of a market and so has no candles of its own (currently only USDC).\n* `\"\"` — unavailable: no priced trade in the window, so `price_usd` is `\"0\"`.\n\n`oracle` does not mean \"more accurate than traded\"; it means the price came from a rate rather than from this asset's trades."
+            "description": "The asset as requested, in canonical form: `native`, `CODE:ISSUER` or a contract address.",
+            "example": "native"
           },
           "price_usd": {
             "type": "string",
-            "description": "Latest USD price for the asset: its own last priced close in the trailing 24-hour window, or — for an asset that never trades as the base of a market — a rate. `method` says which. `\"0\"` means neither was available.\n\nThe value is not age-bounded: for an asset that has stopped trading it is the last close inside the window, up to 24 hours old. `updated_at` is the time of the snapshot, not the age of the price.\n\n**A decimal string, not a JSON number.** Prices are `Decimal(38, 14)` and a JSON number is an IEEE-754 double in every mainstream parser — ~15-16 significant digits against the 19 a five-figure price at this scale carries, so a float round-trip silently drops low-order digits. Assets on this store trade as low as 7e-8, where those digits are the price. Parse with a decimal type; `parseFloat` still works if a float is genuinely wanted, but the reverse is not recoverable."
+            "description": "Latest USD price for the asset: its own last priced close in the trailing 24-hour window, or — for an asset that never trades as the base of a market — a rate. `method` says which. `\"0\"` means neither was available.\n\nThe value is not age-bounded: for an asset that has stopped trading it is the last close inside the window, up to 24 hours old. `updated_at` is the time of the snapshot, not the age of the price.\n\n**A decimal string, not a JSON number.** Prices are `Decimal(38, 14)` and a JSON number is an IEEE-754 double in every mainstream parser — ~15-16 significant digits against the 19 a five-figure price at this scale carries, so a float round-trip silently drops low-order digits. Assets on this store trade as low as 7e-8, where those digits are the price. Parse with a decimal type; `parseFloat` still works if a float is genuinely wanted, but the reverse is not recoverable.",
+            "example": "0.22086251378147"
           },
           "price_xlm": {
             "type": "string",
-            "description": "`price_usd` expressed in XLM: `price_usd` divided by the latest XLM/USD close. Shares the `\"0\"` sentinel. The two closes are dated independently, so this is not a price at any single instant."
-          },
-          "sources": {
-            "type": "object",
-            "description": "Per-venue breakdown, keyed by venue name (for example `sdex`, `soroswap`, `aquarius`), each `{\"price\": \"…\", \"volume_24h\": \"…\"}` as decimal strings. A venue is absent when the volume threshold or the outlier filter excluded it, or when it has no USD-priced close in the window. `{}` means no venue qualified; it is not an error."
-          },
-          "updated_at": {
-            "type": "string",
-            "description": "Time of the snapshot, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`)."
-          },
-          "volume_24h_usd": {
-            "type": "string",
-            "description": "Trailing 24-hour USD volume across all venues — a total, never reduced by the volume threshold or the outlier filter."
+            "description": "`price_usd` expressed in XLM: `price_usd` divided by the latest XLM/USD close. Shares the `\"0\"` sentinel. The two closes are dated independently, so this is not a price at any single instant.",
+            "example": "1"
           },
           "vwap_24h": {
             "type": "string",
-            "description": "Trailing 24-hour volume-weighted average USD price across venues. Venues at or below the volume threshold (100 USD by default — conditional: a low-volume venue is kept when no venue on the asset clears it) and venues whose price is an outlier against the cross-venue median are excluded from the weighting. `min_volume_usd` re-weights it with a caller-supplied threshold."
+            "description": "Trailing 24-hour volume-weighted average USD price across venues. Venues at or below the volume threshold (100 USD by default — conditional: a low-volume venue is kept when no venue on the asset clears it) and venues whose price is an outlier against the cross-venue median are excluded from the weighting. `min_volume_usd` re-weights it with a caller-supplied threshold. `\"0\"` when no venue qualifies, as for an asset priced by `oracle`.",
+            "example": "0.220818422853"
+          },
+          "volume_24h_usd": {
+            "type": "string",
+            "description": "Trailing 24-hour USD volume of every trade the asset took part in, on either side of the pair, across all venues — a total, never reduced by the volume threshold or the outlier filter. It is therefore larger than the sum of `sources`, which counts one side: XLM, quoted against most assets, shows the gap most; USDC, which only ever quotes, has all of its volume here and `{}` in `sources`.",
+            "example": "9232178.49610106508283"
+          },
+          "change_24h_pct": {
+            "type": "string",
+            "description": "Percentage change of `price_usd` against the oldest priced close in the trailing 24-hour window. `\"0\"` when there is no baseline to compare against.",
+            "example": "4.2307"
+          },
+          "sources": {
+            "type": "object",
+            "description": "Per-venue breakdown, keyed by venue name (`aquarius`, `phoenix`, `sdex`, `soroswap`, `sushiswap`), each a `SourceQuote`. A venue's `volume_24h` counts only the trades where this asset is the one being priced — the base of the pair — so the entries add up to less than `volume_24h_usd`, which counts both sides. A venue is absent when the volume threshold or the outlier filter excluded it, or when it has no USD-priced close in the window. `{}` means no venue qualified — always so for an asset priced by `oracle` — and is not an error.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SourceQuote"
+            },
+            "propertyNames": {
+              "type": "string"
+            },
+            "example": {
+              "aquarius": {
+                "price": "0.22086251378147",
+                "volume_24h": "3496887.57491671686026"
+              },
+              "phoenix": {
+                "price": "0.21951246345991",
+                "volume_24h": "143.33960639826163"
+              },
+              "sdex": {
+                "price": "0.22080609088657",
+                "volume_24h": "3706994.74575814385738"
+              },
+              "soroswap": {
+                "price": "0.22083791103349",
+                "volume_24h": "12137.72993461573015"
+              },
+              "sushiswap": {
+                "price": "0.21972140395799",
+                "volume_24h": "98918.83560484752044"
+              }
+            }
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "Time of the snapshot, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`).",
+            "example": "2026-09-23T08:08:00Z"
+          },
+          "method": {
+            "type": "string",
+            "description": "How `price_usd` was obtained:\n\n* `traded` — aggregated from the asset's own trades.\n* `oracle` — taken from an oracle rate, for an asset that never trades as the base of a market and so has no candles of its own (currently only USDC).\n* `\"\"` — unavailable: no priced trade in the window, so `price_usd` is `\"0\"`.\n\n`oracle` does not mean \"more accurate than traded\"; it means the price came from a rate rather than from this asset's trades.",
+            "example": "traded"
           }
         }
       },
@@ -1154,50 +1417,58 @@
           "ledgers_remaining"
         ],
         "properties": {
+          "status": {
+            "type": "string",
+            "description": "`running`, `paused`, `completed`, `error`, or `stalled`. `stalled` is derived at read time, not stored: a stream still recorded as `running` whose last push is more than 7 days old is reported as `stalled`, because nothing writes a terminal state when a run is killed. `paused` is the normal resting state of a finished run that stopped at its planned end rather than at the chain tip.",
+            "example": "completed"
+          },
           "current_ledger": {
             "type": "integer",
             "format": "int64",
             "description": "The OLDEST ledger sequence reflected so far. This stream walks backward from the chain tip toward genesis, so it descends over the life of the run and reaches `start_ledger` when the archive is complete — it is not the newest ledger ingested. Caveat: it is the lowest completed run *start*, so it asserts a floor, not proven contiguous coverage between that floor and `target_ledger`.",
+            "example": 1,
             "maximum": 4294967295,
             "minimum": 0
           },
-          "earliest_data_available": {
-            "type": ["string", "null"],
-            "description": "Timestamp of the oldest candle this stream has written so far, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `null` until the first. Moves backwards as older history is ingested."
-          },
-          "last_push_at": {
-            "type": ["string", "null"],
-            "description": "Time of the most recent successful write, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `null` before the first."
-          },
-          "ledgers_remaining": {
+          "start_ledger": {
             "type": "integer",
             "format": "int64",
-            "description": "`current_ledger − start_ledger` — how far the archive's floor still sits above genesis. This stream walks backward, so what remains is below `current_ledger`, not above it.",
+            "description": "Low end of the span this stream covers — genesis (`1`) for the SDEX archive. Because the stream walks backward it is where the walk *ends*, not where it begins.",
+            "example": 1,
+            "maximum": 4294967295,
+            "minimum": 0
+          },
+          "target_ledger": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ledger sequence the run aims for.",
+            "example": 63795749,
             "maximum": 4294967295,
             "minimum": 0
           },
           "progress_pct": {
             "type": "number",
             "format": "double",
-            "description": "Share of the ledger span covered, in percent: `(target_ledger − current_ledger) / (target_ledger − start_ledger) × 100`. The SDEX archive walks backward from the tip toward genesis, so `current_ledger` is the OLDEST ledger reflected and the covered span is `[current_ledger, target_ledger]`; `0` while the span is unknown or nothing has been reflected yet."
+            "description": "Share of the ledger span covered, in percent: `(target_ledger − current_ledger) / (target_ledger − start_ledger) × 100`. The SDEX archive walks backward from the tip toward genesis, so `current_ledger` is the OLDEST ledger reflected and the covered span is `[current_ledger, target_ledger]`; `0` while the span is unknown or nothing has been reflected yet.",
+            "example": 100.0
           },
-          "start_ledger": {
+          "ledgers_remaining": {
             "type": "integer",
             "format": "int64",
-            "description": "Low end of the span this stream covers — genesis (`1`) for the SDEX archive. Because the stream walks backward it is where the walk *ends*, not where it begins.",
+            "description": "`current_ledger − start_ledger` — how far the archive's floor still sits above genesis. This stream walks backward, so what remains is below `current_ledger`, not above it.",
+            "example": 0,
             "maximum": 4294967295,
             "minimum": 0
           },
-          "status": {
-            "type": "string",
-            "description": "`running`, `paused`, `completed`, `error`, or `stalled`. `stalled` is derived at read time, not stored: a stream still recorded as `running` whose last push is more than 7 days old is reported as `stalled`, because nothing writes a terminal state when a run is killed. `paused` is the normal resting state of a finished run that stopped at its planned end rather than at the chain tip."
+          "last_push_at": {
+            "type": ["string", "null"],
+            "description": "Time of the most recent successful write, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `null` before the first.",
+            "example": "2026-08-11T02:43:32Z"
           },
-          "target_ledger": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Ledger sequence the run aims for.",
-            "maximum": 4294967295,
-            "minimum": 0
+          "earliest_data_available": {
+            "type": ["string", "null"],
+            "description": "Timestamp of the oldest candle this stream has written so far, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `null` until the first. Moves backwards as older history is ingested.",
+            "example": "2015-11-18T03:47:00Z"
           }
         }
       },
@@ -1205,6 +1476,23 @@
         "type": "string",
         "description": "Sort column of the asset listing (`sort`). Case-sensitive.",
         "enum": ["price", "volume_24h", "change_24h", "code"]
+      },
+      "SourceQuote": {
+        "type": "object",
+        "description": "One venue's entry in `sources`.",
+        "required": ["price", "volume_24h"],
+        "properties": {
+          "price": {
+            "type": "string",
+            "description": "The venue's latest USD price for the asset, as a decimal string.",
+            "example": "0.22080609088657"
+          },
+          "volume_24h": {
+            "type": "string",
+            "description": "The venue's trailing 24-hour USD volume for the asset, counted where the asset is the base of the trade.",
+            "example": "3706994.74575814385738"
+          }
+        }
       },
       "Timeframe": {
         "type": "string",

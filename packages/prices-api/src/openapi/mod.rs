@@ -79,11 +79,11 @@ impl Modify for SecurityAddon {
         // Lambda, so a cold-start or panic surfaces as a gateway 5xx.
         //
         // Neither carries `ErrorEnvelope`: both are produced by API Gateway,
-        // whose body is `{"message": …}`. Documented so a client generated from
-        // this document has an error branch rather than trying to parse that as
-        // the OpenAPI document itself.
-        (status = 429, description = "Rate limit exceeded"),
-        (status = 500, description = "The API description could not be served"),
+        // whose body is `{"message": …}` (`GatewayMessage`). Documented so a
+        // client generated from this document has an error branch rather than
+        // trying to parse that as the OpenAPI document itself.
+        (status = 429, description = "Rate limit exceeded", body = crate::common::errors::GatewayMessage),
+        (status = 500, description = "The API description could not be served", body = crate::common::errors::GatewayMessage),
     )
 )]
 #[allow(dead_code, reason = "documentation-only; the route is wired in lib.rs")]
@@ -106,12 +106,15 @@ fn api_docs_json() {}
                        than JSON numbers, so no precision is lost in transport; counts \
                        and ledger sequences are plain integers."
     ),
-    modifiers(&SecurityAddon, &Descriptions),
+    modifiers(&SecurityAddon),
     security(("api_key" = [])),
     paths(api_docs_json),
     components(schemas(
         crate::common::errors::ErrorEnvelope,
+        crate::common::errors::GatewayMessage,
+        crate::ops::HealthStatus,
         crate::assets::dto::PriceResponse,
+        crate::assets::dto::SourceQuote,
         crate::assets::dto::AssetDetail,
         crate::assets::dto::AssetListItem,
         crate::assets::dto::AssetListResponse,
@@ -165,10 +168,19 @@ pub fn stamp_servers(spec: &mut utoipa::openapi::OpenApi, config: &crate::AppCon
 /// paths. Resource routers nest under `/v1`; operational routes stay at the
 /// root.
 pub fn register_routes() -> OpenApiRouter<AppState> {
-    OpenApiRouter::with_openapi(ApiDoc::openapi())
+    let mut router = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(crate::ops::health))
         .nest("/v1", crate::assets::router())
         .nest("/v1", crate::oracles::router())
         .nest("/v1", crate::backfill::router())
-        .nest("/v1", crate::batch::router())
+        .nest("/v1", crate::batch::router());
+    // On the ASSEMBLED document, not as an `#[openapi(modifiers(...))]` entry:
+    // `routes()` replaces every component its handler references with a fresh
+    // copy (utoipa-axum's `extend`), so a modifier run before it loses its
+    // work on those — `/health` alone brought `HealthStatus` and
+    // `GatewayMessage` back undescribed and without examples (task 0306).
+    // `nest()` merges without replacing, which is why only the root route
+    // showed it.
+    Descriptions.modify(router.get_openapi_mut());
+    router
 }

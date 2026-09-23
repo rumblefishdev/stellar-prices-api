@@ -22,6 +22,20 @@ struct Health {
     service: &'static str,
 }
 
+/// `GET /health` as the deployed API answers it: API Gateway's mock
+/// (`infra/src/lib/stacks/api-gateway-stack.ts`), not [`health`] below, which
+/// only local runs reach and which says `service` where the mock says `stack`.
+/// Schema only, for the published document (task 0306).
+#[derive(utoipa::ToSchema)]
+#[allow(
+    dead_code,
+    reason = "documentation-only; the gateway's mock writes this body"
+)]
+pub(crate) struct HealthStatus {
+    status: String,
+    stack: String,
+}
+
 /// `GET /health` — liveness probe. Returns 200 with a tiny JSON body and a
 /// non-cacheable `Cache-Control`. Deliberately does NOT touch ClickHouse, so it
 /// answers even when the CH client is absent (mirrors BE's health exemption).
@@ -41,13 +55,14 @@ struct Health {
     // API Gateway mock and is exempt from the in-app gate (task 0124).
     security(()),
     responses(
-        (status = 200, description = "The API is up"),
+        (status = 200, description = "The API is up", body = HealthStatus),
         // Keyless does not mean unthrottled: the stage-wide throttle covers
-        // `/*` `*`, so API Gateway can 429 this route too. No body — the
-        // gateway produces this response, not the handler (there is none: this
-        // is a MockIntegration). Documented so a generated client has an error
-        // branch instead of trying to deserialize `{"message": …}` as `Health`.
-        (status = 429, description = "Rate limit exceeded"),
+        // `/*` `*`, so API Gateway can 429 this route too. The gateway writes
+        // this response, not the handler (there is none: this is a
+        // MockIntegration). Documented so a generated client has an error
+        // branch instead of trying to deserialize `{"message": …}` as
+        // `HealthStatus`.
+        (status = 429, description = "Rate limit exceeded", body = crate::common::errors::GatewayMessage),
     )
 )]
 pub async fn health() -> Response {

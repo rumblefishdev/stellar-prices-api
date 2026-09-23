@@ -44,7 +44,7 @@ pub struct PriceResponse {
     /// has no USD-priced close within the 0135 carry bound (general-overview
     /// §3.3 / §4.2). `{}` means no source qualified — the exotic-quote and
     /// all-below-threshold cases, not an error.
-    #[schema(value_type = Object)]
+    #[schema(value_type = std::collections::BTreeMap<String, SourceQuote>)]
     pub sources: serde_json::Value,
     /// Timestamp of the snapshot (ISO-8601 UTC).
     pub updated_at: String,
@@ -61,6 +61,23 @@ pub struct PriceResponse {
     /// ⚠️ Never read `"oracle"` as "more accurate than traded" — it means the
     /// price came from a rate rather than from this asset's own trades.
     pub method: String,
+}
+
+/// One `sources` entry, as `toJSONString` in the current-price MV writes it.
+///
+/// Schema only (task 0306): `sources` is carried as the MV's JSON verbatim, so
+/// nothing is ever built from this type — it exists so the published document
+/// can say what a venue's entry holds instead of a bare `object`.
+#[derive(ToSchema)]
+#[allow(
+    dead_code,
+    reason = "documentation-only; `sources` is passed through as JSON"
+)]
+pub struct SourceQuote {
+    /// The venue's latest USD price.
+    price: String,
+    /// The venue's trailing-24h USD volume.
+    volume_24h: String,
 }
 
 /// Parse the MV's `sources` JSON string into a value for the response.
@@ -241,7 +258,7 @@ pub struct AssetListItem {
     /// Per-source breakdown; sources excluded by the §5.5 `min_volume_usd`
     /// threshold or by outlier detection are absent (§3.3). Same semantics as
     /// `PriceResponse::sources`, including the `?min_volume_usd=` override.
-    #[schema(value_type = Object)]
+    #[schema(value_type = std::collections::BTreeMap<String, SourceQuote>)]
     pub sources: serde_json::Value,
     pub updated_at: String,
     /// Price provenance; same vocabulary and caveats as
@@ -516,8 +533,10 @@ pub struct OhlcvResponse {
     /// Echoed natural identity.
     pub asset: String,
     /// Effective granularity (auto-selected from `timeframe` unless overridden).
+    #[schema(value_type = super::queries_ch::Granularity)]
     pub granularity: String,
     /// `USD` or `XLM` — the quote the candles are denominated in.
+    #[schema(value_type = super::queries_ch::BaseCurrency)]
     pub base_currency: String,
     /// Present only when `timeframe=all` and the backfill is still running.
     #[serde(skip_serializing_if = "Option::is_none")]

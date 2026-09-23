@@ -28,15 +28,17 @@ use crate::state::AppState;
     params(
         ("asset_identifier" = String, Path,
          description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
-          the `C…` address of a Soroban contract")
+          the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic \
+          asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract \
+          addresses, which as a rule answer `404`")
     ),
     responses(
         (status = 200, description = "Oracle readings", body = OraclesResponse),
         (status = 400, description = "Invalid asset identifier (`invalid_id`)", body = ErrorEnvelope),
-        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
-        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`), from the service's own key check. Not on the production host: there the gateway rejects the request first, with `403`", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API. The body is the gateway's `{\"message\": \"Forbidden\"}`, not an `ErrorEnvelope`", body = crate::common::errors::GatewayMessage),
         (status = 404, description = "Unknown asset (`not_found`)", body = ErrorEnvelope),
-        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded. The body is the gateway's `{\"message\": …}`, with no `Retry-After`", body = crate::common::errors::GatewayMessage),
         (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]

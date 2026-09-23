@@ -62,27 +62,31 @@ describe('exampleOf', () => {
     expect(
       exampleOf(FIXTURE, { $ref: '#/components/schemas/AssetListResponse' }),
     ).toEqual({
-      data: [
-        {
-          asset_code: 'USDC',
-          price_usd: 'string',
-          stream: { ledger: 1 },
-          updated_at: '2026-01-01T00:00:00Z',
-        },
-      ],
-      cursor: 'string',
+      data: [{ asset_code: 'USDC', stream: { ledger: 1 } }],
       has_more: true,
     });
     expect(
       exampleOf(FIXTURE, { $ref: '#/components/schemas/TypeFilter' }),
     ).toBe('classic');
+    // The placeholders, for a schema with no example to give.
+    expect(exampleOf(FIXTURE, { type: 'string', format: 'date-time' })).toBe(
+      '2026-01-01T00:00:00Z',
+    );
+    expect(exampleOf(FIXTURE, { type: ['string', 'null'] })).toBe('string');
+  });
+
+  it('leaves out an optional field with no example, as the API leaves it out', () => {
+    // `details` is omitted from every real error body; `null` here showed a
+    // field no response carries.
     expect(
       exampleOf(FIXTURE, { $ref: '#/components/schemas/ErrorEnvelope' }),
-    ).toEqual({
-      code: 'invalid_id',
-      message: 'string',
-      details: null,
-    });
+    ).toEqual({ code: 'invalid_id', message: 'string' });
+    const item = exampleOf(FIXTURE, {
+      $ref: '#/components/schemas/AssetListItem',
+    }) as Record<string, unknown>;
+    // Optional and unexemplified: out. Optional but a reference: in, built
+    // from its component. Required: in, placeholder or not.
+    expect(Object.keys(item)).toEqual(['asset_code', 'stream']);
   });
 
   it('terminates on a cycle through a union, not only through a property', () => {

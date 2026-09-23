@@ -33,3 +33,9 @@ rules:
   # excepted in .redocly.lint-ignore.yaml rather than by weakening the rule for
   # the routes where it earns its keep.
   operation-4xx-response: error
+
+  # ON, though `recommended-strict` leaves it off. Every property carries an
+  # example since task 0306 — the API reference renders a response's example
+  # from them — and an example that no longer fits its schema would show a
+  # reader a value the API cannot send. This is the check that it fits.
+  no-invalid-schema-examples: error

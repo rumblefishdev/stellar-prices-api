@@ -63,12 +63,24 @@ pub(super) const SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "ErrorEnvelope",
-        "The body of every error response. `code` is stable and meant for programs; `message` \
-         is for people and its wording may change.",
+        "The body of every error the API itself returns. `code` is stable and meant for \
+         programs; `message` is for people and its wording may change. Responses the API \
+         Gateway writes on the API's behalf — `403` for a missing or unknown key, `429` when \
+         throttled — carry a `GatewayMessage` instead.",
     ),
     (
         "Granularity",
         "Candle bucket size. Case-sensitive: `1m` is one minute, `1M` one month.",
+    ),
+    (
+        "GatewayMessage",
+        "The body API Gateway answers with when it handles a request itself: `403` for a \
+         missing, unknown or disabled `x-api-key`, `429` when throttled, and some `5xx`. It \
+         has no `code`.",
+    ),
+    (
+        "HealthStatus",
+        "Body of `GET /health`, answered at the edge.",
     ),
     ("OhlcvResponse", "Candlestick series for one asset."),
     ("OracleEntry", "The most recent reading from one oracle."),
@@ -79,6 +91,7 @@ pub(super) const SCHEMAS: &[(&str, &str)] = &[
         "Current price snapshot for one asset, computed over the trailing 24-hour window. \
          Every numeric field is a decimal string, so no precision is lost in transport.",
     ),
+    ("SourceQuote", "One venue's entry in `sources`."),
     (
         "SdexStream",
         "Progress of the SDEX archive stream, which walks the ledger history BACKWARD, \
@@ -139,13 +152,14 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "AssetDetail",
         "asset_kind",
-        "`native` (XLM), `credit` (a classic issued asset) or `contract` (a Soroban token or \
-         SAC).",
+        "`native` (XLM), `credit` (a classic issued asset) or `contract` (a Soroban token).",
     ),
     (
         "AssetDetail",
         "code",
-        "Asset code of a classic asset; `\"\"` for `native` and `contract`.",
+        "Display code: `XLM` for `native`, the asset code for `credit`, the token's own \
+         `symbol()` for `contract` — `\"\"` until that symbol is resolved. Not an identifier: \
+         codes are not unique, and a token's symbol is whatever its contract declares.",
     ),
     (
         "AssetDetail",
@@ -155,7 +169,8 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "AssetDetail",
         "home_domain",
-        "The issuer's home domain (SEP-1); `\"\"` when unknown.",
+        "The issuer's home domain (SEP-1). Not populated yet: `\"\"` for every asset \
+         today.",
     ),
     (
         "AssetDetail",
@@ -199,7 +214,8 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "AssetListItem",
         "home_domain",
-        "The issuer's home domain (SEP-1); `\"\"` when unknown.",
+        "The issuer's home domain (SEP-1). Not populated yet: `\"\"` for every asset \
+         today.",
     ),
     (
         "AssetListItem",
@@ -234,7 +250,9 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "AssetListItem",
         "volume_24h_usd",
-        "Trailing 24-hour USD volume across all venues — a total, never filtered.",
+        "Trailing 24-hour USD volume of every trade the asset took part in, on either side of \
+         the pair, across all venues — a total, never filtered. Same meaning as \
+         `PriceResponse.volume_24h_usd`, and likewise larger than the sum of `sources`.",
     ),
     (
         "AssetListItem",
@@ -498,6 +516,15 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
         "Human-readable explanation; the wording may change.",
     ),
     (
+        "GatewayMessage",
+        "message",
+        "The gateway's own text, for example `Forbidden` or `Too Many Requests`. A `403` \
+         reading `Missing Authentication Token` means the path does not exist, not that the \
+         key is wrong.",
+    ),
+    ("HealthStatus", "stack", "The deployment that answered."),
+    ("HealthStatus", "status", "`ok` whenever the API is up."),
+    (
         "OhlcvResponse",
         "asset",
         "The asset as requested, in canonical form: `native`, `CODE:ISSUER` or a contract \
@@ -600,11 +627,13 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "PriceResponse",
         "sources",
-        "Per-venue breakdown, keyed by venue name (for example `sdex`, `soroswap`, \
-         `aquarius`), each `{\"price\": \"…\", \"volume_24h\": \"…\"}` as decimal strings. A \
-         venue is absent when the volume threshold or the outlier filter excluded it, or when \
-         it has no USD-priced close in the window. `{}` means no venue qualified; it is not \
-         an error.",
+        "Per-venue breakdown, keyed by venue name (`aquarius`, `phoenix`, `sdex`, \
+         `soroswap`, `sushiswap`), each a `SourceQuote`. A venue's `volume_24h` counts only \
+         the trades where this asset is the one being priced — the base of the pair — so the \
+         entries add up to less than `volume_24h_usd`, which counts both sides. A venue is \
+         absent when the volume threshold or the outlier filter excluded it, or when it has no \
+         USD-priced close in the window. `{}` means no venue qualified — always so for an \
+         asset priced by `oracle` — and is not an error.",
     ),
     (
         "PriceResponse",
@@ -614,8 +643,11 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "PriceResponse",
         "volume_24h_usd",
-        "Trailing 24-hour USD volume across all venues — a total, never reduced by the volume \
-         threshold or the outlier filter.",
+        "Trailing 24-hour USD volume of every trade the asset took part in, on either side of \
+         the pair, across all venues — a total, never reduced by the volume threshold or the \
+         outlier filter. It is therefore larger than the sum of `sources`, which counts one \
+         side: XLM, quoted against most assets, shows the gap most; USDC, which only ever \
+         quotes, has all of its volume here and `{}` in `sources`.",
     ),
     (
         "PriceResponse",
@@ -624,7 +656,19 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          the volume threshold (100 USD by default — conditional: a low-volume venue is kept \
          when no venue on the asset clears it) and venues whose price is an outlier against \
          the cross-venue median are excluded from the weighting. `min_volume_usd` re-weights \
-         it with a caller-supplied threshold.",
+         it with a caller-supplied threshold. `\"0\"` when no venue qualifies, as for an asset \
+         priced by `oracle`.",
+    ),
+    (
+        "SourceQuote",
+        "price",
+        "The venue's latest USD price for the asset, as a decimal string.",
+    ),
+    (
+        "SourceQuote",
+        "volume_24h",
+        "The venue's trailing 24-hour USD volume for the asset, counted where the asset is \
+         the base of the trade.",
     ),
     (
         "SdexStream",
@@ -687,7 +731,155 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Sets [`SCHEMAS`] and [`FIELDS`] on the built document.
+/// Per-field examples: `(schema, field, JSON)`, taken from production
+/// responses on 2026-09-23 (task 0306).
+///
+/// On the fields rather than as one object per schema, for two reasons. The
+/// portal assembles a schema's example from its properties in document order,
+/// which `preserve_order` makes struct order — the order serde writes — while
+/// a whole-object example is a `serde_json::Map`, sorted alphabetically here.
+/// And a field-level example is what an array or a reference to the schema is
+/// built from, so one entry serves every place the schema appears.
+///
+/// A field left out is left out of the rendered example too, as the API
+/// leaves it out: `ErrorEnvelope.details` and `OhlcvResponse.backfill_note`
+/// are omitted when absent. Fields that are references (`BackfillStatus.sdex`,
+/// `OhlcvResponse.granularity`, the arrays of objects) take their example from
+/// the referenced schema. `every_property_has_an_example_or_a_reason` in
+/// `tests/openapi.rs` holds that to the document.
+pub(super) const EXAMPLES: &[(&str, &str, &str)] = &[
+    ("AmmStream", "status", r#""paused""#),
+    ("AmmStream", "last_push_at", r#""2026-07-14T17:54:24Z""#),
+    ("AmmStream", "completed_at", r#"null"#),
+    (
+        "AmmStream",
+        "earliest_data_available",
+        r#""2024-03-08T19:00:00Z""#,
+    ),
+    (
+        "AssetDetail",
+        "asset",
+        r#""USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN""#,
+    ),
+    ("AssetDetail", "asset_kind", r#""credit""#),
+    ("AssetDetail", "code", r#""USDC""#),
+    (
+        "AssetDetail",
+        "issuer",
+        r#""GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN""#,
+    ),
+    ("AssetDetail", "contract", r#""""#),
+    ("AssetDetail", "home_domain", r#""""#),
+    ("AssetDetail", "is_active", r#"true"#),
+    ("AssetListItem", "asset_code", r#""AQUA""#),
+    ("AssetListItem", "asset_type", r#""classic""#),
+    (
+        "AssetListItem",
+        "issuer_address",
+        r#""GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA""#,
+    ),
+    ("AssetListItem", "contract_address", r#""""#),
+    ("AssetListItem", "home_domain", r#""""#),
+    ("AssetListItem", "price_usd", r#""0.00037300596178""#),
+    ("AssetListItem", "change_24h_pct", r#""2.124""#),
+    ("AssetListItem", "change_7d_pct", r#""11.997""#),
+    (
+        "AssetListItem",
+        "volume_24h_usd",
+        r#""479235.22108659319489""#,
+    ),
+    ("AssetListItem", "vwap_24h", r#""0.00037306538294""#),
+    (
+        "AssetListItem",
+        "sources",
+        r#"{"aquarius": {"price": "0.00037307545161", "volume_24h": "409795.80206351425926"}, "sdex": {"price": "0.00037300596178", "volume_24h": "69438.16887823331656"}}"#,
+    ),
+    ("AssetListItem", "updated_at", r#""2026-09-23T08:08:00Z""#),
+    ("AssetListItem", "method", r#""traded""#),
+    (
+        "AssetListResponse",
+        "cursor",
+        r#""eyJ2IjoiMTU3MC45MDI4NTIwMDAxNzU5MyIsImlkIjo4N30""#,
+    ),
+    ("AssetListResponse", "has_more", r#"true"#),
+    ("BackfillStatus", "realtime_tip_ledger", r#"64573020"#),
+    (
+        "BatchRequest",
+        "assets",
+        r#"["native", "FOO:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"]"#,
+    ),
+    (
+        "BatchResponse",
+        "not_found",
+        r#"["FOO:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"]"#,
+    ),
+    ("Candle", "timestamp", r#""2026-09-22T08:15:00Z""#),
+    ("Candle", "open", r#""0.21155612364244""#),
+    ("Candle", "high", r#""0.21336358305927""#),
+    ("Candle", "low", r#""0.21019557835832""#),
+    ("Candle", "close", r#""0.2104557806765""#),
+    ("Candle", "volume_base", r#""256744.7651102""#),
+    ("Candle", "volume_quote_usd", r#""54161.26730887106528""#),
+    ("Candle", "vwap", r#""0.2109568287069""#),
+    ("Candle", "trade_count", r#"666"#),
+    ("Candle", "method", r#""oracle""#),
+    ("Candle", "derived", r#"true"#),
+    ("Candle", "pf_trade_count", r#"666"#),
+    ("Candle", "pf_vwap", r#""0.21095682870692""#),
+    ("Candle", "close_divergent", r#"false"#),
+    ("Candle", "source", r#"null"#),
+    ("Candle", "quality", r#"null"#),
+    ("ErrorEnvelope", "code", r#""not_found""#),
+    ("ErrorEnvelope", "message", r#""unknown asset""#),
+    ("GatewayMessage", "message", r#""Forbidden""#),
+    ("HealthStatus", "status", r#""ok""#),
+    ("HealthStatus", "stack", r#""prices-production""#),
+    ("OhlcvResponse", "asset", r#""native""#),
+    ("OracleEntry", "name", r#""reflector""#),
+    ("OracleEntry", "price_usd", r#""0.2180727167089""#),
+    ("OracleEntry", "updated_at", r#""2026-09-23T08:05:00Z""#),
+    ("OraclesResponse", "asset", r#""native""#),
+    ("PriceResponse", "asset", r#""native""#),
+    ("PriceResponse", "price_usd", r#""0.22086251378147""#),
+    ("PriceResponse", "price_xlm", r#""1""#),
+    ("PriceResponse", "vwap_24h", r#""0.220818422853""#),
+    (
+        "PriceResponse",
+        "volume_24h_usd",
+        r#""9232178.49610106508283""#,
+    ),
+    ("PriceResponse", "change_24h_pct", r#""4.2307""#),
+    (
+        "PriceResponse",
+        "sources",
+        r#"{"aquarius": {"price": "0.22086251378147", "volume_24h": "3496887.57491671686026"}, "phoenix": {"price": "0.21951246345991", "volume_24h": "143.33960639826163"}, "sdex": {"price": "0.22080609088657", "volume_24h": "3706994.74575814385738"}, "soroswap": {"price": "0.22083791103349", "volume_24h": "12137.72993461573015"}, "sushiswap": {"price": "0.21972140395799", "volume_24h": "98918.83560484752044"}}"#,
+    ),
+    ("PriceResponse", "updated_at", r#""2026-09-23T08:08:00Z""#),
+    ("PriceResponse", "method", r#""traded""#),
+    ("SdexStream", "status", r#""completed""#),
+    ("SdexStream", "current_ledger", r#"1"#),
+    ("SdexStream", "start_ledger", r#"1"#),
+    ("SdexStream", "target_ledger", r#"63795749"#),
+    ("SdexStream", "progress_pct", r#"100.0"#),
+    ("SdexStream", "ledgers_remaining", r#"0"#),
+    ("SdexStream", "last_push_at", r#""2026-08-11T02:43:32Z""#),
+    (
+        "SdexStream",
+        "earliest_data_available",
+        r#""2015-11-18T03:47:00Z""#,
+    ),
+    ("SourceQuote", "price", r#""0.22080609088657""#),
+    ("SourceQuote", "volume_24h", r#""3706994.74575814385738""#),
+];
+
+/// Whole-schema examples, for the few schemas a field cannot speak for: a
+/// field that references an enum cannot carry an example of its own, so the
+/// portal falls back to the enum's first value — `1m` beside a window whose
+/// default bucket is `15m`.
+pub(super) const SCHEMA_EXAMPLES: &[(&str, &str)] = &[("Granularity", r#""15m""#)];
+
+/// Sets [`SCHEMAS`], [`FIELDS`], [`EXAMPLES`] and [`SCHEMA_EXAMPLES`] on the
+/// built document.
 pub(crate) struct Descriptions;
 
 /// Write `description` into whichever schema variant this is. A `$ref` takes
@@ -704,6 +896,19 @@ fn describe(schema: &mut RefOr<Schema>, text: &str) {
         RefOr::T(Schema::AnyOf(a)) => a.description = Some(text.to_string()),
         _ => {}
     }
+}
+
+/// Write `example` into whichever schema variant this is. A `$ref` cannot
+/// carry one (OpenAPI 3.1 allows only `summary` and `description` beside a
+/// reference), which is why [`EXAMPLES`] names no reference fields.
+fn exemplify(schema: &mut RefOr<Schema>, example: serde_json::Value) -> bool {
+    match schema {
+        RefOr::T(Schema::Object(o)) => o.example = Some(example),
+        RefOr::T(Schema::Array(a)) => a.example = Some(example),
+        RefOr::T(Schema::OneOf(o)) => o.example = Some(example),
+        _ => return false,
+    }
+    true
 }
 
 impl Modify for Descriptions {
@@ -723,6 +928,34 @@ impl Modify for Descriptions {
             if let Some(property) = object.properties.get_mut(*field) {
                 describe(property, text);
             }
+        }
+        // Unlike a missing description, which the published-text test reports
+        // by name, a misspelt example would just vanish from the page — so a
+        // table entry that lands nowhere stops the build of the document.
+        for (name, field, json) in EXAMPLES {
+            let example = serde_json::from_str(json)
+                .unwrap_or_else(|e| panic!("example for {name}.{field} is not JSON: {e}"));
+            let property = match components.schemas.get_mut(*name) {
+                Some(RefOr::T(Schema::Object(object))) => object.properties.get_mut(*field),
+                _ => None,
+            }
+            .unwrap_or_else(|| panic!("example for {name}.{field}: no such property"));
+            assert!(
+                exemplify(property, example),
+                "example for {name}.{field}: the property is a reference and cannot carry one"
+            );
+        }
+        for (name, json) in SCHEMA_EXAMPLES {
+            let example = serde_json::from_str(json)
+                .unwrap_or_else(|e| panic!("example for {name} is not JSON: {e}"));
+            let schema = components
+                .schemas
+                .get_mut(*name)
+                .unwrap_or_else(|| panic!("example for {name}: no such schema"));
+            assert!(
+                exemplify(schema, example),
+                "example for {name}: cannot carry one"
+            );
         }
     }
 }

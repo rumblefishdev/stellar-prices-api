@@ -80,7 +80,9 @@ fn min_volume_error(v: Option<f64>) -> Option<Response> {
     params(
         ("asset_identifier" = String, Path,
          description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
-          the `C…` address of a Soroban contract"),
+          the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic \
+          asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract \
+          addresses, which as a rule answer `404`"),
         ("min_volume_usd" = Option<f64>, Query, minimum = 0,
          description = "Drop every venue whose trailing 24-hour USD volume is at or below this value, then \
           recompute `vwap_24h` over the venues that remain. Applied exactly as given: it can \
@@ -93,10 +95,10 @@ fn min_volume_error(v: Option<f64>) -> Option<Response> {
     responses(
         (status = 200, description = "Current price", body = PriceResponse),
         (status = 400, description = "Invalid asset identifier or query parameter (`invalid_id`, `invalid_query`)", body = ErrorEnvelope),
-        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
-        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`), from the service's own key check. Not on the production host: there the gateway rejects the request first, with `403`", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API. The body is the gateway's `{\"message\": \"Forbidden\"}`, not an `ErrorEnvelope`", body = crate::common::errors::GatewayMessage),
         (status = 404, description = "No current price for the asset: unknown, or not priced yet (`not_found`)", body = ErrorEnvelope),
-        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded. The body is the gateway's `{\"message\": …}`, with no `Retry-After`", body = crate::common::errors::GatewayMessage),
         (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
@@ -140,15 +142,17 @@ pub async fn get_price(
     params(
         ("asset_identifier" = String, Path,
          description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
-          the `C…` address of a Soroban contract")
+          the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic \
+          asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract \
+          addresses, which as a rule answer `404`")
     ),
     responses(
         (status = 200, description = "Asset detail", body = AssetDetail),
         (status = 400, description = "Invalid asset identifier (`invalid_id`)", body = ErrorEnvelope),
-        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
-        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`), from the service's own key check. Not on the production host: there the gateway rejects the request first, with `403`", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API. The body is the gateway's `{\"message\": \"Forbidden\"}`, not an `ErrorEnvelope`", body = crate::common::errors::GatewayMessage),
         (status = 404, description = "Unknown asset (`not_found`)", body = ErrorEnvelope),
-        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded. The body is the gateway's `{\"message\": …}`, with no `Retry-After`", body = crate::common::errors::GatewayMessage),
         (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
@@ -222,11 +226,14 @@ pub struct ListParams {
         ("type" = Option<TypeFilter>, Query, description = "Which assets to list: `classic` (classic assets, including the native asset), `soroban` \
           (Soroban contracts) or `all` (default)"),
         ("search" = Option<String>, Query,
-         description = "Case-sensitive prefix match on the asset code, 1 to 64 bytes; an empty value is treated \
-          as absent. Soroban assets whose code is not yet resolved are not matched",
+         description = "Case-sensitive prefix match on a classic asset's code, 1 to 64 bytes; an empty value is \
+          treated as absent. Soroban tokens are never matched, even when `asset_code` shows their \
+          symbol; list them with `type=soroban`",
          min_length = 1, max_length = 64),
         ("sort" = Option<SortCol>, Query,
-         description = "Sort column (default `volume_24h`): `price`, `volume_24h`, `change_24h` or `code`"),
+         description = "Sort column (default `volume_24h`): `price`, `volume_24h`, `change_24h` or `code`. \
+          `code` orders classic assets by their code, byte by byte; Soroban tokens sort as an empty \
+          code, so they come first with `order=asc`, in no defined order among themselves"),
         ("order" = Option<Order>, Query, description = "Sort direction (default `desc`)"),
         ("cursor" = Option<String>, Query, description = "Opaque cursor from the previous page's `cursor` field; use it with the same `sort` and \
           `order`"),
@@ -241,9 +248,9 @@ pub struct ListParams {
     responses(
         (status = 200, description = "Asset list page", body = AssetListResponse),
         (status = 400, description = "Invalid query parameter or cursor (`invalid_query`)", body = ErrorEnvelope),
-        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
-        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
-        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`), from the service's own key check. Not on the production host: there the gateway rejects the request first, with `403`", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API. The body is the gateway's `{\"message\": \"Forbidden\"}`, not an `ErrorEnvelope`", body = crate::common::errors::GatewayMessage),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded. The body is the gateway's `{\"message\": …}`, with no `Retry-After`", body = crate::common::errors::GatewayMessage),
         (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
@@ -392,7 +399,9 @@ pub struct OhlcvParams {
      historical backfill is still running.",
     params(
         ("asset_identifier" = String, Path, description = "`native`, `CODE:ISSUER` (a classic asset's code and its issuer's `G…` public key) or \
-          the `C…` address of a Soroban contract"),
+          the `C…` address of a Soroban contract. The code is case-sensitive (`yXLM` is not `YXLM`). A classic \
+          asset is named by `CODE:ISSUER` and XLM by `native`, not by their Stellar Asset Contract \
+          addresses, which as a rule answer `404`"),
         ("timeframe" = Option<Timeframe>, Query,
          description = "Window ending now: `1h`, `24h` (default), `7d`, `30d`, `1y` or `all` (from Stellar \
           genesis). `start` overrides its start"),
@@ -415,10 +424,10 @@ pub struct OhlcvParams {
         (status = 200, description = "Candlestick series", body = OhlcvResponse),
         (status = 400, description = "Invalid identifier or parameter, or a window over 5000 candles (`invalid_id`, \
           `invalid_query`)", body = ErrorEnvelope),
-        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`)", body = ErrorEnvelope),
-        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API"),
+        (status = 401, description = "Missing or invalid `x-api-key` (`unauthorized`), from the service's own key check. Not on the production host: there the gateway rejects the request first, with `403`", body = ErrorEnvelope),
+        (status = 403, description = "Rejected at the API gateway: `x-api-key` missing, unknown, or not enabled for this API. The body is the gateway's `{\"message\": \"Forbidden\"}`, not an `ErrorEnvelope`", body = crate::common::errors::GatewayMessage),
         (status = 404, description = "Unknown asset (`not_found`)", body = ErrorEnvelope),
-        (status = 429, description = "Per-key rate limit or monthly quota exceeded"),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded. The body is the gateway's `{\"message\": …}`, with no `Retry-After`", body = crate::common::errors::GatewayMessage),
         (status = 500, description = "Database or upstream failure (`db_error`)", body = ErrorEnvelope),
         (status = 503, description = "A reference asset the conversion needs is not tracked — USDC for `USD`, the native \
           asset for `XLM` (`quote_unavailable`)", body = ErrorEnvelope),
