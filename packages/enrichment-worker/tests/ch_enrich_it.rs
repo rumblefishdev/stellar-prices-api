@@ -4611,3 +4611,206 @@ async fn the_0182_epoch_is_refused_below_the_first_usdt_reference_candle_before_
         .await
         .unwrap();
 }
+
+/// AC-2's PERMANENT non-vacuity proof: the damage the epoch guard prevents,
+/// shown without disabling the guard (a library IT cannot compile a
+/// `cfg(test)` bypass into the crate it links).
+///
+/// The subjects start exactly as `reset_sql` leaves them — both USD columns 0 —
+/// and an ordinary pass runs. Hours 19-23 are refilled by the pivot; hours
+/// 00-18 stay at `close_usd = 0` forever, because no tier can reach them: USDT
+/// is not in `stable_ids()` (USDC only), there are no oracle rows, and the
+/// pivot's ASOF finds no USDT/USDC reference at or before 18:00. That is what a
+/// reset from `INCIDENT_EPOCH` would leave behind — and did, on 2026-08-18.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_row_zeroed_below_the_first_reference_candle_is_never_refilled() {
+    let db = "it_enrich_0208_stranded";
+    let client = setup_0208(db, true).await;
+
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1h".to_string();
+    c.one_shot = true;
+    c.usd_reset = None;
+    ChEnrichmentPass::new(c).run().await.unwrap();
+
+    let stranded = count_0208(
+        &client,
+        db,
+        &format!("timestamp < {USDT_FIRST_REFERENCE} AND close_usd = 0"),
+    )
+    .await;
+    assert_eq!(
+        stranded, 19,
+        "hours 00-18 have no reference at or before them and must stay at \
+         close_usd = 0 — if they were refilled, the guard would be protecting \
+         nothing"
+    );
+    let refilled = count_0208(
+        &client,
+        db,
+        &format!("timestamp >= {USDT_FIRST_REFERENCE} AND abs(toFloat64(close_usd) - 1.3) < 1e-4"),
+    )
+    .await;
+    assert_eq!(
+        refilled, 5,
+        "hours 19-23 are covered by the reference and must be priced at \
+         10 x 0.13 x 1.0 = 1.3"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// The companion to the refusal: the MEASURED first reference epoch is
+/// admitted, and every row it re-opens is refilled — nothing is left at
+/// `close_usd = 0`.
+///
+/// It goes through the two-month repair driver on purpose. `reset_step`
+/// re-runs `assert_reset_is_admissible` per month with
+/// `time_window = Some(month)` (`repair.rs`); if the first-reference query ever
+/// took that window, March's first reference would read 2021-03-01 and March
+/// would be refused here (or an empty window would be admitted vacuously).
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_measured_first_reference_epoch_is_admitted_and_every_reset_row_is_refilled() {
+    let db = "it_enrich_0208_admitted";
+    let client = setup_0208(db, false).await;
+    // A second month: 2021-03-01 12:00, reference and a written-peg subject.
+    let march = 1_614_600_000u32;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({march}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 1000,130, 0,0, 0.13, 1,1), \
+             ({march},10, 3,'sdex', 10,10,10,10, 5,50, 50,10, 10, 1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    seed_external_rate(&client, db, 1_614_556_800, 1.0).await;
+
+    let mut enrich = cfg(db);
+    enrich.table = "price_ohlcv_1h".to_string();
+    enrich.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 3,
+        not_before: USDT_FIRST_REFERENCE,
+        not_after: None,
+        require_external_rate: false,
+        require_pivot_usdc_rate: false,
+    });
+    let summary = CoarseRepairDriver::with_client(
+        client.clone(),
+        CoarseRepairConfig {
+            enrich,
+            start_month: 202_102,
+            end_month: 202_103,
+            snapshot: false,
+            dry_run: false,
+            one_shot: true,
+            deadline: None,
+        },
+    )
+    .run()
+    .await
+    .unwrap();
+    assert_eq!(summary.months.len(), 2, "{summary:?}");
+    assert_eq!(
+        summary.total_reset(),
+        6,
+        "hours 19-23 of 2021-02-07 and the March row: {summary:?}"
+    );
+
+    let reset_rows = (0..5u32)
+        .map(|h| USDT_FIRST_REFERENCE + h * 3600)
+        .chain([march]);
+    for ts in reset_rows {
+        let (v, vq, _) = subject_0208(&client, db, ts).await;
+        assert!(
+            (v - 1.3).abs() < 1e-4 && (vq - 6.5).abs() < 1e-4,
+            "{ts}: a re-opened row must be refilled at 10 x 0.13 = 1.3 / \
+             50 x 0.13 = 6.5, got close_usd {v}, volume_quote_usd {vq}"
+        );
+    }
+    for h in 0..19u32 {
+        let ts = INCIDENT_EPOCH + h * 3600;
+        let (v, _, ver) = subject_0208(&client, db, ts).await;
+        assert!(
+            (v - 10.0).abs() < 1e-9 && ver == 1,
+            "hour {h} is below the epoch and must keep its stored par value, \
+             got {v} v{ver}"
+        );
+    }
+    let stranded = count_0208(&client, db, "close_usd = 0 AND close > 0").await;
+    assert_eq!(stranded, 0, "{stranded} row(s) left at close_usd = 0");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// AC-3 in the 0228 mode: an epoch on the SAME DAY as the first XLM/USDC
+/// reference, 12 hours below it, is refused.
+///
+/// `pivot_reference_day_pred` is day-granular: the 12:00 reference makes the
+/// whole depeg day eligible, so it admits the 01:00 subject. Only the seconds
+/// comparison refuses this — the exact 00:00-vs-19:00 shape of 0182, in the
+/// other reset mode (BRIEF §2, D1: both modes).
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_pivot_mode_refuses_an_epoch_hours_below_its_first_reference_on_the_same_day() {
+    let db = "it_enrich_0208_pivot_same_day";
+    let client = setup_0228_reset(db, PIVOT_FIRST_REF, DEPEG_DAY + 5 * 86_400 + 43_200).await;
+    seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
+    let early = DEPEG_DAY + 3_600;
+    let stored = FOO_XLM_CLOSE * XLM_USDC_CLOSE;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({early},10, 1,'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1h".to_string();
+    c.one_shot = true;
+    c.usd_reset = Some(pivot_reset(DEPEG_DAY));
+    let res = ChEnrichmentPass::new(c).run().await;
+
+    let (v, ver) = pivot_subject_1h(&client, db, early).await;
+    assert!(
+        (v - stored).abs() < 1e-6 && ver == 1,
+        "the 01:00 row must keep its stored value {stored} at v1, got \
+         close_usd {v} v{ver} — zeroed with no reference at or before it"
+    );
+    assert!(
+        matches!(
+            &res,
+            Err(ChEnrichError::ResetEpochBelowReference {
+                quote_asset_id: 1,
+                not_before,
+                first_reference,
+                table,
+            }) if *not_before == DEPEG_DAY
+                && *first_reference == PIVOT_FIRST_REF
+                && table == "price_ohlcv_1h"
+        ),
+        "the pivot mode must refuse a same-day epoch below its first reference, got {res:?}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
