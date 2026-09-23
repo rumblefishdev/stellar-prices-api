@@ -2,7 +2,7 @@
 id: "0308"
 title: "The landing's 'Built by Rumble Fish' mark is not a link, while the footer's is"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0301", "0305", "0307"]
 tags: [layer-frontend, portal, priority-medium, effort-small]
@@ -16,6 +16,10 @@ history:
     note: >
       Reported by Stanisław on the public landing, after 0305 shipped: the
       trust band under the hero shows the Rumble Fish mark as a bare image.
+  - date: "2026-09-23"
+    status: active
+    who: stkrolikiewicz
+    note: "Activated; the fix goes on its own branch."
 ---
 
 # The landing's "Built by Rumble Fish" mark is not a link
