@@ -4451,6 +4451,12 @@ const USDT_FIRST_REFERENCE: u32 = 1_612_724_400;
 /// USD columns are already 0 — exactly what `reset_sql` writes — so an ordinary
 /// pass shows what the pivot can and cannot refill.
 async fn setup_0208(db: &str, zeroed: bool) -> Client {
+    setup_0208_with(db, zeroed, true).await
+}
+
+/// [`setup_0208`], optionally WITHOUT the USDT/USDC reference rows
+/// (`reference = false`): the leg then has no reference on the table at all.
+async fn setup_0208_with(db: &str, zeroed: bool, reference: bool) -> Client {
     let client = setup_scratch(db).await;
     client
         .query(&format!(
@@ -4463,7 +4469,7 @@ async fn setup_0208(db: &str, zeroed: bool) -> Client {
         .await
         .unwrap();
     let (vq_usd, c_usd) = if zeroed { (0, 0) } else { (50, 10) };
-    let reference = (0..5u32).map(|h| {
+    let reference = (0..if reference { 5u32 } else { 0 }).map(|h| {
         let ts = USDT_FIRST_REFERENCE + h * 3600;
         format!("({ts}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 1000,130, 0,0, 0.13, 1,1)")
     });
@@ -4806,6 +4812,282 @@ async fn the_pivot_mode_refuses_an_epoch_hours_below_its_first_reference_on_the_
                 && table == "price_ohlcv_1h"
         ),
         "the pivot mode must refuse a same-day epoch below its first reference, got {res:?}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// A plain (0182-mode) USDT reset on `price_ohlcv_1h` from `not_before`.
+fn usdt_reset_1h(db: &str, not_before: u32) -> ChEnrichConfig {
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1h".to_string();
+    c.one_shot = true;
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 3,
+        not_before,
+        not_after: None,
+        require_external_rate: false,
+        require_pivot_usdc_rate: false,
+    });
+    c
+}
+
+/// Every FOO/USDT subject still holds its written `$1` peg at v1 — the proof a
+/// refused reset wrote nothing.
+async fn assert_0208_subjects_untouched(client: &Client, db: &str) {
+    for h in 0..24u32 {
+        let ts = INCIDENT_EPOCH + h * 3600;
+        let (v, _, ver) = subject_0208(client, db, ts).await;
+        assert!(
+            (v - 10.0).abs() < 1e-9 && ver == 1,
+            "hour {h}: a refused reset must leave close_usd 10 at v1, got {v} v{ver}"
+        );
+    }
+}
+
+/// D3 at DB level (review WR-02): the USDT leg has NO reference row on the
+/// table, so the guard's `minOrNull` is NULL and every epoch is refused — here
+/// the one that is correct when the reference exists.
+///
+/// Non-vacuous against the emptiness mutation the review names: if the empty
+/// set were read as a minimum of 0 (`Some(0)`, the 1970 default a bare `min`
+/// returns), this epoch would be admitted, hours 19-23 zeroed, and — with no
+/// reference to pivot from — left at `close_usd = 0`. The stranded count is
+/// asserted before the variant so that mutation reports the damage.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_leg_with_no_reference_rows_on_the_table_refuses_every_epoch() {
+    let db = "it_enrich_0208_no_reference";
+    let client = setup_0208_with(db, false, false).await;
+
+    let res = ChEnrichmentPass::new(usdt_reset_1h(db, USDT_FIRST_REFERENCE))
+        .run()
+        .await
+        .map(|_| ());
+
+    let stranded = count_0208(&client, db, "close_usd = 0 AND close > 0").await;
+    assert_eq!(
+        stranded, 0,
+        "{stranded} row(s) stranded at close_usd = 0 — an empty reference set \
+         was read as a first reference"
+    );
+    assert!(
+        matches!(
+            &res,
+            Err(ChEnrichError::ResetEpochHasNoReference {
+                quote_asset_id: 3,
+                table,
+            }) if table == "price_ohlcv_1h"
+        ),
+        "no reference on the table must refuse every epoch, got {res:?}"
+    );
+    assert_0208_subjects_untouched(&client, db).await;
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// D2 at DB level, term by term (review WR-02): three USDT/USDC rows BEFORE the
+/// real 19:00 reference, each failing exactly one term of the shared
+/// predicate — 00:00 with `pf_trade_count = 0`, 01:00 with `close = 0`, 02:00
+/// with `volume_base = 0`. The pivot cannot use any of them, so neither may
+/// the guard: the incident epoch is still refused, and the first reference it
+/// names is still 19:00.
+///
+/// Non-vacuous per term. A guard that dropped `pf_trade_count > 0` would read
+/// 00:00 = the epoch and ADMIT it — 19 rows stranded, asserted first. Dropping
+/// `close > 0` or `volume_base > 0` would name 01:00 or 02:00 as the first
+/// reference, which the exact `first_reference` match rejects.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn an_earlier_reference_row_the_pivot_cannot_use_is_not_the_first_reference() {
+    let db = "it_enrich_0208_unusable_reference";
+    let client = setup_0208(db, false).await;
+    let (h0, h1, h2) = (INCIDENT_EPOCH, INCIDENT_EPOCH + 3600, INCIDENT_EPOCH + 7200);
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count) VALUES \
+             ({h0}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 1000,130, 0,0, 0.13, 1,1, 0), \
+             ({h1}, 3, 2,'sdex', 0,0,0,0,             1000,0,   0,0, 0,    1,1, 1), \
+             ({h2}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 0,0,      0,0, 0.13, 1,1, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let res = ChEnrichmentPass::new(usdt_reset_1h(db, INCIDENT_EPOCH))
+        .run()
+        .await
+        .map(|_| ());
+
+    let stranded = count_0208(&client, db, "close_usd = 0 AND close > 0").await;
+    assert_eq!(
+        stranded, 0,
+        "{stranded} row(s) stranded at close_usd = 0 — a reference row the \
+         pivot cannot use was taken as the first reference"
+    );
+    assert!(
+        matches!(
+            &res,
+            Err(ChEnrichError::ResetEpochBelowReference {
+                quote_asset_id: 3,
+                not_before,
+                first_reference,
+                table,
+            }) if *not_before == INCIDENT_EPOCH
+                && *first_reference == USDT_FIRST_REFERENCE
+                && table == "price_ohlcv_1h"
+        ),
+        "the first reference must be the 19:00 row the pivot can use, got {res:?}"
+    );
+    assert_0208_subjects_untouched(&client, db).await;
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// D3's other cause, in the PLAIN 0182 mode (review WR-02): canonical USDC is
+/// not in `prices.assets`. USDT still resolves as a pivot leg, so the
+/// priceability gate passes it and — unlike the 0228 mode, which refuses this
+/// earlier as `ResetPivotRateLegIsNotAPivotReference` — nothing else stops the
+/// reset. Without USDC the pivot never runs, so the epoch guard must refuse.
+///
+/// Non-vacuous against treating an unresolved USDC as "nothing to check": the
+/// reset would zero hours 19-23 and no tier could refill them.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_plain_reset_refuses_when_canonical_usdc_is_not_a_tracked_asset() {
+    let db = "it_enrich_0208_no_usdc_asset";
+    let client = setup_0208(db, false).await;
+    client
+        .query(&format!("TRUNCATE TABLE {db}.assets"))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (1,'XLM','classic','',''), (3,'USDT','classic','{USDT_ISSUER}',''), \
+             (10,'FOO','classic','GFOO','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let res = ChEnrichmentPass::new(usdt_reset_1h(db, USDT_FIRST_REFERENCE))
+        .run()
+        .await
+        .map(|_| ());
+
+    let stranded = count_0208(&client, db, "close_usd = 0 AND close > 0").await;
+    assert_eq!(
+        stranded, 0,
+        "{stranded} row(s) stranded at close_usd = 0 — reset with no USDC to pivot from"
+    );
+    assert!(
+        matches!(
+            &res,
+            Err(ChEnrichError::ResetEpochUsdcUnresolved { quote_asset_id: 3 })
+        ),
+        "an unresolved canonical USDC must refuse the pivot leg, got {res:?}"
+    );
+    assert_0208_subjects_untouched(&client, db).await;
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Per table, end to end (review IN-06): the guard measures the first
+/// reference on the pass's OWN table. `_4h` holds the 2021-02-07 16:00 bucket
+/// (it contains the 19:00 trade); `_1h` starts at 19:00. The same epoch,
+/// 16:00, is admitted on `_4h` and refused on `_1h` — and on `_4h` the
+/// incident's midnight epoch is refused against 16:00, not 19:00.
+///
+/// A guard that always read `_1h` would refuse the `_4h` reset; one that always
+/// read `_4h` would admit the `_1h` one. Checked through
+/// `assert_reset_is_admissible`, the list the driver runs before any write.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_epoch_is_measured_on_the_pass_s_own_table() {
+    let db = "it_enrich_0208_per_table";
+    let client = setup_0208(db, false).await;
+    let bucket_4h = 1_612_713_600u32; // 2021-02-07 16:00 UTC
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_4h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({bucket_4h}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 5000,650, 0,0, 0.13, 5,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let on = |table: &str, not_before: u32| {
+        let mut c = usdt_reset_1h(db, not_before);
+        c.table = table.to_string();
+        c
+    };
+
+    let res = ChEnrichmentPass::new(on("price_ohlcv_4h", bucket_4h))
+        .assert_reset_is_admissible()
+        .await;
+    assert!(
+        res.is_ok(),
+        "_4h's own first reference is the 16:00 bucket, so 16:00 is admitted there, got {res:?}"
+    );
+
+    let res = ChEnrichmentPass::new(on("price_ohlcv_1h", bucket_4h))
+        .assert_reset_is_admissible()
+        .await;
+    assert!(
+        matches!(
+            &res,
+            Err(ChEnrichError::ResetEpochBelowReference {
+                not_before,
+                first_reference,
+                table,
+                ..
+            }) if *not_before == bucket_4h
+                && *first_reference == USDT_FIRST_REFERENCE
+                && table == "price_ohlcv_1h"
+        ),
+        "on _1h 16:00 is below the 19:00 first reference, got {res:?}"
+    );
+
+    let res = ChEnrichmentPass::new(on("price_ohlcv_4h", INCIDENT_EPOCH))
+        .assert_reset_is_admissible()
+        .await;
+    assert!(
+        matches!(
+            &res,
+            Err(ChEnrichError::ResetEpochBelowReference {
+                not_before,
+                first_reference,
+                table,
+                ..
+            }) if *not_before == INCIDENT_EPOCH
+                && *first_reference == bucket_4h
+                && table == "price_ohlcv_4h"
+        ),
+        "on _4h the midnight epoch is refused against the 16:00 bucket, got {res:?}"
     );
 
     client
