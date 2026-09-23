@@ -368,7 +368,7 @@ pub enum ChEnrichError {
     /// D3). No epoch is safe: the pivot could refill nothing the reset zeroes.
     ///
     /// The predicate is not spelled out in the message — it would drift from
-    /// [`pivot_reference_row_pred`]; the runbook's first-reference query is
+    /// `pivot_reference_row_pred`; the runbook's first-reference query is
     /// that predicate word for word, and is where the operator measures it.
     #[error(
         "USD reset refused on {table}: quote asset_id {quote_asset_id} has no priced \
