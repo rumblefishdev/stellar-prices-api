@@ -45,5 +45,5 @@ the sign-in.
 
 ## Acceptance Criteria
 
-- [ ] The band's Rumble Fish mark links to `https://rumblefish.dev`, asserted
+- [x] The band's Rumble Fish mark links to `https://rumblefish.dev`, asserted
       in `app.spec.tsx`
