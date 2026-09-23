@@ -2,7 +2,7 @@
 id: "0300"
 title: "Index the Comet weighted pool (Blend backstop BLND/USDC, CAS3FL6T…) — 53k swaps since 2024-05 that never reached a candle"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0100", "0290", "0285", "0286"]
 tags: [layer-indexing, priority-medium, effort-medium, amm, ingestion, data-correctness]
@@ -21,6 +21,13 @@ history:
       extractor of ours recognising its `[Symbol("POOL"), Symbol("swap")]`
       event. It sits on the sweep's allow-list as a temporary [[wasm]] entry
       `until = "0300"` until this task indexes it.
+  - date: "2026-09-23"
+    status: active
+    who: akot
+    note: >
+      Activated. Pattern to follow is [[0290]] (PR #324). History is expected
+      to fold into [[0286]] phase 3 like SushiSwap's did, which makes the
+      order extractor deploy → `CAS3FL6T…` in `pool_registry` → phase 3.
 ---
 
 # Index the Comet weighted pool (Blend backstop BLND/USDC)
