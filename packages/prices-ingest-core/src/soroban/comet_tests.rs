@@ -126,3 +126,112 @@ fn a_registered_comet_pool_swap_becomes_a_comet_tick() {
     assert!(out.dispatch_errors.is_empty());
     assert!(out.unresolved.is_empty());
 }
+
+/// `self_swap_usdc` — ledger 64,112,340, tx idx 367, op 0, event 4. The
+/// 2026-08-25 exploit's USDC → USDC swap (caller `CA27AABN…`).
+fn self_swap_usdc() -> RawSorobanEvent {
+    comet_event(
+        64_112_340,
+        367,
+        4,
+        json!([{"type": "sym", "value": "POOL"}, {"type": "sym", "value": "swap"}]),
+        json!({"type": "map", "value": [{"key": {"type": "sym", "value": "caller"}, "value": {"type": "address", "value": "CA27AABNFZJRDEPW4AGB5IEC4VNYCSWYOZJNZ6GI6GLQALFUWLTLJHYQ"}}, {"key": {"type": "sym", "value": "token_amount_in"}, "value": {"type": "i128", "value": "2594103172416"}}, {"key": {"type": "sym", "value": "token_amount_out"}, "value": {"type": "i128", "value": "1941196544582"}}, {"key": {"type": "sym", "value": "token_in"}, "value": {"type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}, {"key": {"type": "sym", "value": "token_out"}, "value": {"type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}]}),
+    )
+}
+
+/// `exploit_cycle_dump` — ledger 64,112,340, tx idx 367, op 0, event 20. The
+/// same transaction's BLND → USDC dump, 80150040873159 in / 4251768634888 out.
+fn exploit_cycle_dump() -> RawSorobanEvent {
+    comet_event(
+        64_112_340,
+        367,
+        20,
+        json!([{"type": "sym", "value": "POOL"}, {"type": "sym", "value": "swap"}]),
+        json!({"type": "map", "value": [{"key": {"type": "sym", "value": "caller"}, "value": {"type": "address", "value": "CA27AABNFZJRDEPW4AGB5IEC4VNYCSWYOZJNZ6GI6GLQALFUWLTLJHYQ"}}, {"key": {"type": "sym", "value": "token_amount_in"}, "value": {"type": "i128", "value": "80150040873159"}}, {"key": {"type": "sym", "value": "token_amount_out"}, "value": {"type": "i128", "value": "4251768634888"}}, {"key": {"type": "sym", "value": "token_in"}, "value": {"type": "address", "value": "CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY"}}, {"key": {"type": "sym", "value": "token_out"}, "value": {"type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}]}),
+    )
+}
+
+/// Task 0300 D1: a real Comet self-swap prices nothing and is not an error.
+#[test]
+fn a_real_comet_self_swap_yields_no_tick_and_no_error() {
+    let mut reg = comet_registry();
+    let mut assets = seeded_assets();
+    let before = assets.assets().count();
+    let out = run(64_112_340, &[self_swap_usdc()], &mut reg, &mut assets);
+
+    assert!(out.amm_ticks.is_empty());
+    assert!(
+        out.dispatch_errors.is_empty(),
+        "a self-swap is not an error"
+    );
+    assert!(out.unresolved.is_empty());
+    assert_eq!(assets.assets().count(), before);
+}
+
+/// Task 0300 D1 + D2: in the exploit transaction the self-swap drops, and the
+/// dump beside it is indexed as it is — no caller or transaction exclusion.
+#[test]
+fn the_exploit_dump_ticks_as_is_beside_its_dropped_self_swap() {
+    let mut reg = comet_registry();
+    let mut assets = seeded_assets();
+    let out = run(
+        64_112_340,
+        &[self_swap_usdc(), exploit_cycle_dump()],
+        &mut reg,
+        &mut assets,
+    );
+
+    assert_eq!(out.amm_ticks.len(), 1, "only the dump prices");
+    let (source, tick) = &out.amm_ticks[0];
+    assert_eq!(*source, "comet");
+    assert_eq!((tick.base_id, tick.quote_id), (BLND_ID, USDC_ID));
+    // BLND → USDC: price = USDC out / BLND in (≈ 0.053048).
+    assert_eq!(tick.price, d(4_251_768_634_888) / d(80_150_040_873_159));
+    assert_eq!(tick.operation_index, 20);
+    assert!(tick.price_forming);
+    assert!(out.dispatch_errors.is_empty());
+    assert!(out.unresolved.is_empty());
+}
+
+/// Task 0300 D1 holds for a second venue through the same seam: a registered
+/// Aquarius pool's `trade` of a token for itself (SYNTHETIC — the shape of the
+/// real Aquarius `trade`, with sold == bought) gives no tick and no error.
+#[test]
+fn an_aquarius_self_trade_yields_no_tick_and_no_error() {
+    const AQUA: &str = "CDE57N6XTUPBKYYDGQMXX7E7SLNOLFY3JEQB4MULSMR2AKTSAENGX2HC";
+    const TOKEN: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+    let trade = RawSorobanEvent {
+        contract_id: AQUA.to_string(),
+        transaction_id: "62078348:1".to_string(),
+        transaction_index: 1,
+        ledger_sequence: 62_078_348,
+        event_index: 5,
+        topics: json!([
+            {"type": "sym", "value": "trade"},
+            {"type": "address", "value": TOKEN},
+            {"type": "address", "value": TOKEN},
+            {"type": "address", "value": "CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK"}
+        ]),
+        data: json!({"type": "vec", "value": [
+            {"type": "i128", "value": "930000000"},
+            {"type": "i128", "value": "423899086439"},
+            {"type": "i128", "value": "465000"}
+        ]}),
+    };
+    let mut reg = Registries::new();
+    reg.venue.insert(AQUA.to_string(), Venue::Aquarius);
+    let mut assets = AssetRegistry::from_existing(vec![]);
+    let out = run(62_078_348, &[trade.clone()], &mut reg, &mut assets);
+
+    assert!(out.amm_ticks.is_empty());
+    assert!(out.dispatch_errors.is_empty());
+    assert!(out.unresolved.is_empty());
+
+    // The same event with distinct tokens does price — the guard, not the
+    // fixture, is what drops it.
+    let mut distinct = trade;
+    distinct.topics[2]["value"] = json!("CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA");
+    let out = run(62_078_348, &[distinct], &mut reg, &mut assets);
+    assert_eq!(out.amm_ticks.len(), 1);
+    assert_eq!(out.amm_ticks[0].0, "aquarius");
+}

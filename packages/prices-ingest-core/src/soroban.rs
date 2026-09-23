@@ -822,6 +822,17 @@ fn amm_trade_to_tick(
     // its contract-address identity.
     let sold = resolve_amm_token(&trade.token_in, assets);
     let bought = resolve_amm_token(&trade.token_out, assets);
+
+    // Task 0300 D1: a swap of a token for itself carries no price, on ANY
+    // venue. Compared on the RESOLVED identities (`AssetIdentity: Eq`, and a
+    // SAC address is deterministic per asset, so a SAC and its classic form
+    // compare equal). It sits BEFORE `canonicalise`, which interns both
+    // identities into the registry that is persisted to `prices.assets`. It is
+    // not a dispatch error: a `None` tick is consumed in dispatch's `Ok` arm.
+    if sold == bought {
+        return None;
+    }
+
     let pair = canonicalise(&sold, &bought, assets);
 
     // Classified on the RAW i128 amounts, in each token's own decimals, BEFORE
@@ -2185,6 +2196,33 @@ mod tests {
             &mut assets,
             &mut out,
         );
+    }
+
+    /// Task 0300 D1, venue-neutral: a swap of a token for itself carries no
+    /// price on ANY venue. It yields no tick, and the token is not interned
+    /// into the asset registry (which is persisted to `prices.assets`).
+    #[test]
+    fn a_self_swap_prices_nothing_and_interns_nothing_for_any_venue() {
+        // A pure Soroban token, NOT a SAC — it would be minted a fresh id.
+        const TOKEN: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+        let trade = extractors_core::TradeRow {
+            venue: Venue::Aquarius,
+            contract_id: "CDE57N6XTUPBKYYDGQMXX7E7SLNOLFY3JEQB4MULSMR2AKTSAENGX2HC".to_string(),
+            transaction_id: "tx".to_string(),
+            ledger_sequence: 100,
+            first_event_index: 0,
+            token_in: TOKEN.to_string(),
+            token_out: TOKEN.to_string(),
+            amount_in: 930_000_000,
+            amount_out: 423_899_086_439,
+            fee: None,
+            trader: None,
+        };
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let before = assets.assets().count();
+        assert!(amm_trade_to_tick(&trade, 0, 1_700_000_000, &mut assets).is_none());
+        assert_eq!(assets.assets().count(), before, "nothing interned");
     }
 }
 
