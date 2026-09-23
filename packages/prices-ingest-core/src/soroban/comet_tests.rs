@@ -221,7 +221,12 @@ fn an_aquarius_self_trade_yields_no_tick_and_no_error() {
     let mut reg = Registries::new();
     reg.venue.insert(AQUA.to_string(), Venue::Aquarius);
     let mut assets = AssetRegistry::from_existing(vec![]);
-    let out = run(62_078_348, &[trade.clone()], &mut reg, &mut assets);
+    let out = run(
+        62_078_348,
+        std::slice::from_ref(&trade),
+        &mut reg,
+        &mut assets,
+    );
 
     assert!(out.amm_ticks.is_empty());
     assert!(out.dispatch_errors.is_empty());
@@ -234,4 +239,288 @@ fn an_aquarius_self_trade_yields_no_tick_and_no_error() {
     let out = run(62_078_348, &[distinct], &mut reg, &mut assets);
     assert_eq!(out.amm_ticks.len(), 1);
     assert_eq!(out.amm_ticks[0].0, "aquarius");
+}
+
+// The rest of the real samples: 13 distinct events in all. `first_swap` is the
+// same event as `dust_usdc_to_blnd`, and `dust_out_blnd_to_usdc` the same as
+// `dust_blnd_to_usdc`, so the duplicates are not repeated.
+
+/// `typical_blnd_to_usdc_recent` — ledger 64,573,919, tx idx 233, op 0,
+/// event 9. BLND → USDC, 1263056538 in / 6938342 out.
+fn typical_blnd_to_usdc_recent() -> RawSorobanEvent {
+    comet_event(
+        64_573_919,
+        233,
+        9,
+        json!([{"type": "sym", "value": "POOL"}, {"type": "sym", "value": "swap"}]),
+        json!({"type": "map", "value": [{"key": {"type": "sym", "value": "caller"}, "value": {"type": "address", "value": "CBNVK5PE7JCL773P5SHWE3YUCHQVVVPVOG72SKCEFVTZOLLQWVTCPLZ3"}}, {"key": {"type": "sym", "value": "token_amount_in"}, "value": {"type": "i128", "value": "1263056538"}}, {"key": {"type": "sym", "value": "token_amount_out"}, "value": {"type": "i128", "value": "6938342"}}, {"key": {"type": "sym", "value": "token_in"}, "value": {"type": "address", "value": "CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY"}}, {"key": {"type": "sym", "value": "token_out"}, "value": {"type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}]}),
+    )
+}
+
+/// `largest_blnd_to_usdc_pre_exploit` — ledger 61,341,361, tx idx 299, op 0,
+/// event 1. BLND → USDC, 20754799754016 in / 836304108819 out.
+fn largest_blnd_to_usdc_pre_exploit() -> RawSorobanEvent {
+    comet_event(
+        61_341_361,
+        299,
+        1,
+        json!([{"type": "sym", "value": "POOL"}, {"type": "sym", "value": "swap"}]),
+        json!({"type": "map", "value": [{"key": {"type": "sym", "value": "caller"}, "value": {"type": "address", "value": "CB3JAPDEIMA3OOSALUHLYRGM2QTXGVD3EASALPFMVEU2POLLULJBT2XN"}}, {"key": {"type": "sym", "value": "token_amount_in"}, "value": {"type": "i128", "value": "20754799754016"}}, {"key": {"type": "sym", "value": "token_amount_out"}, "value": {"type": "i128", "value": "836304108819"}}, {"key": {"type": "sym", "value": "token_in"}, "value": {"type": "address", "value": "CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY"}}, {"key": {"type": "sym", "value": "token_out"}, "value": {"type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}]}),
+    )
+}
+
+/// `largest_usdc_to_blnd` — ledger 61,341,820, tx idx 348, op 0,
+/// event 1. USDC → BLND, 200000000000 in / 5093532302262 out.
+fn largest_usdc_to_blnd() -> RawSorobanEvent {
+    comet_event(
+        61_341_820,
+        348,
+        1,
+        json!([{"type": "sym", "value": "POOL"}, {"type": "sym", "value": "swap"}]),
+        json!({"type": "map", "value": [{"key": {"type": "sym", "value": "caller"}, "value": {"type": "address", "value": "CB3JAPDEIMA3OOSALUHLYRGM2QTXGVD3EASALPFMVEU2POLLULJBT2XN"}}, {"key": {"type": "sym", "value": "token_amount_in"}, "value": {"type": "i128", "value": "200000000000"}}, {"key": {"type": "sym", "value": "token_amount_out"}, "value": {"type": "i128", "value": "5093532302262"}}, {"key": {"type": "sym", "value": "token_in"}, "value": {"type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}, {"key": {"type": "sym", "value": "token_out"}, "value": {"type": "address", "value": "CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY"}}]}),
+    )
+}
+
+/// `dust_usdc_to_blnd` — ledger 51,500,460, tx idx 237, op 0,
+/// event 0. USDC → BLND, 1000 in / 778906 out. Also tagged `first_swap`: the pool's first swap ever.
+fn dust_usdc_to_blnd() -> RawSorobanEvent {
+    comet_event(
+        51_500_460,
+        237,
+        0,
+        json!([{"type": "sym", "value": "POOL"}, {"type": "sym", "value": "swap"}]),
+        json!({"type": "map", "value": [{"key": {"type": "sym", "value": "caller"}, "value": {"type": "address", "value": "GAZDHUMJW3QL6ITBWQRVR7FVB2H5ZTDPKSJLNUQOPMAX3G5ONIFOFSU5"}}, {"key": {"type": "sym", "value": "token_amount_in"}, "value": {"type": "i128", "value": "1000"}}, {"key": {"type": "sym", "value": "token_amount_out"}, "value": {"type": "i128", "value": "778906"}}, {"key": {"type": "sym", "value": "token_in"}, "value": {"type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}, {"key": {"type": "sym", "value": "token_out"}, "value": {"type": "address", "value": "CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY"}}]}),
+    )
+}
+
+/// `dust_blnd_to_usdc` — ledger 56,131,699, tx idx 226, op 0,
+/// event 5. BLND → USDC, 152 in / 10 out. Also tagged `dust_out_blnd_to_usdc`.
+fn dust_blnd_to_usdc() -> RawSorobanEvent {
+    comet_event(
+        56_131_699,
+        226,
+        5,
+        json!([{"type": "sym", "value": "POOL"}, {"type": "sym", "value": "swap"}]),
+        json!({"type": "map", "value": [{"key": {"type": "sym", "value": "caller"}, "value": {"type": "address", "value": "CCRUA3KR3QGCS5D5QDNITSRKQLIVHFBD4XUCZ3PC37PHN5U6BOKEGKTO"}}, {"key": {"type": "sym", "value": "token_amount_in"}, "value": {"type": "i128", "value": "152"}}, {"key": {"type": "sym", "value": "token_amount_out"}, "value": {"type": "i128", "value": "10"}}, {"key": {"type": "sym", "value": "token_in"}, "value": {"type": "address", "value": "CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY"}}, {"key": {"type": "sym", "value": "token_out"}, "value": {"type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}]}),
+    )
+}
+
+/// `multi_swap_tx` — ledger 64,302,520, tx idx 151, op 0, events 10, 14, 19,
+/// 23 and 27: five swaps against the pool in ONE transaction, in event order.
+fn multi_swap_tx() -> Vec<RawSorobanEvent> {
+    vec![
+        // Event 10: USDC → BLND, 42270699754 in / 2606025902783 out.
+        comet_event(
+            64_302_520,
+            151,
+            10,
+            json!([{"type": "sym", "value": "POOL"}, {"type": "sym", "value": "swap"}]),
+            json!({"type": "map", "value": [{"key": {"type": "sym", "value": "caller"}, "value": {"type": "address", "value": "CAUA3I56LPLZUTWP43AF67DA3BSNSOLJ6M2CD46BGXCAEVI4IQMQ4EWX"}}, {"key": {"type": "sym", "value": "token_amount_in"}, "value": {"type": "i128", "value": "42270699754"}}, {"key": {"type": "sym", "value": "token_amount_out"}, "value": {"type": "i128", "value": "2606025902783"}}, {"key": {"type": "sym", "value": "token_in"}, "value": {"type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}, {"key": {"type": "sym", "value": "token_out"}, "value": {"type": "address", "value": "CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY"}}]}),
+        ),
+        // Event 14: USDC → BLND, 66544251298 in / 961255886637 out.
+        comet_event(
+            64_302_520,
+            151,
+            14,
+            json!([{"type": "sym", "value": "POOL"}, {"type": "sym", "value": "swap"}]),
+            json!({"type": "map", "value": [{"key": {"type": "sym", "value": "caller"}, "value": {"type": "address", "value": "CAUA3I56LPLZUTWP43AF67DA3BSNSOLJ6M2CD46BGXCAEVI4IQMQ4EWX"}}, {"key": {"type": "sym", "value": "token_amount_in"}, "value": {"type": "i128", "value": "66544251298"}}, {"key": {"type": "sym", "value": "token_amount_out"}, "value": {"type": "i128", "value": "961255886637"}}, {"key": {"type": "sym", "value": "token_in"}, "value": {"type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}, {"key": {"type": "sym", "value": "token_out"}, "value": {"type": "address", "value": "CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY"}}]}),
+        ),
+        // Event 19: BLND → USDC, 1416931973976 in / 81363391287 out.
+        comet_event(
+            64_302_520,
+            151,
+            19,
+            json!([{"type": "sym", "value": "POOL"}, {"type": "sym", "value": "swap"}]),
+            json!({"type": "map", "value": [{"key": {"type": "sym", "value": "caller"}, "value": {"type": "address", "value": "CAUA3I56LPLZUTWP43AF67DA3BSNSOLJ6M2CD46BGXCAEVI4IQMQ4EWX"}}, {"key": {"type": "sym", "value": "token_amount_in"}, "value": {"type": "i128", "value": "1416931973976"}}, {"key": {"type": "sym", "value": "token_amount_out"}, "value": {"type": "i128", "value": "81363391287"}}, {"key": {"type": "sym", "value": "token_in"}, "value": {"type": "address", "value": "CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY"}}, {"key": {"type": "sym", "value": "token_out"}, "value": {"type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}]}),
+        ),
+        // Event 23: BLND → USDC, 1889242631968 in / 25821262208 out.
+        comet_event(
+            64_302_520,
+            151,
+            23,
+            json!([{"type": "sym", "value": "POOL"}, {"type": "sym", "value": "swap"}]),
+            json!({"type": "map", "value": [{"key": {"type": "sym", "value": "caller"}, "value": {"type": "address", "value": "CAUA3I56LPLZUTWP43AF67DA3BSNSOLJ6M2CD46BGXCAEVI4IQMQ4EWX"}}, {"key": {"type": "sym", "value": "token_amount_in"}, "value": {"type": "i128", "value": "1889242631968"}}, {"key": {"type": "sym", "value": "token_amount_out"}, "value": {"type": "i128", "value": "25821262208"}}, {"key": {"type": "sym", "value": "token_in"}, "value": {"type": "address", "value": "CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY"}}, {"key": {"type": "sym", "value": "token_out"}, "value": {"type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}]}),
+        ),
+        // Event 27: BLND → USDC, 261107183476 in / 1520891050 out.
+        comet_event(
+            64_302_520,
+            151,
+            27,
+            json!([{"type": "sym", "value": "POOL"}, {"type": "sym", "value": "swap"}]),
+            json!({"type": "map", "value": [{"key": {"type": "sym", "value": "caller"}, "value": {"type": "address", "value": "CAUA3I56LPLZUTWP43AF67DA3BSNSOLJ6M2CD46BGXCAEVI4IQMQ4EWX"}}, {"key": {"type": "sym", "value": "token_amount_in"}, "value": {"type": "i128", "value": "261107183476"}}, {"key": {"type": "sym", "value": "token_amount_out"}, "value": {"type": "i128", "value": "1520891050"}}, {"key": {"type": "sym", "value": "token_in"}, "value": {"type": "address", "value": "CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY"}}, {"key": {"type": "sym", "value": "token_out"}, "value": {"type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"}}]}),
+        ),
+    ]
+}
+
+/// SYNTHETIC — no real non-swap payload was captured. The pool's liquidity
+/// topics and its LP token's SEP-41 events in one transaction; the extractor
+/// keys on topics only, so the data is a placeholder (a malformed one, which
+/// must not matter).
+fn liquidity_and_lp_events(ledger: u32, tx_index: u16) -> Vec<RawSorobanEvent> {
+    let sym = |s: &str| json!({"type": "sym", "value": s});
+    let addr = |s: &str| json!({"type": "address", "value": s});
+    let data = json!({"type": "i128", "value": "1"});
+    [
+        json!([sym("POOL"), sym("deposit")]),
+        json!([sym("POOL"), sym("join_pool")]),
+        json!([sym("POOL"), sym("exit_pool")]),
+        json!([sym("POOL"), sym("withdraw")]),
+        json!([sym("transfer"), addr(COMET), addr(BLND_ISSUER)]),
+        json!([sym("approve"), addr(COMET), addr(BLND_ISSUER)]),
+        json!([sym("burn"), addr(COMET)]),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, topics)| comet_event(ledger, tx_index, i as u32, topics, data.clone()))
+    .collect()
+}
+
+/// Run one real sample alone and return its single comet tick.
+fn only_tick(event: RawSorobanEvent) -> TradeTick {
+    let mut reg = comet_registry();
+    let mut assets = seeded_assets();
+    let ledger = event.ledger_sequence;
+    let out = run(ledger, &[event], &mut reg, &mut assets);
+    assert!(out.dispatch_errors.is_empty());
+    assert!(out.unresolved.is_empty());
+    assert_eq!(out.amm_ticks.len(), 1);
+    let (source, tick) = out.amm_ticks.into_iter().next().unwrap();
+    assert_eq!(source, "comet");
+    assert_eq!((tick.base_id, tick.quote_id), (BLND_ID, USDC_ID));
+    tick
+}
+
+/// AC2: BLND → USDC is priced USDC per BLND too — `amount_out / amount_in`.
+#[test]
+fn a_real_blnd_to_usdc_swap_is_priced_in_usdc_per_blnd() {
+    let tick = only_tick(typical_blnd_to_usdc_recent());
+    assert_eq!(tick.price, d(6_938_342) / d(1_263_056_538)); // ≈ 0.0054933
+    assert_eq!(tick.volume_base, d(1_263_056_538));
+    assert_eq!(tick.volume_quote, d(6_938_342));
+    assert!(tick.price_forming);
+    assert_eq!(tick.operation_index, 9);
+}
+
+/// AC2: the largest real swaps each way price direction-correctly.
+#[test]
+fn the_largest_real_swaps_price_in_usdc_per_blnd_both_ways() {
+    let sell = only_tick(largest_blnd_to_usdc_pre_exploit());
+    assert_eq!(sell.price, d(836_304_108_819) / d(20_754_799_754_016)); // ≈ 0.040294
+    assert!(sell.price_forming);
+
+    let buy = only_tick(largest_usdc_to_blnd());
+    assert_eq!(buy.price, d(200_000_000_000) / d(5_093_532_302_262)); // ≈ 0.039265
+    assert!(buy.price_forming);
+}
+
+/// AC2 / ADR 0287 §1: dust swaps tick with their volume but never price the
+/// candle — the rounding bound fails on raw legs of 1000 and 10.
+#[test]
+fn real_dust_swaps_tick_without_forming_a_price() {
+    let first = only_tick(dust_usdc_to_blnd());
+    assert_eq!(first.price, d(1_000) / d(778_906));
+    assert!(!first.price_forming);
+
+    let tiny = only_tick(dust_blnd_to_usdc());
+    assert_eq!(tiny.price, d(10) / d(152));
+    assert!(!tiny.price_forming);
+}
+
+/// AC2: five swaps in one transaction are five ticks, one per event.
+#[test]
+fn five_real_swaps_in_one_transaction_are_five_ticks() {
+    let mut reg = comet_registry();
+    let mut assets = seeded_assets();
+    let out = run(64_302_520, &multi_swap_tx(), &mut reg, &mut assets);
+
+    assert!(out.dispatch_errors.is_empty());
+    assert!(out.unresolved.is_empty());
+    assert_eq!(out.amm_ticks.len(), 5);
+    assert!(out.amm_ticks.iter().all(|(s, _)| *s == "comet"));
+    let ops: Vec<u16> = out
+        .amm_ticks
+        .iter()
+        .map(|(_, t)| t.operation_index)
+        .collect();
+    assert_eq!(ops, vec![10, 14, 19, 23, 27]);
+    assert!(
+        out.amm_ticks
+            .iter()
+            .all(|(_, t)| t.transaction_index == 151)
+    );
+    // First (USDC → BLND) and last (BLND → USDC), both USDC per BLND.
+    assert_eq!(
+        out.amm_ticks[0].1.price,
+        d(42_270_699_754) / d(2_606_025_902_783)
+    );
+    assert_eq!(
+        out.amm_ticks[4].1.price,
+        d(1_520_891_050) / d(261_107_183_476)
+    );
+}
+
+/// AC3: the pool's liquidity events and its LP token's SEP-41 events are not
+/// trades — alone they give nothing, and beside a real swap only the swap
+/// prices.
+#[test]
+fn liquidity_and_lp_token_events_neither_tick_nor_err() {
+    let mut reg = comet_registry();
+    let mut assets = seeded_assets();
+    let out = run(
+        64_570_597,
+        &liquidity_and_lp_events(64_570_597, 627),
+        &mut reg,
+        &mut assets,
+    );
+    assert!(out.amm_ticks.is_empty());
+    assert!(out.dispatch_errors.is_empty());
+    assert!(out.unresolved.is_empty());
+
+    let mut events = liquidity_and_lp_events(64_570_597, 627);
+    events.push(typical_usdc_to_blnd_recent()); // event 21, after 0..=6
+    let out = run(64_570_597, &events, &mut reg, &mut assets);
+    assert_eq!(out.amm_ticks.len(), 1);
+    assert!(out.dispatch_errors.is_empty());
+}
+
+/// D6: a registered Comet pool's malformed swap is a counted `comet` dispatch
+/// error, not a silent loss — the swap filter knows Comet's `POOL/swap`.
+#[test]
+fn a_malformed_registered_comet_swap_is_a_counted_dispatch_error() {
+    let mut malformed = typical_usdc_to_blnd_recent();
+    malformed.data["value"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|e| e["key"]["value"] != "token_out");
+
+    let mut reg = comet_registry();
+    let mut assets = seeded_assets();
+    let out = run(64_570_597, &[malformed], &mut reg, &mut assets);
+    assert!(out.amm_ticks.is_empty());
+    assert_eq!(out.dispatch_errors, vec![("comet", 1)]);
+
+    // Liquidity traffic alone never counts, even with malformed data.
+    let deposits: Vec<RawSorobanEvent> = liquidity_and_lp_events(64_570_597, 627)
+        .into_iter()
+        .take(1)
+        .collect();
+    let out = run(64_570_597, &deposits, &mut reg, &mut assets);
+    assert!(out.dispatch_errors.is_empty());
+}
+
+/// AC5: with the pool NOT registered, its real swap is counted as a `comet`
+/// trade the registry drops.
+#[test]
+fn an_unregistered_comet_swap_is_counted_as_comet() {
+    let mut reg = Registries::new();
+    let mut assets = seeded_assets();
+    let out = run(
+        64_570_597,
+        &[typical_usdc_to_blnd_recent()],
+        &mut reg,
+        &mut assets,
+    );
+    assert!(out.amm_ticks.is_empty());
+    assert_eq!(out.unregistered_pool_events, vec![("comet", 1)]);
+    assert_eq!(out.unregistered_pool_contracts, vec![COMET.to_string()]);
 }

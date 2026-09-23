@@ -1,5 +1,6 @@
 //! Single-pass Soroban extraction from the same `LedgerCloseMeta` the SDEX path
-//! already parses. Produces AMM OHLCV ticks (Phoenix/Soroswap/Aquarius) and
+//! already parses. Produces AMM OHLCV ticks (Phoenix/Soroswap/Aquarius/
+//! SushiSwap/Comet) and
 //! oracle price samples (REFLECTOR/REDSTONE) — no dependency on a pre-populated
 //! `soroban_events` table.
 //!
@@ -159,7 +160,8 @@ pub struct UnresolvedPoolSwap {
 /// Output of processing one ledger's Soroban events.
 #[derive(Default)]
 pub struct LedgerSoroban {
-    /// (source, tick) pairs; source ∈ {phoenix, soroswap, aquarius}.
+    /// (source, tick) pairs; source ∈ {phoenix, soroswap, aquarius, sushiswap,
+    /// comet}.
     pub amm_ticks: Vec<(&'static str, TradeTick)>,
     pub oracle: Vec<OracleSample>,
     /// Contracts that emitted a `swap` but were not in the venue registry.
@@ -510,9 +512,16 @@ fn classify_amm_groups(
         // pool `trade` — and must NOT be flagged as a gap, or it fatal-trips the
         // unresolved-pools guard. A genuine pool `swap` carries no address `Vec`
         // at topic[1] and is still counted here.
+        //
+        // Comet (task 0300): its swap's topic[0] is "POOL", not "swap", so it
+        // has its own arm — without it a Comet decode failure would be
+        // invisible. `is_pool_swap` is the predicate its extractor decodes by.
         let swaps: Vec<&SorobanEventRow> = rows
             .iter()
-            .filter(|r| r.topics.first().and_then(|t| t.as_str()) == Some("swap"))
+            .filter(|r| {
+                r.topics.first().and_then(|t| t.as_str()) == Some("swap")
+                    || comet_extractor::is_pool_swap(r)
+            })
             .filter(|r| !is_aquarius_router_swap(r))
             .collect();
 
@@ -636,6 +645,11 @@ fn unresolved_from_swaps(
 /// - SushiSwap V3 pool `swap`: `[Symbol("swap")]` **with `amount0`/`amount1` in
 ///   the data** (task 0290).
 ///
+/// - Comet pool swap: `[Symbol("POOL"), Symbol("swap")]` (task 0300). Its
+///   other `POOL/*` topics (`deposit`, `join_pool`, `exit_pool`, `withdraw`)
+///   are liquidity and never counted; the newer Comet wasm's
+///   `[swap_event, POOL, swap]` is out of scope and not counted either.
+///
 /// The router `swap` summaries match none of these, so on a complete registry
 /// this counts nothing.
 ///
@@ -657,6 +671,7 @@ fn unregistered_pool_venue(row: &SorobanEventRow) -> Option<Venue> {
         "swap" if has_data_key(row, "amount0") && has_data_key(row, "amount1") => {
             Some(Venue::Sushiswap)
         }
+        "POOL" if comet_extractor::is_pool_swap(row) => Some(Venue::Comet),
         _ => None,
     }
 }
@@ -1281,9 +1296,30 @@ mod tests {
             0,
         );
 
+        // Task 0300: a Comet pool swap, beside a liquidity event of the same
+        // pool that must not count.
+        const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
+        let comet_swap = event(
+            COMET,
+            vec![
+                TaggedValue::Symbol("POOL".into()),
+                TaggedValue::Symbol("swap".into()),
+            ],
+            0,
+        );
+        let comet_deposit = event(
+            COMET,
+            vec![
+                TaggedValue::Symbol("POOL".into()),
+                TaggedValue::Symbol("deposit".into()),
+            ],
+            1,
+        );
+
         let mut groups: HashMap<String, Vec<SorobanEventRow>> = HashMap::new();
         groups.insert(AQUA.to_string(), vec![trade(0), trade(1)]);
         groups.insert(PAIR.to_string(), vec![pair_swap]);
+        groups.insert(COMET.to_string(), vec![comet_swap, comet_deposit]);
         groups.insert(
             XLM_USDC_POOL.to_string(),
             make_phoenix_xyk_events(XLM_USDC_POOL, 0),
@@ -1297,11 +1333,16 @@ mod tests {
         counted.sort();
         assert_eq!(
             counted,
-            vec![("aquarius", 2), ("phoenix", 1), ("soroswap", 1)]
+            vec![
+                ("aquarius", 2),
+                ("comet", 1),
+                ("phoenix", 1),
+                ("soroswap", 1)
+            ]
         );
         let mut contracts = out.unregistered_pool_contracts.clone();
         contracts.sort();
-        let mut expected = vec![AQUA, PAIR, XLM_USDC_POOL];
+        let mut expected = vec![AQUA, COMET, PAIR, XLM_USDC_POOL];
         expected.sort();
         assert_eq!(contracts, expected);
         assert!(out.amm_ticks.is_empty());
@@ -1368,6 +1409,26 @@ mod tests {
             0,
         );
 
+        // Task 0300: a Comet pool's liquidity event, and the newer Comet
+        // wasm's three-symbol swap (out of scope — it must not alarm).
+        let comet_deposit = event(
+            "CCOMET",
+            vec![
+                TaggedValue::Symbol("POOL".into()),
+                TaggedValue::Symbol("deposit".into()),
+            ],
+            0,
+        );
+        let newer_comet_swap = event(
+            "CCOMETNEW",
+            vec![
+                TaggedValue::Symbol("swap_event".into()),
+                TaggedValue::Symbol("POOL".into()),
+                TaggedValue::Symbol("swap".into()),
+            ],
+            0,
+        );
+
         for row in [
             aquarius_router,
             soroswap_router,
@@ -1375,6 +1436,8 @@ mod tests {
             clmm,
             other_trade,
             odd_swap,
+            comet_deposit,
+            newer_comet_swap,
         ] {
             assert_eq!(unregistered_pool_venue(&row), None, "{:?}", row.topics);
         }
