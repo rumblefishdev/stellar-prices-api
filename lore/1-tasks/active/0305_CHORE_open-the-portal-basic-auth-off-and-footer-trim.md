@@ -4,7 +4,7 @@ title: "Open the portal to the public — explorer basic auth off /api/*, footer
 type: CHORE
 status: active
 related_adr: []
-related_tasks: ["0194", "0195", "0301", "0303"]
+related_tasks: ["0194", "0195", "0301", "0303", "0306"]
 tags: [layer-frontend, portal, priority-high, effort-small]
 links:
   - "../archive/0195_FEATURE_swagger-ui-spa-fallback-and-custom-domain.md"
@@ -43,6 +43,11 @@ the SorobanScan logo is verified on every page.
   recorded, never tracked as a task.
 - On 2026-09-23 `GET /api/` still answers `401` from CloudFront; the explorer
   root answers `200`.
+- Later on 2026-09-23 (~10:20 CEST) the gate was off: without credentials
+  `/api/`, `/api/docs`, `/api/dashboard`, `/api/quick-start`,
+  `/api/privacy-policy` and `/api/login` answered `200` with the portal's
+  `index.html` (the bundle deployed 2026-09-22 14:02 UTC). The explorer's
+  config itself was not read.
 - The footer's `Status` has had no destination since the design (rendered as
   plain text), and `rumblefish.dev` duplicates the Rumble Fish mark next to it,
   which already links there.
@@ -99,6 +104,17 @@ arrived. It is now a viewport tall less the 52 px bar, as the dashboard
 already is. `/docs` has a second short state — the page shell while the
 OpenAPI document downloads — not changed here.
 
+### Step 7: Quick Start error section (found 2026-09-23)
+
+Holding the published docs against production turned up two statements on
+the now-public Quick Start that contradicted the page itself. The 429 card
+rendered the frame's invented body (`Retry-After: 1`, `RATE_LIMIT_EXCEEDED`)
+while its Copy button wrote the measured `{"message":"Too Many Requests"}` —
+an earlier fix had reached the copy text only. And the section's lede
+promised a `code` on every error, above a 403 row that gives the gateway's
+body as `{"message":"Forbidden"}`. Fixed here because the page goes public
+with this task; the rest of that comparison is [[0306]].
+
 ## Acceptance Criteria
 
 - [x] Footer shows neither `Status` nor the `rumblefish.dev` text link; the
@@ -114,3 +130,5 @@ OpenAPI document downloads — not changed here.
       a lazy page, and on back/forward; an in-page link keeps its smooth
       scroll; a pushed page opens at the top
 - [x] The lazy pages' loader keeps the footer below the fold
+- [ ] The Quick Start's 429 card shows what its Copy button writes, and the
+      error lede no longer promises a `code` on the gateway's 403 and 429
