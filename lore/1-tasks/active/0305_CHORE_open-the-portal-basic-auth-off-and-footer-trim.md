@@ -110,7 +110,7 @@ OpenAPI document downloads — not changed here.
 - [ ] Without credentials: `/api/` answers `200`; a refresh on `/api/dashboard`
       and `/api/docs` returns the portal's `index.html` (0195's open AC)
 - [ ] `docs/scf/api-endpoints.md` no longer describes the portal as gated
-- [ ] A `#hash` URL lands on its target: from another page's bar, pasted, on
+- [x] A `#hash` URL lands on its target: from another page's bar, pasted, on
       a lazy page, and on back/forward; an in-page link keeps its smooth
       scroll; a pushed page opens at the top
-- [ ] The lazy pages' loader keeps the footer below the fold
+- [x] The lazy pages' loader keeps the footer below the fold
