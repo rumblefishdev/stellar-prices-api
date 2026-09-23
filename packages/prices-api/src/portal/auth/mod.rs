@@ -212,7 +212,7 @@ impl AuthState {
     /// The callback runs on this backend's host, where the session cookie is
     /// set; the page the visitor is sent back to lives on
     /// `AppConfig::portal_web_origin`. A relative `Location` would keep them
-    /// on the API host, where `/api/` is nothing — the gateway's own `403`.
+    /// on the API host, where `/api/` is nothing — the gateway's own `404`.
     /// `None` keeps the bare path, which is the same-origin deployment and
     /// what every existing test sees. A builder, like [`Self::with_issue`],
     /// so every constructor and test stays valid.

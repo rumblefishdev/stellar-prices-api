@@ -60,9 +60,10 @@ whole stage update if it cannot resolve one — and `ANY` is never a resolvable
 path parameter is fine, depth is fine; `ANY` is not. So a route mapped as `ANY`
 can carry neither a cache setting nor a throttle, and these routes need both.
 
-The cost is that **a verb not in the list** — `PATCH`, say — gets the gateway's
-`403 Missing Authentication Token` instead of the gated `404`. Paths stay free;
-verbs do not. Adding one is a line in `PORTAL_API_METHODS` and a deploy.
+The cost is that **a verb not in the list** — `PATCH`, say — never reaches the
+handler: it gets the gateway's own `404 {"code": "not_found", "message": "no
+such route"}` instead of the gated empty `404`. Paths stay free; verbs do not.
+Adding one is a line in `PORTAL_API_METHODS` and a deploy.
 
 They also carry their own method-level throttle — **10 req/s, burst 40** — which
 is not decoration. Being keyless puts them outside the usage plan, so they
@@ -81,6 +82,14 @@ documentation and is not itself asserted — what CI enforces is that the
 and the extracted spec) plus the faster in-process check in
 `packages/prices-api/tests/openapi.rs`. If this table drifts from either, fix
 the table.
+
+**A route not in this table** — any path, or any verb on a listed path, that
+the gateway does not map, `/v1` included — answers `404 {"code": "not_found",
+"message": "no such route"}`, the handler's own error shape (task 0309). API
+Gateway's default there is `403 {"message": "Missing Authentication Token"}`,
+which reads as a key problem; one gateway response replaces it API-wide. A
+missing or wrong `x-api-key` is a different answer and stays `403 {"message":
+"Forbidden"}`.
 
 ## Portal hosting — two hosts, no distribution of ours (tasks 0194, 0195)
 

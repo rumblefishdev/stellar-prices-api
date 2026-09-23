@@ -170,9 +170,10 @@ const PORTAL_API_RESOURCE_PATH = '/api/{proxy+}';
  * deployment gap, not a defect in either task: the flag keeps the handler dark
  * regardless, and `/config` at depth 1 is unaffected.
  *
- * ⚠️ A verb that is NOT listed here gets the gateway's `403 Missing
- * Authentication Token` rather than task 0183's empty `404`, which is a smaller
- * version of the hole `ANY` was chosen to avoid: paths stay free, verbs do not.
+ * ⚠️ A verb that is NOT listed here never reaches the handler: it gets the
+ * gateway's own `404 {"code": "not_found", …}` (task 0309's gateway response)
+ * rather than task 0183's empty `404`, which is a smaller version of the hole
+ * `ANY` was chosen to avoid: paths stay free, verbs do not.
  * Adding one is a line here and a deploy — cheap, but it is a CDK change, so a
  * slice that needs `PATCH` should notice at design time rather than in a
  * browser.
@@ -545,10 +546,9 @@ export class ApiGatewayStack extends cdk.Stack {
     // ---------------------------------------------------------------
     // Without these resources the portal's routes are unreachable in production
     // no matter what the handler does: CloudFront forwards the request, the
-    // gateway maps nothing, and the caller gets the gateway's own
-    // `403 Missing Authentication Token` instead of the empty `404` task 0183's
-    // gate is careful to produce. This is the "door" that task's note says
-    // arrives here.
+    // gateway maps nothing, and the caller gets the gateway's own `404`
+    // (task 0309) instead of the empty `404` task 0183's gate is careful to
+    // produce. This is the "door" that task's note says arrives here.
     //
     // **One greedy resource, enumerated verbs.** The point of task 0183's prefix
     // gate is that a later slice adds a route without editing the gate; the same
@@ -1014,6 +1014,33 @@ export class ApiGatewayStack extends cdk.Stack {
         },
       });
     }
+
+    // A path or verb the gateway does not map (task 0309). API Gateway's own
+    // answer is `403 {"message": "Missing Authentication Token"}`, which every
+    // caller reads as a key problem when the key is fine and the route does
+    // not exist. `404` in the handler's `ErrorEnvelope` shape instead, so
+    // `GET /v1/nope` reads like the handler's own `not_found`. API-wide, like
+    // the two above — here that is the point. An unmapped verb on a mapped
+    // path gets the same `404`, not a `405`: this response type cannot tell
+    // the two apart.
+    //
+    // No CORS headers: the bundle calls no unmapped route, and the portal's
+    // one credentialed origin on an API-wide answer is what 0194's review took
+    // off `DEFAULT_4XX`. A missing or wrong `x-api-key` is a different
+    // response type and stays `403 {"message": "Forbidden"}`.
+    //
+    // `verify-openapi-routes.mjs` (check 8) holds the synthesized template to
+    // this; a probe of the deployed API is what shows the stage serves it.
+    this.api.addGatewayResponse('UnknownRoute', {
+      type: apigateway.ResponseType.MISSING_AUTHENTICATION_TOKEN,
+      statusCode: '404',
+      templates: {
+        'application/json': JSON.stringify({
+          code: 'not_found',
+          message: 'no such route',
+        }),
+      },
+    });
 
     // ---------------------------------------------------------------
     // The API's own hostname — `config.apiDomain` (task 0194).
