@@ -160,6 +160,18 @@ history:
       the Comet precondition for phase 3 (deploy 0300 → Comet in
       pool_registry → months from 202405), with a script gate to follow
       in the Soroban-era AMM fix.
+  - date: "2026-09-23"
+    status: active
+    who: okarcz
+    note: >
+      Phase 3 STARTED on production with the trial month 201511, from
+      fishuser-hero. Two blockers found and fixed on the way: the script
+      could not verify the CH server's public certificate (#344), and the
+      archive download was request-bound until aws s3 concurrency was
+      raised 10 → 100 (2 900 → 12 270 files/min). All preparation checks
+      and the 201511 dry run passed; the new 201511 1m partition matches
+      the snapshot (19 candles / 24 trades). Stage plan A–D recorded in
+      "Phase 3 — execution".
 ---
 
 # Candles are built from dust fills in the wrong order
@@ -541,6 +553,114 @@ holds aquarius 515, phoenix 20, soroswap 235, sushiswap 133 and **no comet**.
   source. `preroll-amm-reprice.sql` is historical (runbook §4g) and fails
   Code 20 against the current tables. Adding `comet` to its source list is
   harmless, but it is not a phase-3 dependency.
+
+### Phase 3 — execution (started 2026-09-23)
+
+Run by the operator from `fishuser-hero` in tmux, with
+`tools/scripts/reingest_0286.py`; state in `~/reingest-0286/`.
+
+#### Where the task stands
+
+| phase | state |
+| --- | --- |
+| 1 — price-forming fills, fill order | live since 2026-09-22 (rollout section above); first-week measurement (AC 10) closes **2026-09-29** |
+| 2 — order-book fills priced from the resting offer | live; proven 2026-09-22, `order_book_fills=233, offer_lookup_misses=0` |
+| 3 — history re-ingest | **started 2026-09-23** with the trial month 201511 |
+
+Retired before the start: [[0290]]'s 133 SushiSwap pools written (09-22);
+[[0304]] fixed (#339) and with it precondition 5 (`default.transactions`
+coverage) voided; the script brought into the repo (#340); `prices_admin`
+access (BE 0567) with all three bundles on the campaign machine.
+
+#### Found and fixed on 2026-09-23, before the first write
+
+- **The script could not reach ClickHouse (#344).** Every TLS context was
+  built from `--ca` alone — the internal CA that signs the CLIENT certs —
+  while the endpoint presents a Let's Encrypt certificate:
+  `CERTIFICATE_VERIFY_FAILED` on the first `plan`. `chadmin` (curl) hid it
+  by also reading the system CApath; the Rust clients add webpki roots, so
+  `sdex-backfill` was never affected. Fixed by loading the system roots
+  plus `--ca`. It also means the script had never talked to production
+  before today.
+- **Archive download was request-bound, not bandwidth-bound.** A 2015
+  archive partition is ~20 MB in 64 000 objects (a 2021 one is 12 GB), and
+  `aws s3 sync` defaults to 10 concurrent requests: 2 900 files/min, ~22 min
+  per partition. `aws configure set default.s3.max_concurrent_requests 100`
+  on `fishuser-hero` took it to **12 270 files/min, ~5 min per partition**;
+  `sdex-backfill` starts one sync per partition, so the setting applied
+  mid-run without a restart.
+- **The runbook's cleanup time is wrong:** `prices-production-cleanup` is
+  `cron(0 3 * * ? *)`, 03:00 UTC, not 02:00. Irrelevant while it is
+  DISABLED; corrected with the next script PR.
+
+#### Preparation verified on 2026-09-23
+
+| check | result |
+| --- | --- |
+| cleanup rule | `DISABLED` |
+| checkout / binary | `develop` at `86326dbc` (later `9aa97b80` for #344), contains #320; `sdex-backfill --features aws-mtls` built after the pull |
+| identity | `prices_admin` |
+| plan | 130 months, 201511..202608, every START on a month edge; first four cross-checked against an independent run (201511 START 505 831) |
+| preflight (`--to-month 202401`) | all `ok`: server UTC, 21/21 pf columns, snapshot + rollback grants, checkout, disk 448 GiB (floor 300), live cursor 64 576 008 > last END 50 171 401 |
+| dry run 201511 | every write scoped to partition 201511 / ledgers 505 831–1 096 832; `sdex-backfill --mode sdex-only --transport hetzner` |
+| baseline 201511 | 24 trades on 1m, 1h and 1d alike; 591 002 completion markers = one per ledger |
+
+`--ack-phase1-measured` was passed before the measurement week closes — an
+operator decision: if the measurement finds a defect, only the months
+finished by then are redone, and the first ones are the smallest.
+
+#### Trial month 201511
+
+Started 14:40 local (12:40 UTC). Snapshot of 1m/15m/1h/4h/1d taken, 591 002
+markers cleared, 1m partition dropped, coarse tiers left untouched until the
+reconcile. At 15:53 local: 582 167 / 591 002 ledgers indexed (the last
+archive partition downloading) and the new 1m partition already at **19
+candles / 24 trades — identical to the snapshot**, first candle on the same
+minute (2015-11-18 03:47), `pf_trade_count` = 24 of 24. Verdict, the
+minute-alignment count and the post-run checks are recorded below when the
+month closes.
+
+#### Plan for the complete re-ingest
+
+| stage | months | gate | estimate |
+| --- | --- | --- | --- |
+| A — pre-Soroban, SDEX only | 201512 → 202401 (98) | 201511 checked clean | ~10–12 days (early years request-bound and now fast; from ~2017 partitions are GBs and home bandwidth rules — 0088 measured ~12 days for this range) → ~2026-10-03..05 |
+| B — early Soroban | 202402 → 202404 | script PR below merged; `--discover-pools` run to the tip | together with C ~14 M ledgers, the heaviest years: ~4–6 days |
+| C — Comet + SushiSwap era, live-era months | 202405 → 202608 | [[0300]] deployed and Comet in `pool_registry` (else the loop waits at 202404); ≥ 133 SushiSwap from 202601 (met); `--ack-0285` for 202607+ (answered) | (with B) |
+| D — finish | 1w, 1M | every month done | hours, then the re-enrichment of the whole history |
+
+Stage A command: `run --to-month 202401 --ack-phase1-measured --amm stop
+--skip-aws-check`. Each day: progress and disk read on prod, and `release`
+for every month that reconciled clean, to give the snapshot's disk back.
+
+**During stage A (about two weeks of buffer), before 202402:**
+
+- One script PR under 0286: the Soroban-era AMM step still parses
+  `events with no apply order:`, which [[0304]] removed, so the first AMM
+  month would die with a Python `AttributeError` AFTER `events-backfill`
+  wrote; the default `--amm mtls` cannot run because `events-backfill` on
+  `develop` has no `--transport` (use `--amm ssh`); add the Comet registry
+  gate for months ≥ 202405; correct the runbook's cleanup time.
+- `events-backfill --discover-pools` to the current tip.
+- The phase-1 measurement week recorded (AC 10).
+
+**Stage C carries the [[0282]] check:** the days written live between
+2026-07-16 and 2026-09-17 12:04 UTC must come back HIGHER than the
+snapshot — there the snapshot is the damaged side.
+
+**Stage D:** `finish` snapshots and rebuilds 1w and 1M from the new tiers
+(weeks last, because they straddle months), then the enrichment worker
+re-prices the whole history on its own. Acceptance: `post_run_0228_it`, the
+USDT-peg read (`peg_written = 0`, `pivot_written > 0` on 1m and 1h), XLM/USDC
+1d closes on the seven dust days within 5 % of Bitstamp, zero candles priced
+from a quantised close. Keep the TRUNCATE of 1w/1M off M3 review days.
+
+**Afterwards:** drop `prices.rollout_0286_bak_*` (~27 GiB, after the
+measurement week) and the `reingest_0286_bak_*` tables. The cleanup rule
+stays DISABLED until M3 completes (decided 2026-09-14).
+
+**Rough end:** history rebuilt by mid-October, provided 0300 lands before
+the loop reaches 202405.
 
 ## Out of scope
 
