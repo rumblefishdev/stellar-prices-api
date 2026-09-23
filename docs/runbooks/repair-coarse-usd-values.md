@@ -607,15 +607,24 @@ multiplied by a sub-$1 rate.
 **Triage query.** Run it on every table you reset, one table at a time —
 every table, not only the ones that warned. It asks the question that matters,
 which is not _how many rows are at zero_ but _did anything with a usable price
-end up at zero_:
+end up at zero_.
 
-`1612724400` in these queries is the value you passed as `--reset-not-before`.
+The three queries in this section take the same three placeholders. Fill them
+in fresh for **each** table; do not paste one filled-in copy five times:
+
+- `<TABLE>` — the table you reset: `price_ohlcv_1h`, `_4h`, `_1d`, `_1w`, `_1M`,
+  **each in turn**. On 2026-08-18 all the damage was in `_1h` and `_4h`, the two
+  tables nobody queried.
+- `<QUOTE_ID>` — the `--reset-quote-asset-id` you passed (`111` for USDT on
+  prod).
+- `<NOT_BEFORE>` — the `--reset-not-before` you passed (`1612724400` for USDT on
+  `_1h`).
 
 ```sql
 SELECT count() AS stranded_with_real_close
-FROM prices.price_ohlcv_1d FINAL
-WHERE quote_asset_id = 111
-  AND timestamp >= toDateTime(1612724400)
+FROM prices.<TABLE> FINAL          -- each of _1h, _4h, _1d, _1w, _1M in turn
+WHERE quote_asset_id = <QUOTE_ID>
+  AND timestamp >= toDateTime(<NOT_BEFORE>)
   AND close_usd = 0
   AND close > 0.00000000000005
 ```
@@ -637,9 +646,9 @@ something you assumed:
 
 ```sql
 SELECT timestamp, asset_id, source, close, volume_base, volume_quote, close_usd
-FROM prices.price_ohlcv_1d FINAL
-WHERE quote_asset_id = 111
-  AND timestamp >= toDateTime(1612724400)
+FROM prices.<TABLE> FINAL          -- the same table as the triage query
+WHERE quote_asset_id = <QUOTE_ID>
+  AND timestamp >= toDateTime(<NOT_BEFORE>)
   AND close_usd = 0
 ORDER BY timestamp
 ```
@@ -663,16 +672,16 @@ reset) and `_4h` (157,858) produced no shortfall at all.
 > means 8 rows in 41,573 — 0.02% — produce a stop-everything message. Read the
 > shortfall as _"look at these rows"_, not as _"the run failed"_.
 
-Then assert the defect cannot still be present. For the USDT case the fingerprint
-is an implied rate of ~1.0:
+Then assert the defect cannot still be present — again on every table you reset.
+For the USDT case the fingerprint is an implied rate of ~1.0:
 
 ```sql
 SELECT toYYYYMM(timestamp) AS m,
        count()                              AS candles,
        round(avg(close_usd / close), 6)     AS implied_rate
-FROM prices.price_ohlcv_1d FINAL
-WHERE quote_asset_id = 111
-  AND timestamp >= toDateTime(1612724400)
+FROM prices.<TABLE> FINAL          -- each of _1h, _4h, _1d, _1w, _1M in turn
+WHERE quote_asset_id = <QUOTE_ID>
+  AND timestamp >= toDateTime(<NOT_BEFORE>)
   AND close > 0 AND close_usd > 0
 GROUP BY m ORDER BY m
 ```
