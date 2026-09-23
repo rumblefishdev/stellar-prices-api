@@ -1952,6 +1952,24 @@ describe('navigation off the landing page', () => {
     },
   );
 
+  // The hero's "Built by" band shows the footer's mark, and was a bare image
+  // while the footer's led to the company (task 0308): two marks, one href.
+  it('links both Rumble Fish marks on the landing to the company', async () => {
+    openAndSignedOut();
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('navigation', { name: 'Primary' });
+    expect(
+      screen
+        .getAllByRole('link', { name: /rumble fish/i })
+        .map((link) => link.getAttribute('href')),
+    ).toEqual(['https://rumblefish.dev', 'https://rumblefish.dev']);
+  });
+
   /**
    * The browser jumps to a `#hash` only if the target exists when it looks,
    * and on a full load it looks before React has rendered: the landing bar's
