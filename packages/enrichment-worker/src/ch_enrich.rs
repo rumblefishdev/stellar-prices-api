@@ -449,9 +449,13 @@ pub enum ChEnrichError {
 /// The statement additionally mirrors the pivot's own `volume_quote > 0` filter,
 /// so it will not zero a row the pivot is structurally unable to refill.
 ///
-/// ⚠️ Rows whose reference is missing or stale beyond `pivot_window_s` are still
-/// reset and *not* refilled — that residue cannot be predicted from the candidate
-/// side alone. Run against a `FREEZE`d partition and check `zeros_after`.
+/// ⚠️ Rows whose reference is missing or stale beyond `pivot_window_s`, or whose
+/// bucket has no USDC/USD rate for the pivot's `WHERE {rate} > 0` (task 0228),
+/// are still reset and *not* refilled — that residue cannot be predicted from
+/// the candidate side alone. The epoch guard
+/// ([`ChEnrichError::ResetEpochBelowReference`]) bounds only where the reference
+/// BEGINS; in the plain 0182 mode nothing gates on either input (the 0228 mode
+/// does, by day). Run against a `FREEZE`d partition and check `zeros_after`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsdResetSpec {
     /// The quote `asset_id` whose candles get their USD columns zeroed.

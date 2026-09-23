@@ -522,6 +522,62 @@ Task 0172 separately measured USDT at genuine par until June 2022, so the `$1`
 already stored below the epoch is _correct_ — this flag protects real data, it
 does not merely skip work.
 
+### ⚠️ An admitted epoch is a lower bound, not a refill guarantee
+
+The epoch guard checks **only** where the reference begins. Above the epoch the
+pivot (since task 0228) writes a row only when **both** hold for its bucket:
+
+- a USDC/USD rate in `prices.usd_rate` — `oracle`, else `external` (the only one
+  before 2026-03-11 14:00 UTC) — within one day (or the grain's width, if wider)
+  before the bucket end;
+- a priced reference candle of the leg against USDC at or before the bucket,
+  within `--pivot-window-s`.
+
+The 0228 mode (`--reset-require-pivot-usdc-rate`, Appendix C) re-opens only days
+that have both. **The plain 0182 mode (neither `--reset-require-*` flag) checks
+neither**: it zeroes every written row from the epoch on, and a row missing
+either input stays at `close_usd = 0` with nothing to refill it, although the
+epoch was admitted. In particular, if USDC's `external` series is not loaded, a
+plain-mode reset below 2026-03-11 refills nothing at all.
+
+Check both before a plain-mode run, on the same `<TABLE>`, `<QUOTE_ID>`
+(`--reset-quote-asset-id`), `<USDC_ID>` and `<NOT_BEFORE>`. Each counts the
+written rows the reset would zero on a day with no such input; **both must be
+0**:
+
+```sql
+-- 1. written rows on a day with no USDC/USD rate at all
+SELECT count() AS rows_on_days_without_a_usdc_rate
+FROM prices.<TABLE> FINAL
+WHERE quote_asset_id = <QUOTE_ID>
+  AND timestamp >= toDateTime(<NOT_BEFORE>)
+  AND volume_quote > 0 AND (close_usd > 0 OR volume_quote_usd > 0)
+  AND toDate(timestamp, 'UTC') NOT IN (
+      SELECT toDate(timestamp, 'UTC') FROM prices.usd_rate FINAL
+      WHERE asset_kind = 'credit' AND asset_code = 'USDC' AND contract_address = ''
+        AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+        AND method IN ('oracle', 'external') AND usd_rate > 0);
+
+-- 2. written rows on a day with no priced reference candle
+SELECT count() AS rows_on_days_without_a_reference
+FROM prices.<TABLE> FINAL
+WHERE quote_asset_id = <QUOTE_ID>
+  AND timestamp >= toDateTime(<NOT_BEFORE>)
+  AND volume_quote > 0 AND (close_usd > 0 OR volume_quote_usd > 0)
+  AND toDate(timestamp, 'UTC') NOT IN (
+      SELECT toDate(timestamp, 'UTC') FROM prices.<TABLE> FINAL
+      WHERE asset_id = <QUOTE_ID> AND quote_asset_id = <USDC_ID>
+        AND close > 0 AND volume_base > 0 AND pf_trade_count > 0);
+```
+
+Both are day-granular, like the 0228 mode's own gates, so 0 is necessary, not
+sufficient: a rate or reference earlier in the day than the bucket, or a
+reference gap longer than `--pivot-window-s` inside a covered day, still strands
+a row. What catches that residue is the post-run damage check in "Extra
+verification" below, **on every table**. If either count is not 0, do not run
+plain mode over that span: load the missing series first, or use the 0228 mode,
+which does not re-open those days.
+
 ### Worked example — the 2026-08-19 boundary repair (lore 0182 → 0208)
 
 Task 0182's run passed `--reset-not-before 1612656000` — 2021-02-07 **00:00**

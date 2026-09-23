@@ -139,6 +139,17 @@ struct Args {
     /// candles). Task 0172 also measured USDT at genuine par before the June 2022
     /// depeg, so below the epoch the stored $1 is *correct* and this flag
     /// protects it.
+    ///
+    /// ⚠️ An ADMITTED epoch is a lower bound only, not a guarantee that every row
+    /// above it is refilled. In the plain 0182 mode (neither `--reset-require-*`
+    /// flag) the reset still zeroes rows whose bucket has no USDC/USD rate in
+    /// `prices.usd_rate` (oracle, or external — the only one before 2026-03-11)
+    /// or no reference candle within `--pivot-window-s`, and nothing refills
+    /// them. Check both before the run with the runbook's Appendix A queries
+    /// ("An admitted epoch is a lower bound, not a refill guarantee"; both must
+    /// return 0), and after it with the damage check on EVERY table. The 0228
+    /// mode (`--reset-require-pivot-usdc-rate`) re-opens only days that have
+    /// both.
     #[arg(long, requires = "reset_quote_asset_id")]
     reset_not_before: Option<u32>,
 

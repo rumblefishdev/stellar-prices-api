@@ -4675,6 +4675,12 @@ async fn a_row_zeroed_below_the_first_reference_candle_is_never_refilled() {
 /// admitted, and every row it re-opens is refilled — nothing is left at
 /// `close_usd = 0`.
 ///
+/// ⚠️ The refill here is the FIXTURE's doing, not the guard's: `setup_0208` and
+/// this test seed a USDC/USD rate for every covered day. Without those rows
+/// the plain mode would still admit this epoch and all 6 re-opened rows would
+/// be stranded — the guard bounds only where the reference begins (review
+/// WR-04; the runbook's "An admitted epoch is a lower bound" section).
+///
 /// It goes through the two-month repair driver on purpose. `reset_step`
 /// re-runs `assert_reset_is_admissible` per month with
 /// `time_window = Some(month)` (`repair.rs`); if the first-reference query ever
