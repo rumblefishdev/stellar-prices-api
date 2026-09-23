@@ -2272,7 +2272,7 @@ async fn usd_reference_omits_a_bucket_whose_reference_candles_have_no_volume() {
 /// the withholding. Enrich the 1000 units at their true 0.0065 and the bucket
 /// publishes — the gate withholds a bucket, it never deletes an identity.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_dust_print_cannot_price_a_bucket_whose_volume_is_unpriced() {
     let db = "it_views_0147_dust_share";
     let client = setup_scratch(db).await;
@@ -2434,7 +2434,7 @@ async fn a_dust_print_cannot_price_a_bucket_whose_volume_is_unpriced() {
 /// ⚠️ The bucket reads `pending`, NOT `unpriceable`: eligible volume exists and
 /// more of it may yet arrive. `unpriceable` means "we have no USD path at all".
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn only_the_dust_print_is_priced_and_the_absolute_floor_withholds_the_bucket() {
     let db = "it_views_0147_floor";
     let client = setup_scratch(db).await;
@@ -2529,7 +2529,7 @@ async fn only_the_dust_print_is_priced_and_the_absolute_floor_withholds_the_buck
 /// which is also why the guard is an `if` rather than a `nullIf` that a
 /// non-Nullable CAST would turn into Decimal128::MIN or code 349.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_bucket_quoted_only_in_an_ineligible_asset_reads_unpriceable_with_a_zero_share() {
     let db = "it_views_0147_unpriceable";
     let client = setup_scratch(db).await;
@@ -2628,7 +2628,7 @@ async fn a_bucket_quoted_only_in_an_ineligible_asset_reads_unpriceable_with_a_ze
 /// The control is BAR, an identity with the same real print and no dust beside
 /// it: the two must agree to the last digit.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn dust_rows_move_neither_the_published_close_nor_the_share() {
     let db = "it_views_0147_dust_noop";
     let client = setup_scratch(db).await;
@@ -2702,7 +2702,7 @@ async fn dust_rows_move_neither_the_published_close_nor_the_share() {
 /// bodies are kept in step by a text test in src/lib.rs; this is the
 /// behavioural half.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_gate_and_the_coverage_view_behave_the_same_at_the_hourly_grain() {
     let db = "it_views_0147_hourly";
     let client = setup_scratch(db).await;
@@ -2815,7 +2815,7 @@ async fn the_gate_and_the_coverage_view_behave_the_same_at_the_hourly_grain() {
 /// only the sub-floor row and only the dust row respectively, and must be
 /// ABSENT — `no_reference` is a legitimate state, a garbage reference is not.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usd_reference_ignores_sub_floor_and_dust_only_rows_at_both_grains() {
     let db = "it_views_0147_reference";
     let client = setup_scratch(db).await;
@@ -2900,7 +2900,7 @@ async fn usd_reference_ignores_sub_floor_and_dust_only_rows_at_both_grains() {
 /// priced row ALONE — the combination that produced `unpriceable` with a priced
 /// USD volume. Both grains, both JIT modes.
 #[tokio::test]
-#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_priced_row_outside_the_eligible_quote_set_stays_inside_the_share() {
     let db = "it_views_0147_priced_not_eligible";
     let client = setup_scratch(db).await;
