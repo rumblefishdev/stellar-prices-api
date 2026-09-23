@@ -508,6 +508,36 @@ fn a_malformed_registered_comet_swap_is_a_counted_dispatch_error() {
     assert!(out.dispatch_errors.is_empty());
 }
 
+/// SYNTHETIC amounts on the real `typical_usdc_to_blnd_recent` payload: an
+/// i128 string that does not parse, or a negative one, is a counted `comet`
+/// dispatch error — never a silent 0 and never a tick.
+#[test]
+fn an_unparseable_or_negative_comet_amount_is_a_counted_dispatch_error() {
+    for (key, bad) in [
+        ("token_amount_in", "not-a-number"),
+        ("token_amount_out", "12x"),
+        ("token_amount_in", "-3454229"),
+        ("token_amount_out", "-621636466"),
+    ] {
+        let mut event = typical_usdc_to_blnd_recent();
+        for entry in event.data["value"].as_array_mut().unwrap() {
+            if entry["key"]["value"] == key {
+                entry["value"]["value"] = json!(bad);
+            }
+        }
+
+        let mut reg = comet_registry();
+        let mut assets = seeded_assets();
+        let out = run(64_570_597, &[event], &mut reg, &mut assets);
+        assert!(out.amm_ticks.is_empty(), "{key} = {bad:?} must not tick");
+        assert_eq!(
+            out.dispatch_errors,
+            vec![("comet", 1)],
+            "{key} = {bad:?} must be a counted comet dispatch error"
+        );
+    }
+}
+
 /// AC5: with the pool NOT registered, its real swap is counted as a `comet`
 /// trade the registry drops.
 #[test]

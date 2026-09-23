@@ -67,10 +67,21 @@ impl CometPoolExtractor {
                 .map(String::from)
                 .ok_or_else(|| ExtractError::MissingField(key.to_string()))
         };
+        // A swap moves a positive amount each way. Anything else is an error, so
+        // it is counted as a dispatch error instead of becoming a tick. That
+        // includes 0: the typed-JSON conversion reads an unparseable i128
+        // string as 0, and without this check it would be dropped silently.
         let amount = |key: &str| {
-            field(key)
+            let value = field(key)
                 .and_then(TaggedValue::as_i128)
-                .ok_or_else(|| ExtractError::MissingField(key.to_string()))
+                .ok_or_else(|| ExtractError::MissingField(key.to_string()))?;
+            if value <= 0 {
+                return Err(ExtractError::NonPositiveAmount {
+                    field: key.to_string(),
+                    value,
+                });
+            }
+            Ok(value)
         };
 
         Ok(TradeRow {
@@ -376,6 +387,49 @@ mod tests {
                 other => panic!("{key}: expected MissingField, got {other:?}"),
             }
         }
+    }
+
+    /// SYNTHETIC — production holds no zero or negative amount (2026-09-23).
+    #[test]
+    fn a_negative_amount_is_an_error_not_a_trade() {
+        for (key, amounts) in [
+            ("token_amount_in", (-3454229, 621636466)),
+            ("token_amount_out", (3454229, -621636466)),
+        ] {
+            let row = swap_row(
+                64_570_597,
+                "64570597:627",
+                21,
+                "CBNVK5PE7JCL773P5SHWE3YUCHQVVVPVOG72SKCEFVTZOLLQWVTCPLZ3",
+                amounts,
+                (USDC, BLND),
+            );
+            match CometPoolExtractor.extract(&[row]) {
+                Err(ExtractError::NonPositiveAmount { field, value }) => {
+                    assert_eq!(field, key);
+                    assert!(value < 0);
+                }
+                other => panic!("{key}: expected NonPositiveAmount, got {other:?}"),
+            }
+        }
+    }
+
+    /// An amount string that does not parse reaches the decoder as 0 (the
+    /// typed-JSON conversion's fallback); it must fail, not vanish.
+    #[test]
+    fn a_zero_amount_is_an_error_not_a_trade() {
+        let row = swap_row(
+            64_570_597,
+            "64570597:627",
+            21,
+            "CBNVK5PE7JCL773P5SHWE3YUCHQVVVPVOG72SKCEFVTZOLLQWVTCPLZ3",
+            (0, 621636466),
+            (USDC, BLND),
+        );
+        assert!(matches!(
+            CometPoolExtractor.extract(&[row]),
+            Err(ExtractError::NonPositiveAmount { ref field, value: 0 }) if field == "token_amount_in"
+        ));
     }
 
     #[test]

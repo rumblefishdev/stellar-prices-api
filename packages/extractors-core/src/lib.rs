@@ -125,6 +125,10 @@ pub enum ExtractError {
     MissingField(String),
     #[error("unexpected topic shape in row at event_index {0}")]
     UnexpectedTopicShape(u32),
+    /// A swap amount that is zero or negative. Zero includes an amount whose
+    /// string did not parse: the typed-JSON conversion reads that as 0.
+    #[error("non-positive amount in {field}: {value} (0 may be an unparseable value)")]
+    NonPositiveAmount { field: String, value: i128 },
 }
 
 pub type VenueRegistry = HashMap<String, Venue>;

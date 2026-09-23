@@ -100,9 +100,9 @@ SETTINGS index_granularity = 8192;
 ----------------------------------------------------------------------
 -- 1-minute OHLCV candles, per-source rows (ADR 0004). Live writes from the
 -- Prices Ledger Processor; backfill streams write here with source in
--- ('sdex','phoenix','soroswap','aquarius'). version = ledger_seq × 1000 +
--- intra-ledger order; ReplacingMergeTree(version) collapses duplicate PKs.
--- §3.2.
+-- ('sdex','phoenix','soroswap','aquarius','sushiswap','comet'). version =
+-- ledger_seq × 1000 + intra-ledger order; ReplacingMergeTree(version) collapses
+-- duplicate PKs. §3.2.
 --
 -- Price semantics (task 0286, ADR 0287): open/high/low/close come ONLY from the
 -- bucket's PRICE-FORMING fills — open is the first such fill and close the last,

@@ -93,7 +93,7 @@ pub struct PairRegistries<'a> {
 ///
 /// Soroswap and SushiSwap require the pool→tokens registry to resolve token
 /// identities; an unresolved pool (created before the indexed window) yields no
-/// trades rather than an error. Aquarius and Phoenix carry tokens inline.
+/// trades rather than an error. Aquarius, Phoenix and Comet carry tokens inline.
 ///
 /// The two pair-backed venues keep SEPARATE registries so a contract_id can
 /// never resolve to the wrong venue's tokens (task 0290); they arrive together

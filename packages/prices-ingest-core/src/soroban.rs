@@ -164,7 +164,8 @@ pub struct LedgerSoroban {
     /// comet}.
     pub amm_ticks: Vec<(&'static str, TradeTick)>,
     pub oracle: Vec<OracleSample>,
-    /// Contracts that emitted a `swap` but were not in the venue registry.
+    /// Contracts that emitted a `swap` (or Comet's `POOL/swap`) but were not in
+    /// the venue registry.
     pub unresolved: Vec<UnresolvedPoolSwap>,
     /// `(source, swap_events_in_group)` for every group whose dispatch FAILED.
     ///
