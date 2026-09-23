@@ -2,7 +2,7 @@
 id: "0291"
 title: "pool_registry has not learned a pool since 2026-07-06 — live forgets newer pools on every cold start and drops their trades"
 type: BUG
-status: blocked
+status: active
 related_adr: []
 related_tasks: ["0285", "0286", "0282", "0078", "0101", "0256", "0069", "0080", "0290"]
 tags: [layer-indexing, priority-high, effort-small, amm, aquarius, soroswap, ingestion, data-correctness, clickhouse]
@@ -116,9 +116,28 @@ history:
       said on 2026-09-21 that phase 1 starts the same day, so the block is
       expected to be short. Its own precondition — 0282's full-day measurement
       — cleared this morning.
+  - date: "2026-09-23"
+    status: active
+    who: okarcz
+    note: >
+      Unblocked: 0286 phase 1 shipped the ingest on 2026-09-22
+      (deploy-production-compute 11:58:22 UTC, again 14:40:53 UTC), and the
+      live build carries #322. AC 3 met on production: the counter is in the
+      running processor, the alarm prices-production-ledger-processor-
+      unregistered-pool reads OK, and UnregisteredPoolEvents has no datapoint
+      since the deploy — the metric is published only when non-zero, so that
+      is zero dropped events, not a blind sensor. AC 2's production half is
+      still open: four cold starts since the deploy (loaded 770, 770, 903, 903
+      entries — the last two after 0290's 133-pool seed) and no "persisted
+      discovered pool registry" line, i.e. no pool has been created on a
+      tracked venue since. It closes on the first one.
 ---
 
-## 📊 STATUS — 2026-09-18 · ⛔ BLOCKED on [[0286]] · AC 1 DONE on prod
+## 📊 STATUS — 2026-09-23 · ACTIVE · AC 1, 3, 4 DONE on prod — AC 2 waits for the first new pool
+
+> **2026-09-23:** unblocked by 0286 phase 1 (ingest deployed 2026-09-22). AC 3 met; AC 2's prod check needs a pool created after the deploy — none yet. The 2026-09-18 status below is kept for the record.
+
+### 2026-09-18 · ⛔ BLOCKED on [[0286]] · AC 1 DONE on prod
 
 - ✅ **AC 1 is met and permanent.** The 42 missing pools were seeded on
   production 2026-09-18 08:00 UTC — `prices.pool_registry` went **728 → 770**
@@ -251,7 +270,12 @@ Missing today (live era, see [[0285]]'s note):
       merged but cannot be deployed until [[0286]]'s schema lands (see the
       incident below). Not deferred, not abandoned: it ships with 0286's ingest
       step.
-- [ ] Unclassifiable pool events are counted and alarmed on the live path.
+- [x] Unclassifiable pool events are counted and alarmed on the live path.
+      → ✅ **MET on production 2026-09-23.** The counter shipped with 0286's
+      ingest (deploys 2026-09-22 11:58:22 and 14:40:53 UTC); the alarm reads
+      `OK`; `Prices/Ingest UnregisteredPoolEvents` has no datapoint since the
+      deploy, and the processor publishes it only when non-zero
+      (`metrics.rs:161`), so that is zero dropped events. History below.
       → ✅ alarm `prices-production-ledger-processor-unregistered-pool` is
       **deployed and live** (Observability was not rolled back). ⛔ the counter
       that feeds it is in the rolled-back processor, so the alarm currently
