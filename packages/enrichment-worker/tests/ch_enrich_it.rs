@@ -3035,6 +3035,13 @@ async fn setup_0228_reset(db: &str, covered: u32, uncovered: u32) -> Client {
     client
 }
 
+/// The first XLM/USDC reference candle in [`setup_0228_reset`] (its `covered`
+/// argument everywhere) and in the pivot ITs' own fixtures (`with_ref`): 12:00
+/// on the depeg day. Lore 0208: a pivot-leg reset epoch below it is now refused
+/// (`ResetEpochBelowReference`), so every `pivot_reset` names this, not a day
+/// before the depeg.
+const PIVOT_FIRST_REF: u32 = DEPEG_DAY + 43_200;
+
 /// A 0228-shaped spec over the fixture above: XLM's quote leg, bounded above by
 /// the oracle epoch, and only where the imported series can refill.
 fn pivot_reset(not_before: u32) -> UsdResetSpec {
@@ -3083,7 +3090,7 @@ async fn the_pivot_reset_refuses_the_canonical_usdc_leg() {
         // asset_id 2 is canonical USDC in this fixture: priceable, so the
         // priceability gate passes it, and no pivot pass can refill it.
         quote_asset_id: 2,
-        ..pivot_reset(DEPEG_DAY - 86_400)
+        ..pivot_reset(PIVOT_FIRST_REF)
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
     assert!(
@@ -3137,7 +3144,7 @@ async fn the_pivot_reset_refuses_an_oracle_shadowed_span() {
     let mut c = cfg(db);
     c.table = "price_ohlcv_1h".to_string();
     c.one_shot = true;
-    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    c.usd_reset = Some(pivot_reset(PIVOT_FIRST_REF));
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
     assert!(
         matches!(err, ChEnrichError::ResetBlockedByOracleRows { quote_asset_id, rows, .. }
@@ -3167,7 +3174,7 @@ async fn the_pivot_reset_refuses_when_no_external_rates_are_loaded() {
     let mut c = cfg(db);
     c.table = "price_ohlcv_1h".to_string();
     c.one_shot = true;
-    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    c.usd_reset = Some(pivot_reset(PIVOT_FIRST_REF));
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
     assert!(
         matches!(err, ChEnrichError::ResetRequiresExternalRates { quote_asset_id }
@@ -3200,7 +3207,7 @@ async fn the_repair_driver_refuses_an_unloaded_series_before_enumerating_months(
 
     let mut enrich = cfg(db);
     enrich.table = "price_ohlcv_1h".to_string();
-    enrich.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    enrich.usd_reset = Some(pivot_reset(PIVOT_FIRST_REF));
     let driver = |dry_run: bool| {
         CoarseRepairDriver::with_client(
             client.clone(),
@@ -3282,7 +3289,7 @@ async fn the_pivot_reset_refuses_when_canonical_usdc_is_not_a_tracked_asset() {
     let mut c = cfg(db);
     c.table = "price_ohlcv_1h".to_string();
     c.one_shot = true;
-    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    c.usd_reset = Some(pivot_reset(PIVOT_FIRST_REF));
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
     assert!(
         matches!(
@@ -3348,7 +3355,7 @@ async fn a_dry_run_refuses_the_wrong_leg_for_either_rate_gated_mode() {
     // The pivot mode on canonical USDC (asset_id 2 here).
     let err = dry(UsdResetSpec {
         quote_asset_id: 2,
-        ..pivot_reset(DEPEG_DAY - 86_400)
+        ..pivot_reset(PIVOT_FIRST_REF)
     })
     .run()
     .await
@@ -3369,7 +3376,7 @@ async fn a_dry_run_refuses_the_wrong_leg_for_either_rate_gated_mode() {
         quote_asset_id: 1,
         require_external_rate: true,
         require_pivot_usdc_rate: false,
-        ..pivot_reset(DEPEG_DAY - 86_400)
+        ..pivot_reset(PIVOT_FIRST_REF)
     })
     .run()
     .await
@@ -3386,7 +3393,7 @@ async fn a_dry_run_refuses_the_wrong_leg_for_either_rate_gated_mode() {
     );
 
     // The right leg still rehearses: one candidate month, nothing written.
-    let summary = dry(pivot_reset(DEPEG_DAY - 86_400)).run().await.unwrap();
+    let summary = dry(pivot_reset(PIVOT_FIRST_REF)).run().await.unwrap();
     assert_eq!(summary.months.len(), 1, "{summary:?}");
     let (v, ver) = pivot_subject_1h(&client, db, covered).await;
     assert!(
@@ -3442,7 +3449,7 @@ async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() 
     let err = dry(UsdResetSpec {
         quote_asset_id: 99,
         require_pivot_usdc_rate: false,
-        ..pivot_reset(DEPEG_DAY - 86_400)
+        ..pivot_reset(PIVOT_FIRST_REF)
     })
     .run()
     .await
@@ -3463,7 +3470,7 @@ async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() 
         quote_asset_id: 2,
         require_external_rate: true,
         require_pivot_usdc_rate: false,
-        ..pivot_reset(DEPEG_DAY - 86_400)
+        ..pivot_reset(PIVOT_FIRST_REF)
     })
     .run()
     .await
@@ -3483,10 +3490,7 @@ async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() 
         .execute()
         .await
         .unwrap();
-    let err = dry(pivot_reset(DEPEG_DAY - 86_400))
-        .run()
-        .await
-        .unwrap_err();
+    let err = dry(pivot_reset(PIVOT_FIRST_REF)).run().await.unwrap_err();
     assert!(
         matches!(
             err,
@@ -3531,7 +3535,7 @@ async fn the_pivot_reset_never_zeroes_a_bucket_it_cannot_refill() {
     let mut c = cfg(db);
     c.table = "price_ohlcv_1h".to_string();
     c.one_shot = true;
-    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    c.usd_reset = Some(pivot_reset(PIVOT_FIRST_REF));
     let stats = ChEnrichmentPass::new(c).run().await.unwrap();
 
     assert_eq!(
@@ -3618,7 +3622,7 @@ async fn the_pivot_reset_never_zeroes_a_bucket_whose_reference_market_is_silent(
     let mut c = cfg(db);
     c.table = "price_ohlcv_1h".to_string();
     c.one_shot = true;
-    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    c.usd_reset = Some(pivot_reset(PIVOT_FIRST_REF));
     let stats = ChEnrichmentPass::new(c).run().await.unwrap();
 
     assert_eq!(
@@ -3672,7 +3676,7 @@ async fn the_pivot_reset_is_value_idempotent_across_runs() {
         let mut c = cfg(db);
         c.table = "price_ohlcv_1h".to_string();
         c.one_shot = true;
-        c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+        c.usd_reset = Some(pivot_reset(PIVOT_FIRST_REF));
         c
     };
 
@@ -4404,7 +4408,7 @@ async fn the_pivot_reset_never_re_opens_a_day_whose_only_reference_is_dust() {
     let mut c = cfg(db);
     c.table = "price_ohlcv_1h".to_string();
     c.one_shot = true;
-    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    c.usd_reset = Some(pivot_reset(PIVOT_FIRST_REF));
     let stats = ChEnrichmentPass::new(c).run().await.unwrap();
 
     assert_eq!(
@@ -4420,6 +4424,186 @@ async fn the_pivot_reset_never_re_opens_a_day_whose_only_reference_is_dust() {
          was zeroed, and the refill subquery — which also asks pf_trade_count > 0 — \
          found nothing to price it with"
     );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+// ---- task 0208: the reset epoch is checked against its reference -----------
+
+/// The epoch task 0182 passed on 2026-08-18: 2021-02-07 00:00 UTC — the right
+/// DATE, 19 hours below the first USDT/USDC candle.
+const INCIDENT_EPOCH: u32 = 1_612_656_000;
+/// USDT/USDC's first priced candle on `_1h`: 2021-02-07 19:00 UTC. The only
+/// safe `--reset-not-before` for the USDT leg on that table (lore 0182/0208).
+const USDT_FIRST_REFERENCE: u32 = 1_612_724_400;
+
+/// The 2026-08-18 shape on `price_ohlcv_1h`: a USDT/USDC reference from
+/// `USDT_FIRST_REFERENCE` (hours 19-23 of 2021-02-07) and 24 FOO/USDT subject
+/// candles from `INCIDENT_EPOCH` (hours 00-23). Hours 00-18 have no reference at
+/// or before them, so the pivot can never price them.
+///
+/// `zeroed = false`: the subjects carry the written `$1` peg (`close_usd` 10,
+/// `volume_quote_usd` 50) — what a reset would re-open. `zeroed = true`: both
+/// USD columns are already 0 — exactly what `reset_sql` writes — so an ordinary
+/// pass shows what the pivot can and cannot refill.
+async fn setup_0208(db: &str, zeroed: bool) -> Client {
+    let client = setup_scratch(db).await;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (1,'XLM','classic','',''), (2,'USDC','classic','{USDC_ISSUER}',''), \
+             (3,'USDT','classic','{USDT_ISSUER}',''), (10,'FOO','classic','GFOO','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    let (vq_usd, c_usd) = if zeroed { (0, 0) } else { (50, 10) };
+    let reference = (0..5u32).map(|h| {
+        let ts = USDT_FIRST_REFERENCE + h * 3600;
+        format!("({ts}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 1000,130, 0,0, 0.13, 1,1)")
+    });
+    let subjects = (0..24u32).map(|h| {
+        let ts = INCIDENT_EPOCH + h * 3600;
+        format!("({ts},10, 3,'sdex', 10,10,10,10, 5,50, {vq_usd},{c_usd}, 10, 1,1)")
+    });
+    let values = reference.chain(subjects).collect::<Vec<_>>().join(", ");
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES {values}"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // The pivot needs a measured USDC/USD rate at every bucket end, or it leaves
+    // the row unpriced (task 0228). Exactly 1.0, so 10 x 0.13 = 1.3 holds.
+    for ts in [INCIDENT_EPOCH, INCIDENT_EPOCH + 86_400] {
+        seed_external_rate(&client, db, ts, 1.0).await;
+    }
+    client
+}
+
+/// How many FOO/USDT subjects in `price_ohlcv_1h` match `pred`.
+async fn count_0208(client: &Client, db: &str, pred: &str) -> u64 {
+    client
+        .query(&format!(
+            "SELECT count() FROM {db}.price_ohlcv_1h FINAL \
+             WHERE asset_id = 10 AND quote_asset_id = 3 AND ({pred})"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap()
+}
+
+/// `(close_usd, volume_quote_usd, version)` of the FOO/USDT subject at `ts`.
+async fn subject_0208(client: &Client, db: &str, ts: u32) -> (f64, f64, u64) {
+    client
+        .query(&format!(
+            "SELECT toFloat64(close_usd), toFloat64(volume_quote_usd), toUInt64(version) \
+             FROM {db}.price_ohlcv_1h FINAL \
+             WHERE asset_id = 10 AND quote_asset_id = 3 AND timestamp = ?"
+        ))
+        .bind(ts)
+        .fetch_one::<(f64, f64, u64)>()
+        .await
+        .unwrap()
+}
+
+/// The 2026-08-18 invocation, replayed: plain 0182 mode on the USDT leg of
+/// `_1h` with `--reset-not-before 1612656000`. It destroyed 121 `_1h` candles
+/// in production; it must now be refused — by the pass and by the repair
+/// driver, dry run included — before a single row is written.
+///
+/// The stranded-row count is asserted BEFORE the error, so that with the guard
+/// disabled this test reports the damage (19 rows at `close_usd = 0`) rather
+/// than an opaque unwrap.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_0182_epoch_is_refused_below_the_first_usdt_reference_candle_before_any_write() {
+    let db = "it_enrich_0208_refused";
+    let client = setup_0208(db, false).await;
+
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1h".to_string();
+    c.one_shot = true;
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 3,
+        not_before: INCIDENT_EPOCH,
+        not_after: None,
+        require_external_rate: false,
+        require_pivot_usdc_rate: false,
+    });
+    let res = ChEnrichmentPass::new(c.clone()).run().await.map(|_| ());
+
+    let stranded = count_0208(&client, db, "close_usd = 0 AND close > 0").await;
+    assert_eq!(
+        stranded, 0,
+        "{stranded} row(s) stranded at close_usd = 0 — the 2026-08-18 damage"
+    );
+    let is_refusal = |res: &Result<(), ChEnrichError>| {
+        matches!(
+            res,
+            Err(ChEnrichError::ResetEpochBelowReference {
+                quote_asset_id: 3,
+                not_before,
+                first_reference,
+                table,
+            }) if *not_before == INCIDENT_EPOCH
+                && *first_reference == USDT_FIRST_REFERENCE
+                && table == "price_ohlcv_1h"
+        )
+    };
+    assert!(is_refusal(&res), "the pass must refuse, got {res:?}");
+    let msg = res.unwrap_err().to_string();
+    for needle in [
+        "1612724400",
+        "2021-02-07 19:00:00 UTC",
+        "2021-02-07 00:00:00 UTC",
+        "--reset-not-before 1612724400",
+    ] {
+        assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
+    }
+
+    // The driver runs the same list before it enumerates months — the
+    // rehearsal refuses exactly what the real run refuses.
+    for dry_run in [true, false] {
+        let res = CoarseRepairDriver::with_client(
+            client.clone(),
+            CoarseRepairConfig {
+                enrich: c.clone(),
+                start_month: 202_102,
+                end_month: 202_102,
+                snapshot: false,
+                dry_run,
+                one_shot: true,
+                deadline: None,
+            },
+        )
+        .run()
+        .await
+        .map(|_| ());
+        assert!(
+            is_refusal(&res),
+            "dry_run={dry_run}: the driver must refuse, got {res:?}"
+        );
+    }
+
+    // A refused reset writes nothing: every subject keeps its stored value.
+    for h in 0..24u32 {
+        let ts = INCIDENT_EPOCH + h * 3600;
+        let (v, _, ver) = subject_0208(&client, db, ts).await;
+        assert!(
+            (v - 10.0).abs() < 1e-9 && ver == 1,
+            "hour {h}: a refused reset must leave close_usd 10 at v1, got {v} v{ver}"
+        );
+    }
 
     client
         .query(&format!("DROP DATABASE {db}"))
