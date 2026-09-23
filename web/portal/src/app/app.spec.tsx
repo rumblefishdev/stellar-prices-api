@@ -1904,18 +1904,53 @@ describe('navigation off the landing page', () => {
       screen.getByRole('link', { name: /rumble fish/i }).getAttribute('href'),
     ).toBe('https://rumblefish.dev');
     // "Contact" reaches the company's contact page (task 0301) and "Privacy
-    // policy" the portal's own page (task 0303); "Status" stays text until a
-    // status page exists.
+    // policy" the portal's own page (task 0303). "Status" and the
+    // `rumblefish.dev` text are gone (task 0305): the mark above is the
+    // company's one link.
     expect(
       screen.getByRole('link', { name: /^contact$/i }).getAttribute('href'),
     ).toBe('https://www.rumblefish.dev/contact/');
-    expect(screen.queryByRole('link', { name: /^status$/i })).toBeNull();
+    const footer = within(screen.getByRole('navigation', { name: 'Footer' }));
+    expect(footer.queryByText(/^status$/i)).toBeNull();
+    expect(footer.queryByText(/^rumblefish\.dev$/i)).toBeNull();
     expect(
       screen
         .getByRole('link', { name: /^privacy policy$/i })
         .getAttribute('href'),
     ).toBe('/privacy-policy');
   });
+
+  /**
+   * The logo is how a visitor leaves the portal for the rest of the explorer
+   * (task 0301). Every bar renders the same `Wordmark`, but each route picks
+   * its own bar, so each is checked, signed in and out (task 0305). `/login`
+   * has no bar.
+   */
+  it.each([
+    ['/', 'out', 'Primary'],
+    ['/quick-start', 'out', 'Primary'],
+    ['/docs', 'out', 'Primary'],
+    ['/privacy-policy', 'out', 'Primary'],
+    ['/dashboard', 'in', 'Dashboard'],
+    ['/quick-start', 'in', 'Dashboard'],
+    ['/docs', 'in', 'Dashboard'],
+    ['/privacy-policy', 'in', 'Dashboard'],
+  ] as const)(
+    'links the logo on %s (signed %s) to the explorer',
+    async (path, who, bar) => {
+      (who === 'in' ? openAndSignedIn : openAndSignedOut)();
+      render(
+        <MemoryRouter initialEntries={[path]}>
+          <App />
+        </MemoryRouter>,
+      );
+
+      const nav = within(await screen.findByRole('navigation', { name: bar }));
+      expect(
+        nav.getByRole('link', { name: 'SorobanScan' }).getAttribute('href'),
+      ).toBe('https://sorobanscan.rumblefish.dev/');
+    },
+  );
 
   /**
    * ⚠️ Every non-current link in the signed-in bar was `display: none` at

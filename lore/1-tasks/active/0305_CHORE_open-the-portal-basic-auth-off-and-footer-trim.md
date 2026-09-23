@@ -101,9 +101,9 @@ OpenAPI document downloads — not changed here.
 
 ## Acceptance Criteria
 
-- [ ] Footer shows neither `Status` nor the `rumblefish.dev` text link; the
+- [x] Footer shows neither `Status` nor the `rumblefish.dev` text link; the
       Rumble Fish mark still links to `https://rumblefish.dev`
-- [ ] The SorobanScan logo links to `https://sorobanscan.rumblefish.dev/` on
+- [x] The SorobanScan logo links to `https://sorobanscan.rumblefish.dev/` on
       `/`, `/quick-start`, `/docs`, `/privacy-policy` and `/dashboard`, signed
       in and signed out (`/login` has no bar)
 - [ ] Explorer: `enableApiSpaBasicAuth: false` deployed to production
