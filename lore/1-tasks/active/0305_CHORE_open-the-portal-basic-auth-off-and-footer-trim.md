@@ -137,5 +137,5 @@ with this task; the rest of that comparison is [[0306]].
 - [x] The lazy pages' loader keeps the footer below the fold
 - [x] The Quick Start's 429 card shows what its Copy button writes, and the
       error lede no longer promises a `code` on the gateway's 403 and 429
-- [ ] No page names a status page: the sign-in refusal card ends at "contact
+- [x] No page names a status page: the sign-in refusal card ends at "contact
       support"
