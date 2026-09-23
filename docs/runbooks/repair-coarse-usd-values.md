@@ -475,7 +475,7 @@ recompute them.
 
 ### What reset mode refuses outright
 
-All five are hard errors, not warnings, because each one ends with rows zeroed
+All seven are hard errors, not warnings, because each one ends with rows zeroed
 that nothing can refill:
 
 | Refusal                                                        | Why                                                                                                                                                                                                                                                                                                                                |
@@ -485,18 +485,65 @@ that nothing can refill:
 | A quote leg that is not a peg or pivot reference               | A mistyped id (`11` for `111`) passes the oracle check, because an unknown asset has no oracle rows either.                                                                                                                                                                                                                        |
 | A bounded pass (`one_shot = false`)                            | The peg-pivot tier is gated on the oracle tier draining, so a bounded pass can defer the only tier that refills.                                                                                                                                                                                                                   |
 | `oracle_prices` rows for the quote leg                         | See below.                                                                                                                                                                                                                                                                                                                         |
+| `ResetEpochBelowReference`                                     | `--reset-not-before` is below this table's first priced reference candle. Every row in the gap would be zeroed with nothing to refill it. The message prints the exact value to re-run with.                                                                                                                                       |
+| `ResetEpochHasNoReference`                                     | There is no priced reference candle for the leg on this table, or canonical USDC is missing from `prices.assets` — no epoch is safe.                                                                                                                                                                                               |
 
 ### The epoch is not optional tuning
 
-Below the date the pivot's reference market begins there is nothing to recompute
-from, so a reset row stays at `close_usd = 0` **permanently** — an ambiguous zero
-read unguarded by ~130 `argMax(close_usd, …)` sites, which is worse than the
-wrong number it replaced.
+Below the first candle of the pivot's reference market there is nothing to
+recompute from, so a reset row stays at `close_usd = 0` **permanently** — an
+ambiguous zero read unguarded by ~130 `argMax(close_usd, …)` sites, which is worse
+than the wrong number it replaced. The pivot's join matches its reference _at or
+before_ each bucket, so the boundary is the reference's first **candle**, to the
+second, not its first date.
 
-For canonical USDT (`asset_id = 111` on prod) the epoch is **2021-02-07 =
-`1612656000`**, the start of its USDC market. Task 0172 separately measured it at
-genuine par until June 2022, so the `$1` already stored below that date is
-_correct_ — this flag protects real data, it does not merely skip work.
+**Measure the epoch; do not pick one.** Run this on the same table you pass as
+`--table` — its `WHERE` is the tool's own guard predicate, word for word:
+
+```sql
+SELECT count()                          AS reference_rows,
+       toUnixTimestamp(min(timestamp))  AS first_reference_candle
+FROM prices.<TABLE> FINAL
+WHERE asset_id = <REF_ID> AND quote_asset_id = <USDC_ID> AND close > 0 AND volume_base > 0 AND pf_trade_count > 0
+```
+
+Pass `first_reference_candle` as `--reset-not-before`. `reference_rows = 0` means
+there is no reference on that table at all, and **no epoch is safe**.
+
+For canonical USDT (`asset_id = 111` on prod) the value is **`1612724400` =
+2021-02-07 19:00 UTC** on `_1h`. The tool checks per table: it refuses any epoch
+below that table's own first reference candle, before any write and in a dry run
+too (`ResetEpochBelowReference`), and the refusal prints that table's value. `1612724400` is admitted on
+all five coarse tables, because each table's first reference bucket starts at or
+before it; on `_4h` and `_1d` the 2021-02-07 16:00 bucket and the day bucket then
+keep their par value, which task 0172 measured as correct.
+
+Task 0172 separately measured USDT at genuine par until June 2022, so the `$1`
+already stored below the epoch is _correct_ — this flag protects real data, it
+does not merely skip work.
+
+### Worked example — the 2026-08-19 boundary repair (lore 0182 → 0208)
+
+Task 0182's run passed `--reset-not-before 1612656000` — 2021-02-07 **00:00**
+UTC, 19 hours below the USDT/USDC reference's first candle at 19:00
+(`1612724400`). The pivot's join is at-or-before, so every bucket in
+`[1612656000, 1612724400)` was zeroed with nothing to refill it.
+
+- **157 candles destroyed:** 121 on `_1h` (the 19 hourly buckets 00:00-18:00 × 15
+  assets) and 36 on `_4h` (the 00/04/08/12 buckets × 9 assets; the 16:00 bucket
+  contains the 19:00 trade, so it priced). `_1d`, `_1w` and `_1M` had 0.
+- **The shortfall check stayed quiet.** `_1h` and `_4h` reported no shortfall
+  (357,274 reset against 358,315 enriched) — the stranded rows were swamped by
+  legitimately enriched ones. The damage check had been run only on the three
+  tables that warned, which are exactly the three structurally unable to show
+  this defect. A re-check of every table found it the next morning.
+- **Repaired by a versioned par insert** over that window on `_1h` and `_4h`,
+  gated on a count-only dry run returning exactly 121 and 36. A snapshot rollback
+  would have meant a `DROP` + `ATTACH` of partition `202102` on four tables to fix
+  157 rows. The SQL is in the archived task
+  `lore/1-tasks/archive/0182_BUG_close-usd-overstated-7x-on-usdt-quoted-candles.md`.
+
+The tool now refuses that epoch (task 0208).
 
 ### Prerequisite: purge the oracle rows FIRST
 
@@ -527,6 +574,11 @@ They should match. If `rows_reset` exceeds `rows_enriched` the tool prints a lou
 block on stderr naming the shortfall — that run zeroed values it could not
 recompute. **Stop; do not continue to the next table.**
 
+**Run the damage check on every table, not only the ones that warned.** The
+shortfall guard selects the sample, and it is blind to boundary stranding: on
+2026-08-19 the 157 destroyed candles sat in `_1h` and `_4h`, the two tables that
+never warned (see the worked example above). A quiet table is not a checked one.
+
 > ⚠️ **Triage before you roll back.** The shortfall has a known false positive —
 > see the next section. On the 2026-08-18 `_1d` run it fired for 8 rows and the
 > correct action was to continue, not to roll back.
@@ -552,15 +604,18 @@ legitimate zero:
 Both are dust — tokens at a price the stored scale cannot represent once
 multiplied by a sub-$1 rate.
 
-**Triage query.** Swap in the table you just ran. It asks the question that
-matters, which is not _how many rows are at zero_ but _did anything with a usable
-price end up at zero_:
+**Triage query.** Run it on every table you reset, one table at a time —
+every table, not only the ones that warned. It asks the question that matters,
+which is not _how many rows are at zero_ but _did anything with a usable price
+end up at zero_:
+
+`1612724400` in these queries is the value you passed as `--reset-not-before`.
 
 ```sql
 SELECT count() AS stranded_with_real_close
 FROM prices.price_ohlcv_1d FINAL
 WHERE quote_asset_id = 111
-  AND timestamp >= toDateTime(1612656000)
+  AND timestamp >= toDateTime(1612724400)
   AND close_usd = 0
   AND close > 0.00000000000005
 ```
@@ -584,7 +639,7 @@ something you assumed:
 SELECT timestamp, asset_id, source, close, volume_base, volume_quote, close_usd
 FROM prices.price_ohlcv_1d FINAL
 WHERE quote_asset_id = 111
-  AND timestamp >= toDateTime(1612656000)
+  AND timestamp >= toDateTime(1612724400)
   AND close_usd = 0
 ORDER BY timestamp
 ```
@@ -617,7 +672,7 @@ SELECT toYYYYMM(timestamp) AS m,
        round(avg(close_usd / close), 6)     AS implied_rate
 FROM prices.price_ohlcv_1d FINAL
 WHERE quote_asset_id = 111
-  AND timestamp >= toDateTime(1612656000)
+  AND timestamp >= toDateTime(1612724400)
   AND close > 0 AND close_usd > 0
 GROUP BY m ORDER BY m
 ```
@@ -1384,14 +1439,18 @@ precondition 5 told you to.
 ⚠️ **`--reset-not-before` must be the MEASURED first candle of this leg's own
 USDC market.** Task 0182's reset epoch sat 19 hours before its reference
 market's first candle and 157 candles were zeroed with nothing able to refill
-them. Appendix A's USDT figure (`1612656000`) is the worked precedent. Measure
-it per leg, on the table you are about to repair:
+them — see Appendix A's worked example; for USDT on `_1h` the measured value is
+`1612724400`. Measure it per leg, on the table you are about to repair (the same
+`<TABLE>` as `--table`); the `WHERE` is the tool's own guard predicate:
 
 ```sql
-SELECT toUnixTimestamp(min(timestamp)) AS first_reference_candle
-FROM prices.price_ohlcv_1d FINAL
-WHERE asset_id = <XLM_ID> AND quote_asset_id = <USDC_ID> AND close > 0
+SELECT count()                          AS reference_rows,
+       toUnixTimestamp(min(timestamp))  AS first_reference_candle
+FROM prices.<TABLE> FINAL
+WHERE asset_id = <XLM_ID> AND quote_asset_id = <USDC_ID> AND close > 0 AND volume_base > 0 AND pf_trade_count > 0
 ```
+
+`reference_rows = 0` means no epoch is safe for that leg on that table.
 
 The two ids:
 
@@ -1428,7 +1487,11 @@ included** (they need `prices.assets`, `prices.usd_rate` and
   the refusal most likely to stop you, and until 0228's second review round the
   one a dry run could not reach;
 - zero `external` rows for canonical USDC in `prices.usd_rate`
-  (`ResetRequiresExternalRates`, precondition 1).
+  (`ResetRequiresExternalRates`, precondition 1);
+- a `--reset-not-before` below the leg's first priced reference candle on this
+  table (`ResetEpochBelowReference`), or no such candle at all
+  (`ResetEpochHasNoReference`). The comparison is in seconds, so a same-day epoch
+  that is hours early is refused, and the message names the value to re-run with.
 
 Until task 0228's review the leg and rates checks lived only in the per-month
 pass, which a dry run never builds: a rehearsal over the wrong leg listed

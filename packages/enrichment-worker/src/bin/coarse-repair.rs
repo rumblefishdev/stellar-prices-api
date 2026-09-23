@@ -125,12 +125,20 @@ struct Args {
 
     /// Epoch (unix seconds) below which stored USD values are left alone.
     ///
-    /// This is a correctness bound, not a convenience: below the date the pivot's
-    /// reference market begins, there is nothing to recompute from, so a reset
-    /// row stays at `close_usd = 0` permanently. For canonical USDT that date is
-    /// **2021-02-07** (`1612656000`) — the start of its USDC market. Task 0172
-    /// also measured it at genuine par before the June 2022 depeg, so the value
-    /// already on disk for that window is *correct* and this flag protects it.
+    /// This is a correctness bound, not a convenience: below the first candle of
+    /// the pivot's reference market there is nothing to recompute from, so a
+    /// reset row stays at `close_usd = 0` permanently. It must be the MEASURED
+    /// first priced reference candle of this leg's USDC market ON THE TABLE
+    /// BEING REPAIRED — query it with the runbook's Appendix A / Appendix C MIN
+    /// query and pass that value, never a round date.
+    ///
+    /// For canonical USDT on `_1h` that value is **1612724400** (2021-02-07
+    /// 19:00 UTC). The tool refuses any lower epoch before writing, dry run
+    /// included (`ResetEpochBelowReference`), and its message names the value to
+    /// use (task 0208 — task 0182 passed that date's midnight and stranded 157
+    /// candles). Task 0172 also measured USDT at genuine par before the June 2022
+    /// depeg, so below the epoch the stored $1 is *correct* and this flag
+    /// protects it.
     #[arg(long, requires = "reset_quote_asset_id")]
     reset_not_before: Option<u32>,
 
@@ -186,8 +194,10 @@ struct Args {
     /// ⚠️ `--reset-not-before` must be the MEASURED first candle of this leg's own
     /// USDC market, not a convenient round date. Task 0182's reset epoch sat 19
     /// hours before its reference market's first candle and 157 candles were
-    /// zeroed with nothing able to refill them. Appendix A's USDT figure
-    /// (`1612656000`) is the worked precedent; Appendix C gives the query.
+    /// zeroed with nothing able to refill them. For canonical USDT on `_1h` the
+    /// measured value is `1612724400` (2021-02-07 19:00 UTC); a lower value is
+    /// now refused before any write (`ResetEpochBelowReference`, task 0208).
+    /// Appendix C gives the query.
     ///
     /// Mutually exclusive with `--reset-require-external-rate`: that mode is for
     /// canonical USDC, this one for the legs that pivot off it. Refused by
@@ -518,6 +528,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (reset, enriched) = (summary.total_reset(), summary.total_enriched());
     if reset > 0 {
         println!("{reset} row(s) re-opened by the USD reset, {enriched} recomputed");
+        println!(
+            "Run the damage check (runbook Appendix A, 'Extra verification') on \
+             EVERY table you reset — including the ones that printed no shortfall. \
+             A quiet table is not a checked one: on 2026-08-19 the 157 destroyed \
+             candles sat in the two tables that never warned."
+        );
         if args.reset_require_external_rate {
             println!(
                 "This was the task 0268 external mode. Finish the campaign with \
