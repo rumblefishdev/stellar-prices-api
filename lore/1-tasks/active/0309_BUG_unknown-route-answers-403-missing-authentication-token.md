@@ -2,7 +2,7 @@
 id: "0309"
 title: "An unknown path or method answers 403 'Missing Authentication Token' — answer 404 in the ErrorEnvelope shape"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0306", "0183", "0194"]
 tags: [layer-infra, api, priority-medium, effort-small]
@@ -16,6 +16,10 @@ history:
     note: >
       Raised by Stanisław during 0306: the published docs now explain the
       403, but the answer itself is still the wrong one.
+  - date: "2026-09-23"
+    status: active
+    who: stkrolikiewicz
+    note: "Activated; implementation on its own branch."
 ---
 
 # An unknown path or method answers 403 "Missing Authentication Token"
