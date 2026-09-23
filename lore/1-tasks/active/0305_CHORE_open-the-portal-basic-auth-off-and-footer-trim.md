@@ -2,7 +2,7 @@
 id: "0305"
 title: "Open the portal to the public — explorer basic auth off /api/*, footer trimmed to live links"
 type: CHORE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0194", "0195", "0301", "0303"]
 tags: [layer-frontend, portal, priority-high, effort-small]
@@ -19,6 +19,10 @@ history:
       Created after the go-public decision (Stanisław + Marek, 2026-09-22).
       The basic-auth switch was left open by 0194 and 0195 as "not ours to
       decide"; it is now decided.
+  - date: "2026-09-23"
+    status: active
+    who: stkrolikiewicz
+    note: "Activated; footer trim and logo check start on the branch."
 ---
 
 # Open the portal to the public
