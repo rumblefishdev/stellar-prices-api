@@ -616,9 +616,27 @@ markers cleared, 1m partition dropped, coarse tiers left untouched until the
 reconcile. At 15:53 local: 582 167 / 591 002 ledgers indexed (the last
 archive partition downloading) and the new 1m partition already at **19
 candles / 24 trades — identical to the snapshot**, first candle on the same
-minute (2015-11-18 03:47), `pf_trade_count` = 24 of 24. Verdict, the
-minute-alignment count and the post-run checks are recorded below when the
-month closes.
+minute (2015-11-18 03:47), `pf_trade_count` = 24 of 24.
+
+**Closed 16:00:47 local, 4 851 s (81 min) — verdict OK.** `results.tsv`:
+`201511 505831 1096832 1m 24 -> 24 OK - 2/2 - 4851`; both run boundaries
+minute-aligned. Checked on prod against the `reingest_0286_bak_*` snapshot:
+
+| tier | candles new = old | trades new = old | pf trades | volumes | OHLC-order violations |
+| --- | --- | --- | --- | --- | --- |
+| 1m | 19 = 19 | 24 = 24 | 24 | equal | 0 |
+| 15m | 11 = 11 | 24 = 24 | 24 | equal | 0 |
+| 1h | 9 = 9 | 24 = 24 | 24 | equal | 0 |
+| 4h | 5 = 5 | 24 = 24 | 24 | equal | 0 |
+| 1d | 2 = 2 | 24 = 24 | 24 | equal | 0 |
+
+Raw row count = FINAL count on every tier (no duplicates); 591 002 markers
+re-written, one per ledger; 1w/1M untouched. Two 1m candles changed price —
+both single order-book fills, `4.16660000106665` (stroop ratio) →
+`4.1666` (the resting offer's price): phase 2 doing its job, and the 11-29
+day candle inherits the new open. `close_usd = 0` before and after (no USD
+reference in 2015). The trial proves the script against the real
+`sdex-backfill` end to end; stage A may start.
 
 #### Plan for the complete re-ingest
 
