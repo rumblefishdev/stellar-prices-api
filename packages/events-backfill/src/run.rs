@@ -162,16 +162,13 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     // reuse existing surrogate `asset_id`s and resolve every seeded pool.
     let existing_assets = writer.load_assets().await?;
     let mut assets = AssetRegistry::from_existing(existing_assets);
-    let mut reg = writer.load_pool_registry().await?;
+    let mut reg = reprice_registry(writer.load_pool_registry().await?)?;
 
     // Every AMM pool has a `venue` entry (the registry superset); its strkeys are
     // the exact contract set whose events we must read. We filter reads to these
     // so the extractor sees each pool's FULL event group (Phoenix emits 8
     // micro-events, all NULL-signature) — a signature/topic filter would break it.
     let pool_strkeys: Vec<String> = reg.venue.keys().cloned().collect();
-    if pool_strkeys.is_empty() {
-        return Err(EventsBackfillError::EmptyPoolRegistry);
-    }
     let id_map = resolve_contract_ids(writer.client(), &pool_strkeys).await?;
     let contract_ids: Vec<i64> = id_map.keys().copied().collect();
     if contract_ids.is_empty() {
@@ -583,6 +580,20 @@ fn print_summary(
     println!("negative apply order:      {apply_order_fallbacks}");
 }
 
+/// The registry the reprice reads events for: the LOADED `pool_registry` plus
+/// the committed factory-less pools (task 0300 D3a).
+///
+/// The empty check is on the table's rows, before the merge: an unseeded
+/// `pool_registry` still refuses the run rather than repricing only the static
+/// pools.
+fn reprice_registry(mut loaded: Registries) -> Result<Registries, EventsBackfillError> {
+    if loaded.venue.is_empty() {
+        return Err(EventsBackfillError::EmptyPoolRegistry);
+    }
+    loaded.merge_static_pools();
+    Ok(loaded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,5 +762,31 @@ mod tests {
             (0, true),
             "the whole negative range degrades, not just -1"
         );
+    }
+
+    const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
+
+    /// Task 0300 D3a: the static pools never mask an unseeded `pool_registry`
+    /// — the guard is about the table, and still fires on an empty one.
+    #[test]
+    fn an_empty_pool_registry_still_refuses_the_reprice() {
+        assert!(matches!(
+            reprice_registry(Registries::new()),
+            Err(EventsBackfillError::EmptyPoolRegistry)
+        ));
+    }
+
+    /// Task 0300 D3a: on a seeded table the reprice also reads the committed
+    /// factory-less pools' events.
+    #[test]
+    fn a_seeded_reprice_also_reads_the_static_pools() {
+        const AQUA: &str = "CDE57N6XTUPBKYYDGQMXX7E7SLNOLFY3JEQB4MULSMR2AKTSAENGX2HC";
+        let mut loaded = Registries::new();
+        loaded.venue.insert(AQUA.to_string(), Venue::Aquarius);
+
+        let reg = reprice_registry(loaded).expect("a seeded table reprices");
+        assert_eq!(reg.venue.len(), 2);
+        assert_eq!(reg.venue.get(AQUA), Some(&Venue::Aquarius));
+        assert_eq!(reg.venue.get(COMET), Some(&Venue::Comet));
     }
 }

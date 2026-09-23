@@ -524,3 +524,23 @@ fn an_unregistered_comet_swap_is_counted_as_comet() {
     assert_eq!(out.unregistered_pool_events, vec![("comet", 1)]);
     assert_eq!(out.unregistered_pool_contracts, vec![COMET.to_string()]);
 }
+
+/// AC6 (D3a): from an EMPTY `pool_registry`, the committed static list alone
+/// routes the pool — no table row, no manual venue insert.
+#[test]
+fn the_static_list_routes_comet_from_an_empty_registry() {
+    let mut reg = Registries::new();
+    reg.merge_static_pools();
+    let mut assets = seeded_assets();
+    let out = run(
+        64_570_597,
+        &[typical_usdc_to_blnd_recent()],
+        &mut reg,
+        &mut assets,
+    );
+    assert_eq!(out.amm_ticks.len(), 1);
+    let (source, tick) = &out.amm_ticks[0];
+    assert_eq!(*source, "comet");
+    assert_eq!((tick.base_id, tick.quote_id), (BLND_ID, USDC_ID));
+    assert!(out.unregistered_pool_events.is_empty());
+}
