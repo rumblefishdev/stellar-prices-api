@@ -72,6 +72,33 @@ signed in and signed out, with a test.
 (the "shared host" section and the remaining-gaps list). Update once Step 1 is
 deployed.
 
+### Step 5: Scroll on navigation (reported 2026-09-23)
+
+The landing bar's `FAQ` / `Features` from any other page is a full load of
+`/api/#faq`; the browser looks for the target before React renders, so the
+URL said `#faq` and the page stayed at the top. Back/forward to such an entry
+restored that offset. Measured on the dev server: FAQ 6,439 px down, `scrollY`
+0. Also: a router push kept the previous page's offset — "Quick Start" from
+the foot of the landing opened the guide ~6,000 px down.
+
+Fix: one hook in `app.tsx` scrolls to the hash once its target renders
+(waiting up to 5 s for a lazy page), owns back/forward on hashed entries
+(`history.scrollRestoration = 'manual'` on those only), and starts a pushed
+page at the top.
+
+⚠️ Decided: back/forward to `/api/#faq` shows FAQ even if the reader had
+scrolled elsewhere before leaving — with the hash in the address bar anything
+else reads as the link not working. Hashless entries keep the browser's
+restoration.
+
+### Step 6: Lazy pages' loader (reported 2026-09-23)
+
+The `Suspense` fallback of `/privacy-policy` and `/docs` was `py: 12` around a
+28 px spinner: the footer rode up under it and jumped down when the page
+arrived. It is now a viewport tall less the 52 px bar, as the dashboard
+already is. `/docs` has a second short state — the page shell while the
+OpenAPI document downloads — not changed here.
+
 ## Acceptance Criteria
 
 - [ ] Footer shows neither `Status` nor the `rumblefish.dev` text link; the
@@ -83,3 +110,7 @@ deployed.
 - [ ] Without credentials: `/api/` answers `200`; a refresh on `/api/dashboard`
       and `/api/docs` returns the portal's `index.html` (0195's open AC)
 - [ ] `docs/scf/api-endpoints.md` no longer describes the portal as gated
+- [ ] A `#hash` URL lands on its target: from another page's bar, pasted, on
+      a lazy page, and on back/forward; an in-page link keeps its smooth
+      scroll; a pushed page opens at the top
+- [ ] The lazy pages' loader keeps the footer below the fold
