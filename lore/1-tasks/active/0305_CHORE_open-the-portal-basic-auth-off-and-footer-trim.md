@@ -130,5 +130,5 @@ with this task; the rest of that comparison is [[0306]].
       a lazy page, and on back/forward; an in-page link keeps its smooth
       scroll; a pushed page opens at the top
 - [x] The lazy pages' loader keeps the footer below the fold
-- [ ] The Quick Start's 429 card shows what its Copy button writes, and the
+- [x] The Quick Start's 429 card shows what its Copy button writes, and the
       error lede no longer promises a `code` on the gateway's 403 and 429
