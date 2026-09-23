@@ -12,6 +12,13 @@ pub enum Venue {
     /// [`Venue::Soroswap`] does — a separate instance, so the two venues never
     /// share a `contract_id`.
     Sushiswap,
+    /// The Comet weighted pool — a Balancer-style pool; the one indexed is
+    /// Blend's backstop BLND/USDC (task 0300). It emits one
+    /// `[Symbol("POOL"), Symbol("swap")]` per swap with the tokens AND the raw
+    /// amounts inline in a data map, so, like [`Venue::Aquarius`], it needs no
+    /// pair registry. The pool has no factory, so it is registered through
+    /// `prices-ingest-core`'s committed `STATIC_POOLS` list.
+    Comet,
 }
 
 impl Venue {
@@ -23,6 +30,7 @@ impl Venue {
             Venue::Aquarius => "aquarius",
             Venue::Phoenix => "phoenix",
             Venue::Sushiswap => "sushiswap",
+            Venue::Comet => "comet",
         }
     }
 
@@ -34,6 +42,7 @@ impl Venue {
             "aquarius" => Some(Venue::Aquarius),
             "phoenix" => Some(Venue::Phoenix),
             "sushiswap" => Some(Venue::Sushiswap),
+            "comet" => Some(Venue::Comet),
             _ => None,
         }
     }
@@ -119,3 +128,30 @@ pub enum ExtractError {
 }
 
 pub type VenueRegistry = HashMap<String, Venue>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_venue_round_trips_through_its_source_name() {
+        for venue in [
+            Venue::Soroswap,
+            Venue::Aquarius,
+            Venue::Phoenix,
+            Venue::Sushiswap,
+            Venue::Comet,
+        ] {
+            assert_eq!(Venue::from_source(venue.as_source()), Some(venue));
+        }
+    }
+
+    #[test]
+    fn comet_is_named_comet() {
+        // Task 0300 D5: the one literal behind pool_registry.venue, the
+        // pre-roll filter and the amm_ticks source tag.
+        assert_eq!(Venue::Comet.as_source(), "comet");
+        assert_eq!(Venue::from_source("comet"), Some(Venue::Comet));
+        assert_eq!(Venue::from_source("Comet"), None);
+    }
+}

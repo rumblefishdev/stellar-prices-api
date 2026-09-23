@@ -613,7 +613,7 @@ SETTINGS index_granularity = 8192;
 -- output of the in-window registry so a partial re-backfill (a mid-history
 -- window) or the live processor can LOAD it instead of re-deriving from Soroban
 -- activation (this inverts task 0069: registry-as-output, not required-input).
--- venue = 'soroswap' | 'phoenix' | 'aquarius' | 'sushiswap' (task 0290).
+-- venue = 'soroswap' | 'phoenix' | 'aquarius' | 'sushiswap' (task 0290) | 'comet' (task 0300).
 -- token0/token1 are the pair tokens of the two pair-backed venues — Soroswap
 -- (from `new_pair`) and SushiSwap V3 (from `pool_created`) — needed because
 -- their swap events omit them; pool_type / wasm_hash are Phoenix pool details;

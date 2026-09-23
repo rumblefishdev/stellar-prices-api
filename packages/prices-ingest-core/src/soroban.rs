@@ -594,7 +594,7 @@ fn classify_amm_groups(
             // SushiSwap is pair-backed too (task 0290), so the same miss is
             // possible and must be just as loud.
             Venue::Sushiswap => !reg.sushiswap.contains(&contract_id),
-            Venue::Aquarius | Venue::Phoenix => false,
+            Venue::Aquarius | Venue::Phoenix | Venue::Comet => false,
         };
         if pair_unresolved {
             if let Some(rec) = unresolved_from_swaps(contract_id, &swaps, ledger_seq) {
@@ -2187,3 +2187,7 @@ mod tests {
         );
     }
 }
+
+/// Task 0300: the Comet venue, pinned on real production payloads.
+#[cfg(test)]
+mod comet_tests;

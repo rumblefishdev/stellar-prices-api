@@ -946,10 +946,15 @@ mod tests {
             Venue::Phoenix,
             Venue::Soroswap,
             Venue::Sushiswap,
+            Venue::Comet,
         ];
         for v in &venues {
             match v {
-                Venue::Aquarius | Venue::Phoenix | Venue::Soroswap | Venue::Sushiswap => {}
+                Venue::Aquarius
+                | Venue::Phoenix
+                | Venue::Soroswap
+                | Venue::Sushiswap
+                | Venue::Comet => {}
             }
         }
 
