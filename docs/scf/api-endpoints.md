@@ -146,11 +146,17 @@ also why the API reference is a **route of the portal** rather than a static
 the hosting side; adding a backend route needs nothing either, because the
 gateway maps `/api/{proxy+}` and the bundle calls the API host directly.
 
-What the shared host does NOT give us, and what still gates the portal's
-public availability: the same function answers `401` to anyone without the
-explorer's staging credentials while `enableApiSpaBasicAuth` is on in their
-`production.json`. Turning it off is the explorer team's call, not this
-repo's.
+The portal is public since 2026-09-23. Until then the same function answered
+`401` to anyone without the explorer's staging credentials, because
+`enableApiSpaBasicAuth` was on in their `production.json`; task 0305 had it
+turned off for `/api/*` (`568d0a29` on the explorer's `develop`). Measured
+2026-09-23 09:02 UTC, without credentials: `/api/`, `/api/dashboard` and
+`/api/docs` answer `200` with the portal's `index.html`.
+
+⚠️ The explorer's `master` still reads `true`, and their production releases
+tag `origin/master`. The flag lives in their `Delivery` stack, which the
+default release set (Compute + SPA) does not deploy, but a `-all` or
+`-Delivery` tag cut before `develop` reaches `master` puts the gate back.
 
 ## OpenAPI specification (task 0124)
 
@@ -222,11 +228,11 @@ npm run openapi:extract   # → target/openapi.json, servers stamped from config
   reference, `https://sorobanscan.rumblefish.dev/api/docs`, rendering the
   live `/api-docs-json` in the portal's own design system. Nothing on it
   sends a request until the data routes answer CORS (task 0126).
-- **Onboarding portal** — open (`PORTAL_ENABLED=true` since task 0194) at
-  `https://sorobanscan.rumblefish.dev/api/`, behind the block explorer's
-  basic auth until their `enableApiSpaBasicAuth` is turned off; that switch
-  and the move from the test guild to the Stellar guild (task 0179) both
-  precede advertising the URL.
+- **Onboarding portal** — open (`PORTAL_ENABLED=true` since task 0194) and
+  public since 2026-09-23 (task 0305) at
+  `https://sorobanscan.rumblefish.dev/api/`: the block explorer's basic auth
+  is off for `/api/*`. The move from the test guild to the Stellar guild
+  (task 0179) still precedes advertising the URL.
 - **CORS on `/v1`** (task 0126) — no browser can call the data routes yet;
   the portal's API reference sends no requests for exactly this reason.
 - **`info.license`** (task 0155) — currently emitted empty; the licensing

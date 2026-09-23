@@ -127,9 +127,9 @@ with this task; the rest of that comparison is [[0306]].
 
 ## Acceptance Criteria
 
-- [ ] Footer shows neither `Status` nor the `rumblefish.dev` text link; the
+- [x] Footer shows neither `Status` nor the `rumblefish.dev` text link; the
       Rumble Fish mark still links to `https://rumblefish.dev`
-- [ ] The SorobanScan logo links to `https://sorobanscan.rumblefish.dev/` on
+- [x] The SorobanScan logo links to `https://sorobanscan.rumblefish.dev/` on
       `/`, `/quick-start`, `/docs`, `/privacy-policy` and `/dashboard`, signed
       in and signed out (`/login` has no bar)
 - [x] Explorer: `enableApiSpaBasicAuth: false` deployed to production (its
@@ -138,12 +138,12 @@ with this task; the rest of that comparison is [[0306]].
 - [x] Without credentials: `/api/` answers `200`; a refresh on `/api/dashboard`
       and `/api/docs` returns the portal's `index.html` (0195's open AC;
       measured 2026-09-23 09:02 UTC)
-- [ ] `docs/scf/api-endpoints.md` no longer describes the portal as gated
-- [ ] A `#hash` URL lands on its target: from another page's bar, pasted, on
+- [x] `docs/scf/api-endpoints.md` no longer describes the portal as gated
+- [x] A `#hash` URL lands on its target: from another page's bar, pasted, on
       a lazy page, and on back/forward; an in-page link keeps its smooth
       scroll; a pushed page opens at the top
-- [ ] The lazy pages' loader keeps the footer below the fold
-- [ ] The Quick Start's 429 card shows what its Copy button writes, and the
+- [x] The lazy pages' loader keeps the footer below the fold
+- [x] The Quick Start's 429 card shows what its Copy button writes, and the
       error lede no longer promises a `code` on the gateway's 403 and 429
-- [ ] No page names a status page: the sign-in refusal card ends at "contact
+- [x] No page names a status page: the sign-in refusal card ends at "contact
       support"
