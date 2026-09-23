@@ -137,6 +137,23 @@ history:
       placeholders, nothing is deployed, and `current.sql`'s `src_is_live` /
       `src_volume` dust counting is **unowned — needs a task** (no follow-up
       task exists; guardrails row 84 says so rather than pointing at one).
+  - date: "2026-09-23"
+    status: active
+    who: akot
+    note: >
+      **No longer stacked; draft PR #346.** #337 (0216) merged, so the
+      branch was rebased onto develop `e117e57` with no conflicts (none of
+      the 18 intervening commits touch this task's files) and is now eight
+      linear commits on develop alone. Re-verified on ClickHouse 26.3.10.60:
+      **69** `prices-clickhouse` lib, **23** `views_it`, **10**
+      `current_mv_it`, **225** `prices-api` lib, **43** `ohlcv_it`, **12**
+      `openapi`, fmt clean. Pushed and opened as a DRAFT PR, which stays
+      draft until phase 2 replaces both placeholder constants. Views are
+      applied only by hand (`chwf views.sql`); no deploy, init step or 0286
+      phase-3 script applies them, so a merge alone would publish nothing.
+      Phase 2 (≥ 2026-09-29) measures on the same post-0286 week as 0286's
+      AC 10. 0286's phase-3 re-ingest (started 2026-09-23 at 201511) rewrites
+      history only, month by month, and does not touch that window.
 ---
 
 # Volume-coverage gate for `price_usd_series` / `price_usd_series_1h`
