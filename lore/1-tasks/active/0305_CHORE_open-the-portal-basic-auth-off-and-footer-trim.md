@@ -46,8 +46,13 @@ the SorobanScan logo is verified on every page.
 - Later on 2026-09-23 (~10:20 CEST) the gate was off: without credentials
   `/api/`, `/api/docs`, `/api/dashboard`, `/api/quick-start`,
   `/api/privacy-policy` and `/api/login` answered `200` with the portal's
-  `index.html` (the bundle deployed 2026-09-22 14:02 UTC). The explorer's
-  config itself was not read.
+  `index.html` (the bundle deployed 2026-09-22 14:02 UTC). The flag is
+  `false` on the explorer's `develop` (`568d0a29`, their lore-0519,
+  2026-09-23 09:27 CEST); their `master` still reads `true`, and no
+  `deploy-production` run followed the one of 2026-09-21, so the change
+  reached production outside the tag pipeline. ⚠️ Their releases tag
+  `origin/master`: a `-all` or `-Delivery` tag cut before `develop` reaches
+  `master` puts the gate back.
 - The footer's `Status` has had no destination since the design (rendered as
   plain text), and `rumblefish.dev` duplicates the Rumble Fish mark next to it,
   which already links there.
@@ -127,9 +132,12 @@ with this task; the rest of that comparison is [[0306]].
 - [ ] The SorobanScan logo links to `https://sorobanscan.rumblefish.dev/` on
       `/`, `/quick-start`, `/docs`, `/privacy-policy` and `/dashboard`, signed
       in and signed out (`/login` has no bar)
-- [ ] Explorer: `enableApiSpaBasicAuth: false` deployed to production
-- [ ] Without credentials: `/api/` answers `200`; a refresh on `/api/dashboard`
-      and `/api/docs` returns the portal's `index.html` (0195's open AC)
+- [x] Explorer: `enableApiSpaBasicAuth: false` deployed to production (its
+      effect measured below; the flag is on their `develop` only — see the
+      ⚠️ in Context)
+- [x] Without credentials: `/api/` answers `200`; a refresh on `/api/dashboard`
+      and `/api/docs` returns the portal's `index.html` (0195's open AC;
+      measured 2026-09-23 09:02 UTC)
 - [ ] `docs/scf/api-endpoints.md` no longer describes the portal as gated
 - [ ] A `#hash` URL lands on its target: from another page's bar, pasted, on
       a lazy page, and on back/forward; an in-page link keeps its smooth
