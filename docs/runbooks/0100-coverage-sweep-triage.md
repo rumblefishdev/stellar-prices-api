@@ -75,7 +75,8 @@ The run did not complete. Causes, most likely first:
   fails until they do. That is intended: a swallowed error would publish
   nothing and read green.
 - **`TIMEOUT_EXCEEDED`:** the client bounds each of the run's two statements
-  at 50 s (`SWEEP_MAX_EXECUTION_SECS`; 2 × 50 s < the 120 s Lambda timeout).
+  at 50 s (`SWEEP_MAX_EXECUTION_SECS`; 2 × 50 s < the 180 s Lambda timeout,
+  which also leaves room for an Init that is re-run inside the invocation).
   The measured run takes 9.6 s.
 - **A Lambda timeout** (`Task timed out` in the log, no ClickHouse code):
   counted in `Errors` like the rest, but with no cause attached.
@@ -127,9 +128,14 @@ three outcomes:
 
 Also look at:
 
-- **`unresolved:<id>` rows.** BE's `soroban_contracts` has no row for that
-  surrogate id, which is usually BE lag. Check it again next week, and ask BE
-  if it persists.
+- **`unresolved swap emitter` WARN lines** (and the `UnresolvedSwapEmitters`
+  metric, which has no alarm). BE has no wasm for the contract yet: no
+  `soroban_contracts` row (logged as `unresolved:<surrogate id>`) or only its
+  stub. A `[[wasm]]` entry cannot match such a row, so it is kept out of the
+  paged residual — otherwise a new pool of an allow-listed family (SushiSwap
+  V3 before 0290) would page on BE lag. The 14-day window spans two runs, so
+  next week's run sees the contract again, resolved, and classifies it
+  normally. If the same contract is still unresolved two runs later, ask BE.
 - **`unmatched_allowlist`** on the INFO line. It lists entries that matched
   nothing this run. Those are stale entries and candidates for pruning,
   especially an `until` entry whose task has shipped.
@@ -143,18 +149,10 @@ Also look at:
 - The list is compiled into the binary, so an edit **ships only with an
   EventBridge deploy** (§4.4).
 
-> ⚠ **Phase-1 note: the first run WILL alarm.** The residual measured on
-> 2026-09-21 was deliberately left off the allow-list, because classifying it
-> is phase 1 of task 0100. It is:
->
-> - `8abc2891…`, a `POOL`/`swap` Comet-style shape with 730 events, the
->   largest candidate;
-> - an 11-family tail of 1–63 events each: `AtomicSwapV2`,
->   `NewBuyInitiatedTrade`, `SoroswapAggregator`, `lifi_swap`,
->   `swap_executed`, `swap_exact`, and others (the baseline-residual
->   table in task 0100).
->
-> That ALARM is the end-to-end proof (§4.5), not a fault.
+> **The first run will not alarm.** Phase 1 of task 0100 classified the whole
+> residual (`e4bae2a`, `d1b1eda`), so the current window reads 0 unclassified,
+> the run publishes no datapoint and the alarm stays OK. That OK is **not** the
+> end-to-end proof: the proof is the deliberate synthetic datapoint in §4.5.
 
 ## 4. Rollout (deploy-gated)
 
@@ -383,8 +381,9 @@ come out unclassified, the largest pool (`CCR2CH4G…`, 2,829 events) first of
 The same window surfaced the **Soroswap factory** (`CA4HEQTL…`,
 `SoroswapFactory / new_pair`): its topic contains `swap`, so every new
 Soroswap pair would have paged. It is now a permanent `[[contract]]` entry.
-Other April-only candidates for phase 1: `Swap` (`d4b4976b…`, 462 events),
-`SwappedToVUsd` (`a757a1ed…`, 355) and `tokens_swapped_event`.
+The other April-only emitters (`Swap` `d4b4976b…`, `SwappedToVUsd`
+`a757a1ed…`, the `tokens_swapped_event` pair and the 1–2-event tail) were
+classified and allow-listed in `d1b1eda`; the table is in task 0100.
 
 ## 6. Related
 

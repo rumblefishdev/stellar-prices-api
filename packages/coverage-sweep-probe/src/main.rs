@@ -24,7 +24,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     use coverage_sweep_probe::sweep::run_sweep;
     use coverage_sweep_probe::{
         AllowList, BE_DATABASE, PRICES_DATABASE, SWEEP_MAX_EXECUTION_SECS, publish,
-        unclassified_metrics,
+        unclassified_metrics, unresolved_metrics,
     };
     use lambda_runtime::{LambdaEvent, run, service_fn};
     use std::sync::Arc;
@@ -38,7 +38,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     // execution bound is added here because prices_writer's profile carries
     // none (prices-clickhouse `with_execution_bound`): a ClickHouse
     // TIMEOUT_EXCEEDED names its cause in the log, while a Lambda kill at the
-    // 120 s timeout does not; see SWEEP_MAX_EXECUTION_SECS for the arithmetic.
+    // 180 s timeout does not; see SWEEP_MAX_EXECUTION_SECS for the arithmetic.
     let ch = prices_clickhouse::mtls::client_from_lambda_env(PRICES_DATABASE).await?;
     let ch = Arc::new(prices_clickhouse::with_execution_bound(
         ch,
@@ -81,7 +81,23 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 );
             }
 
-            let metrics = unclassified_metrics(&report.unclassified);
+            // Not paged: a row without a wasm cannot be matched by a [[wasm]]
+            // entry, so it is most often BE lag on a listed family.
+            for row in &report.unresolved {
+                tracing::warn!(
+                    contract = %row.display_id(),
+                    events = row.events,
+                    txs = row.txs,
+                    first_ledger = row.first_ledger,
+                    last_ledger = row.last_ledger,
+                    top_action = %row.top_action,
+                    top_shape = %row.top_shape,
+                    "unresolved swap emitter (BE has no wasm yet; not paged)"
+                );
+            }
+
+            let mut metrics = unclassified_metrics(&report.unclassified);
+            metrics.extend(unresolved_metrics(&report.unresolved));
             let unclassified_events: u64 = report.unclassified.iter().map(|r| r.events).sum();
             // Entries that matched nothing this run: informational, candidates
             // for pruning (an `until` entry after its task shipped). Only the
@@ -98,6 +114,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 allowlisted = report.allowlisted.len(),
                 unclassified = report.unclassified.len(),
                 unclassified_events,
+                unresolved = report.unresolved.len(),
                 unmatched_allowlist = %unmatched_allowlist,
                 "coverage sweep complete"
             );
@@ -114,6 +131,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 "allowlisted": report.allowlisted.len(),
                 "unclassified": report.unclassified.len(),
                 "unclassified_events": unclassified_events,
+                "unresolved": report.unresolved.len(),
             }))
         }
     }))

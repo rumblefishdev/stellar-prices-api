@@ -424,9 +424,9 @@ async fn only_in_window_events_count() {
     let max = 1_000_000;
     let lo = max - coverage_sweep_probe::sweep::SWEEP_WINDOW_LEDGERS;
     let (old, straddle, edge) = (strkey(30), strkey(31), strkey(32));
-    f.contract(30, &old, None).await;
-    f.contract(31, &straddle, None).await;
-    f.contract(32, &edge, None).await;
+    f.contract(30, &old, Some(COMET_LIKE_WASM)).await;
+    f.contract(31, &straddle, Some(COMET_LIKE_WASM)).await;
+    f.contract(32, &edge, Some(COMET_LIKE_WASM)).await;
     // Only before the window.
     f.events(30, 700_000, 5, SWAP).await;
     // Both sides: two before, two inside (the max ledger among them).
@@ -451,7 +451,8 @@ async fn only_in_window_events_count() {
 }
 
 /// (4) An emitter BE has not resolved in `soroban_contracts` is still
-/// reported, by surrogate, never silently lost.
+/// reported, by surrogate, never silently lost — as unresolved, not in the
+/// paged residual: no `[[wasm]]` entry can match it yet.
 #[tokio::test]
 #[ignore = "requires ClickHouse (local 26.3.10.60; cargo test -- --ignored)"]
 async fn an_unresolved_contract_is_reported_by_surrogate() {
@@ -462,8 +463,9 @@ async fn an_unresolved_contract_is_reported_by_surrogate() {
         .sweep_as_writer(&AllowList::embedded().unwrap(), true)
         .await;
     let report = result.expect("sweep runs");
-    assert_eq!(report.unclassified.len(), 1, "{report:?}");
-    let row = &report.unclassified[0];
+    assert!(report.unclassified.is_empty(), "{report:?}");
+    assert_eq!(report.unresolved.len(), 1, "{report:?}");
+    let row = &report.unresolved[0];
     assert_eq!(row.strkey, "");
     assert_eq!(row.wasm, None);
     assert_eq!(row.contract_surrogate, 99);

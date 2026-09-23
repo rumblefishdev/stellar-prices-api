@@ -946,10 +946,12 @@ export class EventBridgeStack extends cdk.Stack {
       memorySize: 256,
       // Measured on production 2026-09-21: 9.6 s, 218.5 M rows / 46.6 GB read,
       // 141 MB of server memory. The client bounds each of the run's two
-      // statements at 50 s (SWEEP_MAX_EXECUTION_SECS; 2 × 50 < 120), so a slow
-      // scan ends as a ClickHouse TIMEOUT_EXCEEDED naming its cause, not as a
-      // Lambda kill with none in the log.
-      timeout: cdk.Duration.minutes(2),
+      // statements at 50 s (SWEEP_MAX_EXECUTION_SECS), so a slow scan ends as
+      // a ClickHouse TIMEOUT_EXCEEDED naming its cause, not as a Lambda kill
+      // with none in the log. 3 min rather than 2: an Init over 10 s is re-run
+      // inside the invocation on this clock, and 2 × 50 s + that re-run must
+      // still fit (PR #332 review). Weekly, so the headroom costs nothing.
+      timeout: cdk.Duration.minutes(3),
       secretsExtensionLayer,
       chDomain,
       rule: this.coverageSweepProbeRule,

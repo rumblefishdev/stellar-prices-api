@@ -31,6 +31,10 @@ pub const METRIC_NAMESPACE: &str = "Prices/Coverage";
 pub const UNCLASSIFIED_SWAP_CONTRACTS: &str = "UnclassifiedSwapContracts";
 /// Sum of their swap/trade-shaped events in the window. The alarm watches this.
 pub const UNCLASSIFIED_SWAP_EVENTS: &str = "UnclassifiedSwapEvents";
+/// Number of unlisted contracts whose wasm BE has not resolved yet
+/// ([`sweep::Partition::unresolved`]). No alarm: BE lag clears by the next run;
+/// a contract still here two runs later is a question for BE (runbook §3).
+pub const UNRESOLVED_SWAP_EMITTERS: &str = "UnresolvedSwapEmitters";
 
 /// BE's database (`soroban_events`, `soroban_contracts`).
 pub const BE_DATABASE: &str = "default";
@@ -41,11 +45,13 @@ pub const PRICES_DATABASE: &str = "prices";
 /// runs as `prices_writer`, whose profile carries no execution bound.
 ///
 /// A run issues two statements (the window's `max(ledger_sequence)`, then the
-/// sweep), each bounded separately, inside the 120 s Lambda timeout — so the
-/// bound must be under half of it for a slow run to end in a ClickHouse
-/// `TIMEOUT_EXCEEDED` (a logged error carrying the CH code) rather than a
-/// Lambda kill (counted in `Errors` too, but with no cause in the log).
-/// 2 × 50 s = 100 s < 120 s; 50 s is ~5× the measured 9.6 s (review WR-05).
+/// sweep), each bounded separately, inside the 180 s Lambda timeout — so a
+/// slow run ends in a ClickHouse `TIMEOUT_EXCEEDED` (a logged error carrying
+/// the CH code) rather than a Lambda kill (counted in `Errors` too, but with no
+/// cause in the log). The timeout also has to hold an Init that ran over 10 s
+/// (Secrets Manager fetch, TLS, AWS config) and is therefore re-run inside the
+/// invocation, on its clock. 2 × 50 s = 100 s leaves 80 s for that; 50 s is
+/// ~5× the measured 9.6 s (review WR-05; PR #332 review).
 pub const SWEEP_MAX_EXECUTION_SECS: u64 = 50;
 
 /// One datapoint to publish.
@@ -73,6 +79,18 @@ pub fn unclassified_metrics(unclassified: &[SweepRow]) -> Vec<Metric> {
             value: events as f64,
         },
     ]
+}
+
+/// The unresolved emitters' datapoint: nothing when there are none, like
+/// [`unclassified_metrics`].
+pub fn unresolved_metrics(unresolved: &[SweepRow]) -> Vec<Metric> {
+    if unresolved.is_empty() {
+        return Vec::new();
+    }
+    vec![Metric {
+        name: UNRESOLVED_SWAP_EMITTERS,
+        value: unresolved.len() as f64,
+    }]
 }
 
 /// Publish `metrics` under [`METRIC_NAMESPACE`] with an `Environment`
@@ -137,6 +155,18 @@ mod tests {
     #[test]
     fn nothing_unclassified_publishes_nothing() {
         assert!(unclassified_metrics(&[]).is_empty());
+    }
+
+    #[test]
+    fn unresolved_publishes_only_a_contract_count() {
+        assert!(unresolved_metrics(&[]).is_empty());
+        assert_eq!(
+            unresolved_metrics(&[row(5), row(9)]),
+            vec![Metric {
+                name: UNRESOLVED_SWAP_EMITTERS,
+                value: 2.0
+            }]
+        );
     }
 
     #[test]

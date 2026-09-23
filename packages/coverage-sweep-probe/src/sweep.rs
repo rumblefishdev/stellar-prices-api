@@ -182,25 +182,43 @@ pub struct SweepReport {
     pub rows_total: usize,
     /// Rows no allow-list entry covers: the residual that pages.
     pub unclassified: Vec<SweepRow>,
+    /// Rows no entry covers yet whose wasm BE has not resolved (see
+    /// [`Partition::unresolved`]). Reported, never paged.
+    pub unresolved: Vec<SweepRow>,
     /// Rows an entry covers, with the matching key (`contract:<id>` /
     /// `wasm:<hash>`).
     pub allowlisted: Vec<(SweepRow, String)>,
 }
 
-/// Split the query's rows into `(unclassified, allowlisted)`.
-pub fn partition(
-    rows: Vec<SweepRow>,
-    allow: &AllowList,
-) -> (Vec<SweepRow>, Vec<(SweepRow, String)>) {
-    let mut unclassified = Vec::new();
-    let mut allowlisted = Vec::new();
+/// The query's rows, split by what the allow-list can say about them.
+#[derive(Debug, Default)]
+pub struct Partition {
+    /// No entry covers the row, and its wasm is known: the residual that pages.
+    pub unclassified: Vec<SweepRow>,
+    /// No entry covers the row, and BE has no wasm for it yet — no
+    /// `soroban_contracts` row, or only the stub (`wasm_hash` NULL). A
+    /// `[[wasm]]` entry cannot match such a row, so paging on it would page on
+    /// BE lag, e.g. for a new pool of an allow-listed family (review of PR
+    /// #332). A SAC also has no wasm, but a SAC emits no swap events. The next
+    /// weekly run still sees the contract (the window spans two runs), by then
+    /// resolved.
+    pub unresolved: Vec<SweepRow>,
+    /// An entry covers the row; with the matching key.
+    pub allowlisted: Vec<(SweepRow, String)>,
+}
+
+/// Split the query's rows into unclassified, unresolved and allow-listed. A
+/// `[[contract]]` entry still covers a row whose wasm is unknown.
+pub fn partition(rows: Vec<SweepRow>, allow: &AllowList) -> Partition {
+    let mut out = Partition::default();
     for row in rows {
         match allow.match_row(&row.strkey, row.wasm.as_deref()) {
-            Some(key) => allowlisted.push((row, key)),
-            None => unclassified.push(row),
+            Some(key) => out.allowlisted.push((row, key)),
+            None if row.wasm.as_deref().is_none_or(str::is_empty) => out.unresolved.push(row),
+            None => out.unclassified.push(row),
         }
     }
-    (unclassified, allowlisted)
+    out
 }
 
 /// Run one sweep: read the top ledger, query the window, subtract the
@@ -228,13 +246,18 @@ pub async fn run_sweep(
         .fetch_all::<SweepRow>()
         .await?;
     let rows_total = rows.len();
-    let (unclassified, allowlisted) = partition(rows, allow);
+    let Partition {
+        unclassified,
+        unresolved,
+        allowlisted,
+    } = partition(rows, allow);
     Ok(SweepReport {
         max_ledger,
         lo,
         hi,
         rows_total,
         unclassified,
+        unresolved,
         allowlisted,
     })
 }
@@ -390,6 +413,47 @@ mod tests {
         assert_eq!(window(64_541_178), (64_320_000, 64_541_178));
         assert_eq!(window(100), (0, 100));
         assert_eq!(window(SWEEP_WINDOW_LEDGERS), (0, SWEEP_WINDOW_LEDGERS));
+    }
+
+    fn with_wasm(strkey: &str, surrogate: i64, wasm: &str) -> SweepRow {
+        SweepRow {
+            wasm: Some(wasm.to_string()),
+            ..row(strkey, surrogate)
+        }
+    }
+
+    #[test]
+    fn a_row_without_wasm_is_unresolved_not_unclassified() {
+        // A new pool of an allow-listed wasm family, before BE resolves it:
+        // no strkey, or a stub row with no wasm. Neither may page.
+        let allow = AllowList::embedded().unwrap();
+        let sushi = "003710b383f9da7d650a7f719a7be479110266427817ebbed61d924505fcd7c7";
+        let fresh = "CCR2CH4GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let p = partition(
+            vec![
+                row("", 1),
+                row(fresh, 2),
+                with_wasm(fresh, 3, ""),
+                with_wasm(fresh, 4, sushi),
+                with_wasm(fresh, 5, &"ab".repeat(32)),
+            ],
+            &allow,
+        );
+        let surrogates =
+            |rows: &[SweepRow]| -> Vec<i64> { rows.iter().map(|r| r.contract_surrogate).collect() };
+        assert_eq!(surrogates(&p.unresolved), vec![1, 2, 3]);
+        assert_eq!(surrogates(&p.unclassified), vec![5]);
+        assert_eq!(p.allowlisted.len(), 1);
+        assert_eq!(p.allowlisted[0].1, format!("wasm:{sushi}"));
+    }
+
+    #[test]
+    fn a_contract_entry_covers_a_row_without_wasm() {
+        let allow = AllowList::embedded().unwrap();
+        let router = allow.contract[0].id.clone();
+        let p = partition(vec![row(&router, 1)], &allow);
+        assert!(p.unresolved.is_empty() && p.unclassified.is_empty());
+        assert_eq!(p.allowlisted[0].1, format!("contract:{router}"));
     }
 
     #[test]
