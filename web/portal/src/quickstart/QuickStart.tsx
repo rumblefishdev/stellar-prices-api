@@ -408,7 +408,8 @@ export const RESPONSE_FIELDS: readonly {
     value: <Tok c={STR}>&quot;2026-08-31T12:22:00Z&quot;</Tok>,
     raw: '"2026-08-31T12:22:00Z"',
     dot: STR,
-    meaning: 'When this price was last computed (ISO 8601, UTC)',
+    meaning:
+      'When this snapshot row was last refreshed (ISO 8601, UTC) — not the age of the price',
   },
   {
     // `PriceResponse` requires it, and the table went without it until task
@@ -419,6 +420,20 @@ export const RESPONSE_FIELDS: readonly {
     dot: STR,
     meaning:
       "How price_usd was obtained: traded (this asset's own trades) or oracle (an oracle rate, currently USDC only); empty when no priced trade fell in the window",
+  },
+  {
+    key: 'as_of',
+    value: <Tok c={STR}>&quot;2026-08-31T12:16:00Z&quot;</Tok>,
+    raw: '"2026-08-31T12:16:00Z"',
+    dot: STR,
+    meaning: "The price's own time: the minute price_usd was read from",
+  },
+  {
+    key: 'price_status',
+    value: <Tok c={STR}>&quot;carried&quot;</Tok>,
+    raw: '"carried"',
+    dot: STR,
+    meaning: 'priced, carried or unpriced — what kind of price this is',
   },
 ];
 

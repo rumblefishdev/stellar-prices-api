@@ -11,6 +11,22 @@ use crate::assets::dto::Candle;
 use crate::common::cursor::Cursor;
 use crate::identity::AssetIdentifier;
 
+/// `as_of`, projected with its epoch guard — ONE definition, shared by every
+/// current-price query (task 0216).
+///
+/// `current_prices.as_of` is non-nullable, so "there is no price" has to be a
+/// value, and the value is `toDateTime(0)`. Formatted like any other timestamp
+/// that becomes `1970-01-01T00:00:00Z` on the wire: an ordinary-looking
+/// 56-year-old price that no consumer would read as absent. The guard maps
+/// exactly the sentinel to `""`, which is the form `/price` already uses for an
+/// unavailable `method`.
+///
+/// Shared rather than copied because the failure is invisible: a query that
+/// lost the guard would publish the epoch and still pass any test that merely
+/// checks the key is present.
+pub(crate) const AS_OF_SQL: &str =
+    "if(c.as_of = toDateTime(0), '', formatDateTime(c.as_of, '%Y-%m-%dT%H:%i:%SZ')) AS as_of";
+
 /// One current-price row, all numeric fields as decimal strings.
 #[derive(Debug, clickhouse::Row, serde::Deserialize)]
 pub struct CurrentPriceRow {
@@ -27,6 +43,13 @@ pub struct CurrentPriceRow {
     /// POSITIONALLY by `clickhouse::Row`, so this field's position must match
     /// the SELECT's — append to both together or the row silently misparses.
     pub method: String,
+    /// The price's own timestamp (task 0216): the candle `price_usd` was read
+    /// from, ISO-8601 UTC, or `""` when there is no price. Positional — see the
+    /// note on `method`.
+    pub as_of: String,
+    /// `priced` / `carried` / `unpriced`, or `""` for a row the MV has not
+    /// rewritten yet. Positional — see the note on `method`.
+    pub price_status: String,
 }
 
 /// One `assets` row, for the detail endpoint.
@@ -62,6 +85,16 @@ pub struct AssetListRow {
     pub updated_at: String,
     /// Price provenance (task 0178). Positional — see [`CurrentPriceRow::method`].
     pub method: String,
+    /// The price's own timestamp (task 0216), or `""` when there is no price.
+    /// Positional — see [`CurrentPriceRow::method`].
+    pub as_of: String,
+    /// `priced` / `carried` / `unpriced` / `""` (task 0216). Positional — see
+    /// [`CurrentPriceRow::method`].
+    ///
+    /// ⚠️ This is the LAST published field; `sort_key` below stays last in the
+    /// struct. Both are `String`, so swapping them is a silent misparse that
+    /// would publish the cursor payload as the price's status.
+    pub price_status: String,
     /// String form of the sort-column value for this row (cursor payload).
     pub sort_key: String,
 }
@@ -140,6 +173,48 @@ pub struct ListArgs {
     pub fetch_limit: u64,
 }
 
+/// The `GET /assets` listing SELECT. Split out of [`list_assets`] so the
+/// projection is reachable from a unit test without a ClickHouse client — the
+/// epoch guard's absence is otherwise invisible until it reaches a consumer.
+///
+/// `sort_key` stays LAST, after the two 0216 columns: it is a cursor artefact,
+/// not a published field, and it is a `String` beside two other `String`s, so a
+/// reorder here misparses silently.
+fn list_assets_sql(
+    sort_key_expr: &str,
+    sort_expr: &str,
+    dir: &str,
+    where_clause: &str,
+    limit: u64,
+) -> String {
+    format!(
+        "SELECT \
+           a.asset_id AS asset_id, \
+           if(a.asset_code != '', a.asset_code, sym.symbol) AS asset_code, \
+           a.issuer_address AS issuer_address, \
+           a.contract_address AS contract_address, \
+           m.home_domain AS home_domain, \
+           toString(c.price_usd) AS price_usd, \
+           toString(c.change_24h_pct) AS change_24h_pct, \
+           toString(c.change_7d_pct) AS change_7d_pct, \
+           toString(c.volume_24h_usd) AS volume_24h_usd, \
+           toString(c.vwap_24h) AS vwap_24h, \
+           c.sources AS sources, \
+           formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at, \
+           c.method AS method, \
+           {AS_OF_SQL}, \
+           c.price_status AS price_status, \
+           {sort_key_expr} AS sort_key \
+         FROM current_prices AS c FINAL \
+         INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
+         LEFT JOIN asset_metadata AS m FINAL ON m.asset_id = a.asset_id \
+         LEFT JOIN asset_symbol AS sym FINAL ON sym.contract_address = a.contract_address \
+         {where_clause} \
+         ORDER BY {sort_expr} {dir}, a.asset_id {dir} \
+         LIMIT {limit}"
+    )
+}
+
 /// Listing query (overview §4.1 / §3.3 CH idiom: `ORDER BY` + `LIMIT` on the
 /// merged `current_prices`, keyset cursor on `(sort, asset_id)`). Numeric sorts
 /// compare via `toFloat64` (asset_id breaks ties); `code` sorts lexically.
@@ -183,30 +258,12 @@ pub async fn list_assets(
         format!("WHERE {}", where_parts.join(" AND "))
     };
 
-    let sql = format!(
-        "SELECT \
-           a.asset_id AS asset_id, \
-           if(a.asset_code != '', a.asset_code, sym.symbol) AS asset_code, \
-           a.issuer_address AS issuer_address, \
-           a.contract_address AS contract_address, \
-           m.home_domain AS home_domain, \
-           toString(c.price_usd) AS price_usd, \
-           toString(c.change_24h_pct) AS change_24h_pct, \
-           toString(c.change_7d_pct) AS change_7d_pct, \
-           toString(c.volume_24h_usd) AS volume_24h_usd, \
-           toString(c.vwap_24h) AS vwap_24h, \
-           c.sources AS sources, \
-           formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at, \
-           c.method AS method, \
-           {sort_key_expr} AS sort_key \
-         FROM current_prices AS c FINAL \
-         INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
-         LEFT JOIN asset_metadata AS m FINAL ON m.asset_id = a.asset_id \
-         LEFT JOIN asset_symbol AS sym FINAL ON sym.contract_address = a.contract_address \
-         {where_clause} \
-         ORDER BY {sort_expr} {dir}, a.asset_id {dir} \
-         LIMIT {limit}",
-        limit = args.fetch_limit
+    let sql = list_assets_sql(
+        &sort_key_expr,
+        &sort_expr,
+        dir,
+        &where_clause,
+        args.fetch_limit,
     );
 
     // Bind in the order placeholders appear: search, then cursor (value, id).
@@ -238,6 +295,31 @@ fn identity_where(id: &AssetIdentifier) -> (&'static str, Vec<String>) {
     }
 }
 
+/// The `GET /assets/{id}/price` SELECT, split out for the same reason as
+/// [`list_assets_sql`]. This path is the one that most needs it: it ends in
+/// `fetch_optional` + `LIMIT 1`, and the RowBinary cursor's leftover-bytes
+/// check only runs at end of stream — so a projection that drifts from
+/// [`CurrentPriceRow`] here returns a plausible 200 rather than an error.
+fn current_price_sql(where_sql: &str) -> String {
+    format!(
+        "SELECT \
+           toString(c.price_usd) AS price_usd, \
+           toString(c.price_xlm) AS price_xlm, \
+           toString(c.vwap_24h) AS vwap_24h, \
+           toString(c.volume_24h_usd) AS volume_24h_usd, \
+           toString(c.change_24h_pct) AS change_24h_pct, \
+           c.sources AS sources, \
+           formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at, \
+           c.method AS method, \
+           {AS_OF_SQL}, \
+           c.price_status AS price_status \
+         FROM current_prices AS c FINAL \
+         INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
+         WHERE {where_sql} \
+         LIMIT 1"
+    )
+}
+
 /// Fetch the current price for `id` from `current_prices ⨝ assets`.
 ///
 /// Returns `None` when the asset has no current-price row (unknown asset, or the
@@ -248,21 +330,7 @@ pub async fn current_price(
     id: &AssetIdentifier,
 ) -> Result<Option<CurrentPriceRow>, clickhouse::error::Error> {
     let (where_sql, binds) = identity_where(id);
-    let sql = format!(
-        "SELECT \
-           toString(c.price_usd) AS price_usd, \
-           toString(c.price_xlm) AS price_xlm, \
-           toString(c.vwap_24h) AS vwap_24h, \
-           toString(c.volume_24h_usd) AS volume_24h_usd, \
-           toString(c.change_24h_pct) AS change_24h_pct, \
-           c.sources AS sources, \
-           formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at, \
-           c.method AS method \
-         FROM current_prices AS c FINAL \
-         INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
-         WHERE {where_sql} \
-         LIMIT 1"
-    );
+    let sql = current_price_sql(where_sql);
     let mut q = ch.query(&sql);
     for b in binds {
         q = q.bind(b);
@@ -288,6 +356,12 @@ pub struct BatchPriceRow {
     pub updated_at: String,
     /// Price provenance (task 0178). Positional — see [`CurrentPriceRow::method`].
     pub method: String,
+    /// The price's own timestamp (task 0216), or `""` when there is no price.
+    /// Positional — see [`CurrentPriceRow::method`].
+    pub as_of: String,
+    /// `priced` / `carried` / `unpriced` / `""` (task 0216). Positional — see
+    /// [`CurrentPriceRow::method`].
+    pub price_status: String,
 }
 
 /// A natural-identity lookup key shared by a requested [`AssetIdentifier`] and a
@@ -321,7 +395,30 @@ impl BatchPriceRow {
     }
 }
 
+/// The `POST /prices/batch` SELECT, split out for the same reason as
+/// [`list_assets_sql`]. Kept in lockstep with [`current_price_sql`] so `/price`
+/// and `/prices/batch` cannot drift.
+fn current_prices_batch_sql(where_clause: &str) -> String {
+    format!(
+        "SELECT a.asset_code, a.issuer_address, a.contract_address, \
+           toString(c.price_usd) AS price_usd, \
+           toString(c.price_xlm) AS price_xlm, \
+           toString(c.vwap_24h) AS vwap_24h, \
+           toString(c.volume_24h_usd) AS volume_24h_usd, \
+           toString(c.change_24h_pct) AS change_24h_pct, \
+           c.sources AS sources, \
+           formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at, \
+           c.method AS method, \
+           {AS_OF_SQL}, \
+           c.price_status AS price_status \
+         FROM current_prices AS c FINAL \
+         INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
+         WHERE {where_clause}"
+    )
+}
+
 /// Fetch current prices for many assets in ONE query (vs. a per-asset N+1 loop).
+///
 /// The identity predicates are OR-ed; positional binds are collected in clause
 /// order. Returns one row per matched asset — callers map back via [`IdentKey`]
 /// and treat absent identifiers as not-found.
@@ -339,21 +436,7 @@ pub async fn current_prices_batch(
         clauses.push(format!("({where_sql})"));
         binds.extend(b);
     }
-    let sql = format!(
-        "SELECT a.asset_code, a.issuer_address, a.contract_address, \
-           toString(c.price_usd) AS price_usd, \
-           toString(c.price_xlm) AS price_xlm, \
-           toString(c.vwap_24h) AS vwap_24h, \
-           toString(c.volume_24h_usd) AS volume_24h_usd, \
-           toString(c.change_24h_pct) AS change_24h_pct, \
-           c.sources AS sources, \
-           formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at, \
-           c.method AS method \
-         FROM current_prices AS c FINAL \
-         INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
-         WHERE {where_clause}",
-        where_clause = clauses.join(" OR ")
-    );
+    let sql = current_prices_batch_sql(&clauses.join(" OR "));
     let mut q = ch.query(&sql);
     for b in binds {
         q = q.bind(b);
@@ -1971,6 +2054,218 @@ mod tests {
         assert!(
             ext < traded,
             "the USDC arms are tested before traded: {sql}"
+        );
+    }
+
+    /// Every current-price query must guard `as_of` against the epoch (task
+    /// 0216). `current_prices.as_of` is non-nullable, so a row with no price
+    /// carries `toDateTime(0)` — and a query that formats it like any other
+    /// timestamp publishes `1970-01-01T00:00:00Z`, which reads as a very old
+    /// price rather than as no price. There is no error and no 500; the value
+    /// simply lies. Three surfaces read this column, so the guard is one shared
+    /// const and this test proves all three interpolate it.
+    #[test]
+    fn every_current_price_query_guards_as_of_against_the_epoch() {
+        let list = list_assets_sql(
+            "toString(c.price_usd)",
+            "toFloat64(c.price_usd)",
+            "DESC",
+            "",
+            51,
+        );
+        let price = current_price_sql("a.contract_address = ?");
+        let batch = current_prices_batch_sql("(a.contract_address = ?)");
+
+        for (what, sql) in [
+            ("list_assets", &list),
+            ("current_price", &price),
+            ("current_prices_batch", &batch),
+        ] {
+            assert!(
+                sql.contains(AS_OF_SQL),
+                "{what} must project as_of through the shared epoch guard, got: {sql}"
+            );
+            assert!(
+                sql.contains("c.price_status AS price_status"),
+                "{what} must project price_status, got: {sql}"
+            );
+        }
+
+        // The listing's cursor payload stays LAST: it and price_status are both
+        // String, so a reorder is a silent misparse that publishes the cursor
+        // as the price's status.
+        let status_at = list
+            .find("AS price_status")
+            .expect("price_status in the listing");
+        let sort_at = list.find("AS sort_key").expect("sort_key in the listing");
+        assert!(
+            status_at < sort_at,
+            "price_status must precede sort_key in the listing projection: {list}"
+        );
+    }
+
+    /// The projected column NAMES of a SELECT, in order: the alias after a
+    /// paren-depth-0 ` AS `, or the bare (possibly table-qualified) column name
+    /// when the projection carries none — `a.asset_code` is `asset_code`.
+    ///
+    /// Deliberately crude, like `aliases_of` above: a real SQL parser would be
+    /// a dependency and a second thing to trust. It tracks paren depth and
+    /// single-quoted strings, which is all these three projections need — every
+    /// comma and every ` AS ` inside a function call or a literal is invisible
+    /// to it, so `if(a.asset_code != '', a.asset_code, sym.symbol) AS
+    /// asset_code` is ONE item named `asset_code`.
+    fn projected_columns(sql: &str) -> Vec<String> {
+        let body = sql
+            .strip_prefix("SELECT ")
+            .expect("a current-price projection starts with SELECT");
+        let chars: Vec<char> = body.chars().collect();
+        let mut items: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut depth = 0i32;
+        let mut in_str = false;
+        let mut i = 0usize;
+        while i < chars.len() {
+            let c = chars[i];
+            if in_str {
+                cur.push(c);
+                if c == '\'' {
+                    in_str = false;
+                }
+                i += 1;
+                continue;
+            }
+            // The top-level FROM ends the projection. Only at depth 0, and only
+            // on a word boundary, so a column called `from_*` cannot end it.
+            if depth == 0
+                && chars[i..].starts_with(&['F', 'R', 'O', 'M', ' '])
+                && cur.chars().next_back().is_none_or(char::is_whitespace)
+            {
+                break;
+            }
+            match c {
+                '\'' => in_str = true,
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    items.push(std::mem::take(&mut cur));
+                    i += 1;
+                    continue;
+                }
+                _ => {}
+            }
+            cur.push(c);
+            i += 1;
+        }
+        items.push(cur);
+        items.iter().map(|item| output_name_of(item)).collect()
+    }
+
+    /// One projection item's output name: the identifier after its LAST
+    /// paren-depth-0 ` AS `, else the item itself with any table qualifier
+    /// stripped.
+    fn output_name_of(item: &str) -> String {
+        let chars: Vec<char> = item.trim().chars().collect();
+        let mut depth = 0i32;
+        let mut in_str = false;
+        let mut alias_at: Option<usize> = None;
+        let mut i = 0usize;
+        while i < chars.len() {
+            let c = chars[i];
+            if in_str {
+                if c == '\'' {
+                    in_str = false;
+                }
+                i += 1;
+                continue;
+            }
+            match c {
+                '\'' => in_str = true,
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {
+                    if depth == 0 && chars[i..].starts_with(&[' ', 'A', 'S', ' ']) {
+                        alias_at = Some(i + 4);
+                    }
+                }
+            }
+            i += 1;
+        }
+        let name: String = match alias_at {
+            Some(at) => chars[at..].iter().collect(),
+            None => chars.iter().collect(),
+        };
+        name.trim()
+            .rsplit('.')
+            .next()
+            .expect("rsplit always yields one element")
+            .to_string()
+    }
+
+    /// 🔴 The API-side twin of
+    /// `current_sql_to_clause_and_select_project_the_same_columns_in_the_same_order`
+    /// (prices-clickhouse), and it exists for the same reason one level down.
+    ///
+    /// `clickhouse::Row` decodes RowBinary POSITIONALLY: the server sends values
+    /// in the SELECT's order and serde fills the struct's fields in declaration
+    /// order, with no names on the wire to disagree. Transposing two adjacent
+    /// `String` columns — `c.method AS method` and the `as_of` guard, say — is
+    /// therefore not an error anywhere. The types still line up, every existing
+    /// assertion still passes, and `/price` ends in `fetch_optional` + `LIMIT 1`
+    /// so RowBinary's leftover-bytes check never even runs. The endpoint returns
+    /// a plausible 200 with the age published as the provenance and the
+    /// provenance as the age.
+    ///
+    /// `Row::COLUMN_NAMES` is filled by the derive in struct-field order, so it
+    /// IS the decode order, read from the struct rather than restated here —
+    /// adding a field to one side alone fails this test rather than drifting.
+    #[test]
+    fn every_current_price_projection_matches_its_row_struct_order() {
+        use clickhouse::Row;
+
+        let list = list_assets_sql(
+            // A concrete sort, because the listing's last projection item is a
+            // `{sort_key_expr} AS sort_key` placeholder.
+            "toString(c.price_usd)",
+            "toFloat64(c.price_usd)",
+            "DESC",
+            "",
+            51,
+        );
+        let price = current_price_sql("a.contract_address = ?");
+        let batch = current_prices_batch_sql("(a.contract_address = ?)");
+
+        for (what, sql, expected) in [
+            ("list_assets", &list, AssetListRow::COLUMN_NAMES),
+            ("current_price", &price, CurrentPriceRow::COLUMN_NAMES),
+            ("current_prices_batch", &batch, BatchPriceRow::COLUMN_NAMES),
+        ] {
+            let projected = projected_columns(sql);
+            let expected: Vec<String> = expected.iter().map(|s| (*s).to_string()).collect();
+            assert_eq!(
+                projected, expected,
+                "{what}'s SELECT must project exactly the Row struct's fields, in the \
+                 struct's order — RowBinary decodes positionally, so a transposition \
+                 here is a wrong answer, not an error. SQL: {sql}"
+            );
+        }
+
+        // Non-vacuous: an empty or truncated parse would compare equal to an
+        // empty expectation, and a Row whose derive stopped filling
+        // COLUMN_NAMES would make every assertion above trivially true.
+        assert_eq!(
+            CurrentPriceRow::COLUMN_NAMES.len(),
+            10,
+            "CurrentPriceRow is 10 columns; update this count WITH the struct"
+        );
+        assert_eq!(
+            AssetListRow::COLUMN_NAMES.len(),
+            16,
+            "AssetListRow is 15 published columns plus the sort_key cursor payload"
+        );
+        assert_eq!(
+            BatchPriceRow::COLUMN_NAMES.len(),
+            13,
+            "BatchPriceRow is CurrentPriceRow's 10 plus the three identity columns"
         );
     }
 

@@ -239,9 +239,9 @@
 --                    PRICED close in the 24h window, NOT age-bounded: for an
 --                    asset that stopped trading it is simply its last priced
 --                    close, and updated_at (refresh time) is NOT a price-age
---                    signal. No column carries that age yet. 0 = no priced
---                    candle in the window (an un-enriched tip alone no longer
---                    produces 0).
+--                    signal — as_of below is, and price_status says what kind
+--                    of price this is. 0 = no priced candle in the window (an
+--                    un-enriched tip alone no longer produces 0).
 --   price_xlm        Decimal(38,14). 0 = unavailable (no XLM market, or
 --                    price_usd on its 0 sentinel per the 0135 rule above) —
 --                    indistinguishable from a true 0. An un-enriched tip by
@@ -276,6 +276,43 @@
 --                    across all sources) — that asymmetry is intentional.
 --                    Guard the '' case explicitly; our own API does, in
 --                    `prices-api/src/assets/dto.rs::parse_sources`.
+--   as_of            DateTime. The timestamp of the candle price_usd was read
+--                    from — the price's own age, as opposed to updated_at,
+--                    which is when this snapshot was refreshed. For a row
+--                    priced from the measured USDC rate it is that reading's
+--                    own timestamp.
+--                    1970-01-01 00:00:00 means there is no price: treat epoch
+--                    as ABSENT, never as an age. It is written deliberately
+--                    whenever price_usd is the 0 sentinel, so it is a decision,
+--                    not an artefact of an empty aggregate.
+--                    It is NOT by itself "no price", though: the epoch is also
+--                    this column's table DEFAULT, so a row the current MV has
+--                    not rewritten yet carries it beside a real price — see
+--                    price_status's '' below, which is the same window. Read
+--                    "no price" as as_of = epoch AND price_status = 'unpriced'.
+--                    price_xlm divides price_usd by an XLM/USD close dated
+--                    independently and market_cap_usd multiplies it by a supply
+--                    figure with its own fetch time, so both are no fresher
+--                    than as_of and may be older. as_of bounds price_usd only.
+--                    USD values are computed by an HOURLY pass, so an as_of up
+--                    to about an hour behind updated_at is the ordinary state
+--                    of an actively traded asset, not a fault.
+--   price_status     LowCardinality(String). priced | carried | unpriced.
+--                    priced = as_of IS the asset's newest price-forming candle
+--                    in the window (every measured-rate row reads this too).
+--                    carried = a real priced close, but a newer price-forming
+--                    candle has not been priced yet — the price is real and
+--                    stale, and as_of says how stale. On the hourly enrichment
+--                    cadence that is the ordinary state of an actively traded
+--                    asset for up to about an hour; it also covers a newer
+--                    trade on a pair with NO USD conversion path, where no
+--                    newer USD price is coming at all and as_of is the newest
+--                    convertible minute.
+--                    unpriced = price_usd is the 0 sentinel; method is '' for
+--                    the same reason and as_of is the epoch.
+--                    '' = a row the current MV has not rewritten yet (table
+--                    DEFAULT); it can only be seen between the ALTER that adds
+--                    the column and the MV re-CREATE. Not a vocabulary word.
 
 ----------------------------------------------------------------------
 -- prices.usd_reference — per-bucket USD reference availability.
@@ -1051,6 +1088,8 @@ SELECT
     c.market_cap_usd   AS market_cap_usd,
     c.vwap_24h         AS vwap_24h,
     c.sources          AS sources,
-    c.method           AS method
+    c.method           AS method,
+    c.as_of            AS as_of,
+    c.price_status     AS price_status
 FROM prices.current_prices AS c FINAL
 INNER JOIN prices.assets AS a FINAL ON a.asset_id = c.asset_id;
