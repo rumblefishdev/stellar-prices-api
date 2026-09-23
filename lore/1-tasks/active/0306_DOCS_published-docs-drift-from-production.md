@@ -2,7 +2,7 @@
 id: "0306"
 title: "The API reference shows type placeholders where the data goes, and parts of the published docs contradict production"
 type: DOCS
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0305", "0233", "0195", "0124"]
 tags: [layer-docs, layer-frontend, api, portal, priority-medium, effort-medium]
@@ -18,6 +18,10 @@ history:
       Spawned from 0305: the portal's docs held against production on
       2026-09-23. The two Quick Start statements that contradicted the page
       itself were fixed in 0305; everything else found is here.
+  - date: "2026-09-23"
+    status: active
+    who: stkrolikiewicz
+    note: "Activated; implementation on its own branch."
 ---
 
 # The published docs show placeholders where the data goes, and parts of them contradict production
