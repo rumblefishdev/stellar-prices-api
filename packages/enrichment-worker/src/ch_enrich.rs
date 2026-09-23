@@ -657,7 +657,8 @@ fn external_rate_day_pred(db: &str) -> String {
 ///
 /// ⚠️ It is a SHARED TERM, not the whole of any of the three (review IN-01).
 /// The pivot's reference subquery is `{PRICED_REFERENCE_ROW} AND
-/// pf_trade_count > 0`; the day set below is the fragment ALONE. The day set is
+/// pf_trade_count > 0` (rendered by [`pivot_reference_row_pred`]); the day set
+/// below is the fragment ALONE. The day set is
 /// therefore strictly wider, and the divergence runs in the recoverable
 /// direction: a day whose only reference minute is a LEGACY one — `close > 0`
 /// with `pf_trade_count = 0`, not the post-0286 dust-only shape, whose
@@ -680,9 +681,12 @@ const PRICED_REFERENCE_ROW: &str = "close > 0 AND volume_base > 0";
 /// `r.timestamp <= p.timestamp`: a row zeroed below the first row matching this
 /// predicate has nothing at or before it to refill from. If the guard measured
 /// that first row with a looser or different predicate, it could admit an epoch
-/// the pivot cannot honour — the two must not drift, and
+/// the pivot cannot honour. So the two do not merely agree, they are ONE
+/// string: [`pivot_sql`] renders its reference leg's `WHERE` from this function
+/// and [`first_reference_sql`] renders its whole `WHERE` from it, and
 /// `the_first_reference_query_and_the_pivot_share_one_reference_predicate`
-/// pins that `pivot_sql`'s reference leg renders this exact text.
+/// pins both clauses EXACTLY, so an extra term on either side — the dangerous,
+/// narrowing direction — fails it.
 fn pivot_reference_row_pred(ref_id: u32, usdc_id: u32) -> String {
     format!(
         "asset_id = {ref_id} AND quote_asset_id = {usdc_id} \
@@ -2846,6 +2850,9 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> St
     // the write path and the two read surfaces agree on any bucket holding both.
     // The else-branch is 0, which the outer `WHERE` then drops.
     let rate = format!("multiIf({o_ok}, po.orate, {e_ok}, re.erate, toDecimal128(0, 14))");
+    // The reference leg's row filter IS the reset-epoch guard's (task 0208,
+    // WR-01): rendered from the one function, so neither side can narrow alone.
+    let ref_pred = pivot_reference_row_pred(ref_id, usdc_id);
     let columns = insert_columns();
     format!(
         "INSERT INTO {db}.{tbl} ({columns}) \
@@ -2903,8 +2910,7 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> St
                          timestamp, \
                          sum(toFloat64(close) * toFloat64(volume_base)) / nullIf(sum(toFloat64(volume_base)), 0) AS usd \
                      FROM {db}.{tbl} FINAL \
-                     WHERE asset_id = {ref_id} AND quote_asset_id = {usdc_id} \
-                       AND {PRICED_REFERENCE_ROW} AND pf_trade_count > 0 \
+                     WHERE {ref_pred} \
                        AND timestamp <= toDateTime(?) \
                      GROUP BY timestamp \
                      ORDER BY timestamp \
@@ -4983,6 +4989,13 @@ mod tests {
     /// cannot honour. Distinct ids so a swapped argument fails. The query has
     /// no bind, no window and no date cast: `reset_step` re-runs it per month,
     /// and a windowed minimum would refuse every month after the first.
+    ///
+    /// Both clauses are pinned EXACTLY, from the `WHERE` to the next keyword
+    /// (review WR-01). A `contains(pred)` check could not see the dangerous
+    /// drift: a term appended to the pivot's leg (`… AND source != 'x'`) moves
+    /// its first usable reference later while the rendered SQL still CONTAINS
+    /// the guard's predicate, so the guard would measure an earlier minimum
+    /// than the pivot can use and admit an epoch that strands rows.
     #[test]
     fn the_first_reference_query_and_the_pivot_share_one_reference_predicate() {
         let pred = pivot_reference_row_pred(5, 3);
@@ -4994,13 +5007,24 @@ mod tests {
 
         let sql = pivot_sql("prices", "price_ohlcv_1m", 5, 3, "");
         let reference = &sql[sql.find("AS ref_asset_id").expect("the reference subquery")..];
-        assert!(
-            reference.contains(&pred),
-            "the pivot's reference leg must render the shared predicate: {reference}"
+        let clause = &reference[reference.find("WHERE ").expect("the reference WHERE")
+            ..reference
+                .find(" GROUP BY timestamp")
+                .expect("the reference GROUP BY")];
+        assert_eq!(
+            clause,
+            format!("WHERE {pred} AND timestamp <= toDateTime(?)"),
+            "the pivot's reference leg must filter on the shared predicate and \
+             nothing else but its watermark"
         );
 
         let first = first_reference_sql("prices", "price_ohlcv_1h", 5, 3);
-        assert!(first.contains(&pred), "{first}");
+        let where_at = first.find(" WHERE ").expect("the first-reference WHERE");
+        assert_eq!(
+            &first[where_at..],
+            format!(" WHERE {pred}"),
+            "the guard's WHERE must be the shared predicate, nothing more: {first}"
+        );
         assert!(
             first.contains("FROM prices.price_ohlcv_1h FINAL"),
             "{first}"
