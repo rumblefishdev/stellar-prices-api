@@ -1285,17 +1285,14 @@ function SwitchAccountDialog({
 
 /**
  * The refusal card's footer — the frame's "If this keeps happening, contact
- * support or check our status page."
+ * support or check our status page.", less the status page.
  *
- * ⚠️ **The frame underlines both as links; "contact support" is one, "status
- * page" is plain text**, and that is [`Legal`]'s rule applied rather than an
- * omission: no status page exists in this build (`landing/links.ts` holds
- * every off-page destination the portal names, and none is one). A link to a
- * placeholder is a promise the page cannot keep, and it is a worse failure
- * here than on the legal line — this sentence is read by somebody already
- * stuck. "contact support" got its URL in task 0301 (`RUMBLEFISH_CONTACT`);
- * give the other word its URL when one exists and it becomes a link without
- * moving.
+ * ⚠️ **"or check our status page" was cut in task 0305**, with the footer's
+ * `Status` and for the same reason: no status page exists
+ * (`landing/links.ts` holds every off-page destination the portal names, and
+ * none is one). It was drawn as underlined plain text, which reads as a
+ * broken link to somebody who is already stuck. "contact support" has had its
+ * URL since task 0301 (`RUMBLEFISH_CONTACT`).
  */
 function KeepsHappening() {
   return (
@@ -1303,10 +1300,6 @@ function KeepsHappening() {
       If this keeps happening,{' '}
       <Box component="a" href={RUMBLEFISH_CONTACT} sx={UNDERLINED}>
         contact support
-      </Box>{' '}
-      or check our{' '}
-      <Box component="span" sx={UNDERLINED}>
-        status page
       </Box>
       .
     </Typography>
@@ -1315,17 +1308,13 @@ function KeepsHappening() {
 
 /**
  * The frame's underline on a footer's named destinations — the OAuth error
- * card's "contact support" and "status page".
+ * card's "contact support".
  *
- * ⚠️ **Underlined at Adam's instruction (2026-08-26). "contact support" is an
- * `<a>` since task 0301 (`RUMBLEFISH_CONTACT`); "status page" is still a
- * `<span>`**, because no status page exists in this build —
- * `landing/links.ts` holds every off-page target the portal names and none is
- * one. The rule this follows: a link to a placeholder is a promise the page
- * cannot keep. The status page is therefore drawn as the frame draws it and
- * is not clickable, a known and deliberate mismatch — swap the `<span>` for
- * an `<a>` the day the URL lands and nothing else moves. (The legal footer that used to share
- * this rule is no longer rendered at all — see the note below `UNDERLINED`.)
+ * ⚠️ **Underlined at Adam's instruction (2026-08-26).** "contact support" is
+ * an `<a>` since task 0301 (`RUMBLEFISH_CONTACT`). The card's "status page"
+ * shared this underline as a `<span>` until task 0305 cut it — see
+ * `KeepsHappening`. (The legal footer that used to share the same rule is no
+ * longer rendered at all — see the note below `UNDERLINED`.)
  */
 const UNDERLINED = {
   textDecoration: 'underline',
