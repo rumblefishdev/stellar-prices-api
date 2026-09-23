@@ -1,0 +1,197 @@
+# Coverage sweep allow-list (task 0100, layer 3 of the coverage model).
+#
+# The weekly coverage sweep reports every contract that emits swap- or
+# trade-shaped Soroban events and is NOT in prices.pool_registry. An entry here
+# takes a contract out of that residual on purpose. The sweep itself never
+# registers anything: it only reports. Auto-registering a router would
+# double-count the pool-level trades it wraps.
+#
+# Two entry kinds:
+#
+#   [[contract]]  one contract, permanent. `id` is the C… strkey; `wasm` is
+#                 informational (64 lowercase hex) and does not widen the match.
+#                 For routers, aggregators and other non-AMM emitters.
+#
+#   [[wasm]]      every contract running this wasm hash (64 lowercase hex).
+#                 REQUIRES `until` = the task that removes the entry (normally
+#                 the task that registers the family). A permanent family-wide
+#                 ignore would hide the next pool of a real venue, so a [[wasm]]
+#                 entry without `until` fails validation.
+#
+# Every entry needs a non-empty `reason` and `task`. Unknown keys are rejected.
+#
+# This file is compiled into the Lambda binary (include_str!). An edit is
+# validated by `cargo test -p coverage-sweep-probe` and ships only with an
+# EventBridge-stack deploy. Triage: docs/runbooks/0100-coverage-sweep-triage.md.
+
+# --- routers (permanent) ------------------------------------------------------
+
+[[contract]]
+id = "CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK"
+wasm = "06f4207b0c9ef78cc595e075ded8fa40e73fdb8346e5f9281068a2d4ba1e5037"
+reason = "Aquarius router; its swap summary wraps the pool-level trade, indexing it double-counts"
+task = "0087"
+
+[[contract]]
+id = "CA7RQDMMV6E53P5EDZA5GPWBZ33AMW2ZNO42XLI2RGRIAP4QXIARUOJQ"
+wasm = "06f4207b0c9ef78cc595e075ded8fa40e73fdb8346e5f9281068a2d4ba1e5037"
+reason = "Aquarius router; its swap summary wraps the pool-level trade, indexing it double-counts"
+task = "0087"
+
+[[contract]]
+id = "CAG5LRYQ5JVEUI5TEID72EYOVX44TTUJT5BQR2J6J77FH65PCCFAJDDH"
+wasm = "4c3db3ebd2d6a2ab23de1f622eaabb39501539b4611b68622ec4e47f76c4ba07"
+reason = "Soroswap-style router (SoroswapRouter/swap); indexing it double-counts the pair swaps"
+task = "0285"
+
+[[contract]]
+id = "CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL"
+wasm = "4edd745f5fbf4d103edb55041efb8e6c399f66d43c0b6d38b781e63c432b6c8d"
+reason = "SushiSwap router; same `swap` topic as its pools, and indexing it double-counts"
+task = "0290"
+
+[[contract]]
+id = "CAUF4DFYSX52L2KJ4J7OFW3WDQMEUDVXNB7PG5VIC4VVOA3BCLWXDO2E"
+wasm = "9677074ae7fce0e8c41747377da02ebf4e1cf06902c60c4fe64ea0ee6aab4545"
+reason = "SushiSwap router; same `swap` topic as its pools, and indexing it double-counts"
+task = "0290"
+
+[[contract]]
+id = "CD3YDAM5QV235R4PNPJB4J2STZRJGMSB6KR3R2VATKULSLHZNI5KWLPH"
+wasm = "800c5441a63701438301f08125ea0f3c0f0656cbaaa3f6b954f50c09a878a9ac"
+reason = "SushiSwap V3 router, older (init_router, swap_exact_input); its swap repeats the pool's; 1603/1603 txs also hold a SushiSwap V3 pool swap"
+task = "0290"
+
+# --- factories (permanent) ---------------------------------------------------
+
+[[contract]]
+id = "CA4HEQTL2WPEUYKYKCDOHCDNIV4QHNJ7EL4J4NQ6VADP7SYHVRYZ7AW2"
+wasm = "5db738b05d9148128a240b0e2c1cb935c2805192bf98a579421aacda364c8dae"
+reason = "Soroswap factory; its SoroswapFactory/new_pair event matches `swap` but creates pools and trades nothing; learn_factory already registers the pairs it announces"
+task = "0002"
+
+# --- aggregators and routers (permanent; phase-1 classification, task 0100) ----
+
+[[contract]]
+id = "CC6QAV7JEG5MYRSPO5Z65E5G2M4ZB64BEG2ZXIZXL55TQT35JDI2LC6K"
+wasm = "91060e9c28257fef68a650d7a1174baa6e46913137f261a3f2da2648329ea7b1"
+reason = "split-route swap aggregator (single-path or split-order); 682 of its 684 txs also hold a registered pool's swap"
+task = "0100"
+
+[[contract]]
+id = "CAYP3UWLJM7ZPTUKL6R6BFGTRWLZ46LRKOXTERI2K6BIJAWGYY62TXTO"
+wasm = "5e0bff5a29e2473b5289fe96aeb59b48ac335e5e87c46632b53be1f662447d2c"
+reason = "Soroswap Aggregator (SoroswapAggregator/swap) routing through adapters; 23/23 txs also hold a registered pool's swap"
+task = "0100"
+
+[[contract]]
+id = "CDETNHJCL6HWQZVV3KELAF5I5V77QC4BZKQL7GXUPSLD54TCHH6524S2"
+wasm = "277444b5d4a175567c78d774ec17a7f3279983f34b135cf02803127bfa206a87"
+reason = "swap router with a pool whitelist and price protection (swap_executed); 15/15 txs also hold a registered pool's swap"
+task = "0100"
+
+[[contract]]
+id = "CAVDUEGLKNHTKDOBNOKRH3C4T75OBYGOBJO2GGG3MSLTOS4SO7SQ5ETT"
+wasm = "c546a2d0990623086a56f8bfb1b57b42a227f8c39705e18f97b8a0441180bd81"
+reason = "fee-taking split-route aggregator (swap_split, register_pool); 3/3 txs also hold a registered pool's swap"
+task = "0100"
+
+[[contract]]
+id = "CARVQXFP4JF5ELLXUMQ6DALR346YVGBMQOHB4ENA7SSVXAYABXLBDDC4"
+wasm = "437653282e9c93b0b4d736d8fde01bf002adefb61bfb75917e609f5336ee3190"
+reason = "fee-taking swap wrapper over routers (swap_exact_in, set_routers, treasury); its txs hold the pool swaps it wraps"
+task = "0100"
+
+[[contract]]
+id = "CAVNAZFNJU63OFO7XRFQF3FBEVNBQ2SQNJY2A2AJFBGCUNCQK6J5HLER"
+wasm = "3afca1034f133569a907b2bc1c7436e16e09eddae4bfcf56e0932dfb53a50acf"
+reason = "fee-taking swap wrapper, older version of the same family (swap_exact_in, treasury); its txs hold the pool swaps it wraps"
+task = "0100"
+
+[[contract]]
+id = "CDE5MFAGZOUHFYEPPS2O7J3QO755NRZAK76K3XRBNMCF3AEGHTGKKLLO"
+wasm = "a317f5bd9fab28992f1d9548c60f462d1e90b0014e707f9f1c02a7afb22b780d"
+reason = "small swap router (swap, registry, fee_policy); low confidence, 1 event in the classification window"
+task = "0100"
+
+[[contract]]
+id = "CDCNXZHYWRDHNAQEY5EX3WCF7BCWVJBS64ZBVUGRTQBFTHUKG6NAXFTR"
+wasm = "cbbb1bde44acab147b7e2eece89350ed37fe79f33c4b8938fba89c2583a6b52f"
+reason = "LI.FI swap/bridge aggregator (lifi_swap); routes through pools, prices nothing itself"
+task = "0100"
+
+[[contract]]
+id = "CAJDT2GIDPCRX7HSTB2U2TBNRL6Y4YDO2ZXMJTCBFCFVWEPLW7RCIZ3F"
+wasm = "6c6224428fdbfd6194d861f5948298183630985eb9dac67646b7bf63b8f793fb"
+reason = "Blend flash-loan bot (exec_op) swapping through the Aquarius router; 30/30 txs also hold a registered pool's swap"
+task = "0100"
+
+[[contract]]
+id = "CCC27LQ43TXGZUTTKFYV2ZLSKX3MMVWCAZDFCEERQHY67C7EQBWB2UKK"
+wasm = "1f7949915027dfc31b649264be5997ad30c9d9052f570cb46ef0b8e2d5323dd8"
+reason = "Blend flash-loan bot (exec_op) swapping through the Aquarius router, older build of CAJDT2GI…; 118/118 txs also hold a registered pool's swap"
+task = "0100"
+
+# --- non-AMM emitters (permanent; phase-1 classification, task 0100) ---------
+
+[[contract]]
+id = "CAYDBAJBA6G2HOZF5IH4MVIXG27FABWYV3UDO5Q2CPOCFUKLXSQAL66S"
+wasm = "d4b4976b4fe214170a21aa11b70274a54877160e05ca88af0f41246956170ff4"
+reason = "USDM1->USDM0 issuer conversion (swap/process_swap burns USDM1, mints USDM0); predecessor of CDWTSHMD…, not a market; 0/462 txs hold a registered pool's swap"
+task = "0100"
+
+[[contract]]
+id = "CAOTMWRKNMV5GWSVOMWCTCM5ZZFEQFUSWNLCZXA2KAXD4YG5A4DIPNFT"
+wasm = "a757a1ed02cb764a3d76d9c6a82fb3ab67fc1e5ccf980966f5a89a0bb280949c"
+reason = "Allbridge Core bridge pool (swap_to_v_usd/swap_from_v_usd): USDC against the virtual cross-chain vUSD, no on-chain pair to price; 0/355 txs hold a registered pool's swap"
+task = "0100"
+
+[[contract]]
+id = "CAE2G5Z77UP7GYPYGFOWFGW7C7J6I4YP2AFGSADRKQY62SYUFLPNFTXL"
+wasm = "a6c1acc6e367e46535733ce8a7320c718616ed42f762cf2f1a0aa77ac6e056f6"
+reason = "Circle CCTP V2 TokenMessengerMinter; swap_minter_config_set is an admin config event, it trades nothing; 0/27 txs hold a registered pool's swap"
+task = "0100"
+
+[[contract]]
+id = "CDWTSHMDQO5NOWVBWMBUKBOXXUIWSQZVRWOOS4WIHOA63WEAGH66SG76"
+wasm = "8110634bc9c8d95f0d852f0dd3fea6951a92140fb2b23c41fbced507a5125c9d"
+reason = "USDM0<->USDM1 issuer conversion (AtomicSwapV2): mint/burn against a signed price attestation, not a market"
+task = "0100"
+
+[[contract]]
+id = "CA5YJ5H2HH6KUZBGQ7M7R2TX63LQKQVG57Y3HE23NVC5C6Q7BQFMSOI5"
+wasm = "4d6abb0d5dfae9b2450c694e123f1f4f2e614bd109c6b383a03d36d49b2b6bf8"
+reason = "on-chain order book of tokenised instruments (NewBuyInitiatedTrade); instruments are u64 ids with no token addresses, not priceable here"
+task = "0100"
+
+[[contract]]
+id = "CBOSXSEZXU7P66O6F3AQV65URR5XUVKMY6CAQ7FT7C5TQLGYNV7IG5I6"
+wasm = "4d6abb0d5dfae9b2450c694e123f1f4f2e614bd109c6b383a03d36d49b2b6bf8"
+reason = "on-chain order book of tokenised instruments (NewSellInitiatedTrade); instruments are u64 ids with no token addresses, not priceable here"
+task = "0100"
+
+[[contract]]
+id = "CBP76I2FRMUKYKIYYBKN3DH7TSWMFAJF2WTDC7Q2OHQFBIVWP7CAAI5Q"
+wasm = "76e60d025ee6c0322cb19f4846b9587ab172870802251de903e93545371678b6"
+reason = "lending protocol (borrow, liquidate, flash_loan); its swap_exact event is a liquidation step, not a market"
+task = "0100"
+
+# --- unindexed venue families (temporary, keyed by wasm) ----------------------
+
+[[wasm]]
+hash = "003710b383f9da7d650a7f719a7be479110266427817ebbed61d924505fcd7c7"
+reason = "SushiSwap V3 pools, not yet registered; new pools keep appearing, so this is keyed by wasm"
+task = "0290"
+until = "0290"
+
+[[wasm]]
+hash = "95a8e0018530226701ef8d31c7d4c2fe20ed9d7c303a14a70c3d96848ca4fa54"
+reason = "SushiSwap V3 pools (v2 code), not yet registered; new pools keep appearing, so this is keyed by wasm"
+task = "0290"
+until = "0290"
+
+[[wasm]]
+hash = "8abc28913035c07411ed5d134e6bfeab4723d97ddd4d1a22a0605d35c94d1a36"
+reason = "Comet weighted pool, Blend backstop BLND/USDC (CAS3FL6T…), a venue not yet indexed; 53k swaps since 2024-05-02"
+task = "0100"
+until = "0300"
