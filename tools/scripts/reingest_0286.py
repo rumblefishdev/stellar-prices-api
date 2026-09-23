@@ -500,6 +500,21 @@ def stream(cmd, env, logfile, stdin_text=None):
 RERENDER = lambda: None
 
 
+def require_transport_flag(a):
+    """Stop unless the events-backfill binary accepts `--transport` (needed by --amm mtls).
+
+    Shared by the Comet binary probe and the `amm` step, so a binary without the
+    flag is reported as exactly that — never as a pre-0300 binary (PR #345 review).
+    """
+    probe = subprocess.run(shlex.split(a.events_backfill) + ["--help"],
+                           capture_output=True, text=True)
+    if "--transport" not in (probe.stdout + probe.stderr):
+        raise Stop(
+            f"{a.events_backfill} has no --transport flag, so --amm mtls cannot run. "
+            "Either merge the events-backfill mTLS transport, or use --amm ssh "
+            "(run it on the CH host as `default`) or --amm wait + amm-done.")
+
+
 def prove_comet_binary(a, ch, m, pw, logfile):
     """Stop unless the events-backfill binary routes venue 'comet' (task 0300, WR-02).
 
@@ -523,6 +538,8 @@ def prove_comet_binary(a, ch, m, pw, logfile):
         COMET_BINARY_PROVEN = True
         return
     if a.amm == "mtls":
+        if not ch.dry:
+            require_transport_flag(a)
         stem = os.path.expanduser(a.admin_cert)
         env = dict(os.environ, CH_DOMAIN=urllib.parse.urlparse(ch.url).hostname or "",
                    MTLS_CERT_PATH=stem + ".crt", MTLS_KEY_PATH=stem + ".key",
@@ -682,13 +699,7 @@ def run_month(a, ch, st, m, pw):
                 # dropped. The alternatives both work today: `--amm ssh` runs the tool
                 # on the CH host as `default` (proven 2026-09-22 by the 0290 pool
                 # seed), and `--amm wait` + `amm-done` records a run made by hand.
-                probe = subprocess.run(shlex.split(a.events_backfill) + ["--help"],
-                                       capture_output=True, text=True)
-                if "--transport" not in (probe.stdout + probe.stderr):
-                    raise Stop(
-                        f"{a.events_backfill} has no --transport flag, so --amm mtls cannot run. "
-                        "Either merge the events-backfill mTLS transport, or use --amm ssh "
-                        "(run it on the CH host as `default`) or --amm wait + amm-done.")
+                require_transport_flag(a)
                 stem = os.path.expanduser(a.admin_cert)
                 env = dict(os.environ, CH_DOMAIN=urllib.parse.urlparse(ch.url).hostname or "",
                            MTLS_CERT_PATH=stem + ".crt", MTLS_KEY_PATH=stem + ".key",
