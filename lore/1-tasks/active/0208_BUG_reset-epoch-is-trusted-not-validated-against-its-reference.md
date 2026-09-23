@@ -2,7 +2,7 @@
 id: "0208"
 title: "coarse-repair trusts --reset-not-before instead of checking it against the reference market's first candle — the 0182 run destroyed 157 candles through a 19-hour hole"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0182", "0172", "0114", "0145"]
 tags: ["priority-high", "effort-small", "clickhouse", "data-correctness", "enrichment", "milestone-M2"]
@@ -21,6 +21,14 @@ history:
       could not refill them. The tool accepted the epoch without checking it
       against the reference it would later join on, and every existing guard
       passed.
+  - date: "2026-09-23"
+    status: active
+    who: akot
+    note: >
+      Activated. Implementation runs from `.planning/BRIEF-0208.md` via
+      /gsd-quick --full on branch fix/0208: refusal in
+      assert_reset_is_admissible for pivot-reference legs, compared in seconds
+      against the pivot's own reference predicate on the pass's table.
 ---
 
 # The reset epoch is an operator assertion the tool never checks
