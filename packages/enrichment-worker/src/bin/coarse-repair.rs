@@ -132,8 +132,9 @@ struct Args {
     /// BEING REPAIRED — query it with the runbook's Appendix A / Appendix C MIN
     /// query and pass that value, never a round date.
     ///
-    /// For canonical USDT on `_1h` that value is **1612724400** (2021-02-07
-    /// 19:00 UTC). The tool refuses any lower epoch before writing, dry run
+    /// For canonical USDT on `_1h` that value was **1612724400** (2021-02-07
+    /// 19:00 UTC) as of 2026-09 — measure it anyway: task 0286 phase 3
+    /// re-derives `pf_trade_count` and can move it later. The tool refuses any lower epoch before writing, dry run
     /// included (`ResetEpochBelowReference`), and its message names the value to
     /// use (task 0208 — task 0182 passed that date's midnight and stranded 157
     /// candles). Task 0172 also measured USDT at genuine par before the June 2022
@@ -542,8 +543,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "Run the damage check (runbook Appendix A, 'Extra verification') on \
              EVERY table you reset — including the ones that printed no shortfall. \
-             A quiet table is not a checked one: on 2026-08-19 the 157 destroyed \
-             candles sat in the two tables that never warned."
+             A quiet table is not a checked one: the 157 candles the 2026-08-18 \
+             run destroyed (found on 2026-08-19) sat in the two tables that \
+             never warned."
         );
         if args.reset_require_external_rate {
             println!(

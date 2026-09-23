@@ -475,7 +475,7 @@ recompute them.
 
 ### What reset mode refuses outright
 
-All seven are hard errors, not warnings, because each one ends with rows zeroed
+All eight are hard errors, not warnings, because each one ends with rows zeroed
 that nothing can refill:
 
 | Refusal                                                        | Why                                                                                                                                                                                                                                                                                                                                |
@@ -486,7 +486,8 @@ that nothing can refill:
 | A bounded pass (`one_shot = false`)                            | The peg-pivot tier is gated on the oracle tier draining, so a bounded pass can defer the only tier that refills.                                                                                                                                                                                                                   |
 | `oracle_prices` rows for the quote leg                         | See below.                                                                                                                                                                                                                                                                                                                         |
 | `ResetEpochBelowReference`                                     | `--reset-not-before` is below this table's first priced reference candle. Every row in the gap would be zeroed with nothing to refill it. The message prints the exact value to re-run with.                                                                                                                                       |
-| `ResetEpochHasNoReference`                                     | There is no priced reference candle for the leg on this table, or canonical USDC is missing from `prices.assets` — no epoch is safe.                                                                                                                                                                                               |
+| `ResetEpochHasNoReference`                                     | There is no priced reference candle for the leg on this table — no epoch is safe. The message points to the first-reference query below.                                                                                                                                                                                           |
+| `ResetEpochUsdcUnresolved`                                     | Canonical USDC is missing from `prices.assets`, so the pivot has no USDC market to measure the leg against and never runs — no epoch is safe. (The 0228 mode refuses this earlier, as `ResetPivotRateLegIsNotAPivotReference`.)                                                                                                    |
 
 ### The epoch is not optional tuning
 
@@ -513,10 +514,17 @@ there is no reference on that table at all, and **no epoch is safe**.
 For canonical USDT (`asset_id = 111` on prod) the value is **`1612724400` =
 2021-02-07 19:00 UTC** on `_1h`. The tool checks per table: it refuses any epoch
 below that table's own first reference candle, before any write and in a dry run
-too (`ResetEpochBelowReference`), and the refusal prints that table's value. `1612724400` is admitted on
-all five coarse tables, because each table's first reference bucket starts at or
-before it; on `_4h` and `_1d` the 2021-02-07 16:00 bucket and the day bucket then
-keep their par value, which task 0172 measured as correct.
+too (`ResetEpochBelowReference`), and the refusal prints that table's value.
+
+As of 2026-09, `1612724400` should be admitted on all five coarse tables: each
+table's first reference bucket starts at or before it (the 16:00 bucket on `_4h`,
+the day, week and month buckets on `_1d`, `_1w`, `_1M`), and those buckets then
+keep their par value, which task 0172 measured as correct. That is derived from
+the incident's damage pattern, **not measured on every table — always run the
+query above instead of reusing the number.** Task 0286 phase 3 re-derives
+`pf_trade_count` for the history, so the first _price-forming_ reference can move
+later; the guard will then enforce the new value, and a remembered epoch will be
+refused.
 
 Task 0172 separately measured USDT at genuine par until June 2022, so the `$1`
 already stored below the epoch is _correct_ — this flag protects real data, it
@@ -585,12 +593,13 @@ UTC, 19 hours below the USDT/USDC reference's first candle at 19:00
 (`1612724400`). The pivot's join is at-or-before, so every bucket in
 `[1612656000, 1612724400)` was zeroed with nothing to refill it.
 
-- **157 candles destroyed:** 121 on `_1h` (the 19 hourly buckets 00:00-18:00 × 15
-  assets) and 36 on `_4h` (the 00/04/08/12 buckets × 9 assets; the 16:00 bucket
-  contains the 19:00 trade, so it priced). `_1d`, `_1w` and `_1M` had 0.
+- **157 candles destroyed:** 121 on `_1h` (hourly buckets 00:00-18:00 across 15
+  assets — not every asset traded every hour) and 36 on `_4h` (the 00/04/08/12
+  buckets × 9 assets; the 16:00 bucket contains the 19:00 trade, so it priced).
+  `_1d`, `_1w` and `_1M` had 0.
 - **The shortfall check stayed quiet.** `_1h` and `_4h` reported no shortfall
-  (357,274 reset against 358,315 enriched) — the stranded rows were swamped by
-  legitimately enriched ones. The damage check had been run only on the three
+  (`_1h`: 357,274 reset against 358,315 enriched; `_4h`: 157,858 against 158,319)
+  — the stranded rows were swamped by legitimately enriched ones. The damage check had been run only on the three
   tables that warned, which are exactly the three structurally unable to show
   this defect. A re-check of every table found it the next morning.
 - **Repaired by a versioned par insert** over that window on `_1h` and `_4h`,
@@ -631,9 +640,9 @@ block on stderr naming the shortfall — that run zeroed values it could not
 recompute. **Stop; do not continue to the next table.**
 
 **Run the damage check on every table, not only the ones that warned.** The
-shortfall guard selects the sample, and it is blind to boundary stranding: on
-2026-08-19 the 157 destroyed candles sat in `_1h` and `_4h`, the two tables that
-never warned (see the worked example above). A quiet table is not a checked one.
+shortfall guard selects the sample, and it is blind to boundary stranding: the
+157 candles the 2026-08-18 run destroyed (found on 2026-08-19) sat in `_1h` and
+`_4h`, the two tables that never warned (see the worked example above). A quiet table is not a checked one.
 
 > ⚠️ **Triage before you roll back.** The shortfall has a known false positive —
 > see the next section. On the 2026-08-18 `_1d` run it fired for 8 rows and the
@@ -1505,23 +1514,30 @@ precondition 5 told you to.
 USDC market.** Task 0182's reset epoch sat 19 hours before its reference
 market's first candle and 157 candles were zeroed with nothing able to refill
 them — see Appendix A's worked example; for USDT on `_1h` the measured value is
-`1612724400`. Measure it per leg, on the table you are about to repair (the same
-`<TABLE>` as `--table`); the `WHERE` is the tool's own guard predicate:
+`1612724400` (as of 2026-09 — measure it, do not reuse it). Measure it per leg —
+`<LEG_ID>` is the `--reset-quote-asset-id` of THIS run, XLM's id on the XLM
+pass and USDT's on the USDT pass, never one reused for the other — on the table
+you are about to repair (the same `<TABLE>` as `--table`); the `WHERE` is the
+tool's own guard predicate:
 
 ```sql
 SELECT count()                          AS reference_rows,
        toUnixTimestamp(min(timestamp))  AS first_reference_candle
 FROM prices.<TABLE> FINAL
-WHERE asset_id = <XLM_ID> AND quote_asset_id = <USDC_ID> AND close > 0 AND volume_base > 0 AND pf_trade_count > 0
+WHERE asset_id = <LEG_ID> AND quote_asset_id = <USDC_ID> AND close > 0 AND volume_base > 0 AND pf_trade_count > 0
 ```
 
 `reference_rows = 0` means no epoch is safe for that leg on that table.
 
-The two ids:
+The ids — `<LEG_ID>` is the XLM or the USDT one, `<USDC_ID>` is USDC's:
 
 ```sql
 SELECT asset_id FROM prices.assets FINAL
 WHERE asset_code = 'XLM' AND issuer_address = '' AND contract_address = '';
+
+SELECT asset_id FROM prices.assets FINAL
+WHERE asset_code = 'USDT' AND contract_address = ''
+  AND issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V';
 
 SELECT asset_id FROM prices.assets FINAL
 WHERE asset_code = 'USDC' AND contract_address = ''
