@@ -66,6 +66,11 @@ Remove `Status` and `rumblefish.dev` from the footer in
 `web/portal/src/landing/Chrome.tsx`. The Rumble Fish mark keeps the link to
 `rumblefish.dev`.
 
+Added 2026-09-23: the sign-in refusal card's "If this keeps happening, contact
+support or check our status page." loses "or check our status page" for the
+same reason — no status page exists, and the words were underlined plain text
+(`KeepsHappening` in `app.tsx`). "contact support" keeps its link.
+
 ### Step 3: SorobanScan logo on every page
 
 Every bar renders the same `Wordmark` (`href = EXPLORER`). Cover each route,
@@ -132,3 +137,5 @@ with this task; the rest of that comparison is [[0306]].
 - [ ] The lazy pages' loader keeps the footer below the fold
 - [ ] The Quick Start's 429 card shows what its Copy button writes, and the
       error lede no longer promises a `code` on the gateway's 403 and 429
+- [ ] No page names a status page: the sign-in refusal card ends at "contact
+      support"
