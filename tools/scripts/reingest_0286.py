@@ -62,6 +62,9 @@ LIVE_LOSS_MONTHS = range(202607, 202610)
 # 0290: SushiSwap V3's first swap is at ledger 60,770,886 (2026-01).
 SUSHI_FROM_MONTH = 202601
 SUSHI_POOLS = 133
+# 0300: Comet BLND/USDC's first swap is at ledger 51,500,460 (2024-05).
+COMET_FROM_MONTH = 202405
+COMET_POOLS = 1
 BAK = "reingest_0286_bak_"
 
 
@@ -368,6 +371,12 @@ def cmd_preflight(a, ch, st, months=None):
         gate("0290 registry write", n >= SUSHI_POOLS,
              f"{n} {a.sushi_source} pools, need {SUSHI_POOLS}: phase 1 -> 0290 deploy (PR #324) -> "
              "--discover-pools WRITE -> phase 3. Earlier, the ~88.8k swaps are silently absent again")
+    if any(m >= COMET_FROM_MONTH for m in months):
+        n = int(ch.one("reader", f"SELECT count() FROM prices.pool_registry FINAL WHERE venue = '{a.comet_source}'"))
+        gate("0300 registry write", n >= COMET_POOLS,
+             f"{n} {a.comet_source} pools, need {COMET_POOLS}: 0300 deploy -> --discover-pools WRITE "
+             "(any range; the static row is written regardless) -> phase 3. "
+             "Earlier, the ~51.6k Comet swaps are silently absent again")
     free = int(ch.one("reader", "SELECT min(free_space) FROM system.disks"))
     gate("disk", free >= a.min_free_gb * 2 ** 30,
          f"{free / 2 ** 30:.0f} GiB free, floor {a.min_free_gb} — snapshots keep every dropped part alive")
@@ -501,6 +510,10 @@ def run_month(a, ch, st, m, pw):
             n = int(ch.one("reader", f"SELECT count() FROM prices.pool_registry FINAL WHERE venue = '{a.sushi_source}'"))
             if n < SUSHI_POOLS:
                 raise Stop(f"{n} {a.sushi_source} pools < {SUSHI_POOLS}: 0290's --discover-pools write has not run")
+        if m >= COMET_FROM_MONTH:
+            n = int(ch.one("reader", f"SELECT count() FROM prices.pool_registry FINAL WHERE venue = '{a.comet_source}'"))
+            if n < COMET_POOLS:
+                raise Stop(f"{n} {a.comet_source} pools < {COMET_POOLS}: 0300's --discover-pools write has not run")
         if soroban and a.amm == "stop":
             raise Stop(f"{m} is Soroban-era and --amm stop is set: its AMM candles need events-backfill "
                        "on the CH host. Re-run with --amm ssh or --amm wait")
@@ -663,6 +676,10 @@ def run_month(a, ch, st, m, pw):
         if m >= SUSHI_FROM_MONTH and not ch.dry and after.get(a.sushi_source, {}).get("trades", 0) == 0:
             rank = 2
             note(f"{m}: no {a.sushi_source} volume — the ORDER slipped (0290's registry write), the data is not bad")
+        # Every month since 2024-05 holds >= 135 real Comet swaps (measured 2026-09-23).
+        if m >= COMET_FROM_MONTH and not ch.dry and after.get(a.comet_source, {}).get("trades", 0) == 0:
+            rank = 2
+            note(f"{m}: no {a.comet_source} volume — the ORDER slipped (0300's registry write), the data is not bad")
         if m >= 202609 and amm_bits:
             note(f"{m}: an AMM gain here includes pools seeded mid-month (0291 on 09-18 08:00 UTC, then 0290) — "
                  "the re-ingest resolves pool_registry as of now, so it is not loss repaired")
@@ -837,6 +854,7 @@ def main():
     p.add_argument("--cleanup-rule", default="prices-production-cleanup")
     p.add_argument("--skip-aws-check", action="store_true")
     p.add_argument("--sushi-source", default="sushiswap")
+    p.add_argument("--comet-source", default="comet")
     p.add_argument("--min-free-gb", type=int, default=300)
     p.add_argument("--sdex-max-gain-pct", type=float, default=0.5)
     a = p.parse_args()
