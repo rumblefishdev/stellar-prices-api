@@ -252,6 +252,7 @@ Comet BLND/USDC `CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM`
   Expected until written: a `change="new"` line for `CAS3FL6T…` with
   `venue="comet"`, then `to_write=1 per_venue={"comet": 1}` (plus any
   factory pools created in that ledger).
+
 - sdex-backfill's end-of-run registry write also persists it — the identical
   row, idempotent under the table's `ReplacingMergeTree`.
 - asset-discovery neither adds nor removes it.
