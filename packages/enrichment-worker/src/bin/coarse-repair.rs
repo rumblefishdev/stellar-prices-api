@@ -503,7 +503,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "coarse-repair starting"
     );
 
-    let summary = driver.run().await?;
+    // Print the refusal's Display form, not the Debug form `main`'s `Result`
+    // would give: the Display text carries the UTC times, the stranded window
+    // and the value to re-run with — the message is the fix (task 0208).
+    let summary = match driver.run().await {
+        Ok(summary) => summary,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // Human-readable roll-up; the structured per-month lines are already logged.
     println!("\n=== coarse-repair summary ({}) ===", args.table);
