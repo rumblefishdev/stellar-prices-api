@@ -207,21 +207,28 @@ function ExampleResponse() {
               '// GET /v1/assets/native/price — 200 OK',
             )}
             {'\n{\n'}
+            {/* Every field, in the order the API writes them — `method` was
+                missing until task 0306 — from the same production snapshot
+                as the quick start's example (2026-09-23 08:08 UTC). */}
             {tok(KEY, '"asset"')}: {tok(STR, '"native"')},{'\n'}
-            {tok(KEY, '"price_usd"')}: {tok(STR, '"0.17735783908195"')},{'\n'}
+            {tok(KEY, '"price_usd"')}: {tok(STR, '"0.22086251378147"')},{'\n'}
             {tok(KEY, '"price_xlm"')}: {tok(STR, '"1"')},{'\n'}
-            {tok(KEY, '"vwap_24h"')}: {tok(STR, '"0.17729898377938"')},{'\n'}
+            {tok(KEY, '"vwap_24h"')}: {tok(STR, '"0.220818422853"')},{'\n'}
             {tok(KEY, '"volume_24h_usd"')}:{' '}
-            {tok(STR, '"383736.40419055725213"')},{'\n'}
-            {tok(KEY, '"change_24h_pct"')}: {tok(STR, '"-1.6635"')},{'\n'}
+            {tok(STR, '"9232178.49610106508283"')},{'\n'}
+            {tok(KEY, '"change_24h_pct"')}: {tok(STR, '"4.2307"')},{'\n'}
             {tok(KEY, '"sources"')}: {'{ '}
             {tok(KEY, '"aquarius"')}: {'{ '}
-            {tok(KEY, '"price"')}: {tok(STR, '"0.1774"')},{' '}
-            {tok(KEY, '"volume_24h"')}: {tok(STR, '"277436.70"')}
+            {tok(KEY, '"price"')}: {tok(STR, '"0.2209"')},{' '}
+            {tok(KEY, '"volume_24h"')}: {tok(STR, '"3496887.57"')}
             {' }, '}
+            {tok(KEY, '"phoenix"')}: {'{…}, '}
             {tok(KEY, '"sdex"')}: {'{…}, '}
-            {tok(KEY, '"soroswap"')}: {'{…} },\n'}
-            {tok(KEY, '"updated_at"')}: {tok(STR, '"2026-08-31T12:22:00Z"')}
+            {tok(KEY, '"soroswap"')}: {'{…}, '}
+            {tok(KEY, '"sushiswap"')}: {'{…} },\n'}
+            {tok(KEY, '"updated_at"')}: {tok(STR, '"2026-09-23T08:08:00Z"')},
+            {'\n'}
+            {tok(KEY, '"method"')}: {tok(STR, '"traded"')}
             {'\n}'}
           </code>
         </Box>
