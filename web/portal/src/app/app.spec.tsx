@@ -5,7 +5,7 @@ import {
   waitFor,
   within,
 } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ROUTER_BASENAME } from '../base-path';
@@ -1951,6 +1951,88 @@ describe('navigation off the landing page', () => {
       ).toBe('https://sorobanscan.rumblefish.dev/');
     },
   );
+
+  /**
+   * The browser jumps to a `#hash` only if the target exists when it looks,
+   * and on a full load it looks before React has rendered: the landing bar's
+   * `/api/#faq` from any other page left the reader at the top (task 0305).
+   */
+  describe('scrolling on navigation', () => {
+    const scrolled: string[] = [];
+    beforeEach(() => {
+      scrolled.length = 0;
+      // jsdom has no `scrollIntoView`.
+      Element.prototype.scrollIntoView = function (this: Element) {
+        scrolled.push(this.id);
+      };
+    });
+    afterEach(() => {
+      delete (Element.prototype as Partial<Element>).scrollIntoView;
+      window.history.scrollRestoration = 'auto';
+    });
+
+    function GoBack() {
+      const navigate = useNavigate();
+      return <button onClick={() => navigate(-1)}>test: back</button>;
+    }
+
+    // The policy renders its ids a lazy chunk later than the landing does.
+    it.each([
+      ['/#faq', 'faq'],
+      ['/privacy-policy#personal-data-we-process', 'personal-data-we-process'],
+    ])('lands a load of %s on its target', async (entry, id) => {
+      openAndSignedOut();
+      render(
+        <MemoryRouter initialEntries={[entry]}>
+          <App />
+        </MemoryRouter>,
+      );
+      await waitFor(() => expect(scrolled).toContain(id));
+    });
+
+    it('lands back onto a hash on its target, not on the offset the browser saved', async () => {
+      openAndSignedOut();
+      render(
+        <MemoryRouter
+          initialEntries={['/#faq', '/quick-start']}
+          initialIndex={1}
+        >
+          <App />
+          <GoBack />
+        </MemoryRouter>,
+      );
+      await screen.findByRole('heading', {
+        name: /get your first response in under 5 minutes/i,
+      });
+      expect(scrolled).toEqual([]);
+
+      fireEvent.click(screen.getByRole('button', { name: 'test: back' }));
+      await waitFor(() => expect(scrolled).toContain('faq'));
+      expect(window.history.scrollRestoration).toBe('manual');
+    });
+
+    it('opens a pushed page at the top', async () => {
+      const scrollTo = vi.fn();
+      vi.stubGlobal('scrollTo', scrollTo);
+      vi.stubGlobal('scrollY', 6439);
+      openAndSignedOut();
+      render(
+        <MemoryRouter initialEntries={['/']}>
+          <App />
+        </MemoryRouter>,
+      );
+      expect(scrollTo).not.toHaveBeenCalled();
+
+      const bar = within(
+        await screen.findByRole('navigation', { name: 'Primary' }),
+      );
+      fireEvent.click(bar.getByRole('link', { name: /^quick start$/i }));
+      await screen.findByRole('heading', {
+        name: /get your first response in under 5 minutes/i,
+      });
+      expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'instant' });
+    });
+  });
 
   /**
    * ⚠️ Every non-current link in the signed-in bar was `display: none` at

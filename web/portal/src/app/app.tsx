@@ -11,6 +11,7 @@ import {
   lazy,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ChangeEvent,
@@ -24,6 +25,7 @@ import {
   Routes,
   useLocation,
   useNavigate,
+  useNavigationType,
   useSearchParams,
 } from 'react-router-dom';
 
@@ -4564,6 +4566,23 @@ const ApiReference = lazy(() => import('../docs/ApiReference'));
 const PrivacyPolicy = lazy(() => import('../privacy/PrivacyPolicy'));
 
 /**
+ * A lazy page's placeholder, a viewport tall (less the 52 px bar): shorter,
+ * and the footer rode up under the spinner and jumped back down when the
+ * page arrived (task 0305).
+ */
+function PageLoading({ label }: { label: string }) {
+  return (
+    <Stack
+      alignItems="center"
+      sx={{ py: 12, minHeight: 'calc(100dvh - 52px)' }}
+      aria-busy="true"
+    >
+      <CircularProgress size={28} aria-label={label} />
+    </Stack>
+  );
+}
+
+/**
  * `/docs` — the API reference, the live OpenAPI document rendered in the
  * portal's own pieces (task 0195). Documentation like the quick start: no
  * session needed, and the bar depends on who is looking. The document is
@@ -4587,16 +4606,7 @@ function DocsRoute({ gate }: { gate: Gate }) {
       ) : (
         <Navbar canOfferKey={gate.open} inPage={false} />
       )}
-      <Suspense
-        fallback={
-          <Stack alignItems="center" sx={{ py: 12 }} aria-busy="true">
-            <CircularProgress
-              size={28}
-              aria-label="Loading the API reference"
-            />
-          </Stack>
-        }
-      >
+      <Suspense fallback={<PageLoading label="Loading the API reference" />}>
         <ApiReference />
       </Suspense>
       <Footer canOfferKey={signedIn} />
@@ -4622,16 +4632,7 @@ function PrivacyPolicyRoute({ gate }: { gate: Gate }) {
       ) : (
         <Navbar canOfferKey={gate.open} inPage={false} />
       )}
-      <Suspense
-        fallback={
-          <Stack alignItems="center" sx={{ py: 12 }} aria-busy="true">
-            <CircularProgress
-              size={28}
-              aria-label="Loading the privacy policy"
-            />
-          </Stack>
-        }
-      >
+      <Suspense fallback={<PageLoading label="Loading the privacy policy" />}>
         <PrivacyPolicy />
       </Suspense>
       <Footer canOfferKey={signedIn} />
@@ -4639,7 +4640,83 @@ function PrivacyPolicyRoute({ gate }: { gate: Gate }) {
   );
 }
 
+/**
+ * Scroll to the URL's `#hash` once its target is rendered, and start a newly
+ * pushed page at the top (task 0305).
+ *
+ * The browser jumps to a hash by itself only if the target exists when it
+ * looks, and on a full load — the landing bar's `/api/#faq` from any other
+ * page, or a pasted link — it looks before React has rendered anything: the
+ * URL said `#faq` and the page stayed at the top. And a router link kept the
+ * previous page's offset: "Quick Start" clicked at the foot of the landing
+ * opened the guide 6,000 px down.
+ *
+ * An entry with a hash is positioned here and nowhere else, so back/forward
+ * to `/api/#faq` shows FAQ rather than the offset the browser saved when the
+ * reader left. With `#faq` in the address bar, anything else reads as the
+ * link not working. Back/forward to an entry without a hash is the browser's.
+ */
+function useScrollOnNavigate() {
+  const { pathname, hash } = useLocation();
+  const navigation = useNavigationType();
+  // The page this effect last positioned, to tell a new page from a hash
+  // change within one. Cleared on unmount, so StrictMode's rehearsal mount
+  // runs as a new page too.
+  const shown = useRef<string | null>(null);
+  useEffect(
+    () => () => {
+      shown.current = null;
+    },
+    [],
+  );
+
+  // A layout effect, so a new page is in place before its first paint.
+  useLayoutEffect(() => {
+    const newPage = shown.current !== pathname;
+    shown.current = pathname;
+    window.history.scrollRestoration = hash ? 'manual' : 'auto';
+
+    if (!hash) {
+      if (newPage && navigation === 'PUSH' && window.scrollY > 0) {
+        window.scrollTo({ top: 0, behavior: 'instant' });
+      }
+      return;
+    }
+    let id = hash.slice(1);
+    try {
+      id = decodeURIComponent(id);
+    } catch {
+      // A malformed escape names no id we render; look for it as written.
+    }
+    const jump = () => {
+      const target = document.getElementById(id);
+      // Instant onto a new page, like the browser's own jump on load. Within
+      // a page the theme's smooth scroll: an in-page link is already being
+      // animated there by the browser, and this only re-aims it.
+      // Optional call: jsdom has no `scrollIntoView`.
+      target?.scrollIntoView?.(newPage ? { behavior: 'instant' } : undefined);
+      return target !== null;
+    };
+    if (jump()) return;
+
+    // ponytail: a lazy route (`/privacy-policy`) renders its ids a chunk
+    // later, so watch for the target for 5 s; after that a jump would yank a
+    // reader who has started scrolling.
+    const observer = new MutationObserver(() => {
+      if (jump()) stop();
+    });
+    const timer = setTimeout(stop, 5000);
+    function stop() {
+      observer.disconnect();
+      clearTimeout(timer);
+    }
+    observer.observe(document.body, { childList: true, subtree: true });
+    return stop;
+  }, [pathname, hash, navigation]);
+}
+
 export function App() {
+  useScrollOnNavigate();
   const probe = useConfigProbe();
   const open = probe.state === 'ok' && probe.config.enabled;
   const { session, onSignOut, reload } = useSession(open);
