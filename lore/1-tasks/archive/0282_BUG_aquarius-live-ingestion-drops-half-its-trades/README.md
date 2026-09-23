@@ -2,7 +2,7 @@
 id: "0282"
 title: "Candle writes are replaced instead of summed whenever a minute bucket spans a reconcile run — Aquarius loses ~50% of its trades daily, and SDEX is affected too"
 type: BUG
-status: blocked
+status: completed
 assignee: okarcz
 related_adr: []
 related_tasks: ["0080", "0101", "0100", "0097", "0203"]
@@ -141,11 +141,24 @@ history:
       2026-09-22; alarm OK, no datapoint since, i.e. zero drops). All seven
       criteria are now met; status left unchanged pending the operator's
       close-out.
+  - date: "2026-09-23"
+    status: completed
+    who: okarcz
+    note: >
+      Closed. All seven criteria met. The live fix (#313, deployed 2026-09-17
+      12:04 UTC) measured exactly zero Aquarius loss on 2026-09-19 and 09-20
+      (26,422 and 20,497 trades, raw = stored). Drops are observable on both
+      remaining paths: forced partial flushes (ForcedPartialFlushes) and
+      unregistered pools (0291 AC 3, live since 0286 phase 1's 2026-09-22
+      ingest deploy). The history repair of the lost trades is 0286 phase 3's
+      re-ingest, decided with the operator, not a separate job here.
 ---
 
 # Aquarius live ingestion drops about half of every day's trades
 
-## 📊 STATUS — 2026-09-21 · ⛔ BLOCKED on [[0291]] · FIX VERIFIED, two full days at EXACTLY zero loss
+## 📊 STATUS — 2026-09-23 · ✅ COMPLETED · all seven criteria met, history repair in [[0286]] phase 3
+
+### 2026-09-21 · ⛔ BLOCKED on [[0291]] · FIX VERIFIED, two full days at EXACTLY zero loss
 
 **The live fix is in production and verified.** PR #313 was merged as `2cb5b2b`
 and deployed at **12:04:20 UTC** on 2026-09-17 (Observability, then Compute).
