@@ -4,7 +4,7 @@ title: "Candles take every fill at equal weight, including stroop-dust, in the w
 type: BUG
 status: active
 related_adr: ["0287"]
-related_tasks: ["0278", "0276", "0266", "0228", "0146", "0142", "0137", "0200", "0088", "0282", "0285"]
+related_tasks: ["0278", "0276", "0266", "0228", "0146", "0142", "0137", "0200", "0088", "0282", "0285", "0300", "0304"]
 tags: [layer-backend, priority-high, effort-large, ohlcv, ingest, enrichment, clickhouse, data-correctness, api-contract]
 links:
   - "../../2-adrs/0287_candle-prices-come-from-price-forming-fills-and-a-windowed-close.md"
@@ -152,6 +152,14 @@ history:
       [[0302]] spawned for the generator-level fix. Phase-1 AC 10 (the
       first-week measurement) is now the only open phase-1 item and the
       measurement clock starts 2026-09-22 12:00 UTC.
+  - date: "2026-09-23"
+    status: active
+    who: okarcz
+    note: >
+      Task now owned by the operator end to end, phase 3 included. Added
+      the Comet precondition for phase 3 (deploy 0300 → Comet in
+      pool_registry → months from 202405), with a script gate to follow
+      in the Soroban-era AMM fix.
 ---
 
 # Candles are built from dust fills in the wrong order
@@ -508,6 +516,31 @@ section above without changing its rules.
   0296's "start" date and 7-day window (the only clean window before the
   load tests is 09-10 → 09-16; 1-min metrics for 09-04 → 09-20 get exported
   before 09-25 regardless).
+
+### Phase 3 — Comet precondition (2026-09-23)
+
+[[0300]] indexes the Comet weighted pool (Blend backstop BLND/USDC), first
+swap at ledger 51 500 460 (2024-05-02). As of 2026-09-23 `prices.pool_registry`
+holds aquarius 515, phoenix 20, soroswap 235, sushiswap 133 and **no comet**.
+
+- **Order: deploy 0300 → Comet written to `pool_registry` → phase 3 past
+  202404.** A month from 202405 on re-ingested without Comet is not damaged
+  (Comet was never indexed, so the snapshot holds none of it either), but it
+  would have to be rebuilt a second time once 0300 lands — the same argument
+  as SushiSwap's gate at 202601. If 0300 is not live when the loop reaches
+  202405, the loop stops at 202404.
+- **The script enforces it** the way it enforces the 133 SushiSwap pools: a
+  `comet` registry gate in `preflight` and in the per-month `gates` step for
+  months ≥ 202405. Not yet in `reingest_0286.py` — it goes in with the
+  Soroban-era AMM fix (the parse of the `events with no apply order:` line
+  that [[0304]] removed, and the default `--amm mtls` that the `develop`
+  `events-backfill` cannot run).
+- **`preroll-amm-reprice.sql` needs no `comet` for phase 3.** The month loop
+  pre-rolls with `preroll-live-gap.sql` (`reingest_0286.py:686`), which has no
+  `source` filter, so Comet's minutes reach 15m/1h/4h/1d like every other
+  source. `preroll-amm-reprice.sql` is historical (runbook §4g) and fails
+  Code 20 against the current tables. Adding `comet` to its source list is
+  harmless, but it is not a phase-3 dependency.
 
 ## Out of scope
 

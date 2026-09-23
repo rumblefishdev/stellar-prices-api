@@ -2,9 +2,9 @@
 id: "0305"
 title: "Open the portal to the public — explorer basic auth off /api/*, footer trimmed to live links"
 type: CHORE
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0194", "0195", "0301", "0303", "0306"]
+related_tasks: ["0194", "0195", "0301", "0303", "0306", "0307"]
 tags: [layer-frontend, portal, priority-high, effort-small]
 links:
   - "../archive/0195_FEATURE_swagger-ui-spa-fallback-and-custom-domain.md"
@@ -23,6 +23,17 @@ history:
     status: active
     who: stkrolikiewicz
     note: "Activated; footer trim and logo check start on the branch."
+  - date: "2026-09-23"
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Shipped: PR #341 merged 09:10 UTC (`4c9b70e2`), bundle synced 09:16 UTC
+      (`index-DIgi8Afa.js`, `/api/*` invalidation completed), checked live.
+      All 9 criteria met; the portal is public since the explorer's
+      basic auth came off `/api/*`. Scope grew by three items found on the
+      way: hash scrolling and the loader, the Quick Start error section, the
+      sign-in card's status page. Spawned [[0306]] (docs drift) and [[0307]]
+      (revoked-key contact). ⚠️ The explorer's `master` still reads `true`.
 ---
 
 # Open the portal to the public
@@ -127,9 +138,9 @@ with this task; the rest of that comparison is [[0306]].
 
 ## Acceptance Criteria
 
-- [ ] Footer shows neither `Status` nor the `rumblefish.dev` text link; the
+- [x] Footer shows neither `Status` nor the `rumblefish.dev` text link; the
       Rumble Fish mark still links to `https://rumblefish.dev`
-- [ ] The SorobanScan logo links to `https://sorobanscan.rumblefish.dev/` on
+- [x] The SorobanScan logo links to `https://sorobanscan.rumblefish.dev/` on
       `/`, `/quick-start`, `/docs`, `/privacy-policy` and `/dashboard`, signed
       in and signed out (`/login` has no bar)
 - [x] Explorer: `enableApiSpaBasicAuth: false` deployed to production (its
@@ -138,12 +149,89 @@ with this task; the rest of that comparison is [[0306]].
 - [x] Without credentials: `/api/` answers `200`; a refresh on `/api/dashboard`
       and `/api/docs` returns the portal's `index.html` (0195's open AC;
       measured 2026-09-23 09:02 UTC)
-- [ ] `docs/scf/api-endpoints.md` no longer describes the portal as gated
-- [ ] A `#hash` URL lands on its target: from another page's bar, pasted, on
+- [x] `docs/scf/api-endpoints.md` no longer describes the portal as gated
+- [x] A `#hash` URL lands on its target: from another page's bar, pasted, on
       a lazy page, and on back/forward; an in-page link keeps its smooth
       scroll; a pushed page opens at the top
-- [ ] The lazy pages' loader keeps the footer below the fold
-- [ ] The Quick Start's 429 card shows what its Copy button writes, and the
+- [x] The lazy pages' loader keeps the footer below the fold
+- [x] The Quick Start's 429 card shows what its Copy button writes, and the
       error lede no longer promises a `code` on the gateway's 403 and 429
-- [ ] No page names a status page: the sign-in refusal card ends at "contact
+- [x] No page names a status page: the sign-in refusal card ends at "contact
       support"
+
+## Implementation Notes
+
+- **Footer and logo** (`93738a9d`): `Footer` in `landing/Chrome.tsx` lists
+  Documentation, Dashboard (when a key can be offered), Contact and Privacy
+  policy; the Rumble Fish mark is its only `rumblefish.dev` link.
+  `app.spec.tsx` asserts the wordmark's `href` on every route with a bar,
+  signed in and out.
+- **Scroll and loader** (`259fbbbc`): `useScrollOnNavigate` in `app.tsx`
+  (Step 5) and `PageLoading`, a viewport tall less the bar (Step 6), with
+  tests for a hash on load, on a lazy page, on back, and push-to-top.
+- **Quick Start error section** (`e464bdb8`): the 429 card is `RATE_LIMIT`,
+  a `Snippet` in `SNIPPET_TABLES`, so the existing drift spec compares what it
+  renders with what it copies — and fails on the old card, checked. New lede.
+- **Sign-in card** (`0800ab31`): `KeepsHappening` ends at "contact support".
+- **Docs** (`9b0c1c7d`): `docs/scf/api-endpoints.md` describes the portal as
+  public, with the explorer-`master` caveat below.
+- **Shipped**: PR #341 merged 09:10 UTC (`4c9b70e2`); `make -C infra
+  sync-portal-explorer` from that commit, `api/index.html` written 09:16 UTC,
+  invalidation `I8D8ALLIBV53W9F3ALN12OSDB9` completed in ~20 s. Checked live
+  in a browser: entry chunk `index-DIgi8Afa.js`, both footers, the 429 card
+  and lede, the refusal card, `/api/docs` (9 operations, 20 schemas).
+- 6 files outside `lore/`, +291 / −114. Portal suite 249 passed, 4 skipped;
+  typecheck and lint clean.
+
+**Modified test:** the footer assertion in `app.spec.tsx` went from "no
+`Status` link" to "no `Status` and no `rumblefish.dev` text inside the footer
+navigation" — stricter, because `Status` used to render as plain text.
+
+## Design Decisions
+
+### From Plan
+
+1. **`Status` and the `rumblefish.dev` text out of the footer**; the Rumble
+   Fish mark keeps the company link.
+2. **Back/forward to a hashed entry shows its target** even if the reader had
+   scrolled away before leaving (Step 5's ⚠️).
+
+### Emerged
+
+3. **The 429 card became a `Snippet`** rather than a second hand-kept copy:
+   the drift spec already renders every `SNIPPET_TABLES` entry against its
+   Copy text, so one table entry is the whole test.
+4. **The error lede was rewritten, not dropped**, and says only what the table
+   under it shows: the API's own errors carry a `code` and a `message`, the
+   gateway's 403 and 429 a `message` only.
+5. **The sign-in card's "status page" was cut too** (Stanisław, 2026-09-23),
+   for the reason the footer's `Status` was.
+6. **The basic-auth criteria were ticked from measurement** (Stanisław,
+   2026-09-23), with the explorer's `master` caveat recorded rather than
+   waited on.
+7. **The docs-vs-production comparison became its own task** ([[0306]]);
+   only the two statements that contradicted the public page itself were
+   fixed here.
+
+## Issues Encountered
+
+- **An earlier fix reached half a card.** 0193's measured 429 body went into
+  the Copy text (`RATE_LIMIT_BODY`); the rendered card kept the Figma frame's
+  invented body, and nothing compared the two because the card was not in
+  `SNIPPET_TABLES`.
+- **The explorer's `master` still reads `enableApiSpaBasicAuth: true`.**
+  Production is open, but no `deploy-production` run followed 2026-09-21, so
+  the change reached it outside the tag pipeline; a `-all` or `-Delivery`
+  release tagged from `master` before their `develop` merges closes the gate
+  again.
+- **`lore-framework_validate` rejects `type: CHORE`** (its enum is BUG,
+  FEATURE, RESEARCH, REFACTOR, DOCS). Left as created; the repo uses CHORE
+  elsewhere too.
+
+## Future Work
+
+- [[0306]] — the rest of the docs-vs-production comparison.
+- [[0307]] — the revoked-key card's contact button and "Contact support."
+  lead nowhere.
+- Explorer `develop` → `master`, so the flag stays `false` — their lore-0519,
+  not a task in this repo.

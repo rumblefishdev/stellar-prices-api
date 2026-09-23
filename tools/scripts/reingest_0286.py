@@ -92,7 +92,12 @@ class CH:
         if self.url.startswith("https"):
             for role, stem in (("admin", a.admin_cert), ("writer", a.writer_cert),
                                ("reader", a.reader_cert)):
-                c = ssl.create_default_context(cafile=os.path.expanduser(a.ca))
+                # The server presents a public (Let's Encrypt) certificate; --ca is the
+                # internal CA that signs the CLIENT certs. Passing it as `cafile` alone
+                # drops the system roots and fails CERTIFICATE_VERIFY_FAILED — curl hides
+                # this by also reading its CApath, the Rust client by adding webpki roots.
+                c = ssl.create_default_context()
+                c.load_verify_locations(cafile=os.path.expanduser(a.ca))
                 stem = os.path.expanduser(stem)
                 c.load_cert_chain(stem + ".crt", stem + ".key")
                 self.ctx[role] = c

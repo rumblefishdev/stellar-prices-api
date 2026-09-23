@@ -56,10 +56,26 @@ async fn setup(db: &str) -> Client {
         .unwrap();
     admin
         .query(&format!(
+            // Task 0216: asset 2 carries a REAL as_of/price_status pair, dated
+            // half an hour behind updated_at so a transposition of the two
+            // DateTime columns cannot hide.
             "INSERT INTO {db}.current_prices \
-             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at) VALUES \
+             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at, as_of, price_status) \
+             VALUES \
+             (2, 1.0, 1.0, 3000, '2026-02-10 12:00:00', '2026-02-10 11:30:00', 'carried')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            // The other three rows name neither new column, so they really
+            // take the table DEFAULTs (the epoch and ''), which is the shape
+            // the wire must render as ""/"" — not a hand-written copy of it.
+            "INSERT INTO {db}.current_prices \
+             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at) \
+             VALUES \
              (1, 0.5, 0.5, 1000, '2026-02-10 12:00:00'), \
-             (2, 1.0, 1.0, 3000, '2026-02-10 12:00:00'), \
              (3, 2.0, 2.0, 2000, '2026-02-10 12:00:00'), \
              (4, 9.0, 9.0, 500,  '2026-02-10 12:00:00')"
         ))
@@ -194,6 +210,19 @@ async fn default_sort_volume_desc_paginates() {
     assert_eq!(d1[0]["asset_code"], "USDC");
     assert_eq!(d1[1]["asset_type"], "soroban");
     assert_eq!(page1["has_more"], true);
+
+    // Task 0216 — asserted BY VALUE on both arms. In this row `as_of`,
+    // `price_status` and the cursor payload `sort_key` are three adjacent
+    // Strings decoded positionally, so a reorder would publish the cursor as
+    // the status and misparse silently. Checking the keys exist would not see
+    // it; checking the values, and then walking the cursor below, does.
+    assert_eq!(d1[0]["as_of"], "2026-02-10T11:30:00Z");
+    assert_ne!(
+        d1[0]["as_of"], d1[0]["updated_at"],
+        "the listing must publish the price's own time, not the snapshot's"
+    );
+    assert_eq!(d1[0]["price_status"], "carried");
+
     let cursor = page1["cursor"].as_str().unwrap().to_string();
 
     // Page 2: XLM(1000), FOO(500); no more.
@@ -206,6 +235,12 @@ async fn default_sort_volume_desc_paginates() {
     assert_eq!(d2[1]["asset_code"], "FOO");
     assert_eq!(page2["has_more"], false);
     assert!(page2["cursor"].is_null());
+
+    // The other arm: a row on the DEFAULT pair reaches the wire as two empty
+    // strings, never as a formatted epoch. That the cursor delivered this page
+    // at all is the second half of the positional proof above.
+    assert_eq!(d2[0]["as_of"], "");
+    assert_eq!(d2[0]["price_status"], "");
 
     teardown(db).await;
 }

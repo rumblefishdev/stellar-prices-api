@@ -197,7 +197,7 @@ export const LANDING = `${ROUTER_BASENAME}/`;
  */
 export const EXPLORER = 'https://sorobanscan.rumblefish.dev/';
 
-/** Rumble Fish's own site — the footer's mark and its text link. */
+/** Rumble Fish's own site — where the footer's mark leads. */
 export const RUMBLEFISH_SITE = 'https://rumblefish.dev';
 
 /**

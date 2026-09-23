@@ -919,6 +919,46 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         "the carried venue must appear in sources at its priced close, got {lag_srcs}"
     );
 
+    // ── 0216: the age of that carry, and the word for it ───────────────────
+    // Both 7 ZER and 11 LAG are the same shape — a real priced close plus a
+    // NEWER price-forming candle nobody has priced yet — which is exactly what
+    // `carried` names. `as_of` must date the priced close, NOT the newest
+    // candle: reporting the latter would say the price is a minute old when it
+    // is half an hour old, which is the whole defect this column removes.
+    let candle_ts = |expr: &str, id: u32| {
+        format!(
+            "SELECT toString({expr}) FROM {db}.price_ohlcv_1m FINAL \
+             WHERE asset_id = {id} AND timestamp >= now() - INTERVAL 24 HOUR"
+        )
+    };
+    for id in [7_u32, 11] {
+        let priced_ts: String = admin
+            .query(&candle_ts("maxIf(timestamp, close_usd > 0)", id))
+            .fetch_one()
+            .await
+            .unwrap_or_else(|e| panic!("priced ts for {id}: {e}"));
+        let newest_ts: String = admin
+            .query(&candle_ts("max(timestamp)", id))
+            .fetch_one()
+            .await
+            .unwrap_or_else(|e| panic!("newest ts for {id}: {e}"));
+        let as_of = as_of_of(&admin, db, id).await;
+        assert_eq!(
+            as_of, priced_ts,
+            "asset {id}: as_of must be the timestamp of the candle price_usd was read from"
+        );
+        assert_ne!(
+            as_of, newest_ts,
+            "asset {id}: as_of must NOT be the newest candle — that candle has no price yet, \
+             and equality here would mean the column is max(timestamp) in disguise"
+        );
+        assert_eq!(
+            status_of(&admin, db, id).await,
+            "carried",
+            "asset {id}: a priced close older than a price-forming candle is `carried`"
+        );
+    }
+
     // ── 0135 x §5.5: the mask arms over a population WITH a carried price ──
     // Three sources, aquarius carried (1.01 from 50 min ago, tip un-enriched).
     // All three sit within 2% of the median, so arming must keep all three —
@@ -1124,6 +1164,279 @@ async fn method_of(admin: &Client, db: &str, asset: u32) -> String {
         .unwrap_or_else(|e| panic!("method for {asset}: {e}"))
 }
 
+async fn status_of(admin: &Client, db: &str, asset: u32) -> String {
+    admin
+        .query(&format!(
+            "SELECT price_status FROM {db}.current_prices FINAL WHERE asset_id = {asset}"
+        ))
+        .fetch_one::<String>()
+        .await
+        .unwrap_or_else(|e| panic!("price_status for {asset}: {e}"))
+}
+
+/// `as_of` as a string, so the epoch sentinel is readable in a failure message
+/// rather than arriving as an integer nobody recognises.
+async fn as_of_of(admin: &Client, db: &str, asset: u32) -> String {
+    admin
+        .query(&format!(
+            "SELECT toString(as_of) FROM {db}.current_prices FINAL WHERE asset_id = {asset}"
+        ))
+        .fetch_one::<String>()
+        .await
+        .unwrap_or_else(|e| panic!("as_of for {asset}: {e}"))
+}
+
+/// A candle `mins` minutes old with `pf_trade_count` named EXPLICITLY — the
+/// only fixture path in this file that can reach 0. Every other insert helper
+/// here stops the column list at `version`, so `pf_trade_count` takes its
+/// DEFAULT (= `trade_count` = 1) and every fixture candle is price-forming.
+fn insert_pair_pf(
+    db: &str,
+    base: u32,
+    quote: u32,
+    close_usd: &str,
+    vol_usd: &str,
+    mins: i64,
+    pf_trade_count: u32,
+) -> String {
+    format!(
+        "INSERT INTO {db}.price_ohlcv_1m \
+         (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+          volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version, \
+          pf_trade_count) \
+         VALUES (now() - INTERVAL {mins} MINUTE, {base}, {quote}, 'sdex', {close_usd}, \
+          {close_usd}, {close_usd}, {close_usd}, 50, {vol_usd}, {vol_usd}, {close_usd}, \
+          {close_usd}, 1, 1, {pf_trade_count})"
+    )
+}
+
+/// A candle at an EXPLICIT timestamp, for the fixtures that need one on either
+/// side of `now()`. `insert_pair`/`insert_pair_pf` can only date a candle in the
+/// past; `ts_literal` is a `'YYYY-MM-DD HH:MM:SS'` string the caller has already
+/// read back from the server, so the fixture and the assertion agree on the
+/// exact value even if the clock ticks between them. `source` is explicit here
+/// because the upper bound has to be proven on the PER-VENUE pipeline too, and
+/// that needs two venues on one asset. Volume is a fixed $500 per candle, above
+/// the §5.5 threshold, so neither venue is erased before the liveness rule runs.
+fn insert_pair_at(
+    db: &str,
+    base: u32,
+    quote: u32,
+    close_usd: &str,
+    ts_literal: &str,
+    source: &str,
+) -> String {
+    format!(
+        "INSERT INTO {db}.price_ohlcv_1m \
+         (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+          volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+         VALUES ('{ts_literal}', {base}, {quote}, '{source}', {close_usd}, {close_usd}, \
+          {close_usd}, {close_usd}, 50, 500, 500, {close_usd}, {close_usd}, 1, 1)"
+    )
+}
+
+/// `as_of` is the field the published contract tells consumers to subtract from
+/// `now()`, so it must never be dated in the future: a negative age is the one
+/// value no freshness threshold handles the way its author meant it to. A
+/// candle stamped after the wall clock is a data defect (bucket timestamps are
+/// ledger close times), but the window's own lower-only bound made it a
+/// publishable one, so the window is bounded above.
+///
+/// The bound is on EVERY 24h window in the MV, not on the tip alone, and that
+/// is what this test pins — by value, column by column. Bounding the tip only
+/// would pass an `as_of`/`price_usd` assertion while splitting the row against
+/// itself everywhere else: `sources.<venue>.price` and `vwap_24h` drawn from
+/// the future candle the age does not name, `volume_24h_usd` counting its
+/// volume, `price_xlm` no longer 1 for XLM against its own close, and a venue
+/// that stopped quoting hours ago held live forever on the strength of one
+/// future stamp. Each of those is asserted below, so removing any single
+/// `timestamp <= now()` from `current.sql` turns this test red.
+///
+/// Fixture: `sdex` quotes FUT at 2.00 five minutes ago and 3.00 in the future;
+/// XLM carries its own base candles at 0.40 (past) and 0.60 (future); and
+/// `soroswap` quotes FUT at 9.00 three hours ago — outside CARRY_BOUND, so it
+/// is dead — then emits one future-stamped candle.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
+    let db = "it_current_mv_0216_future";
+    let admin = setup(db).await;
+
+    // Both literals are read back from the server ONCE, so the assertion below
+    // compares against the exact string the fixture inserted rather than
+    // re-deriving it from a clock that has moved on.
+    let past: String = admin
+        .query("SELECT toString(toStartOfMinute(now() - INTERVAL 5 MINUTE))")
+        .fetch_one()
+        .await
+        .expect("past timestamp");
+    let future: String = admin
+        .query("SELECT toString(toStartOfMinute(now() + INTERVAL 10 MINUTE))")
+        .fetch_one()
+        .await
+        .expect("future timestamp");
+    // Older than CARRY_BOUND (2h), so `soroswap` is unambiguously dead unless
+    // its future-stamped candle is allowed to speak for it.
+    let stale: String = admin
+        .query("SELECT toString(toStartOfMinute(now() - INTERVAL 3 HOUR))")
+        .fetch_one()
+        .await
+        .expect("stale timestamp");
+
+    for q in [
+        insert_asset(db, 1, "XLM", ""),
+        insert_asset(db, 12, "FUT", "GFUT"),
+        insert_pair_at(db, 12, 1, "2.00", &past, "sdex"),
+        // A DIFFERENT price on the future candle: if the bound ever moves back
+        // inside the `as_of` aggregate alone, price_usd reads 3.0 here and the
+        // assertion below says so.
+        insert_pair_at(db, 12, 1, "3.00", &future, "sdex"),
+        // XLM priced as a BASE leg, so the `xlm_usd` scalar has something to
+        // read and `price_xlm` is a real quotient instead of the 0 sentinel.
+        // Two closes again, so an unbounded scalar is visible as a number.
+        insert_pair_at(db, 1, 12, "0.40", &past, "sdex"),
+        insert_pair_at(db, 1, 12, "0.60", &future, "sdex"),
+        // A venue that stopped quoting three hours ago and then emitted one
+        // future-stamped candle. `per_source`'s liveness test is a `max` over
+        // the same window, so an unbounded one reads it as live forever.
+        insert_pair_at(db, 12, 1, "9.00", &stale, "soroswap"),
+        insert_pair_at(db, 12, 1, "9.00", &future, "soroswap"),
+    ] {
+        admin.query(&q).execute().await.expect("fixture");
+    }
+    refresh(&admin, db, 2).await;
+
+    // BY VALUE, not `<= now()`: the latter passes on any timestamp the MV
+    // happens to pick, including one that silently dropped the newest real
+    // candle. This says which candle as_of must name.
+    assert_eq!(
+        as_of_of(&admin, db, 12).await,
+        past,
+        "as_of must name the newest candle at or before now(), not the future-dated one"
+    );
+    // The whole tip, not only the age: the future candle's 3.00 must be
+    // invisible to price_usd as well, or as_of would name a candle the
+    // published price did not come from.
+    let price = scalar_f64(
+        &admin,
+        &format!("SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = 12"),
+    )
+    .await;
+    assert!(
+        (price - 2.0).abs() < 1e-9,
+        "price_usd must come from the same candle as_of names (the past one, 2.00) — got {price}"
+    );
+    assert_eq!(
+        status_of(&admin, db, 12).await,
+        "priced",
+        "tip_at is bounded the same way, so a future candle cannot make a live price `carried`"
+    );
+
+    // ── the rest of the row, which a tip-only bound would leave disagreeing ──
+    // Each assertion below names a column the review found still reading the
+    // future candle while `price_usd`/`as_of` no longer did.
+
+    // per_source: the venue's own price must be the past close, not the future
+    // one, or `sources` publishes a price the age beside it does not describe.
+    let src_price = scalar_f64(
+        &admin,
+        &format!(
+            "SELECT toFloat64OrZero(JSONExtractString(sources, 'sdex', 'price')) \
+             FROM {db}.current_prices FINAL WHERE asset_id = 12"
+        ),
+    )
+    .await;
+    assert!(
+        (src_price - 2.0).abs() < 1e-9,
+        "sources.sdex.price must be the past close 2.00 that as_of names — got {src_price}"
+    );
+
+    // vwap_24h weights the surviving venues, so it inherits per_source's bound.
+    // One kept venue at 2.00 → exactly 2.00.
+    let vwap = scalar_f64(
+        &admin,
+        &format!("SELECT toFloat64(vwap_24h) FROM {db}.current_prices FINAL WHERE asset_id = 12"),
+    )
+    .await;
+    assert!(
+        (vwap - 2.0).abs() < 1e-9,
+        "vwap_24h must weight the past close only — got {vwap}"
+    );
+
+    // src_is_live is a `max(timestamp)` over the same window. Unbounded, the
+    // dead venue's future stamp keeps it live and it survives into `sources`.
+    let srcs: String = admin
+        .query(&format!(
+            "SELECT sources FROM {db}.current_prices FINAL WHERE asset_id = 12"
+        ))
+        .fetch_one()
+        .await
+        .expect("sources");
+    assert!(
+        srcs.contains("sdex"),
+        "the live venue must survive — got {srcs}"
+    );
+    assert!(
+        !srcs.contains("soroswap"),
+        "a venue last quoting 3h ago is dead; one future-stamped candle must not \
+         make it live beside a live venue — got {srcs}"
+    );
+
+    // volume_24h_usd sums BOTH legs over the same window: $500 from sdex's past
+    // candle, $500 from soroswap's stale one, $500 from XLM's past candle
+    // counted on its quote leg (FUT) = $1,500. Every future candle is excluded.
+    let vol = scalar_f64(
+        &admin,
+        &format!(
+            "SELECT toFloat64(volume_24h_usd) FROM {db}.current_prices FINAL WHERE asset_id = 12"
+        ),
+    )
+    .await;
+    assert!(
+        (vol - 1_500.0).abs() < 1e-6,
+        "volume_24h_usd must exclude the future candles (1500, not 3000) — got {vol}"
+    );
+
+    // The xlm_usd scalar is its own window. Unbounded it reads 0.60 while XLM's
+    // own price_usd reads 0.40, and XLM stops being worth 1 XLM.
+    let xlm_price = scalar_f64(
+        &admin,
+        &format!("SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = 1"),
+    )
+    .await;
+    assert!(
+        (xlm_price - 0.40).abs() < 1e-9,
+        "XLM's own price_usd must be the past close 0.40 — got {xlm_price}"
+    );
+    assert_eq!(
+        as_of_of(&admin, db, 1).await,
+        past,
+        "XLM is dated from its own past candle too"
+    );
+    let xlm_in_xlm = scalar_f64(
+        &admin,
+        &format!("SELECT toFloat64(price_xlm) FROM {db}.current_prices FINAL WHERE asset_id = 1"),
+    )
+    .await;
+    assert!(
+        (xlm_in_xlm - 1.0).abs() < 1e-9,
+        "XLM divided by the XLM/USD close is 1 by construction, and stays 1 only \
+         while both sides read the same candle set — got {xlm_in_xlm}"
+    );
+    // The same scalar, seen from a second asset: 2.00 / 0.40 = 5.
+    let fut_in_xlm = scalar_f64(
+        &admin,
+        &format!("SELECT toFloat64(price_xlm) FROM {db}.current_prices FINAL WHERE asset_id = 12"),
+    )
+    .await;
+    assert!(
+        (fut_in_xlm - 5.0).abs() < 1e-9,
+        "price_xlm must be 2.00 / 0.40 = 5 — got {fut_in_xlm}"
+    );
+
+    teardown(db).await;
+}
+
 /// The headline defect: canonical USDC never trades as a BASE leg, so every
 /// base-keyed aggregate skipped it and `/price` returned 404. It must now
 /// publish a row, priced from the measured rate rather than a $1 placeholder,
@@ -1154,6 +1467,29 @@ async fn usdc_publishes_a_row_from_the_measured_rate_and_is_tagged_oracle() {
         "USDC must carry the MEASURED rate, not a $1 placeholder — got {price}"
     );
     assert_eq!(method_of(&admin, db, 2).await, "oracle");
+
+    // Task 0216 — the oracle arm dates itself from the reading it published,
+    // not from the refresh. `as_of` = `tip_at` there by construction, which is
+    // what puts every oracle row in the `priced` branch without the status
+    // expression ever keying on `is_oracle` (the 0178 lesson).
+    let rate_ts: String = admin
+        .query(&format!(
+            "SELECT toString(max(timestamp)) FROM {db}.usd_rate FINAL \
+             WHERE asset_code = 'USDC' AND method = 'oracle'"
+        ))
+        .fetch_one()
+        .await
+        .expect("rate timestamp");
+    assert_eq!(
+        as_of_of(&admin, db, 2).await,
+        rate_ts,
+        "as_of must be the measured rate's OWN timestamp"
+    );
+    assert_eq!(
+        status_of(&admin, db, 2).await,
+        "priced",
+        "a measured rate is the newest thing there is to wait for here"
+    );
 
     // Volume counts the quote leg: 10,000 + 2,000. Base-only summed an empty
     // set and published 0, which is the bug.
@@ -1204,6 +1540,10 @@ async fn the_oracle_allowlist_is_usdc_only_and_never_repegs_stellar_usdt() {
     for q in [
         insert_asset(db, 1, "XLM", ""),
         insert_asset(db, 3, "USDT", USDT_ISSUER),
+        // The canonical USDC identity IS resolvable here — it simply has no
+        // oracle reading. That is the "no rate" half of the tuple scalar
+        // (task 0216), asserted below.
+        insert_asset(db, 2, "USDC", USDC_ISSUER),
         // USDT trades as a base at its real, depegged value.
         insert_pair(db, 3, 1, "0.13", "65"),
         // The trap: a par rate filed under the depegged issuer's identity.
@@ -1225,6 +1565,24 @@ async fn the_oracle_allowlist_is_usdc_only_and_never_repegs_stellar_usdt() {
         "traded",
         "a market-priced asset is 'traded'; tagging it 'oracle' would assert \
          authority this price does not have"
+    );
+
+    // Task 0216 — the rate and its own timestamp are read as ONE tuple, and
+    // with no matching reading that tuple is (0, 1970-01-01 00:00:00). The
+    // `.1 > 0` guard must still stand the oracle arm down: USDC's identity
+    // resolves here, so a row would be a 0 price dated 1970 wearing the
+    // 'oracle' label — the exact "confident zero" the arm exists to refuse.
+    let usdc_rows: u64 = admin
+        .query(&format!(
+            "SELECT count() FROM {db}.current_prices FINAL WHERE asset_id = 2"
+        ))
+        .fetch_one()
+        .await
+        .expect("count usdc rows");
+    assert_eq!(
+        usdc_rows, 0,
+        "with no oracle reading the synthesised arm must emit NO row; absent \
+         is honest, a 1970-dated zero tagged 'oracle' is not"
     );
 
     teardown(db).await;
@@ -1357,6 +1715,69 @@ async fn an_unpriced_asset_carries_the_empty_sentinel_not_traded() {
         method_of(&admin, db, 5).await,
         "",
         "no method applies to a missing price"
+    );
+
+    // Task 0216 — the same window, read for its age and its kind. `maxIf` over
+    // a window with no priced candle returns the DateTime DEFAULT rather than
+    // NULL, so without the MV's `if(price_usd > 0, …)` guard this row would
+    // carry 1970-01-01 by ACCIDENT and be indistinguishable from a deliberate
+    // sentinel. The guard makes the epoch a decision; the API maps exactly this
+    // value to "".
+    assert_eq!(
+        as_of_of(&admin, db, 5).await,
+        "1970-01-01 00:00:00",
+        "no priced candle → as_of is the epoch sentinel, never an age"
+    );
+    assert_eq!(
+        status_of(&admin, db, 5).await,
+        "unpriced",
+        "price_usd is the 0 sentinel, so the status word is `unpriced`"
+    );
+
+    teardown(db).await;
+}
+
+/// A dust-only newest minute must NOT flip a real price to `carried`. `carried`
+/// means the reader is waiting for a price that a newer candle ought to have
+/// and does not — but a minute whose only fills were stroop dust has no price
+/// to wait for (task 0286 leaves such a bucket without a close at all). Keying
+/// `carried` on `trade_count`, or on "any newer candle", would label every such
+/// asset stale forever.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_dust_only_newest_minute_does_not_make_a_price_read_carried() {
+    let db = "it_current_mv_0216_dust";
+    let admin = setup(db).await;
+
+    for q in [
+        insert_asset(db, 1, "XLM", ""),
+        insert_asset(db, 9, "DST", "GDST"),
+        insert_asset(db, 10, "WAI", "GWAI"),
+        // 9 DST — a real priced close, then a newest minute that traded only
+        // dust: trade_count = 1 (a fill DID happen) but pf_trade_count = 0, so
+        // none of it was price-forming and the bucket carries no close.
+        insert_pair_pf(db, 9, 1, "2.00", "500", 30, 1),
+        insert_pair_pf(db, 9, 1, "0", "0", 1, 0),
+        // 10 WAI — the control, and the reason this test cannot pass vacuously:
+        // the SAME shape with a PRICE-FORMING newest minute that has not been
+        // enriched yet. That one IS a price the reader is waiting for.
+        insert_pair_pf(db, 10, 1, "2.00", "500", 30, 1),
+        insert_pair_pf(db, 10, 1, "0", "0", 1, 1),
+    ] {
+        admin.query(&q).execute().await.expect("fixture");
+    }
+    refresh(&admin, db, 2).await;
+
+    assert_eq!(
+        status_of(&admin, db, 9).await,
+        "priced",
+        "a dust-only newest minute has no price to wait for — the asset is priced, not carried"
+    );
+    assert_eq!(
+        status_of(&admin, db, 10).await,
+        "carried",
+        "control: a price-forming newest minute with no close yet IS `carried` — if this \
+         also read `priced`, the assertion above would prove nothing"
     );
 
     teardown(db).await;

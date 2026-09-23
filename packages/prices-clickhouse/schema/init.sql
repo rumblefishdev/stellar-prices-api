@@ -241,7 +241,9 @@ CREATE TABLE IF NOT EXISTS prices.current_prices (
     vwap_24h         Decimal(38, 14),
     sources          String,
     updated_at       DateTime      DEFAULT now(),
-    method           LowCardinality(String) DEFAULT ''
+    method           LowCardinality(String) DEFAULT '',
+    as_of            DateTime      DEFAULT toDateTime(0),
+    price_status     LowCardinality(String) DEFAULT ''
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (asset_id)
@@ -270,6 +272,40 @@ SETTINGS index_granularity = 8192;
 -- Idempotent ALTER for databases created before 0178, mirroring the close_usd
 -- pattern above.
 ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS method LowCardinality(String) DEFAULT '' AFTER updated_at;
+
+-- The price's own age and what kind of price it is (task 0216). `updated_at` is
+-- when this snapshot was REFRESHED — every row carries a timestamp a minute old
+-- no matter how old the price is — so before these two columns no consumer
+-- could apply a freshness policy at all.
+--
+--   as_of        — the timestamp of the candle `price_usd` was read from, i.e.
+--                  the SAME predicate `price_usd` itself is chosen by. For the
+--                  oracle arm it is the rate reading's own timestamp.
+--   price_status — 'priced'   the price is the asset's newest price-forming
+--                             candle (every oracle row reads this too).
+--                  'carried'  a real priced close exists, but a NEWER
+--                             price-forming candle has not been priced yet.
+--                  'unpriced' `price_usd` is the 0 sentinel: no priced candle
+--                             in the window, and `method` is '' for the same
+--                             reason.
+--                  ''         the "not yet rewritten" SENTINEL, not a
+--                             vocabulary word: a row this table carries from
+--                             before the MV was re-created. It can only be seen
+--                             between this ALTER and that re-CREATE.
+--
+-- Both are non-nullable like every other column here, so absence must be a
+-- value — and that is exactly the trap to respect on as_of. `maxIf(timestamp,
+-- …)` over a window with no matching candle returns the DateTime DEFAULT, not
+-- NULL: 1970-01-01, an ordinary-looking 56-year-old price sitting beside a 0.
+-- The MV forces the epoch deliberately whenever there is no price
+-- (current.sql's as_of projection) so the API can map exactly that value to ''
+-- rather than publishing an age that is a coincidence of an empty aggregate.
+--
+-- Idempotent ALTERs for databases created before 0216, mirroring the method
+-- pattern above. Kept as two statements, one per column, for the same reason
+-- the method ALTER is its own statement: each is independently re-runnable.
+ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS as_of DateTime DEFAULT toDateTime(0) AFTER method;
+ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS price_status LowCardinality(String) DEFAULT '' AFTER as_of;
 
 ----------------------------------------------------------------------
 -- Per-asset circulating supply (task 0039 supply worker). Its OWN

@@ -408,7 +408,8 @@ export const RESPONSE_FIELDS: readonly {
     value: <Tok c={STR}>&quot;2026-08-31T12:22:00Z&quot;</Tok>,
     raw: '"2026-08-31T12:22:00Z"',
     dot: STR,
-    meaning: 'When this price was last computed (ISO 8601, UTC)',
+    meaning:
+      'When this snapshot row was last refreshed (ISO 8601, UTC) — not the age of the price',
   },
   {
     // `PriceResponse` requires it, and the table went without it until task
@@ -419,6 +420,20 @@ export const RESPONSE_FIELDS: readonly {
     dot: STR,
     meaning:
       "How price_usd was obtained: traded (this asset's own trades) or oracle (an oracle rate, currently USDC only); empty when no priced trade fell in the window",
+  },
+  {
+    key: 'as_of',
+    value: <Tok c={STR}>&quot;2026-08-31T12:16:00Z&quot;</Tok>,
+    raw: '"2026-08-31T12:16:00Z"',
+    dot: STR,
+    meaning: "The price's own time: the minute price_usd was read from",
+  },
+  {
+    key: 'price_status',
+    value: <Tok c={STR}>&quot;carried&quot;</Tok>,
+    raw: '"carried"',
+    dot: STR,
+    meaning: 'priced, carried or unpriced — what kind of price this is',
   },
 ];
 
@@ -632,7 +647,7 @@ const ERROR_CODES: readonly {
     when: 'Rate limit exceeded (1 req/s) or monthly quota reached',
     // No `Retry-After`: API Gateway's throttle response carries none, and
     // telling a reader to wait for a header that never comes is worse than
-    // no advice. Measured — see `RATE_LIMIT_BODY`.
+    // no advice. Measured — see `RATE_LIMIT`.
     fix: 'Slow down to 1 request per second and retry after a short pause — the response carries no Retry-After header. Monitor quota on your dashboard.',
   },
   {
@@ -659,11 +674,28 @@ const ERROR_CODES: readonly {
  * the design said only "what headers to watch", so the concrete contract is
  * decided here, from a measurement, and not from the frame.
  *
+ * ⚠️ The card kept rendering it until task 0305: that fix reached the Copy
+ * text only, so the page showed the invented body and copied the measured one.
+ * A `Snippet` in `SNIPPET_TABLES` now, so the spec holds the two together.
+ *
  * Not measured: the MONTHLY quota's 429, which API Gateway documents as
  * `{"message":"Limit Exceeded"}` — producing it means spending the plan's
  * 100 000 requests. The page does not show a body it has not seen.
  */
-const RATE_LIMIT_BODY = `// HTTP 429 Too Many Requests\n// x-amzn-errortype: TooManyRequestsException\n{\n  "message": "Too Many Requests"\n}`;
+const RATE_LIMIT: Snippet = {
+  text: `// HTTP 429 Too Many Requests\n// x-amzn-errortype: TooManyRequestsException\n{\n  "message": "Too Many Requests"\n}`,
+  view: (
+    <>
+      <Tok c={MUTED}>{'// HTTP 429 Too Many Requests'}</Tok>
+      {'\n'}
+      <Tok c={MUTED}>{'// x-amzn-errortype: TooManyRequestsException'}</Tok>
+      {'\n{\n  '}
+      <Tok c={KEY}>&quot;message&quot;</Tok>:{' '}
+      <Tok c={STR}>&quot;Too Many Requests&quot;</Tok>
+      {'\n}'}
+    </>
+  ),
+};
 
 /**
  * The free plan's burst — `pricingApiFreePlanBurstLimit` in
@@ -887,6 +919,7 @@ export const SNIPPET_TABLES: Record<string, Record<string, Snippet>> = {
   FIRST_REQUEST,
   EXAMPLES,
   SDK,
+  RATE_LIMIT: { body: RATE_LIMIT },
 };
 
 /**
@@ -1373,7 +1406,7 @@ function Errors() {
     <DocSection
       id="errors"
       title="Error handling"
-      lede="All errors return a JSON body with a code and message field."
+      lede="Every error has a JSON body. The API's own errors carry a stable code and a message; the gateway's 403 and 429 carry a message only."
     >
       <DocCard title="HTTP error codes">
         {/* A real table, scrolling inside its card at 375px rather than
@@ -1431,21 +1464,9 @@ function Errors() {
         </Typography>
         <DocCard
           title="JSON"
-          copy={{ text: RATE_LIMIT_BODY, label: '429 response body' }}
+          copy={{ text: RATE_LIMIT.text, label: '429 response body' }}
         >
-          <Code>
-            <Tok c={MUTED}>{'// HTTP 429 Too Many Requests'}</Tok>
-            {'\n'}
-            <Tok c={MUTED}>{'// Retry-After: 1'}</Tok>
-            {'\n{\n  '}
-            <Tok c={KEY}>&quot;code&quot;</Tok>:{' '}
-            <Tok c={STR}>&quot;RATE_LIMIT_EXCEEDED&quot;</Tok>,{'\n  '}
-            <Tok c={KEY}>&quot;message&quot;</Tok>:{' '}
-            <Tok c={STR}>
-              &quot;Request rate limit exceeded. Retry after 1 second.&quot;
-            </Tok>
-            {'\n}'}
-          </Code>
+          <Code>{RATE_LIMIT.view}</Code>
         </DocCard>
       </Stack>
     </DocSection>

@@ -29,10 +29,9 @@ import { ArrowBadge, cardBorder } from './primitives';
 /**
  * The navbar and the footer.
  *
- * The labels are the design's, read off the exported frame. One of the
- * footer's six — `Status` — names a destination that does not exist (no
- * status page anywhere), so it is rendered as text until somebody supplies a
- * URL: a footer link to a 404 is worse than one that is plainly not wired.
+ * The labels are the design's, read off the exported frame, minus two of the
+ * footer's (task 0305): `Status`, which never had a destination, and the
+ * `rumblefish.dev` text link, which repeated the Rumble Fish mark beside it.
  * `Contact` got its URL in task 0301, `Privacy policy` its page in 0303.
  */
 
@@ -124,8 +123,8 @@ export function Wordmark() {
 /** The footer's mark. Same provenance as the header's. */
 export function RumbleFishMark({ height = 32 }: { height?: number }) {
   return (
-    // The mark is the company's link, like the `rumblefish.dev` text beside
-    // it in the footer (task 0301). Named by the image's `alt`.
+    // The mark is the company's link (task 0301), and since task 0305 the
+    // footer's only one. Named by the image's `alt`.
     <Link href={RUMBLEFISH_SITE} sx={{ display: 'inline-flex' }}>
       <Box
         component="img"
@@ -401,9 +400,7 @@ export function Footer({ canOfferKey }: { canOfferKey: boolean }) {
     // a path the deployment does not serve. Every other in-app destination on
     // the page already goes through `RouterLink`; this one did not.
     ...(canOfferKey ? [{ label: 'Dashboard', to: DASHBOARD_ROUTE }] : []),
-    { label: 'Status' },
     { label: 'Contact', href: RUMBLEFISH_CONTACT },
-    { label: 'rumblefish.dev', href: RUMBLEFISH_SITE },
     { label: 'Privacy policy', to: PRIVACY_POLICY_ROUTE },
   ];
 
@@ -440,36 +437,21 @@ export function Footer({ canOfferKey }: { canOfferKey: boolean }) {
             component="nav"
             aria-label="Footer"
           >
-            {links.map(({ label, href, to }) =>
-              href || to ? (
-                <Link
-                  key={label}
-                  {...(to ? { component: RouterLink, to } : { href })}
-                  sx={{
-                    color: color.text.secondary,
-                    fontFamily: font.secondary,
-                    fontSize: '0.875rem',
-                    fontWeight: 500,
-                    '&:hover': { color: color.text.primary },
-                  }}
-                >
-                  {label}
-                </Link>
-              ) : (
-                <Typography
-                  key={label}
-                  component="span"
-                  sx={{
-                    color: color.text.tertiary,
-                    fontFamily: font.secondary,
-                    fontSize: '0.875rem',
-                    fontWeight: 500,
-                  }}
-                >
-                  {label}
-                </Typography>
-              ),
-            )}
+            {links.map(({ label, href, to }) => (
+              <Link
+                key={label}
+                {...(to ? { component: RouterLink, to } : { href })}
+                sx={{
+                  color: color.text.secondary,
+                  fontFamily: font.secondary,
+                  fontSize: '0.875rem',
+                  fontWeight: 500,
+                  '&:hover': { color: color.text.primary },
+                }}
+              >
+                {label}
+              </Link>
+            ))}
           </Stack>
           <Typography variant="body2" sx={{ color: color.text.tertiary }}>
             © 2026 Rumble Fish. All rights reserved.

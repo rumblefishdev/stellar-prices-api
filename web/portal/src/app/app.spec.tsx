@@ -5,7 +5,7 @@ import {
   waitFor,
   within,
 } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ROUTER_BASENAME } from '../base-path';
@@ -1904,17 +1904,152 @@ describe('navigation off the landing page', () => {
       screen.getByRole('link', { name: /rumble fish/i }).getAttribute('href'),
     ).toBe('https://rumblefish.dev');
     // "Contact" reaches the company's contact page (task 0301) and "Privacy
-    // policy" the portal's own page (task 0303); "Status" stays text until a
-    // status page exists.
+    // policy" the portal's own page (task 0303). "Status" and the
+    // `rumblefish.dev` text are gone (task 0305): the mark above is the
+    // company's one link.
     expect(
       screen.getByRole('link', { name: /^contact$/i }).getAttribute('href'),
     ).toBe('https://www.rumblefish.dev/contact/');
-    expect(screen.queryByRole('link', { name: /^status$/i })).toBeNull();
+    const footer = within(screen.getByRole('navigation', { name: 'Footer' }));
+    expect(footer.queryByText(/^status$/i)).toBeNull();
+    expect(footer.queryByText(/^rumblefish\.dev$/i)).toBeNull();
     expect(
       screen
         .getByRole('link', { name: /^privacy policy$/i })
         .getAttribute('href'),
     ).toBe('/privacy-policy');
+  });
+
+  /**
+   * The logo is how a visitor leaves the portal for the rest of the explorer
+   * (task 0301). Every bar renders the same `Wordmark`, but each route picks
+   * its own bar, so each is checked, signed in and out (task 0305). `/login`
+   * has no bar.
+   */
+  it.each([
+    ['/', 'out', 'Primary'],
+    ['/quick-start', 'out', 'Primary'],
+    ['/docs', 'out', 'Primary'],
+    ['/privacy-policy', 'out', 'Primary'],
+    ['/dashboard', 'in', 'Dashboard'],
+    ['/quick-start', 'in', 'Dashboard'],
+    ['/docs', 'in', 'Dashboard'],
+    ['/privacy-policy', 'in', 'Dashboard'],
+  ] as const)(
+    'links the logo on %s (signed %s) to the explorer',
+    async (path, who, bar) => {
+      (who === 'in' ? openAndSignedIn : openAndSignedOut)();
+      render(
+        <MemoryRouter initialEntries={[path]}>
+          <App />
+        </MemoryRouter>,
+      );
+
+      const nav = within(await screen.findByRole('navigation', { name: bar }));
+      expect(
+        nav.getByRole('link', { name: 'SorobanScan' }).getAttribute('href'),
+      ).toBe('https://sorobanscan.rumblefish.dev/');
+    },
+  );
+
+  // The hero's "Built by" band shows the footer's mark, and was a bare image
+  // while the footer's led to the company (task 0308): two marks, one href.
+  it('links both Rumble Fish marks on the landing to the company', async () => {
+    openAndSignedOut();
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('navigation', { name: 'Primary' });
+    expect(
+      screen
+        .getAllByRole('link', { name: /rumble fish/i })
+        .map((link) => link.getAttribute('href')),
+    ).toEqual(['https://rumblefish.dev', 'https://rumblefish.dev']);
+  });
+
+  /**
+   * The browser jumps to a `#hash` only if the target exists when it looks,
+   * and on a full load it looks before React has rendered: the landing bar's
+   * `/api/#faq` from any other page left the reader at the top (task 0305).
+   */
+  describe('scrolling on navigation', () => {
+    const scrolled: string[] = [];
+    beforeEach(() => {
+      scrolled.length = 0;
+      // jsdom has no `scrollIntoView`.
+      Element.prototype.scrollIntoView = function (this: Element) {
+        scrolled.push(this.id);
+      };
+    });
+    afterEach(() => {
+      delete (Element.prototype as Partial<Element>).scrollIntoView;
+      window.history.scrollRestoration = 'auto';
+    });
+
+    function GoBack() {
+      const navigate = useNavigate();
+      return <button onClick={() => navigate(-1)}>test: back</button>;
+    }
+
+    // The policy renders its ids a lazy chunk later than the landing does.
+    it.each([
+      ['/#faq', 'faq'],
+      ['/privacy-policy#personal-data-we-process', 'personal-data-we-process'],
+    ])('lands a load of %s on its target', async (entry, id) => {
+      openAndSignedOut();
+      render(
+        <MemoryRouter initialEntries={[entry]}>
+          <App />
+        </MemoryRouter>,
+      );
+      await waitFor(() => expect(scrolled).toContain(id));
+    });
+
+    it('lands back onto a hash on its target, not on the offset the browser saved', async () => {
+      openAndSignedOut();
+      render(
+        <MemoryRouter
+          initialEntries={['/#faq', '/quick-start']}
+          initialIndex={1}
+        >
+          <App />
+          <GoBack />
+        </MemoryRouter>,
+      );
+      await screen.findByRole('heading', {
+        name: /get your first response in under 5 minutes/i,
+      });
+      expect(scrolled).toEqual([]);
+
+      fireEvent.click(screen.getByRole('button', { name: 'test: back' }));
+      await waitFor(() => expect(scrolled).toContain('faq'));
+      expect(window.history.scrollRestoration).toBe('manual');
+    });
+
+    it('opens a pushed page at the top', async () => {
+      const scrollTo = vi.fn();
+      vi.stubGlobal('scrollTo', scrollTo);
+      vi.stubGlobal('scrollY', 6439);
+      openAndSignedOut();
+      render(
+        <MemoryRouter initialEntries={['/']}>
+          <App />
+        </MemoryRouter>,
+      );
+      expect(scrollTo).not.toHaveBeenCalled();
+
+      const bar = within(
+        await screen.findByRole('navigation', { name: 'Primary' }),
+      );
+      fireEvent.click(bar.getByRole('link', { name: /^quick start$/i }));
+      await screen.findByRole('heading', {
+        name: /get your first response in under 5 minutes/i,
+      });
+      expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'instant' });
+    });
   });
 
   /**
