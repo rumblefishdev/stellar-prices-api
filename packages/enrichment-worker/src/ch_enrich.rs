@@ -3313,14 +3313,14 @@ mod tests {
         let spec = usdt_reset();
         assert_eq!(
             reset_pending_pred("prices", "price_ohlcv_1d", &spec),
-            "quote_asset_id = 111 AND timestamp >= toDateTime(1612656000) \
+            "quote_asset_id = 111 AND timestamp >= toDateTime(1612724400) \
              AND (close_usd > 0 OR volume_quote_usd > 0) AND volume_quote > 0"
         );
         assert_eq!(
             repair_target_pred("prices", "price_ohlcv_1d", Some(&spec)),
             format!(
                 "({CANDIDATE_PRED}) OR (quote_asset_id = 111 \
-                 AND timestamp >= toDateTime(1612656000) \
+                 AND timestamp >= toDateTime(1612724400) \
                  AND (close_usd > 0 OR volume_quote_usd > 0) AND volume_quote > 0)"
             )
         );
@@ -3352,10 +3352,10 @@ mod tests {
     }
 
     fn usdt_reset() -> UsdResetSpec {
-        // 2021-02-07, the start of USDT's USDC market.
+        // 2021-02-07 19:00 UTC, USDT/USDC's first reference candle on _1h (lore 0208).
         UsdResetSpec {
             quote_asset_id: 111,
-            not_before: 1_612_656_000,
+            not_before: 1_612_724_400,
             // Task 0182's shape, stated rather than defaulted: unbounded above,
             // and no reference join of either kind. This fixture is what pins
             // that path, and every later mode is APPENDED so it stays byte-exact.
@@ -3391,7 +3391,7 @@ mod tests {
     fn reset_sql_honours_the_epoch_and_the_quote_leg() {
         let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
         assert!(sql.contains("p.quote_asset_id = 111"));
-        assert!(sql.contains("p.timestamp >= toDateTime(1612656000)"));
+        assert!(sql.contains("p.timestamp >= toDateTime(1612724400)"));
     }
 
     /// Mirrors the pivot's own filter, so the reset cannot zero a row the pivot
@@ -4819,6 +4819,9 @@ mod tests {
 
     /// USDT/USDC's first priced candle on `_1h`: 2021-02-07 19:00 UTC.
     const USDT_FIRST_REFERENCE_1H: u32 = 1_612_724_400;
+    /// The epoch task 0182 passed on 2026-08-18 (2021-02-07 00:00 UTC) — the
+    /// value the guard exists to refuse, never a recommended one.
+    const INCIDENT_EPOCH_0182: u32 = 1_612_656_000;
 
     /// Task 0182's AC-4 regression: the exact epoch passed on 2026-08-18
     /// (2021-02-07 00:00 UTC), 19 hours below the first reference candle. It
@@ -4828,7 +4831,7 @@ mod tests {
         let res = check_reset_epoch(
             3,
             "price_ohlcv_1h",
-            1_612_656_000,
+            INCIDENT_EPOCH_0182,
             Some(USDT_FIRST_REFERENCE_1H),
         );
         assert!(
@@ -4836,7 +4839,7 @@ mod tests {
                 &res,
                 Err(ChEnrichError::ResetEpochBelowReference {
                     quote_asset_id: 3,
-                    not_before: 1_612_656_000,
+                    not_before: INCIDENT_EPOCH_0182,
                     first_reference: USDT_FIRST_REFERENCE_1H,
                     table,
                 }) if table == "price_ohlcv_1h"
@@ -4940,11 +4943,11 @@ mod tests {
     /// 19:00 trade); on `_1d` the midnight epoch IS the first reference bucket.
     #[test]
     fn the_0182_epoch_is_refused_per_table_exactly_where_it_destroyed_candles() {
-        let epoch = 1_612_656_000;
+        let epoch = INCIDENT_EPOCH_0182;
         for (table, first_reference, refused) in [
             ("price_ohlcv_1h", 1_612_724_400, true),
             ("price_ohlcv_4h", 1_612_713_600, true),
-            ("price_ohlcv_1d", 1_612_656_000, false),
+            ("price_ohlcv_1d", INCIDENT_EPOCH_0182, false),
         ] {
             let res = check_reset_epoch(3, table, epoch, Some(first_reference));
             assert_eq!(res.is_err(), refused, "{table}: {res:?}");
@@ -4958,7 +4961,7 @@ mod tests {
         let msg = ChEnrichError::ResetEpochBelowReference {
             quote_asset_id: 3,
             table: "price_ohlcv_1h".to_string(),
-            not_before: 1_612_656_000,
+            not_before: INCIDENT_EPOCH_0182,
             first_reference: 1_612_724_400,
         }
         .to_string();
