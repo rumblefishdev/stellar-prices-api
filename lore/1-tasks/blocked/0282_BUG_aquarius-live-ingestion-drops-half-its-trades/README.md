@@ -131,6 +131,16 @@ history:
       archived today. Also corrected: status row 7 read "not started" for the
       phoenix shortfall while the criterion below it was already ticked at
       ~12%. Nothing here can move until the deploy 0286 phase 1 carries.
+  - date: "2026-09-23"
+    status: blocked
+    who: okarcz
+    by: ["0291"]
+    note: >
+      Seventh criterion ticked: 0291 AC 3 is met on production (the
+      UnregisteredPoolEvents counter shipped with 0286 phase 1's ingest on
+      2026-09-22; alarm OK, no datapoint since, i.e. zero drops). All seven
+      criteria are now met; status left unchanged pending the operator's
+      close-out.
 ---
 
 # Aquarius live ingestion drops about half of every day's trades
@@ -696,7 +706,7 @@ just re-corrupts. That constraint is real; it simply does not apply to
       deploy** (07-06 → 07-15 partly, written while the cursor kept resetting;
       live-era fully). AMM months from 2026-07 need [[0291]] first. Expected
       SDEX `trade_count` rise in the live era: ~2.8-3.1x.
-- [ ] Live-path drops become observable — a dropped swap leaves a trace
+- [x] Live-path drops become observable — a dropped swap leaves a trace
       somewhere, rather than nothing at all. ◐ **Half covered by #313:** the one
       path that still loses data after the fix — a forced partial flush — is
       alarmed (`ForcedPartialFlushes`).
@@ -711,6 +721,10 @@ just re-corrupts. That constraint is real; it simply does not apply to
       same delegation, so the two agree.
       **Tick this when 0291 AC 3 is met on production** — same deploy, same
       day-after check, no separate work.
+      ✅ **Ticked 2026-09-23:** [[0291]] AC 3 met on production — the counter
+      shipped with 0286's ingest on 2026-09-22, the alarm reads `OK`, and
+      `UnregisteredPoolEvents` (published only when non-zero) has no datapoint
+      since the deploy.
 - [x] Phoenix's parallel shortfall is measured and either folded in or spawned.
       → ~12% lost (≈4,194 true swaps vs 3,675 stored, live era), via [[0285]]'s
       corrected count; soroswap 43.8%. Folded in: same mechanism, same repair.

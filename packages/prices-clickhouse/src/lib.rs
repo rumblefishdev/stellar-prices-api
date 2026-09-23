@@ -464,8 +464,12 @@ mod tests {
         // (+7 = 41: task 0286's per-table pf ALTERs — pf_trade_count, pf_volume
         // and pf_price_volume added as three clauses of one ALTER per OHLCV
         // grain, because the `CREATE … AS` copies do not inherit them.)
+        // (+2 = 43: task 0216's two idempotent `ALTER TABLE
+        // prices.current_prices ADD COLUMN IF NOT EXISTS` statements — as_of
+        // and price_status — kept one per statement like the method ALTER
+        // above, so each is independently re-runnable.)
         let stmts = split_statements(INIT_SQL);
-        assert_eq!(stmts.len(), 41, "got {}", stmts.len());
+        assert_eq!(stmts.len(), 43, "got {}", stmts.len());
     }
 
     /// The single `CREATE TABLE … IF NOT EXISTS <table> (` statement of `sql`.
@@ -648,28 +652,124 @@ mod tests {
         );
     }
 
-    /// The `TO prices.current_prices (...)` column list must name every column
-    /// the SELECT projects: a materialised view inserts POSITIONALLY, so an
-    /// omitted column silently shifts every value one slot left (0039 review).
-    #[test]
-    fn current_sql_to_clause_names_all_ten_written_columns() {
-        for col in [
-            "asset_id",
-            "price_usd",
-            "price_xlm",
-            "change_24h_pct",
-            "change_7d_pct",
-            "volume_24h_usd",
-            "market_cap_usd",
-            "vwap_24h",
-            "sources",
-            "updated_at",
-        ] {
-            assert!(
-                CURRENT_SQL.contains(col),
-                "current.sql must write column `{col}`"
-            );
+    /// Column names of the `TO prices.current_prices (...)` list, in order.
+    fn to_clause_columns(stmt: &str) -> Vec<String> {
+        let after = stmt
+            .split_once("TO prices.current_prices")
+            .expect("`TO prices.current_prices` clause in the CREATE statement")
+            .1;
+        let open = after.find('(').expect("open paren of the TO column list");
+        let close = open
+            + after[open..]
+                .find(')')
+                .expect("close paren of the TO column list");
+        assert!(
+            after[close + 1..].trim_start().starts_with("AS"),
+            "the TO column list must be followed by `AS` — parsed the wrong parens"
+        );
+        after[open + 1..close]
+            .split(',')
+            .map(|c| c.trim().to_string())
+            .collect()
+    }
+
+    /// Top-level aliases of the final SELECT (the one feeding `FROM unfiltered
+    /// AS u`), in projection order. Every `AS <ident>` at paren depth 0 inside
+    /// that region is an output column; comments are already gone, because
+    /// `split_statements` strips them before we ever see the text.
+    fn final_select_aliases(stmt: &str) -> Vec<String> {
+        let (mut depth, mut select_at, mut from_at) = (0i32, None, None);
+        for (i, ch) in stmt.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            if depth != 0 {
+                continue;
+            }
+            if stmt[i..].starts_with("FROM unfiltered AS u") {
+                from_at = Some(i);
+                break;
+            }
+            if stmt[i..].starts_with("SELECT") {
+                select_at = Some(i);
+            }
         }
+        let select_at = select_at.expect("a top-level SELECT before `FROM unfiltered AS u`");
+        let from_at = from_at.expect("`FROM unfiltered AS u` at the top level");
+        let region = &stmt[select_at + "SELECT".len()..from_at];
+
+        let mut depth = 0i32;
+        let mut aliases = Vec::new();
+        for (i, ch) in region.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            if depth != 0 || !region[i..].starts_with("AS ") {
+                continue;
+            }
+            // Only an alias keyword, never the tail of an identifier.
+            if region[..i].ends_with(|c: char| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            let rest = region[i + "AS ".len()..].trim_start();
+            let ident: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            assert!(!ident.is_empty(), "`AS` with no identifier after it");
+            let tail = rest[ident.len()..].trim_start();
+            assert!(
+                tail.is_empty() || tail.starts_with(','),
+                "alias `{ident}` is followed by neither `,` nor the end of the projection"
+            );
+            aliases.push(ident);
+        }
+        aliases
+    }
+
+    /// The `TO prices.current_prices (...)` column list and the final SELECT's
+    /// projection must be the SAME sequence, in the SAME order — a
+    /// materialised view inserts POSITIONALLY (0039 review), and this one is
+    /// REFRESH … TO, so what it writes is whatever position each expression
+    /// happens to land in.
+    ///
+    /// This replaces a `contains` check (task 0216), which could not have
+    /// caught the failure that actually matters. Measured on the prod build
+    /// 26.3.10.60: transposing two columns of DIFFERENT types throws
+    /// `CANNOT_PARSE_DATETIME` and the refresh dies loudly. Transposing two of
+    /// the SAME type — `as_of` with `updated_at`, or `price_status` with
+    /// `method`, and every such pair in this table is adjacent — produces NO
+    /// ERROR AT ALL: the table simply publishes the snapshot's refresh time as
+    /// the price's own age. Membership is identical in both cases; only order
+    /// tells them apart.
+    #[test]
+    fn current_sql_to_clause_and_select_project_the_same_columns_in_the_same_order() {
+        let create = split_statements(CURRENT_SQL).remove(1);
+        let to_list = to_clause_columns(&create);
+        let select = final_select_aliases(&create);
+
+        // Non-vacuity: a parse that silently returned nothing would make the
+        // equality below pass while proving nothing.
+        assert_eq!(
+            to_list.len(),
+            13,
+            "expected 13 columns in the TO list, parsed {to_list:?}"
+        );
+        assert_eq!(
+            select.len(),
+            13,
+            "expected 13 aliases in the final SELECT, parsed {select:?}"
+        );
+        assert_eq!(
+            to_list, select,
+            "the TO(...) list and the final SELECT disagree.\n  TO:     {to_list:?}\n  SELECT: {select:?}\n\
+             A same-type transposition here (as_of/updated_at, price_status/method) is accepted \
+             by ClickHouse WITHOUT an error and publishes the refresh time as the price's age."
+        );
     }
 
     #[test]
@@ -1132,6 +1232,12 @@ mod tests {
             "vwap_24h",
             "sources",
             "updated_at",
+            // Appended by task 0178 (`method`) and task 0216 (`as_of`,
+            // `price_status`) — a freshness policy is unstateable in-cluster
+            // without the last two.
+            "method",
+            "as_of",
+            "price_status",
         ] {
             assert!(
                 stmt.contains(&format!("c.{col}")),

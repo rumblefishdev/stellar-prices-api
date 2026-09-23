@@ -196,6 +196,16 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     ),
     (
         "AssetListItem",
+        "as_of",
+        "The time the price itself is from: the timestamp of the trading minute `price_usd` \
+         was read from, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`); `\"\"` when there is no price \
+         at all, and also — briefly, after a schema change — on a row the current snapshot \
+         definition has not rewritten yet, where `price_status` is `\"\"` as well. \"No \
+         price\" is an empty `as_of` together with a `price_status` of `unpriced`. Same \
+         meaning as `PriceResponse.as_of`.",
+    ),
+    (
+        "AssetListItem",
         "change_24h_pct",
         "Percentage change of `price_usd` against the oldest priced close in the trailing \
          24-hour window; `\"0\"` without a baseline.",
@@ -231,10 +241,17 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     ),
     (
         "AssetListItem",
+        "price_status",
+        "What kind of price `price_usd` is: `priced`, `carried` or `unpriced` (`\"\"` on a \
+         row the current snapshot definition has not rewritten yet). Same meaning as \
+         `PriceResponse.price_status`.",
+    ),
+    (
+        "AssetListItem",
         "price_usd",
         "Latest USD price for the asset; `\"0\"` when none is available. Same meaning as \
-         `PriceResponse.price_usd`, including the `method` it is attributed to and the \
-         decimal-string form and its precision rationale.",
+         `PriceResponse.price_usd`, including the `method` it is attributed to, the age \
+         `as_of` gives it, and the decimal-string form and its precision rationale.",
     ),
     (
         "AssetListItem",
@@ -245,7 +262,9 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "AssetListItem",
         "updated_at",
-        "Time of the snapshot, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`).",
+        "When this snapshot row was last refreshed, ISO 8601 UTC \
+         (`YYYY-MM-DDTHH:MM:SSZ`). Every asset is refreshed every minute whether or not its \
+         price moved, so this is NOT the age of the price — `as_of` is the price's own time.",
     ),
     (
         "AssetListItem",
@@ -587,6 +606,28 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     ),
     (
         "PriceResponse",
+        "as_of",
+        "The time the price itself is from: the timestamp of the trading minute `price_usd` \
+         was read from, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`). For an asset priced from a \
+         rate it is that rate reading's own time.\n\nThis is the field to apply a freshness \
+         policy to. `updated_at` tells you when this snapshot was last refreshed, which \
+         happens every minute for every asset regardless of whether its price moved — so it \
+         is never a measure of how old a price is.\n\nUSD values are computed by a pass \
+         that runs hourly, so an `as_of` up to about an hour behind `updated_at` — and a \
+         `price_status` of `carried` — is the ORDINARY state of an actively traded asset, \
+         not a fault. A freshness threshold tighter than that cadence rejects the whole \
+         market.\n\n`\"\"` means one of two things, and `price_status` tells them apart. \
+         Almost always there is no price at all: `price_usd` is `\"0\"` and `price_status` \
+         is `unpriced`. An epoch timestamp is never published for that case. The other is \
+         brief and follows a schema change: a row the current snapshot definition has not \
+         rewritten yet carries neither value, so `as_of` is `\"\"` beside a real price and \
+         `price_status` is `\"\"` too. Read \"no price\" as `as_of` empty AND `price_status` \
+         `unpriced`, never as an empty `as_of` on its own.\n\nIt bounds `price_usd` only. \
+         `price_xlm` divides it by an XLM/USD close \
+         dated independently, so it is no fresher than `as_of` and may be older.",
+    ),
+    (
+        "PriceResponse",
         "change_24h_pct",
         "Percentage change of `price_usd` against the oldest priced close in the trailing \
          24-hour window. `\"0\"` when there is no baseline to compare against.",
@@ -603,13 +644,34 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     ),
     (
         "PriceResponse",
+        "price_status",
+        "What kind of price `price_usd` is:\n\n* `priced` — nothing newer is outstanding: \
+         `as_of` is the newest price-forming minute in the window, or no newer price-forming \
+         minute exists. Prices taken from a rate read this too.\n* `carried` — a real priced \
+         close, but a newer price-forming minute has not been priced yet. The price is \
+         genuine and stale; `as_of` says by how much.\n* `unpriced` — no priced trade in the \
+         window, so `price_usd` is `\"0\"`, `method` is `\"\"` and `as_of` is `\"\"`.\n* \
+         `\"\"` — this row predates the current snapshot definition and has not been \
+         rewritten yet. Not one of the three words above; it can only appear briefly after a \
+         schema change.\n\nA minute that traded only dust does not make a price `carried`: \
+         `carried` means a price is outstanding, and a dust-only minute forms no \
+         price.\n\nUSD values are computed by a pass that runs hourly, so `carried` for up \
+         to about an hour after a trade is the ORDINARY state of an actively traded asset, \
+         not a fault. A freshness threshold tighter than that cadence rejects the whole \
+         market.\n\n`carried` also covers the case where the newer trade happened on a pair \
+         with no USD conversion path. Then no newer USD price is coming at all, and `as_of` \
+         is the newest minute that could be converted.",
+    ),
+    (
+        "PriceResponse",
         "price_usd",
         "Latest USD price for the asset: its own last priced close in the trailing \
          24-hour window, or — for an asset that never trades as the base of a market — a \
          rate. `method` says which. `\"0\"` means neither was available.\n\nThe value is not \
          age-bounded: for an asset that has stopped trading it is the last close inside \
          the window, up to 24 hours old. `updated_at` is the time of the snapshot, not \
-         the age of the price.\n\n**A decimal string, not a JSON number.** Prices are \
+         the age of the price — `as_of` is, and `price_status` says whether this is the \
+         asset's newest price or a carried one.\n\n**A decimal string, not a JSON number.** Prices are \
          `Decimal(38, 14)` and a JSON number is an IEEE-754 double in every mainstream \
          parser — ~15-16 significant digits against the 19 a five-figure price at this \
          scale carries, so a float round-trip silently drops low-order digits. Assets on \
@@ -638,7 +700,9 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "PriceResponse",
         "updated_at",
-        "Time of the snapshot, ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`).",
+        "When this snapshot row was last refreshed, ISO 8601 UTC \
+         (`YYYY-MM-DDTHH:MM:SSZ`). Every asset is refreshed every minute whether or not its \
+         price moved, so this is NOT the age of the price — `as_of` is the price's own time.",
     ),
     (
         "PriceResponse",
@@ -747,6 +811,12 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
 /// `OhlcvResponse.granularity`, the arrays of objects) take their example from
 /// the referenced schema. `every_property_has_an_example_or_a_reason` in
 /// `tests/openapi.rs` holds that to the document.
+///
+/// Every value is from production except `as_of` and `price_status`: task
+/// 0216 had not reached it when these were taken, so they follow 0216's own
+/// example — a `carried` price minutes behind `updated_at`, as the hourly USD
+/// pass leaves it. Replace them from the first live response after 0216's
+/// rollout.
 pub(super) const EXAMPLES: &[(&str, &str, &str)] = &[
     ("AmmStream", "status", r#""paused""#),
     ("AmmStream", "last_push_at", r#""2026-07-14T17:54:24Z""#),
@@ -796,6 +866,8 @@ pub(super) const EXAMPLES: &[(&str, &str, &str)] = &[
     ),
     ("AssetListItem", "updated_at", r#""2026-09-23T08:08:00Z""#),
     ("AssetListItem", "method", r#""traded""#),
+    ("AssetListItem", "as_of", r#""2026-09-23T08:02:00Z""#),
+    ("AssetListItem", "price_status", r#""carried""#),
     (
         "AssetListResponse",
         "cursor",
@@ -856,6 +928,8 @@ pub(super) const EXAMPLES: &[(&str, &str, &str)] = &[
     ),
     ("PriceResponse", "updated_at", r#""2026-09-23T08:08:00Z""#),
     ("PriceResponse", "method", r#""traded""#),
+    ("PriceResponse", "as_of", r#""2026-09-23T08:02:00Z""#),
+    ("PriceResponse", "price_status", r#""carried""#),
     ("SdexStream", "status", r#""completed""#),
     ("SdexStream", "current_ledger", r#"1"#),
     ("SdexStream", "start_ledger", r#"1"#),

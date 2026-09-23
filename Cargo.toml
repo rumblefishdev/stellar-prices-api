@@ -22,6 +22,7 @@ members = [
     "packages/rollup-freshness-probe",
     "packages/mtls-notafter-probe",
     "packages/pool-registry-seed",
+    "packages/coverage-sweep-probe",
 ]
 
 [workspace.dependencies]
@@ -75,3 +76,7 @@ tempfile = "3"
 # to publish days-to-expiry. Pure/no-AWS, so the probe's day-math stays testable
 # in the default build.
 x509-parser = "0.16"
+
+# The coverage sweep's committed allow-list (task 0100) is TOML, compiled into
+# the probe binary. Same toml-rs family already in Cargo.lock transitively.
+toml = "1"

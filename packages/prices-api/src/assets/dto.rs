@@ -15,8 +15,9 @@ pub struct PriceResponse {
     /// **This value can be older than it looks, and is not age-bounded.** For
     /// an asset that has stopped trading it is simply the last priced close,
     /// up to the 24 h aggregation window old. `updated_at` is the snapshot
-    /// time, **not** the price's age, and no field currently carries that
-    /// age. `"0"` means no priced close exists in the window at all.
+    /// time, **not** the price's age — `as_of` is, and `price_status` says
+    /// whether the price is the asset's newest or a carried one. `"0"` means
+    /// no priced close exists in the window at all.
     ///
     /// Note the deliberate asymmetry with `sources` / `vwap_24h`: those drop a
     /// venue whose last quote is stale, because a per-venue price asserts
@@ -61,6 +62,55 @@ pub struct PriceResponse {
     /// ⚠️ Never read `"oracle"` as "more accurate than traded" — it means the
     /// price came from a rate rather than from this asset's own trades.
     pub method: String,
+    /// The price's OWN timestamp (task 0216): the candle `price_usd` was read
+    /// from, ISO-8601 UTC. `""` when there is no price — the stored value is
+    /// the epoch sentinel and the query maps it, so `1970-01-01T00:00:00Z`
+    /// must never reach the wire.
+    ///
+    /// ⚠️ `""` is NOT by itself "no price". It also appears, briefly, on a row
+    /// the snapshot's current definition has not rewritten yet — between the
+    /// ALTER that adds this column and the re-CREATE of the view, the old
+    /// definition keeps refreshing in REPLACE mode and every row takes the
+    /// table DEFAULT (the epoch), which this query maps to `""` beside a real
+    /// price. `price_status` is `""` in exactly that window and `"unpriced"` in
+    /// the real no-price case, so "no price" is `as_of == ""` AND
+    /// `price_status == "unpriced"` — the same deploy-window state
+    /// `price_status` documents below.
+    ///
+    /// Bounds `price_usd` alone. `price_xlm` divides it by an XLM/USD close
+    /// dated independently, so it is no fresher than this and may be older.
+    /// (This DTO publishes no `market_cap_usd`; the same reasoning applies to
+    /// it on the surfaces that do.)
+    ///
+    /// ⚠️ USD values are computed by a pass that runs HOURLY, so an `as_of` up
+    /// to about an hour behind `updated_at` — and a `price_status` of
+    /// `"carried"` — is the ORDINARY state of an actively traded asset, not a
+    /// fault. A freshness threshold tighter than that cadence rejects the whole
+    /// market. Shortening the enrichment cycle is its own task; this field only
+    /// reports the cadence honestly.
+    pub as_of: String,
+    /// What kind of price `price_usd` is (task 0216):
+    ///
+    /// * `"priced"` — nothing newer is outstanding: `as_of` is the newest
+    ///   price-forming candle in the window, or no newer price-forming candle
+    ///   exists (a measured rate reads this too).
+    /// * `"carried"` — a real priced close, but a newer price-forming candle
+    ///   has not been priced yet; `as_of` says how far behind it is.
+    /// * `"unpriced"` — `price_usd` is the `"0"` sentinel, `method` is `""`
+    ///   and `as_of` is `""`.
+    /// * `""` — the row predates the snapshot's current definition and has not
+    ///   been rewritten yet. Not a vocabulary word; a deploy-window state.
+    ///
+    /// `"carried"` is the ORDINARY state of an actively traded asset for up to
+    /// about an hour, because USD values are computed by an hourly pass — a
+    /// freshness threshold tighter than that cadence rejects the whole market.
+    ///
+    /// It also covers a newer trade that happened on a pair with NO USD
+    /// conversion path: there no newer USD price is coming at all, and `as_of`
+    /// is the newest minute that could be converted. The two cases are not
+    /// distinguishable here — "does this quote have a conversion path" is not
+    /// data this snapshot holds (task 0147).
+    pub price_status: String,
 }
 
 /// One `sources` entry, as `toJSONString` in the current-price MV writes it.
@@ -200,6 +250,8 @@ impl PriceResponse {
             sources: parse_sources(&row.sources),
             updated_at: row.updated_at,
             method: row.method,
+            as_of: row.as_of,
+            price_status: row.price_status,
         }
     }
 }
@@ -264,6 +316,14 @@ pub struct AssetListItem {
     /// Price provenance; same vocabulary and caveats as
     /// [`PriceResponse::method`].
     pub method: String,
+    /// The price's own timestamp; same semantics and the same `""` sentinel as
+    /// [`PriceResponse::as_of`] — including the deploy-window case where `""`
+    /// sits beside a real price and `price_status` is `""` too. It bounds
+    /// `price_usd` on this row alone.
+    pub as_of: String,
+    /// What kind of price this is; same vocabulary as
+    /// [`PriceResponse::price_status`].
+    pub price_status: String,
 }
 
 /// `GET /assets` paginated response.

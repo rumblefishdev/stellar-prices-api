@@ -145,6 +145,7 @@ export const SCHEDULED_WORKERS = [
   'backfill-freshness-probe',
   'rollup-freshness-probe',
   'mtls-notafter-probe',
+  'coverage-sweep-probe',
 ] as const;
 
 export type ScheduledWorker = (typeof SCHEDULED_WORKERS)[number];
@@ -188,6 +189,8 @@ export const WORKERS_WITHOUT_HEALTH_ALARMS: Readonly<
     'its EventBridge rule is disabled on purpose (task 0200), so zero invocations is the intended state and a liveness alarm would fire forever',
   'asset-discovery':
     "deliberately deferred to task 0256, which is deciding whether the worker's scan stage survives at all — alarming the liveness of a stage that may be removed is not coverage",
+  'coverage-sweep-probe':
+    "it runs weekly (task 0100), and a -no-invocations alarm needs three cadences (21 days), over CloudWatch's 7-day evaluation limit; confirm a run from its Monday 'coverage sweep complete' log line",
 };
 
 /**
@@ -305,6 +308,16 @@ export interface WorkerLambdaProps extends BaselineLambdaContext {
   readonly alarmDescription: string;
   /** Period over which the error alarm sums invocation errors. */
   readonly alarmPeriod: cdk.Duration;
+  /**
+   * How many `alarmPeriod`s the `-errors` alarm looks back over, alarming on a
+   * single erroring period (`datapointsToAlarm: 1`). Default 1 — the alarm
+   * clears one period after the failure. A worker that runs far less often
+   * than `alarmPeriod` (the weekly coverage sweep, task 0100) sets this so a
+   * failed run stays in ALARM until the next run can clear it, instead of
+   * flipping to OK at the next period boundary. CloudWatch caps
+   * `period × evaluationPeriods` at 7 days.
+   */
+  readonly alarmEvaluationPeriods?: number;
   /**
    * Actions wired to the worker's `-errors` alarm (e.g. an ops SNS topic).
    * Optional: the alarm is created either way, but with no action it is inert
@@ -427,7 +440,10 @@ export function createWorkerLambda(
     ),
     metric: fn.metricErrors({ period: alarmPeriod, statistic: 'Sum' }),
     threshold: 1,
-    evaluationPeriods: 1,
+    evaluationPeriods: props.alarmEvaluationPeriods ?? 1,
+    ...(props.alarmEvaluationPeriods !== undefined && {
+      datapointsToAlarm: 1,
+    }),
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
   // Both directions. Only the ALARM action was wired before, so a worker that
