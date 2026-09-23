@@ -35,6 +35,13 @@ history:
       site; one predicate or none. ⚠️ 0147's two constants (`X = 0.5`,
       `FLOOR_USD = 100`) are PLACEHOLDERS until its phase 2 measures them — take
       the definition now, take the numbers after that.
+  - date: "2026-09-23"
+    status: backlog
+    who: akot
+    note: >
+      0147 phase 2 fixed the numbers: X = 0.5 and NO absolute USD floor
+      (measured on prod — the share is binary and a per-bucket dollar floor
+      carries no information about price quality). Take both as they are.
 ---
 
 # 0088 step-3 pre-roll: gate/warn when 1m USD coverage is below a threshold

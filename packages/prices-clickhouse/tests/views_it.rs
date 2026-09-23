@@ -2254,12 +2254,10 @@ async fn usd_reference_omits_a_bucket_whose_reference_candles_have_no_volume() {
 // priced volume does not clear the gate is ABSENT — with a row in
 // `price_usd_series_coverage{,_1h}` that says why.
 //
-// ⚠️ The fixtures below carry `volume_quote_usd` values scaled to clear
-// `FLOOR_USD` (a PLACEHOLDER 100 until task 0147 phase 2 measures it). The
-// floor itself is exercised by
-// `only_the_dust_print_is_priced_and_the_absolute_floor_withholds_the_bucket`;
-// every other 0147 test is about the SHARE, so its fixture must clear the floor
-// or it would prove nothing.
+// The fixtures below carry `volume_quote_usd` values scaled to clear a $100
+// floor that phase 1 had and phase 2 (2026-09-23) removed by measurement — see
+// the views.sql header. Nothing gates on that column any more; the values are
+// left as they were because they change no assertion.
 // ----------------------------------------------------------------------
 
 /// Task 0147 (a) — BE's yXLM case, RED→GREEN.
@@ -2366,7 +2364,7 @@ async fn a_dust_print_cannot_price_a_bucket_whose_volume_is_unpriced() {
     // --- ENRICHED ---------------------------------------------------------
     // The same row, re-inserted at a higher `version` with its true price. Its
     // `volume_quote_usd` arrives with `close_usd` (one enrichment pass writes
-    // both) and is scaled to clear the placeholder floor — see the block comment.
+    // both); its scale is a phase-1 leftover — see the block comment.
     client
         .query(&format!(
             "INSERT INTO {db}.price_ohlcv_1d \
@@ -2424,18 +2422,19 @@ async fn a_dust_print_cannot_price_a_bucket_whose_volume_is_unpriced() {
         .unwrap();
 }
 
-/// Task 0147 (b) — the ABSOLUTE floor, which the share alone cannot express.
+/// Task 0147 (b) — a small bucket that is fully priced PUBLISHES: there is no
+/// absolute USD floor.
 ///
 /// A bucket holding ONLY the 0.764-unit print is 100 % priced: every eligible
-/// unit that traded has a USD price, so the coverage share says nothing is
-/// missing. It is still a dollar of trade, and one dollar of trade does not
-/// establish a price for the asset — that is what `FLOOR_USD` is for.
-///
-/// ⚠️ The bucket reads `pending`, NOT `unpriceable`: eligible volume exists and
-/// more of it may yet arrive. `unpriceable` means "we have no USD path at all".
+/// unit that traded has a USD price. Phase 1 withheld it with a placeholder
+/// `FLOOR_USD = 100`; phase 2 (2026-09-23) measured that a per-bucket dollar
+/// floor withheld 82–97 % of today's buckets and did not predict a bad price,
+/// and removed it (views.sql header). The only trade of a bucket IS that
+/// bucket's price. What 0147 guards against is a small print standing in for
+/// UNPRICED volume — test (a) — not a small bucket.
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
-async fn only_the_dust_print_is_priced_and_the_absolute_floor_withholds_the_bucket() {
+async fn a_fully_priced_small_bucket_publishes_at_full_share() {
     let db = "it_views_0147_floor";
     let client = setup_scratch(db).await;
 
@@ -2473,9 +2472,9 @@ async fn only_the_dust_print_is_priced_and_the_absolute_floor_withholds_the_buck
             .await
             .unwrap_or_else(|e| panic!("price_usd_series{jit} must not raise: {e}"));
         assert!(
-            published.is_empty(),
-            "price_usd_series{jit}: a fully-priced bucket worth 1 USD is below \
-             FLOOR_USD and must be WITHHELD, got {published:?}"
+            published.len() == 1 && approx(published[0], 1.3085),
+            "price_usd_series{jit}: a fully-priced bucket publishes its own \
+             price whatever its dollar size (no absolute floor), got {published:?}"
         );
 
         let (share, usd, status): (f64, f64, String) = client
@@ -2495,9 +2494,8 @@ async fn only_the_dust_print_is_priced_and_the_absolute_floor_withholds_the_buck
             "{jit}: one dollar changed hands, got {usd}"
         );
         assert_eq!(
-            status, "pending",
-            "{jit}: withheld by the floor is still `pending` — eligible volume \
-             exists, so more of it may yet arrive"
+            status, "priced",
+            "{jit}: published by the series, so the coverage row says `priced`"
         );
     }
 

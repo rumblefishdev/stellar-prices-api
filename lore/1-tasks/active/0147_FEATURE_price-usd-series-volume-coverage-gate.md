@@ -154,6 +154,23 @@ history:
       Phase 2 (≥ 2026-09-29) measures on the same post-0286 week as 0286's
       AC 10. 0286's phase-3 re-ingest (started 2026-09-23 at 201511) rewrites
       history only, month by month, and does not touch that window.
+  - date: "2026-09-23"
+    status: active
+    who: akot
+    note: >
+      **Phase 2 measured, both constants final.** Brought forward from
+      2026-09-29 at Adam's call. On prod (dev_read, this branch's coverage
+      body inlined) the share is binary in all four windows — 0 of 266,011
+      eligible buckets between 0 and 1 — so X = 0.5 stays, now as a measured
+      value, and the absolute FLOOR_USD is REMOVED from all four executable
+      sites: a $1 floor kept ~16 % of today's buckets, $100 ~3 %, and price
+      error does not fall with volume (median ~0.6 % in every bin). Test (b)
+      flips to `a_fully_priced_small_bucket_publishes_at_full_share`; the
+      placeholder-marker test is replaced by
+      `views_sql_has_no_placeholder_constant_and_no_absolute_usd_floor`; both
+      proven RED against a re-added floor. 70 prices-clickhouse lib, 23
+      views_it, 10 current_mv_it, 225 prices-api lib, 43 ohlcv_it, 12 openapi.
+      A 1d-grain and weekend re-check stays due 2026-09-29, not gating.
 ---
 
 # Volume-coverage gate for `price_usd_series` / `price_usd_series_1h`
@@ -334,32 +351,67 @@ both constants, drop both markers, and record the distribution in the view
 header and here. Rollout (`.planning/rollout-2026-09/ROLLOUT-0147.md`) waits for
 that.
 
+## Phase 2 — the measurement (2026-09-23)
+
+Run read-only as `dev_read` on production, with this branch's own coverage view
+body inlined and the candle tier pre-filtered to each window.
+
+| Window | Grain | Eligible buckets | 0 < share < 1 |
+| --- | --- | --- | --- |
+| 09-23 06:00 → 15:00, incl. the hour in progress | 1h | 13,363 | 0 |
+| 09-22 12:00 → 09-23 12:00 (post-0286) | 1h | 24,311 | 0 |
+| 09-15 → 09-22 | 1h | 122,166 | 0 |
+| 08-23 → 09-22 | 1d | 106,671 | 0 |
+
+- **X = 0.5.** Enrichment prices a bucket whole or not at all, so no X in
+  (0, 1] withholds anything today. X guards the yXLM shape if it returns
+  (a half-enriched bucket, e.g. USDT-quoted candles waiting on the sweep, [[0209]]).
+- **No `FLOOR_USD`.** Median `priced_volume_usd` per bucket is $0.01–0.02;
+  a $1 floor keeps 15.7–17.6 % of today's published buckets, $100 keeps
+  3.2–3.7 %. Against the median of the same asset's other hourly buckets
+  within ±12 h (274,754 buckets, 09-01 → 09-22) the median price error is
+  ~0.6 % in every volume bin, and `usd < 100` catches 93 % of > 2x outliers
+  by withholding 96 % of buckets — no information. Industry practice agrees:
+  CF Benchmarks publishes on one trade; dollar thresholds elsewhere pick
+  sources, not whether to publish.
+- The share-0 buckets that publish today (63 / 475 / 1,828) are all
+  sub-1e-12 prices `/ohlcv` already refuses; with X = 0.5 the views publish
+  98.4–99.7 % of today's set.
+- `close_usd > 0 AND volume_quote_usd = 0`: 0 in every window.
+- Off-market prints (> 2x from the asset's ±12 h median) are 0.3–0.5 % of
+  hourly buckets, none on the 7 assets with ≥ $1M 3-week volume; 35 of the 55
+  on assets ≥ $100k are one wash-traded-looking token (VORIXLM, 4e-5 → 60).
+  Not in 0147's scope — a deviation filter is a separate backlog item.
+
 ## Acceptance Criteria
 
 - [x] Neither view can return a bucket whose published price rests on a
       negligible share of that bucket's volume — regression test on CH
       **26.3.10.60** reproducing BE's yXLM case.
       → `a_dust_print_cannot_price_a_bucket_whose_volume_is_unpriced` (RED
-      captured above), `only_the_dust_print_is_priced_and_the_absolute_floor_withholds_the_bucket`,
+      captured above), `a_fully_priced_small_bucket_publishes_at_full_share`,
       `the_gate_and_the_coverage_view_behave_the_same_at_the_hourly_grain`.
 - [x] A fully unpriceable bucket is absent; a *pending* bucket is
       distinguishable from a *priced* one — not conflated.
       → `price_usd_series_coverage{,_1h}`'s `status`;
       `a_bucket_quoted_only_in_an_ineligible_asset_reads_unpriceable_with_a_zero_share`.
-- [ ] X justified against query C's measured distribution, recorded in the
-      header. **OPEN — owned by phase 2** (≥ 2026-09-29, after the 0286
-      measurement week). X ships as a marked placeholder until then, and
-      nothing is deployed on it.
+- [x] X justified against query C's measured distribution, recorded in the
+      header. → phase 2, 2026-09-23 (Adam brought it forward from 09-29):
+      the share is BINARY in every measured window — 0 of 266,011 buckets
+      between 0 and 1 — so X = 0.5 is kept as the volume-weighted-median rule
+      and `FLOOR_USD` is REMOVED (a $1 floor keeps ~16 % of today's buckets,
+      and volume does not predict a bad price). Numbers in the `views.sql`
+      header and "Phase 2" below. A full-week re-check (1d grain, weekend) is
+      due 2026-09-29 but no longer gates the PR.
 - [x] `priced_volume_share` exposed to consumers. **Confirmed as wanted by the
       only consumer** — BE, 2026-08-06: *"please do expose the coverage share,
       we'll set our own bar on it."* Not optional; ship it with the gate.
       → `0144/notes/S-be-0199-response-received.md`
 - [x] Threshold definition reconciled with [[0118]] and [[0131]].
-      → `FLOOR_USD` cites 0118 by name AND carries 0118's own 96.5 %
-      measurement in the `views.sql` header, which is why it is a placeholder
-      too; [[0131]] has a history note pointing at this definition; the
-      guardrails inventory rows 79-82 are closed against their tests.
+      → 0118's verdict on an unconditional floor is confirmed per bucket and
+      the floor is gone; [[0131]] has history notes pointing at this
+      definition and at X = 0.5; the guardrails inventory rows 79-82 are
+      closed against their tests.
 - [ ] BE told the gate has shipped and what X is. **OPEN — owned by Adam**,
       who sends `.planning/CONTRACT-0147-be.md` (written, deliberately not
-      committed) after phase 2 fixes the numbers. Sending it now would give BE
-      two values that are about to move.
+      committed) once the PR is merged and rolled out; the numbers are final.

@@ -270,46 +270,46 @@
 -- 1.3085 against a true ~0.170 — a 7.7x overstatement in the column they
 -- multiply into TVL. The arithmetic was right; the POPULATION was wrong.
 --
--- A bucket is now published only when BOTH hold:
+-- A bucket is now published only when
 --   priced_volume_share >= X            -- most of what traded is priced
---   priced_volume_usd   >= FLOOR_USD    -- and it is worth something absolute
--- where `priced_volume_usd = sumIf(volume_quote_usd, priced)`. A bucket that
--- fails either is ABSENT — the value-or-absent contract is unchanged — and
--- `price_usd_series_coverage{,_1h}` says which of the two it failed.
+-- and is otherwise ABSENT — the value-or-absent contract is unchanged — while
+-- `price_usd_series_coverage{,_1h}` says why.
 --
---   X         = 0.5    -- ⚠️ PLACEHOLDER, measured in phase 2
---   FLOOR_USD = 100    -- ⚠️ PLACEHOLDER, measured in phase 2
+--   X = 0.5
 --
--- ⚠️ BOTH constants are UNMEASURED and NOTHING may be deployed on them. They
--- are pinned by `views_sql_marks_both_gate_constants_as_phase_2_placeholders`
--- in src/lib.rs, which fails if a marker is removed without the value moving.
--- Each value is spelled in FOUR executable places — the publish WHERE of both
--- series grains and the `priced` branch of both coverage grains' `status` — and
+-- X is spelled in FOUR executable places — the publish WHERE of both series
+-- grains and the `priced` branch of both coverage grains' `status` — and
 -- `views_sql_gate_constants_agree_between_the_header_the_gates_and_the_coverage_status`
--- pins all four to THIS header. Phase 2 edits the two lines above; that test
--- then names every copy still carrying the old value.
--- Phase 2 measures the `priced_volume_share` and `priced_volume_usd`
--- distributions on prod over a 7-day post-0286 window, PER GRAIN, and replaces
--- both.
+-- pins all four to THIS line.
 --
--- ⚠️ Why FLOOR_USD is a placeholder too, and why 100 is not a measurement.
--- 100 USD is the number task 0118 uses for `min_volume_usd` in current.sql, and
--- it is cited here for PROVENANCE only — it carries none of 0118's measured
--- safety, because 0118's threshold is CONDITIONAL and this one is not.
--- current.sql:130-150 records the measurement: applied UNCONDITIONALLY over a
--- 24 h window on prod 2026-08-27, that same 100 USD would have blanked 2,960
--- of 3,068 priced assets (96.5 %; ~85 % of the table has a max per-venue 24 h
--- volume of <= $1), which is why 0118 made its threshold conditional on a
--- clearing sibling. 0147's floor is PER BUCKET — per HOUR at the _1h grain,
--- i.e. ~$2.4k/day — and has no sibling notion, so it is strictly harsher.
--- Measure its blast radius per grain before it goes anywhere near prod.
+-- Measured on prod 2026-09-23 (task 0147 phase 2, dev_read, read-only), with
+-- this file's own coverage body over four windows: 1h 09-23 06:00→15:00
+-- (13,363 eligible buckets, incl. the hour in progress), 1h 09-22 12:00→09-23
+-- 12:00 post-0286 (24,311), 1h 09-15→09-22 (122,166) and 1d 08-23→09-22
+-- (106,671). NOT ONE bucket had 0 < share < 1: enrichment prices a bucket
+-- whole or not at all, so today X withholds nothing a different X in (0, 1]
+-- would not. It is a guard for the yXLM shape (a bucket half-enriched, e.g.
+-- USDT-quoted candles waiting on the sweep, task 0209), and 0.5 is the
+-- volume-weighted-median rule: a price resting on less than half of what
+-- traded is not that bucket's price. BE reads the share on every row and sets
+-- its own bar on it.
 --
--- ⚠️ Two caveats about `volume_quote_usd`, which the floor is read from:
+-- There is NO absolute USD floor, by measurement (same day, same windows).
+-- Median `priced_volume_usd` per bucket is $0.01–0.02 (p90 ≈ $5): a $1 floor
+-- keeps 15.7–17.6 % of today's published buckets, $100 keeps 3.2–3.7 %. Nor
+-- does volume predict a bad price: against the median of the same asset's
+-- other hourly buckets within ±12 h (274,754 buckets, 09-01→09-22), the median
+-- error is ~0.6 % in every volume bin from < $0.01 to ≥ $1k, and `usd < 100`
+-- catches 93 % of > 2x outliers by withholding 96 % of all buckets — no
+-- information. 0118 reached the same verdict for an unconditional floor
+-- (current.sql:130-150). `priced_volume_usd` stays on the coverage views for
+-- a consumer that wants a floor of its own.
+--
+-- ⚠️ Two caveats about `volume_quote_usd`, which `priced_volume_usd` reads:
 --   * It is summed over EVERY fill, not just the price-forming subset — task
 --     0286 added no `pf_volume_quote_usd`. So a row's dust volume is counted
---     in the floor alongside its real volume. Accepted approximation.
---   * It is denominated on the QUOTE leg, so the floor reads "USD that changed
---     hands", which is what a `min_volume_usd`-style floor wants.
+--     alongside its real volume. Accepted approximation.
+--   * It is denominated on the QUOTE leg: "USD that changed hands".
 --
 -- The priced predicate itself is `/ohlcv`'s `valid` for the SAME row
 -- (queries_ch.rs::usd_projection) PLUS a positive price-forming weight
@@ -595,7 +595,6 @@ SELECT
     max(is_peg) AS peg_present,
     sum(rpv)    AS pv,
     sum(rpw)    AS pw,
-    sum(rpusd)  AS pusd,
     sum(rew)    AS ew
 FROM
 (
@@ -954,7 +953,7 @@ GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket
 -- publishes Decimal128::MIN or raises code 349 depending on which expression
 -- JIT the server picked. Write both.
 WHERE (peg_present = 1 AND pw = 0)
-   OR (ew > 0 AND pw > 0 AND pw / ew >= 0.5 AND pusd >= 100);
+   OR (ew > 0 AND pw > 0 AND pw / ew >= 0.5);
 
 ----------------------------------------------------------------------
 -- Hourly-grain variants — identical shape/semantics to the daily views above,
@@ -1043,7 +1042,6 @@ SELECT
     max(is_peg) AS peg_present,
     sum(rpv)    AS pv,
     sum(rpw)    AS pw,
-    sum(rpusd)  AS pusd,
     sum(rew)    AS ew
 FROM
 (
@@ -1401,7 +1399,7 @@ GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket
 -- publishes Decimal128::MIN or raises code 349 depending on which expression
 -- JIT the server picked. Write both.
 WHERE (peg_present = 1 AND pw = 0)
-   OR (ew > 0 AND pw > 0 AND pw / ew >= 0.5 AND pusd >= 100);
+   OR (ew > 0 AND pw > 0 AND pw / ew >= 0.5);
 
 
 ----------------------------------------------------------------------
@@ -1412,12 +1410,12 @@ WHERE (peg_present = 1 AND pw = 0)
 -- withholds is simply MISSING — indistinguishable, on that surface alone, from
 -- an asset that never traded. These views close that: one row per (natural
 -- identity, bucket) the candles hold, carrying the same `priced_volume_share`
--- the series publishes, the priced USD volume the absolute floor is compared
--- against, and a status.
+-- the series publishes, the priced USD volume (published for the consumer; no
+-- gate reads it), and a status.
 --
 --   status = priced       -- the series publishes this bucket
 --          | pending      -- eligible price-forming volume exists, but the
---                         --   share or the absolute floor is not met. PENDING
+--                         --   share is below X. PENDING
 --                         --   ENRICHMENT, not unpriceable: enrich the rest of
 --                         --   the bucket and it publishes.
 --          | unpriceable  -- NO ELIGIBLE PRICE-FORMING VOLUME IN THE BUCKET —
@@ -1493,7 +1491,7 @@ SELECT
     -- here casts that into a Decimal.
     CAST(multiIf(max(is_peg) = 1 AND sum(rpw) = 0, 'priced',
                  sum(rew) = 0, 'unpriceable',
-                 sum(rpw) > 0 AND sum(rpw) / sum(rew) >= 0.5 AND sum(rpusd) >= 100, 'priced',
+                 sum(rpw) > 0 AND sum(rpw) / sum(rew) >= 0.5, 'priced',
                  'pending') AS LowCardinality(String)) AS status
 FROM
 (
@@ -1684,7 +1682,7 @@ SELECT
     -- here casts that into a Decimal.
     CAST(multiIf(max(is_peg) = 1 AND sum(rpw) = 0, 'priced',
                  sum(rew) = 0, 'unpriceable',
-                 sum(rpw) > 0 AND sum(rpw) / sum(rew) >= 0.5 AND sum(rpusd) >= 100, 'priced',
+                 sum(rpw) > 0 AND sum(rpw) / sum(rew) >= 0.5, 'priced',
                  'pending') AS LowCardinality(String)) AS status
 FROM
 (

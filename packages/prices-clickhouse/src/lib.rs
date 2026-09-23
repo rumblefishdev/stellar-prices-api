@@ -1382,56 +1382,36 @@ mod tests {
         }
     }
 
-    /// Task 0147 (D-04, R-07) — the two gate constants ship as PLACEHOLDERS.
+    /// Task 0147 phase 2 (2026-09-23) — X is measured and there is NO absolute
+    /// USD floor. Phase 1 shipped both as `⚠️ PLACEHOLDER` constants; the
+    /// measurement (views.sql header) kept X = 0.5 and removed the floor, because
+    /// a per-bucket dollar floor withheld 82–97 % of today's buckets without
+    /// predicting a bad price. This keeps a placeholder from coming back
+    /// unnoticed and the floor from creeping back into a gate or a status.
     ///
-    /// `X` (the coverage share) and `FLOOR_USD` (the absolute priced-USD floor)
-    /// are both unmeasured in phase 1. Phase 2 measures them on prod over the
-    /// 7-day post-0286 window, per grain, and removes both markers with the
-    /// values it finds.
-    ///
-    /// ⚠️ Reads the RAW `VIEWS_SQL`, not a split statement: `split_statements`
-    /// strips `-- …` comments, so a marker is invisible to every other test in
-    /// this module. The flip side is that the two LITERALS have to live in
-    /// executable SQL to stay pinnable, which
-    /// `views_sql_both_series_grains_agree_on_every_task_0147_token` asserts.
+    /// ⚠️ Reads the RAW `VIEWS_SQL` for the marker: `split_statements` strips
+    /// `-- …` comments, so a marker is invisible to every statement-level test.
     #[test]
-    fn views_sql_marks_both_gate_constants_as_phase_2_placeholders() {
-        const MARKER: &str = "-- ⚠️ PLACEHOLDER, measured in phase 2";
-
-        let marked: Vec<String> = VIEWS_SQL
-            .lines()
-            .filter(|line| line.contains(MARKER))
-            .map(squash)
-            .collect();
+    fn views_sql_has_no_placeholder_constant_and_no_absolute_usd_floor() {
+        assert!(
+            !VIEWS_SQL.contains("PLACEHOLDER"),
+            "views.sql still marks a constant as an unmeasured placeholder"
+        );
         assert_eq!(
-            marked.len(),
-            2,
-            "exactly two constants are unmeasured in phase 1 — the coverage \
-             share and the absolute floor; got {marked:?}"
+            header_constant("X"),
+            "0.5",
+            "X was measured at 0.5 on 2026-09-23 (task 0147 phase 2); a new value \
+             needs a new measurement recorded in the views.sql header"
         );
-        assert!(
-            marked.iter().any(|l| l.contains("X = 0.5")),
-            "the coverage share must carry the marker beside its value, got {marked:?}"
-        );
-        assert!(
-            marked.iter().any(|l| l.contains("FLOOR_USD = 100")),
-            "the absolute floor is a placeholder TOO (D-04 as amended): 0118 \
-             measured the same unconditional 100 USD blanking 96.5 % of priced \
-             assets on prod, got {marked:?}"
-        );
-
-        // …and the two values the markers guard must ALSO live in executable
-        // SQL, or the gate could drift away from its own documentation without
-        // any test noticing. `split_statements` strips these comment lines.
-        for (name, stmt) in series_grains() {
-            assert!(
-                stmt.contains("pw / ew >= 0.5"),
-                "{name}: the coverage share X must be a literal in the gate"
-            );
-            assert!(
-                stmt.contains("pusd >= 100"),
-                "{name}: FLOOR_USD must be a literal in the gate"
-            );
+        for (name, stmt) in series_grains().into_iter().chain(coverage_grains()) {
+            for floor in ["pusd >=", "sum(rpusd) >=", "FLOOR_USD"] {
+                assert!(
+                    !stmt.contains(floor),
+                    "{name}: `{floor}` — the absolute USD floor was removed by \
+                     measurement (task 0147 phase 2); `priced_volume_usd` is \
+                     published for the consumer and gates nothing"
+                );
+            }
         }
     }
 
@@ -1456,51 +1436,40 @@ mod tests {
             .to_string()
     }
 
-    /// Task 0147 — the gate's two constants are spelled in FOUR places: the
-    /// publish `WHERE` of each series grain and the `priced` branch of each
-    /// coverage grain's `status`. A view cannot read a settings table, so
-    /// nothing but this test keeps the four in step with the header. Phase 2
-    /// changes both values once: edit the header, and this names every copy
-    /// still carrying the old one. A coverage copy left behind would report
-    /// `priced` for a bucket the series withholds, or `pending` for one it
-    /// publishes — two answers to one question.
+    /// Task 0147 — the gate's X is spelled in FOUR places: the publish `WHERE`
+    /// of each series grain and the `priced` branch of each coverage grain's
+    /// `status`. A view cannot read a settings table, so nothing but this test
+    /// keeps the four in step with the header. To change X: edit the header
+    /// line, and this names every copy still carrying the old value. A coverage
+    /// copy left behind would report `priced` for a bucket the series withholds,
+    /// or `pending` for one it publishes — two answers to one question.
     #[test]
     fn views_sql_gate_constants_agree_between_the_header_the_gates_and_the_coverage_status() {
         let x = header_constant("X");
-        let floor = header_constant("FLOOR_USD");
         for (name, stmt) in series_grains() {
-            for token in [format!("pw / ew >= {x} "), format!("pusd >= {floor})")] {
-                assert_eq!(
-                    stmt.matches(&token).count(),
-                    1,
-                    "{name}: the publish gate must spell `{token}` once, as the \
-                     views.sql header states (X = {x}, FLOOR_USD = {floor})"
-                );
-            }
+            let token = format!("pw / ew >= {x})");
+            assert_eq!(
+                stmt.matches(&token).count(),
+                1,
+                "{name}: the publish gate must spell `{token}` once, as the \
+                 views.sql header states (X = {x})"
+            );
         }
         for (name, stmt) in coverage_grains() {
-            for token in [
-                format!("sum(rpw) / sum(rew) >= {x} "),
-                format!("sum(rpusd) >= {floor},"),
-            ] {
-                assert_eq!(
-                    stmt.matches(&token).count(),
-                    1,
-                    "{name}: the `priced` status must spell `{token}` once, as \
-                     the views.sql header and the series gate do (X = {x}, \
-                     FLOOR_USD = {floor})"
-                );
-            }
+            let token = format!("sum(rpw) / sum(rew) >= {x},");
+            assert_eq!(
+                stmt.matches(&token).count(),
+                1,
+                "{name}: the `priced` status must spell `{token}` once, as the \
+                 views.sql header and the series gate do (X = {x})"
+            );
         }
     }
 
     /// The single-grain-edit guard for task 0147, modelled on 0267's. Every
     /// token the gate introduced must occur the SAME number of times in both
-    /// grain statements — a floor measured for the daily view and forgotten on
-    /// the hourly one would withhold $100/HOUR, ~$2.4k/day, silently.
-    ///
-    /// This is also what keeps the two placeholder LITERALS in executable SQL:
-    /// the marker test above reads comments, which the splitter strips.
+    /// grain statements — a threshold changed on the daily view and forgotten
+    /// on the hourly one would publish two different rules, silently.
     #[test]
     fn views_sql_both_series_grains_agree_on_every_task_0147_token() {
         let grains = series_grains();
@@ -1510,12 +1479,10 @@ mod tests {
             "AS priced_volume_share",
             "AS pv",
             "AS pw",
-            "AS pusd",
             "AS ew",
             "CAST(if(sum(rpw) > 0, sum(rpv) / sum(rpw), toFloat64(0)) AS Decimal(38, 14))",
             "if(sum(rew) > 0, sum(rpw) / sum(rew), toFloat64(0))",
             "pw / ew >= 0.5",
-            "pusd >= 100",
             "AS is_priced",
             "AS is_eligible",
             "p.pf_trade_count > 0",
