@@ -1036,3 +1036,48 @@ async fn attaching_to_a_paid_plan_puts_the_key_on_it() {
         vec![(BASIC_PLAN_ID.to_string(), key)]
     );
 }
+
+/// AWS's two "already on a plan" refusals are both `AlreadyOnAPlan` (task
+/// 0311, review WR-05): `409` for the same plan, and `400` "cannot reference
+/// multiple Usage Plans with the same API Stage" for another plan on the
+/// stage. Neither moves the key, and neither is an error.
+#[tokio::test]
+async fn both_already_on_a_plan_refusals_are_reported_as_such() {
+    use prices_api::portal::keys::gateway::Attachment;
+
+    let gateway = MockGateway::start().await;
+    let key = gateway.with(|s| {
+        s.plans.push(StoredPlan::basic());
+        s.seed_on_plan(&key_name(), 100, BASIC_PLAN_ID)
+    });
+    let client = test_gateway(&gateway.base);
+
+    for plan in [BASIC_PLAN_ID, PLAN_ID] {
+        assert_eq!(
+            client.attach_to_plan(&key, plan).await.expect(plan),
+            Attachment::AlreadyOnAPlan,
+            "{plan}"
+        );
+    }
+    assert_eq!(
+        gateway.with(|s| s.plan_keys.clone()),
+        vec![(BASIC_PLAN_ID.to_string(), key)]
+    );
+}
+
+/// Any OTHER `400` from the attach stays an error — only AWS's same-stage
+/// wording means "already on a plan".
+#[tokio::test]
+async fn any_other_bad_request_from_the_attach_is_an_error() {
+    let gateway = MockGateway::start().await;
+    let key = gateway.with(|s| {
+        s.fail_next_attach = true;
+        s.seed(&key_name(), 100)
+    });
+
+    let error = test_gateway(&gateway.base)
+        .attach_to_plan(&key, PLAN_ID)
+        .await
+        .expect_err("a plain 400 is not a success");
+    assert!(error.to_string().contains("CreateUsagePlanKey"), "{error}");
+}

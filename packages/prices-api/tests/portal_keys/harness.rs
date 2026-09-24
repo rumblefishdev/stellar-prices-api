@@ -168,6 +168,16 @@ pub struct Store {
     /// Sticky, for the reason `throttle_usage` is: the SDK's own backoff
     /// retries a 429, so only a throttle that persists reaches the handler.
     pub throttle_plans: bool,
+    /// Answer the next N `GetUsagePlans` asking about key `id` as if the key
+    /// were on no plan at all (task 0311) — `GetUsagePlans` lagging behind an
+    /// attach that already happened, which is the window the WR-05 race paths
+    /// run in. `usize::MAX` keeps it lagging for good.
+    pub plans_hidden_for: HashMap<String, usize>,
+    /// Hide the key the next `CreateApiKey` mints from the `GetApiKeys` right
+    /// after it (task 0311) — the reconciler's "create not listed" branch
+    /// (Step 2), reached with whatever else the name holds still listed.
+    /// One-shot.
+    pub omit_next_created_from_list: bool,
     /// Every `{plan}` segment `GetUsage` was asked for, in order (task 0311) —
     /// which plan's counter was read. Separate from `usage_queries`, whose
     /// 3-tuple shape the pre-0311 tests destructure.
@@ -535,6 +545,9 @@ pub async fn create_key(
     };
     store.keys.push(created.clone());
     store.ops.push(format!("create:{id}"));
+    if std::mem::take(&mut store.omit_next_created_from_list) {
+        store.next_list_omits_newest = true;
+    }
     if std::mem::take(&mut store.fail_next_create_after_creating) {
         return (StatusCode::INTERNAL_SERVER_ERROR, "response lost").into_response();
     }
@@ -662,6 +675,16 @@ pub async fn list_plans(
         return throttled();
     }
 
+    // The listing lagging the attach (task 0311): the next N asks about this
+    // key see it on no plan, whatever `plan_keys` holds.
+    if let Some(key_id) = query.key_id.as_deref()
+        && let Some(left) = store.plans_hidden_for.get_mut(key_id)
+        && *left > 0
+    {
+        *left -= 1;
+        return Json(json!({ "item": [] })).into_response();
+    }
+
     let matched: Vec<StoredPlan> = store
         .plans
         .iter()
@@ -689,6 +712,23 @@ pub async fn list_plans(
         body["position"] = json!(end.to_string());
     }
     Json(body).into_response()
+}
+
+/// AWS's answer to attaching a key to a second plan on a stage it already has
+/// a plan for (task 0311): `400 BadRequestException`, with the service's own
+/// wording, which is what `Gateway::attach_to_plan` recognises.
+pub fn same_stage_refusal(key_id: &str, api_id: &str, stage: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [("x-amzn-errortype", "BadRequestException")],
+        Json(json!({
+            "message": format!(
+                "API Key {key_id} cannot reference multiple Usage Plans with the same API \
+                 Stage: {api_id}:{stage}"
+            )
+        })),
+    )
+        .into_response()
 }
 
 /// The `400` shape the SDK maps to `BadRequestException` — not retried by
@@ -728,24 +768,37 @@ pub async fn attach_key(
     let Some(target) = store.plans.iter().find(|p| p.id == plan).cloned() else {
         return not_found();
     };
-    // Already on this plan — or on any plan sharing one of its stages, since
-    // a key belongs to one plan per stage — → `409 ConflictException`, as the
-    // service answers. The reconciler attaches every key it is about to hand
-    // out, so this is the ordinary case rather than an edge one, and a mock
-    // that silently accepted a re-attach would let a handler that treats the
-    // conflict as a failure pass every test here.
+    // Already on THIS plan → `409 ConflictException`, as the service answers
+    // ("API Key already exists in the usage plan"). A mock that silently
+    // accepted a re-attach would let a handler that treats the conflict as a
+    // failure pass every test here.
+    if store
+        .plan_keys
+        .iter()
+        .any(|(p, k)| p == &plan && k == &key_id)
+    {
+        return conflict();
+    }
+    // Already on ANOTHER plan sharing one of this plan's stages → `400
+    // BadRequestException` "cannot reference multiple Usage Plans with the
+    // same API Stage" (task 0311, review WR-05): a key belongs to one plan per
+    // stage, and AWS reports the second attach as a bad request, not as a
+    // conflict. Modelled that way so the race paths — a double-submit whose
+    // `GetUsagePlans` lagged, a sign-in inside an operator's delete→create gap
+    // — are tested against the answer the service gives.
     let shares_a_stage = |other: &str| {
-        other == plan
-            || store.plans.iter().any(|p| {
-                p.id == other && p.api_stages.iter().any(|s| target.api_stages.contains(s))
-            })
+        store
+            .plans
+            .iter()
+            .any(|p| p.id == other && p.api_stages.iter().any(|s| target.api_stages.contains(s)))
     };
     if store
         .plan_keys
         .iter()
         .any(|(p, k)| k == &key_id && shares_a_stage(p))
     {
-        return conflict();
+        let (api_id, stage) = target.api_stages.first().cloned().unwrap_or_default();
+        return same_stage_refusal(&key_id, &api_id, &stage);
     }
     store.plan_keys.push((plan, key_id.clone()));
     store.ops.push(format!("attach:{key_id}"));

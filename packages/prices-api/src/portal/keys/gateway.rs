@@ -58,6 +58,7 @@ use std::time::Duration;
 
 use aws_sdk_apigateway::Client;
 use aws_sdk_apigateway::config::timeout::TimeoutConfig;
+use aws_sdk_apigateway::error::ProvideErrorMetadata;
 use aws_sdk_apigateway::types::UsagePlan;
 use serde::Serialize;
 
@@ -123,16 +124,43 @@ impl std::fmt::Debug for KeyValue {
 
 /// What [`Gateway::attach_to_plan`] observed.
 ///
-/// Two outcomes rather than `()` because the caller has to act on the second
-/// one: a key that vanished between the listing and the attach is the same race
-/// [`Gateway::value_of`] reports with `None`, and the answer to it is to run the
-/// reconciliation again, not to tell the caller the control plane is broken.
+/// Three outcomes rather than `()` because the caller has to act on the last
+/// two: a key that vanished between the listing and the attach is the same
+/// race [`Gateway::value_of`] reports with `None`, and the answer to it is to
+/// run the reconciliation again, not to tell the caller the control plane is
+/// broken; and a key already on a plan is on SOME plan, which the caller has
+/// to find out rather than assume (task 0311).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Attachment {
-    /// The key is on the usage plan — this call put it there, or it already was.
+    /// This call put the key on the usage plan it was given.
     OnPlan,
+    /// The key was already on a usage plan for this API stage, so AWS refused
+    /// the attach (task 0311). Two refusals land here:
+    ///
+    /// - `409 ConflictException` — by AWS's own wording "already exists in the
+    ///   usage plan", i.e. THIS plan;
+    /// - `400 BadRequestException` "… cannot reference multiple Usage Plans
+    ///   with the same API Stage" — ANOTHER plan on the same stage, since a
+    ///   key belongs to one plan per stage.
+    ///
+    /// Neither status code is trusted to say which plan: the caller asks
+    /// [`Gateway::plan_of`]. A key a concurrent issue, or an operator, put on
+    /// a plan a moment ago is a working key, not a failure.
+    AlreadyOnAPlan,
     /// The key no longer exists, so there was nothing to attach.
     KeyGone,
+}
+
+/// Whether a `400 BadRequestException` from `CreateUsagePlanKey` is the
+/// "already on another plan for this stage" refusal (task 0311), rather than
+/// any other malformed request — which stays an error.
+///
+/// Matched on the message, because AWS gives this case no error type of its
+/// own. The phrase is AWS's ("API Key … cannot reference multiple Usage Plans
+/// with the same API Stage: <apiId>:<stage>"); matched case-insensitively and
+/// on its distinctive tail only, so a reworded prefix still lands here.
+fn is_same_stage_refusal(message: Option<&str>) -> bool {
+    message.is_some_and(|m| m.to_ascii_lowercase().contains("same api stage"))
 }
 
 /// What [`Gateway::disable`] observed (task 0191).
@@ -233,8 +261,9 @@ pub enum GatewayError {
 /// Parsed from the plan's NAME, because the name is the one contract CDK and
 /// this code share: `pricing-api-<tier>-<stage>` for the five CDK plans
 /// (`api-gateway-stack.ts`). Anything else on our stage — the loadtest plan, a
-/// hand-made Enterprise plan — is [`Tier::Custom`] and is shown with its own
-/// name.
+/// hand-made Enterprise plan — is [`Tier::Custom`]. The dashboard labels every
+/// one of those `Custom`; the plan's own name still travels in `plan.name` on
+/// `/api/usage`, for a support conversation, but is not rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
@@ -760,11 +789,11 @@ impl Gateway {
     /// **Idempotent**, and that is what lets the caller run it on every key it
     /// is about to hand out rather than only on keys it just created. API
     /// Gateway answers `409 ConflictException` when the key is already on the
-    /// plan; that is the desired state, so it is a success. Without this the
-    /// caller would need to *know* whether a key is attached, and there is no
-    /// cheap way to know: `GetApiKey` does not report usage-plan membership, and
-    /// asking `GetUsagePlanKeys` would be an extra call and an extra IAM grant
-    /// to learn what this call can simply assert.
+    /// plan, and `400 BadRequestException` ("cannot reference multiple Usage
+    /// Plans with the same API Stage") when it is already on ANOTHER plan for
+    /// the same stage. Neither is a failure: both are
+    /// [`Attachment::AlreadyOnAPlan`], and the caller asks [`Self::plan_of`]
+    /// which plan that is (task 0311). Any other `400` is still an error.
     ///
     /// A `404` is **ambiguous** and is resolved before it is acted on. API
     /// Gateway answers `NotFoundException` both when the key is gone and when
@@ -793,8 +822,11 @@ impl Gateway {
             Err(e) => {
                 let message = sdk_message(&e);
                 let service_error = e.into_service_error();
-                if service_error.is_conflict_exception() {
-                    Ok(Attachment::OnPlan)
+                if service_error.is_conflict_exception()
+                    || (service_error.is_bad_request_exception()
+                        && is_same_stage_refusal(service_error.message()))
+                {
+                    Ok(Attachment::AlreadyOnAPlan)
                 } else if service_error.is_not_found_exception() {
                     // `NotFoundException` here means EITHER "that key is gone"
                     // OR "that usage plan does not exist", and the error carries
@@ -1230,6 +1262,23 @@ mod tests {
                     .build(),
             )
             .build()
+    }
+
+    /// AWS's "already on another plan for this stage" refusal is recognised
+    /// by its wording; any other `400`, and no message at all, is not
+    /// (task 0311).
+    #[test]
+    fn only_the_same_stage_refusal_is_already_on_a_plan() {
+        assert!(is_same_stage_refusal(Some(
+            "API Key abc123 cannot reference multiple Usage Plans with the same API Stage: \
+             02mabge71l:production"
+        )));
+        assert!(is_same_stage_refusal(Some(
+            "… WITH THE SAME API STAGE: x:y"
+        )));
+        assert!(!is_same_stage_refusal(Some("Bad Request")));
+        assert!(!is_same_stage_refusal(Some("Invalid key type")));
+        assert!(!is_same_stage_refusal(None));
     }
 
     /// The five CDK names parse to their tiers on the matching stage.

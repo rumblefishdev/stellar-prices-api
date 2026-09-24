@@ -1318,3 +1318,260 @@ async fn a_live_key_already_on_a_plan_gets_no_attach() {
         });
     }
 }
+
+// ---------------------------------------------------------------------------
+// Revoked records that disagree about the plan (task 0311, review WR-04)
+// ---------------------------------------------------------------------------
+
+/// Two revoked records under one name — a double-submit duplicate, or an
+/// undeletable record from an earlier period — and the NEWER one is on free
+/// or on no plan at all, while the older one is on Basic. The rework walks
+/// every revoked record, newest first, and keeps the first paid or custom
+/// plan it finds: the new key lands on Basic, never on free. Both records are
+/// swept only after the attach.
+#[tokio::test]
+async fn a_rework_keeps_the_paid_plan_when_a_newer_revoked_record_is_on_free() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    for newer_on in [Some(PLAN_ID), None] {
+        let gateway = MockGateway::start().await;
+        let revoked_at = the_3rd_of(first_of_month_offset(-1));
+        let (on_basic, newer) = gateway.with(|s| {
+            s.plans.push(StoredPlan::basic());
+            let on_basic = s.seed_revoked(&key_name(), 1_000, revoked_at);
+            s.plan_keys
+                .push((BASIC_PLAN_ID.to_string(), on_basic.clone()));
+            let newer = s.seed_revoked(&key_name(), 1_000, revoked_at + 3_600);
+            if let Some(plan) = newer_on {
+                s.plan_keys.push((plan.to_string(), newer.clone()));
+            }
+            (on_basic, newer)
+        });
+        let app = app_with_discord(&discord, &gateway);
+
+        assert_eq!(
+            issue_round_trip(&app).await.location(),
+            "/api/?issue=ok",
+            "{newer_on:?}"
+        );
+        gateway.with(|s| {
+            let new = s
+                .keys
+                .iter()
+                .find(|k| k.enabled)
+                .expect("the new key exists")
+                .id
+                .clone();
+            assert!(
+                s.plan_keys
+                    .contains(&(BASIC_PLAN_ID.to_string(), new.clone())),
+                "{newer_on:?}: {:?}",
+                s.plan_keys
+            );
+            assert!(
+                !s.plan_keys.contains(&(PLAN_ID.to_string(), new.clone())),
+                "{newer_on:?}: the new key must not land on free"
+            );
+            assert_attached_before_deleted(&s.ops, &new, &on_basic);
+            assert_attached_before_deleted(&s.ops, &new, &newer);
+        });
+    }
+}
+
+/// Two revoked records on two different non-free plans: the NEWEST revocation
+/// decides, deterministically — here the Basic record revoked after the
+/// Custom one.
+#[tokio::test]
+async fn between_two_non_free_revoked_plans_the_newest_revocation_wins() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let revoked_at = the_3rd_of(first_of_month_offset(-1));
+    gateway.with(|s| {
+        s.plans.push(StoredPlan::basic());
+        s.plans.push(StoredPlan::custom_unlimited());
+        let older = s.seed_revoked(&key_name(), 1_000, revoked_at);
+        s.plan_keys.push((CUSTOM_PLAN_ID.to_string(), older));
+        let newer = s.seed_revoked(&key_name(), 1_000, revoked_at + 60);
+        s.plan_keys.push((BASIC_PLAN_ID.to_string(), newer));
+    });
+    let app = app_with_discord(&discord, &gateway);
+
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
+    gateway.with(|s| {
+        let new = s
+            .keys
+            .iter()
+            .find(|k| k.enabled)
+            .expect("new key")
+            .id
+            .clone();
+        assert!(
+            s.plan_keys
+                .contains(&(BASIC_PLAN_ID.to_string(), new.clone())),
+            "{:?}",
+            s.plan_keys
+        );
+        assert!(!s.plan_keys.contains(&(CUSTOM_PLAN_ID.to_string(), new)));
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Step 2's "create not listed" branch on a paid plan (task 0311, review IN-01)
+// ---------------------------------------------------------------------------
+
+/// The listing after the create does not show the new key yet, so Step 2
+/// trusts the create and attaches it there — to the previous key's plan, not
+/// to free. That branch sweeps nothing (the listing did not show the new key
+/// to rank against), so the revoked record survives until the next issue,
+/// which adopts the new key as it stands — no second attach — and sweeps it.
+#[tokio::test]
+async fn a_rework_whose_new_key_is_not_listed_yet_still_lands_on_the_paid_plan() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    gateway.with(|s| {
+        s.plans.push(StoredPlan::basic());
+        s.omit_next_created_from_list = true;
+    });
+    let dead = seed_revoked_on(
+        &gateway,
+        the_3rd_of(first_of_month_offset(-1)),
+        BASIC_PLAN_ID,
+    );
+    let app = app_with_discord(&discord, &gateway);
+
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
+    let new = gateway.with(|s| {
+        let new = s
+            .keys
+            .iter()
+            .find(|k| k.enabled)
+            .expect("new key")
+            .id
+            .clone();
+        assert!(
+            s.plan_keys
+                .contains(&(BASIC_PLAN_ID.to_string(), new.clone())),
+            "{:?}",
+            s.plan_keys
+        );
+        assert!(!s.plan_keys.contains(&(PLAN_ID.to_string(), new.clone())));
+        assert_eq!(
+            s.ops,
+            vec![format!("create:{new}"), format!("attach:{new}")],
+            "Step 2's branch deletes nothing"
+        );
+        new
+    });
+
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
+    gateway.with(|s| {
+        assert_eq!(
+            s.create_calls, 1,
+            "the next issue adopts, it does not create"
+        );
+        assert_eq!(s.attach_calls, 1, "already on Basic, so no second attach");
+        assert_eq!(
+            s.ops,
+            vec![
+                format!("create:{new}"),
+                format!("attach:{new}"),
+                format!("delete:{dead}")
+            ]
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// An attach AWS refuses as already done (task 0311, review WR-05)
+// ---------------------------------------------------------------------------
+
+/// A sign-in inside an operator's move, or a double-submit's second half:
+/// the key IS on Basic, but `GetUsagePlans` has not caught up, so the flow
+/// resolves free and attaches there. AWS refuses with the `400` "cannot
+/// reference multiple Usage Plans with the same API Stage"; the flow asks
+/// which plan the key is on, finds Basic, and hands the key out as it is —
+/// not an `?issue=failed`, and not a key moved to free.
+#[tokio::test]
+async fn an_attach_refused_for_another_plan_on_the_stage_keeps_that_plan() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let key = gateway.with(|s| {
+        s.plans.push(StoredPlan::basic());
+        let key = s.seed_on_plan(&key_name(), 1_000, BASIC_PLAN_ID);
+        s.plans_hidden_for.insert(key.clone(), 1);
+        key
+    });
+    let app = app_with_discord(&discord, &gateway);
+
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
+    gateway.with(|s| {
+        assert_eq!(s.attach_calls, 1, "the lagging lookup led to one attach");
+        assert_eq!(
+            s.plan_keys,
+            vec![(BASIC_PLAN_ID.to_string(), key.clone())],
+            "refused, so still on Basic alone"
+        );
+        assert!(s.ops.is_empty(), "nothing written: {:?}", s.ops);
+    });
+}
+
+/// The double-submit rework: the other invocation already put the new key on
+/// Basic (the previous key's plan) but this one's `GetUsagePlans` for it
+/// lags. It resolves Basic from the revoked record, attaches, is refused with
+/// `409` — already on THIS plan — confirms Basic and carries on to the sweep.
+#[tokio::test]
+async fn a_conflict_on_the_same_plan_is_settled_and_the_sweep_still_runs() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    gateway.with(|s| s.plans.push(StoredPlan::basic()));
+    let dead = seed_revoked_on(
+        &gateway,
+        the_3rd_of(first_of_month_offset(-1)),
+        BASIC_PLAN_ID,
+    );
+    let new = gateway.with(|s| {
+        let new = s.seed_on_plan(&key_name(), 2_000, BASIC_PLAN_ID);
+        s.plans_hidden_for.insert(new.clone(), 1);
+        new
+    });
+    let app = app_with_discord(&discord, &gateway);
+
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
+    gateway.with(|s| {
+        assert_eq!(s.attach_calls, 1);
+        assert_eq!(
+            s.plan_keys
+                .iter()
+                .filter(|(_, k)| k == &new)
+                .collect::<Vec<_>>(),
+            vec![&(BASIC_PLAN_ID.to_string(), new.clone())]
+        );
+        assert_eq!(s.ops, vec![format!("delete:{dead}")]);
+    });
+}
+
+/// AWS refuses the attach as already done, but `GetUsagePlans` never names
+/// the plan: the key's plan cannot be confirmed, so it is not handed out as
+/// working. Every attempt re-runs and the round-trip ends `?issue=failed` —
+/// and at no point is the key put on free.
+#[tokio::test]
+async fn a_refused_attach_whose_plan_never_shows_is_not_handed_out() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let key = gateway.with(|s| {
+        s.plans.push(StoredPlan::basic());
+        let key = s.seed_on_plan(&key_name(), 1_000, BASIC_PLAN_ID);
+        s.plans_hidden_for.insert(key.clone(), usize::MAX);
+        key
+    });
+    let app = app_with_discord(&discord, &gateway);
+
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/api/?issue=failed"
+    );
+    gateway.with(|s| {
+        assert!(s.attach_calls >= 1);
+        assert_eq!(s.plan_keys, vec![(BASIC_PLAN_ID.to_string(), key.clone())]);
+        assert!(s.ops.is_empty(), "nothing written: {:?}", s.ops);
+    });
+}

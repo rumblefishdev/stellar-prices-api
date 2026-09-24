@@ -112,8 +112,8 @@ use super::period::Period;
 use cap::Cap;
 use gateway::{Attachment, Disable, Gateway, GatewayError, KeyValue};
 use naming::{
-    KeyRecord, choose_winner, current_key, exact_matches, key_name, latest_revoked, losers,
-    revocation_instant,
+    KeyRecord, choose_winner, current_key, exact_matches, key_name, losers, revocation_instant,
+    revoked_newest_first,
 };
 
 /// The reveal, on both verbs — see [`key`] for why `POST` answers identically.
@@ -389,8 +389,9 @@ async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
             } = cap::decide(revoked_at, &Period::now())
             else {
                 // Revoked in an earlier period: a new key is due, and the
-                // issue round-trip will delete this one and create it. Until
-                // that press the honest answer is still "no usable key".
+                // issue round-trip will create it, attach it to this key's
+                // plan and only then delete this one (task 0311). Until that
+                // press the honest answer is still "no usable key".
                 return no_store(no_key_response());
             };
             no_store(
@@ -931,11 +932,14 @@ pub(crate) async fn issue_for(gateway: &Gateway, sub: &str, deadline: Duration) 
             );
             IssueOutcome::Failed
         }
-        // Every attempt found a key and then lost it before reading its value.
+        // Every attempt found a key and then lost it before reading its value
+        // — or, since task 0311, could not confirm the plan AWS said it was
+        // already on (see `attach`).
         Ok(Ok(Reconciled::Lost)) => {
             tracing::warn!(
                 attempts = MAX_ATTEMPTS,
-                "a key was deleted underneath every issue attempt"
+                "every issue attempt lost its key: deleted underneath it, or on a usage plan \
+                 GetUsagePlans could not name yet"
             );
             IssueOutcome::Failed
         }
@@ -995,9 +999,10 @@ enum Attempt {
 /// The least time a create is started with. `CreateApiKey` and
 /// `CreateUsagePlanKey` each get up to `gateway::OPERATION_TIMEOUT` (5s) in
 /// the worst case; in practice each is a few hundred milliseconds. Since task
-/// 0311 one or two `GetUsagePlans` reads (the new key's plan, then the
-/// previous key's — see [`resolve_target_plan`]) run between them, each as
-/// cheap as the attach. 4s is still enough for all of it at ordinary latency
+/// 0311 a few `GetUsagePlans` reads (the new key's plan, then one per revoked
+/// record until a paid plan turns up — see [`resolve_target_plan`]; one more
+/// if the attach is refused as already done, see [`attach`]) run between them,
+/// each as cheap as the attach. 4s is still enough for all of it at ordinary latency
 /// and refuses to start the create when the invocation is about to be killed
 /// — which is the one way this flow can leave an enabled, unattached key
 /// behind. And if it does anyway, the revoked record is still there (it is
@@ -1125,7 +1130,7 @@ async fn attempt(
             // The same target plan as Step 4 (task 0311): a rework's new key
             // goes onto the previous key's plan, not onto free by default.
             if let Some(plan_id) = resolve_target_plan(gateway, &record.id, &revoked).await?
-                && gateway.attach_to_plan(&record.id, &plan_id).await? == Attachment::KeyGone
+                && attach(gateway, &record.id, &plan_id).await? == Settled::Retry
             {
                 return Ok(Attempt::Retry);
             }
@@ -1195,7 +1200,9 @@ async fn attempt(
     // not be "corrected" to free, and a `409` on free used to hide that only by
     // accident — else the plan the previous (revoked) key was on, so a rework
     // keeps a paid or custom user on their plan, else free. The attach itself
-    // is idempotent (`Gateway::attach_to_plan` treats the `409` as success).
+    // is idempotent: a key AWS says is already on a plan for our stage (`409`,
+    // or the `400` "multiple Usage Plans with the same API Stage") is settled
+    // by asking which plan that is — see [`attach`].
     // Before the deletions below rather than after: the key the caller is
     // about to receive is made usable first, and the destructive half of
     // reconciliation only runs once that has succeeded — which since 0311 also
@@ -1209,7 +1216,7 @@ async fn attempt(
     // place that race can surface, so it has to answer it rather than turn a
     // hand-deleted key back into the dead end this slice exists to remove.
     if let Some(plan_id) = resolve_target_plan(gateway, &winner.id, &revoked).await?
-        && gateway.attach_to_plan(&winner.id, &plan_id).await? == Attachment::KeyGone
+        && attach(gateway, &winner.id, &plan_id).await? == Settled::Retry
     {
         return Ok(Attempt::Retry);
     }
@@ -1282,22 +1289,89 @@ async fn attempt(
     }
 }
 
+/// Whether an [`attach`] left the key usable, or the attempt has to re-run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settled {
+    /// The key is on a usage plan for our stage.
+    Ready,
+    /// The key is gone, or AWS says it is on a plan `GetUsagePlans` cannot
+    /// name yet: re-enter the flow, which lists and resolves again.
+    Retry,
+}
+
+/// Attach `key_id` to `plan_id`, and settle what AWS answered (task 0311).
+///
+/// [`Attachment::AlreadyOnAPlan`] is the interesting case. A `409` (this
+/// plan) or the `400` "cannot reference multiple Usage Plans with the same
+/// API Stage" (another plan) means the key is ALREADY usable — some writer got
+/// there first: the other half of a double-submit, a sign-in that ran inside
+/// an operator's delete→create gap, or the operator. Which plan it is, is
+/// asked of [`Gateway::plan_of`] rather than inferred from the status code:
+///
+/// - on a plan for our stage → [`Settled::Ready`]; if that is not the plan
+///   this attempt wanted, the key is left where it is (this code has no grant
+///   to move a key between plans, by design) and the disagreement is logged
+///   as a warning — for an operator, that is the runbook's "verify" step
+///   failing, with the recovery written there;
+/// - on no plan `GetUsagePlans` will name yet (its listing lags the refusal)
+///   → [`Settled::Retry`]: handing out a key whose plan cannot be confirmed
+///   is how a key that answers `403` gets revealed.
+async fn attach(gateway: &Gateway, key_id: &str, plan_id: &str) -> Result<Settled, GatewayError> {
+    match gateway.attach_to_plan(key_id, plan_id).await? {
+        Attachment::OnPlan => Ok(Settled::Ready),
+        Attachment::KeyGone => Ok(Settled::Retry),
+        Attachment::AlreadyOnAPlan => match gateway.plan_of(key_id).await? {
+            Some(plan) => {
+                if plan.id != plan_id {
+                    tracing::warn!(
+                        key_id,
+                        wanted_plan_id = plan_id,
+                        plan_id = %plan.id,
+                        tier = ?plan.tier,
+                        "the key was already on another usage plan for this stage; leaving it there"
+                    );
+                }
+                Ok(Settled::Ready)
+            }
+            None => {
+                tracing::warn!(
+                    key_id,
+                    wanted_plan_id = plan_id,
+                    "AWS says the key is already on a usage plan, but GetUsagePlans names none \
+                     for this stage yet; re-running the reconciliation"
+                );
+                Ok(Settled::Retry)
+            }
+        },
+    }
+}
+
 /// The usage plan to attach `winner_id` to, decided before anything is
 /// deleted (task 0311). `None` means "no attach": the winner is already on a
 /// plan for our stage.
 ///
 /// 1. The winner's own plan for our stage — Step 4's "however it came to
 ///    exist": a key an operator moved to Basic stays on Basic.
-/// 2. Else the plan of the **previous key**: the latest revoked record in this
-///    attempt's listing (the same latest-revocation rule the cap reads,
-///    [`latest_revoked`]), if it is on a plan for our stage. This is what
-///    makes a rework keep the plan — paid stays paid, custom stays custom,
-///    free stays free.
-/// 3. Else free — a first issue, or a previous key on no plan of ours.
+/// 2. Else the plan of a **previous key**: every revoked record in this
+///    attempt's listing, walked newest revocation first
+///    ([`revoked_newest_first`]). The first one on a NON-free plan of our
+///    stage wins — paid stays paid, custom stays custom. A record on free is
+///    remembered but does not stop the walk: the records under one name can
+///    disagree (a double-submit duplicate, or an undeletable record from an
+///    earlier period, left on free beside the one an operator moved), and
+///    letting the newest of them decide would be exactly the silent downgrade
+///    decision 7 forbids. Only the portal ever puts a key on free, so a free
+///    record beside a paid one is the portal's default, not an operator's
+///    choice.
+/// 3. Else free — a first issue, a previous key on free, or previous keys on
+///    no plan of ours.
 ///
 /// Only a plan `GetUsagePlans` reported on OUR API stage can come out of
 /// here, which is the code half of the wildcard `POST /usageplans/*/keys`
-/// grant's justification (`api-gateway-stack.ts`).
+/// grant's justification (`compute-stack.ts`).
+///
+/// One `GetUsagePlans` per revoked record at most, and the walk stops at the
+/// first paid or custom plan; a name carries one or two records in practice.
 async fn resolve_target_plan(
     gateway: &Gateway,
     winner_id: &str,
@@ -1306,9 +1380,24 @@ async fn resolve_target_plan(
     if gateway.plan_of(winner_id).await?.is_some() {
         return Ok(None);
     }
-    if let Some(previous) = latest_revoked(revoked)
-        && let Some(plan) = gateway.plan_of(&previous.id).await?
-    {
+    let mut on_free: Option<&str> = None;
+    for previous in revoked_newest_first(revoked) {
+        let Some(plan) = gateway.plan_of(&previous.id).await? else {
+            continue;
+        };
+        if plan.id == gateway.free_plan_id() {
+            on_free.get_or_insert(previous.id.as_str());
+            continue;
+        }
+        if let Some(free_key_id) = on_free {
+            tracing::warn!(
+                previous_key_id = %previous.id,
+                free_key_id,
+                plan_id = %plan.id,
+                "revoked records disagree about the plan: a newer one is on free; keeping the \
+                 paid or custom plan of the older one"
+            );
+        }
         tracing::info!(
             previous_key_id = %previous.id,
             plan_id = %plan.id,

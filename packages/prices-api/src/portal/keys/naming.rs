@@ -114,22 +114,30 @@ pub fn revocation_instant(revoked: &[KeyRecord]) -> Option<u64> {
         .max()
 }
 
-/// The revoked record whose plan a rework keeps (task 0311): the one with the
-/// **latest** `lastUpdatedDate` — the same "latest revocation governs" rule as
-/// [`revocation_instant`], so the record the cap is decided from and the
-/// record the new key's plan is read from are the same record.
+/// The revoked records, newest revocation first (task 0311) — the order a
+/// rework walks them in to find the plan the new key keeps.
 ///
-/// An undated record loses to any dated one (it is skipped by
-/// [`revocation_instant`] for the same reason); ties — including all-undated —
-/// go to the smaller id, so every invocation reads the same record. Empty →
-/// `None`, and the caller falls back to the free plan.
-pub fn latest_revoked(revoked: &[KeyRecord]) -> Option<&KeyRecord> {
-    revoked.iter().max_by(|a, b| {
-        a.last_updated_at
-            .cmp(&b.last_updated_at)
-            // Reversed, so that among equal instants the SMALLER id is "max".
-            .then_with(|| b.id.cmp(&a.id))
-    })
+/// Newest first by `lastUpdatedDate`, the same "latest revocation governs"
+/// rule as [`revocation_instant`]. An undated record sorts after every dated
+/// one (it is skipped by [`revocation_instant`] for the same reason); ties —
+/// including all-undated — go to the smaller id first, so every invocation
+/// walks the same order. Empty in, empty out, and the caller falls back to
+/// the free plan.
+///
+/// All of them rather than only the latest, because the records under one
+/// name can disagree about plans: a double-submit duplicate, or an
+/// undeletable record from an earlier period, can be the latest and sit on
+/// free (or on no plan) beside the record an operator moved to Basic. Which
+/// one wins is the caller's rule — see `super::resolve_target_plan`.
+pub fn revoked_newest_first(revoked: &[KeyRecord]) -> Vec<&KeyRecord> {
+    let mut ordered: Vec<&KeyRecord> = revoked.iter().collect();
+    ordered.sort_by(|a, b| {
+        // `Option`'s order puts `None` first; reversed, the undated go last.
+        b.last_updated_at
+            .cmp(&a.last_updated_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    ordered
 }
 
 /// The key the owner currently holds, among `records`: the earliest **enabled**
@@ -265,39 +273,35 @@ mod tests {
         assert_eq!(revocation_instant(&[]), None);
     }
 
-    /// The latest revocation is the record a rework keeps the plan of; an
-    /// undated record loses; a tie goes to the smaller id; nothing → None.
+    /// Newest revocation first; an undated record last; a tie goes to the
+    /// smaller id first; nothing → nothing (task 0311).
     #[test]
-    fn the_latest_revoked_record_is_the_latest_dated_one() {
+    fn revoked_records_are_walked_newest_first() {
         let at = |id: &str, when: Option<u64>| KeyRecord {
             last_updated_at: when,
             ..disabled(id, "n", Some(1))
         };
+        let ids = |records: &[KeyRecord]| -> Vec<String> {
+            revoked_newest_first(records)
+                .into_iter()
+                .map(|r| r.id.clone())
+                .collect()
+        };
         let older = at("a", Some(10));
         let newer = at("b", Some(20));
         let undated = at("c", None);
-        assert_eq!(
-            latest_revoked(&[older.clone(), newer.clone(), undated.clone()])
-                .unwrap()
-                .id,
-            "b"
-        );
-        assert_eq!(
-            latest_revoked(&[undated.clone(), older.clone()])
-                .unwrap()
-                .id,
-            "a"
-        );
         let tie_high = at("z", Some(20));
         assert_eq!(
-            latest_revoked(&[tie_high.clone(), newer.clone()])
-                .unwrap()
-                .id,
-            "b"
+            ids(&[older.clone(), undated.clone(), newer.clone()]),
+            ["b", "a", "c"]
         );
-        assert_eq!(latest_revoked(&[newer.clone(), tie_high]).unwrap().id, "b");
-        assert_eq!(latest_revoked(&[undated]).unwrap().id, "c");
-        assert!(latest_revoked(&[]).is_none());
+        assert_eq!(
+            ids(&[tie_high.clone(), older.clone(), newer.clone()]),
+            ["b", "z", "a"]
+        );
+        assert_eq!(ids(&[newer, tie_high]), ["b", "z"]);
+        assert_eq!(ids(&[undated.clone(), at("0", None)]), ["0", "c"]);
+        assert!(revoked_newest_first(&[]).is_empty());
     }
 
     #[test]
