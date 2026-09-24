@@ -1017,6 +1017,45 @@ async fn a_day_plan_is_the_utc_day_and_is_served_from_the_cache() {
     });
 }
 
+/// A MONTH quota with a nonzero `offset` (task 0311, review IN-02): the offset
+/// is "the number of requests subtracted from the given limit in the initial
+/// time period" — a request count, not a start day — so the period is still
+/// the calendar month from the 1st, the `GetUsage` window starts on the 1st,
+/// and `limit` is the quota itself.
+#[tokio::test]
+async fn a_month_quota_offset_never_shifts_the_period() {
+    let mock = MockGateway::start().await;
+    mock.with(|s| {
+        s.plans.push(StoredPlan::on_our_stage(
+            "offset7",
+            "prices-production-offset-plan",
+            Some((2.0, 10)),
+            Some((50_000, 7, "MONTH")),
+        ));
+        let id = s.seed_on_plan(&format!("discord-{USER_ID}-key"), 100, "offset7");
+        s.usage.insert(id, vec![vec![12, 49_981]]);
+    });
+
+    let today = Utc::now().date_naive();
+    let first = today.with_day(1).unwrap();
+    let body = usage(&mock, USER_ID).await.json();
+    assert_eq!(
+        body["period_start"],
+        first.format("%Y-%m-%d").to_string(),
+        "{body}"
+    );
+    assert_eq!(body["limit"], 50_000, "{body}");
+    assert_eq!(body["plan"]["quota_period"], "MONTH", "{body}");
+    mock.with(|s| {
+        let (_, start, _) = s
+            .usage_queries
+            .last()
+            .cloned()
+            .expect("GetUsage was called");
+        assert_eq!(start, first.format("%Y-%m-%d").to_string());
+    });
+}
+
 /// `used + remaining` disagreeing with the plan's quota is a cross-check
 /// failure (logged as a warning), not a figure: the answer states the quota.
 #[tokio::test]

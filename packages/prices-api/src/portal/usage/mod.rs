@@ -976,22 +976,10 @@ mod tests {
         assert_eq!(rule.resets_at().as_deref(), Some("2026-10-01T00:00:00Z"));
     }
 
-    /// The offset is a request count, not a start day: a plan with offset 7
-    /// gets exactly the period a plan with offset 0 does. The rule is not
-    /// even given the offset, which is the point — this test pins that the
-    /// period depends on `quota.period` alone.
-    #[test]
-    fn a_month_offset_never_shifts_the_period() {
-        let today = date(2026, 12, 31);
-        let offset_zero = PeriodRule::for_period(Some("MONTH"), today);
-        let offset_seven = PeriodRule::for_period(Some("MONTH"), today);
-        assert_eq!(offset_zero, offset_seven);
-        assert_eq!(offset_seven.period_start().as_deref(), Some("2026-12-01"));
-        assert_eq!(
-            offset_seven.resets_at().as_deref(),
-            Some("2027-01-01T00:00:00Z")
-        );
-    }
+    // A MONTH quota's `offset` never shifting the period is tested end to end
+    // in `tests/portal_usage.rs` (`a_month_quota_offset_never_shifts_the_period`):
+    // `PeriodRule` is never handed the offset, so a unit test here could only
+    // compare a rule with itself.
 
     /// DAY is the UTC day, resetting at the next midnight UTC.
     #[test]
