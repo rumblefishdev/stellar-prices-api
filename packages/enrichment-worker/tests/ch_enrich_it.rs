@@ -3493,7 +3493,9 @@ async fn a_dry_run_refuses_the_wrong_leg_for_either_rate_gated_mode() {
 /// passed and the real run refused, on exactly the case the operator was most
 /// likely to hit. Every month-independent refusal now runs in the driver before
 /// any month is enumerated, dry run included, through ONE list that
-/// `reset_step` runs too.
+/// `reset_step` runs too. That list includes the plain-mode leg refusal (task
+/// 0208 review WR-04): a plain reset of the XLM leg is refused by the rehearsal
+/// as `ResetPlainModeOnPivotLeg`.
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() {
@@ -3554,6 +3556,26 @@ async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() 
     assert!(
         matches!(err, ChEnrichError::ResetRequiresHourlyRates { ref table } if table == "price_ohlcv_1h"),
         "a dry run of the external mode on _1h without hourly rates must refuse, got {err:?}"
+    );
+
+    // The plain 0182 mode on the XLM (pivot) leg (task 0208 review WR-04).
+    // Before the Reflector row below on purpose: an XLM oracle reading inside
+    // the window would refuse this spec first, as `ResetBlockedByOracleRows`,
+    // which sits before the plain-mode leg check.
+    let err = dry(UsdResetSpec {
+        require_pivot_usdc_rate: false,
+        ..pivot_reset(PIVOT_FIRST_REF)
+    })
+    .run()
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ChEnrichError::ResetPlainModeOnPivotLeg { quote_asset_id: 1 }
+        ),
+        "a dry run of the plain mode on the XLM leg must refuse as \
+         ResetPlainModeOnPivotLeg, got {err:?}"
     );
 
     // One Reflector reading for XLM inside the reset's own window: the
