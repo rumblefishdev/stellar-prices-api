@@ -93,6 +93,23 @@ history:
       2 not applicable; 3 and 4 wait on 0291. The [[0223]] liveness question is
       still open and is NOT gated — it can be settled now. See "Decision —
       drop the ledger scan" below.
+  - date: 2026-09-24
+    status: active
+    who: stkrolikiewicz
+    note: >
+      SHIPPED. #331 merged 12:31 (b22ffb44) after a rebase over #327/#332/#337;
+      Prices-production-EventBridge deployed 13:06 from origin/develop
+      @ 246ef739 (asset-discovery bootstrap 13.98 MB → 7.07 MB, env without
+      BUCKET_NAME / STELLAR_NETWORK_PASSPHRASE, role without any s3:* action;
+      Adam's coverage-sweep-probe (0100, #332) rode along, rule enabled for
+      Mondays 05:17 UTC). First run 13:17:17: symbols 0/0, assets_total
+      209,901, NO "skipping ledger scan" WARN, 0 errors, cold start 159 MB /
+      3.5 s. prices.discovery_state DROPped on ch-prod-01 at ~13:35
+      (count 0 before, EXISTS 0 after). Criteria 3 and 4 met on production.
+      ⚠️ Merged before 0291's AC 2 had its production event (no pool created
+      on a tracked venue since 2026-09-22 14:40 UTC); the gate that replaced
+      the dormant scan is 0291's unregistered-pool alarm, live and OK. Still
+      open, and the last thing before archive: the [[0223]] liveness question.
 ---
 
 # The ledger scan is dead code in production
@@ -591,14 +608,39 @@ with its own IT, not part of a removal. Recorded in [[0140]], which the CDK
 memory comment now points at. It also sharpens this task's open question: the
 seed stage is free on writes since PR #319, but not on reads.
 
+## Shipped — 2026-09-24
+
+| step | evidence |
+|---|---|
+| #331 merged | 12:31, `b22ffb44`; rebased the same morning over #327 (`discover_it.rs` modify/delete → deletion kept), #332 (`WORKERS_WITHOUT_HEALTH_ALARMS` gained `coverage-sweep-probe`) and #337 (`init.sql` count 43 → **42**) |
+| `Prices-production-EventBridge` deployed | 13:06 from `origin/develop` @ `246ef739`, operator's terminal (`--require-approval broadening` asked for [[0100]]'s new role). A first attempt from `docs/0306` with a mistyped `AWS_PRFILE` stopped at CDK's bootstrap check of the wrong account — nothing was written anywhere |
+| what the diff carried | asset-discovery: new code (bootstrap **13.98 MB → 7.07 MB**, the S3 SDK gone), env minus `BUCKET_NAME` and `STELLAR_NETWORK_PASSPHRASE`, role minus `s3:GetBucket*/GetObject*/List*`, rule and `-errors` descriptions; three SSM parameters dropped from the stack. Stowaway: Adam's `coverage-sweep-probe` Lambda + role + rule (`cron(17 5 ? * MON *)`, enabled). The other eight workers: code hash only |
+| first run, 13:17:17 | `symbols_considered 0`, `symbols_resolved 0`, `assets_total 209,901`; the `seeded` / `scanned` / `pools_total` fields are gone; **0 × "skipping ledger scan"** — the first hour without it since 2026-06-25; 0 errors; cold start init 280 ms, run 3.5 s, `Max Memory Used` **159 MB** / 512 |
+| `prices.discovery_state` | `DROP TABLE … SYNC` on `ch-prod-01` (`docker exec app-clickhouse-1 clickhouse-client`, operator): `count() = 0` before, `EXISTS TABLE = 0` after. Nothing referenced it; `init.sql` no longer creates it |
+| alarms after | 55 OK; `coverage-sweep-probe-errors` `INSUFFICIENT_DATA` until its first Monday run |
+
+### Sequencing, as it actually happened
+
+The decision section above gated the removal on [[0291]]'s AC 2 + AC 3. AC 3
+was met on 2026-09-23; AC 2's production half — a pool created on a tracked
+venue after the 2026-09-22 14:40 UTC deploy — had not happened by the merge
+(zero `persisted AMM pools` lines, ~0.7 pools/day historically). The operator
+merged anyway, on this reading: the dormant scan had never run and would have
+needed [[0140]]'s guard before it could, so it was not a working fallback; the
+thing that now stands in for it is 0291's `unregistered-pool` alarm, which is
+live in the running processor and reads OK on zero events, plus
+`events-backfill --discover-pools` for a manual seed. AC 2 stays 0291's to
+close on the first new pool.
+
 ## Acceptance Criteria
 
 - [x] A recorded decision on whether the ledger scan is still needed
       → **dropped**, 2026-09-21. See "Decision — drop the ledger scan".
 - [ ] If kept: `discovery_state` has a cursor and it advances between runs
       → not applicable: the scan is not kept.
-- [ ] If dropped: the scan path and its config are removed, not left dormant
-      → ⛔ sequenced after [[0291]]'s AC 2 + AC 3 on production.
-- [ ] The permanent WARN is gone — either the scan runs, or the code does not
+- [x] If dropped: the scan path and its config are removed, not left dormant
+      → **met 2026-09-24**: #331 merged, EventBridge deployed 13:06,
+      `discovery_state` dropped. See "Shipped".
+- [x] The permanent WARN is gone — either the scan runs, or the code does not
       pretend it might
-      → goes with the removal above.
+      → **met 2026-09-24**: first post-deploy run 13:17 logs no WARN.
