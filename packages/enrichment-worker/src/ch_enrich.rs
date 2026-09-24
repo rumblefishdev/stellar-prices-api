@@ -3192,7 +3192,7 @@ mod tests {
             "the reference is read from the table under repair"
         );
         // Neither other mode carries it.
-        for other in [usdc_external_reset(), usdt_reset()] {
+        for other in [usdc_external_reset(), plain_reset()] {
             let pred = reset_pending_pred("prices", "price_ohlcv_1d", &other);
             assert!(!pred.contains("volume_base > 0"), "{pred}");
         }
@@ -3267,7 +3267,7 @@ mod tests {
         // Each mode alone is fine, and so is neither.
         xlm_pivot_reset().validate().unwrap();
         usdc_external_reset().validate().unwrap();
-        usdt_reset().validate().unwrap();
+        plain_reset().validate().unwrap();
     }
 
     /// WR-05's refusal covers the new mode too, and it is PURE — so the CLI
@@ -3423,7 +3423,7 @@ mod tests {
             "{sql}"
         );
 
-        let unbounded = reset_pending_pred("prices", "price_ohlcv_1d", &usdt_reset());
+        let unbounded = reset_pending_pred("prices", "price_ohlcv_1d", &plain_reset());
         assert!(
             !unbounded.contains("timestamp < toDateTime("),
             "{unbounded}"
@@ -3437,11 +3437,11 @@ mod tests {
     /// has already run against production.
     ///
     /// Task 0228 appends its mode the same way 0268 did, so this test now pins
-    /// the pre-0228 strings as well — the `usdt_reset()` fixture sets both flags
+    /// the pre-0228 strings as well — the `plain_reset()` fixture sets both flags
     /// false and this equality is what proves nothing leaked into that path.
     #[test]
     fn a_0182_shaped_spec_renders_byte_identically_to_the_pre_0268_statement() {
-        let spec = usdt_reset();
+        let spec = plain_reset();
         assert_eq!(
             reset_pending_pred("prices", "price_ohlcv_1d", &spec),
             "quote_asset_id = 111 AND timestamp >= toDateTime(1612724400) \
@@ -3482,11 +3482,15 @@ mod tests {
         );
     }
 
-    /// Pins the plain 0182 mode's SQL bytes, which the canonical USDC (peg) leg
-    /// still renders. On a real USDT leg the admission list refuses this spec
-    /// (`ResetPlainModeOnPivotLeg`, task 0208 review WR-04).
-    fn usdt_reset() -> UsdResetSpec {
-        // 2021-02-07 19:00 UTC, USDT/USDC's first reference candle on _1h (lore 0208).
+    /// Pins the plain 0182 mode's SQL bytes — the shape the canonical USDC
+    /// (peg) leg still renders. A SQL-rendering fixture only, never run through
+    /// the admission list: its `quote_asset_id` and `not_before` are arbitrary
+    /// literals the byte-equality tests below spell out, not a usable spec.
+    /// Once the prod USDT id (111), it is not a live usage example: a plain
+    /// reset of the USDT leg is refused (`ResetPlainModeOnPivotLeg`, task 0208
+    /// review WR-04), and a plain USDC reset on production also needs a
+    /// `not_after` below USDC's first oracle row.
+    fn plain_reset() -> UsdResetSpec {
         UsdResetSpec {
             quote_asset_id: 111,
             not_before: 1_612_724_400,
@@ -3504,7 +3508,7 @@ mod tests {
     /// over the exact population task 0182 exists to correct.
     #[test]
     fn reset_sql_targets_written_values_not_zeros() {
-        let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
+        let sql = reset_sql("prices", "price_ohlcv_1d", &plain_reset(), "");
         assert!(sql.contains("(p.close_usd > 0 OR p.volume_quote_usd > 0)"));
         assert!(!sql.contains("p.close_usd = 0"));
     }
@@ -3514,7 +3518,7 @@ mod tests {
     /// row would carry two figures derived from different rates.
     #[test]
     fn reset_sql_zeroes_both_usd_columns() {
-        let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
+        let sql = reset_sql("prices", "price_ohlcv_1d", &plain_reset(), "");
         assert!(sql.contains("CAST(0 AS Decimal(38, 14)) AS volume_quote_usd"));
         assert!(sql.contains("CAST(0 AS Decimal(38, 14)) AS close_usd"));
     }
@@ -3523,7 +3527,7 @@ mod tests {
     /// reference, so a reset row can never be refilled and stays at 0 forever.
     #[test]
     fn reset_sql_honours_the_epoch_and_the_quote_leg() {
-        let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
+        let sql = reset_sql("prices", "price_ohlcv_1d", &plain_reset(), "");
         assert!(sql.contains("p.quote_asset_id = 111"));
         assert!(sql.contains("p.timestamp >= toDateTime(1612724400)"));
     }
@@ -3532,7 +3536,7 @@ mod tests {
     /// is structurally unable to refill.
     #[test]
     fn reset_sql_will_not_reopen_a_row_the_pivot_cannot_refill() {
-        let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
+        let sql = reset_sql("prices", "price_ohlcv_1d", &plain_reset(), "");
         assert!(sql.contains("p.volume_quote > 0"));
         // Task 0228 moved the pivot's candidate filters into its candidate
         // subquery, where they are alias-free. Same filter, same meaning.
@@ -3543,7 +3547,7 @@ mod tests {
     /// repair driver takes is a real rollback point.
     #[test]
     fn reset_sql_is_a_versioned_insert_not_a_mutation() {
-        let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
+        let sql = reset_sql("prices", "price_ohlcv_1d", &plain_reset(), "");
         assert!(sql.starts_with("INSERT INTO prices.price_ohlcv_1d"));
         assert!(sql.contains("p.version + 1 AS version"));
         assert!(!sql.contains("ALTER"));
@@ -3554,7 +3558,7 @@ mod tests {
         let sql = reset_sql(
             "prices",
             "price_ohlcv_1d",
-            &usdt_reset(),
+            &plain_reset(),
             " AND p.timestamp >= toDateTime(100) AND p.timestamp < toDateTime(200)",
         );
         assert!(sql.contains("AND p.timestamp >= toDateTime(100)"));
@@ -3566,7 +3570,7 @@ mod tests {
     /// and the pass would spin to its batch ceiling on every run.
     #[test]
     fn reset_pending_pred_stops_matching_once_a_row_is_zeroed() {
-        let pred = reset_pending_pred("prices", "price_ohlcv_1d", &usdt_reset());
+        let pred = reset_pending_pred("prices", "price_ohlcv_1d", &plain_reset());
         assert!(pred.contains("(close_usd > 0 OR volume_quote_usd > 0)"));
         assert!(pred.contains("quote_asset_id = 111"));
         assert!(pred.contains("volume_quote > 0"));
@@ -3588,7 +3592,7 @@ mod tests {
     /// With a spec the enumeration must admit the written-value rows too.
     #[test]
     fn repair_target_pred_sees_months_that_hold_only_written_values() {
-        let pred = repair_target_pred("prices", "price_ohlcv_1d", Some(&usdt_reset()));
+        let pred = repair_target_pred("prices", "price_ohlcv_1d", Some(&plain_reset()));
         assert!(pred.contains(CANDIDATE_PRED));
         assert!(pred.contains("(close_usd > 0 OR volume_quote_usd > 0)"));
         // Still an OR, not a replacement — a reset run must not stop finding
@@ -4492,11 +4496,11 @@ mod tests {
     #[test]
     fn well_formed_and_unbounded_reset_windows_are_accepted() {
         usdc_external_reset().validate().unwrap();
-        usdt_reset().validate().unwrap();
+        plain_reset().validate().unwrap();
         let wide = UsdResetSpec {
             not_before: u32::MAX,
             not_after: None,
-            ..usdt_reset()
+            ..plain_reset()
         };
         wide.validate().unwrap();
     }
