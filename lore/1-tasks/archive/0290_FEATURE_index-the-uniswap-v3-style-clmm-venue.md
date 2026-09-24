@@ -2,7 +2,7 @@
 id: "0290"
 title: "Index the Uniswap-v3-style concentrated-liquidity venue (factory CD3KRKGD…) — ~8.5k swaps a month we never see"
 type: FEATURE
-status: active
+status: completed
 assignee: okarcz
 related_adr: []
 related_tasks: ["0285", "0286", "0282"]
@@ -90,6 +90,15 @@ history:
       deploy's cold start loaded all 903 eight seconds later. AC 2 and AC 4 are
       now met on production. Only AC 3 remains — a full live day, checkable
       2026-09-23.
+  - date: 2026-09-24
+    status: completed
+    who: okarcz
+    note: >
+      AC 3 met on 2026-09-23, the first full UTC day after the seed: 2 057 raw
+      pool swaps = 2 057 stored trades, every hour equal. 5/5 criteria. The
+      venue is live as `sushiswap` with 133 registered pools; its history
+      (2026-01 →) arrives with 0286 phase 3, which gates on the 133 pools from
+      202601. No follow-up task: the history is tracked on 0286.
 ---
 
 # Index the Uniswap-v3-style concentrated-liquidity venue
@@ -415,6 +424,26 @@ weakened: the test still asserts `None` for every row in the list.
   warnings` fails on 9 lints inside `prices-ingest-core`, identically without
   this change; CI does not lint that crate. Lint with `--no-deps`.
 
+## Design Decisions
+
+### From Plan
+
+1. **Source label `sushiswap`**, decided with the operator once the venue was
+   identified as SushiSwap V3.
+2. **Pools learned from the factory's `pool_created`**, which carries the token
+   pair — no contract-storage read, and one shape arm covers all four factory
+   generations.
+
+### Emerged
+
+3. **Match the pool by its data shape (`amount0`/`amount1`), never by the
+   topic** — the routers emit the identical `[Symbol("swap")]` topic
+   (Issues Encountered).
+4. **Price from the amounts, like every other AMM extractor**; `sqrt_price_x96`
+   and `tick` are kept as a decode cross-check only.
+5. **History folded into [[0286]] phase 3** instead of a separate backfill
+   (AC 5), so it is written once, under the ADR 0287 rules.
+
 ## Acceptance Criteria
 
 - [x] The venue is named and has a `source` label. → **SushiSwap V3**, settled
@@ -436,13 +465,22 @@ weakened: the test still asserts `None` for every row in the list.
       `loaded discovered pool registry from ClickHouse entries=903`, eight
       seconds after the 14:40:53 Compute deploy. Learned, persisted, survived a
       restart.
-- [ ] Live candles for it match a raw count of its pool `swap` events for a full
+- [x] Live candles for it match a raw count of its pool `swap` events for a full
       day. → Clock starts at the 2026-09-22 14:40:53 UTC deploy; checkable
       2026-09-23. ⚠️ The count must join `default.soroban_events.contract_id`
       (an Int64 surrogate) through `default.soroban_contracts.id` — comparing
       the strkey directly returns zero and reads like total loss
       ([[soroban-events-gotchas]]). SushiSwap trades ~13 times an hour, so a
       short window proves nothing either way; use a whole UTC day.
+      ✅ **MET 2026-09-24 on 2026-09-23 UTC** (ledgers 64 567 165 – 64 584 444,
+      wholly after the 09-22 13:53 seed and the 14:41 cold start): **raw 2 057
+      pool swaps = stored 2 057 trades, equal in all 24 hours.** Raw = distinct
+      `signature = 'swap'` events carrying `amount0` (pool shape, routers
+      excluded) from the 133 `sushiswap` contracts in `pool_registry`, joined
+      through `soroban_contracts.id`, hour from `default.ledgers.closed_at`;
+      stored = `sum(trade_count)` of `price_ohlcv_1m FINAL`,
+      `source = 'sushiswap'`. The day's 1 316 candles span 21 pairs, all 2 057
+      trades price-forming, 1 280 candles USD-priced.
 - [x] Its routers stay unindexed (a test pins it). →
       `a_routed_sushiswap_trade_prices_once_from_the_pool_not_the_router`
       (`7021ae2`), a real routed transaction, negative-controlled. See
