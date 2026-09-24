@@ -39,6 +39,16 @@ history:
       _1d/_1w/_1M. enrichment-worker lib 181/0, ch_enrich_it --ignored 66/0
       (8 new). Review: 0 blockers, 4 warnings + 7 info, all fixed. Stays
       active until #347 merges.
+  - date: "2026-09-24"
+    status: active
+    who: akot
+    note: >
+      WR-04 fixed in #347 instead of a separate task (0312 created and deleted
+      the same day): a plain-mode reset of a pivot leg (XLM, USDT) is refused
+      with ResetPlainModeOnPivotLeg, pointing to the 0228 mode. Review found
+      the check sat behind the oracle-shadow query (the operator would be told
+      to purge live readings first) — moved before it. #347 now 26 commits;
+      lib 189/0, ch_enrich_it --ignored 70/0, verified 13/13.
 ---
 
 # The reset epoch is an operator assertion the tool never checks
@@ -189,12 +199,31 @@ it). Unit fixtures that embedded `1612656000` as the USDT epoch now use
   operator to check every table — the same sampling error as the incident.
   Replaced with `<TABLE>`.
 
+## Plain mode on pivot legs (review WR-04, fixed in #347)
+
+The epoch guard bounds only where the reference begins. A plain-mode reset
+(neither `--reset-require-*` flag) checked neither refill input — a USDC rate
+and a reference inside `--pivot-window-s` — so rows in a mid-history reference
+gap were still zeroed for good. Adam chose to refuse it rather than gate it:
+
+- `ResetPlainModeOnPivotLeg { quote_asset_id }` from the pure
+  `check_plain_mode_leg`, placed right after `assert_reset_target_is_priceable`
+  and **before** `assert_reset_not_shadowed_by_oracle`. The first placement
+  (after it) was a review blocker: plain mode has no default
+  `--reset-not-after`, XLM has live Reflector rows, so the operator got
+  `ResetBlockedByOracleRows` ("purge those rows") first — an irreversible
+  delete — and only then the plain-mode refusal.
+- Plain mode stays for the USDC peg leg, which needs `--reset-not-after` at or
+  below USDC's first oracle reading on prod; `ResetBlockedByOracleRows` now
+  says bound the window, never purge live readings.
+- Tests: the plain-mode USDT/XLM ITs moved to the 0228 mode (none removed);
+  new ITs for the 3-day reference-gap refusal, the refusal with live oracle
+  rows on both legs, the peg tier refilling a plain USDC reset, and the
+  unbounded USDC refusal. Red runs: without the check 3 ITs fail (1 row
+  stranded in the gap), with it behind the oracle query 2 fail.
+- Runbook Appendix A (0182's plain procedure) is historical and peg-only.
+
 ## Future Work
 
-- **Plain-mode (0182) pivot resets were not gated on refill inputs** (review
-  WR-04, pre-existing): an admitted epoch is only a lower bound — rows with no
-  USDC rate or no reference inside `--pivot-window-s` were still zeroed and not
-  refilled. Briefly spawned as 0312 on 2026-09-24, then deleted the same day:
-  Adam chose to fix it in PR #347 by refusing a plain-mode reset of a pivot leg
-  (XLM, USDT) and pointing the operator to the 0228 mode. In progress on the
-  branch.
+None open. WR-04 was briefly spawned as 0312 and deleted the same day — it is
+fixed in #347 (section above).
