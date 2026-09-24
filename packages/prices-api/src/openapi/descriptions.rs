@@ -63,10 +63,11 @@ pub(super) const SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "ErrorEnvelope",
-        "The body of every error the API itself returns. `code` is stable and meant for \
-         programs; `message` is for people and its wording may change. Responses the API \
-         Gateway writes on the API's behalf — `403` for a missing or unknown key, `429` when \
-         throttled — carry a `GatewayMessage` instead.",
+        "The body of every error the API itself returns, and of the `404` API Gateway \
+         answers for a path or method the API does not have (`not_found`). `code` is stable \
+         and meant for programs; `message` is for people and its wording may change. The \
+         other responses API Gateway writes on the API's behalf — `403` for a missing or \
+         unknown key, `429` when throttled — carry a `GatewayMessage` instead.",
     ),
     (
         "Granularity",
@@ -537,9 +538,7 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     (
         "GatewayMessage",
         "message",
-        "The gateway's own text, for example `Forbidden` or `Too Many Requests`. A `403` \
-         reading `Missing Authentication Token` means the path does not exist, not that the \
-         key is wrong.",
+        "The gateway's own text, for example `Forbidden` or `Too Many Requests`.",
     ),
     ("HealthStatus", "stack", "The deployment that answered."),
     ("HealthStatus", "status", "`ok` whenever the API is up."),
