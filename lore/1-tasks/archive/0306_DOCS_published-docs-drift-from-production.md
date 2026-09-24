@@ -2,9 +2,9 @@
 id: "0306"
 title: "The API reference shows type placeholders where the data goes, and parts of the published docs contradict production"
 type: DOCS
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0305", "0233", "0195", "0124"]
+related_tasks: ["0305", "0233", "0195", "0124", "0309", "0252"]
 tags: [layer-docs, layer-frontend, api, portal, priority-medium, effort-medium]
 links:
   - "../../../packages/prices-api/src/openapi/descriptions.rs"
@@ -22,6 +22,17 @@ history:
     status: active
     who: stkrolikiewicz
     note: "Activated; implementation on its own branch."
+  - date: "2026-09-24"
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Shipped and checked live. PR #343 (21 files, +1219 −396) merged 10:08
+      CEST; the API half went out with Adam's 0216 Compute rollout at 11:30,
+      the portal was synced at 11:42 (`index-i5pA_HeE.js`), and the bundled
+      `openapi.json` equals the live `/api-docs-json`. 6/6 criteria met: 74
+      production examples in struct order, descriptions matched to
+      production, Quick Start and landing reconciled, two new checks.
+      Spawned 0309 (unknown route → 404).
 ---
 
 # The published docs show placeholders where the data goes, and parts of them contradict production
@@ -163,3 +174,65 @@ names the new bundle `index-i5pA_HeE.js`; `/api/`, `/api/docs`,
 `openapi.json` equals the live `/api-docs-json`. The Quick Start's 403 row
 still explains `Missing Authentication Token`, which is true until [[0309]]
 ships and rewrites it.
+
+## Implementation Notes
+
+- **API document** (`94a82475`): utoipa `preserve_order`; 74 field examples
+  from 40 production responses; `sources` a `SourceQuote` map, `/health` a
+  `HealthStatus` body; the gateway's 403/429/5xx carry `GatewayMessage`; 401
+  marked as the service's own gate, unarmed in production; `AssetDetail.code`,
+  SAC identifiers, `search` / `sort=code` on Soroban tokens, `home_domain` and
+  the two volumes described as they behave.
+- **Portal** (`2a83adca`): Quick Start and landing held against `native` at
+  2026-09-23 08:08 UTC — five venues from one list that feeds the view and
+  the Copy text, examples in the API's order with the missing fields, the
+  live ledger tip, `invalid_body`, one-price SDK tabs, `method` on the
+  landing's 200 example, six fields and an ellipsis in the hero.
+- **Design doc** (`ce3a495c`): §4 of `docs/prices-api-general-overview.md`
+  brought to production.
+- **Checks:** `every_property_has_an_example_or_a_reason` (`tests/openapi.rs`),
+  redocly `no-invalid-schema-examples` (proved against a mistyped example),
+  and the portal test "leaves out an optional field with no example".
+
+## Design Decisions
+
+### From Plan
+
+1. **Per-field examples, not one `json!` per struct**: `serde_json` has no
+   `preserve_order` here, so an object example would come out alphabetical
+   again.
+2. **401 stays in the document, marked as the service's own gate**, unarmed
+   in production — the second of the plan's two options (drop it, or mark it
+   self-hosted).
+3. **Item 20 explained rather than changed**: `volume_24h_usd` counts both
+   sides of each trade, `sources` the base side only; the examples follow.
+
+### Emerged
+
+4. **The `Descriptions` pass runs on the assembled document**: `routes()`
+   replaces the components it collects, so a pass before it lost `/health`'s
+   schemas.
+5. **The reference leaves out an optional field with no example**, as the API
+   does — which is what made "API first, portal second" a hard order.
+6. **The design doc's §4 came along** (24.09), though no finding named it.
+7. **The 403 was explained here and fixed elsewhere**: the Quick Start and
+   `GatewayMessage` say what `Missing Authentication Token` means; the wrong
+   answer itself went to [[0309]], which rewrites those texts when it ships.
+
+## Issues Encountered
+
+- **#337 (0216) landed mid-review** on seven of the same files (`dto.rs`, two
+  handlers, `descriptions.rs`, `public/openapi.json`, `Endpoints.tsx`,
+  `QuickStart.tsx`). The merge of `develop` (`75c1fcdd`) resolved them and
+  added 0216's `as_of` / `price_status` examples.
+- **The API half shipped with someone else's deploy.** Adam's 0216 Compute
+  rollout carried #343. The order held — the portal went 12 minutes later —
+  but nobody had planned that deploy for 0306, so the live document was
+  compared against the extracted one before the sync.
+
+## Future Work
+
+- [[0309]] — the unknown-route `403` becomes a `404` (PR #348); it rewrites
+  the 403 texts above.
+- Populating `home_domain` is part 1 of [[0252]]; this task only says it is
+  not populated yet.
