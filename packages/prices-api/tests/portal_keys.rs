@@ -481,22 +481,24 @@ async fn a_read_that_fails_for_any_other_reason_is_a_502_and_creates_nothing() {
 #[tokio::test]
 async fn a_control_plane_slower_than_the_deadline_answers_503() {
     let mock = MockGateway::start().await;
-    mock.with(|s| s.list_delay_ms = 400);
+    // The delay is far above both the deadline and the bound below, so a
+    // loaded CI runner cannot close the gap: only a response that did NOT wait
+    // for the mock passes. A 400 ms delay against a 350 ms bound left < 300 ms
+    // of scheduling slack and failed once at 587 ms.
+    mock.with(|s| s.list_delay_ms = 3_000);
+    // Built before the clock starts: the SDK client's construction is not
+    // what this test measures.
+    let router = keys_router_with_deadline(&mock, std::time::Duration::from_millis(50));
 
     let started = std::time::Instant::now();
-    let reply = call(
-        keys_router_with_deadline(&mock, std::time::Duration::from_millis(50)),
-        "POST",
-        Some(&session_cookie(USER_ID)),
-    )
-    .await;
+    let reply = call(router, "POST", Some(&session_cookie(USER_ID))).await;
     let elapsed = started.elapsed();
 
     assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(reply.json()["code"], "key_unavailable");
     assert_eq!(reply.cache_control(), "no-store");
     assert!(
-        elapsed < std::time::Duration::from_millis(350),
+        elapsed < std::time::Duration::from_millis(2_000),
         "the deadline did not cut the work off: {elapsed:?}"
     );
     assert_eq!(
