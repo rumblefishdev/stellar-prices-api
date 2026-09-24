@@ -120,6 +120,12 @@ struct Args {
     /// else in this tool is purely additive — it fills zeros. Use it only to
     /// correct a *pricing* defect, where the stored number is wrong rather than
     /// missing, and only against a FREEZE-snapshotted partition.
+    ///
+    /// The leg decides the mode. For canonical USDC (the peg leg), use the plain
+    /// mode (no `--reset-require-*` flag) or `--reset-require-external-rate`.
+    /// For XLM or USDT (pivot legs), use `--reset-require-pivot-usdc-rate` only:
+    /// a plain reset of a pivot leg is refused right after connecting, dry run
+    /// included (`ResetPlainModeOnPivotLeg`, task 0208 review WR-04).
     #[arg(long, requires = "reset_not_before")]
     reset_quote_asset_id: Option<u32>,
 
@@ -141,16 +147,15 @@ struct Args {
     /// depeg, so below the epoch the stored $1 is *correct* and this flag
     /// protects it.
     ///
-    /// ⚠️ An ADMITTED epoch is a lower bound only, not a guarantee that every row
-    /// above it is refilled. In the plain 0182 mode (neither `--reset-require-*`
-    /// flag) the reset still zeroes rows whose bucket has no USDC/USD rate in
-    /// `prices.usd_rate` (oracle, or external — the only one before 2026-03-11)
-    /// or no reference candle within `--pivot-window-s`, and nothing refills
-    /// them. Check both before the run with the runbook's Appendix A queries
-    /// ("An admitted epoch is a lower bound, not a refill guarantee"; both must
-    /// return 0), and after it with the damage check on EVERY table. The 0228
-    /// mode (`--reset-require-pivot-usdc-rate`) re-opens only days that have
-    /// both.
+    /// ⚠️ An admitted epoch bounds only where the reference BEGINS. The plain
+    /// 0182 mode, which gated neither the USDC/USD rate nor the reference, is
+    /// refused on a pivot leg (`ResetPlainModeOnPivotLeg`). The 0228 mode
+    /// (`--reset-require-pivot-usdc-rate`) re-opens only days that have a USDC
+    /// rate and a priced reference, but those gates are day-granular: a bucket
+    /// whose nearest reference is outside `--pivot-window-s` inside a covered
+    /// day can still be zeroed and not refilled. The damage check on EVERY
+    /// table (runbook Appendix A, "Extra verification") is what catches that
+    /// residue.
     #[arg(long, requires = "reset_quote_asset_id")]
     reset_not_before: Option<u32>,
 
@@ -214,6 +219,9 @@ struct Args {
     /// Mutually exclusive with `--reset-require-external-rate`: that mode is for
     /// canonical USDC, this one for the legs that pivot off it. Refused by
     /// `UsdResetSpec::validate`, before a connection is opened.
+    ///
+    /// Required for an XLM or USDT leg: without it the reset is the plain mode,
+    /// which is refused on a pivot leg (`ResetPlainModeOnPivotLeg`).
     ///
     /// Refused outright when `prices.usd_rate` holds zero `external` rows for
     /// canonical USDC (`ResetRequiresExternalRates`) — checked first thing after

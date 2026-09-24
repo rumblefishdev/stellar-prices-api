@@ -447,6 +447,18 @@ ALTER TABLE prices.<table> ATTACH PARTITION <month>
 
 ## Appendix A — reset mode, for a _wrong_ value rather than a missing one (task 0182)
 
+> ⚠️ **Since task 0208 (review WR-04), the plain mode this appendix describes
+> runs only on the canonical USDC (peg) leg.** The plain mode is
+> `--reset-quote-asset-id` + `--reset-not-before` with neither
+> `--reset-require-*` flag. On an XLM or USDT (pivot) leg it is refused right
+> after connecting, dry run included (`ResetPlainModeOnPivotLeg`): the pivot
+> refills such a row only with a USDC/USD rate and a reference inside
+> `--pivot-window-s`, and the plain mode checks neither. The 0182 USDT campaign
+> this appendix was written for is finished, so read its USDT procedure as
+> history. To re-price an XLM or USDT leg, use Appendix C
+> (`--reset-require-pivot-usdc-rate`). The epoch, oracle-purge, damage-check and
+> run-it-once rules below apply to every mode.
+
 Everything above fills zeros and is purely additive. This appendix covers the one
 mode that **discards a stored value**. Read it in full before using the flags.
 
@@ -471,23 +483,25 @@ table. The `--reset-*` flags widen the month enumeration so those rows count.
 
 They require each other. Together they re-insert the matching rows with **both**
 USD columns at 0 and `version + 1`, ahead of the normal tiers, which then
-recompute them.
+recompute them. Without a `--reset-require-*` flag this is the plain mode, for
+the canonical USDC leg only.
 
 ### What reset mode refuses outright
 
-All eight are hard errors, not warnings, because each one ends with rows zeroed
+All nine are hard errors, not warnings, because each one ends with rows zeroed
 that nothing can refill:
 
-| Refusal                                                        | Why                                                                                                                                                                                                                                                                                                                                |
-| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--skip-snapshot` + `--reset-*` without `--snapshots-verified` | Rollback for a bad reset **is** `ATTACH PARTITION` from the frozen copy. On prod `--skip-snapshot` is the _correct_ flag (Step 3b: the admin freezes, `prices_writer` cannot), so it is not refused — but "the admin did it" and "nobody did it" must not look identical. Verify under `shadow/`, then add `--snapshots-verified`. |
-| `--pivot-window-s` below the table's bucket width              | On `_1w`/`_1M`/`_1d` a bucket whose reference is the previous bucket falls outside a short window. Before a reset that left a row unenriched; now it discards the value first.                                                                                                                                                     |
-| A quote leg that is not a peg or pivot reference               | A mistyped id (`11` for `111`) passes the oracle check, because an unknown asset has no oracle rows either.                                                                                                                                                                                                                        |
-| A bounded pass (`one_shot = false`)                            | The peg-pivot tier is gated on the oracle tier draining, so a bounded pass can defer the only tier that refills.                                                                                                                                                                                                                   |
-| `oracle_prices` rows for the quote leg                         | See below.                                                                                                                                                                                                                                                                                                                         |
-| `ResetEpochBelowReference`                                     | `--reset-not-before` is below this table's first priced reference candle. Every row in the gap would be zeroed with nothing to refill it. The message prints the exact value to re-run with.                                                                                                                                       |
-| `ResetEpochHasNoReference`                                     | There is no priced reference candle for the leg on this table — no epoch is safe. The message points to the first-reference query below.                                                                                                                                                                                           |
-| `ResetEpochUsdcUnresolved`                                     | Canonical USDC is missing from `prices.assets`, so the pivot has no USDC market to measure the leg against and never runs — no epoch is safe. (The 0228 mode refuses this earlier, as `ResetPivotRateLegIsNotAPivotReference`.)                                                                                                    |
+| Refusal                                                        | Why                                                                                                                                                                                                                                                                                                                                                        |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--skip-snapshot` + `--reset-*` without `--snapshots-verified` | Rollback for a bad reset **is** `ATTACH PARTITION` from the frozen copy. On prod `--skip-snapshot` is the _correct_ flag (Step 3b: the admin freezes, `prices_writer` cannot), so it is not refused — but "the admin did it" and "nobody did it" must not look identical. Verify under `shadow/`, then add `--snapshots-verified`.                         |
+| `--pivot-window-s` below the table's bucket width              | On `_1w`/`_1M`/`_1d` a bucket whose reference is the previous bucket falls outside a short window. Before a reset that left a row unenriched; now it discards the value first.                                                                                                                                                                             |
+| A quote leg that is not a peg or pivot reference               | A mistyped id (`11` for `111`) passes the oracle check, because an unknown asset has no oracle rows either.                                                                                                                                                                                                                                                |
+| A bounded pass (`one_shot = false`)                            | The peg-pivot tier is gated on the oracle tier draining, so a bounded pass can defer the only tier that refills.                                                                                                                                                                                                                                           |
+| `oracle_prices` rows for the quote leg                         | See below.                                                                                                                                                                                                                                                                                                                                                 |
+| `ResetPlainModeOnPivotLeg`                                     | The plain mode on an XLM or USDT leg. The pivot refills such a row only with a USDC/USD rate AND a reference inside `--pivot-window-s`, and the plain mode checks neither, so it zeroes rows in the middle of history that nothing can refill. Re-run with `--reset-require-pivot-usdc-rate` (Appendix C).                                                 |
+| `ResetEpochBelowReference`                                     | `--reset-not-before` is below this table's first priced reference candle. Every row in the gap would be zeroed with nothing to refill it. The message prints the exact value to re-run with.                                                                                                                                                               |
+| `ResetEpochHasNoReference`                                     | There is no priced reference candle for the leg on this table — no epoch is safe. The message points to the first-reference query below.                                                                                                                                                                                                                   |
+| `ResetEpochUsdcUnresolved`                                     | A backstop: canonical USDC is missing from `prices.assets`, so the pivot has no USDC market to measure the leg against and never runs — no epoch is safe. Every mode that can reach the epoch check on a pivot leg refuses a missing USDC earlier: the 0228 mode as `ResetPivotRateLegIsNotAPivotReference`, the plain mode as `ResetPlainModeOnPivotLeg`. |
 
 ### The epoch is not optional tuning
 
@@ -512,7 +526,8 @@ Pass `first_reference_candle` as `--reset-not-before`. `reference_rows = 0` mean
 there is no reference on that table at all, and **no epoch is safe**.
 
 For canonical USDT (`asset_id = 111` on prod) the value is **`1612724400` =
-2021-02-07 19:00 UTC** on `_1h`. The tool checks per table: it refuses any epoch
+2021-02-07 19:00 UTC** on `_1h` — for an Appendix C (0228-mode) run, because the
+plain mode no longer runs on USDT. The tool checks per table: it refuses any epoch
 below that table's own first reference candle, before any write and in a dry run
 too (`ResetEpochBelowReference`), and the refusal prints that table's value.
 
@@ -530,7 +545,7 @@ Task 0172 separately measured USDT at genuine par until June 2022, so the `$1`
 already stored below the epoch is _correct_ — this flag protects real data, it
 does not merely skip work.
 
-### ⚠️ An admitted epoch is a lower bound, not a refill guarantee
+### ⚠️ An admitted epoch bounds only where the reference begins
 
 The epoch guard checks **only** where the reference begins. Above the epoch the
 pivot (since task 0228) writes a row only when **both** hold for its bucket:
@@ -541,50 +556,17 @@ pivot (since task 0228) writes a row only when **both** hold for its bucket:
 - a priced reference candle of the leg against USDC at or before the bucket,
   within `--pivot-window-s`.
 
+The plain 0182 mode checked neither and is refused on a pivot leg
+(`ResetPlainModeOnPivotLeg`), so the pre-run counts the plain mode needed are
+gone with it.
+
 The 0228 mode (`--reset-require-pivot-usdc-rate`, Appendix C) re-opens only days
-that have both. **The plain 0182 mode (neither `--reset-require-*` flag) checks
-neither**: it zeroes every written row from the epoch on, and a row missing
-either input stays at `close_usd = 0` with nothing to refill it, although the
-epoch was admitted. In particular, if USDC's `external` series is not loaded, a
-plain-mode reset below 2026-03-11 refills nothing at all.
-
-Check both before a plain-mode run, on the same `<TABLE>`, `<QUOTE_ID>`
-(`--reset-quote-asset-id`), `<USDC_ID>` and `<NOT_BEFORE>`. Each counts the
-written rows the reset would zero on a day with no such input; **both must be
-0**:
-
-```sql
--- 1. written rows on a day with no USDC/USD rate at all
-SELECT count() AS rows_on_days_without_a_usdc_rate
-FROM prices.<TABLE> FINAL
-WHERE quote_asset_id = <QUOTE_ID>
-  AND timestamp >= toDateTime(<NOT_BEFORE>)
-  AND volume_quote > 0 AND (close_usd > 0 OR volume_quote_usd > 0)
-  AND toDate(timestamp, 'UTC') NOT IN (
-      SELECT toDate(timestamp, 'UTC') FROM prices.usd_rate FINAL
-      WHERE asset_kind = 'credit' AND asset_code = 'USDC' AND contract_address = ''
-        AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
-        AND method IN ('oracle', 'external') AND usd_rate > 0);
-
--- 2. written rows on a day with no priced reference candle
-SELECT count() AS rows_on_days_without_a_reference
-FROM prices.<TABLE> FINAL
-WHERE quote_asset_id = <QUOTE_ID>
-  AND timestamp >= toDateTime(<NOT_BEFORE>)
-  AND volume_quote > 0 AND (close_usd > 0 OR volume_quote_usd > 0)
-  AND toDate(timestamp, 'UTC') NOT IN (
-      SELECT toDate(timestamp, 'UTC') FROM prices.<TABLE> FINAL
-      WHERE asset_id = <QUOTE_ID> AND quote_asset_id = <USDC_ID>
-        AND close > 0 AND volume_base > 0 AND pf_trade_count > 0);
-```
-
-Both are day-granular, like the 0228 mode's own gates, so 0 is necessary, not
-sufficient: a rate or reference earlier in the day than the bucket, or a
-reference gap longer than `--pivot-window-s` inside a covered day, still strands
-a row. What catches that residue is the post-run damage check in "Extra
-verification" below, **on every table**. If either count is not 0, do not run
-plain mode over that span: load the missing series first, or use the 0228 mode,
-which does not re-open those days.
+that have both. Its gates are day-granular, so passing them is necessary, not
+sufficient: a bucket earlier in its day than that day's first reference with
+none inside `--pivot-window-s` before it, or a bucket inside a reference gap
+longer than `--pivot-window-s` within a covered day, can still be zeroed and not
+refilled. What catches that residue is the post-run damage check in "Extra
+verification" below, **on every table**.
 
 ### Worked example — the 2026-08-19 boundary repair (lore 0182 → 0208)
 
@@ -608,7 +590,9 @@ UTC, 19 hours below the USDT/USDC reference's first candle at 19:00
   157 rows. The SQL is in the archived task
   `lore/1-tasks/archive/0182_BUG_close-usd-overstated-7x-on-usdt-quoted-candles.md`.
 
-The tool now refuses that epoch (task 0208).
+The tool now refuses that invocation twice over. The plain mode on the USDT leg
+is refused (`ResetPlainModeOnPivotLeg`), and the same epoch in the 0228 mode is
+refused too (`ResetEpochBelowReference`).
 
 ### Prerequisite: purge the oracle rows FIRST
 
@@ -1557,6 +1541,9 @@ And first thing after connecting, before any month is enumerated, **dry run
 included** (they need `prices.assets`, `prices.usd_rate` and
 `prices.oracle_prices`, so not before the connection):
 
+- forgetting `--reset-require-pivot-usdc-rate` on an XLM or USDT leg
+  (`ResetPlainModeOnPivotLeg`) — this mode is the only one that re-opens a pivot
+  leg;
 - a quote leg the scaled pivot cannot refill
   (`ResetPivotRateLegIsNotAPivotReference`) — canonical USDC, which is
   Appendix B's leg, any non-reference asset, **and any leg at all while
@@ -1573,6 +1560,10 @@ included** (they need `prices.assets`, `prices.usd_rate` and
   table (`ResetEpochBelowReference`), or no such candle at all
   (`ResetEpochHasNoReference`). The comparison is in seconds, so a same-day epoch
   that is hours early is refused, and the message names the value to re-run with.
+
+An admitted epoch is still not a refill guarantee. See Appendix A,
+"An admitted epoch bounds only where the reference begins", for the
+day-granularity residue the post-run damage check must catch.
 
 Until task 0228's review the leg and rates checks lived only in the per-month
 pass, which a dry run never builds: a rehearsal over the wrong leg listed
