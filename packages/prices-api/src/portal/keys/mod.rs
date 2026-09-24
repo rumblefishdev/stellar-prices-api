@@ -1149,7 +1149,11 @@ async fn attempt(
             // the create and this call. Handing its value out would be handing
             // out a dead id — the one thing the adopt-or-recreate rule exists to
             // prevent — so this re-enters the flow like any other lost race.
-            if gateway.attach_to_free_plan(&record.id).await? == Attachment::KeyGone {
+            if gateway
+                .attach_to_plan(&record.id, gateway.free_plan_id())
+                .await?
+                == Attachment::KeyGone
+            {
                 return Ok(Attempt::Retry);
             }
             return Ok(Attempt::Done(Outcome {
@@ -1222,7 +1226,11 @@ async fn attempt(
     // replacement. Because this call now runs before the read, it is the first
     // place that race can surface, so it has to answer it rather than turn a
     // hand-deleted key back into the dead end this slice exists to remove.
-    if gateway.attach_to_free_plan(&winner.id).await? == Attachment::KeyGone {
+    if gateway
+        .attach_to_plan(&winner.id, gateway.free_plan_id())
+        .await?
+        == Attachment::KeyGone
+    {
         return Ok(Attempt::Retry);
     }
 

@@ -110,17 +110,16 @@ pub const OPENAPI_PATH: &str = "/api/api-docs-json";
 pub struct PortalConfig {
     /// Whether the portal is open for business.
     pub enabled: bool,
-    /// The free plan's per-key rate limit in requests per second, for the
-    /// dashboard to state (task 0188).
+    /// The free plan's per-key rate limit in requests per second (task 0188).
     ///
     /// Served from here rather than written into the bundle because it is a
     /// per-env config value (`pricingApiFreePlanRateLimit`) that the gateway
-    /// enforces and the page merely reports: a literal in the frontend is the
-    /// one number on that panel that can drift from what is actually enforced.
-    /// It rides on `/config` rather than on `/usage` because the dashboard
-    /// states it in the no-key state too, and that state is a `404` with no
-    /// body to carry it — and because the limit is a property of the plan every
-    /// key joins, not of any one caller's key.
+    /// enforces and the page merely reports: a literal in the frontend would
+    /// drift from what is actually enforced. Since task 0311 a signed-in
+    /// caller WITH a key is shown their own plan's figures, from `/usage`
+    /// (`GetUsagePlans` on the key). This stays for what has no key to ask
+    /// about: the no-key state — a `404` with no body to carry a plan — the
+    /// landing page, and the fallback while the usage call is unanswered.
     ///
     /// Omitted from the JSON entirely when this deployment was not told what
     /// the limit is; the page then omits the line rather than inventing a

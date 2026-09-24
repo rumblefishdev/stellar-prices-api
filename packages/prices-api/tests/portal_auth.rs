@@ -38,8 +38,7 @@ use mock_discord::{GRANTED_SCOPE, MemberReply, MockDiscord, USER_ID};
 // `USER_ID` of its own, and this file already has both.
 #[path = "portal_keys/harness.rs"]
 mod harness;
-use harness::{MockGateway, PLAN_ID};
-use prices_api::portal::keys::gateway::Gateway;
+use harness::{MockGateway, test_gateway};
 
 // ---------------------------------------------------------------------------
 // Router under test
@@ -624,7 +623,7 @@ fn app_with_keys_and(
             api_base: discord.base.clone(),
             ..Endpoints::default()
         },
-        portal_keys: Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
+        portal_keys: Some(test_gateway(&gateway.base)),
         portal_eligibility: Some(eligibility),
         portal_rate_limit: None,
         portal_web_origin: None,

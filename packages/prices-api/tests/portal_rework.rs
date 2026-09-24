@@ -33,14 +33,13 @@ use chrono::{Datelike, NaiveDate, Utc};
 use harness::*;
 use mock_discord::{GRANTED_SCOPE, MemberReply, MockDiscord};
 use prices_api::portal::auth::discord::Endpoints;
-use prices_api::portal::keys::gateway::Gateway;
 use prices_api::portal::keys::{KEY_PATH, PORTAL_REQUEST_HEADER, REWORK_PATH};
 use prices_api::portal::usage::USAGE_PATH;
 
 fn app_with_discord(discord: &MockDiscord, gateway: &MockGateway) -> Router {
     build_app_with(
         true,
-        Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
+        Some(test_gateway(&gateway.base)),
         Endpoints {
             api_base: discord.base.clone(),
             ..Endpoints::default()
@@ -129,10 +128,7 @@ async fn reveal_via(router: &Router) -> Reply {
 async fn revoke_is_an_empty_404_while_the_portal_is_closed() {
     let gateway = MockGateway::start().await;
     seed_attached(&gateway, 1_000);
-    let closed = build_app(
-        false,
-        Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
-    );
+    let closed = build_app(false, Some(test_gateway(&gateway.base)));
 
     let reply = revoke(&closed, Some(&session_cookie(USER_ID))).await;
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
@@ -1029,7 +1025,7 @@ async fn a_same_site_revoke_is_accepted_from_the_configured_origin_only() {
     seed_attached(&gateway, 1_000);
     let app = build_app_on(
         true,
-        Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
+        Some(test_gateway(&gateway.base)),
         Endpoints {
             api_base: discord.base.clone(),
             ..Endpoints::default()

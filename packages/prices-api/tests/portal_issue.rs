@@ -32,7 +32,6 @@ use harness::*;
 use mock_discord::{GRANTED_SCOPE, MemberReply, MockDiscord};
 use prices_api::portal::auth::discord::Endpoints;
 use prices_api::portal::auth::{cookies, session::Session, state_token};
-use prices_api::portal::keys::gateway::Gateway;
 use prices_api::portal::usage::USAGE_PATH;
 
 /// Milliseconds since the Discord epoch, shifted into snowflake position —
@@ -58,7 +57,7 @@ fn issue_app_with(
 ) -> Router {
     build_app_with(
         true,
-        Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
+        Some(test_gateway(&gateway.base)),
         Endpoints {
             api_base: discord.base.clone(),
             ..Endpoints::default()
@@ -86,7 +85,7 @@ async fn everything_including_issue_is_an_empty_404_while_the_portal_is_closed()
     let gateway = MockGateway::start().await;
     let closed = build_app_with(
         false,
-        Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
+        Some(test_gateway(&gateway.base)),
         Endpoints {
             api_base: discord.base.clone(),
             ..Endpoints::default()
@@ -983,5 +982,57 @@ async fn a_duplicate_that_will_not_delete_does_not_withhold_the_key() {
         reveal(&gateway, USER_ID).await.json()["key_id"],
         earliest,
         "the winner is still the earliest, and it is what the reveal hands out"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Attaching to a plan other than free (task 0311)
+// ---------------------------------------------------------------------------
+
+/// A plan the control plane does not know is `PlanNotFound` NAMING that plan
+/// — a paid or custom plan id comes from the previous key's `GetUsagePlans`
+/// answer, not from the SSM parameter, so a message that only pointed at
+/// `PORTAL_FREE_PLAN_PARAM` would send the operator to the wrong place.
+#[tokio::test]
+async fn attaching_to_an_unknown_plan_names_that_plan() {
+    use prices_api::portal::keys::gateway::GatewayError;
+
+    let gateway = MockGateway::start().await;
+    let key = gateway.with(|s| s.seed(&key_name(), 100));
+
+    let error = test_gateway(&gateway.base)
+        .attach_to_plan(&key, "vanishedplan9")
+        .await
+        .expect_err("the mock knows no plan `vanishedplan9`");
+    assert!(
+        matches!(&error, GatewayError::PlanNotFound { plan_id } if plan_id == "vanishedplan9"),
+        "{error:?}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("vanishedplan9"), "{message}");
+    assert!(message.contains("GetUsagePlans"), "{message}");
+    assert!(message.contains("PORTAL_FREE_PLAN_PARAM"), "{message}");
+    assert!(gateway.with(|s| s.plan_keys.is_empty()));
+}
+
+/// And a known paid plan is attached to like the free one.
+#[tokio::test]
+async fn attaching_to_a_paid_plan_puts_the_key_on_it() {
+    use prices_api::portal::keys::gateway::Attachment;
+
+    let gateway = MockGateway::start().await;
+    let key = gateway.with(|s| {
+        s.plans.push(StoredPlan::basic());
+        s.seed(&key_name(), 100)
+    });
+
+    let attached = test_gateway(&gateway.base)
+        .attach_to_plan(&key, BASIC_PLAN_ID)
+        .await
+        .expect("basic1 exists");
+    assert_eq!(attached, Attachment::OnPlan);
+    assert_eq!(
+        gateway.with(|s| s.plan_keys.clone()),
+        vec![(BASIC_PLAN_ID.to_string(), key)]
     );
 }

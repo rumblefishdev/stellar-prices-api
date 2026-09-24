@@ -70,11 +70,114 @@ pub struct StoredKey {
     pub last_updated_at: Option<u64>,
 }
 
+/// One usage plan the mock knows (task 0311) — what `GetUsagePlans` lists
+/// and what `CreateUsagePlanKey` / `GetUsage` accept in their `{plan}` path.
+#[derive(Clone, Debug)]
+pub struct StoredPlan {
+    pub id: String,
+    pub name: String,
+    /// `(apiId, stage)` pairs — the plan's `apiStages`.
+    pub api_stages: Vec<(String, String)>,
+    /// `(rateLimit, burstLimit)`, or no throttle at all.
+    pub throttle: Option<(f64, i32)>,
+    /// `(limit, offset, period)`, or no quota at all.
+    pub quota: Option<(i32, i32, &'static str)>,
+}
+
+impl StoredPlan {
+    /// A plan on OUR stage (`API_ID`, `STAGE`) with the given figures.
+    pub fn on_our_stage(
+        id: &str,
+        name: &str,
+        throttle: Option<(f64, i32)>,
+        quota: Option<(i32, i32, &'static str)>,
+    ) -> Self {
+        Self {
+            id: id.to_string(),
+            name: name.to_string(),
+            api_stages: vec![(API_ID.to_string(), STAGE.to_string())],
+            throttle,
+            quota,
+        }
+    }
+
+    /// The free plan every mock starts with: `pricing-api-free-production`,
+    /// 1 req/s, burst 5, 100 000 a MONTH — so every pre-0311 test keeps the
+    /// free-plan semantics it was written against.
+    pub fn free() -> Self {
+        Self::on_our_stage(
+            PLAN_ID,
+            "pricing-api-free-production",
+            Some((1.0, 5)),
+            Some((100_000, 0, "MONTH")),
+        )
+    }
+
+    /// `pricing-api-basic-production`, 3 req/s, burst 15, 1 000 000 a MONTH.
+    pub fn basic() -> Self {
+        Self::on_our_stage(
+            BASIC_PLAN_ID,
+            "pricing-api-basic-production",
+            Some((3.0, 15)),
+            Some((1_000_000, 0, "MONTH")),
+        )
+    }
+
+    /// A hand-made plan on our stage with no throttle and no quota —
+    /// the unlimited Custom state.
+    pub fn custom_unlimited() -> Self {
+        Self::on_our_stage(CUSTOM_PLAN_ID, "prices-production-acme-plan", None, None)
+    }
+
+    fn json(&self) -> Value {
+        let mut plan = json!({
+            "id": self.id,
+            "name": self.name,
+            "apiStages": self
+                .api_stages
+                .iter()
+                .map(|(api_id, stage)| json!({ "apiId": api_id, "stage": stage }))
+                .collect::<Vec<_>>(),
+        });
+        if let Some((rate, burst)) = self.throttle {
+            plan["throttle"] = json!({ "rateLimit": rate, "burstLimit": burst });
+        }
+        if let Some((limit, offset, period)) = self.quota {
+            plan["quota"] = json!({ "limit": limit, "offset": offset, "period": period });
+        }
+        plan
+    }
+}
+
 #[derive(Default)]
 pub struct Store {
     pub keys: Vec<StoredKey>,
     /// `(usage_plan_id, key_id)` pairs, in the order they were attached.
     pub plan_keys: Vec<(String, String)>,
+    /// Every usage plan the mock knows (task 0311). Seeded with
+    /// [`StoredPlan::free`] by [`MockGateway::start`]; a test adds paid,
+    /// custom, other-API or WEEK plans with `s.plans.push(..)`.
+    pub plans: Vec<StoredPlan>,
+    /// How many plans one `GetUsagePlans` page holds.
+    pub plans_page_size: usize,
+    /// How many `GetUsagePlans` HTTP calls arrived.
+    pub plans_calls: usize,
+    /// Every `keyId` `GetUsagePlans` was asked about.
+    pub plans_queries: Vec<Option<String>>,
+    /// Answer every `GetUsagePlans` with `429 TooManyRequestsException`.
+    /// Sticky, for the reason `throttle_usage` is: the SDK's own backoff
+    /// retries a 429, so only a throttle that persists reaches the handler.
+    pub throttle_plans: bool,
+    /// Every `{plan}` segment `GetUsage` was asked for, in order (task 0311) —
+    /// which plan's counter was read. Separate from `usage_queries`, whose
+    /// 3-tuple shape the pre-0311 tests destructure.
+    pub usage_plan_queries: Vec<String>,
+    /// Answer the next `CreateUsagePlanKey` with `400 BadRequestException`
+    /// and change nothing, then clear (task 0311) — an attach that did not
+    /// happen after a create that did: the crash-between-create-and-attach
+    /// window. A 400 rather than a 500 because the SDK retries a 500, so a
+    /// one-shot 500 is not observable from a handler at all.
+    pub fail_next_attach: bool,
     /// How many keys one `GetApiKeys` page holds. Small numbers force the
     /// pagination path the reconciler must walk to exhaustion.
     pub page_size: usize,
@@ -231,6 +334,20 @@ impl Store {
         id
     }
 
+    /// [`Self::seed`], attached to `plan` — what an issued key looks like
+    /// (task 0311): since the usage route reads the key's own plan, a key on
+    /// no plan is the "issued but dead" state, not the ordinary one.
+    pub fn seed_on_plan(&mut self, name: &str, created_at: u64, plan: &str) -> String {
+        let id = self.seed(name, created_at);
+        self.plan_keys.push((plan.to_string(), id.clone()));
+        id
+    }
+
+    /// [`Self::seed_on_plan`] on the free plan.
+    pub fn seed_on_free_plan(&mut self, name: &str, created_at: u64) -> String {
+        self.seed_on_plan(name, created_at, PLAN_ID)
+    }
+
     /// A key the owner revoked at `revoked_at` (task 0191): disabled, with
     /// `lastUpdatedDate` set to the revocation instant.
     pub fn seed_revoked(&mut self, name: &str, created_at: u64, revoked_at: u64) -> String {
@@ -279,6 +396,8 @@ impl MockGateway {
     pub async fn start() -> Self {
         let store = Arc::new(Mutex::new(Store {
             page_size: 100,
+            plans: vec![StoredPlan::free()],
+            plans_page_size: 100,
             ..Store::default()
         }));
 
@@ -288,6 +407,7 @@ impl MockGateway {
                 "/apikeys/{id}",
                 get(read_key).delete(delete_key).patch(update_key),
             )
+            .route("/usageplans", get(list_plans))
             .route("/usageplans/{plan}/keys", post(attach_key))
             .route("/usageplans/{plan}/usage", get(read_usage))
             .with_state(store.clone());
@@ -512,6 +632,76 @@ pub async fn update_key(
     Json(api_key_json(&snapshot)).into_response()
 }
 
+#[derive(serde::Deserialize)]
+pub struct PlansQuery {
+    #[serde(rename = "keyId")]
+    pub key_id: Option<String>,
+    pub position: Option<String>,
+    #[allow(dead_code)]
+    pub limit: Option<i32>,
+}
+
+/// `GET /usageplans` — `GetUsagePlans`, task 0311's one new call.
+///
+/// Answers under **`item`**, not `items`: the SDK's deserializer matches
+/// `"item"` (`shape_get_usage_plans.rs`), and the CLI's `items` is a rename.
+/// A mock that answered `items` would hand every test an empty page and the
+/// no-plan branch would cover everything, vacuously — the same trap
+/// [`read_usage`] documents for `values`.
+///
+/// With `keyId`, only the plans that key is attached to (per `plan_keys`),
+/// exactly as the service filters; paged by `plans_page_size`.
+pub async fn list_plans(
+    State(store): State<Arc<Mutex<Store>>>,
+    Query(query): Query<PlansQuery>,
+) -> Response {
+    let mut store = store.lock().unwrap();
+    store.plans_calls += 1;
+    store.plans_queries.push(query.key_id.clone());
+    if store.throttle_plans {
+        return throttled();
+    }
+
+    let matched: Vec<StoredPlan> = store
+        .plans
+        .iter()
+        .filter(|plan| match query.key_id.as_deref() {
+            Some(key_id) => store
+                .plan_keys
+                .iter()
+                .any(|(p, k)| p == &plan.id && k == key_id),
+            None => true,
+        })
+        .cloned()
+        .collect();
+    let start: usize = query
+        .position
+        .as_deref()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    let start = start.min(matched.len());
+    let end = (start + store.plans_page_size.max(1)).min(matched.len());
+
+    let mut body = json!({
+        "item": matched[start..end].iter().map(StoredPlan::json).collect::<Vec<_>>(),
+    });
+    if end < matched.len() {
+        body["position"] = json!(end.to_string());
+    }
+    Json(body).into_response()
+}
+
+/// The `400` shape the SDK maps to `BadRequestException` — not retried by
+/// the SDK, so one of them is observable from a handler.
+pub fn bad_request() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [("x-amzn-errortype", "BadRequestException")],
+        Json(json!({ "message": "Bad Request" })),
+    )
+        .into_response()
+}
+
 pub async fn attach_key(
     State(store): State<Arc<Mutex<Store>>>,
     Path(plan): Path<String>,
@@ -520,6 +710,9 @@ pub async fn attach_key(
     let mut store = store.lock().unwrap();
     store.attach_calls += 1;
     let key_id = body["keyId"].as_str().unwrap_or_default().to_string();
+    if std::mem::take(&mut store.fail_next_attach) {
+        return bad_request();
+    }
     if store.attach_always_404 {
         return not_found();
     }
@@ -530,15 +723,27 @@ pub async fn attach_key(
     if !store.keys.iter().any(|k| k.id == key_id) {
         return not_found();
     }
-    // Already on this plan → `409 ConflictException`, exactly as the service
-    // answers. The reconciler attaches every key it is about to hand out, so
-    // this is the ordinary case rather than an edge one, and a mock that
-    // silently accepted a re-attach would let a handler that treats the
+    // An unknown plan is the same `404` as an unknown key (task 0311) —
+    // which is what makes `PlanNotFound` for a paid plan testable.
+    let Some(target) = store.plans.iter().find(|p| p.id == plan).cloned() else {
+        return not_found();
+    };
+    // Already on this plan — or on any plan sharing one of its stages, since
+    // a key belongs to one plan per stage — → `409 ConflictException`, as the
+    // service answers. The reconciler attaches every key it is about to hand
+    // out, so this is the ordinary case rather than an edge one, and a mock
+    // that silently accepted a re-attach would let a handler that treats the
     // conflict as a failure pass every test here.
+    let shares_a_stage = |other: &str| {
+        other == plan
+            || store.plans.iter().any(|p| {
+                p.id == other && p.api_stages.iter().any(|s| target.api_stages.contains(s))
+            })
+    };
     if store
         .plan_keys
         .iter()
-        .any(|(p, k)| p == &plan && k == &key_id)
+        .any(|(p, k)| k == &key_id && shares_a_stage(p))
     {
         return conflict();
     }
@@ -573,11 +778,12 @@ pub struct UsageQuery {
 /// no-rows path would cover everything, vacuously.
 pub async fn read_usage(
     State(store): State<Arc<Mutex<Store>>>,
-    Path(_plan): Path<String>,
+    Path(plan): Path<String>,
     Query(query): Query<UsageQuery>,
 ) -> Response {
     let mut store = store.lock().unwrap();
     store.usage_calls += 1;
+    store.usage_plan_queries.push(plan.clone());
     let key_id = query.key_id.clone().unwrap_or_default();
     store.usage_queries.push((
         key_id.clone(),
@@ -607,7 +813,7 @@ pub async fn read_usage(
     let end = (start + page).min(days.len());
 
     let mut body = json!({
-        "usagePlanId": "freeplan1",
+        "usagePlanId": plan,
         "startDate": query.start_date,
         "endDate": query.end_date,
     });
@@ -657,7 +863,7 @@ pub fn not_found() -> Response {
 /// The `409` shape the SDK maps to `ConflictException`.
 ///
 /// Sibling of [`not_found`] and load-bearing for the same reason: the header is
-/// what restJson1 matches on, and `Gateway::attach_to_free_plan` reads that
+/// what restJson1 matches on, and `Gateway::attach_to_plan` reads that
 /// mapping to decide that a key already on the plan is the desired state rather
 /// than a failure.
 pub fn conflict() -> Response {
@@ -687,6 +893,24 @@ pub fn api_key_json(key: &StoredKey) -> Value {
 
 pub const SIGNING_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 pub const PLAN_ID: &str = "freeplan1";
+/// Our REST API id and stage, as the mock's plans carry them (task 0311).
+pub const API_ID: &str = "02mabge71l";
+pub const STAGE: &str = "production";
+/// The mock's `pricing-api-basic-production` plan id ([`StoredPlan::basic`]).
+pub const BASIC_PLAN_ID: &str = "basic1";
+/// The mock's hand-made unlimited plan id ([`StoredPlan::custom_unlimited`]).
+pub const CUSTOM_PLAN_ID: &str = "custom1";
+
+/// A `Gateway` pointed at the mock at `base`, scoped to the free plan and our
+/// API stage — the one constructor every test uses.
+pub fn test_gateway(base: &str) -> Gateway {
+    Gateway::against(
+        base,
+        PLAN_ID.to_string(),
+        API_ID.to_string(),
+        STAGE.to_string(),
+    )
+}
 pub const USER_ID: &str = "308994132968210433";
 pub const USER_NAME: &str = "adam";
 
@@ -763,10 +987,7 @@ pub const GUILD_ID: &str = "897514728459468821";
 /// A router with the portal open, sign-in configured, and the control plane
 /// pointed at `mock`.
 pub fn app_against(mock: &MockGateway) -> Router {
-    build_app(
-        true,
-        Some(Gateway::against(&mock.base, PLAN_ID.to_string())),
-    )
+    build_app(true, Some(test_gateway(&mock.base)))
 }
 
 /// The key routes alone, with a shortened reconciliation deadline.
@@ -780,7 +1001,7 @@ pub fn keys_router_with_deadline(mock: &MockGateway, deadline: std::time::Durati
     prices_api::portal::keys::routes(
         prices_api::portal::keys::KeysState::new(
             Some(oauth_secret()),
-            Some(Gateway::against(&mock.base, PLAN_ID.to_string())),
+            Some(test_gateway(&mock.base)),
         )
         .with_deadline(deadline),
     )
@@ -873,7 +1094,7 @@ pub fn usage_router_with(
     prices_api::portal::usage::routes(
         prices_api::portal::usage::UsageState::new(
             Some(oauth_secret()),
-            Some(Gateway::against(&mock.base, PLAN_ID.to_string())),
+            Some(test_gateway(&mock.base)),
         )
         .with_ttl(ttl)
         .with_deadline(deadline),

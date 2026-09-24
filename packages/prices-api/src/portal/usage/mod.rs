@@ -7,7 +7,7 @@
 //!
 //! | route | does |
 //! | --- | --- |
-//! | `GET /api/usage` | the caller's used / remaining / limit for the current period, from `GetUsage` |
+//! | `GET /api/usage` | the caller's plan (`GetUsagePlans`) and used / remaining / limit for its current period (`GetUsage` on that plan) |
 //!
 //! # This route is read-only, and that is a safety property
 //!
@@ -28,15 +28,35 @@
 //! the victim's own tab is not readable cross-origin. The worst outcome is the
 //! visitor seeing their own dashboard.
 //!
+//! # The key's own plan (task 0311)
+//!
+//! The key is not assumed to be on the free plan. An operator moves a paid
+//! user's key onto `pricing-api-{basic,analyst,lite,pro}-<env>` by hand, and a
+//! hand-made Custom plan can hold one too — so the route first asks which plan
+//! holds the key on OUR API stage (`Gateway::plan_of`, `GetUsagePlans?keyId=`)
+//! and reports it as `plan`. `limit` is that plan's own `quota.limit`;
+//! `used + remaining` is only a cross-check, logged when it disagrees.
+//!
+//! Two states are stated rather than rendered as zeros: a key on **no plan**
+//! for our stage (`plan: null`, every counter and period field null — the
+//! "issued but dead" state, the gateway answers it `403`), and a plan with
+//! **no quota** (`plan.quota_limit: null`, counters and period null, and no
+//! `GetUsage` call at all — there is nothing to count against). A plan whose
+//! quota period this code does not compute (`WEEK`, or a period a newer
+//! service invents) reports its quota and names the period, with the period
+//! fields null: reported, never guessed.
+//!
 //! # The numbers are AWS's; the period boundary is ours
 //!
-//! `used`, `remaining` and the reconstructed `limit` come from `GetUsage`,
-//! scoped to `(usagePlanId, apiKeyId)` — no accounting of our own. The period
-//! rendered around them does **not** come from AWS, because AWS documents
-//! neither the reset instant nor its timezone (ADR 0010, correction #2, still
-//! open — the only statement anywhere is an example caption). "The 1st of the
-//! month, 00:00 UTC" is **our stated product rule**, the same one the rework
-//! cap in [0191] is defined by.
+//! `used` and `remaining` come from `GetUsage`, scoped to
+//! `(usagePlanId, apiKeyId)` — no accounting of our own. The period rendered
+//! around them does **not** come from AWS, because AWS documents neither the
+//! reset instant nor its timezone (ADR 0010, correction #2, still open — the
+//! only statement anywhere is an example caption). For a `MONTH` plan "the
+//! 1st of the month, 00:00 UTC" is **our stated product rule**, the same one
+//! the rework cap in [0191] is defined by; for a `DAY` plan it is the UTC day.
+//! A quota's `offset` never shifts either: it is a request count subtracted in
+//! the first period, not a start day.
 //!
 //! If AWS's counter turns out to roll at a different instant, the LABEL is a UX
 //! wrinkle to word around — but the NUMBERS under it are not, and that is worth
@@ -81,14 +101,14 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use chrono::{SecondsFormat, Utc};
+use chrono::{NaiveDate, SecondsFormat, Utc};
 use serde::Serialize;
 
 use crate::common::{cache_control, errors};
 
 use super::auth::secret::OauthSecret;
 use super::keys::cap::{self, Cap};
-use super::keys::gateway::{Gateway, GatewayError};
+use super::keys::gateway::{Gateway, GatewayError, PlanInfo, Tier};
 use super::keys::naming::{current_key, exact_matches, key_name, revocation_instant};
 use super::period::Period;
 
@@ -108,8 +128,10 @@ const USAGE_UNCONFIGURED: &str = "usage_unconfigured";
 
 /// How long a cached answer is served without asking AWS again.
 ///
-/// One dashboard load is one `GetApiKeys` + one `GetUsage`; within this window
-/// every further load by the same caller is neither. 60 seconds is far inside
+/// One dashboard load is one `GetApiKeys` + one `GetUsagePlans` + at most one
+/// `GetUsage`; within this window every further load by the same caller is
+/// none of them. The plan lives in the same entry (task 0311), so an operator's
+/// plan change shows within one TTL — no external invalidation. 60 seconds is far inside
 /// `GetUsage`'s own reporting lag (minutes — see the module docs), so the
 /// cache costs the viewer no freshness AWS was offering, while a refresh
 /// loop at any human rate collapses to one control-plane call a minute.
@@ -141,7 +163,7 @@ const USAGE_DEADLINE: Duration = Duration::from_secs(10);
 pub struct UsageState {
     /// Verifies the session cookie — the same secret sign-in issued it with.
     oauth: Option<Arc<OauthSecret>>,
-    /// The control-plane client, carrying the free plan id. `None` while the
+    /// The control-plane client, carrying the free plan id and our API stage. `None` while the
     /// portal is closed, exactly as `KeysState` holds it.
     gateway: Option<Arc<Gateway>>,
     /// The last good answer per caller (session `sub`), plus the per-caller
@@ -296,34 +318,142 @@ pub fn routes(state: UsageState) -> Router {
 /// What the route answers with. Everything the dashboard renders, nothing it
 /// has to compute.
 ///
-/// The three counters are one `Option` each and go absent **together**: when
-/// AWS has no row for the key yet (see `Gateway::usage_of` — common for a key
-/// issued minutes ago), inventing `used: 0` would be defensible but inventing
-/// `remaining` and `limit` would not, and a response that is honest about two
-/// fields and guessing on the third is worse than one that says "nothing
-/// recorded yet". The period and `as_of` are always present — they are ours.
+/// `used` and `remaining` go absent **together** when AWS has no row for the
+/// key yet (see `Gateway::usage_of` — common for a key issued minutes ago):
+/// inventing `used: 0` would be defensible but inventing `remaining` would
+/// not. `limit` is the plan's quota, known even before AWS records a row.
+///
+/// For a free key every pre-0311 field keeps its name, meaning and — apart
+/// from `limit` now being the plan's quota rather than `used + remaining` —
+/// its value; `plan` is added. The no-plan, no-quota and unsupported-period
+/// states null the counters and the period (see the module docs).
 #[derive(Clone, Serialize)]
 struct UsageResponse {
     /// Requests counted against the quota this period, per AWS.
     used: Option<u64>,
     /// Requests left, as of the latest day AWS has data for.
     remaining: Option<u64>,
-    /// The plan quota, reconstructed as `used + remaining` — `GetUsage` does
-    /// not report it directly, and reading it from `GetUsagePlan` would cost a
-    /// grant this slice deliberately does not take.
+    /// The plan's quota, `plan.quota_limit` (task 0311). `used + remaining` is
+    /// only a cross-check against it, logged when it disagrees — never
+    /// rendered.
     limit: Option<u64>,
     /// First day of the current period, `YYYY-MM-DD` — ours: the calendar
-    /// month, UTC.
-    period_start: String,
+    /// month, UTC, for a `MONTH` plan; the UTC day for a `DAY` plan; null when
+    /// there is no plan, no quota, or a period this code does not compute.
+    period_start: Option<String>,
     /// Last day of the current period, inclusive, `YYYY-MM-DD`.
-    period_end: String,
-    /// When the quota resets under our stated rule: the 1st of the next month,
-    /// 00:00 UTC, as an RFC 3339 instant.
-    resets_at: String,
-    /// When the `GetUsage` behind this answer was made, RFC 3339. The "last
+    period_end: Option<String>,
+    /// When the quota resets under our stated rule, RFC 3339: the 1st of the
+    /// next month (`MONTH`) or the next day (`DAY`), 00:00 UTC.
+    resets_at: Option<String>,
+    /// When the lookup behind this answer was made, RFC 3339. The "last
     /// updated" line renders this — for a cached or stale-served answer it is
     /// the fetch time, not now, which is the point.
     as_of: String,
+    /// The key's plan on our API stage (task 0311); `null` when it is on none.
+    plan: Option<PlanWire>,
+}
+
+/// The plan as the dashboard needs it (task 0311): the pill (`tier`, and
+/// `name` for a Custom plan), the Rate Limit card's figures and the Monthly
+/// Usage card's quota. Every figure is optional because AWS makes it so, and
+/// an absent one is stated ("Unlimited"), never rendered as zero.
+#[derive(Clone, Serialize)]
+struct PlanWire {
+    tier: Tier,
+    name: String,
+    rate_limit_per_second: Option<f64>,
+    burst_limit: Option<i32>,
+    quota_limit: Option<u64>,
+    /// `MONTH`, `DAY`, `WEEK` — or whatever else AWS answers, verbatim.
+    quota_period: Option<String>,
+}
+
+impl From<&PlanInfo> for PlanWire {
+    fn from(plan: &PlanInfo) -> Self {
+        Self {
+            tier: plan.tier,
+            name: plan.name.clone(),
+            rate_limit_per_second: plan.rate_limit,
+            burst_limit: plan.burst_limit,
+            quota_limit: plan.quota_limit,
+            quota_period: plan.quota_period.clone(),
+        }
+    }
+}
+
+/// The current period under a plan's `quota.period` (task 0311).
+///
+/// `MONTH` is today's calendar-month rule, **whatever the quota's offset** —
+/// the offset is a request count, not a start day. `DAY` is the UTC day, which
+/// is trivial. Anything else (`WEEK`: which weekday? AWS does not say) is
+/// [`PeriodRule::Unsupported`] and is reported by name, not guessed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PeriodRule {
+    Month(Period),
+    Day(NaiveDate),
+    Unsupported,
+}
+
+/// Which rule an answer was built under — what the cache re-checks it
+/// against (see [`answers_for_period`]). `None` is a period-independent
+/// answer: no plan, no quota, or an unsupported period.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeriodKind {
+    Month,
+    Day,
+    None,
+}
+
+fn ymd(date: NaiveDate) -> String {
+    date.format("%Y-%m-%d").to_string()
+}
+
+impl PeriodRule {
+    fn for_period(quota_period: Option<&str>, today: NaiveDate) -> Self {
+        match quota_period {
+            Some("MONTH") => PeriodRule::Month(Period::containing(today)),
+            Some("DAY") => PeriodRule::Day(today),
+            _ => PeriodRule::Unsupported,
+        }
+    }
+
+    fn kind(&self) -> PeriodKind {
+        match self {
+            PeriodRule::Month(_) => PeriodKind::Month,
+            PeriodRule::Day(_) => PeriodKind::Day,
+            PeriodRule::Unsupported => PeriodKind::None,
+        }
+    }
+
+    /// First day of the period, `YYYY-MM-DD` — also the query's `startDate`.
+    fn period_start(&self) -> Option<String> {
+        match self {
+            PeriodRule::Month(period) => Some(period.start_ymd()),
+            PeriodRule::Day(day) => Some(ymd(*day)),
+            PeriodRule::Unsupported => None,
+        }
+    }
+
+    /// Last day of the period, inclusive.
+    fn period_end(&self) -> Option<String> {
+        match self {
+            PeriodRule::Month(period) => Some(period.end_ymd()),
+            PeriodRule::Day(day) => Some(ymd(*day)),
+            PeriodRule::Unsupported => None,
+        }
+    }
+
+    /// The instant the period ends, RFC 3339.
+    fn resets_at(&self) -> Option<String> {
+        match self {
+            PeriodRule::Month(period) => Some(period.resets_at()),
+            PeriodRule::Day(day) => day
+                .succ_opt()
+                .map(|next| format!("{}T00:00:00Z", ymd(next))),
+            PeriodRule::Unsupported => None,
+        }
+    }
 }
 
 /// What the cache remembers for one caller.
@@ -331,9 +461,21 @@ struct UsageResponse {
 /// "No key" is cached alongside real answers, deliberately: the lookup for a
 /// keyless caller costs the same `GetApiKeys` as anyone else's, and a keyless
 /// caller pressing refresh is the same loop as anyone else pressing refresh.
+///
+/// A usage answer carries the period rule it was built under (task 0311), so
+/// the cache can tell when it stops describing "now" — at the month roll for a
+/// `MONTH` plan, at midnight UTC for a `DAY` plan, never for a
+/// period-independent answer. The plan lives in the same entry, so a plan an
+/// operator changed shows within one TTL.
+///
+/// The body is boxed: it is ~240 bytes beside a unit `NoKey`, and every cache
+/// entry would otherwise pay for the larger variant.
 #[derive(Clone)]
 enum CachedAnswer {
-    Usage(UsageResponse),
+    Usage {
+        body: Box<UsageResponse>,
+        rule: PeriodKind,
+    },
     NoKey,
 }
 
@@ -370,17 +512,17 @@ async fn usage(State(state): State<UsageState>, headers: HeaderMap) -> Response 
         ));
     };
 
-    // Computed once per request and used to validate cache entries as well as
-    // to build the query: an entry answering for a different period_start is
-    // last month's answer wearing this month's label, and the minute after a
-    // month boundary is exactly when a viewer checks whether the reset
-    // happened.
-    let period_start = Period::now().start_ymd();
+    // Computed once per request and used to validate cache entries: an entry
+    // answering for a different period_start is last period's answer wearing
+    // this period's label, and the minute after a boundary is exactly when a
+    // viewer checks whether the reset happened. Each entry is checked against
+    // its OWN rule (month or day) — see `answers_for_period`.
+    let today = Utc::now().date_naive();
 
     // Fresh cache hit: no control-plane call of any kind. This is the
     // "repeated dashboard loads do not produce one GetUsage call each"
     // acceptance criterion, in one branch.
-    if let Some(entry) = cached(&state, &session.sub, state.ttl, &period_start) {
+    if let Some(entry) = cached(&state, &session.sub, state.ttl, today) {
         return answer(entry.answer);
     }
 
@@ -399,7 +541,7 @@ async fn usage(State(state): State<UsageState>, headers: HeaderMap) -> Response 
             // timing — so it gets the same answer as the throttle arm below:
             // the last good answer (re-stamped, so the next TTL of loads
             // leaves the struggling control plane alone) beats the error page.
-            if let Some(entry) = cached(&state, &session.sub, STALE_KEEP, &period_start) {
+            if let Some(entry) = cached(&state, &session.sub, STALE_KEEP, today) {
                 tracing::warn!(
                     deadline_secs = state.deadline.as_secs_f32(),
                     "portal usage lookup ran out of time; serving the cached answer"
@@ -430,7 +572,7 @@ async fn usage(State(state): State<UsageState>, headers: HeaderMap) -> Response 
         // happening and invite a retry; the entry the next success writes ends
         // the condition.
         Err(GatewayError::Throttled { operation }) => {
-            if let Some(entry) = cached(&state, &session.sub, STALE_KEEP, &period_start) {
+            if let Some(entry) = cached(&state, &session.sub, STALE_KEEP, today) {
                 tracing::warn!(
                     operation,
                     "control plane is throttling; serving the cached usage answer"
@@ -474,7 +616,26 @@ async fn usage(State(state): State<UsageState>, headers: HeaderMap) -> Response 
     }
 }
 
-/// Look the key up (read-only) and read its usage.
+/// An answer with every counter and period field null — the no-plan,
+/// no-quota and unsupported-period states (task 0311). `limit` carries the
+/// plan's quota when there is one.
+fn without_counters(plan: Option<&PlanInfo>) -> CachedAnswer {
+    CachedAnswer::Usage {
+        body: Box::new(UsageResponse {
+            used: None,
+            remaining: None,
+            limit: plan.and_then(|p| p.quota_limit),
+            period_start: None,
+            period_end: None,
+            resets_at: None,
+            as_of: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            plan: plan.map(PlanWire::from),
+        }),
+        rule: PeriodKind::None,
+    }
+}
+
+/// Look the key up (read-only), find its plan, and read its usage on it.
 async fn fetch(gateway: &Gateway, name: &str) -> Result<CachedAnswer, GatewayError> {
     // The same list → exact filter → rank as the reveal, so the usage shown is
     // the usage of the key the reveal hands out — and nothing more: no create,
@@ -497,33 +658,69 @@ async fn fetch(gateway: &Gateway, name: &str) -> Result<CachedAnswer, GatewayErr
         return Ok(CachedAnswer::NoKey);
     }
 
+    // Which plan holds the key on OUR API stage (task 0311). A revoked key is
+    // still on its plan (a disable does not detach it), so this also answers
+    // for the revoked-inside-its-period case above.
+    let Some(plan) = gateway.plan_of(&winner.id).await? else {
+        return Ok(without_counters(None));
+    };
+
     let today = Utc::now().date_naive();
-    let period = Period::containing(today);
-    // The QUERY ends today, not at the month's last day. The rendered
-    // period_end stays the month boundary — that is our rule — but whether
+    let rule = PeriodRule::for_period(plan.quota_period.as_deref(), today);
+    // No quota → unlimited: nothing to count against, so no `GetUsage` at
+    // all. A period this code does not compute → the quota is reported and
+    // the counters are not, because a window we would have to guess is a
+    // number we would have to guess.
+    let (Some(quota), Some(query_start)) = (plan.quota_limit, rule.period_start()) else {
+        return Ok(without_counters(Some(&plan)));
+    };
+
+    // The QUERY ends today, not at the period's last day. The rendered
+    // period_end stays the period boundary — that is our rule — but whether
     // the live control plane accepts a future `endDate` has never been
     // verified (the mock accepts any string), days after today can carry no
     // data anyway, and a rejected query here would turn every dashboard load
     // into a 502 on the first deployed run.
-    let query_end = today.format("%Y-%m-%d").to_string();
+    let query_end = ymd(today);
     let usage = gateway
-        .usage_of(&winner.id, &period.start_ymd(), &query_end)
+        .usage_of(&plan.id, &winner.id, &query_start, &query_end)
         .await?;
+
+    // The cross-check `limit` used to BE (task 0188): the plan's quota and
+    // `used + remaining` should agree. When they do not — a reset or a quota
+    // change inside the window, or AWS's reporting lag — the plan's figure is
+    // the one stated, and the disagreement is logged rather than rendered.
+    if let Some(u) = usage
+        && u.limit() != quota
+    {
+        tracing::warn!(
+            plan_id = %plan.id,
+            quota,
+            used = u.used,
+            remaining = u.remaining,
+            quota_offset = ?plan.quota_offset,
+            "GetUsage's used + remaining disagrees with the plan's quota; stating the quota"
+        );
+    }
 
     // Stamped when the call was actually made, not when the answer is served —
     // a cached or stale-served response keeps this value, which is what makes
     // the "last updated" line truthful.
     let as_of = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
-    Ok(CachedAnswer::Usage(UsageResponse {
-        used: usage.map(|u| u.used),
-        remaining: usage.map(|u| u.remaining),
-        limit: usage.map(|u| u.limit()),
-        period_start: period.start_ymd(),
-        period_end: period.end_ymd(),
-        resets_at: period.resets_at(),
-        as_of,
-    }))
+    Ok(CachedAnswer::Usage {
+        body: Box::new(UsageResponse {
+            used: usage.map(|u| u.used),
+            remaining: usage.map(|u| u.remaining),
+            limit: Some(quota),
+            period_start: rule.period_start(),
+            period_end: rule.period_end(),
+            resets_at: rule.resets_at(),
+            as_of,
+            plan: Some(PlanWire::from(&plan)),
+        }),
+        rule: rule.kind(),
+    })
 }
 
 /// The cached entry for `sub`, if it is younger than `max_age` **and answers
@@ -532,7 +729,7 @@ fn cached(
     state: &UsageState,
     sub: &str,
     max_age: Duration,
-    current_period_start: &str,
+    today: NaiveDate,
 ) -> Option<CacheEntry> {
     let cache = state
         .cache
@@ -542,7 +739,7 @@ fn cached(
         .entries
         .get(sub)
         .filter(|entry| entry.fetched_at.elapsed() < max_age)
-        .filter(|entry| answers_for_period(&entry.answer, current_period_start))
+        .filter(|entry| answers_for_period(&entry.answer, today))
         .cloned()
 }
 
@@ -563,17 +760,27 @@ fn epoch_of(state: &UsageState, sub: &str) -> Option<u64> {
     cache.epochs.get(sub).map(|mark| mark.value)
 }
 
-/// Whether a cached answer still describes the current period.
+/// Whether a cached answer still describes the current period — under the
+/// answer's OWN rule (task 0311), not the calendar month for everyone.
 ///
 /// An entry cached before midnight on the last of the month and served after
 /// it would render last month's `period_start`/`period_end` and a `resets_at`
 /// already in the past, labelled "this period" — a minute a month under the
 /// TTL, up to [`STALE_KEEP`] under the throttle fallback, and precisely when a
-/// viewer looks to see whether the reset happened. "No key" carries no period
-/// and stays valid across the boundary.
-fn answers_for_period(answer: &CachedAnswer, current_period_start: &str) -> bool {
+/// viewer looks to see whether the reset happened. A `DAY` answer has the same
+/// hazard at every midnight UTC, and is served from the cache (and the stale
+/// fallback) only within its own day. "No key", and an answer with no period
+/// (no plan, no quota, an unsupported period), stay valid across any boundary.
+fn answers_for_period(answer: &CachedAnswer, today: NaiveDate) -> bool {
     match answer {
-        CachedAnswer::Usage(body) => body.period_start == current_period_start,
+        CachedAnswer::Usage { body, rule } => {
+            let current_start = match rule {
+                PeriodKind::Month => Period::containing(today).start_ymd(),
+                PeriodKind::Day => ymd(today),
+                PeriodKind::None => return true,
+            };
+            body.period_start.as_deref() == Some(current_start.as_str())
+        }
         CachedAnswer::NoKey => true,
     }
 }
@@ -635,7 +842,7 @@ fn remember(state: &UsageState, sub: &str, answer: CachedAnswer, epoch: Option<u
 /// Serialize a cached answer, `no-store` attached.
 fn answer(cached: CachedAnswer) -> Response {
     match cached {
-        CachedAnswer::Usage(body) => no_store(Json(body).into_response()),
+        CachedAnswer::Usage { body, .. } => no_store(Json(body).into_response()),
         // A real portal `404` with the JSON envelope — deliberately
         // distinguishable from the gate's empty one: the portal is open, the
         // caller is signed in, and the honest answer is "you have no key",
@@ -695,16 +902,28 @@ mod tests {
         assert!(!rest.contains('/'));
     }
 
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    fn answer_with(period_start: Option<&str>, rule: PeriodKind) -> CachedAnswer {
+        CachedAnswer::Usage {
+            body: Box::new(UsageResponse {
+                used: Some(1),
+                remaining: Some(2),
+                limit: Some(3),
+                period_start: period_start.map(str::to_string),
+                period_end: Some("2026-08-31".to_string()),
+                resets_at: Some("2026-09-01T00:00:00Z".to_string()),
+                as_of: "2026-08-19T10:00:00Z".to_string(),
+                plan: None,
+            }),
+            rule,
+        }
+    }
+
     fn usage_answer(period_start: &str) -> CachedAnswer {
-        CachedAnswer::Usage(UsageResponse {
-            used: Some(1),
-            remaining: Some(2),
-            limit: Some(3),
-            period_start: period_start.to_string(),
-            period_end: "2026-08-31".to_string(),
-            resets_at: "2026-09-01T00:00:00Z".to_string(),
-            as_of: "2026-08-19T10:00:00Z".to_string(),
-        })
+        answer_with(Some(period_start), PeriodKind::Month)
     }
 
     /// A cached answer survives the cache only inside its own period: last
@@ -714,21 +933,93 @@ mod tests {
     fn a_cached_answer_dies_at_the_month_boundary() {
         assert!(answers_for_period(
             &usage_answer("2026-08-01"),
-            "2026-08-01"
+            date(2026, 8, 31)
         ));
         assert!(!answers_for_period(
             &usage_answer("2026-08-01"),
-            "2026-09-01"
+            date(2026, 9, 1)
         ));
+    }
+
+    /// A DAY answer lives within its own UTC day — cache hits and the stale
+    /// fallback included — and dies at midnight (task 0311).
+    #[test]
+    fn a_day_answer_dies_at_midnight_utc() {
+        let answer = answer_with(Some("2026-09-24"), PeriodKind::Day);
+        assert!(answers_for_period(&answer, date(2026, 9, 24)));
+        assert!(!answers_for_period(&answer, date(2026, 9, 25)));
+    }
+
+    /// No plan, no quota or an unsupported period: nothing in the answer is
+    /// tied to a period, so only the TTL retires it (task 0311).
+    #[test]
+    fn a_periodless_answer_is_period_independent() {
+        let answer = answer_with(None, PeriodKind::None);
+        assert!(answers_for_period(&answer, date(2026, 9, 24)));
+        assert!(answers_for_period(&answer, date(2027, 1, 1)));
     }
 
     /// "No key" carries no period and stays valid across the boundary — a
     /// month rolling over does not conjure a key into existence.
     #[test]
     fn no_key_is_period_independent() {
-        assert!(answers_for_period(&CachedAnswer::NoKey, "2026-09-01"));
+        assert!(answers_for_period(&CachedAnswer::NoKey, date(2026, 9, 1)));
     }
 
+    /// MONTH is the calendar month, UTC — the pre-0311 rule byte for byte.
+    #[test]
+    fn a_month_plan_is_the_calendar_month() {
+        let rule = PeriodRule::for_period(Some("MONTH"), date(2026, 9, 24));
+        assert_eq!(rule.kind(), PeriodKind::Month);
+        assert_eq!(rule.period_start().as_deref(), Some("2026-09-01"));
+        assert_eq!(rule.period_end().as_deref(), Some("2026-09-30"));
+        assert_eq!(rule.resets_at().as_deref(), Some("2026-10-01T00:00:00Z"));
+    }
+
+    /// The offset is a request count, not a start day: a plan with offset 7
+    /// gets exactly the period a plan with offset 0 does. The rule is not
+    /// even given the offset, which is the point — this test pins that the
+    /// period depends on `quota.period` alone.
+    #[test]
+    fn a_month_offset_never_shifts_the_period() {
+        let today = date(2026, 12, 31);
+        let offset_zero = PeriodRule::for_period(Some("MONTH"), today);
+        let offset_seven = PeriodRule::for_period(Some("MONTH"), today);
+        assert_eq!(offset_zero, offset_seven);
+        assert_eq!(offset_seven.period_start().as_deref(), Some("2026-12-01"));
+        assert_eq!(
+            offset_seven.resets_at().as_deref(),
+            Some("2027-01-01T00:00:00Z")
+        );
+    }
+
+    /// DAY is the UTC day, resetting at the next midnight UTC.
+    #[test]
+    fn a_day_plan_is_the_utc_day() {
+        let rule = PeriodRule::for_period(Some("DAY"), date(2026, 2, 28));
+        assert_eq!(rule.kind(), PeriodKind::Day);
+        assert_eq!(rule.period_start().as_deref(), Some("2026-02-28"));
+        assert_eq!(rule.period_end().as_deref(), Some("2026-02-28"));
+        assert_eq!(rule.resets_at().as_deref(), Some("2026-03-01T00:00:00Z"));
+    }
+
+    /// WEEK, an unknown period and no period at all are reported, not
+    /// guessed: every field is absent.
+    #[test]
+    fn week_and_unknown_periods_are_unsupported() {
+        for period in [Some("WEEK"), Some("FORTNIGHT"), None] {
+            let rule = PeriodRule::for_period(period, date(2026, 9, 24));
+            assert_eq!(rule, PeriodRule::Unsupported, "{period:?}");
+            assert_eq!(rule.kind(), PeriodKind::None);
+            assert_eq!(rule.period_start(), None);
+            assert_eq!(rule.period_end(), None);
+            assert_eq!(rule.resets_at(), None);
+        }
+    }
+
+    fn any_day() -> NaiveDate {
+        date(2026, 8, 19)
+    }
     const ANY_PERIOD: &str = "2026-08-01";
 
     /// The write-after-eviction race, replayed step by step: a "no key"
@@ -748,13 +1039,13 @@ mod tests {
         // The lookup finishes with its stale keyless snapshot.
         remember(&state, sub, CachedAnswer::NoKey, epoch_at_lookup_start);
         assert!(
-            cached(&state, sub, CACHE_TTL, ANY_PERIOD).is_none(),
+            cached(&state, sub, CACHE_TTL, any_day()).is_none(),
             "a pre-eviction 'no key' must not be cached"
         );
 
         // Whereas a lookup that STARTED after the eviction stores normally.
         remember(&state, sub, CachedAnswer::NoKey, epoch_of(&state, sub));
-        assert!(cached(&state, sub, CACHE_TTL, ANY_PERIOD).is_some());
+        assert!(cached(&state, sub, CACHE_TTL, any_day()).is_some());
     }
 
     /// What `STALE_KEEP` pruning does to one caller's mark, without waiting
@@ -824,7 +1115,7 @@ mod tests {
 
         remember(&state, sub, CachedAnswer::NoKey, epoch_at_lookup_start);
         assert!(
-            cached(&state, sub, CACHE_TTL, ANY_PERIOD).is_some(),
+            cached(&state, sub, CACHE_TTL, any_day()).is_some(),
             "no mark means no eviction happened, so this 'no key' is good"
         );
     }
@@ -872,11 +1163,11 @@ mod tests {
         let stale_epoch = epoch_of(&state, sub);
         state.cache_handle().invalidate_no_key(sub);
         remember(&state, sub, usage_answer(ANY_PERIOD), stale_epoch);
-        assert!(cached(&state, sub, CACHE_TTL, ANY_PERIOD).is_some());
+        assert!(cached(&state, sub, CACHE_TTL, any_day()).is_some());
 
         // And invalidating again does not evict it — only "no key" is the
         // handle's to remove.
         state.cache_handle().invalidate_no_key(sub);
-        assert!(cached(&state, sub, CACHE_TTL, ANY_PERIOD).is_some());
+        assert!(cached(&state, sub, CACHE_TTL, any_day()).is_some());
     }
 }
