@@ -2,7 +2,7 @@
 id: "0311"
 title: "Five usage plans (free + Basic/Analyst/Lite/Pro), and the dashboard states the limits and usage of the key's own plan"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0157", "0180", "0187", "0188", "0191", "0193", "0293", "0307"]
 tags: ["portal", "self-onboarding", "api-gateway", "usage-plans", "effort-medium", "priority-medium"]
@@ -38,6 +38,11 @@ history:
       Rework keeps the plan (decision 7 reversed): the plan is read from the
       previous key before the revoked keys are deleted, and the new key is
       attached to it. Step 2b added; IAM gains POST /usageplans/*/keys.
+  - date: "2026-09-24"
+    status: active
+    who: akot
+    note: >
+      Activated; implementation starting.
 ---
 
 # Five usage plans, and the dashboard states the key's own plan
