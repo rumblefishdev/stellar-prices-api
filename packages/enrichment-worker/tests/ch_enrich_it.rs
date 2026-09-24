@@ -1287,6 +1287,11 @@ async fn an_ordinary_pass_cannot_see_a_wrong_but_written_close_usd() {
 /// got fixed" would also pass for a reset with no epoch bound at all — which
 /// would zero the pre-2021 rows that have no pivot reference and strand them at
 /// `close_usd = 0` permanently.
+///
+/// Runs in the task 0228 mode (`require_pivot_usdc_rate`): since task 0208
+/// review WR-04 it is the only mode that re-opens a pivot leg, and the plain
+/// mode's end-to-end run lives on the peg leg in
+/// `the_plain_reset_still_repairs_the_peg_leg_and_respects_the_epoch`.
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
@@ -1301,12 +1306,15 @@ async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
     c.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 3,
         not_before: t_new,
-        // The 0182 shape, stated at every site rather than defaulted: unbounded
-        // above and no reference join. Task 0268 added both fields precisely so
-        // each caller has to say which repair it is running.
-        not_after: None,
+        // The task 0228 mode: since task 0208 review WR-04 it is the only mode
+        // that re-opens a pivot leg (the plain mode is refused on USDT as
+        // `ResetPlainModeOnPivotLeg`). `setup_0182` seeds a 1.0 rate on both
+        // days and a same-day USDT/USDC reference, so the mode's day gates
+        // admit `t_new`. The plain-mode run lives on the peg leg in
+        // `the_plain_reset_still_repairs_the_peg_leg_and_respects_the_epoch`.
+        not_after: Some(USDC_ORACLE_EPOCH_S),
         require_external_rate: false,
-        require_pivot_usdc_rate: false,
+        require_pivot_usdc_rate: true,
     });
     let stats = ChEnrichmentPass::new(c).run().await.unwrap();
 
@@ -4041,17 +4049,26 @@ async fn pf_columns_survive_every_enrichment_rewrite() {
 
     // And the reset path, which rewrites already-written values rather than
     // zeros — it zeroes the XLM-quoted leg and the pivot refills it in the same
-    // draining run, so the row goes through TWO more re-inserts.
+    // draining run, so the row goes through TWO more re-inserts. The reset runs
+    // in the task 0228 mode (`require_pivot_usdc_rate`), the only mode that
+    // re-opens a pivot leg since task 0208 review WR-04: the `DEEP_DAY_START`
+    // rate and the same-minute XLM/USDC reference above are the two inputs its
+    // day gates need.
     let mut reset_cfg = cfg(db);
     reset_cfg.one_shot = true;
     reset_cfg.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 1,
         not_before: deep,
-        not_after: None,
+        not_after: Some(USDC_ORACLE_EPOCH_S),
         require_external_rate: false,
-        require_pivot_usdc_rate: false,
+        require_pivot_usdc_rate: true,
     });
-    ChEnrichmentPass::new(reset_cfg).run().await.unwrap();
+    let reset_stats = ChEnrichmentPass::new(reset_cfg).run().await.unwrap();
+    assert_eq!(
+        reset_stats.rows_reset, 1,
+        "the migrated (task 0228 mode) reset must still re-open the XLM-quoted \
+         row, or the two extra re-inserts this test checks never happen"
+    );
 
     for (asset, quote, ts) in [(10u32, 1u32, deep), (10, 2, recent), (10, 2, deep)] {
         let (tc, pf) = pf_of(&client, db, asset, quote, ts).await;
@@ -4522,10 +4539,18 @@ async fn subject_0208(client: &Client, db: &str, ts: u32) -> (f64, f64, u64) {
         .unwrap()
 }
 
-/// The 2026-08-18 invocation, replayed: plain 0182 mode on the USDT leg of
-/// `_1h` with `--reset-not-before 1612656000`. It destroyed 121 `_1h` candles
-/// in production; it must now be refused — by the pass and by the repair
-/// driver, dry run included — before a single row is written.
+/// The 2026-08-18 epoch, `--reset-not-before 1612656000` on the USDT leg of
+/// `_1h`, replayed in the task 0228 mode (`--reset-require-pivot-usdc-rate`).
+/// In production it destroyed 121 `_1h` candles; it must now be refused — by
+/// the pass and by the repair driver, dry run included — before a single row
+/// is written.
+///
+/// The literal 2026-08-18 invocation was the plain task 0182 mode. Since task
+/// 0208 review WR-04 that is refused earlier, as `ResetPlainModeOnPivotLeg`, in
+/// `a_plain_reset_of_a_pivot_leg_is_refused_before_any_write`. In the 0228 mode
+/// the only thing that stops the damage is the epoch guard: the mode's
+/// `pivot_reference_day_pred` is day-granular, and the 19:00 reference makes
+/// the whole of 2021-02-07 eligible, so it admits hours 00-18.
 ///
 /// The stranded-row count is asserted BEFORE the error, so that with the guard
 /// disabled this test reports the damage (19 rows at `close_usd = 0`) rather
@@ -4536,16 +4561,7 @@ async fn the_0182_epoch_is_refused_below_the_first_usdt_reference_candle_before_
     let db = "it_enrich_0208_refused";
     let client = setup_0208(db, false).await;
 
-    let mut c = cfg(db);
-    c.table = "price_ohlcv_1h".to_string();
-    c.one_shot = true;
-    c.usd_reset = Some(UsdResetSpec {
-        quote_asset_id: 3,
-        not_before: INCIDENT_EPOCH,
-        not_after: None,
-        require_external_rate: false,
-        require_pivot_usdc_rate: false,
-    });
+    let c = usdt_pivot_reset_1h(db, INCIDENT_EPOCH);
     let res = ChEnrichmentPass::new(c.clone()).run().await.map(|_| ());
 
     let stranded = count_0208(&client, db, "close_usd = 0 AND close > 0").await;
@@ -4675,11 +4691,11 @@ async fn a_row_zeroed_below_the_first_reference_candle_is_never_refilled() {
 /// admitted, and every row it re-opens is refilled — nothing is left at
 /// `close_usd = 0`.
 ///
-/// ⚠️ The refill here is the FIXTURE's doing, not the guard's: `setup_0208` and
-/// this test seed a USDC/USD rate for every covered day. Without those rows
-/// the plain mode would still admit this epoch and all 6 re-opened rows would
-/// be stranded — the guard bounds only where the reference begins (review
-/// WR-04; the runbook's "An admitted epoch is a lower bound" section).
+/// It runs in the task 0228 mode (`--reset-require-pivot-usdc-rate`), where the
+/// refill is guaranteed by the mode: it re-opens only days that have a seeded
+/// USDC/USD rate and a priced reference, and `setup_0208` and this test seed
+/// both for every covered day. The plain mode, which could zero rows that have
+/// neither, is refused on this leg (task 0208 review WR-04).
 ///
 /// It goes through the two-month repair driver on purpose. `reset_step`
 /// re-runs `assert_reset_is_admissible` per month with
@@ -4711,9 +4727,9 @@ async fn the_measured_first_reference_epoch_is_admitted_and_every_reset_row_is_r
     enrich.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 3,
         not_before: USDT_FIRST_REFERENCE,
-        not_after: None,
+        not_after: Some(USDC_ORACLE_EPOCH_S),
         require_external_rate: false,
-        require_pivot_usdc_rate: false,
+        require_pivot_usdc_rate: true,
     });
     let summary = CoarseRepairDriver::with_client(
         client.clone(),
@@ -4827,8 +4843,9 @@ async fn the_pivot_mode_refuses_an_epoch_hours_below_its_first_reference_on_the_
         .unwrap();
 }
 
-/// A plain (0182-mode) USDT reset on `price_ohlcv_1h` from `not_before`.
-fn usdt_reset_1h(db: &str, not_before: u32) -> ChEnrichConfig {
+/// A plain (task 0182 mode) USDT reset on `price_ohlcv_1h` from `not_before`.
+/// Refused on this leg since task 0208 review WR-04, so only refusal ITs use it.
+fn usdt_plain_reset_1h(db: &str, not_before: u32) -> ChEnrichConfig {
     let mut c = cfg(db);
     c.table = "price_ohlcv_1h".to_string();
     c.one_shot = true;
@@ -4838,6 +4855,22 @@ fn usdt_reset_1h(db: &str, not_before: u32) -> ChEnrichConfig {
         not_after: None,
         require_external_rate: false,
         require_pivot_usdc_rate: false,
+    });
+    c
+}
+
+/// A task 0228 mode (`require_pivot_usdc_rate`) USDT reset on `price_ohlcv_1h`
+/// from `not_before`: the only mode that can re-open the USDT leg.
+fn usdt_pivot_reset_1h(db: &str, not_before: u32) -> ChEnrichConfig {
+    let mut c = cfg(db);
+    c.table = "price_ohlcv_1h".to_string();
+    c.one_shot = true;
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 3,
+        not_before,
+        not_after: Some(USDC_ORACLE_EPOCH_S),
+        require_external_rate: false,
+        require_pivot_usdc_rate: true,
     });
     c
 }
@@ -4859,18 +4892,21 @@ async fn assert_0208_subjects_untouched(client: &Client, db: &str) {
 /// table, so the guard's `minOrNull` is NULL and every epoch is refused — here
 /// the one that is correct when the reference exists.
 ///
-/// Non-vacuous against the emptiness mutation the review names: if the empty
-/// set were read as a minimum of 0 (`Some(0)`, the 1970 default a bare `min`
-/// returns), this epoch would be admitted, hours 19-23 zeroed, and — with no
-/// reference to pivot from — left at `close_usd = 0`. The stranded count is
-/// asserted before the variant so that mutation reports the damage.
+/// Runs in the task 0228 mode (`require_pivot_usdc_rate`), the only mode that
+/// re-opens the USDT leg since task 0208 review WR-04. Non-vacuous against the
+/// emptiness mutation the review names: if the empty set were read as a
+/// minimum of 0 (`Some(0)`, the 1970 default a bare `min` returns), this epoch
+/// would be admitted. In the 0228 mode the day gate then finds no reference
+/// day either and re-opens nothing, so that mutation fails this test on the
+/// variant (`Ok` instead of `ResetEpochHasNoReference`), not on stranded rows.
+/// The stranded count stays as a harmless first check.
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_leg_with_no_reference_rows_on_the_table_refuses_every_epoch() {
     let db = "it_enrich_0208_no_reference";
     let client = setup_0208_with(db, false, false).await;
 
-    let res = ChEnrichmentPass::new(usdt_reset_1h(db, USDT_FIRST_REFERENCE))
+    let res = ChEnrichmentPass::new(usdt_pivot_reset_1h(db, USDT_FIRST_REFERENCE))
         .run()
         .await
         .map(|_| ());
@@ -4904,8 +4940,9 @@ async fn a_leg_with_no_reference_rows_on_the_table_refuses_every_epoch() {
 /// real 19:00 reference, each failing exactly one term of the shared
 /// predicate — 00:00 with `pf_trade_count = 0`, 01:00 with `close = 0`, 02:00
 /// with `volume_base = 0`. The pivot cannot use any of them, so neither may
-/// the guard: the incident epoch is still refused, and the first reference it
-/// names is still 19:00.
+/// the guard: the incident epoch is still refused (in the task 0228 mode, the
+/// only mode that re-opens the USDT leg), and the first reference it names is
+/// still 19:00.
 ///
 /// Non-vacuous per term. A guard that dropped `pf_trade_count > 0` would read
 /// 00:00 = the epoch and ADMIT it — 19 rows stranded, asserted first. Dropping
@@ -4931,7 +4968,7 @@ async fn an_earlier_reference_row_the_pivot_cannot_use_is_not_the_first_referenc
         .await
         .unwrap();
 
-    let res = ChEnrichmentPass::new(usdt_reset_1h(db, INCIDENT_EPOCH))
+    let res = ChEnrichmentPass::new(usdt_pivot_reset_1h(db, INCIDENT_EPOCH))
         .run()
         .await
         .map(|_| ());
@@ -4994,7 +5031,7 @@ async fn the_plain_reset_refuses_when_canonical_usdc_is_not_a_tracked_asset() {
         .await
         .unwrap();
 
-    let res = ChEnrichmentPass::new(usdt_reset_1h(db, USDT_FIRST_REFERENCE))
+    let res = ChEnrichmentPass::new(usdt_plain_reset_1h(db, USDT_FIRST_REFERENCE))
         .run()
         .await
         .map(|_| ());
@@ -5028,7 +5065,8 @@ async fn the_plain_reset_refuses_when_canonical_usdc_is_not_a_tracked_asset() {
 ///
 /// A guard that always read `_1h` would refuse the `_4h` reset; one that always
 /// read `_4h` would admit the `_1h` one. Checked through
-/// `assert_reset_is_admissible`, the list the driver runs before any write.
+/// `assert_reset_is_admissible`, the list the driver runs before any write, on
+/// task 0228 mode specs (the only mode that re-opens the USDT leg).
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_epoch_is_measured_on_the_pass_s_own_table() {
@@ -5047,7 +5085,7 @@ async fn the_epoch_is_measured_on_the_pass_s_own_table() {
         .unwrap();
 
     let on = |table: &str, not_before: u32| {
-        let mut c = usdt_reset_1h(db, not_before);
+        let mut c = usdt_pivot_reset_1h(db, not_before);
         c.table = table.to_string();
         c
     };
