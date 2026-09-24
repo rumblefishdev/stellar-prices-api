@@ -1486,18 +1486,21 @@ impl ChEnrichmentPass {
     /// likeliest blocker — and three more reachable only by the real run (0228
     /// review round 2, finding 2). Two lists drift; this is the only one now.
     /// Every check here takes the spec and the pass config, never a month
-    /// window, which is what makes it hoistable. Same order as before, cheapest
-    /// first, so the real run and the rehearsal report the same refusal.
+    /// window, which is what makes it hoistable. One order for both callers,
+    /// so the real run and the rehearsal report the same refusal.
+    ///
+    /// The order has one rule: a refusal that makes every later remedy moot
+    /// comes before the checks whose messages prescribe one, and among the
+    /// rest the cheapest (pure, in memory) goes before a database round trip.
+    /// So `check_plain_mode_leg` (task 0208 review WR-04), which refuses the
+    /// plain 0182 mode on a pivot leg, runs right after the priceable check and
+    /// BEFORE the oracle-shadow query: that query's refusal prescribes a
+    /// narrower window or a purge, and for a spec whose mode is inadmissible
+    /// any such action buys nothing. Pivot legs go through the 0228 mode.
     ///
     /// The last step (task 0208) is `assert_reset_epoch_is_covered`: a
     /// pivot leg's `not_before` below the table's first priced reference
     /// candle is refused, because nothing could refill the rows in between.
-    ///
-    /// Right after the every-spec refusals, `check_plain_mode_leg` (task 0208
-    /// review WR-04) refuses the plain 0182 mode on a pivot leg: an admitted
-    /// epoch bounds only where the reference begins, and the plain mode checks
-    /// neither the rate nor the reference the pivot needs for every row above
-    /// it. Pivot legs go through the 0228 mode.
     pub async fn assert_reset_is_admissible(&self) -> Result<(), ChEnrichError> {
         let Some(spec) = self.cfg.usd_reset.as_ref() else {
             return Ok(());
@@ -1510,24 +1513,21 @@ impl ChEnrichmentPass {
         // did not resolve" warning per check, and this list runs once in the
         // driver and again in every month's `reset_step`.
         let refs = self.resolve_reference_ids().await?;
-        // Every spec: the leg must be one a tier in this pass can re-price, and
-        // the oracle tier — which runs first and wins — must not be able to
-        // re-apply the very rate the reset exists to replace.
+        // Every spec: the leg must be one a tier in this pass can re-price.
         self.assert_reset_target_is_priceable(spec, &refs)?;
-        self.assert_reset_not_shadowed_by_oracle(spec).await?;
         // The plain 0182 mode's own leg check (task 0208 review WR-04): refused
-        // on a pivot leg. It sits where the other two modes' leg checks sit —
-        // after the every-spec refusals (priceable, oracle-shadow), at the head
-        // of the mode logic — so those keep their variant for a plain pivot-leg
-        // spec: `the_usd_reset_is_refused_by_an_oracle_row_that_forward_fills_into_it`
-        // and `the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_leg`
-        // still read `ResetBlockedByOracleRows`. It precedes the epoch guard under
-        // that guard's "more specific refusals first" rule: a wrong mode is fixed
-        // by switching mode, and the epoch is then measured again. Pinned by
-        // `a_plain_reset_of_a_pivot_leg_is_refused_before_any_write` (the literal
-        // 2026-08-18 invocation reads this variant, not `ResetEpochBelowReference`)
-        // and by `the_plain_reset_refuses_when_canonical_usdc_is_not_a_tracked_asset`.
+        // on a pivot leg. Pure and free, and it decides whether any other
+        // remedy matters, so it goes before the oracle-shadow query: that
+        // query's refusal tells the operator to narrow the window or purge,
+        // and on a spec whose mode is refused anyway either action is wasted
+        // — a purge of a polled leg's live readings cannot be undone. It also
+        // precedes the epoch guard, under that guard's "more specific refusals
+        // first" rule: a wrong mode is fixed by switching mode, and the epoch
+        // is then measured again.
         check_plain_mode_leg(spec, &refs)?;
+        // Every spec: the oracle tier — which runs first and wins — must not be
+        // able to re-apply the very rate the reset exists to replace.
+        self.assert_reset_not_shadowed_by_oracle(spec).await?;
         // Task 0268's mode, whose refill path is the EXTERNAL tier.
         if spec.require_external_rate {
             // The external path is USDC-only, so a different quote leg cannot be

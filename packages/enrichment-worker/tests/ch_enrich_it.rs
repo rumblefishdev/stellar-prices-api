@@ -3598,7 +3598,8 @@ async fn a_dry_run_refuses_the_wrong_leg_for_either_rate_gated_mode() {
 /// any month is enumerated, dry run included, through ONE list that
 /// `reset_step` runs too. That list includes the plain-mode leg refusal (task
 /// 0208 review WR-04): a plain reset of the XLM leg is refused by the rehearsal
-/// as `ResetPlainModeOnPivotLeg`.
+/// as `ResetPlainModeOnPivotLeg`, ahead of the oracle-shadow refusal (review
+/// CR-01).
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() {
@@ -3661,10 +3662,21 @@ async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() 
         "a dry run of the external mode on _1h without hourly rates must refuse, got {err:?}"
     );
 
-    // The plain 0182 mode on the XLM (pivot) leg (task 0208 review WR-04).
-    // Before the Reflector row below on purpose: an XLM oracle reading inside
-    // the window would refuse this spec first, as `ResetBlockedByOracleRows`,
-    // which sits before the plain-mode leg check.
+    // One Reflector reading for XLM inside the reset's own window: the
+    // oracle-shadow guard, precondition 5.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES ({covered}, 1, 'reflector', 0.0588, '{{}}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // The plain 0182 mode on the XLM (pivot) leg (task 0208 review WR-04),
+    // WITH that reading in its window: the rehearsal reports the wrong mode,
+    // not the oracle rows, so the operator is never told to purge a polled
+    // leg for a spec that is refused anyway.
     let err = dry(UsdResetSpec {
         require_pivot_usdc_rate: false,
         ..pivot_reset(PIVOT_FIRST_REF)
@@ -3678,19 +3690,11 @@ async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() 
             ChEnrichError::ResetPlainModeOnPivotLeg { quote_asset_id: 1 }
         ),
         "a dry run of the plain mode on the XLM leg must refuse as \
-         ResetPlainModeOnPivotLeg, got {err:?}"
+         ResetPlainModeOnPivotLeg even with an XLM oracle reading in its \
+         window, got {err:?}"
     );
 
-    // One Reflector reading for XLM inside the reset's own window: the
-    // oracle-shadow guard, precondition 5.
-    client
-        .query(&format!(
-            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES ({covered}, 1, 'reflector', 0.0588, '{{}}')"
-        ))
-        .execute()
-        .await
-        .unwrap();
+    // The 0228 mode over the same span: the oracle-shadow refusal.
     let err = dry(pivot_reset(PIVOT_FIRST_REF)).run().await.unwrap_err();
     assert!(
         matches!(
@@ -5411,6 +5415,103 @@ async fn a_plain_reset_of_a_pivot_leg_is_refused_before_any_write() {
     }
     let stranded = count_0208(&client, db, "close_usd = 0 AND close > 0").await;
     assert_eq!(stranded, 0, "{stranded} row(s) left at close_usd = 0");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0208 review CR-01: on production the pivot legs hold LIVE Reflector
+/// readings (XLM since 2026-03-11), and the plain mode has no default upper
+/// bound, so the oracle-shadow guard counts them to the end of time. With the
+/// plain-mode leg check behind that query, the realistic mistake — a plain
+/// XLM or USDT reset — was refused as `ResetBlockedByOracleRows`, whose
+/// all-time advice is a purge: the operator would delete live readings, which
+/// cannot be undone, only to meet `ResetPlainModeOnPivotLeg` on the re-run.
+///
+/// Here both legs have a live reading above the epoch. A plain reset of either
+/// is refused as `ResetPlainModeOnPivotLeg` — by the pass and by the repair
+/// driver, dry run included — no reading is touched, nothing is written, and
+/// the operator's fix (the task 0228 mode, bounded at `USDC_ORACLE_EPOCH_S` by
+/// default) is admitted with the readings still in place.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_plain_pivot_reset_is_refused_before_the_oracle_shadow_query() {
+    let db = "it_enrich_0208_plain_before_oracle";
+    let client = setup_0208_gap(db).await;
+    let live = USDC_ORACLE_EPOCH_S + 3_600;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices \
+             (asset_id, oracle_name, timestamp, price_usd) VALUES \
+             (1, 'reflector', {live}, 0.25), (3, 'reflector', {live}, 1.0)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    let readings = || async {
+        client
+            .query(&format!("SELECT count() FROM {db}.oracle_prices"))
+            .fetch_one::<u64>()
+            .await
+            .unwrap()
+    };
+
+    for leg in [3u32, 1] {
+        let mut c = usdt_plain_reset_1h(db, USDT_FIRST_REFERENCE);
+        if let Some(spec) = c.usd_reset.as_mut() {
+            spec.quote_asset_id = leg;
+        }
+        let res = ChEnrichmentPass::new(c.clone()).run().await.map(|_| ());
+        assert!(
+            matches!(
+                &res,
+                Err(ChEnrichError::ResetPlainModeOnPivotLeg { quote_asset_id }) if *quote_asset_id == leg
+            ),
+            "leg {leg}: the pass must refuse the plain mode before the oracle-shadow \
+             query, got {res:?}"
+        );
+        for dry_run in [true, false] {
+            let res = CoarseRepairDriver::with_client(
+                client.clone(),
+                CoarseRepairConfig {
+                    enrich: c.clone(),
+                    start_month: 202_102,
+                    end_month: 202_102,
+                    snapshot: false,
+                    dry_run,
+                    one_shot: true,
+                    deadline: None,
+                },
+            )
+            .run()
+            .await
+            .map(|_| ());
+            assert!(
+                matches!(
+                    &res,
+                    Err(ChEnrichError::ResetPlainModeOnPivotLeg { quote_asset_id }) if *quote_asset_id == leg
+                ),
+                "leg {leg}, dry_run={dry_run}: the driver must refuse the plain mode \
+                 before the oracle-shadow query, got {res:?}"
+            );
+        }
+    }
+    assert_eq!(readings().await, 2, "no oracle reading may be touched");
+    assert_0208_subjects_untouched(&client, db).await;
+
+    // The fix the refusal names: the 0228 mode, bounded below the readings.
+    let stats = ChEnrichmentPass::new(usdt_pivot_reset_1h(db, USDT_FIRST_REFERENCE))
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(
+        stats.rows_reset, 5,
+        "the 0228 mode must be admitted with the live readings in place"
+    );
+    assert_eq!(readings().await, 2, "the readings are still there");
 
     client
         .query(&format!("DROP DATABASE {db}"))
