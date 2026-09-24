@@ -1366,15 +1366,25 @@ async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
 
 /// Task 0208 review WR-04 refuses the plain 0182 mode on a PIVOT leg; this is
 /// the proof the refusal is not over-broad. The plain mode on canonical USDC
-/// (the peg leg) still runs end to end — re-opening the post-epoch row, letting
-/// the peg tier refill it, and leaving the pre-epoch row and the USDT leg
-/// alone — so the plain reset keeps a run test on the only leg where it is
-/// legal.
+/// (the peg leg) still runs end to end, re-opening the post-epoch rows and
+/// leaving the pre-epoch row and the USDT leg alone.
+///
+/// The exemption rests on one premise: the PEG tier refills a USDC row
+/// unconditionally, with no rate and no reference (review WR-03). So the
+/// re-opened `t_new` row sits on a day with NO USDC/USD rate at all — the
+/// fixture's rates are removed after the first pass, and there are no oracle
+/// rows — and only the peg tier can put 0.13 back. If the peg tier were ever
+/// rate-gated like the 0228 mode, that row would stay at 0 and this test
+/// fails. A second re-opened row, `t_ext`, sits on a day whose external rate
+/// is 2.0, so it must come back at 0.26: where the external tier applies it
+/// still wins, and the two tiers cannot be confused by a rate of exactly 1.0.
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_plain_reset_still_repairs_the_peg_leg_and_respects_the_epoch() {
     let db = "it_enrich_0182_plain_peg";
     let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    // 2022-04-15 — after t_new, below USDC_ORACLE_EPOCH_S.
+    let t_ext = 1_650_000_000u32;
     let client = setup_0182(db, t_old, t_new).await;
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
 
@@ -1386,6 +1396,25 @@ async fn the_plain_reset_still_repairs_the_peg_leg_and_respects_the_epoch() {
             "the ordinary pass must peg USDT/USDC at {ts} to 0.13, got {v}"
         );
     }
+    // No USDC/USD rate for t_new's day (nor any other) from here on: only the
+    // peg tier can refill it. Then one written USDT/USDC row on a day whose
+    // external rate is 2.0.
+    client
+        .query(&format!("TRUNCATE TABLE {db}.usd_rate"))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({t_ext}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 1000,130, 130,0.13, 0.13, 1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    seed_external_rate(&client, db, utc_day_start(t_ext), 2.0).await;
     let v_old = version_of(&client, db, 3, 2, t_old).await;
     let v_new = version_of(&client, db, 3, 2, t_new).await;
 
@@ -1394,6 +1423,9 @@ async fn the_plain_reset_still_repairs_the_peg_leg_and_respects_the_epoch() {
     c.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 2,
         not_before: t_new,
+        // Unbounded above: this fixture has no oracle rows. The bounded run
+        // production needs is
+        // `the_plain_peg_reset_is_refused_unbounded_and_admitted_below_usdc_s_oracle_rows`.
         not_after: None,
         require_external_rate: false,
         require_pivot_usdc_rate: false,
@@ -1401,18 +1433,26 @@ async fn the_plain_reset_still_repairs_the_peg_leg_and_respects_the_epoch() {
     let stats = ChEnrichmentPass::new(c).run().await.unwrap();
 
     assert_eq!(
-        stats.rows_reset, 1,
-        "exactly the one post-epoch USDT/USDC row should have been re-opened"
+        stats.rows_reset, 2,
+        "exactly the two post-epoch USDT/USDC rows should have been re-opened"
     );
-    let fixed = close_usd(&client, db, 3, 2, t_new).await;
+    let pegged = close_usd(&client, db, 3, 2, t_new).await;
     assert!(
-        (fixed - 0.13).abs() < 1e-4,
-        "the re-opened peg-leg row must be refilled at 0.13, got {fixed}"
+        (pegged - 0.13).abs() < 1e-4,
+        "the re-opened row on a day with no rate must be refilled by the PEG \
+         tier at 0.13, got {pegged}. 0 means the peg tier no longer refills a \
+         USDC row unconditionally, and the plain mode's USDC exemption is void."
     );
     assert_eq!(
         version_of(&client, db, 3, 2, t_new).await,
         v_new + 2,
         "the re-opened row must go through the reset and the refill"
+    );
+    let external = close_usd(&client, db, 3, 2, t_ext).await;
+    assert!(
+        (external - 0.26).abs() < 1e-4,
+        "the re-opened row on a rate day must be refilled by the EXTERNAL tier \
+         at 0.13 x 2.0 = 0.26, got {external}"
     );
     assert_eq!(
         version_of(&client, db, 3, 2, t_old).await,
