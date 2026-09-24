@@ -246,8 +246,10 @@ pub enum ChEnrichError {
          days and leave the external tier unable to refill a single one — the \
          peg tier would write $1 back over every one of them, which is task \
          0182's incident with a different quote asset.\n\
-         Reset this leg without --reset-require-external-rate, or target \
-         canonical USDC."
+         For an XLM or USDT leg use --reset-require-pivot-usdc-rate (the task \
+         0228 mode, docs/runbooks/repair-coarse-usd-values.md Appendix C) — \
+         dropping the flag instead is the plain mode, which is refused on a \
+         pivot leg; otherwise target canonical USDC."
     )]
     ResetExternalRateLegIsNotUsdc { quote_asset_id: u32, usdc_id: u32 },
 
@@ -5294,6 +5296,29 @@ mod tests {
         ] {
             assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
         }
+    }
+
+    /// The 0268 mode's leg refusal must not send an XLM or USDT leg to the
+    /// plain mode, which WR-04 refuses there: it names the 0228 mode instead
+    /// (review WR-01).
+    #[test]
+    fn the_external_leg_refusal_points_a_pivot_leg_to_the_0228_mode() {
+        let msg = ChEnrichError::ResetExternalRateLegIsNotUsdc {
+            quote_asset_id: 3,
+            usdc_id: 2,
+        }
+        .to_string();
+        for needle in [
+            "--reset-require-pivot-usdc-rate",
+            "Appendix C",
+            "XLM or USDT",
+        ] {
+            assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
+        }
+        assert!(
+            !msg.contains("Reset this leg without --reset-require-external-rate"),
+            "the old advice leads to the refused plain mode: {msg}"
+        );
     }
 
     /// U6: `ResetEpochUsdcUnresolved` is a backstop no mode reaches through the
