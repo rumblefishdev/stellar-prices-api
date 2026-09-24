@@ -75,6 +75,22 @@ export interface EnvironmentConfig {
    * TTLs are fixed in `ApiGatewayStack` per §2.1.
    */
   readonly apiGatewayCacheEnabled: boolean;
+  /**
+   * Whether the weekly coverage sweep's EventBridge rule is ENABLED (task 0100).
+   *
+   * The probe reads BE's `default.soroban_events` / `default.soroban_contracts`
+   * as `prices_writer`, which needs two SELECT grants only BE can add (their
+   * `users.d` XML). Production is `true`: BE applied them on 2026-09-21 and they
+   * were verified live the same day as `prices_writer` (`SHOW GRANTS`, reads on
+   * both tables, `default.transactions` still Code 497 — runbook §4.2). Set it
+   * `false` wherever the grants are not verified live (a new environment, a BE
+   * change that drops them): the Lambda, rule and alarms still deploy, but
+   * nothing invokes the probe, so it does not fail with Code 497 every Monday.
+   *
+   * Config rather than `aws events disable-rule`, because CDK re-enables a rule
+   * on the next deploy of the stack; a flag survives it.
+   */
+  readonly coverageSweepEnabled: boolean;
 
   /**
    * Public base URL of the deployed API, passed to the api-handler as
@@ -218,6 +234,14 @@ export interface EnvironmentConfig {
      * Daily is ample for a 30-day threshold.
      */
     readonly mtlsNotafterProbe: string;
+    /**
+     * Coverage sweep probe (task 0100, layer 3 of the coverage model). Weekly
+     * sweep over a trailing 14-day ledger window of BE's `soroban_events` for
+     * swap/trade-shaped emitters in neither `prices.pool_registry` nor the
+     * committed allow-list → `Prices/Coverage` `UnclassifiedSwapEvents`.
+     * Weekly and off-peak; not coarse-sweep's minute 30.
+     */
+    readonly coverageSweepProbe: string;
   };
 
   // Ops alarms + notification (consumed by ObservabilityStack — task 0056)
@@ -608,6 +632,11 @@ export function validateConfig(config: EnvironmentConfig): void {
       `pricingApiFreePlanMonthlyQuota must be a positive integer, got: ${config.pricingApiFreePlanMonthlyQuota}`,
     );
   }
+  if (typeof config.coverageSweepEnabled !== 'boolean') {
+    errors.push(
+      `coverageSweepEnabled must be a boolean, got: ${config.coverageSweepEnabled}`,
+    );
+  }
   if (typeof config.apiGatewayCacheEnabled !== 'boolean') {
     errors.push(
       `apiGatewayCacheEnabled must be a boolean, got: ${config.apiGatewayCacheEnabled}`,
@@ -803,6 +832,7 @@ export function validateConfig(config: EnvironmentConfig): void {
       'backfillFreshnessProbe',
       'rollupFreshnessProbe',
       'mtlsNotafterProbe',
+      'coverageSweepProbe',
     ] as const;
     for (const key of expectedKeys) {
       const value = schedules[key];

@@ -2,7 +2,7 @@
 id: "0282"
 title: "Candle writes are replaced instead of summed whenever a minute bucket spans a reconcile run — Aquarius loses ~50% of its trades daily, and SDEX is affected too"
 type: BUG
-status: blocked
+status: completed
 assignee: okarcz
 related_adr: []
 related_tasks: ["0080", "0101", "0100", "0097", "0203"]
@@ -131,11 +131,34 @@ history:
       archived today. Also corrected: status row 7 read "not started" for the
       phoenix shortfall while the criterion below it was already ticked at
       ~12%. Nothing here can move until the deploy 0286 phase 1 carries.
+  - date: "2026-09-23"
+    status: blocked
+    who: okarcz
+    by: ["0291"]
+    note: >
+      Seventh criterion ticked: 0291 AC 3 is met on production (the
+      UnregisteredPoolEvents counter shipped with 0286 phase 1's ingest on
+      2026-09-22; alarm OK, no datapoint since, i.e. zero drops). All seven
+      criteria are now met; status left unchanged pending the operator's
+      close-out.
+  - date: "2026-09-23"
+    status: completed
+    who: okarcz
+    note: >
+      Closed. All seven criteria met. The live fix (#313, deployed 2026-09-17
+      12:04 UTC) measured exactly zero Aquarius loss on 2026-09-19 and 09-20
+      (26,422 and 20,497 trades, raw = stored). Drops are observable on both
+      remaining paths: forced partial flushes (ForcedPartialFlushes) and
+      unregistered pools (0291 AC 3, live since 0286 phase 1's 2026-09-22
+      ingest deploy). The history repair of the lost trades is 0286 phase 3's
+      re-ingest, decided with the operator, not a separate job here.
 ---
 
 # Aquarius live ingestion drops about half of every day's trades
 
-## 📊 STATUS — 2026-09-21 · ⛔ BLOCKED on [[0291]] · FIX VERIFIED, two full days at EXACTLY zero loss
+## 📊 STATUS — 2026-09-23 · ✅ COMPLETED · all seven criteria met, history repair in [[0286]] phase 3
+
+### 2026-09-21 · ⛔ BLOCKED on [[0291]] · FIX VERIFIED, two full days at EXACTLY zero loss
 
 **The live fix is in production and verified.** PR #313 was merged as `2cb5b2b`
 and deployed at **12:04:20 UTC** on 2026-09-17 (Observability, then Compute).
@@ -696,7 +719,7 @@ just re-corrupts. That constraint is real; it simply does not apply to
       deploy** (07-06 → 07-15 partly, written while the cursor kept resetting;
       live-era fully). AMM months from 2026-07 need [[0291]] first. Expected
       SDEX `trade_count` rise in the live era: ~2.8-3.1x.
-- [ ] Live-path drops become observable — a dropped swap leaves a trace
+- [x] Live-path drops become observable — a dropped swap leaves a trace
       somewhere, rather than nothing at all. ◐ **Half covered by #313:** the one
       path that still loses data after the fix — a forced partial flush — is
       alarmed (`ForcedPartialFlushes`).
@@ -711,6 +734,10 @@ just re-corrupts. That constraint is real; it simply does not apply to
       same delegation, so the two agree.
       **Tick this when 0291 AC 3 is met on production** — same deploy, same
       day-after check, no separate work.
+      ✅ **Ticked 2026-09-23:** [[0291]] AC 3 met on production — the counter
+      shipped with 0286's ingest on 2026-09-22, the alarm reads `OK`, and
+      `UnregisteredPoolEvents` (published only when non-zero) has no datapoint
+      since the deploy.
 - [x] Phoenix's parallel shortfall is measured and either folded in or spawned.
       → ~12% lost (≈4,194 true swaps vs 3,675 stored, live era), via [[0285]]'s
       corrected count; soroswap 43.8%. Folded in: same mechanism, same repair.
