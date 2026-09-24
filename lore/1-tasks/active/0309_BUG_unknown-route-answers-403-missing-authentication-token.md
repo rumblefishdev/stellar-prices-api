@@ -67,13 +67,13 @@ the docs describe that.
 
 ## Acceptance Criteria
 
-- [ ] `GET /v1/nope` and `PATCH /v1/assets` answer `404` with `{"code":
-      "not_found", …}` on production
-- [ ] A missing or wrong `x-api-key` still answers `403 {"message":
-      "Forbidden"}`
-- [ ] The Quick Start, the OpenAPI descriptions and `api-endpoints.md`
+- [x] `GET /v1/nope` and `PATCH /v1/assets` answer `404` with `{"code":
+      "not_found", …}` on production — measured 2026-09-24 12:20
+- [x] A missing or wrong `x-api-key` still answers `403 {"message":
+      "Forbidden"}` — same run
+- [x] The Quick Start, the OpenAPI descriptions and `api-endpoints.md`
       describe the `404`, and none still sends a reader to the 403
-      explanation
+      explanation — `/api-docs-json` 12:22, portal bundle 12:23
 - [x] The synthesized template is checked for the override, so a stack
       refactor cannot drop it silently — check 8 of `verify-openapi-routes.mjs`
 
@@ -137,3 +137,33 @@ portal sync have shipped the texts.
 differs from this branch's extract in exactly the two descriptions above. So
 0309's Compute deploy carries those two plus whatever merges meanwhile — read
 the diff first.
+
+## Shipped — 2026-09-24 (CEST)
+
+From `develop` `b7bddad2` (#348 merged 11:51), Lambdas built locally from the
+same commit and checked (12 aarch64 bootstraps; the api-handler carries the new
+`ErrorEnvelope` text and not the removed sentence). Diffs before the deploy:
+ApiGateway as on 2026-09-23; Compute only the two functions' `S3Key` — the
+ledger-processor's source is unchanged, its local build is not byte-identical.
+No IAM in either.
+
+1. **ApiGateway, 12:19:51** (22 s). 13 s later the answers were mixed — two of
+   the six unknown-route probes still `403` — and by 12:20:24 ten samples of
+   each were all `404`: here the new stage deployment took between 13 and
+   33 s to reach every node, so a probe right after a gateway deploy should
+   be sampled, not read once. Full run at 12:20:41: `/v1/nope` (no key, a wrong key,
+   `Accept: text/html`), `PATCH /v1/assets`, `GET /api/` and `PATCH /api/key`
+   all `404 {"code":"not_found","message":"no such route"}`,
+   `content-type: application/json`; `/v1/assets` with no key or a wrong key
+   `403 {"message":"Forbidden"}`; `/health` `200`. The `404` still carries
+   `x-amzn-ErrorType: MissingAuthenticationTokenException` — API Gateway's
+   header, left as is.
+2. **Compute, 12:21:50** (17 s), stage cache flushed. `/api-docs-json` serves
+   the new descriptions and equals the extracted document. The
+   ledger-processor ran 10–13 invocations a minute through the deploy with 0
+   errors; all 61 `prices-production-*` alarms OK.
+3. **Portal, 12:23** — `sync-portal-explorer`, guild check ok, bundle
+   `index-BCrE5KYY.js`: the Quick Start's 404 row names "no such route", the
+   403 row's `Missing Authentication Token` sentence is gone, and the bundled
+   `openapi.json` equals the live `/api-docs-json`.
+
