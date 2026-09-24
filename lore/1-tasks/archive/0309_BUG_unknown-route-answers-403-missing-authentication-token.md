@@ -2,13 +2,14 @@
 id: "0309"
 title: "An unknown path or method answers 403 'Missing Authentication Token' — answer 404 in the ErrorEnvelope shape"
 type: BUG
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0306", "0183", "0194"]
+related_tasks: ["0306", "0183", "0194", "0255", "0205"]
 tags: [layer-infra, api, priority-medium, effort-small]
 links:
   - "../../../infra/src/lib/stacks/api-gateway-stack.ts"
   - "../../../docs/scf/api-endpoints.md"
+  - "../../../tools/scripts/verify-openapi-routes.mjs"
 history:
   - date: "2026-09-23"
     status: backlog
@@ -20,6 +21,17 @@ history:
     status: active
     who: stkrolikiewicz
     note: "Activated; implementation on its own branch."
+  - date: "2026-09-24"
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Shipped and checked live. PR #348 merged 11:51 CEST; ApiGateway 12:19,
+      Compute 12:21 (cache flushed), portal 12:23. 4/4 criteria: six
+      unknown-route probes answer 404 `not_found`, keyless and wrong-key
+      stay 403 Forbidden, the published texts describe the 404, and check 8
+      of verify-openapi-routes holds the template (four mutations fail it).
+      One gateway response, no IAM; two OpenAPI descriptions and two Quick
+      Start rows changed.
 ---
 
 # An unknown path or method answers 403 "Missing Authentication Token"
@@ -166,4 +178,74 @@ No IAM in either.
    `index-BCrE5KYY.js`: the Quick Start's 404 row names "no such route", the
    403 row's `Missing Authentication Token` sentence is gone, and the bundled
    `openapi.json` equals the live `/api-docs-json`.
+
+## Implementation Notes
+
+- **Infra** (`7f40dc55`): `UnknownRoute` in `api-gateway-stack.ts`, after the
+  two CORS responses; the comments on `PORTAL_API_METHODS` and the
+  `/api/{proxy+}` block now name the `404`. Check 8 in
+  `verify-openapi-routes.mjs` — exactly one `MISSING_AUTHENTICATION_TOKEN`
+  response, `404`, a JSON body with `code: not_found` and a `message` — and
+  its check-3 and unroutable messages say `404` instead of `403`.
+- **Docs** (`cac16123`, after #343): `ErrorEnvelope` and
+  `GatewayMessage.message` in `descriptions.rs`, the Quick Start's 403 and
+  404 rows, `public/openapi.json` re-extracted (two lines); plus
+  `api-endpoints.md` (a paragraph on routes outside the table),
+  `portal-oauth-deploy-prep.md` and the doc comment on `with_web_origin` in
+  `portal/auth/mod.rs` (`/api/` on the API host), which went with the infra
+  commit.
+- **Tests:** none modified. Rust OpenAPI suite 13/13 + 2/2, portal 253
+  tests with lint and typecheck, `redocly lint`, synth + check 8, all green
+  before the push; CI 4/4 on #348.
+
+## Design Decisions
+
+### From Plan
+
+1. **The plan's shape**: `404 {"code":"not_found","message":"no such route"}`
+   from a `MISSING_AUTHENTICATION_TOKEN` gateway response, API-wide.
+2. **An unmapped verb gets `404`, not `405`** — accepted in the plan.
+3. **No CORS headers** (the plan left it open): the bundle calls no unmapped
+   route, and the portal's one credentialed origin on an API-wide answer is
+   what 0194's review took off `DEFAULT_4XX`.
+
+### Emerged
+
+4. **Check 8 in the existing verifier**, not a new script: it is already the
+   CI step that reads the synthesized ApiGateway template.
+5. **The docs half waited for #343** rather than stacking on 0306's branch —
+   Stanisław's call; one PR against `develop`.
+6. **Shipped as ApiGateway + Compute + portal**, not "ApiGateway only" as the
+   plan said: the OpenAPI descriptions live in the api-handler.
+7. **ApiGateway before Compute**, so the minutes between them had the docs
+   still explaining the old `403` rather than promising a `404` the gateway
+   did not give yet.
+8. **Historical mentions left alone**: "a reader's first request 403'd" in
+   `Terminal.tsx`, `QuickStart.tsx:52` and the spec describe the past; only
+   statements about current behaviour changed.
+
+## Issues Encountered
+
+- **Two tasks numbered 0309.** A CSP task created as 0309 in another worktree
+  at 11:40 on 2026-09-23 was never pushed (the push was refused), and this
+  task took 0309 at 12:58. The CSP task still needs a free number.
+- **A synth that proved nothing.** The Lambda-asset stub directory in the
+  session scratchpad was gone the next morning, the synth failed on the
+  redirect, and the verifier "passed" against the previous day's `cdk.out`.
+  Caught from the redirect error; re-run after recreating the stubs, with the
+  template's timestamp checked.
+- **Gateway propagation**: see Shipped, step 1.
+- **`gh pr edit` fails** on GitHub's Projects (classic) deprecation; the PR
+  body was edited with `gh api --method PATCH …/pulls/348`.
+
+## Future Work
+
+- [[0205]] can close: the `cdk diff`s of 2026-09-23 and 24 showed no change
+  to `/api/{proxy+}`, so the greedy proxy is live, and the stack comment
+  calling the intermediate pair "CURRENTLY DEPLOYED" is stale.
+- [[0255]]: a candidate mechanism, not written there (Oskar's task) —
+  changing a `GatewayResponse`'s `ResponseType` replaces the resource, and the
+  new `Deployment` snapshots the API before the cleanup phase deletes the old
+  response, so the stage keeps serving it. The same would apply to removing
+  `UnknownRoute`: roll back with one extra `aws apigateway create-deployment`.
 
