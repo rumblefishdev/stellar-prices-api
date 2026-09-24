@@ -1936,8 +1936,9 @@ async fn seed_0246(db: &str, admin: &Client) {
     // the same price; a fixture with two different prices would fail here for
     // a reason that is not a defect.
     //
-    // ⚠️ And it must clear the ABSOLUTE FLOOR (250 USD against a placeholder
-    // 100), or the view withholds the bucket and the comparison proves nothing.
+    // ⚠️ And the view must PUBLISH it, or the comparison proves nothing: its
+    // one row is priced, so the share is 1 and clears X. There is no absolute
+    // USD floor (task 0147 phase 2); `volume_quote_usd = 250` is incidental.
     // The XLM leg carries `close_usd != close`, which is what makes it
     // convertible under the shared predicate.
     admin
@@ -2113,8 +2114,8 @@ async fn ohlcv_agrees_with_price_usd_series_on_the_same_bucket() {
         .await
         .unwrap_or_else(|e| {
             panic!(
-                "the view must PUBLISH this bucket — one priced row, share 1, \
-                 250 USD of quote volume, well clear of the gate: {e}"
+                "the view must PUBLISH this bucket — one priced row, so its \
+                 share is 1 and clears X: {e}"
             )
         });
     let view_close_f: f64 = view_close.parse().unwrap();

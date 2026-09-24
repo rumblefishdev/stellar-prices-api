@@ -2644,7 +2644,8 @@ async fn dust_rows_move_neither_the_published_close_nor_the_share() {
         .unwrap();
     // FOO: a real 7-unit print at 5, plus a dust row at a DIFFERENT price (4)
     // carrying 1000 units of volume_base and 4000 USD of quote volume — every
-    // number that could perturb a mean or a floor, priced to be unmistakable.
+    // number that could perturb the mean or `priced_volume_usd`, priced to be
+    // unmistakable.
     // BAR: the same real print, nothing else.
     for tbl in ["price_ohlcv_1d", "price_ohlcv_1h"] {
         client

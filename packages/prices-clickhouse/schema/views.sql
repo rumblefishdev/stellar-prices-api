@@ -689,6 +689,8 @@ FROM
         -- raises code 407 (DECIMAL_OVERFLOW) on 26.3.10.60, measured twice.
         if(is_priced,   toFloat64(p.close_usd) * toFloat64(p.pf_volume), toFloat64(0)) AS rpv,
         if(is_priced,   toFloat64(p.pf_volume),                          toFloat64(0)) AS rpw,
+        -- rpusd feeds the coverage views' `priced_volume_usd` only; no gate reads
+        -- it. The series views carry it because arm A is shared verbatim.
         if(is_priced,   toFloat64(p.volume_quote_usd),                   toFloat64(0)) AS rpusd,
         -- ⚠️ `is_priced OR is_eligible`, NOT `is_eligible` alone. The priced set
         -- is not a subset of the eligible one by definition: `is_priced` admits
@@ -931,7 +933,8 @@ FROM
 GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket
 )
 -- THE GATE (task 0147, D-04). A bucket is published only when its priced,
--- convertible volume is most of what traded AND is worth something absolute.
+-- convertible volume is most of what traded (share >= X). There is no absolute
+-- USD floor — removed by measurement, see the header.
 -- The peg disjunct comes FIRST and is not subject to the gate: arm B's
 -- placeholder has ew = 0 and pw = 0 by construction, so a naive `ew > 0`
 -- would delete USDC's fallback row. It tests `pw = 0` — NO PRICED WEIGHT —
@@ -1135,6 +1138,8 @@ FROM
         -- raises code 407 (DECIMAL_OVERFLOW) on 26.3.10.60, measured twice.
         if(is_priced,   toFloat64(p.close_usd) * toFloat64(p.pf_volume), toFloat64(0)) AS rpv,
         if(is_priced,   toFloat64(p.pf_volume),                          toFloat64(0)) AS rpw,
+        -- rpusd feeds the coverage views' `priced_volume_usd` only; no gate reads
+        -- it. The series views carry it because arm A is shared verbatim.
         if(is_priced,   toFloat64(p.volume_quote_usd),                   toFloat64(0)) AS rpusd,
         -- ⚠️ `is_priced OR is_eligible`, NOT `is_eligible` alone. The priced set
         -- is not a subset of the eligible one by definition: `is_priced` admits
@@ -1377,7 +1382,8 @@ FROM
 GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket
 )
 -- THE GATE (task 0147, D-04). A bucket is published only when its priced,
--- convertible volume is most of what traded AND is worth something absolute.
+-- convertible volume is most of what traded (share >= X). There is no absolute
+-- USD floor — removed by measurement, see the header.
 -- The peg disjunct comes FIRST and is not subject to the gate: arm B's
 -- placeholder has ew = 0 and pw = 0 by construction, so a naive `ew > 0`
 -- would delete USDC's fallback row. It tests `pw = 0` — NO PRICED WEIGHT —
@@ -1587,6 +1593,8 @@ FROM
         -- raises code 407 (DECIMAL_OVERFLOW) on 26.3.10.60, measured twice.
         if(is_priced,   toFloat64(p.close_usd) * toFloat64(p.pf_volume), toFloat64(0)) AS rpv,
         if(is_priced,   toFloat64(p.pf_volume),                          toFloat64(0)) AS rpw,
+        -- rpusd feeds the coverage views' `priced_volume_usd` only; no gate reads
+        -- it. The series views carry it because arm A is shared verbatim.
         if(is_priced,   toFloat64(p.volume_quote_usd),                   toFloat64(0)) AS rpusd,
         -- ⚠️ `is_priced OR is_eligible`, NOT `is_eligible` alone. The priced set
         -- is not a subset of the eligible one by definition: `is_priced` admits
@@ -1778,6 +1786,8 @@ FROM
         -- raises code 407 (DECIMAL_OVERFLOW) on 26.3.10.60, measured twice.
         if(is_priced,   toFloat64(p.close_usd) * toFloat64(p.pf_volume), toFloat64(0)) AS rpv,
         if(is_priced,   toFloat64(p.pf_volume),                          toFloat64(0)) AS rpw,
+        -- rpusd feeds the coverage views' `priced_volume_usd` only; no gate reads
+        -- it. The series views carry it because arm A is shared verbatim.
         if(is_priced,   toFloat64(p.volume_quote_usd),                   toFloat64(0)) AS rpusd,
         -- ⚠️ `is_priced OR is_eligible`, NOT `is_eligible` alone. The priced set
         -- is not a subset of the eligible one by definition: `is_priced` admits
