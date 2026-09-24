@@ -450,13 +450,19 @@ any behaviour until the flag moves.
 
 ### The IAM, and the three limits that come with it
 
-CDK grants the api-handler role seven control-plane actions and nothing else:
+CDK grants the api-handler role eight control-plane actions and nothing else:
 `GET`/`POST` on `/apikeys`, `GET`/`PATCH`/`DELETE` on `/apikeys/*` (`PATCH`
-is task 0191's revoke — see below), `POST` on
-`/usageplans/{the free plan}/keys`, and — task 0188 — `GET` on
-`/usageplans/{the free plan}/usage` (`GetUsage`, the dashboard's usage read).
-The last two are declared in `api-gateway-stack.ts` rather than
-`compute-stack.ts`, because that is the only stack that knows the plan id.
+is task 0191's revoke — see below), and three on `/usageplans` since task
+0311: `GET /usageplans` (`GetUsagePlans` by key — which plan a key is on),
+`GET /usageplans/*/usage` (`GetUsage` on the key's own plan, the dashboard's
+usage read) and `POST /usageplans/*/keys` (attaching a key to any plan — the
+free plan on a first issue, the previous key's plan on a rework). The three
+`/usageplans` grants are declared in `api-gateway-stack.ts` rather than
+`compute-stack.ts`, because that is where the policy has always lived —
+moving it is a delete in one stack and a create in the other, with a window in
+which key issuance breaks. No `DELETE` or `PATCH` on a plan or a plan key, and
+no `GET /usageplans/{id}`: moving a key between plans is an operator's job
+(`manual-api-key-tier.md`).
 
 Two of the six cannot be scoped any further, and one can but is not yet. All
 three are written out in full in `compute-stack.ts`; the short version:
