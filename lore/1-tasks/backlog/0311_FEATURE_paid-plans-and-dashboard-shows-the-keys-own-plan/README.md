@@ -17,6 +17,12 @@ history:
       moved off the free plan gets the new limits from the gateway, but the
       dashboard shows "nothing recorded yet" and 1 req/s (measured on the
       loadtest key). Plans proposed from CoinGecko's lineup, scaled linearly.
+  - date: "2026-09-24"
+    status: backlog
+    who: akot
+    note: >
+      Plan figures decided: variant B (Basic 1M/3 rps, Analyst 5M/5 rps,
+      Lite 20M/10 rps, Pro 50M/25 rps; burst 5x rate).
 ---
 
 # Five usage plans, and the dashboard states the key's own plan
@@ -50,8 +56,9 @@ Details and measurements: [notes/R-coingecko-plans-and-aws-limits.md](notes/R-co
 ## Plans
 
 Proposal and reasoning: [notes/S-proposed-plan-tiers.md](notes/S-proposed-plan-tiers.md).
-Recommended variant B: quota ×10 vs CoinGecko; rate ×0.6, raised for
-Lite/Pro so their quota stays reachable; burst 5× rate.
+**Variant B — decided by Adam on 2026-09-24.** Quota is CoinGecko ×10;
+rate is CoinGecko ×0.6, raised for Lite/Pro so that their quota stays
+reachable; burst is 5× the rate.
 
 | Plan | AWS name | Quota / month | Rate | Burst |
 |---|---|---|---|---|
@@ -61,7 +68,7 @@ Lite/Pro so their quota stays reachable; burst 5× rate.
 | Lite | `pricing-api-lite-<env>` | 20 000 000 | 10 req/s | 50 |
 | Pro | `pricing-api-pro-<env>` | 50 000 000 | 25 req/s | 125 |
 
-> Figures await Adam's pick (A vs B in the note). The code below does not
+> These figures go into the per-env CDK config. The dashboard code does not
 > depend on them: it reads whatever the key's plan says.
 
 ## Implementation Plan
@@ -140,7 +147,6 @@ Lite/Pro so their quota stays reachable; burst 5× rate.
 
 ## Open questions
 
-- **Plan figures:** variant A or B ([notes/S-proposed-plan-tiers.md](notes/S-proposed-plan-tiers.md)).
 - **"Contact us for commercial plans"** on a paid plan: hide it, or change it
   to "Need more? Contact us"? Related to [[0307]] (the contact leads nowhere).
 - **Plan name on the page:** where and how. Figma has no frame for it.

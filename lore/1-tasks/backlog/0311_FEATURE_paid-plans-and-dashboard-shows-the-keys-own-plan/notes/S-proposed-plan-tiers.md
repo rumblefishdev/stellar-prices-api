@@ -1,7 +1,7 @@
 ---
 title: "Proposal: five plans scaled linearly from CoinGecko's"
 type: synthesis
-status: developing
+status: mature
 spawned_from: notes/R-coingecko-plans-and-aws-limits.md
 spawns: []
 tags: [portal, usage-plans, pricing]
@@ -11,9 +11,16 @@ history:
     status: developing
     who: akot
     note: "Proposal awaiting Adam's decision on the figures"
+  - date: "2026-09-24"
+    status: mature
+    who: akot
+    note: "Adam chose variant B"
 ---
 
 # Proposal: five plans scaled linearly from CoinGecko's
+
+> **Decided 2026-09-24 (Adam): variant B.** Variant A is kept below as the
+> reason B raises the Lite and Pro rates.
 
 ## Method
 
@@ -43,7 +50,7 @@ unreachable. Running flat out for the whole month, a Lite key reaches 13M of
 1 000/min ≈ 43M/month vs 5M). Scaling the two dimensions by different factors
 (×10 vs ×0.6) breaks that at the top of the ladder.
 
-## Variant B (recommended): linear quotas, rates raised where the quota must stay reachable
+## Variant B (chosen): linear quotas, rates raised where the quota must stay reachable
 
 | Plan | Quota / month | Rate | Burst | Max reachable / month | Worst-case cost / month* |
 |---|---|---|---|---|---|
@@ -64,8 +71,7 @@ not a price.
 - Enterprise is not a sixth plan. It is a per-customer plan created by hand
   (like the partner plan today), outside this ladder.
 
-## Open for Adam
+## Open
 
-- Variant A or B, or other figures.
 - Whether to show the rest of the ladder anywhere (pricing page) — not part
   of 0311.
