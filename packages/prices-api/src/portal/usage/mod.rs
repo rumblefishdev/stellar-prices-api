@@ -641,7 +641,7 @@ async fn fetch(gateway: &Gateway, name: &str) -> Result<CachedAnswer, GatewayErr
     // the usage of the key the reveal hands out — and nothing more: no create,
     // no attach, no delete. See the module docs.
     // The same selector as the reveal and the revoke (`current_key`): the
-    // earliest LIVE key, else the earliest record. A live key beside a
+    // earliest LIVE key, else the most recently revoked record. A live key beside a
     // revoked one must show its own counter, not the dead key's.
     let candidates = exact_matches(gateway.list_named(name).await?, name);
     let Some(winner) = current_key(&candidates).cloned() else {

@@ -1575,3 +1575,60 @@ async fn a_refused_attach_whose_plan_never_shows_is_not_handed_out() {
         assert!(s.ops.is_empty(), "nothing written: {:?}", s.ops);
     });
 }
+
+/// Two revoked records under one name — the previous key outlived the issue
+/// that replaced it, and the replacement was then revoked too — and the usage
+/// card reports the REPLACEMENT's counter, not the older record's (task 0311).
+///
+/// The way in: after a rolled rework the listing lags the create, so the
+/// reconciler's "create not listed" branch attaches the new key and sweeps
+/// nothing; a rework of the new key in the same period then disables it
+/// beside the old record. `current_key` used to take the EARLIEST record, so
+/// the card read the old key's counter — empty for the period, since it was
+/// disabled a month earlier — and the new key's traffic vanished from the
+/// dashboard until the 1st.
+#[tokio::test]
+async fn after_a_second_rework_usage_reports_the_key_revoked_last() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    gateway.with(|s| s.plans.push(StoredPlan::basic()));
+    let old = seed_revoked_on(
+        &gateway,
+        the_3rd_of(first_of_month_offset(-1)),
+        BASIC_PLAN_ID,
+    );
+    gateway.with(|s| s.omit_next_created_from_list = true);
+    let app = app_with_discord(&discord, &gateway);
+    let session = session_cookie(USER_ID);
+
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
+    let new = gateway.with(|s| {
+        assert!(
+            s.keys.iter().any(|k| k.id == old),
+            "precondition: the lagging listing left the old record in place"
+        );
+        s.keys.iter().find(|k| k.enabled).unwrap().id.clone()
+    });
+    // The new key's traffic this period; the old key has none (it was
+    // disabled last month).
+    gateway.with(|s| {
+        s.usage.insert(new.clone(), vec![vec![7, 999_993]]);
+    });
+
+    assert_eq!(revoke(&app, Some(&session)).await.status, StatusCode::OK);
+
+    let usage = call_path(app, "GET", USAGE_PATH, Some(&session)).await;
+    assert_eq!(usage.status, StatusCode::OK);
+    assert_eq!(
+        usage.json()["used"],
+        7,
+        "{}",
+        String::from_utf8_lossy(&usage.body)
+    );
+    assert_eq!(usage.json()["plan"]["tier"], "basic");
+    assert_eq!(
+        gateway.with(|s| s.usage_queries.last().unwrap().0.clone()),
+        new,
+        "the counter read must be the key revoked last"
+    );
+}
