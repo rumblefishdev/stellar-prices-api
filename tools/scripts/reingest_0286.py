@@ -9,7 +9,7 @@ every gate that runbook names. Standard library only.
   run        the month loop (resumable; one month = twelve steps)
   status     the dashboard, once (use under `watch -n5` in a second pane)
   amm-done   record an events-backfill run someone did on the host (--amm wait)
-             — the default, --amm mtls, runs events-backfill here and needs nobody
+             — the default, --amm ssh, runs events-backfill on the CH host (--ssh)
   finish     1w + 1M rebuild and the acceptance reads, after the last month
   rollback   put one month back from its snapshot (REPLACE PARTITION, SQL only)
   release    drop one finished month's snapshot, to give the disk back
@@ -416,6 +416,12 @@ def cmd_preflight(a, ch, st, months=None):
         exe = shlex.split(a.events_backfill)[0]
         gate("events-backfill", bool(shutil.which(exe) or os.path.exists(exe)), exe)
     if any(st.d["plan"][str(m)]["end"] >= SOROBAN_ACTIVATION_LEDGER for m in months):
+        try:
+            require_amm_path(a)
+            gate("AMM path", True, f"--amm {a.amm}")
+        except Stop as e:
+            gate("AMM path", False, str(e))
+    if any(st.d["plan"][str(m)]["end"] >= SOROBAN_ACTIVATION_LEDGER for m in months):
         print("  note AMM path: " +
              {"mtls": f"--amm mtls: {a.events_backfill} --transport {a.transport}, as the admin certificate "
                       "(cargo build --release -p events-backfill --features aws-mtls)",
@@ -515,6 +521,45 @@ def require_transport_flag(a):
             "(run it on the CH host as `default`) or --amm wait + amm-done.")
 
 
+def amm_summary(text, logfile):
+    """Read events-backfill's closing summary, or Stop naming what is missing.
+
+    Called after the --dry-run pass as well as the write, so a binary whose
+    summary this script cannot read is refused BEFORE it writes — not with a
+    Python AttributeError after the month's AMM candles are already in.
+    `negative apply order:` replaced `events with no apply order:` in task 0304;
+    a binary without it predates that fix and cannot read BE's events anyway.
+    """
+    found = {}
+    for key, label in (("fallbacks", "negative apply order:"), ("dropped", "swaps dropped (unresolved):")):
+        hit = re.search(rf"^{re.escape(label)}\s*(\d+)", text, re.M)
+        if not hit:
+            raise Stop(f"events-backfill printed no `{label}` line — "
+                       f"see {logfile}. A binary without it predates task 0304: rebuild events-backfill "
+                       "from develop (on the CH host for --amm ssh)")
+        found[key] = int(hit.group(1))
+    return found
+
+
+def record_amm_summary(ms, m, summary):
+    """Keep the write pass's figures on the month and note the ones that need reading."""
+    ms["fallbacks"], ms["dropped"] = summary["fallbacks"], summary["dropped"]
+    if ms["dropped"]:
+        note(f"{m}: {ms['dropped']} swaps dropped for unregistered pools — see prices.unresolved_pools")
+    if ms["fallbacks"]:
+        note(f"{m}: {ms['fallbacks']} events with a negative apply order — their fill order is a fallback, "
+             "the range is not repaired (runbook §6)")
+
+
+def require_amm_path(a):
+    """Stop unless the chosen --amm mode can run at all. Runs before any DROP."""
+    if a.amm == "mtls":
+        require_transport_flag(a)
+    elif a.amm == "ssh" and not a.ssh.strip():
+        raise Stop("--amm ssh needs --ssh (the ssh target of the CH host, with any options), "
+                   "e.g. --ssh '-i ~/.ssh/<key> deploy@<ch-host>'")
+
+
 def prove_comet_binary(a, ch, m, pw, logfile):
     """Stop unless the events-backfill binary routes venue 'comet' (task 0300, WR-02).
 
@@ -606,6 +651,10 @@ def run_month(a, ch, st, m, pw):
         if soroban and a.amm == "stop":
             raise Stop(f"{m} is Soroban-era and --amm stop is set: its AMM candles need events-backfill "
                        "on the CH host. Re-run with --amm ssh or --amm wait")
+        if soroban and not ch.dry:
+            # Before the snapshot and the DROP: a mode that cannot run would
+            # otherwise be found only at the amm step, with the 1m month gone.
+            require_amm_path(a)
         if m >= COMET_FROM_MONTH and soroban:
             # The row gate above is not enough: the BINARY routes Comet (WR-02).
             prove_comet_binary(a, ch, m, pw, mdir / "comet-probe.log")
@@ -710,10 +759,8 @@ def run_month(a, ch, st, m, pw):
                     code, text = stream(cmd, env, mdir / "events-backfill.log")
                     if code != 0 or "=== events-backfill complete ===" not in text:
                         raise Stop(f"events-backfill {' '.join(flag)} exit {code} — see {mdir}/events-backfill.log")
-                ms["fallbacks"] = int(re.search(r"events with no apply order:\s*(\d+)", text).group(1))
-                ms["dropped"] = int(re.search(r"swaps dropped \(unresolved\):\s*(\d+)", text).group(1))
-                if ms["dropped"]:
-                    note(f"{m}: {ms['dropped']} swaps dropped for unregistered pools — see prices.unresolved_pools")
+                    summary = amm_summary(text, mdir / "events-backfill.log")
+                record_amm_summary(ms, m, summary)
             elif a.amm == "ssh":
                 for flag in (" --dry-run", ""):
                     remote = f"read -r CLICKHOUSE_PASSWORD; export CLICKHOUSE_PASSWORD; exec {base}{flag}"
@@ -721,11 +768,12 @@ def run_month(a, ch, st, m, pw):
                                         mdir / "events-backfill.log", stdin_text=pw)
                     if code != 0 or "=== events-backfill complete ===" not in text:
                         raise Stop(f"events-backfill{flag} exit {code} — see {mdir}/events-backfill.log")
-                ms["fallbacks"] = int(re.search(r"events with no apply order:\s*(\d+)", text).group(1))
+                    summary = amm_summary(text, mdir / "events-backfill.log")
+                record_amm_summary(ms, m, summary)
             else:
                 marker = mdir / "amm.done"
                 note(f"{m}: waiting for the host run —  read -rs CH_PW; CLICKHOUSE_PASSWORD=\"$CH_PW\" {base}"
-                     f"   then: reingest_0286.py amm-done {m} --fallbacks <events with no apply order>")
+                     f"   then: reingest_0286.py amm-done {m} --fallbacks <negative apply order>")
                 while not marker.exists():
                     DASH["step"] = "waiting for amm-done"
                     RERENDER()
@@ -834,8 +882,9 @@ def cmd_run(a, ch, st):
     if not a.yes and not ch.dry:
         if input(f"Type the database name to start dropping partitions on it: ") != ch.db:
             raise Stop("not confirmed")
+    soroban_due = any(st.d["plan"][str(m)]["end"] >= SOROBAN_ACTIVATION_LEDGER for m in todo)
     pw = getpass.getpass("CH `default` password for events-backfill (stdin only, never argv): ") \
-        if a.amm == "ssh" and not ch.dry else None
+        if a.amm == "ssh" and soroban_due and not ch.dry else None
     RERENDER = lambda: render(st, months)
     for m in todo:
         run_month(a, ch, st, m, pw)
@@ -928,7 +977,8 @@ def main():
     p.add_argument("--ack-0285", action="store_true")
     p.add_argument("--ack-0300-binary", action="store_true",
                    help="--amm wait only: the host events-backfill is built from 0300 or later (routes Comet)")
-    p.add_argument("--amm", choices=["mtls", "stop", "ssh", "wait"], default="mtls")
+    # ssh, not mtls: events-backfill on develop has no --transport (runbook §6).
+    p.add_argument("--amm", choices=["mtls", "stop", "ssh", "wait"], default="ssh")
     p.add_argument("--events-backfill", default="./target/release/events-backfill")
     p.add_argument("--ssh", default="", help="ssh target (and options) of the CH host, for --amm ssh")
     p.add_argument("--state-dir", default="~/reingest-0286")
