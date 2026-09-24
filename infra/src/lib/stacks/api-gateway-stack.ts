@@ -8,7 +8,7 @@ import * as targets from 'aws-cdk-lib/aws-route53-targets';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 
-import type { EnvironmentConfig } from '../types.js';
+import { PAID_PLAN_TIERS, type EnvironmentConfig } from '../types.js';
 
 /**
  * Physical name of the public REST API.
@@ -832,16 +832,22 @@ export class ApiGatewayStack extends cdk.Stack {
     }
 
     // ---------------------------------------------------------------
-    // UsagePlan + API key — the `pricing-api-free` tier (task 0157).
+    // UsagePlans + API key — the `pricing-api-free` tier (task 0157) and the
+    // four paid tiers beside it (task 0311).
     //
-    // One plan, because a key belongs to exactly one plan per stage and
-    // self-service is the default (and currently only) way to hold a key.
-    // Higher limits are a manual, out-of-band arrangement made by hand in the
-    // console — see docs/runbooks/manual-api-key-tier.md.
+    // Five plans on the same stage. A key belongs to exactly one plan per
+    // stage, but a stage belongs to any number of plans — the loadtest plan
+    // already shares this one. Self-service keys are issued onto the free
+    // plan; an operator moves a key onto a paid plan by hand (delete the plan
+    // key, create it on the target plan) — see
+    // docs/runbooks/manual-api-key-tier.md. Hand-made Custom/Enterprise plans
+    // stay outside CDK.
     //
-    // The construct id stays `UsagePlan` so this updates the deployed plan in
-    // place rather than creating a second one: every property of
-    // AWS::ApiGateway::UsagePlan, including UsagePlanName, is "no interruption".
+    // The free plan's construct id stays `UsagePlan` so this updates the
+    // deployed plan in place rather than creating a second one: every property
+    // of AWS::ApiGateway::UsagePlan, including UsagePlanName, is "no
+    // interruption". The paid plans are new logical ids (`UsagePlanBasic`, …)
+    // and touch nothing that exists.
     // ---------------------------------------------------------------
     const usagePlan = this.api.addUsagePlan('UsagePlan', {
       name: `pricing-api-free-${config.envName}`,
@@ -855,6 +861,28 @@ export class ApiGatewayStack extends cdk.Stack {
       },
     });
     usagePlan.addApiStage({ stage: this.api.deploymentStage });
+
+    // The paid plans (task 0311). No API key and no SSM parameter per plan:
+    // nothing is issued onto them, and the portal backend finds a key's plan by
+    // asking which plans hold the key (`GetUsagePlans?keyId=`), so nothing ever
+    // needs a paid plan's id. The name is the contract — the backend parses
+    // the tier out of `pricing-api-<tier>-<env>`.
+    for (const tier of PAID_PLAN_TIERS) {
+      const limits = config.pricingApiPaidPlans[tier];
+      this.api
+        .addUsagePlan(`UsagePlan${tier[0].toUpperCase()}${tier.slice(1)}`, {
+          name: `pricing-api-${tier}-${config.envName}`,
+          throttle: {
+            rateLimit: limits.rateLimit,
+            burstLimit: limits.burstLimit,
+          },
+          quota: {
+            limit: limits.monthlyQuota,
+            period: apigateway.Period.MONTH,
+          },
+        })
+        .addApiStage({ stage: this.api.deploymentStage });
+    }
 
     // Two separate lines here can rotate this key, by two different mechanisms:
     //
@@ -899,74 +927,97 @@ export class ApiGatewayStack extends cdk.Stack {
     });
     usagePlan.addApiKey(apiKey);
 
+    // Also read by the portal backend at cold start (task 0311,
+    // `PORTAL_API_ID_PARAM`): `plan_of` keeps only the plans whose apiStages
+    // name this API + stage. Through SSM for the same cycle reason as the plan
+    // id below.
     new ssm.StringParameter(this, 'ApiGatewayIdParam', {
       parameterName: `/prices/${config.envName}/api-gateway-id`,
       stringValue: this.api.restApiId,
       description: `REST API ID for prices-${config.envName}-api`,
     });
 
-    // The onboarding backend (task 0160) issues keys and reads per-key usage,
-    // both of which need the plan id. It lives in ComputeStack, which this stack
-    // depends on, so it cannot read the plan object without closing the cycle —
-    // same shape as the apiBaseUrl problem in task 0124. Publish via SSM instead.
+    // The onboarding backend (task 0160) issues keys onto the free plan, so it
+    // needs the plan id — the target of a first issue and the fallback when a
+    // rework finds no previous plan (task 0311; usage is now read on whichever
+    // plan the key is on, found by key, and needs no id from here). It lives in
+    // ComputeStack, which this stack depends on, so it cannot read the plan
+    // object without closing the cycle — same shape as the apiBaseUrl problem
+    // in task 0124. Publish via SSM instead. The description string below is
+    // left as it is: changing it would touch the deployed parameter for nothing.
     new ssm.StringParameter(this, 'PricingApiFreePlanIdParam', {
       parameterName: `/prices/${config.envName}/pricing-api-free-plan-id`,
       stringValue: usagePlan.usagePlanId,
       description: `Usage plan ID for pricing-api-free-${config.envName} (key issuance + GetUsage)`,
     });
 
-    // The control-plane grants that need the plan id (tasks 0187 and 0188).
-    // Declared here rather than in `ComputeStack` for the cycle reason on
-    // `apiHandlerRole` in the props above; their four siblings are declared
-    // there.
+    // The portal's `/usageplans` grants (tasks 0187, 0188, widened by 0311).
+    // Declared here rather than in `ComputeStack`, beside their five siblings
+    // there, for a reason that outlived the one it started with.
     //
-    // `iam.Policy` rather than `apiHandlerRole.addToPrincipalPolicy`, and the
-    // distinction is the whole point: `addToPrincipalPolicy` would append to
-    // the role's default policy, which is a resource of ComputeStack, so the
-    // plan id would travel as an export of THIS stack imported by that one —
-    // the cycle again, just written differently. A standalone `Policy` is a
-    // resource of this stack that names the role, so the reference runs
-    // ApiGateway -> Compute like every other one here.
+    // It started as the cycle: the grants named the free plan's id, and
+    // `iam.Policy` rather than `apiHandlerRole.addToPrincipalPolicy` because
+    // the latter appends to the role's default policy — a resource of
+    // ComputeStack — so the plan id would have travelled as an export of THIS
+    // stack imported by that one. Since task 0311 no statement references the
+    // plan id, but the policy STAYS here with its construct id and policyName:
+    // moving it to ComputeStack is a delete in one stack and a create in
+    // another, with a window in which the Lambda can attach no key and key
+    // issuance breaks. Renaming it is a replacement for the same cosmetic gain.
     //
-    // Two statements, one sub-resource each, on THIS plan alone:
+    // Three statements, and they are the whole set. Task 0188's decision 1 was
+    // "one plan's ARN, nothing wider"; task 0311 widens it deliberately,
+    // because the dashboard must state the key's OWN plan and the usage counted
+    // on it, and a rework must keep a paid user on their paid plan:
     //
-    // - `POST …/keys` (task 0187) attaches a self-service key to the plan.
-    // - `GET …/usage` (task 0188) is `GetUsage` — reading per-key consumption
-    //   for the dashboard. `GET` on the usage sub-resource does NOT permit
-    //   reading the plan itself (`GET /usageplans/{id}`), listing its keys
-    //   (`GET …/keys`), or changing its limits — the resource path is the
-    //   scope, and `/usage` is the narrowest form this call has.
+    // - `GET /usageplans` is `GetUsagePlans?keyId=` — which plans hold this
+    //   key. The keyId filter is a query parameter, not a resource, so this
+    //   cannot be scoped below the collection. Read-only; it reveals plan
+    //   names and limits, never another key.
+    // - `GET /usageplans/*/usage` is `GetUsage` on whichever plan the key is
+    //   on — paid, free or hand-made. The usage sub-resource still does NOT
+    //   permit reading a plan itself, listing its keys or changing it.
+    // - `POST /usageplans/*/keys` attaches a key. The code only ever attaches
+    //   to the free plan, the key's own plan, or the previous (revoked) key's
+    //   plan — and only one that `GetUsagePlans` reported on OUR API stage.
+    //   Hand-made plans have no ARN known at synth, hence the wildcard.
     //
-    // Deliberately NOT granted, though task 0187's review suggested deciding it
-    // here: `GET /usageplans/{id}` to validate the plan at cold start. It would
-    // turn a stale plan id into an init failure instead of a runtime one — but
-    // 0187's decision 22 already rejected cold-start validation (a warm
-    // container still misses a plan that changes under it, and the attach path
-    // disambiguates a dead plan id into `PlanNotFound` loudly), and `GetUsage`
-    // against a wrong plan id fails visibly on the first dashboard load. An
-    // extra standing grant to move one failure earlier is not worth it.
-    // The construct id and policyName predate the second statement (task 0187
-    // named them for the attach, then task 0188 added the usage read) and are
-    // KEPT: renaming an AWS::IAM::Policy is a resource replacement bought for
-    // a cosmetic gain, on the policy whose absence breaks key issuance. Task
-    // 0194's audit should read this policy as "the portal grants that need
-    // the plan id", whatever the name says.
+    // Deliberately NOT granted:
+    // - `GET /usageplans/{id}` to validate the plan at cold start. 0187's
+    //   decision 22 rejected cold-start validation (a warm container still
+    //   misses a plan that changes under it, and the attach path
+    //   disambiguates a dead plan id into `PlanNotFound` loudly), and
+    //   `GetUsagePlans` already returns every figure the dashboard shows.
+    // - `DELETE`/`PATCH` on a plan or a plan key. The code never moves a key
+    //   between plans or changes limits; an operator does, by hand.
+    // - `GET /usageplans/*/keys`. Nothing lists a plan's members.
+    //
+    // A `sid` on every statement is load-bearing: cdk.json enables
+    // `@aws-cdk/aws-iam:minimizePolicies`, which merges sid-less statements —
+    // the two GETs would collapse into one and the set would stop reading as
+    // three. Task 0194's audit should read this policy as "the portal's
+    // `/usageplans` grants", whatever the name says.
     new iam.Policy(this, 'PortalAttachKeyToFreePlan', {
       policyName: `prices-${config.envName}-portal-attach-key`,
       roles: [apiHandlerRole],
       statements: [
         new iam.PolicyStatement({
-          sid: 'PortalAttachKeyToFreePlan',
-          actions: ['apigateway:POST'],
+          sid: 'PortalListUsagePlansByKey',
+          actions: ['apigateway:GET'],
+          resources: [`arn:aws:apigateway:${config.awsRegion}::/usageplans`],
+        }),
+        new iam.PolicyStatement({
+          sid: 'PortalReadAnyPlanUsage',
+          actions: ['apigateway:GET'],
           resources: [
-            `arn:aws:apigateway:${config.awsRegion}::/usageplans/${usagePlan.usagePlanId}/keys`,
+            `arn:aws:apigateway:${config.awsRegion}::/usageplans/*/usage`,
           ],
         }),
         new iam.PolicyStatement({
-          sid: 'PortalReadFreePlanUsage',
-          actions: ['apigateway:GET'],
+          sid: 'PortalAttachKeyToAnyPlan',
+          actions: ['apigateway:POST'],
           resources: [
-            `arn:aws:apigateway:${config.awsRegion}::/usageplans/${usagePlan.usagePlanId}/usage`,
+            `arn:aws:apigateway:${config.awsRegion}::/usageplans/*/keys`,
           ],
         }),
       ],
