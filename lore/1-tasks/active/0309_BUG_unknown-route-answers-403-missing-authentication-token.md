@@ -76,3 +76,34 @@ the docs describe that.
       explanation
 - [ ] The synthesized template is checked for the override, so a stack
       refactor cannot drop it silently
+
+## Progress — 2026-09-23
+
+**Infra half written on `fix/0309_…`, not yet pushed.** `UnknownRoute` in
+`api-gateway-stack.ts`: `MISSING_AUTHENTICATION_TOKEN` → `404`,
+`{"code":"not_found","message":"no such route"}`. **No CORS headers** — the
+decision the plan left open: the bundle calls no unmapped route, and the
+portal's one credentialed origin on an API-wide answer is what 0194's review
+took off `DEFAULT_4XX`. Check 8 in `verify-openapi-routes.mjs` (already the CI
+step that reads the synthesized ApiGateway template) holds the template to it;
+the synthesized template mutated four ways — override dropped, `403`, a
+non-JSON body, duplicated — fails it each time.
+
+**`cdk diff --exclusively Prices-production-ApiGateway` against production:**
+`+ GatewayResponse`, the `Deployment` replaced (`…13811535` → `…4bf28938`) and
+`Stage.DeploymentId` repointed. No IAM, nothing else. CDK 2.257's
+`GatewayResponse` both hashes itself into the deployment's logical id and makes
+the deployment depend on it, so the new stage snapshot is taken after the
+response exists — [[0255]]'s "control plane right, stage stale" does not apply
+to an addition.
+
+⚠️ **The docs half waits on [[0306]] (PR #343, open).** The texts this task
+names — `GatewayMessage` and its description, the rewritten Quick Start — are
+0306's: `GatewayMessage` does not exist on `develop` yet, and `QuickStart.tsx`
+and `public/openapi.json` are rewritten there.
+
+⚠️ **"Deploy the `ApiGateway` stack only" holds for the infra half alone.**
+The OpenAPI descriptions are compiled into the api-handler and served at
+`/api-docs-json`, so the docs half ships the way 0306 does: Compute,
+`flush-production-cache`, then `sync-portal-explorer`. Shipping the two
+together costs one round instead of two.

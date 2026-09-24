@@ -172,6 +172,14 @@ history:
       and the 201511 dry run passed; the new 201511 1m partition matches
       the snapshot (19 candles / 24 trades). Stage plan A–D recorded in
       "Phase 3 — execution".
+  - date: "2026-09-23"
+    status: active
+    who: okarcz
+    note: >
+      Trial month 201511 closed OK (81 min; every fine tier equal to the
+      snapshot, 2/2 minute-aligned, two order-book fills repriced from the
+      resting offer as phase 2 intends). Its snapshot released. Stage A
+      (201512 → 202401) started ~16:10 local; 201512 in flight.
 ---
 
 # Candles are built from dust fills in the wrong order
@@ -637,6 +645,34 @@ both single order-book fills, `4.16660000106665` (stroop ratio) →
 day candle inherits the new open. `close_usd = 0` before and after (no USD
 reference in 2015). The trial proves the script against the real
 `sdex-backfill` end to end; stage A may start.
+
+#### Stage A — running (status 2026-09-23 16:15 local)
+
+| | |
+| --- | --- |
+| started | ~16:10 local, `run --to-month 202401 --ack-phase1-measured --amm stop --skip-aws-check`, tmux session `reingest` on `fishuser-hero`, first pane |
+| months done | **1 of 99** in scope (201511, OK); 130 planned in total |
+| current month | **201512**, ledgers 1 096 833 – 1 618 657 (521 825): snapshot taken (1m 4 rows, 15m/1h/4h/1d 3 each), markers cleared, 1m dropped, `sdex-backfill` downloading its first archive partition |
+| snapshots held | 201512 only — 201511's released after its check (`release 201511`) |
+| CH disk | 447 GiB free (floor 300) |
+| pending mutations | 0 |
+| expected finish | ~2026-10-03..05 |
+
+**How it is watched.** The status pane (`watch -n5 … status`, second pane)
+shows the month, step and partitions indexed; each finished month lands in
+its table with a verdict and the aligned count. A `STOP — …` line in the
+first pane means a gate fired: state is kept, the cause is read before
+anything else, then the same `run` resumes or `rollback <month>` restores.
+On prod, per finished month: FINAL candles / trades / volumes per tier
+against `reingest_0286_bak_*`, OHLC order, raw = FINAL row count; for the
+month in flight, the `backfill_sdex_ledgers` marker count against its range.
+Every month that reconciles clean is `release`d.
+
+**Operating notes.** `fishuser-hero` must stay powered and awake (detach
+and log-out are fine). `aws s3` concurrency there is 100
+(`default.s3.max_concurrent_requests`). Archive partitions are downloaded
+into `~/stellar-prices-api/.temp/sdex-backfill/` — from ~2017 they are GBs
+each, so the campaign machine's own disk is watched too.
 
 #### Plan for the complete re-ingest
 

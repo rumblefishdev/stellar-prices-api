@@ -27,6 +27,8 @@ extractors-core = { path = "../extractors-core" }
 phoenix-extractor = { path = "../phoenix-extractor" }
 soroswap-extractor = { path = "../soroswap-extractor" }
 aquarius-extractor = { path = "../aquarius-extractor" }
+# task 0300: the one POOL/swap predicate, shared by dispatch and the sensors.
+comet-extractor = { path = "../comet-extractor" }
 ledger-processor = { path = "../ledger-processor" }
 
 [dev-dependencies]

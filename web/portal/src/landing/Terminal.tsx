@@ -67,8 +67,10 @@ export function Terminal() {
                 `api.soroswap.finance` (a page that renders a credential must
                 not aim it at another domain) and, since 2026-08-31, not the
                 design's `/prices XLM-USDC` either: that path does not exist,
-                and a reader's first request 403'd. Fields and shape are the
-                live `/v1/assets/native/price` answer, decimals as strings. */}
+                and a reader's first request 403'd. The fields are the live
+                `/v1/assets/native/price` answer's first six, in its order and
+                rounded to fit, and the `…` stands for the rest — it showed a
+                reordered subset as the whole body until task 0306. */}
             <Tok c={NUM}>{PUBLIC_API_BASE_URL}/assets/native/price</Tok>
             {' \\\n-H '}
             <Tok c={KEY}>&quot;x-api-key: YOUR_API_KEY&quot;</Tok>
@@ -81,28 +83,25 @@ export function Terminal() {
             {', '}
             <Tok c={KEY}>&quot;price_usd&quot;</Tok>
             {': '}
-            <Tok c={STR}>&quot;0.1774&quot;</Tok>
+            <Tok c={STR}>&quot;0.2209&quot;</Tok>
+            {', '}
+            <Tok c={KEY}>&quot;price_xlm&quot;</Tok>
+            {': '}
+            <Tok c={STR}>&quot;1&quot;</Tok>
             {', '}
             <Tok c={KEY}>&quot;vwap_24h&quot;</Tok>
             {': '}
-            <Tok c={STR}>&quot;0.1773&quot;</Tok>
-            {', '}
-            <Tok c={KEY}>&quot;change_24h_pct&quot;</Tok>
-            {': '}
-            <Tok c={STR}>&quot;-1.66&quot;</Tok>
+            <Tok c={STR}>&quot;0.2208&quot;</Tok>
             {', '}
             <Tok c={KEY}>&quot;volume_24h_usd&quot;</Tok>
             {': '}
-            <Tok c={STR}>&quot;383736.40&quot;</Tok>
+            <Tok c={STR}>&quot;9232178.5&quot;</Tok>
             {', '}
-            <Tok c={KEY}>&quot;sources&quot;</Tok>
-            {': { '}
-            <Tok c={KEY}>&quot;aquarius&quot;</Tok>
-            {': {…}, '}
-            <Tok c={KEY}>&quot;sdex&quot;</Tok>
-            {': {…}, '}
-            <Tok c={KEY}>&quot;soroswap&quot;</Tok>
-            {': {…} }'}
+            <Tok c={KEY}>&quot;change_24h_pct&quot;</Tok>
+            {': '}
+            <Tok c={STR}>&quot;4.23&quot;</Tok>
+            {', '}
+            {'…'}
             {'\n}'}
             {/* The block cursor. A static glyph, not an animation: a blinking
               caret next to a code sample is a distraction on a page whose job

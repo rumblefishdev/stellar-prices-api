@@ -8,6 +8,7 @@ members = [
     "packages/phoenix-extractor",
     "packages/soroswap-extractor",
     "packages/aquarius-extractor",
+    "packages/comet-extractor",
     "packages/ledger-processor",
     "packages/prices-ingest-core",
     "packages/prices-ledger-processor",
@@ -40,7 +41,9 @@ tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 lambda_http = "1"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
-utoipa = { version = "5", features = ["axum_extras"] }
+# `preserve_order`: schema properties in struct order, the order serde writes
+# them, so the reference's examples read like the responses (task 0306).
+utoipa = { version = "5", features = ["axum_extras", "preserve_order"] }
 utoipa-axum = "0.2"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"

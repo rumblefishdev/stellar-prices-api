@@ -1,4 +1,5 @@
 use aquarius_extractor::AquariusPoolExtractor;
+use comet_extractor::CometPoolExtractor;
 use extractors_core::{
     ExtractError, SorobanEventRow, SwapExtractor, TradeRow, Venue, VenueRegistry,
 };
@@ -92,7 +93,7 @@ pub struct PairRegistries<'a> {
 ///
 /// Soroswap and SushiSwap require the pool→tokens registry to resolve token
 /// identities; an unresolved pool (created before the indexed window) yields no
-/// trades rather than an error. Aquarius and Phoenix carry tokens inline.
+/// trades rather than an error. Aquarius, Phoenix and Comet carry tokens inline.
 ///
 /// The two pair-backed venues keep SEPARATE registries so a contract_id can
 /// never resolve to the wrong venue's tokens (task 0290); they arrive together
@@ -123,6 +124,8 @@ pub fn dispatch(
             None => Ok(vec![]),
         },
         Some(Venue::Aquarius) => Ok(AquariusPoolExtractor.extract(rows)?.trades),
+        // Tokens and amounts are inline in the swap's data map (task 0300).
+        Some(Venue::Comet) => Ok(CometPoolExtractor.extract(rows)?.trades),
         None => Ok(vec![]),
     }
 }
@@ -235,6 +238,57 @@ mod tests {
         )
         .unwrap();
         assert!(trades.is_empty());
+    }
+
+    /// Task 0300: a registry mapping the Comet pool to `Venue::Comet` routes its
+    /// `POOL/swap` group to one Comet trade. Values are the real
+    /// `typical_blnd_to_usdc_recent` swap (ledger 64,573,919, tx idx 233, ev 9).
+    #[test]
+    fn dispatch_routes_a_comet_pool_swap() {
+        use extractors_core::TaggedValue;
+        const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
+        const BLND: &str = "CD25MNVTZDL4Y3XBCPCJXGXATV5WUHHOWMYFF4YBEGU5FCPGMYTVG5JY";
+        const USDC: &str = "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75";
+        let sym = |s: &str| TaggedValue::Symbol(s.to_string());
+        let addr = |s: &str| TaggedValue::Address(s.to_string());
+        let rows = [SorobanEventRow {
+            contract_id: COMET.to_string(),
+            transaction_id: "64573919:233".to_string(),
+            ledger_sequence: 64_573_919,
+            event_index: 9,
+            topics: vec![sym("POOL"), sym("swap")],
+            data: TaggedValue::Map(vec![
+                (
+                    sym("caller"),
+                    addr("CBNVK5PE7JCL773P5SHWE3YUCHQVVVPVOG72SKCEFVTZOLLQWVTCPLZ3"),
+                ),
+                (sym("token_amount_in"), TaggedValue::I128(1263056538)),
+                (sym("token_amount_out"), TaggedValue::I128(6938342)),
+                (sym("token_in"), addr(BLND)),
+                (sym("token_out"), addr(USDC)),
+            ]),
+        }];
+        let venue_reg: VenueRegistry = [(COMET.to_string(), Venue::Comet)].into();
+
+        let trades = dispatch(
+            &rows,
+            &venue_reg,
+            &PhoenixPoolRegistry::new(),
+            PairRegistries {
+                soroswap: &PairPoolRegistry::new(),
+                sushiswap: &PairPoolRegistry::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].venue, Venue::Comet);
+        assert_eq!(trades[0].contract_id, COMET);
+        assert_eq!(
+            (trades[0].amount_in, trades[0].amount_out),
+            (1263056538, 6938342)
+        );
+        assert_eq!(trades[0].token_in, BLND);
+        assert_eq!(trades[0].token_out, USDC);
     }
 
     #[test]

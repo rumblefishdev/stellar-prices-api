@@ -53,8 +53,9 @@ pub const CH_WRITE_LATENCY: &str = "ClickHouseWriteLatencyMs";
 pub const FORCED_PARTIAL_FLUSH: &str = "ForcedPartialFlushes";
 
 /// Trades a reconcile run dropped because they came from a contract shaped like
-/// a pool we index (Aquarius `trade`, Soroswap pair `swap`, Phoenix swap) that is
-/// missing from `prices.pool_registry` (task 0291).
+/// a pool we index (Aquarius `trade`, Soroswap pair `swap`, Phoenix swap,
+/// SushiSwap V3 pool `swap`, Comet `POOL/swap` — task 0300) that is missing from
+/// `prices.pool_registry` (task 0291).
 ///
 /// Emitted ONLY when non-zero, so the alarm on it is `>= 1` over
 /// `NOT_BREACHING`. With the live processor persisting the pools it learns, a

@@ -3,7 +3,7 @@ import Box from '@mui/material/Box';
 import Link from '@mui/material/Link';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
-import { useState, type KeyboardEvent, type ReactNode } from 'react';
+import { Fragment, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 import { PUBLIC_API_BASE_URL } from '../landing/links';
 
@@ -307,6 +307,20 @@ const FIRST_REQUEST_TITLE: Record<FirstRequestLang, string> = {
 };
 
 /**
+ * The example response's venues — `GET /v1/assets/native/price` on production,
+ * 2026-09-23 08:08 UTC, with the per-venue values rounded to fit the card.
+ * Every venue the API reports, in the order it writes them (task 0306: the
+ * page named three while production answered five).
+ */
+const EXAMPLE_SOURCES: readonly (readonly [string, string, string])[] = [
+  ['aquarius', '0.2209', '3496887.57'],
+  ['phoenix', '0.2195', '143.34'],
+  ['sdex', '0.2208', '3706994.75'],
+  ['soroswap', '0.2208', '12137.73'],
+  ['sushiswap', '0.2197', '98918.84'],
+];
+
+/**
  * The 200 response, and what each field means — the two columns of the frame.
  *
  * Exported for `QuickStart.spec.tsx`, which ties `value` to `raw` the way it
@@ -330,8 +344,8 @@ export const RESPONSE_FIELDS: readonly {
   },
   {
     key: 'price_usd',
-    value: <Tok c={STR}>&quot;0.17735783908195&quot;</Tok>,
-    raw: '"0.17735783908195"',
+    value: <Tok c={STR}>&quot;0.22086251378147&quot;</Tok>,
+    raw: '"0.22086251378147"',
     dot: NUM,
     meaning: 'Current price in USD. A decimal string, never a float',
   },
@@ -344,69 +358,68 @@ export const RESPONSE_FIELDS: readonly {
   },
   {
     key: 'vwap_24h',
-    value: <Tok c={STR}>&quot;0.17729898377938&quot;</Tok>,
-    raw: '"0.17729898377938"',
+    value: <Tok c={STR}>&quot;0.220818422853&quot;</Tok>,
+    raw: '"0.220818422853"',
     dot: NUM,
     meaning: 'Volume-weighted average price over the last 24 hours',
   },
   {
     key: 'volume_24h_usd',
-    value: <Tok c={STR}>&quot;383736.40419055725213&quot;</Tok>,
-    raw: '"383736.40419055725213"',
+    value: <Tok c={STR}>&quot;9232178.49610106508283&quot;</Tok>,
+    raw: '"9232178.49610106508283"',
     dot: NUM,
-    meaning: '24h traded volume in USD, all venues combined',
+    meaning:
+      '24h USD volume of every trade in the asset, as either side of the pair — more than the venues below add up to',
   },
   {
     key: 'change_24h_pct',
-    value: <Tok c={STR}>&quot;-1.6635&quot;</Tok>,
-    raw: '"-1.6635"',
+    value: <Tok c={STR}>&quot;4.2307&quot;</Tok>,
+    raw: '"4.2307"',
     dot: NUM,
     meaning: '% change over the last 24 hours',
   },
   {
-    // All three venues spelled out, in `value` and `raw` alike. An earlier
-    // version elided two of them as `{…}` — fine on screen, but `raw` feeds
-    // the Copy button, and "Copy example response" then wrote a block no JSON
-    // parser accepts (task 0194's PR review). The per-venue volumes sum to
-    // `volume_24h_usd` above, as the real response's do.
+    // Every venue spelled out, in `value` and `raw` alike, from one list so
+    // the two cannot disagree. An earlier version elided venues as `{…}` —
+    // fine on screen, but `raw` feeds the Copy button, and "Copy example
+    // response" then wrote a block no JSON parser accepts (task 0194's PR
+    // review). The venues add up to LESS than `volume_24h_usd`, as a real
+    // response's do: a venue counts the trades where the asset is the base,
+    // the total counts both sides (task 0306).
     key: 'sources',
     value: (
       <>
-        {'{\n    '}
-        <Tok c={KEY}>&quot;aquarius&quot;</Tok>: {'{ '}
-        <Tok c={KEY}>&quot;price&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1774&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;volume_24h&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;277436.70&quot;</Tok>
-        {' },\n    '}
-        <Tok c={KEY}>&quot;sdex&quot;</Tok>: {'{ '}
-        <Tok c={KEY}>&quot;price&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1773&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;volume_24h&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;98211.53&quot;</Tok>
-        {' },\n    '}
-        <Tok c={KEY}>&quot;soroswap&quot;</Tok>: {'{ '}
-        <Tok c={KEY}>&quot;price&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1775&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;volume_24h&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;8088.17&quot;</Tok>
-        {' }\n  }'}
+        {'{'}
+        {EXAMPLE_SOURCES.map(([venue, price, volume], i) => (
+          <Fragment key={venue}>
+            {'\n    '}
+            <Tok c={KEY}>&quot;{venue}&quot;</Tok>: {'{ '}
+            <Tok c={KEY}>&quot;price&quot;</Tok>:{' '}
+            <Tok c={STR}>&quot;{price}&quot;</Tok>,{' '}
+            <Tok c={KEY}>&quot;volume_24h&quot;</Tok>:{' '}
+            <Tok c={STR}>&quot;{volume}&quot;</Tok>
+            {i < EXAMPLE_SOURCES.length - 1 ? ' },' : ' }'}
+          </Fragment>
+        ))}
+        {'\n  }'}
       </>
     ),
     raw: [
       '{',
-      '    "aquarius": { "price": "0.1774", "volume_24h": "277436.70" },',
-      '    "sdex": { "price": "0.1773", "volume_24h": "98211.53" },',
-      '    "soroswap": { "price": "0.1775", "volume_24h": "8088.17" }',
+      ...EXAMPLE_SOURCES.map(
+        ([venue, price, volume], i) =>
+          `    "${venue}": { "price": "${price}", "volume_24h": "${volume}" }${i < EXAMPLE_SOURCES.length - 1 ? ',' : ''}`,
+      ),
       '  }',
     ].join('\n'),
     dot: STR,
-    meaning: 'Per-venue price and 24h volume: aquarius, sdex, soroswap',
+    meaning:
+      'Per-venue price and 24h volume, counting the trades where the asset is the base: aquarius, phoenix, sdex, soroswap, sushiswap',
   },
   {
     key: 'updated_at',
-    value: <Tok c={STR}>&quot;2026-08-31T12:22:00Z&quot;</Tok>,
-    raw: '"2026-08-31T12:22:00Z"',
+    value: <Tok c={STR}>&quot;2026-09-23T08:08:00Z&quot;</Tok>,
+    raw: '"2026-09-23T08:08:00Z"',
     dot: STR,
     meaning:
       'When this snapshot row was last refreshed (ISO 8601, UTC) — not the age of the price',
@@ -423,8 +436,8 @@ export const RESPONSE_FIELDS: readonly {
   },
   {
     key: 'as_of',
-    value: <Tok c={STR}>&quot;2026-08-31T12:16:00Z&quot;</Tok>,
-    raw: '"2026-08-31T12:16:00Z"',
+    value: <Tok c={STR}>&quot;2026-09-23T08:02:00Z&quot;</Tok>,
+    raw: '"2026-09-23T08:02:00Z"',
     dot: STR,
     meaning: "The price's own time: the minute price_usd was read from",
   },
@@ -495,6 +508,9 @@ const ENDPOINTS: readonly {
         <Tok c={KEY}>&quot;code&quot;</Tok>: <Tok c={STR}>&quot;USDC&quot;</Tok>
         , <Tok c={KEY}>&quot;issuer&quot;</Tok>:{' '}
         <Tok c={STR}>&quot;GA5Z…KZVN&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;contract&quot;</Tok>: <Tok c={STR}>&quot;&quot;</Tok>
+        , <Tok c={KEY}>&quot;home_domain&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;is_active&quot;</Tok>: <Tok c={NUM}>true</Tok> {'}'}
       </>
     ),
@@ -512,10 +528,11 @@ const ENDPOINTS: readonly {
         <Tok c={KEY}>&quot;asset&quot;</Tok>:{' '}
         <Tok c={STR}>&quot;native&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;price_usd&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1774&quot;</Tok>,{' '}
+        <Tok c={STR}>&quot;0.2209&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;price_xlm&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;1&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;vwap_24h&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1773&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;sources&quot;</Tok>: {'{…}'}, ... {'}'}
+        <Tok c={STR}>&quot;0.2208&quot;</Tok>, ... {'}'}
       </>
     ),
   },
@@ -534,20 +551,22 @@ const ENDPOINTS: readonly {
         <Tok c={KEY}>&quot;asset&quot;</Tok>:{' '}
         <Tok c={STR}>&quot;native&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;granularity&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;15m&quot;</Tok>, <Tok c={KEY}>&quot;data&quot;</Tok>:
+        <Tok c={STR}>&quot;15m&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;base_currency&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;USD&quot;</Tok>, <Tok c={KEY}>&quot;data&quot;</Tok>:
         [{'{ '}
         <Tok c={KEY}>&quot;timestamp&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;2026-08-30T12:30:00Z&quot;</Tok>,{' '}
+        <Tok c={STR}>&quot;2026-09-22T08:15:00Z&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;open&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1806&quot;</Tok>,{' '}
+        <Tok c={STR}>&quot;0.2116&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;high&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1807&quot;</Tok>,{' '}
+        <Tok c={STR}>&quot;0.2134&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;low&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1801&quot;</Tok>,{' '}
+        <Tok c={STR}>&quot;0.2102&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;close&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1806&quot;</Tok>,{' '}
-        <Tok c={KEY}>&quot;volume_quote_usd&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;1491.51&quot;</Tok>, ... {'}, ...] }'}
+        <Tok c={STR}>&quot;0.2105&quot;</Tok>,{' '}
+        <Tok c={KEY}>&quot;volume_base&quot;</Tok>:{' '}
+        <Tok c={STR}>&quot;256744.77&quot;</Tok>, ... {'}, ...] }'}
       </>
     ),
   },
@@ -567,9 +586,9 @@ const ENDPOINTS: readonly {
         <Tok c={KEY}>&quot;name&quot;</Tok>:{' '}
         <Tok c={STR}>&quot;reflector&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;price_usd&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1770&quot;</Tok>,{' '}
+        <Tok c={STR}>&quot;0.2181&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;updated_at&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;2026-08-31T12:20:00Z&quot;</Tok> {'}] }'}
+        <Tok c={STR}>&quot;2026-09-23T08:05:00Z&quot;</Tok> {'}] }'}
       </>
     ),
   },
@@ -586,11 +605,11 @@ const ENDPOINTS: readonly {
         </Tok>
         {'\n{ '}
         <Tok c={KEY}>&quot;realtime_tip_ledger&quot;</Tok>:{' '}
-        <Tok c={NUM}>63795749</Tok>, <Tok c={KEY}>&quot;sdex&quot;</Tok>: {'{ '}
+        <Tok c={NUM}>64573020</Tok>, <Tok c={KEY}>&quot;sdex&quot;</Tok>: {'{ '}
         <Tok c={KEY}>&quot;status&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;completed&quot;</Tok>,{' '}
+        <Tok c={STR}>&quot;completed&quot;</Tok>, ...,{' '}
         <Tok c={KEY}>&quot;earliest_data_available&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;2015-11-18T03:47:00Z&quot;</Tok>, ... {'}, '}
+        <Tok c={STR}>&quot;2015-11-18T03:47:00Z&quot;</Tok> {'}, '}
         <Tok c={KEY}>&quot;soroban_amm&quot;</Tok>: {'{…} }'}
       </>
     ),
@@ -611,7 +630,8 @@ const ENDPOINTS: readonly {
         <Tok c={KEY}>&quot;asset&quot;</Tok>:{' '}
         <Tok c={STR}>&quot;native&quot;</Tok>,{' '}
         <Tok c={KEY}>&quot;price_usd&quot;</Tok>:{' '}
-        <Tok c={STR}>&quot;0.1774&quot;</Tok>, ... {'}, ...] }'}
+        <Tok c={STR}>&quot;0.2209&quot;</Tok>, ... {'}, ...],'}{' '}
+        <Tok c={KEY}>&quot;not_found&quot;</Tok>: [] {'}'}
       </>
     ),
   },
@@ -626,8 +646,8 @@ const ERROR_CODES: readonly {
   {
     status: 400,
     tone: 'muted',
-    when: 'Malformed identifier or query — body { "code": "invalid_id" | "invalid_query", "message": … }',
-    fix: 'The message names the parameter. Identifiers are native, CODE:ISSUER (uppercase code, G… issuer) or a C… contract; limit is 1–200; timeframe is one of 1h, 24h, 7d, 30d, 1y, all.',
+    when: 'Malformed identifier, query or body — body { "code": "invalid_id" | "invalid_query" | "invalid_body", "message": … }',
+    fix: 'The message names the parameter. Identifiers are native, CODE:ISSUER (the code as issued — yXLM is not YXLM — and the G… issuer) or a C… contract; limit is 1–200; timeframe is one of 1h, 24h, 7d, 30d, 1y, all. A POST body must be JSON, sent with content-type: application/json.',
   },
   {
     status: 403,
@@ -809,10 +829,10 @@ const SDK: Record<SdkLang, Snippet> = {
 };
 
 const SDK_TITLE: Record<SdkLang, string> = {
-  js: 'javascript — fetch all prices',
-  python: 'python — fetch all prices',
-  rust: 'rust — fetch all prices',
-  go: 'go — fetch all prices',
+  js: 'javascript — fetch a price',
+  python: 'python — fetch a price',
+  rust: 'rust — fetch a price',
+  go: 'go — fetch a price',
 };
 
 /**

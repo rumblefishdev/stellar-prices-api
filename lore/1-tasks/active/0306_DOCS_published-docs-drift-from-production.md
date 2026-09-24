@@ -125,11 +125,30 @@ the hand-written Quick Start and landing examples have smaller slips.
 
 ## Acceptance Criteria
 
-- [ ] Every example on `/api/docs` is shaped like a real response: key
+- [x] Every example on `/api/docs` is shaped like a real response: key
       order, decimal strings, ISO timestamps, enum tokens, the venue map
-- [ ] The batch example body, copied and sent, answers 200
-- [ ] No published description contradicts production on items 6–12
-- [ ] Quick Start and landing: items 13–19 fixed
-- [ ] Item 20 explained, and the example agrees with the explanation
-- [ ] A spec fails when a published example stops validating against its
-      schema
+      (all seven operations' rendered examples match production's key sets
+      and order, recursively)
+- [x] The batch example body, copied and sent, answers 200 (`prices:
+      [native]`, `not_found: [FOO:…]`, as the response example shows)
+- [x] No published description contradicts production on items 6–12
+      (12: `granularity` and `base_currency` reference their enums;
+      `asset_type`, `asset_kind`, `method` and `status` stay strings with
+      real tokens as examples)
+- [x] Quick Start and landing: items 13–19 fixed
+- [x] Item 20 explained, and the example agrees with the explanation:
+      `volume_24h_usd` counts both sides of each trade, `sources` the base
+      side only
+- [x] A spec fails when a published example stops validating against its
+      schema: `no-invalid-schema-examples` in `redocly.yaml` (checked
+      against a mistyped example), and `every_property_has_an_example_or_a_reason`
+      in `tests/openapi.rs`
+
+## Shipping order
+
+**API first, portal second.** `/api/docs` reads the live `/api-docs-json`,
+and the portal now leaves out an optional field that has no example. Against
+today's document — no examples at all — that would drop most optional fields
+from the rendered examples, so the portal bundle must not ship before the
+API's new document is served (Compute deploy, then `make -C infra
+flush-production-cache`).

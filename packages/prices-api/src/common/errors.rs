@@ -18,13 +18,25 @@ use crate::common::cache_control;
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ErrorEnvelope {
     /// Stable machine-readable code (see the `*` constants below).
-    #[schema(example = "invalid_id")]
     pub code: &'static str,
     /// Human-readable explanation.
     pub message: String,
     /// Optional structured context (omitted from the JSON when absent).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+}
+
+/// The body API Gateway itself answers with: a `403` for a missing or unknown
+/// key, a `429` when throttled, a `5xx` it produces on the service's behalf.
+/// Never built here — the requests it answers do not reach this code — which
+/// is exactly why it is published: a client that parsed every error as
+/// [`ErrorEnvelope`] would meet `{"message": "Forbidden"}` and no `code`
+/// (task 0306).
+#[derive(utoipa::ToSchema)]
+#[allow(dead_code, reason = "documentation-only; the gateway writes this body")]
+pub struct GatewayMessage {
+    /// The gateway's text, e.g. `Forbidden` or `Too Many Requests`.
+    message: String,
 }
 
 impl ErrorEnvelope {
