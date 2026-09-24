@@ -62,6 +62,20 @@ LIVE_LOSS_MONTHS = range(202607, 202610)
 # 0290: SushiSwap V3's first swap is at ledger 60,770,886 (2026-01).
 SUSHI_FROM_MONTH = 202601
 SUSHI_POOLS = 133
+# 0300: Comet BLND/USDC's first swap is at ledger 51,500,460 (2024-05).
+COMET_FROM_MONTH = 202405
+COMET_POOLS = 1
+# Measured on production 2026-09-23: every month 2024-05..2026-09 holds >= 135
+# real Comet swaps, so an empty month up to here is a DEFECT. The pool is frozen
+# and winding down after the 2026-08-25 exploit, so a LATER month may be empty
+# for real — past this bound "no Comet volume" is only a FINDING.
+COMET_MEASURED_THROUGH = 202609
+# The first Comet swap (tx 237, 1000 USDC stroops -> 778,906 BLND stroops). A
+# one-ledger events-backfill --dry-run here yields a `comet ticks: 1` line only
+# from a binary that routes venue 'comet' — the proof the row gate cannot give.
+COMET_PROBE_LEDGER = 51_500_460
+# Set once the events-backfill binary has been proven to route Comet (per process).
+COMET_BINARY_PROVEN = False
 BAK = "reingest_0286_bak_"
 
 
@@ -373,6 +387,17 @@ def cmd_preflight(a, ch, st, months=None):
         gate("0290 registry write", n >= SUSHI_POOLS,
              f"{n} {a.sushi_source} pools, need {SUSHI_POOLS}: phase 1 -> 0290 deploy (PR #324) -> "
              "--discover-pools WRITE -> phase 3. Earlier, the ~88.8k swaps are silently absent again")
+    if any(m >= COMET_FROM_MONTH for m in months):
+        n = int(ch.one("reader", f"SELECT count() FROM prices.pool_registry FINAL WHERE venue = '{a.comet_source}'"))
+        gate("0300 registry write", n >= COMET_POOLS,
+             f"{n} {a.comet_source} pools, need {COMET_POOLS}: 0300 deploy -> --discover-pools WRITE "
+             "(any range; the static row is written regardless) -> phase 3. "
+             "Earlier, the ~51.6k Comet swaps are silently absent again. The row alone does not route "
+             "Comet — each month's gates step also proves the events-backfill binary does, before any DROP")
+        if a.amm == "wait":
+            gate("0300 events-backfill binary", a.ack_0300_binary,
+                 "--amm wait: the host binary cannot be probed from here; check that it is built from 0300 "
+                 "or later (a pre-0300 binary skips venue 'comet' silently), then pass --ack-0300-binary")
     free = int(ch.one("reader", "SELECT min(free_space) FROM system.disks"))
     gate("disk", free >= a.min_free_gb * 2 ** 30,
          f"{free / 2 ** 30:.0f} GiB free, floor {a.min_free_gb} — snapshots keep every dropped part alive")
@@ -475,6 +500,74 @@ def stream(cmd, env, logfile, stdin_text=None):
 RERENDER = lambda: None
 
 
+def require_transport_flag(a):
+    """Stop unless the events-backfill binary accepts `--transport` (needed by --amm mtls).
+
+    Shared by the Comet binary probe and the `amm` step, so a binary without the
+    flag is reported as exactly that — never as a pre-0300 binary (PR #345 review).
+    """
+    probe = subprocess.run(shlex.split(a.events_backfill) + ["--help"],
+                           capture_output=True, text=True)
+    if "--transport" not in (probe.stdout + probe.stderr):
+        raise Stop(
+            f"{a.events_backfill} has no --transport flag, so --amm mtls cannot run. "
+            "Either merge the events-backfill mTLS transport, or use --amm ssh "
+            "(run it on the CH host as `default`) or --amm wait + amm-done.")
+
+
+def prove_comet_binary(a, ch, m, pw, logfile):
+    """Stop unless the events-backfill binary routes venue 'comet' (task 0300, WR-02).
+
+    The pool_registry row is not what makes Comet candles appear: a pre-0300
+    binary skips a `venue='comet'` row silently (`Venue::from_source` -> None), so
+    a month re-ingested with it loses every Comet swap while the row gate passes.
+    Run the same binary the `amm` step will run, as a one-ledger --dry-run over
+    COMET_PROBE_LEDGER, and require a non-zero `comet ticks:` line. Runs in the
+    gates step, before the snapshot and every DROP. Fails closed.
+    """
+    global COMET_BINARY_PROVEN
+    if COMET_BINARY_PROVEN or a.amm == "stop":
+        return
+    fix = ("the events-backfill binary predates 0300 — deploy/rebuild it from 0300 (the Comet venue) "
+           f"before phase 3 reaches {m}. Nothing was dropped")
+    L = str(COMET_PROBE_LEDGER)
+    if a.amm == "wait":
+        if not a.ack_0300_binary:
+            raise Stop(f"{m}: --amm wait cannot probe the host binary for venue '{a.comet_source}': check it "
+                       "is built from 0300 or later, then pass --ack-0300-binary")
+        COMET_BINARY_PROVEN = True
+        return
+    if a.amm == "mtls":
+        if not ch.dry:
+            require_transport_flag(a)
+        stem = os.path.expanduser(a.admin_cert)
+        env = dict(os.environ, CH_DOMAIN=urllib.parse.urlparse(ch.url).hostname or "",
+                   MTLS_CERT_PATH=stem + ".crt", MTLS_KEY_PATH=stem + ".key",
+                   MTLS_CA_PATH=os.path.expanduser(a.ca))
+        cmd = shlex.split(a.events_backfill) + ["--transport", a.transport, "--start", L, "--end", L,
+                                                "--dry-run"]
+        stdin_text = None
+    else:  # ssh — the host's ~/events-backfill, exactly as the amm step runs it
+        env = os.environ
+        remote = ("read -r CLICKHOUSE_PASSWORD; export CLICKHOUSE_PASSWORD; exec ~/events-backfill "
+                  f"--start {L} --end {L} --clickhouse-url http://localhost:8123 --dry-run")
+        cmd = ["ssh"] + shlex.split(a.ssh) + [remote]
+        stdin_text = pw
+    if ch.dry:
+        log(f"[DRY] Comet binary probe: {' '.join(cmd)}")
+        return
+    code, text = stream(cmd, env, logfile, stdin_text=stdin_text)
+    if code != 0 or "=== events-backfill complete ===" not in text:
+        raise Stop(f"{m}: the Comet binary probe (events-backfill --dry-run, ledger {L}) exit {code} — "
+                   f"see {logfile}. If the binary is the cause: {fix}")
+    hit = re.search(rf"^\s*{re.escape(a.comet_source)} ticks:\s*([1-9]\d*)", text, re.M)
+    if not hit:
+        raise Stop(f"{m}: events-backfill does not route venue '{a.comet_source}': a --dry-run over ledger "
+                   f"{L} (Comet's first swap) printed no `{a.comet_source} ticks:` line — {fix}")
+    COMET_BINARY_PROVEN = True
+    log(f"{m}: events-backfill routes '{a.comet_source}' ({hit.group(1)} tick at ledger {L})")
+
+
 # ---------------------------------------------------------------- the 12 steps
 
 def run_month(a, ch, st, m, pw):
@@ -506,9 +599,16 @@ def run_month(a, ch, st, m, pw):
             n = int(ch.one("reader", f"SELECT count() FROM prices.pool_registry FINAL WHERE venue = '{a.sushi_source}'"))
             if n < SUSHI_POOLS:
                 raise Stop(f"{n} {a.sushi_source} pools < {SUSHI_POOLS}: 0290's --discover-pools write has not run")
+        if m >= COMET_FROM_MONTH:
+            n = int(ch.one("reader", f"SELECT count() FROM prices.pool_registry FINAL WHERE venue = '{a.comet_source}'"))
+            if n < COMET_POOLS:
+                raise Stop(f"{n} {a.comet_source} pools < {COMET_POOLS}: 0300's --discover-pools write has not run")
         if soroban and a.amm == "stop":
             raise Stop(f"{m} is Soroban-era and --amm stop is set: its AMM candles need events-backfill "
                        "on the CH host. Re-run with --amm ssh or --amm wait")
+        if m >= COMET_FROM_MONTH and soroban:
+            # The row gate above is not enough: the BINARY routes Comet (WR-02).
+            prove_comet_binary(a, ch, m, pw, mdir / "comet-probe.log")
         done()
 
     if step("snapshot"):
@@ -599,13 +699,7 @@ def run_month(a, ch, st, m, pw):
                 # dropped. The alternatives both work today: `--amm ssh` runs the tool
                 # on the CH host as `default` (proven 2026-09-22 by the 0290 pool
                 # seed), and `--amm wait` + `amm-done` records a run made by hand.
-                probe = subprocess.run(shlex.split(a.events_backfill) + ["--help"],
-                                       capture_output=True, text=True)
-                if "--transport" not in (probe.stdout + probe.stderr):
-                    raise Stop(
-                        f"{a.events_backfill} has no --transport flag, so --amm mtls cannot run. "
-                        "Either merge the events-backfill mTLS transport, or use --amm ssh "
-                        "(run it on the CH host as `default`) or --amm wait + amm-done.")
+                require_transport_flag(a)
                 stem = os.path.expanduser(a.admin_cert)
                 env = dict(os.environ, CH_DOMAIN=urllib.parse.urlparse(ch.url).hostname or "",
                            MTLS_CERT_PATH=stem + ".crt", MTLS_KEY_PATH=stem + ".key",
@@ -668,6 +762,17 @@ def run_month(a, ch, st, m, pw):
         if m >= SUSHI_FROM_MONTH and not ch.dry and after.get(a.sushi_source, {}).get("trades", 0) == 0:
             rank = 2
             note(f"{m}: no {a.sushi_source} volume — the ORDER slipped (0290's registry write), the data is not bad")
+        no_comet = not ch.dry and after.get(a.comet_source, {}).get("trades", 0) == 0
+        if COMET_FROM_MONTH <= m <= COMET_MEASURED_THROUGH and no_comet:
+            # Measured: this month holds >= 135 real Comet swaps (see COMET_MEASURED_THROUGH).
+            rank = 2
+            note(f"{m}: no {a.comet_source} volume — the ORDER slipped (the events-backfill binary predates "
+                 "0300, or 0300's registry write is missing), the data is not bad")
+        elif m > COMET_MEASURED_THROUGH and no_comet:
+            rank = max(rank, 1)
+            note(f"{m}: no {a.comet_source} volume in an unmeasured month — the pool is frozen and winding "
+                 "down since the 2026-08-25 exploit and may simply be idle; the binary and the registry row "
+                 "were proven in the gates step")
         if m >= 202609 and amm_bits:
             note(f"{m}: an AMM gain here includes pools seeded mid-month (0291 on 09-18 08:00 UTC, then 0290) — "
                  "the re-ingest resolves pool_registry as of now, so it is not loss repaired")
@@ -821,6 +926,8 @@ def main():
     p.add_argument("--fallbacks", type=int, default=0)
     p.add_argument("--ack-phase1-measured", action="store_true")
     p.add_argument("--ack-0285", action="store_true")
+    p.add_argument("--ack-0300-binary", action="store_true",
+                   help="--amm wait only: the host events-backfill is built from 0300 or later (routes Comet)")
     p.add_argument("--amm", choices=["mtls", "stop", "ssh", "wait"], default="mtls")
     p.add_argument("--events-backfill", default="./target/release/events-backfill")
     p.add_argument("--ssh", default="", help="ssh target (and options) of the CH host, for --amm ssh")
@@ -842,6 +949,7 @@ def main():
     p.add_argument("--cleanup-rule", default="prices-production-cleanup")
     p.add_argument("--skip-aws-check", action="store_true")
     p.add_argument("--sushi-source", default="sushiswap")
+    p.add_argument("--comet-source", default="comet")
     p.add_argument("--min-free-gb", type=int, default=300)
     p.add_argument("--sdex-max-gain-pct", type=float, default=0.5)
     a = p.parse_args()

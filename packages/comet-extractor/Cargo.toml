@@ -1,0 +1,8 @@
+[package]
+name = "comet-extractor"
+version = "0.1.0"
+edition = "2024"
+description = "Comet weighted-pool swap extractor (task 0300)"
+
+[dependencies]
+extractors-core = { path = "../extractors-core" }

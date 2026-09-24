@@ -216,7 +216,7 @@ jobs:
 
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace
-      - run: cargo clippy -p extractors-core -p phoenix-extractor -p soroswap-extractor -p aquarius-extractor -p ledger-processor -p prices-api -- -D warnings
+      - run: cargo clippy -p extractors-core -p phoenix-extractor -p soroswap-extractor -p aquarius-extractor -p comet-extractor -p ledger-processor -p prices-api -- -D warnings
       # `--no-deps` because prices-ingest-core (a path dependency) carries
       # pre-existing clippy findings; this lints only the crate that owns the
       # ClickHouseWriteLatencyMs publish path (task 0125).

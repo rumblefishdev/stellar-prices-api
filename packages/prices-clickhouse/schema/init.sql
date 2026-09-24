@@ -100,9 +100,9 @@ SETTINGS index_granularity = 8192;
 ----------------------------------------------------------------------
 -- 1-minute OHLCV candles, per-source rows (ADR 0004). Live writes from the
 -- Prices Ledger Processor; backfill streams write here with source in
--- ('sdex','phoenix','soroswap','aquarius'). version = ledger_seq × 1000 +
--- intra-ledger order; ReplacingMergeTree(version) collapses duplicate PKs.
--- §3.2.
+-- ('sdex','phoenix','soroswap','aquarius','sushiswap','comet'). version =
+-- ledger_seq × 1000 + intra-ledger order; ReplacingMergeTree(version) collapses
+-- duplicate PKs. §3.2.
 --
 -- Price semantics (task 0286, ADR 0287): open/high/low/close come ONLY from the
 -- bucket's PRICE-FORMING fills — open is the first such fill and close the last,
@@ -649,7 +649,7 @@ SETTINGS index_granularity = 8192;
 -- output of the in-window registry so a partial re-backfill (a mid-history
 -- window) or the live processor can LOAD it instead of re-deriving from Soroban
 -- activation (this inverts task 0069: registry-as-output, not required-input).
--- venue = 'soroswap' | 'phoenix' | 'aquarius' | 'sushiswap' (task 0290).
+-- venue = 'soroswap' | 'phoenix' | 'aquarius' | 'sushiswap' (task 0290) | 'comet' (task 0300).
 -- token0/token1 are the pair tokens of the two pair-backed venues — Soroswap
 -- (from `new_pair`) and SushiSwap V3 (from `pool_created`) — needed because
 -- their swap events omit them; pool_type / wasm_hash are Phoenix pool details;

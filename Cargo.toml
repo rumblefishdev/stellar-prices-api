@@ -8,6 +8,7 @@ members = [
     "packages/phoenix-extractor",
     "packages/soroswap-extractor",
     "packages/aquarius-extractor",
+    "packages/comet-extractor",
     "packages/ledger-processor",
     "packages/prices-ingest-core",
     "packages/prices-ledger-processor",

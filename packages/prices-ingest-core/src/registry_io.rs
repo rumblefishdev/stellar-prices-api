@@ -67,7 +67,9 @@ impl Registries {
                             row.token1 = p.token1.clone();
                         }
                     }
-                    Venue::Aquarius => {}
+                    // Tokens are inline in their swaps (task 0300 for Comet):
+                    // venue only, blank tokens, pool_type 0.
+                    Venue::Aquarius | Venue::Comet => {}
                 }
                 row
             })
@@ -146,7 +148,7 @@ impl Registries {
                         .phoenix
                         .register(row.contract_id.clone(), row.pool_type),
                 },
-                Venue::Aquarius => {}
+                Venue::Aquarius | Venue::Comet => {}
             }
         }
     }
@@ -197,11 +199,24 @@ mod tests {
         reg.venue.insert("CSUSHI".into(), Venue::Sushiswap);
         reg.sushiswap
             .register("CSUSHI".into(), "CSUSHI0".into(), "CSUSHI1".into());
+        // Task 0300: tokens inline in its swaps, like Aquarius.
+        reg.venue.insert("CCOMET".into(), Venue::Comet);
 
         let rows = reg.to_pool_rows();
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 5);
         // Sorted, stable order.
         assert_eq!(rows[0].contract_id, "CAQUA");
+        assert_eq!(
+            rows[1],
+            PoolRegistryRow {
+                contract_id: "CCOMET".into(),
+                venue: "comet".into(),
+                token0: String::new(),
+                token1: String::new(),
+                pool_type: 0,
+                wasm_hash: String::new(),
+            }
+        );
 
         let mut loaded = Registries::new();
         loaded.load_pool_rows(&rows);
@@ -209,6 +224,7 @@ mod tests {
         assert_eq!(loaded.venue.get("CSOROSWAP"), Some(&Venue::Soroswap));
         assert_eq!(loaded.venue.get("CPHOENIX"), Some(&Venue::Phoenix));
         assert_eq!(loaded.venue.get("CAQUA"), Some(&Venue::Aquarius));
+        assert_eq!(loaded.venue.get("CCOMET"), Some(&Venue::Comet));
         let sw = loaded.soroswap.lookup("CSOROSWAP").expect("soroswap pair");
         assert_eq!(
             (sw.token0.as_str(), sw.token1.as_str()),

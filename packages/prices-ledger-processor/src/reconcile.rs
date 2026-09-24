@@ -149,6 +149,32 @@ pub struct ProcessingState {
     pub persisted_pools: HashMap<String, PoolRegistryRow>,
 }
 
+/// The cold-start [`ProcessingState`] built from what was loaded.
+///
+/// The committed factory-less pools (`STATIC_POOLS`, task 0300) are merged
+/// FIRST, before the `persisted_pools` snapshot: live then routes them from
+/// the first ledger but never writes their rows, because
+/// `events-backfill --discover-pools` is their writer (task 0300 D3b).
+fn initial_state(assets: AssetRegistry, mut registries: Registries) -> ProcessingState {
+    registries.merge_static_pools();
+    // Everything loaded from `prices.assets` at cold start is already durable,
+    // so the persisted watermark starts at the loaded registry's next id.
+    let persisted_asset_watermark = assets.watermark();
+    // Same for pools. Built from the registry's own rows, not the table's —
+    // see `Registries::pool_rows_unpersisted`.
+    let persisted_pools = registries
+        .to_pool_rows()
+        .into_iter()
+        .map(|row| (row.contract_id.clone(), row))
+        .collect();
+    ProcessingState {
+        assets,
+        registries,
+        persisted_asset_watermark,
+        persisted_pools,
+    }
+}
+
 pub struct Reconciler<F, C, S> {
     fetcher: F,
     cursor: C,
@@ -169,26 +195,11 @@ where
         assets: AssetRegistry,
         registries: Registries,
     ) -> Self {
-        // Everything loaded from `prices.assets` at cold start is already durable,
-        // so the persisted watermark starts at the loaded registry's next id.
-        let persisted_asset_watermark = assets.watermark();
-        // Same for pools. Built from the registry's own rows, not the table's —
-        // see `Registries::pool_rows_unpersisted`.
-        let persisted_pools = registries
-            .to_pool_rows()
-            .into_iter()
-            .map(|row| (row.contract_id.clone(), row))
-            .collect();
         Self {
             fetcher,
             cursor,
             sink,
-            state: Mutex::new(ProcessingState {
-                assets,
-                registries,
-                persisted_asset_watermark,
-                persisted_pools,
-            }),
+            state: Mutex::new(initial_state(assets, registries)),
         }
     }
 
@@ -998,5 +1009,28 @@ mod tests {
     #[test]
     fn an_empty_run_has_no_boundary() {
         assert_eq!(run_boundary(&[]), (0, None));
+    }
+
+    /// Task 0300 D3: from an EMPTY `pool_registry` the live processor routes
+    /// the committed factory-less pools, and — because they are merged before
+    /// the persisted snapshot — never INSERTs their rows (discover-pools does).
+    #[test]
+    fn live_routes_the_static_pools_but_never_writes_them() {
+        use super::initial_state;
+        use extractors_core::Venue;
+        use prices_ingest_core::{AssetRegistry, Registries};
+
+        const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
+        let state = initial_state(AssetRegistry::from_existing(vec![]), Registries::new());
+
+        assert_eq!(state.registries.venue.get(COMET), Some(&Venue::Comet));
+        assert!(state.persisted_pools.contains_key(COMET));
+        assert!(
+            state
+                .registries
+                .pool_rows_unpersisted(&state.persisted_pools)
+                .is_empty(),
+            "nothing for live to write"
+        );
     }
 }

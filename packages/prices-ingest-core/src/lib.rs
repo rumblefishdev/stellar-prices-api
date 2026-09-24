@@ -13,6 +13,8 @@
 //! Layers, in pipeline order:
 //! - [`filter`] — classic SDEX trades from `LedgerCloseMeta` operation results.
 //! - [`soroban`] — Soroban AMM trades + oracle samples from contract events.
+//! - [`static_pools`] — the committed list of factory-less pools
+//!   ([`STATIC_POOLS`], task 0300) merged into the AMM registries.
 //! - [`canonical`] — asset identity, the [`AssetRegistry`] surrogate-id store,
 //!   and `(base, quote)` canonicalisation.
 //! - [`price`] / [`tick`] — per-trade price + the [`TradeTick`] the bucketer eats.
@@ -32,6 +34,7 @@ pub mod registry_io;
 pub mod retry;
 pub mod safe_log;
 pub mod soroban;
+pub mod static_pools;
 pub mod tick;
 pub mod writer;
 
@@ -54,5 +57,6 @@ pub use soroban::{
     LedgerSoroban, RawSorobanEvent, Registries, UnresolvedPoolSwap, learn_factory_event,
     process_ledger, process_soroban_event_rows, reflector_key_to_identity,
 };
+pub use static_pools::STATIC_POOLS;
 pub use tick::{PricedFrom, TradeTick, raw_trade_to_tick, raw_trade_to_tick_with_source};
 pub use writer::{AssetMetadata, OhlcvWriter, OracleSample, UnresolvedPool};
