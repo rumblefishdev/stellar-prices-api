@@ -632,6 +632,35 @@ live in the running processor and reads OK on zero events, plus
 `events-backfill --discover-pools` for a manual seed. AC 2 stays 0291's to
 close on the first new pool.
 
+## Liveness alarm — decided 2026-09-24
+
+The question [[0223]] parked here (2026-09-15) is answered: **yes, the standard
+pair.** After the removal the worker is the Soroban symbol stage ([[0210]]) and
+the asset seed — real hourly work, not dead code — so it joins `workerHealth`
+like `supply` did, and leaves `WORKERS_WITHOUT_HEALTH_ALARMS` (which changes
+the `-errors` alarm's sentence in the EventBridge stack from "has NO liveness
+alarm — deferred to task 0256" to the conditional-by-design one).
+
+Read before the first deploy, 0223's lesson (a diff cannot show what a metric
+will do against a threshold):
+
+| metric, last 48 h | value | alarm it feeds |
+|---|---|---|
+| `Invocations` per hour | 1 in every one of 48 hours | `-no-invocations` (3 of 3 empty cadences, `treatMissingData: BREACHING`) |
+| `Duration.Maximum` | 5.4 s (avg 3.7 s), timeout 300 s, threshold 240 s | `-duration-near-timeout` (2 of 2) — 44× headroom, no latch |
+| `Errors` | 0 | — |
+
+Impact sentence on both alarms: a Soroban token that starts trading gets no
+`symbol()` lookup and lists with an empty `code` until the worker is back; the
+seed of the major assets stops being re-asserted.
+
+Branch `fix/0256_asset-discovery-liveness-alarm`. `cdk diff` before the PR:
+Observability gains the two alarms (and, as a stowaway, [[0100]]'s
+`CoverageSweepUnclassifiedAlarm` + its dashboard row — Adam's, not deployed
+yet); EventBridge changes one alarm description. Induction after the deploy,
+0222-style: disable `prices-production-asset-discovery` for three cadences,
+see `-no-invocations` go ALARM, enable, see OK — recorded here when done.
+
 ## Acceptance Criteria
 
 - [x] A recorded decision on whether the ledger scan is still needed
