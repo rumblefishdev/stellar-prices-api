@@ -646,17 +646,43 @@ day candle inherits the new open. `close_usd = 0` before and after (no USD
 reference in 2015). The trial proves the script against the real
 `sdex-backfill` end to end; stage A may start.
 
-#### Stage A — running (status 2026-09-23 16:15 local)
+#### Stage A — running (status 2026-09-24 11:08 UTC)
 
 | | |
 | --- | --- |
-| started | ~16:10 local, `run --to-month 202401 --ack-phase1-measured --amm stop --skip-aws-check`, tmux session `reingest` on `fishuser-hero`, first pane |
-| months done | **1 of 99** in scope (201511, OK); 130 planned in total |
-| current month | **201512**, ledgers 1 096 833 – 1 618 657 (521 825): snapshot taken (1m 4 rows, 15m/1h/4h/1d 3 each), markers cleared, 1m dropped, `sdex-backfill` downloading its first archive partition |
-| snapshots held | 201512 only — 201511's released after its check (`release 201511`) |
-| CH disk | 447 GiB free (floor 300) |
+| started | ~16:10 local 2026-09-23, `run --to-month 202401 --ack-phase1-measured --amm stop --skip-aws-check`, tmux session `reingest` on `fishuser-hero`, first pane |
+| months done | **16 of 99** in scope: 201511 → 201702 (201702's 1m partition written 10:36 UTC); 130 planned in total |
+| current month | **201703**, re-ingest in progress: newest 1m candle 2017-03-16 12:56, 18 trades so far |
+| pace | ~80 min per month over the first 16 (1m partitions written 2026-09-23 13:52 → 2026-09-24 10:36 UTC); these months hold 1–32 candles each, so the pace is download-bound and will slow from ~2017 as archive partitions grow to GBs |
+| snapshots held | 201512 → 201703 in all five `reingest_0286_bak_*` tables — none released since 201511; each is a few rows, so no disk pressure |
+| CH disk | 603 GiB free (floor 300) |
 | pending mutations | 0 |
-| expected finish | ~2026-10-03..05 |
+| expected finish | ~2026-10-03..05 (unchanged) |
+
+**201512 → 201702 checked on prod** (2026-09-24 11:08 UTC, read-only, `FINAL`
+against `reingest_0286_bak_*`, 15 months together):
+
+| tier | candles new = old | trades new = old | volumes | OHLC-order violations | raw = FINAL |
+| --- | --- | --- | --- | --- | --- |
+| 1m | 175 = 175 | 211 = 211 | equal in every month | 0 | 175 = 175 |
+| 15m | 138 = 138 | 211 = 211 | — | 0 | 138 = 138 |
+| 1h | 126 = 126 | 211 = 211 | — | 0 | 126 = 126 |
+| 4h | 110 = 110 | 211 = 211 | — | 0 | 110 = 110 |
+| 1d | 103 = 103 | 211 = 211 | equal in every month | 0 | 103 = 103 |
+
+All 15 months are clean and can be `release`d.
+
+**Progress can be read without `fishuser-hero`.** Every step writes to
+ClickHouse, so the laptop's read-only `dev_read` cert shows it:
+`system.parts` for `price_ohlcv_1m` (a partition whose parts are all newer
+than 2026-09-23 12:00 UTC has been re-ingested; `max(modification_time)`
+dates it), the partitions still held by `reingest_0286_bak_*`, and the
+in-flight month's newest candle. What prod cannot show: a `STOP` line (the
+loop simply stops writing — a month far past its usual time is the signal to
+look at the tmux), the archive download inside a month, and the campaign
+machine's own disk. `dev_read`'s 4 TiB/hour quota was exhausted by other
+users on the morning of 09-24 until the 11:00 UTC reset; a check then waits
+for the next hour.
 
 **How it is watched.** The status pane (`watch -n5 … status`, second pane)
 shows the month, step and partitions indexed; each finished month lands in
