@@ -1529,10 +1529,15 @@ async fn the_usd_reset_refuses_a_bounded_pass() {
 /// would report a healthy repair over unchanged values, now labelled
 /// `method = 'oracle'`. The pass must refuse instead.
 ///
-/// ⚠️ **This test now pins the UNBOUNDED half of the guard.** Task 0268 scoped
-/// the count to `[not_before, not_after)`; with `not_after = None` — the spec
-/// this test builds — it still counts to the end of time, so 0182's all-time
-/// refusal is unchanged. The bounded half is
+/// Runs in the task 0228 mode on the USDT leg: since task 0208 review WR-04 a
+/// plain reset of a pivot leg is refused before the oracle-shadow query, as
+/// `ResetPlainModeOnPivotLeg`. The oracle-shadow guard runs for every mode,
+/// and the mode's default upper bound (`USDC_ORACLE_EPOCH_S`) sits above the
+/// fixture's `t_new`, so the reading below is still inside the scanned band.
+/// The UNBOUNDED half of the guard (`not_after = None`, counted to the end of
+/// time) is pinned on the plain mode's only legal leg by
+/// `the_plain_peg_reset_is_refused_unbounded_and_admitted_below_usdc_s_oracle_rows`;
+/// the bounded half by
 /// `the_bounded_usd_reset_is_not_refused_by_oracle_rows_above_its_window`.
 /// 🔑 **The forward-fill band below `not_before`.** The oracle tier ASOFs
 /// `o.timestamp <= p.timestamp` and accepts a reading up to `window_s` old, so a
@@ -1570,9 +1575,10 @@ async fn the_usd_reset_is_refused_by_an_oracle_row_that_forward_fills_into_it() 
     c.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 3,
         not_before: t_new,
-        not_after: None,
+        // The task 0228 mode, the only one that re-opens a pivot leg.
+        not_after: Some(USDC_ORACLE_EPOCH_S),
         require_external_rate: false,
-        require_pivot_usdc_rate: false,
+        require_pivot_usdc_rate: true,
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
 
@@ -1663,12 +1669,15 @@ async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_l
     c.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 3,
         not_before: t_new,
-        // The 0182 shape, stated at every site rather than defaulted: unbounded
-        // above and no reference join. Task 0268 added both fields precisely so
-        // each caller has to say which repair it is running.
-        not_after: None,
+        // Stated at every site rather than defaulted: task 0268 added both
+        // fields precisely so each caller has to say which repair it is running.
+        // The task 0228 mode — since task 0208 review WR-04 the only one that
+        // re-opens a pivot leg; the plain mode is refused before this guard's
+        // query. `t_new` sits below the mode's upper bound, so the reading is
+        // inside the scanned window.
+        not_after: Some(USDC_ORACLE_EPOCH_S),
         require_external_rate: false,
-        require_pivot_usdc_rate: false,
+        require_pivot_usdc_rate: true,
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
 
@@ -1678,13 +1687,107 @@ async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_l
         "expected the reset to be refused while oracle rows shadow the quote leg, got {err:?}"
     );
 
-    // And it refused *before* writing: the stored value is untouched, so the
-    // operator can purge and re-run without a half-applied repair in the way.
+    // And it refused *before* writing: the stored value is untouched, so a
+    // re-run over a corrected window (or after removing a reading that is
+    // known to be mis-attributed, as task 0196's USDT rows were) starts from
+    // the stored state, without a half-applied repair in the way.
     let v = close_usd(&client, db, 10, 3, t_new).await;
     assert!(
         (v - 10.0).abs() < 1e-4,
         "a refused reset must not have written anything, got {v}"
     );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// The UNBOUNDED half of the oracle-shadow guard, on the only leg the plain
+/// mode still runs on (task 0208 review WR-04): canonical USDC. With
+/// `not_after = None` the count runs to the end of time, so on production —
+/// where canonical USDC has held live Reflector readings since 2026-03-11 —
+/// an unbounded plain USDC reset is always refused, by readings its 2020-2025
+/// window never touches. The fix is an upper bound at or below the first
+/// reading (`--reset-not-after`), NOT a purge: the same spec bounded at
+/// `USDC_ORACLE_EPOCH_S` is admitted, and the live reading is still there.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_plain_peg_reset_is_refused_unbounded_and_admitted_below_usdc_s_oracle_rows() {
+    let db = "it_enrich_0208_plain_peg_bound";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    let client = setup_0182(db, t_old, t_new).await;
+    // Write the values the reset re-opens.
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    // A live canonical USDC poll, an hour after the epoch — prod's shape.
+    let live = USDC_ORACLE_EPOCH_S + 3_600;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices \
+             (asset_id, oracle_name, timestamp, price_usd) VALUES \
+             (2, 'reflector', {live}, 1.0001)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let plain_usdc = |not_after: Option<u32>| {
+        let mut c = cfg(db);
+        c.one_shot = true;
+        c.usd_reset = Some(UsdResetSpec {
+            quote_asset_id: 2,
+            not_before: t_new,
+            not_after,
+            require_external_rate: false,
+            require_pivot_usdc_rate: false,
+        });
+        c
+    };
+
+    // Unbounded above: refused by a reading the window can never reach.
+    let v_new = version_of(&client, db, 3, 2, t_new).await;
+    let err = ChEnrichmentPass::new(plain_usdc(None))
+        .run()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ChEnrichError::ResetBlockedByOracleRows { quote_asset_id: 2, rows: 1, window, .. }
+                if window.contains("all time")
+        ),
+        "an unbounded plain USDC reset must be refused by the live reading, got {err:?}"
+    );
+    assert_eq!(
+        version_of(&client, db, 3, 2, t_new).await,
+        v_new,
+        "a refused reset must not have written anything"
+    );
+
+    // Bounded at the first reading: admitted, and the reading was not purged.
+    let stats = ChEnrichmentPass::new(plain_usdc(Some(USDC_ORACLE_EPOCH_S)))
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(
+        stats.rows_reset, 1,
+        "the bounded plain USDC reset must re-open the post-epoch USDT/USDC row"
+    );
+    let fixed = close_usd(&client, db, 3, 2, t_new).await;
+    assert!(
+        (fixed - 0.13).abs() < 1e-4,
+        "the re-opened USDC-leg row must be refilled at 0.13, got {fixed}"
+    );
+    let readings: u64 = client
+        .query(&format!(
+            "SELECT count() FROM {db}.oracle_prices WHERE asset_id = 2"
+        ))
+        .fetch_one()
+        .await
+        .unwrap();
+    assert_eq!(readings, 1, "the live USDC reading must still be there");
 
     client
         .query(&format!("DROP DATABASE {db}"))
