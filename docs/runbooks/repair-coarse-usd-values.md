@@ -474,7 +474,8 @@ idempotent. After a _pricing_ defect that is a problem: task 0172 found that
 USDT-quoted candles had been valued at par by a peg tier, and those 44,657 rows
 are inert. The writer is fixed; nothing will ever revisit what it already wrote.
 
-⚠️ **A plain dry run over this shape reports "no months with enrichable zeros".**
+⚠️ **A dry run without `--reset-*` flags over this shape reports "no months
+with enrichable zeros".**
 Before task 0182 that all-clear was indistinguishable from a genuinely clean
 table. The `--reset-*` flags widen the month enumeration so those rows count.
 
