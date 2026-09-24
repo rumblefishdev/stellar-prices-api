@@ -118,8 +118,9 @@ pub struct PortalConfig {
     /// drift from what is actually enforced. Since task 0311 a signed-in
     /// caller WITH a key is shown their own plan's figures, from `/usage`
     /// (`GetUsagePlans` on the key). This stays for what has no key to ask
-    /// about: the no-key state — a `404` with no body to carry a plan — the
-    /// landing page, and the fallback while the usage call is unanswered.
+    /// about: the no-key state — a `404` with no body to carry a plan — and the
+    /// landing page. While the usage call is unanswered or failed the
+    /// dashboard states no figure rather than falling back to this one.
     ///
     /// Omitted from the JSON entirely when this deployment was not told what
     /// the limit is; the page then omits the line rather than inventing a

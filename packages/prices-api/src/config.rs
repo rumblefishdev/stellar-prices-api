@@ -41,8 +41,9 @@ pub struct AppConfig {
     /// `api-gateway-stack.ts` feeds to `addUsagePlan`. Since task 0311 the
     /// signed-in dashboard does not state this figure: `/api/usage` reads the
     /// key's OWN plan through `GetUsagePlans` and reports its figures. This
-    /// stays for what has no key to ask about — the no-key state, the landing
-    /// page, and the fallback while the usage call is unanswered — and it
+    /// stays for what has no key to ask about — the no-key state and the
+    /// landing page; while the usage call is unanswered or failed the
+    /// dashboard states no figure at all rather than this one — and it
     /// stays config-fed rather than a literal in the frontend, because a
     /// literal would drift from what the gateway enforces the moment
     /// `infra/envs/production.json` changed.

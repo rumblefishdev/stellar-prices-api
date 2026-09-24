@@ -484,6 +484,9 @@ function RawFigure({ testId, value }: { testId: string; value: number }) {
   );
 }
 
+/** One header pill: a label and a tone. */
+export type Pill = { label: string; tone: 'ok' | 'muted' | 'bad' };
+
 /**
  * The dashboard's card shell — a titled header band over a body.
  *
@@ -491,9 +494,6 @@ function RawFigure({ testId, value }: { testId: string; value: number }) {
  * and "Rate Limit". The status pill lives in the header beside the title, which
  * is the only place the design ever puts one.
  */
-/** One header pill: a label and a tone. */
-export type Pill = { label: string; tone: 'ok' | 'muted' | 'bad' };
-
 export function DashboardCard({
   title,
   status,

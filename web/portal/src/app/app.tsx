@@ -249,12 +249,7 @@ function useOneShotParams(
  * the task. "Cancelled" is not an error: the visitor pressed Cancel at Discord's
  * consent screen, the callback redirected here with `?signin=cancelled`, and the
  * only reasonable response is to say so and leave the button where it was.
- *
- * `rateLimit` is nothing to do with sign-in and is not read here: it comes off
- * `/config`, which only this component's parent has, and is wanted three levels
- * down by the usage panel (task 0188). Passed through rather than re-fetched or
- * put in a context — one prop across two hops is less machinery than either,
- * and it keeps the value's single source visible in the call chain.
+
  */
 function useSession(enabled: boolean): {
   session: SessionState;
@@ -1351,12 +1346,9 @@ const UNDERLINED = {
  */
 function Dashboard({
   session,
-  rateLimit,
   onSignOut,
 }: {
   session: PortalSession;
-  /** The free plan's per-second rate limit, straight from `/config`. */
-  rateLimit?: number;
   /**
    * ⚠️ Back on this component since 2026-08-26, for one caller only: the
    * revoked card puts "Sign out" among its actions, as the frame draws it.
@@ -1419,19 +1411,25 @@ function Dashboard({
     // already consumed by then, so a reload could not bring it back.
     return landed.get('issue') !== null || landed.get('signin') !== null;
   });
-  // The quota `/usage` reported, so the key card's "Monthly quota" field can
-  // state a number this page was actually told. `undefined` until the panel
-  // below has an answer; the field is simply absent until then.
+  // The quota `/usage` reported, so the key card's quota field can state a
+  // number this page was actually told. `null` until the panel below has an
+  // answer; the field is simply absent until then.
   //
-  // `plan` (task 0311) feeds the Rate Limit card: `undefined` while `/usage`
-  // has not answered (or failed) — the card then states `/config`'s free
-  // figure as it always did — `null` for a key on no usage plan, and the
-  // plan's figures and pill otherwise.
+  // `plan` (task 0311) is what `/usage` said about the key's plan, as a
+  // `PlanView`: the Rate Limit card and the key card state that plan's
+  // figures and nothing else. Until it is `known` they state no figure at all
+  // — `/config`'s is the FREE plan's, and a paid key would read it as its own
+  // (task 0311's review, CR-02/WR-01).
+  //
+  // `capResetsAt` is `/usage`'s `resets_at` only when the plan counts per
+  // MONTH: the rework cap is the calendar month whatever the quota's period
+  // (task 0191), so a DAY plan's "tomorrow" must never become the date the
+  // next key can be issued from (review WR-02).
   const [usageFacts, setUsageFacts] = useState<{
     quota: number | null;
-    resetsAt: string | null;
-    plan: PortalPlan | null | undefined;
-  }>({ quota: null, resetsAt: null, plan: undefined });
+    capResetsAt: string | null;
+    plan: PlanView;
+  }>({ quota: null, capResetsAt: null, plan: { state: 'loading' } });
 
   // ⚠️ **A revoked key replaces the whole dashboard** (Adam, 2026-08-26).
   //
@@ -1473,9 +1471,9 @@ function Dashboard({
         onRevokedState={setRevoked}
         onKeyAbsent={setKeyAbsent}
         session={session}
-        rateLimit={rateLimit}
         quota={usageFacts.quota}
-        resetsAt={usageFacts.resetsAt}
+        resetsAt={usageFacts.capResetsAt}
+        plan={usageFacts.plan}
       />
 
       {/* Two columns at the design's 5:3 ratio, one at 375px. `align-items:
@@ -1501,20 +1499,26 @@ function Dashboard({
           keyAbsent={keyAbsent}
           keyOnScreen={keyOnScreen}
           revokedCount={revokedCount}
-          rateLimit={rateLimit}
           onUsage={(usage) =>
             setUsageFacts({
               quota: usage?.limit ?? null,
-              resetsAt: usage?.resets_at ?? null,
-              plan: usage?.plan,
+              capResetsAt:
+                usage?.plan?.quota_period === 'MONTH'
+                  ? (usage.resets_at ?? null)
+                  : null,
+              plan: planViewOf(usage),
             })
           }
+          onUsageFailed={() =>
+            setUsageFacts((facts) => ({ ...facts, plan: { state: 'failed' } }))
+          }
+          quotaPeriod={
+            usageFacts.plan.state === 'known'
+              ? usageFacts.plan.plan?.quota_period
+              : undefined
+          }
         />
-        <RateLimitCard
-          rateLimit={rateLimit}
-          keyAbsent={keyAbsent}
-          plan={usageFacts.plan}
-        />
+        <RateLimitCard keyAbsent={keyAbsent} plan={usageFacts.plan} />
       </Box>
     </Stack>
   );
@@ -2418,9 +2422,9 @@ function ApiKey({
   onRevokedState,
   onKeyAbsent,
   session,
-  rateLimit,
   quota,
   resetsAt,
+  plan = { state: 'loading' },
 }: {
   onKey?: () => void;
   /** Task 0191: the key on screen was just deactivated. A fact, no data. */
@@ -2455,20 +2459,28 @@ function ApiKey({
    */
   onKeyAbsent?: (absent: boolean) => void;
   session: PortalSession;
-  /** The free plan's per-second limit, from `/config`. */
-  rateLimit?: number;
   /**
-   * The monthly quota, as `/usage` reported it to the panel below — `null`
-   * where AWS has recorded nothing yet, `undefined` before it has answered.
+   * The key's plan, as `/usage` reported it to the panel below (task 0311).
+   * The first-login row states its rate and names its quota's period; until
+   * it is `known` the row states neither — never `/config`'s free figure,
+   * which a paid key would read as its own (review CR-02).
+   */
+  plan?: PlanView;
+  /**
+   * The plan's quota, as `/usage` reported it to the panel below — `null`
+   * where the plan has none or `/usage` has not answered, `undefined` before
+   * the dashboard passes anything.
    * Lifted rather than fetched again: `GetUsage` is a control-plane call and
    * this page already spends one (task 0194 owns that budget).
    */
   quota?: number | null;
   /**
-   * When the current quota period ends, RFC 3339, as `/usage` reported it —
-   * and so the instant a key revoked today becomes re-issuable (task 0191:
-   * one key per period, the cap decided against the same `Period`). `null`
-   * until the panel below has an answer.
+   * The instant a key revoked today becomes re-issuable, RFC 3339 — `/usage`'s
+   * `resets_at`, passed ONLY for a plan whose quota counts per `MONTH`, where
+   * the quota period and the rework cap's calendar month (task 0191) are the
+   * same `Period`. `null` otherwise, and the strip computes the 1st of next
+   * month itself: a `DAY` plan's reset is tomorrow, the cap's is not (task
+   * 0311's review, WR-02).
    */
   resetsAt?: string | null;
 }) {
@@ -2537,6 +2549,8 @@ function ApiKey({
    * the ordinary card.
    */
   const justIssued = landedWithKey && view.state === 'ok';
+  /** The key's plan once `/usage` has named it (task 0311); else `null`. */
+  const knownPlan = plan.state === 'known' ? plan.plan : null;
   /**
    * The `Dashboard - no key` card: the account has no key and this load did not
    * arrive from a completed issue round-trip.
@@ -3109,13 +3123,25 @@ function ApiKey({
                 Just now
                 {issuedOn && ` · ${issuedOn}`}
               </MetaField>
-              {quota !== undefined && quota !== null && (
-                <MetaField label="Monthly quota">
+              {/* Task 0311: the quota and the rate are the key's OWN plan's,
+                  and the quota is named by its period — "Monthly" on a DAY
+                  plan is a false figure (review WR-02). Until `/usage` has
+                  named the plan both are absent, never `/config`'s free
+                  figure (review CR-02). */}
+              {knownPlan && quota !== undefined && quota !== null && (
+                <MetaField label={quotaLabel(knownPlan.quota_period)}>
                   {quota.toLocaleString('en-US')} requests
                 </MetaField>
               )}
-              {rateLimit !== undefined && (
-                <MetaField label="Rate limit">{rateLimit} req/s</MetaField>
+              {knownPlan && knownPlan.quota_limit === null && (
+                <MetaField label="Quota">Unlimited</MetaField>
+              )}
+              {knownPlan && (
+                <MetaField label="Rate limit">
+                  {knownPlan.rate_limit_per_second === null
+                    ? 'Unlimited'
+                    : `${formatRate(knownPlan.rate_limit_per_second)} req/s`}
+                </MetaField>
               )}
             </MetaRow>
           )}
@@ -3263,7 +3289,10 @@ function ApiKey({
           contradicting it. The date is the same instant either way.
 
           The date prefers `/usage`'s `resets_at`, which is the backend's own
-          `Period`; without it the page computes the 1st of next month itself,
+          `Period` — but only for a plan whose quota counts per MONTH (the
+          dashboard passes nothing else, task 0311's review WR-02): the cap is
+          the calendar month on every plan, and a DAY plan's reset is
+          tomorrow. Without it the page computes the 1st of next month itself,
           because that IS the rule (`portal/period.rs`) rather than a number
           the server holds. */}
       {view.state === 'ok' && !justIssued && (
@@ -3329,7 +3358,14 @@ function ApiKey({
  * `RUMBLEFISH_CONTACT` — and this strip's copy is left as it was (0311 scopes
  * its contact change to that card).
  */
-function QuotaReachedNotice({ resetsAt }: { resetsAt: string }) {
+function QuotaReachedNotice({
+  resetsAt,
+  period,
+}: {
+  resetsAt: string;
+  /** The plan's `quota_period` — the notice names it (task 0311, WR-02). */
+  period?: string | null;
+}) {
   const at = new Date(resetsAt);
   const on = Number.isNaN(at.getTime())
     ? null
@@ -3342,7 +3378,7 @@ function QuotaReachedNotice({ resetsAt }: { resetsAt: string }) {
   return (
     <NoticeStrip tone="error">
       <p data-testid="usage-quota-reached">
-        Monthly quota reached. API requests will return{' '}
+        {quotaLabel(period)} reached. API requests will return{' '}
         <strong>HTTP 429</strong>
         {/* The date is dropped rather than guessed if `resets_at` is
             unparseable: the sentence still says what is happening and when it
@@ -3369,8 +3405,9 @@ function Usage({
   keyAbsent = false,
   keyOnScreen,
   revokedCount = 0,
-  rateLimit,
   onUsage,
+  onUsageFailed,
+  quotaPeriod,
 }: {
   /**
    * The account has no key at all — the frame gives this card an empty body.
@@ -3381,7 +3418,6 @@ function Usage({
   keyOnScreen: boolean;
   /** Task 0191: bumped by the dashboard on each in-page revoke. */
   revokedCount?: number;
-  rateLimit?: number;
   /**
    * What this panel read, handed to the dashboard so the key card above can
    * state the quota and the date the next key becomes available without a
@@ -3390,6 +3426,17 @@ function Usage({
    * zero or a guessed date.
    */
   onUsage?: (usage: PortalUsage | null) => void;
+  /**
+   * `/usage` failed (task 0311) — so the dashboard can tell "not answered
+   * yet" from "will not answer", and the Rate Limit card can say which.
+   */
+  onUsageFailed?: () => void;
+  /**
+   * The key's plan's `quota_period`, once known (task 0311): the card is
+   * titled by it — "Monthly Usage" for every CDK plan, "Daily Usage" for a
+   * hand-made DAY plan (review WR-02). Absent → "Monthly Usage", the frame's.
+   */
+  quotaPeriod?: string | null;
 }) {
   type UsageView =
     | { state: 'loading' }
@@ -3423,9 +3470,11 @@ function Usage({
         // expired session must read "sign out and sign in again" in BOTH
         // places, not as that sentence in one and a raw "answered 401" in the
         // other — two wordings for one cause on one screen reads as two bugs.
-        if (live) setView({ state: 'failed', reason: describeFailure(error) });
+        if (!live) return;
+        setView({ state: 'failed', reason: describeFailure(error) });
+        onUsageFailed?.();
       });
-    // ⚠️ `onUsage` IS an inline arrow at the call site, so it is a new
+    // ⚠️ `onUsage` (and `onUsageFailed`) IS an inline arrow at the call site, so it is a new
     // function on every render of `Dashboard` — and naming it here would
     // re-create `load`, which the mount effect below depends on, and refetch
     // usage in a loop. It is left out on purpose: `load` reads nothing from
@@ -3528,7 +3577,7 @@ function Usage({
   if (keyAbsent) return <DashboardCard title="Monthly Usage" />;
 
   return (
-    <DashboardCard title="Monthly Usage">
+    <DashboardCard title={usageTitle(quotaPeriod)}>
       {view.state === 'loading' && <p>Loading your usage…</p>}
 
       {view.state === 'no-key' &&
@@ -3564,7 +3613,7 @@ function Usage({
           // Task 0311: a plan without a quota. Nothing is counted against
           // it, so there is no meter to draw — "Unlimited" is the figure.
           <p data-testid="usage-unlimited">
-            <strong>Unlimited</strong> — your plan has no monthly quota.
+            <strong>Unlimited</strong> — your plan has no quota.
           </p>
         ) : view.usage.limit !== null && view.usage.resets_at === null ? (
           // Task 0311: a quota whose period the backend does not compute
@@ -3653,7 +3702,10 @@ function Usage({
               view.usage.limit > 0 &&
               view.usage.used >= view.usage.limit &&
               view.usage.resets_at !== null && (
-                <QuotaReachedNotice resetsAt={view.usage.resets_at} />
+                <QuotaReachedNotice
+                  resetsAt={view.usage.resets_at}
+                  period={view.usage.plan?.quota_period}
+                />
               )}
           </>
         ))}
@@ -3668,44 +3720,78 @@ function Usage({
 }
 
 /**
- * The Rate Limit card — the key's plan, its two figures, and what the gateway
- * does when you cross them.
+ * What the dashboard knows about the key's usage plan (task 0311).
  *
- * **The figures are the key's OWN plan's** since task 0311: `/api/usage`
- * reports the plan the key is on (`plan`), and the per-second figure is its
- * `rate_limit_per_second`; the per-minute one is that times sixty, computed
- * rather than written down. The plan's name rides beside "Active" as a second
- * pill (`Free` … `Pro`, `Custom` for any other plan on our stage), and the
- * contact line under the figures links to `RUMBLEFISH_CONTACT` with copy for
- * the tier — contacting us is the only way to change plan, so it is shown on
- * every tier.
+ * - `loading` — `/usage` has not answered yet;
+ * - `failed` — it answered with an error;
+ * - `unknown` — it answered, but named no plan: `no_key` while the key card
+ *   holds one (the backend's short cache lagging an issue), or a backend older
+ *   than task 0311 that sends no `plan` at all;
+ * - `known` — the plan, or `null` for a key on no plan for this API's stage.
  *
- * Three states besides that one:
- *
- * - **No plan** (`plan: null`): the key is on no usage plan for this API, so
- *   the gateway answers it `403`. No pill — "Active" would be false — and the
- *   state is said in words.
- * - **Unlimited** (`rate_limit_per_second: null`): both figures read
- *   "Unlimited", never a zero.
- * - **Not answered yet** (`plan` undefined — `/usage` in flight or failed):
- *   `/config`'s free-plan figure, as before 0311. `/config` stays the source
- *   for that, for the no-key state and for the landing page.
- *
- * **The card always renders**, which is a change from the build that dropped
- * it whenever `/config` carried no limit (Adam, 2026-08-25: "brakuje całego
- * jednego kafelka"). A missing panel is a worse answer than a stated one: the
- * free plan's rate is 1 req/s (task 0157), the landing page says so to every
- * visitor before they sign in, and this card says the same where neither the
- * key's plan nor the deployment has spoken.
- *
- * ⚠️ `/config` WINS over this constant wherever it answers, which is every
- * deployed environment (`compute-stack.ts` passes `pricingApiFreePlanRateLimit`
- * unconditionally), and the key's plan wins over both. The fallback is for the
- * local case only, and if the free plan's rate ever changes, this constant is
- * one of the two places that must change with it — the other being
- * `FairAccess`.
+ * Only `known` puts figures on the page. The other three state no rate and
+ * no tier: `/config`'s figure is the FREE plan's, and a paid key reading it as
+ * its own is exactly the contradiction task 0311 exists to remove (review
+ * CR-02/WR-01). `/config` stays the source for the no-key state and the
+ * landing page only.
  */
-const FREE_PLAN_RATE_LIMIT = 1;
+type PlanView =
+  | { state: 'loading' }
+  | { state: 'failed' }
+  | { state: 'unknown' }
+  | { state: 'known'; plan: PortalPlan | null };
+
+/** `/usage`'s answer as a `PlanView` — `null` is its `no_key`. */
+function planViewOf(usage: PortalUsage | null | undefined): PlanView {
+  if (!usage || usage.plan === undefined) return { state: 'unknown' };
+  return { state: 'known', plan: usage.plan };
+}
+
+/**
+ * A quota named by its period (task 0311's review, WR-02): the five CDK plans
+ * all count per `MONTH`, but a hand-made Custom plan can count per `DAY` or
+ * `WEEK`, and "Monthly quota" over a daily figure is a false statement. A
+ * period this page has no word for is just "Quota"; no period known yet reads
+ * as the frame's "Monthly quota", which is every CDK plan's.
+ */
+function quotaLabel(period: string | null | undefined): string {
+  switch (period) {
+    case undefined:
+    case 'MONTH':
+      return 'Monthly quota';
+    case 'WEEK':
+      return 'Weekly quota';
+    case 'DAY':
+      return 'Daily quota';
+    default:
+      return 'Quota';
+  }
+}
+
+/** The usage card's title, by the same rule as `quotaLabel`. */
+function usageTitle(period: string | null | undefined): string {
+  switch (period) {
+    case 'WEEK':
+      return 'Weekly Usage';
+    case 'DAY':
+      return 'Daily Usage';
+    default:
+      return 'Monthly Usage';
+  }
+}
+
+/**
+ * A rate as the cards print it (task 0311's review, IN-03). AWS's
+ * `rateLimit` is a double, so a Custom plan at 0.1 req/s is 6.000000000000001
+ * per minute in floating point. At most two decimals, and no grouping — the
+ * cards have always printed `1500`, not `1,500`.
+ */
+function formatRate(value: number): string {
+  return value.toLocaleString('en-US', {
+    maximumFractionDigits: 2,
+    useGrouping: false,
+  });
+}
 
 /** The pill label per tier (task 0311, decision 5). */
 const PLAN_LABEL: Record<PortalPlanTier, string> = {
@@ -3731,13 +3817,25 @@ const CONTACT_COPY: Record<PortalPlanTier, readonly [string, string]> = {
 };
 
 /**
+ * The pill and the contact copy for a tier — a tier this bundle does not know
+ * (a newer backend: the two deploy separately) is `Custom`, never a lookup
+ * that throws and unmounts the dashboard (task 0311's review, IN-04).
+ */
+function planLabel(tier: string): string {
+  return PLAN_LABEL[tier as PortalPlanTier] ?? PLAN_LABEL.custom;
+}
+function contactCopy(tier: string): readonly [string, string] {
+  return CONTACT_COPY[tier as PortalPlanTier] ?? CONTACT_COPY.custom;
+}
+
+/**
  * The Rate Limit card's contact line (task 0311): a link to
  * `RUMBLEFISH_CONTACT`, underlined like the OAuth card's "contact support",
  * worded for the tier. It replaced a plain-text "Contact us for commercial
  * plans." that had no destination to point at.
  */
-function PlanContact({ tier }: { tier: PortalPlanTier }) {
-  const [lead, link] = CONTACT_COPY[tier];
+function PlanContact({ copy }: { copy: readonly [string, string] }) {
+  const [lead, link] = copy;
   return (
     <Typography
       variant="body2"
@@ -3752,12 +3850,65 @@ function PlanContact({ tier }: { tier: PortalPlanTier }) {
   );
 }
 
+/**
+ * The no-plan state's own contact line (task 0311's review, IN-05). A key on
+ * no plan is broken, not a customer asking for bigger limits, so it gets none
+ * of decision 6's tier copy. What fixes it is a sign-in: the issue flow finds
+ * the key on no plan and attaches it (Step 4 of `attempt()`); "contact us" is
+ * for when that does not.
+ */
+const NO_PLAN_CONTACT: readonly [string, string] = [
+  'Signing out and in again puts it back on a plan. If that does not fix it,',
+  'contact us.',
+];
+
+/** The HTTP codes every key meets, whatever its plan. */
+function GatewayResponses() {
+  return (
+    <Stack spacing={1} sx={{ pt: 1, borderTop: cardBorder }}>
+      <ResponseRow label="Response on throttle" code="HTTP 429" />
+      <ResponseRow label="Response on missing key" code="HTTP 403" />
+    </Stack>
+  );
+}
+
+/**
+ * The Rate Limit card — the key's plan, its two figures, and what the gateway
+ * does when you cross them.
+ *
+ * **The figures are the key's OWN plan's** since task 0311: `/api/usage`
+ * reports the plan the key is on (`plan`), and the per-second figure is its
+ * `rate_limit_per_second`; the per-minute one is that times sixty, computed
+ * rather than written down. The plan's name rides beside "Active" as a second
+ * pill (`Free` … `Pro`, `Custom` for any other plan on our stage), and the
+ * contact line under the figures links to `RUMBLEFISH_CONTACT` with copy for
+ * the tier — contacting us is the only way to change plan, so it is shown on
+ * every tier.
+ *
+ * The other states:
+ *
+ * - **No plan** (`plan: null`): the key is on no usage plan for this API, so
+ *   the gateway answers it `403`. No pill — "Active" would be false — the
+ *   state is said in words, and the contact line says what fixes it.
+ * - **Unlimited** (`rate_limit_per_second: null`): both figures read
+ *   "Unlimited", never a zero.
+ * - **Plan not known** (`/usage` in flight, failed, or naming no plan): no
+ *   figure, no pill, no tier's contact copy — only what is true of every key
+ *   (the gateway's `429`/`403`). Before task 0311's review this state showed
+ *   `/config`'s free figure and the free plan's pitch, which a Pro customer
+ *   read, on every load, as their own limit and an offer of the plan they
+ *   already pay for (review WR-01).
+ *
+ * **The card always renders**, which is a change from the build that dropped
+ * it whenever `/config` carried no limit (Adam, 2026-08-25: "brakuje całego
+ * jednego kafelka"). A missing panel is a worse answer than a stated one —
+ * and since task 0311 its figures come from the key's plan, so `/config`
+ * missing a limit changes nothing here at all.
+ */
 function RateLimitCard({
-  rateLimit,
   keyAbsent = false,
   plan,
 }: {
-  rateLimit?: number;
   /**
    * The account has no key — the frame empties this card too. See the
    * dashboard's `keyAbsent`.
@@ -3770,54 +3921,61 @@ function RateLimitCard({
    * there is no key to make it about.
    */
   keyAbsent?: boolean;
-  /**
-   * The key's plan, from `/api/usage` (task 0311): `undefined` until it
-   * answers (or when it failed), `null` for a key on no plan.
-   */
-  plan?: PortalPlan | null;
+  /** The key's plan, from `/api/usage` (task 0311) — see `PlanView`. */
+  plan: PlanView;
 }) {
   if (keyAbsent) return <DashboardCard title="Rate Limit" />;
 
-  if (plan === null) {
+  if (plan.state !== 'known') {
+    return (
+      <DashboardCard title="Rate Limit">
+        <p data-testid="rate-limit-pending">
+          {plan.state === 'loading'
+            ? 'Loading your plan…'
+            : plan.state === 'failed'
+              ? 'Could not load your plan, so its limits are not shown.'
+              : "Your plan's limits appear here once your usage has loaded."}
+        </p>
+        <GatewayResponses />
+      </DashboardCard>
+    );
+  }
+
+  if (plan.plan === null) {
     return (
       <DashboardCard title="Rate Limit">
         <p data-testid="rate-limit-no-plan">
           This key is not on a usage plan for this API, so the API answers 403
           to it.
         </p>
-        <PlanContact tier="custom" />
+        <PlanContact copy={NO_PLAN_CONTACT} />
       </DashboardCard>
     );
   }
 
+  const { tier } = plan.plan;
   // `null` is a plan without a throttle: unlimited, stated as such.
-  const perSecond: number | null = plan
-    ? plan.rate_limit_per_second
-    : (rateLimit ?? FREE_PLAN_RATE_LIMIT);
+  const perSecond = plan.plan.rate_limit_per_second;
 
   return (
     <DashboardCard
       title="Rate Limit"
-      status={
-        plan
-          ? [
-              { label: 'Active', tone: 'ok' },
-              { label: PLAN_LABEL[plan.tier], tone: 'muted' },
-            ]
-          : { label: 'Active', tone: 'ok' }
-      }
+      status={[
+        { label: 'Active', tone: 'ok' },
+        { label: planLabel(tier), tone: 'muted' },
+      ]}
     >
       <Stack direction="row" spacing={4}>
         <Figure
           label="Per-second limit"
-          value={perSecond ?? 'Unlimited'}
-          unit="req/s"
+          value={perSecond === null ? 'Unlimited' : formatRate(perSecond)}
+          unit={perSecond === null ? undefined : 'req/s'}
           testId="rate-limit"
         />
         <Figure
           label="Per-minute limit"
-          value={perSecond === null ? 'Unlimited' : perSecond * 60}
-          unit="req/min"
+          value={perSecond === null ? 'Unlimited' : formatRate(perSecond * 60)}
+          unit={perSecond === null ? undefined : 'req/min'}
         />
       </Stack>
       {/* Task 0188's sentence, kept verbatim and read only by assistive
@@ -3830,25 +3988,20 @@ function RateLimitCard({
           <>Rate limit: unlimited.</>
         ) : (
           <>
-            Rate limit: {perSecond} request{perSecond === 1 ? '' : 's'} per
-            second.
+            Rate limit: {formatRate(perSecond)} request
+            {perSecond === 1 ? '' : 's'} per second.
           </>
         )}
       </Box>
-      <Stack spacing={1} sx={{ pt: 1, borderTop: cardBorder }}>
-        <ResponseRow label="Response on throttle" code="HTTP 429" />
-        <ResponseRow label="Response on missing key" code="HTTP 403" />
-      </Stack>
-      {/* Until `/usage` names the plan the card states the free figure, so it
-          makes the free plan's offer. */}
-      <PlanContact tier={plan?.tier ?? 'free'} />
+      <GatewayResponses />
+      <PlanContact copy={contactCopy(tier)} />
     </DashboardCard>
   );
 }
 
 /**
- * One big yellow number with its unit, from the Rate Limit card. A string
- * value ("Unlimited", task 0311) is the whole statement and takes no unit.
+ * One big yellow number with its unit, from the Rate Limit card. A value that
+ * is the whole statement ("Unlimited", task 0311) is passed without a unit.
  */
 function Figure({
   label,
@@ -3858,7 +4011,8 @@ function Figure({
 }: {
   label: string;
   value: number | string;
-  unit: string;
+  /** Omitted when the value is the whole statement ("Unlimited", task 0311). */
+  unit?: string;
   testId?: string;
 }) {
   return (
@@ -3882,7 +4036,7 @@ function Figure({
         >
           {value}
         </Typography>
-        {typeof value === 'number' && (
+        {unit !== undefined && (
           <Typography variant="body2" sx={{ color: color.text.secondary }}>
             {unit}
           </Typography>
@@ -4582,11 +4736,6 @@ function DashboardRoute({ gate }: { gate: Gate }) {
     );
   }
 
-  const rateLimit =
-    gate.probe.state === 'ok'
-      ? gate.probe.config.rate_limit_per_second
-      : undefined;
-
   const session = (gate.session as { state: 'ok'; session: PortalSession })
     .session;
 
@@ -4635,11 +4784,7 @@ function DashboardRoute({ gate }: { gate: Gate }) {
         />
         <Container sx={{ position: 'relative' }}>
           <PortalStatusChrome>
-            <Dashboard
-              session={session}
-              rateLimit={rateLimit}
-              onSignOut={gate.onSignOut}
-            />
+            <Dashboard session={session} onSignOut={gate.onSignOut} />
           </PortalStatusChrome>
         </Container>
       </Box>
