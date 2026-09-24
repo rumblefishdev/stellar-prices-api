@@ -7,7 +7,7 @@ related_adr: ["0287", "0292"]
 related_tasks: ["0147", "0286", "0209"]
 tags: [layer-database, priority-low, effort-medium, data-correctness, enrichment, clickhouse]
 links:
-  - "../active/0147_FEATURE_price-usd-series-volume-coverage-gate.md"
+  - "../archive/0147_FEATURE_price-usd-series-volume-coverage-gate.md"
 history:
   - date: "2026-09-23"
     status: backlog

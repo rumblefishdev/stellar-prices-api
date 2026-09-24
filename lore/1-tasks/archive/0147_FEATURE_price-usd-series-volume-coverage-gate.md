@@ -2,7 +2,7 @@
 id: "0147"
 title: "Replace price_usd_series*'s close_usd > 0 filter with a volume-coverage gate"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0292", "0287"]
 related_tasks: ["0144", "0118", "0131", "0116", "0146", "0150", "0061", "0151", "0286"]
 tags:
@@ -11,7 +11,7 @@ milestone: 2
 links:
   - "../../../packages/prices-clickhouse/schema/views.sql"
 history:
-  - date: 2026-08-05
+  - date: "2026-08-05"
     status: backlog
     who: okarcz
     note: >
@@ -171,6 +171,18 @@ history:
       proven RED against a re-added floor. 70 prices-clickhouse lib, 23
       views_it, 10 current_mv_it, 225 prices-api lib, 43 ohlcv_it, 12 openapi.
       A 1d-grain and weekend re-check stays due 2026-09-29, not gating.
+  - date: "2026-09-24"
+    status: completed
+    who: akot
+    note: >
+      **Merged and rolled out.** PR #346 merged as c7a733d5 after Oskar's
+      review (3 low stale-comment findings, fixed in e684a11). Rolled out on
+      prod 2026-09-24 11:16 UTC: the six 0147 views applied one statement per
+      request as dev_shared, `current_price_usd` left to 0216. Published rows
+      dropped 1.00 % (1d) and 0.35 % (1h), inside the predicted 0.3–1.6 %;
+      reference counts unchanged, sampled prices identical. Details in
+      "Rollout". The BE contract is sent by Adam; the 2026-09-29 re-check
+      moves to [[0313]].
 ---
 
 # Volume-coverage gate for `price_usd_series` / `price_usd_series_1h`
@@ -383,6 +395,41 @@ body inlined and the candle tier pre-filtered to each window.
   on assets ≥ $100k are one wash-traded-looking token (VORIXLM, 4e-5 → 60).
   Not in 0147's scope — a deviation filter is a separate backlog item.
 
+## Rollout (2026-09-24)
+
+Applied by Adam as `dev_shared` at 11:16 UTC from develop `c7a733d5`, with the
+runbook `.planning/rollout-2026-09/ROLLOUT-0147.md` (not committed).
+Before/after were compared over fixed windows ending at 2026-09-24 12:00.
+
+| Surface | Before | After |
+| --- | --- | --- |
+| `price_usd_series` (2 days) | 8,784 | 8,696 (−1.00 %) |
+| `price_usd_series_1h` (48 h) | 42,754 | 42,605 (−0.35 %) |
+| `usd_reference` / `_1h` buckets | 2 / 48 | 2 / 48 |
+
+- `xlm_usd` moved only in the 14th decimal place (dust weights). XLM,
+  canonical USDC (`oracle`, share 1) and the thin `50X` kept `close_usd` and
+  `method`.
+- `priced_volume_share` is at position 8 in both views, and both coverage
+  views exist. Coverage status counts: 1d = 8,696 priced / 89 pending (all
+  share 0) / 1,733 unpriceable; 1h = 42,605 / 720 / 10,245.
+- **New since phase 2:** at 1h there are now 53 published buckets with a share
+  strictly between 0 and 1, and 15 withheld as `pending` with a share above 0.
+  So X = 0.5 now has an effect; phase 2 measured 0 such buckets. Follow-up in
+  [[0313]].
+- `query_log` showed no exception on the six views after the apply.
+
+### Emerged during rollout
+
+1. **Six statements, not `chwf views.sql`.** The HTTP interface takes one
+   statement per request, and the file also holds 0216's `current_price_usd`,
+   which on prod still had its 2026-09-11 definition. The six 0147 views were
+   applied one by one, and the rollback is the four pre-0147 bodies from
+   `246ef739`.
+2. **Dry run before the write.** Each view body was run as `dev_read` with
+   `LIMIT 0` on prod (HTTP 200, while a bad column returns 404), so a missing
+   column would have shown up before the change.
+
 ## Acceptance Criteria
 
 - [x] Neither view can return a bucket whose published price rests on a
@@ -412,6 +459,7 @@ body inlined and the candle tier pre-filtered to each window.
       the floor is gone; [[0131]] has history notes pointing at this
       definition and at X = 0.5; the guardrails inventory rows 79-82 are
       closed against their tests.
-- [ ] BE told the gate has shipped and what X is. **OPEN — owned by Adam**,
-      who sends `.planning/CONTRACT-0147-be.md` (written, deliberately not
-      committed) once the PR is merged and rolled out; the numbers are final.
+- [ ] BE told the gate has shipped and what X is. **Handed to Adam at
+      close (2026-09-24)**: he sends `.planning/CONTRACT-0147-be.md` with the
+      rollout date 2026-09-24; the numbers are final. Closed with this open at
+      his call, since nothing left in the repo gates it.

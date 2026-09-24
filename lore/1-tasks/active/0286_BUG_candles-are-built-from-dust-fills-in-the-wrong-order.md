@@ -938,6 +938,9 @@ price-forming 1m close on all 14 393 pairs; 10.5 % of SDEX minutes have
 13. **`views.sql` / `current.sql` keep no pf gate** (out of scope) —
     `/ohlcv` can now refuse a price that `price_usd_series` and
     `current_prices` still publish.
+    **Update 2026-09-24:** the series views (`price_usd_series{,_1h}`,
+    `usd_reference{,_1h}`) now carry the pf gate, since [[0147]] went live on
+    prod. `current.sql` still does not.
 14. **The coarse `close_usd` rate is held to the precision floor on BOTH legs**
     (`rollup_sql::RATE_BEARING_CHILD`, found by [[0151]]'s audit, 2026-09-17).
     The gate was `close_usd > 0 AND close > 0`; the prod row
