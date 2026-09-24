@@ -490,6 +490,26 @@ USD columns at 0 and `version + 1`, ahead of the normal tiers, which then
 recompute them. Without a `--reset-require-*` flag this is the plain mode, for
 the canonical USDC leg only.
 
+For canonical USDC the repair is normally Appendix B
+(`--reset-require-external-rate`). If you do run the plain mode on USDC, it
+needs an explicit upper bound: it is the only mode with none by default, and
+canonical USDC has held live Reflector readings since 2026-03-11, so an
+unbounded plain reset is always refused (`ResetBlockedByOracleRows`, "all
+time"). Pass `--reset-not-after` at or below USDC's first reading: measure it,
+and pass the lower of `first_reading` and `USDC_ORACLE_EPOCH_S` (2026-03-11
+14:00 UTC, the value Appendix B sets as `param_epoch`):
+
+```sql
+SELECT count() AS readings, toUnixTimestamp(min(timestamp)) AS first_reading
+FROM prices.oracle_prices
+WHERE asset_id = <USDC_ID> AND oracle_name = 'reflector'
+```
+
+```bash
+--reset-quote-asset-id <USDC_ID> --reset-not-before <UNIX_TS> \
+  --reset-not-after <the lower of the two>
+```
+
 ### What reset mode refuses outright
 
 All nine are hard errors, not warnings, because each one ends with rows zeroed
@@ -620,7 +640,7 @@ undone, and it is never what the refusal needs. The fix is the window: pass
 below the span the oracle tier prices (the rate-gated modes default it to
 `USDC_ORACLE_EPOCH_S`; Appendix C precondition 5 says when that default is not
 enough). The plain mode has no default upper bound, so on canonical USDC it
-always needs one.
+always needs one — see "The flags" above.
 
 The 2026-08-13 purge (task 0196) was a different case: those USDT rows were
 mis-attributed, not live readings. Purge only rows you have shown to be wrong.
@@ -1472,6 +1492,10 @@ it as `{epoch:UInt32}`.
    `--reset-not-after <first>` using the `first` this query returns, so the
    campaign stops below the leg's earliest poll. Every row above that instant is
    one the oracle tier priced, which this campaign has no business re-opening.
+
+   Run it again for the USDT leg before the USDT pass, with the USDT identity
+   from precondition 4 in the subquery. The same rule applies to whatever it
+   returns: bound the window, do not purge.
 
 ### The granularities
 

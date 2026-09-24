@@ -121,10 +121,15 @@ struct Args {
     /// correct a *pricing* defect, where the stored number is wrong rather than
     /// missing, and only against a FREEZE-snapshotted partition.
     ///
-    /// The leg decides the mode. For canonical USDC (the peg leg), use the plain
-    /// mode (no `--reset-require-*` flag) or `--reset-require-external-rate`.
-    /// For XLM or USDT (pivot legs), use `--reset-require-pivot-usdc-rate` only:
-    /// a plain reset of a pivot leg is refused right after connecting, dry run
+    /// The leg decides the mode. For canonical USDC (the peg leg), the repair is
+    /// `--reset-require-external-rate` (runbook Appendix B). The plain mode (no
+    /// `--reset-require-*` flag) is legal only on canonical USDC, and there it
+    /// needs an explicit `--reset-not-after` at or below USDC's first oracle row
+    /// (`USDC_ORACLE_EPOCH_S`, 1773237600, unless `prices.oracle_prices` holds
+    /// an earlier one): unbounded above, it is refused by USDC's live readings
+    /// (`ResetBlockedByOracleRows`). For XLM or USDT (pivot legs), use
+    /// `--reset-require-pivot-usdc-rate` only: a plain reset of a pivot leg is
+    /// refused right after connecting, before the oracle check and dry run
     /// included (`ResetPlainModeOnPivotLeg`, task 0208 review WR-04).
     #[arg(long, requires = "reset_not_before")]
     reset_quote_asset_id: Option<u32>,
@@ -160,8 +165,10 @@ struct Args {
     reset_not_before: Option<u32>,
 
     /// **Exclusive** epoch (unix seconds) above which stored USD values are left
-    /// alone (task 0268). Omitted, the reset is unbounded above — task 0182's
-    /// behaviour, unchanged.
+    /// alone (task 0268). Omitted in the plain mode, the reset is unbounded above
+    /// — task 0182's behaviour — and on production that is always refused:
+    /// the plain mode runs only on canonical USDC, which has live oracle rows
+    /// since `USDC_ORACLE_EPOCH_S`, so pass this at or below that value.
     ///
     /// When `--reset-require-external-rate` is passed and this is omitted, it
     /// defaults to `prices_clickhouse::USDC_ORACLE_EPOCH_S`

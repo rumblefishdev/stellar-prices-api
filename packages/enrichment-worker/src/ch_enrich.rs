@@ -152,12 +152,17 @@ pub enum ChEnrichError {
          The oracle tier runs before the peg-pivot tier and wins where it applies, \
          so resetting now would re-apply the oracle's rate to every row this reset \
          zeroes — and label it method='oracle'.\n\
-         If the window is all time: purge those rows first (task 0196), verify the \
-         count is 0, then re-run.\n\
+         If the window is all time (no --reset-not-after): pass --reset-not-after \
+         at or below the leg's first oracle row (SELECT min(timestamp) FROM \
+         prices.oracle_prices WHERE asset_id = {quote_asset_id} AND oracle_name = \
+         '{oracle_name}'), so the reset stays below the span the oracle tier \
+         prices. Purge only rows known to be mis-attributed (task 0196 removed \
+         USDT's), never a polled leg's live readings: that cannot be undone.\n\
          If the window is bounded: the overlap is real — narrow --reset-not-after \
-         below the first oracle row, or widen --reset-not-before above the last \
+         below the first oracle row, or raise --reset-not-before above the last \
          one, so the reset and the oracle tier do not both claim the same span.\n\
-         See lore/1-tasks/active/0182_BUG_close-usd-overstated-7x-on-usdt-quoted-candles.md."
+         See docs/runbooks/repair-coarse-usd-values.md (Appendix A, \"Oracle rows \
+         in the window\"; Appendix C, precondition 5)."
     )]
     ResetBlockedByOracleRows {
         quote_asset_id: u32,
@@ -5296,6 +5301,33 @@ mod tests {
         ] {
             assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
         }
+    }
+
+    /// The oracle-shadow refusal's all-time branch (task 0208 review WR-02).
+    /// Since WR-04 the plain mode — the only one unbounded above by default —
+    /// runs only on canonical USDC, whose readings are LIVE polls, so a purge
+    /// is never the fix: the message sends the operator to an upper bound.
+    #[test]
+    fn the_oracle_shadow_refusal_bounds_the_window_instead_of_purging_live_readings() {
+        let msg = ChEnrichError::ResetBlockedByOracleRows {
+            quote_asset_id: 2,
+            oracle_name: "reflector".to_string(),
+            rows: 1,
+            window: "[1599999700, all time)".to_string(),
+        }
+        .to_string();
+        for needle in [
+            "--reset-not-after",
+            "asset_id = 2 AND oracle_name = 'reflector'",
+            "never a polled leg's live readings",
+            "Appendix C, precondition 5",
+        ] {
+            assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
+        }
+        assert!(
+            !msg.contains("purge those rows first"),
+            "a purge must not be the all-time advice: {msg}"
+        );
     }
 
     /// The 0268 mode's leg refusal must not send an XLM or USDT leg to the
