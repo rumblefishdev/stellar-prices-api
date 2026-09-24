@@ -23,6 +23,14 @@ history:
     note: >
       Plan figures decided: variant B (Basic 1M/3 rps, Analyst 5M/5 rps,
       Lite 20M/10 rps, Pro 50M/25 rps; burst 5x rate).
+  - date: "2026-09-24"
+    status: backlog
+    who: akot
+    note: >
+      Open questions closed: the plan name is a pill in the Rate Limit card
+      header; the contact line becomes a RUMBLEFISH_CONTACT link with copy
+      for each tier (0311 owns it, not 0307). Decisions gathered into one
+      section.
 ---
 
 # Five usage plans, and the dashboard states the key's own plan
@@ -110,9 +118,13 @@ reachable; burst is 5× the rate.
 - Rate Limit card: per-second = `usage.plan.rate_limit_per_second`,
   per-minute = ×60 (the look stays as it is, Adam 2026-09-23). `/config`
   stays the source only for the no-key state and the landing page.
-- Monthly Usage: limit and reset date from the plan. Plan name visible on the
-  dashboard (e.g. "Basic plan" next to the card title).
-- "Need higher limits? Contact us…": see Open questions, and [[0307]].
+- Monthly Usage: limit and reset date from the plan. The card's layout does
+  not change.
+- **Plan name** (decision 5): a second pill in the Rate Limit card header,
+  next to "Active", reusing the card's existing `status` pill. Shown on every
+  plan, free included.
+- **Contact text** (decision 6): a link to `RUMBLEFISH_CONTACT`
+  (`landing/links.ts`), with copy chosen by tier.
 
 ### Step 4: Operator runbook — upgrading a user
 1. Key name from the Discord id: `discord-<id>-key` (`naming.rs:60`); exact
@@ -144,12 +156,50 @@ reachable; burst is 5× the rate.
 - [ ] No-plan and unlimited/custom-plan keys render stated, distinct states.
 - [ ] IAM widened only to `GET /usageplans` and `GET /usageplans/*/usage`.
 - [ ] Runbook for upgrading a user (Step 4) in the wiki or ops docs.
+- [ ] Rate Limit card header shows the plan pill (`Free`…`Pro`, `Custom`)
+      beside "Active", asserted per tier in `app.spec.tsx`.
+- [ ] The contact line links to `RUMBLEFISH_CONTACT`, with the copy for each
+      tier from decision 6.
 
-## Open questions
+## Decisions (Adam)
 
-- **"Contact us for commercial plans"** on a paid plan: hide it, or change it
-  to "Need more? Contact us"? Related to [[0307]] (the contact leads nowhere).
-- **Plan name on the page:** where and how. Figma has no frame for it.
+1. **Five plans, CoinGecko-shaped** (2026-09-24): free (name unchanged) +
+   Basic, Analyst, Lite, Pro.
+2. **Variant B figures** (2026-09-24): see the Plans table and
+   [notes/S-proposed-plan-tiers.md](notes/S-proposed-plan-tiers.md).
+3. **An operator changes a plan by hand in AWS** (2026-09-23). No self-service
+   upgrade.
+4. **The Rate Limit card keeps its look** (2026-09-23): per-second plus
+   per-minute (×60) from the key's plan. Burst is not shown.
+5. **Plan name = a pill in the Rate Limit card header, next to "Active"**
+   (2026-09-24). Labels: `Free`, `Basic`, `Analyst`, `Lite`, `Pro`, and
+   `Custom` for any other plan on our stage (Enterprise, loadtest).
+   - Why there: the name sits beside the figures it explains ("Basic · 3 req/s").
+   - Shown on free too, so the user sees their plan, and the contact line
+     below it says how to move up.
+   - One pill on the dashboard. The Monthly Usage card stays as it is.
+   - The Figma frame has no slot for a plan name, so reusing the card's
+     existing `status` pill avoids inventing new UI.
+   - A key on no plan shows the no-plan error state instead (Step 2), not a
+     pill.
+6. **The contact line stays, becomes a link and depends on the tier**
+   (2026-09-24). It is not hidden on paid plans: contacting us is the only
+   way to change plan (decision 3), so hiding it would strand paying users.
+   Target: `RUMBLEFISH_CONTACT` (`https://www.rumblefish.dev/contact/`,
+   `landing/links.ts`, since [[0301]]). Copy:
+
+   | Plan | Text |
+   |---|---|
+   | Free | "Need higher limits? Contact us about a paid plan." |
+   | Basic, Analyst, Lite | "Need more? Contact us to change your plan." |
+   | Pro, Custom | "Need custom limits? Contact us." |
+
+   [[0307]] (revoked-key card contacts) explicitly leaves this line out,
+   because at the time there were no commercial plans to point at. 0311
+   removes that reason and owns this line. 0307 keeps its two revoked-card
+   affordances. The two tasks touch different cards and share only the
+   `RUMBLEFISH_CONTACT` constant.
+7. **A rework keeping the plan is out of scope** (2026-09-23), see below.
 
 ## Out of scope
 
