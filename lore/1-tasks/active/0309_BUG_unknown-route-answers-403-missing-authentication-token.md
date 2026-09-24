@@ -74,8 +74,8 @@ the docs describe that.
 - [ ] The Quick Start, the OpenAPI descriptions and `api-endpoints.md`
       describe the `404`, and none still sends a reader to the 403
       explanation
-- [ ] The synthesized template is checked for the override, so a stack
-      refactor cannot drop it silently
+- [x] The synthesized template is checked for the override, so a stack
+      refactor cannot drop it silently — check 8 of `verify-openapi-routes.mjs`
 
 ## Progress — 2026-09-23
 
@@ -107,3 +107,31 @@ The OpenAPI descriptions are compiled into the api-handler and served at
 `/api-docs-json`, so the docs half ships the way 0306 does: Compute,
 `flush-production-cache`, then `sync-portal-explorer`. Shipping the two
 together costs one round instead of two.
+
+## Progress — 2026-09-24
+
+**Docs half on the branch, after #343 merged.** `GatewayMessage.message` loses
+its "`403` reading `Missing Authentication Token` means the path does not
+exist" sentence; `ErrorEnvelope`'s description names the gateway's unknown-route
+`404` as its second source; the Quick Start's 403 row loses the same sentence
+and its 404 row says "or no such route". `public/openapi.json` re-extracted:
+those two descriptions are the only content change. The Quick Start lede
+("the gateway's 403 and 429 carry a message only") and the `Authorization:
+Bearer` → 403 verdict stay true.
+
+**Production before the deploy, measured 09:30 CEST** (no key needed —
+route matching runs before the key check):
+
+| request | now | expected after |
+|---|---|---|
+| `GET /v1/nope`, no key and a wrong key | `403` `MissingAuthenticationTokenException` | `404` `not_found` |
+| `PATCH /v1/assets` | same `403` | `404` |
+| `GET /api/` on the API host, `PATCH /api/key` | same `403` | `404` |
+| `GET /v1/assets`, no key and a wrong key | `403 {"message":"Forbidden"}`, `ForbiddenException` | unchanged |
+
+The same probes after the deploy settle AC 1–2; AC 3 once Compute and the
+portal sync have shipped the texts.
+
+⚠️ **Compute from `develop` now carries more than 0306:** #337 (0216) and #345
+(0300, the Comet venue in the ledger-processor) are merged and undeployed.
+Agree the Compute deploy with Adam before shipping.
