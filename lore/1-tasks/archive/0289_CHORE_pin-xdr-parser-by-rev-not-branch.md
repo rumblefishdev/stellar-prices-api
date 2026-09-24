@@ -2,7 +2,7 @@
 id: "0289"
 title: "Pin the xdr-parser git dependency by rev, not branch — a bare `cargo update` silently pulls BE's develop HEAD into our event decoding"
 type: CHORE
-status: backlog
+status: completed
 related_adr: []
 related_tasks: ["0277", "0210", "0168"]
 tags: [layer-tooling, layer-infra, priority-low, effort-small, dependencies, block-explorer]
@@ -34,6 +34,13 @@ history:
       this task's mechanism happening once for real, deliberately that time.
       `Cargo.toml` still says `branch = "develop"` and CI still has no
       `--locked`, so nothing here is fixed.
+  - date: "2026-09-24"
+    status: completed
+    who: okarcz
+    note: >
+      Decided against: xdr-parser stays on branch = "develop" deliberately (PR
+      #104, task 0091, 2026-07-14); Cargo.toml:33 unchanged. Closed in the
+      backlog cleanup, [[0314]].
 ---
 
 # Pin xdr-parser by rev, not branch

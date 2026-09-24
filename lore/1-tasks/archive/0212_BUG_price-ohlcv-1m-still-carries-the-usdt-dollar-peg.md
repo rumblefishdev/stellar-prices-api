@@ -2,7 +2,7 @@
 id: "0212"
 title: "1.56M price_ohlcv_1m rows still carry the USDT $1 peg — 0172 declared it fixed and 0182 repaired only the coarse tiers"
 type: BUG
-status: backlog
+status: completed
 related_adr: []
 related_tasks: ["0172", "0182", "0209", "0204", "0145", "0111"]
 tags: ["priority-high", "effort-medium", "clickhouse", "data-correctness", "enrichment", "milestone-M2"]
@@ -21,6 +21,16 @@ history:
       defect still live on the tier every coarse table rolls from. 0172 closed
       on the writer fix and a 90,741-row purge; 0182 repaired the coarse tiers
       and was archived against them.
+  - date: "2026-09-24"
+    status: completed
+    who: okarcz
+    note: >
+      Moved into [[0286]], NOT yet verified (4c7709e3, "close 0212 in the
+      re-ingest"): the 1.56 M pegged _1m rows are still live until 0286
+      phase 3 (running on prod) replaces them. Tracking lives in 0286's
+      unchecked criterion (runbook §7e, peg_written = 0, pivot_written > 0);
+      if 0286 is re-scoped, that criterion must move with it. Closed in the
+      backlog cleanup, [[0314]].
 ---
 
 # 1.56M `_1m` rows still carry the USDT $1 peg

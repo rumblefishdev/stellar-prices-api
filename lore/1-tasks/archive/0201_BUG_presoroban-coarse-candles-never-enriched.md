@@ -2,7 +2,7 @@
 id: "0201"
 title: "32M pre-Soroban coarse candles carry close_usd = 0 — the 0088 backfill wrote them, the 0114 repair started three years too late"
 type: BUG
-status: backlog
+status: completed
 assignee: okarcz
 related_adr: []
 related_tasks: ["0088", "0114", "0182", "0145", "0111"]
@@ -59,6 +59,17 @@ history:
       Assigned to okarcz, who is solving it personally. Stays in backlog until
       they promote it themselves — it is not to be started, drafted or folded
       into a 0182 run by anyone else.
+  - date: "2026-09-24"
+    status: completed
+    who: okarcz
+    note: >
+      Done — this task's own 2026-08-18 entry records the recovery: 53,965,024
+      rows as pass 1 of [[0182]]'s campaign. The recoverable window was
+      2022-04 -> 2024-01, not the title's 2021-02 -> 2024-01: rows below
+      2022-04 are exotic-quoted and stay at the permanent no_reference floor
+      (close_usd = 0 there is expected, not a regression). [[0286]] phase 3
+      re-enriches the whole history again. Closed in the backlog cleanup,
+      [[0314]].
 ---
 
 # 32M pre-Soroban coarse candles were never enriched

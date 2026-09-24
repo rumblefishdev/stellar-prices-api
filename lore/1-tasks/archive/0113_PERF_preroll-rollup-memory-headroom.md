@@ -2,7 +2,7 @@
 id: "0113"
 title: "Pre-roll rollup INSERTs use half the CH memory quota — check headroom before 0088's recovery step 3"
 type: PERF
-status: backlog
+status: completed
 related_adr: ["0007"]
 related_tasks: ["0088", "0111", "0090", "0095"]
 tags: [layer-database, clickhouse, preroll, rollup, memory, priority-medium, effort-small]
@@ -21,6 +21,14 @@ history:
       2938 MB against a 5.59 GiB quota. Two Code 241 memory-limit exceptions
       occurred in the same window. 0088's recovery step 3 requires running this
       pre-roll, so headroom should be checked before committing to it.
+  - date: "2026-09-24"
+    status: completed
+    who: okarcz
+    note: >
+      Stale — written for [[0088]] step 3 (archived). preroll-incremental.sql
+      is marked historical by [[0286]]; phase 3's per-month pre-rolls are
+      bounded, and [[0302]] owns the full-range limit. Closed in the backlog
+      cleanup, [[0314]].
 ---
 
 # Pre-roll rollup INSERTs use half the ClickHouse memory quota

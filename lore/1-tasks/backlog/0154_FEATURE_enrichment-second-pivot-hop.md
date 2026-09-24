@@ -4,7 +4,7 @@ title: "Enrichment resolves only USDC/USDT/XLM quotes — two thirds of every OH
 type: FEATURE
 status: backlog
 related_adr: ["0007"]
-related_tasks: ["0144", "0061", "0111", "0147", "0151", "0116", "0135"]
+related_tasks: ["0144", "0061", "0111", "0147", "0151", "0116", "0135", "0115"]
 tags:
   [
     "priority-high",
@@ -266,6 +266,13 @@ path.
 - [ ] The historical estate is repaired or explicitly written off, coordinated
       with [[0148]] so both do not rewrite the same rows.
 - [ ] BE re-measures coverage for their LP asset set and confirms the change.
+- [ ] Carried from [[0115]] (closed as a duplicate by [[0314]]): reachability
+      is measured first, as a share of trades rather than candles, and the hop
+      proceeds only if the recovered share justifies the cost.
+- [ ] Carried from [[0115]]: a hop value never overwrites a direct or
+      single-hop one, and depeg-awareness holds through the whole chain.
+- [ ] Carried from [[0115]]: hop prices are spot-checked against an
+      independent source for a sample of exotic pairs — present is not correct.
 
 ## Out of scope
 

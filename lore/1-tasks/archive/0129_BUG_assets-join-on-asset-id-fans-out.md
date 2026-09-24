@@ -2,7 +2,7 @@
 id: "0129"
 title: "Joining prices.assets on asset_id fans out ~0.4% even under FINAL — FINAL dedupes by natural key, not asset_id"
 type: BUG
-status: backlog
+status: completed
 related_adr: ["0003"]
 related_tasks: ["0114", "0054"]
 tags: [layer-database, clickhouse, data-quality, priority-medium, effort-small, assets, join]
@@ -20,6 +20,17 @@ history:
       c.quote_asset_id` fanning out. Immaterial to 0114's conclusion (0.4%
       against a 100%-vs-0.9% split) but a live hazard for any other query that
       joins on `asset_id`.
+  - date: "2026-09-24"
+    status: completed
+    who: okarcz
+    note: >
+      Same root cause as [[0139]] (asset_id allocator collisions,
+      canonical.rs:169-225), which owns the fix and is being re-measured;
+      linked from 0139's related_tasks. Its four criteria that 0139 lacked
+      (count == countDistinct(asset_id) on assets FINAL, the two-query
+      cross-check, a uniqueness invariant, a full /assets cursor walk) are
+      carried into 0139's acceptance criteria. Closed in the backlog cleanup,
+      [[0314]].
 ---
 
 # Joining `prices.assets` on `asset_id` fans out even under `FINAL`

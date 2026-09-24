@@ -2,7 +2,7 @@
 id: "0115"
 title: "Two-hop USD pivot for exotic quotes — 55% of trades are served with no USD value"
 type: FEATURE
-status: backlog
+status: completed
 related_adr: ["0007"]
 related_tasks: ["0114", "0026", "0061", "0107"]
 tags: [clickhouse, enrichment, coverage, usd, priority-medium, effort-medium]
@@ -17,6 +17,14 @@ history:
       stablecoin- and XLM-quoted candles but 0% of everything else, which is
       55.2% of trades and ~62% of candles. Currently by design
       (ch_enrich.rs:499-504 treats exotic quotes as unreachable).
+  - date: "2026-09-24"
+    status: completed
+    who: okarcz
+    note: >
+      Duplicate of [[0154]], which covers the same exotic-quote pivot. Its
+      three criteria 0154 lacked (reachability first, no overwrite + depeg-
+      awareness, independent spot-check) were carried into 0154's acceptance
+      criteria. Closed in the backlog cleanup, [[0314]].
 ---
 
 # Two-hop USD pivot for exotic quotes

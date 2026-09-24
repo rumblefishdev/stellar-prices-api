@@ -2,7 +2,7 @@
 id: "0062"
 title: "Enrichment loop: drive progress from INSERT rows-affected (gated on clickhouse-crate upgrade)"
 type: PERF
-status: backlog
+status: completed
 related_adr: ["0007"]
 related_tasks: ["0061", "0026", "0039", "0111", "0085"]
 tags: [layer-database, clickhouse, enrichment, perf, priority-medium, effort-small, blocked-on-dependency]
@@ -30,6 +30,13 @@ history:
       NOTE: PR #133 (0108 grooming, unmerged) archives this task as completed
       on the strength of the crate-upgrade blocker; that closure is WRONG on
       this evidence and must be reverted before #133 merges.
+  - date: "2026-09-24"
+    status: completed
+    who: okarcz
+    note: >
+      Stale — the cost it was about is gone: [[0111]] cut count_candidates
+      from 9.27 s / 735 M rows to 0.08 s / 4.27 M rows, which also fails this
+      task's own profiling gate. Closed in the backlog cleanup, [[0314]].
 ---
 
 # Enrichment loop: drive progress from INSERT rows-affected
