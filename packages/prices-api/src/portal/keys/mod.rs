@@ -112,7 +112,8 @@ use super::period::Period;
 use cap::Cap;
 use gateway::{Attachment, Disable, Gateway, GatewayError, KeyValue};
 use naming::{
-    KeyRecord, choose_winner, current_key, exact_matches, key_name, losers, revocation_instant,
+    KeyRecord, choose_winner, current_key, exact_matches, key_name, latest_revoked, losers,
+    revocation_instant,
 };
 
 /// The reveal, on both verbs — see [`key`] for why `POST` answers identically.
@@ -867,8 +868,9 @@ async fn lookup(gateway: &Gateway, name: &str) -> Result<Lookup, GatewayError> {
 /// What the eligibility-checked issue round-trip needs to know.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum IssueOutcome {
-    /// A key exists, is on the free plan, and its value is readable — created
-    /// now or adopted. The value is deliberately not carried: the callback
+    /// A key exists, is on a usage plan for our stage — the one it was already
+    /// on, else the plan the previous (revoked) key was on, else free (task
+    /// 0311) — and its value is readable, created now or adopted. The value is deliberately not carried: the callback
     /// that consumes this answers with a redirect, and a credential must
     /// never ride in a `Location`.
     ///
@@ -992,10 +994,14 @@ enum Attempt {
 
 /// The least time a create is started with. `CreateApiKey` and
 /// `CreateUsagePlanKey` each get up to `gateway::OPERATION_TIMEOUT` (5s) in
-/// the worst case; in practice each is a few hundred milliseconds. 4s is
-/// enough for both at ordinary latency and refuses to start them when the
-/// invocation is about to be killed — which is the one way this flow can
-/// leave an enabled, unattached key behind.
+/// the worst case; in practice each is a few hundred milliseconds. Since task
+/// 0311 one or two `GetUsagePlans` reads (the new key's plan, then the
+/// previous key's — see [`resolve_target_plan`]) run between them, each as
+/// cheap as the attach. 4s is still enough for all of it at ordinary latency
+/// and refuses to start the create when the invocation is about to be killed
+/// — which is the one way this flow can leave an enabled, unattached key
+/// behind. And if it does anyway, the revoked record is still there (it is
+/// deleted only after the attach), so the retry resolves the same plan.
 ///
 /// Above `auth::issue::RECONCILE_FLOOR` (2s) on purpose: between the two a
 /// reconciliation can still adopt an existing key but will not start a
@@ -1042,19 +1048,23 @@ async fn attempt(
     // Step 1b (task 0191): a revoked key. If every key under the name is
     // disabled, the owner revoked it, and the re-issue cap decides: inside the
     // period of the revocation → refused with the date, nothing written;
-    // after it → the revocation records are deleted and the flow continues
-    // into a create, exactly as for a first issue. Deleting BEFORE creating
-    // is safe here, unlike a swap, because a disabled key is not a credential
-    // anybody can lose; and it keeps the next listing from ranking a dead key
-    // ahead of the live one.
-    let (live, mut revoked): (Vec<KeyRecord>, Vec<KeyRecord>) =
+    // after it → the flow continues into a create, exactly as for a first
+    // issue. The cap is unchanged by task 0311, and a paid plan buys no extra
+    // reworks: the rule is per owner and per period, whatever plan they are on.
+    //
+    // The revocation records are NOT deleted here any more (task 0311). They
+    // used to be, before the create — safe then, since a disabled key is not a
+    // credential anybody can lose — but the previous key's usage-plan
+    // membership goes with it, and a paid user who reworked silently dropped
+    // to the free plan. They are now the SOURCE of the new key's plan
+    // ([`resolve_target_plan`], Step 4), so they are kept until the new key is
+    // attached and swept by Step 5 afterwards. A crash in between leaves them
+    // in place, and the retry resolves the same plan. A disabled key is still
+    // never a candidate: the partition below keeps it out of ranking, and the
+    // re-listing after a create filters on `enabled` whether or not the
+    // listing lags (`list_resurrects_deleted` in the tests covers that).
+    let (live, revoked): (Vec<KeyRecord>, Vec<KeyRecord>) =
         existing.into_iter().partition(|k| k.enabled);
-    // Ids this attempt deleted. `GetApiKeys` is eventually consistent, so the
-    // re-listing after a create can still show them; ranked, a deleted
-    // earlier-created record wins, its attach 404s, and the single retry is
-    // spent on a phantom — leaving the key just created unattached. Filtered
-    // out of the re-listing instead, along with anything disabled.
-    let mut deleted_here: Vec<String> = Vec::new();
     if live.is_empty() && !revoked.is_empty() {
         // The LATEST revocation governs: a duplicate revoked last month must
         // not open a door a revocation this month closed.
@@ -1065,51 +1075,13 @@ async fn attempt(
         {
             return Ok(Attempt::Capped { next_eligible_date });
         }
-        // Logged and stepped over, NOT propagated — the same rule, for the
-        // same reason, as the loser sweep at the end of this function. A `?`
-        // here makes a delete that cannot succeed permanent: this branch is
-        // reached on EVERY press once the name holds nothing but revoked keys,
-        // so one undeletable record (an untagged exact-name key made by hand in
-        // the console, against the tag condition task 0194 may add to `DELETE`)
-        // would answer `?issue=failed` forever, with no in-product recovery.
-        // Housekeeping must not be able to withhold the key the request is for.
-        //
-        // The create below is safe with the record still there: the re-listing
-        // drops everything disabled, so a survivor is neither ranked nor
-        // adopted, and the sweep at the end tries it again.
-        let mut undeleted: Vec<KeyRecord> = Vec::new();
-        for dead in &revoked {
-            if dead.name != name {
-                tracing::error!(
-                    key_id = %dead.id,
-                    "refusing to delete a key whose name is not the caller's; \
-                     the exact-name filter has been bypassed"
-                );
-                continue;
-            }
-            tracing::info!(key_id = %dead.id, "deleting a revoked key whose period has rolled");
-            match gateway.delete(&dead.id).await {
-                Ok(()) => deleted_here.push(dead.id.clone()),
-                Err(error) => {
-                    tracing::error!(
-                        key_id = %dead.id,
-                        error = %error,
-                        "could not delete a revoked key whose period has rolled; continuing \
-                         into the create and leaving it for the sweep"
-                    );
-                    undeleted.push(dead.clone());
-                }
-            }
-        }
-        // Whatever was deleted here is gone, so the sweep below has nothing of
-        // theirs left to do; whatever failed stays in the list for it to retry.
-        revoked = undeleted;
     }
 
     let mut created: Option<KeyRecord> = None;
-    // Live keys only: a revoked key that survived the branch above (one live
-    // key beside it — a console re-enable, or a duplicate) is neither ranked
-    // nor adopted; it is swept like any other loser below.
+    // Live keys only: a revoked key (the only kind left beside a live one —
+    // a console re-enable, a duplicate, or the previous key a rework is
+    // replacing) is neither ranked nor adopted; it is swept like any other
+    // loser in Step 5, after the winner is attached.
     let mut candidates = live;
 
     // Step 2: nothing yet — create one. The value the create answers with is
@@ -1139,7 +1111,7 @@ async fn attempt(
         // from the same list rather than each deleting the other's.
         candidates = exact_matches(gateway.list_named(name).await?, name)
             .into_iter()
-            .filter(|k| k.enabled && !deleted_here.contains(&k.id))
+            .filter(|k| k.enabled)
             .collect();
         if candidates.is_empty() {
             // The control plane did not list what it just created. Rather than
@@ -1149,13 +1121,17 @@ async fn attempt(
             // the create and this call. Handing its value out would be handing
             // out a dead id — the one thing the adopt-or-recreate rule exists to
             // prevent — so this re-enters the flow like any other lost race.
-            if gateway
-                .attach_to_plan(&record.id, gateway.free_plan_id())
-                .await?
-                == Attachment::KeyGone
+            //
+            // The same target plan as Step 4 (task 0311): a rework's new key
+            // goes onto the previous key's plan, not onto free by default.
+            if let Some(plan_id) = resolve_target_plan(gateway, &record.id, &revoked).await?
+                && gateway.attach_to_plan(&record.id, &plan_id).await? == Attachment::KeyGone
             {
                 return Ok(Attempt::Retry);
             }
+            // Nothing is swept on this path: the listing did not show our key,
+            // and the next issue — which lists again — sweeps any revoked
+            // record after its own attach.
             return Ok(Attempt::Done(Outcome {
                 record,
                 created: true,
@@ -1214,11 +1190,17 @@ async fn attempt(
     // because every retry took the same branch. That is the "issued but does not
     // work" state this call exists to prevent, made permanent.
     //
-    // Idempotent (see `Gateway::attach_to_free_plan`), so the common case — a
-    // key already on the plan — costs one `409` and no state change. Before the
-    // deletions below rather than after: the key the caller is about to receive
-    // is made usable first, and the destructive half of reconciliation only runs
-    // once that has succeeded.
+    // WHICH plan is [`resolve_target_plan`]'s answer (task 0311): none, when the
+    // winner is already on a plan for our stage — an operator's paid plan must
+    // not be "corrected" to free, and a `409` on free used to hide that only by
+    // accident — else the plan the previous (revoked) key was on, so a rework
+    // keeps a paid or custom user on their plan, else free. The attach itself
+    // is idempotent (`Gateway::attach_to_plan` treats the `409` as success).
+    // Before the deletions below rather than after: the key the caller is
+    // about to receive is made usable first, and the destructive half of
+    // reconciliation only runs once that has succeeded — which since 0311 also
+    // means the revoked records, the source of the target plan, outlive the
+    // attach.
     //
     // A `404` from it is not a failure but the deletion race — the winner was
     // listed and is gone — and it is reported the way `value_of`'s `None` is:
@@ -1226,16 +1208,16 @@ async fn attempt(
     // replacement. Because this call now runs before the read, it is the first
     // place that race can surface, so it has to answer it rather than turn a
     // hand-deleted key back into the dead end this slice exists to remove.
-    if gateway
-        .attach_to_plan(&winner.id, gateway.free_plan_id())
-        .await?
-        == Attachment::KeyGone
+    if let Some(plan_id) = resolve_target_plan(gateway, &winner.id, &revoked).await?
+        && gateway.attach_to_plan(&winner.id, &plan_id).await? == Attachment::KeyGone
     {
         return Ok(Attempt::Retry);
     }
 
     // Step 5: everything that is not the winner is deleted — duplicates, and
-    // (task 0191) any revoked key left beside a live one.
+    // (task 0191) any revoked key left beside a live one, which since task
+    // 0311 includes the previous key a rework replaced: it is deleted here,
+    // AFTER the winner is on its plan, never before.
     for loser in losers(&candidates, &winner)
         .into_iter()
         .chain(revoked.iter())
@@ -1298,6 +1280,44 @@ async fn attempt(
         })),
         None => Ok(Attempt::Retry),
     }
+}
+
+/// The usage plan to attach `winner_id` to, decided before anything is
+/// deleted (task 0311). `None` means "no attach": the winner is already on a
+/// plan for our stage.
+///
+/// 1. The winner's own plan for our stage — Step 4's "however it came to
+///    exist": a key an operator moved to Basic stays on Basic.
+/// 2. Else the plan of the **previous key**: the latest revoked record in this
+///    attempt's listing (the same latest-revocation rule the cap reads,
+///    [`latest_revoked`]), if it is on a plan for our stage. This is what
+///    makes a rework keep the plan — paid stays paid, custom stays custom,
+///    free stays free.
+/// 3. Else free — a first issue, or a previous key on no plan of ours.
+///
+/// Only a plan `GetUsagePlans` reported on OUR API stage can come out of
+/// here, which is the code half of the wildcard `POST /usageplans/*/keys`
+/// grant's justification (`api-gateway-stack.ts`).
+async fn resolve_target_plan(
+    gateway: &Gateway,
+    winner_id: &str,
+    revoked: &[KeyRecord],
+) -> Result<Option<String>, GatewayError> {
+    if gateway.plan_of(winner_id).await?.is_some() {
+        return Ok(None);
+    }
+    if let Some(previous) = latest_revoked(revoked)
+        && let Some(plan) = gateway.plan_of(&previous.id).await?
+    {
+        tracing::info!(
+            previous_key_id = %previous.id,
+            plan_id = %plan.id,
+            tier = ?plan.tier,
+            "attaching the new key to the plan the previous key was on"
+        );
+        return Ok(Some(plan.id));
+    }
+    Ok(Some(gateway.free_plan_id().to_string()))
 }
 
 /// `no-store` on every response this module produces.

@@ -15,8 +15,9 @@
 //!   names the date, and never hands the dead value out again.
 //! - **The replacement waits for the 1st.** An issue inside the revocation's
 //!   period is `?issue=capped&next_eligible_at=…` with nothing written; the
-//!   same issue once the period has rolled deletes the revocation record and
-//!   creates the new key.
+//!   same issue once the period has rolled creates the new key, attaches it to
+//!   the plan the revoked key was on (task 0311) and only then deletes the
+//!   revocation record.
 //! - **A session cookie can revoke its own key and nothing else.** The route
 //!   is `POST`-only, writes only `enabled=false` on the caller's exact name,
 //!   and every other state the store can be in leaves it untouched.
@@ -561,8 +562,8 @@ async fn an_issue_after_a_revoke_in_the_same_period_is_capped_with_the_date() {
 
 /// The worked example against the real calendar: revoked on the 3rd of THIS
 /// month → capped until the 1st of next; revoked on the 3rd of LAST month →
-/// the period has rolled, the revocation record is deleted, a new key is
-/// created and attached, and the reveal hands the NEW one out.
+/// the period has rolled, a new key is created and attached, the revocation
+/// record is deleted, and the reveal hands the NEW one out.
 #[tokio::test]
 async fn revoked_on_the_3rd_refuses_until_the_1st_and_issues_once_it_has_passed() {
     let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
@@ -600,12 +601,16 @@ async fn revoked_on_the_3rd_refuses_until_the_1st_and_issues_once_it_has_passed(
                 .contains(&(PLAN_ID.to_string(), s.keys[0].id.clone()))
         );
         let new = s.keys[0].id.clone();
+        // Create, attach, THEN delete (task 0311). The revocation record used
+        // to be deleted first, and its usage-plan membership went with it —
+        // a paid user who reworked came back on the free plan. It is now the
+        // source of the new key's plan, so it outlives the attach.
         assert_eq!(
             s.ops,
             vec![
-                format!("delete:{dead}"),
                 format!("create:{new}"),
-                format!("attach:{new}")
+                format!("attach:{new}"),
+                format!("delete:{dead}")
             ]
         );
     });
@@ -1083,4 +1088,233 @@ async fn a_same_site_revoke_is_accepted_from_the_configured_origin_only() {
     .await;
     assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
     assert!(!gateway.with(|s| s.keys[0].enabled), "the key is off");
+}
+
+// ---------------------------------------------------------------------------
+// A rework keeps the plan (task 0311)
+// ---------------------------------------------------------------------------
+
+/// Seed a key the user revoked at `revoked_at`, on usage plan `plan`.
+fn seed_revoked_on(gateway: &MockGateway, revoked_at: u64, plan: &str) -> String {
+    gateway.with(|s| {
+        let id = s.seed_revoked(&key_name(), 1_000, revoked_at);
+        s.plan_keys.push((plan.to_string(), id.clone()));
+        id
+    })
+}
+
+/// The revocation record is never deleted before the new key is attached:
+/// `attach:<new>` comes first in `ops`, `delete:<dead>` after it.
+fn assert_attached_before_deleted(ops: &[String], new: &str, dead: &str) {
+    let attach = ops
+        .iter()
+        .position(|op| op == &format!("attach:{new}"))
+        .unwrap_or_else(|| panic!("the new key was never attached: {ops:?}"));
+    let delete = ops
+        .iter()
+        .position(|op| op == &format!("delete:{dead}"))
+        .unwrap_or_else(|| panic!("the revoked key was never deleted: {ops:?}"));
+    assert!(
+        attach < delete,
+        "the revoked key was deleted before the new key was attached: {ops:?}"
+    );
+}
+
+/// Issue once the rework's period has rolled, for a revoked key on `plan`, and
+/// answer `(dead, new)`.
+async fn rework_rolled_on(plan: StoredPlan) -> (MockGateway, Router, String, String) {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let plan_id = plan.id.clone();
+    if plan_id != PLAN_ID {
+        gateway.with(|s| s.plans.push(plan));
+    }
+    let dead = seed_revoked_on(&gateway, the_3rd_of(first_of_month_offset(-1)), &plan_id);
+    let app = app_with_discord(&discord, &gateway);
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
+    let new = gateway.with(|s| {
+        assert_eq!(s.keys.len(), 1, "the revocation record is gone");
+        s.keys[0].id.clone()
+    });
+    // `MockDiscord` is dropped here; the reveal/usage routes below need no
+    // Discord.
+    (gateway, app, dead, new)
+}
+
+/// A free user's rework stays on free: the new key on `freeplan1`, created,
+/// attached and only then the revoked record deleted.
+#[tokio::test]
+async fn a_rework_on_free_stays_on_free() {
+    let (gateway, _app, dead, new) = rework_rolled_on(StoredPlan::free()).await;
+    gateway.with(|s| {
+        assert!(s.plan_keys.contains(&(PLAN_ID.to_string(), new.clone())));
+        assert_eq!(
+            s.ops,
+            vec![
+                format!("create:{new}"),
+                format!("attach:{new}"),
+                format!("delete:{dead}")
+            ]
+        );
+        assert_attached_before_deleted(&s.ops, &new, &dead);
+    });
+}
+
+/// A paid user's rework keeps the paid plan: the new key goes onto `basic1`,
+/// not onto free — the silent downgrade task 0311 exists to remove — and the
+/// dashboard's usage then reports Basic.
+#[tokio::test]
+async fn a_rework_on_a_paid_plan_keeps_the_paid_plan() {
+    let (gateway, app, dead, new) = rework_rolled_on(StoredPlan::basic()).await;
+    gateway.with(|s| {
+        assert!(
+            s.plan_keys
+                .contains(&(BASIC_PLAN_ID.to_string(), new.clone())),
+            "{:?}",
+            s.plan_keys
+        );
+        assert!(
+            !s.plan_keys.contains(&(PLAN_ID.to_string(), new.clone())),
+            "the new key must not land on free"
+        );
+        assert_eq!(
+            s.ops,
+            vec![
+                format!("create:{new}"),
+                format!("attach:{new}"),
+                format!("delete:{dead}")
+            ]
+        );
+        assert_attached_before_deleted(&s.ops, &new, &dead);
+    });
+
+    let usage = call_path(app, "GET", USAGE_PATH, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(usage.status, StatusCode::OK);
+    assert_eq!(usage.json()["plan"]["tier"], "basic");
+}
+
+/// A hand-made Custom plan on our stage is kept the same way.
+#[tokio::test]
+async fn a_rework_on_a_custom_plan_keeps_the_custom_plan() {
+    let (gateway, _app, dead, new) = rework_rolled_on(StoredPlan::custom_unlimited()).await;
+    gateway.with(|s| {
+        assert!(
+            s.plan_keys
+                .contains(&(CUSTOM_PLAN_ID.to_string(), new.clone())),
+            "{:?}",
+            s.plan_keys
+        );
+        assert!(!s.plan_keys.contains(&(PLAN_ID.to_string(), new.clone())));
+        assert_attached_before_deleted(&s.ops, &new, &dead);
+    });
+}
+
+/// A previous key on no plan of OURS (only on another API's plan) gives the
+/// rework nothing to keep: the new key goes onto free, never onto the other
+/// API's plan.
+#[tokio::test]
+async fn a_rework_whose_previous_plan_is_not_ours_lands_on_free() {
+    let other = StoredPlan {
+        id: "q7sd40".to_string(),
+        name: "production-partner-plan".to_string(),
+        api_stages: vec![("6l9k06w4pl".to_string(), STAGE.to_string())],
+        throttle: Some((50.0, 100)),
+        quota: Some((10_000, 0, "DAY")),
+    };
+    let (gateway, _app, dead, new) = rework_rolled_on(other).await;
+    gateway.with(|s| {
+        assert!(s.plan_keys.contains(&(PLAN_ID.to_string(), new.clone())));
+        assert!(!s.plan_keys.contains(&("q7sd40".to_string(), new.clone())));
+        assert_attached_before_deleted(&s.ops, &new, &dead);
+    });
+}
+
+/// The crash window task 0311 closes: the new key is created and the attach
+/// then fails. The revoked record is still there — it is only deleted after
+/// an attach — so the retry reads the same previous plan and lands the new
+/// key on `basic1`, then sweeps the revoked record.
+#[tokio::test]
+async fn a_crash_between_create_and_attach_retries_onto_the_previous_keys_plan() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    gateway.with(|s| {
+        s.plans.push(StoredPlan::basic());
+        s.fail_next_attach = true;
+    });
+    let dead = seed_revoked_on(
+        &gateway,
+        the_3rd_of(first_of_month_offset(-1)),
+        BASIC_PLAN_ID,
+    );
+    let app = app_with_discord(&discord, &gateway);
+
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/api/?issue=failed"
+    );
+    let new = gateway.with(|s| {
+        assert_eq!(s.keys.len(), 2, "the new key exists beside the revoked one");
+        assert!(s.deleted.is_empty(), "nothing is deleted before an attach");
+        let new = s
+            .keys
+            .iter()
+            .find(|k| k.enabled)
+            .expect("the new key was created")
+            .id
+            .clone();
+        assert!(!s.plan_keys.iter().any(|(_, k)| k == &new), "not attached");
+        assert_eq!(s.ops, vec![format!("create:{new}")]);
+        new
+    });
+
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
+    gateway.with(|s| {
+        assert!(
+            s.plan_keys
+                .contains(&(BASIC_PLAN_ID.to_string(), new.clone())),
+            "{:?}",
+            s.plan_keys
+        );
+        assert!(!s.plan_keys.contains(&(PLAN_ID.to_string(), new.clone())));
+        assert_eq!(
+            s.ops,
+            vec![
+                format!("create:{new}"),
+                format!("attach:{new}"),
+                format!("delete:{dead}")
+            ]
+        );
+        assert_attached_before_deleted(&s.ops, &new, &dead);
+        assert_eq!(s.create_calls, 1, "the retry adopts, it does not re-create");
+    });
+}
+
+/// Step 4's "however it came to exist", with a paid plan: a live key an
+/// operator moved to Basic is adopted as it is — no attach call at all, and
+/// certainly no attempt to put it back on free.
+#[tokio::test]
+async fn a_live_key_already_on_a_plan_gets_no_attach() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    for plan in [StoredPlan::free(), StoredPlan::basic()] {
+        let gateway = MockGateway::start().await;
+        let plan_id = plan.id.clone();
+        let key = gateway.with(|s| {
+            if plan_id != PLAN_ID {
+                s.plans.push(plan);
+            }
+            s.seed_on_plan(&key_name(), 1_000, &plan_id)
+        });
+        let app = app_with_discord(&discord, &gateway);
+
+        assert_eq!(
+            issue_round_trip(&app).await.location(),
+            "/api/?issue=ok",
+            "{plan_id}"
+        );
+        gateway.with(|s| {
+            assert_eq!(s.attach_calls, 0, "{plan_id}: already on a plan, no attach");
+            assert_eq!(s.plan_keys, vec![(plan_id.clone(), key.clone())]);
+            assert!(s.ops.is_empty(), "{plan_id}: nothing written: {:?}", s.ops);
+        });
+    }
 }

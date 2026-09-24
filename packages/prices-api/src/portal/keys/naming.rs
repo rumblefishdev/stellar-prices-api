@@ -114,6 +114,24 @@ pub fn revocation_instant(revoked: &[KeyRecord]) -> Option<u64> {
         .max()
 }
 
+/// The revoked record whose plan a rework keeps (task 0311): the one with the
+/// **latest** `lastUpdatedDate` — the same "latest revocation governs" rule as
+/// [`revocation_instant`], so the record the cap is decided from and the
+/// record the new key's plan is read from are the same record.
+///
+/// An undated record loses to any dated one (it is skipped by
+/// [`revocation_instant`] for the same reason); ties — including all-undated —
+/// go to the smaller id, so every invocation reads the same record. Empty →
+/// `None`, and the caller falls back to the free plan.
+pub fn latest_revoked(revoked: &[KeyRecord]) -> Option<&KeyRecord> {
+    revoked.iter().max_by(|a, b| {
+        a.last_updated_at
+            .cmp(&b.last_updated_at)
+            // Reversed, so that among equal instants the SMALLER id is "max".
+            .then_with(|| b.id.cmp(&a.id))
+    })
+}
+
 /// The key the owner currently holds, among `records`: the earliest **enabled**
 /// key if there is one, otherwise the earliest key of any state (task 0191).
 ///
@@ -245,6 +263,41 @@ mod tests {
         // Nothing datable at all is the one undatable case.
         assert_eq!(revocation_instant(&[undated]), None);
         assert_eq!(revocation_instant(&[]), None);
+    }
+
+    /// The latest revocation is the record a rework keeps the plan of; an
+    /// undated record loses; a tie goes to the smaller id; nothing → None.
+    #[test]
+    fn the_latest_revoked_record_is_the_latest_dated_one() {
+        let at = |id: &str, when: Option<u64>| KeyRecord {
+            last_updated_at: when,
+            ..disabled(id, "n", Some(1))
+        };
+        let older = at("a", Some(10));
+        let newer = at("b", Some(20));
+        let undated = at("c", None);
+        assert_eq!(
+            latest_revoked(&[older.clone(), newer.clone(), undated.clone()])
+                .unwrap()
+                .id,
+            "b"
+        );
+        assert_eq!(
+            latest_revoked(&[undated.clone(), older.clone()])
+                .unwrap()
+                .id,
+            "a"
+        );
+        let tie_high = at("z", Some(20));
+        assert_eq!(
+            latest_revoked(&[tie_high.clone(), newer.clone()])
+                .unwrap()
+                .id,
+            "b"
+        );
+        assert_eq!(latest_revoked(&[newer.clone(), tie_high]).unwrap().id, "b");
+        assert_eq!(latest_revoked(&[undated]).unwrap().id, "c");
+        assert!(latest_revoked(&[]).is_none());
     }
 
     #[test]
