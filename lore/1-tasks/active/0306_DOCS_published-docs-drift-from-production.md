@@ -152,3 +152,14 @@ today's document — no examples at all — that would drop most optional fields
 from the rendered examples, so the portal bundle must not ship before the
 API's new document is served (Compute deploy, then `make -C infra
 flush-production-cache`).
+
+**Shipped 2026-09-24, in that order.** The API half went out with Adam's 0216
+rollout (Compute, 11:30 CEST, `develop` with #343): the live `/api-docs-json`
+is this task's document. The portal half at 11:42 — `make -C infra
+sync-portal-explorer` from `develop` `d8f46f3b`, guild check ok, invalidation
+`I3784KES66EBFQ18475YIQ45I2` completed. Measured right after: `index.html`
+names the new bundle `index-i5pA_HeE.js`; `/api/`, `/api/docs`,
+`/api/quickstart` and `/api/privacy-policy` answer 200; the bundled
+`openapi.json` equals the live `/api-docs-json`. The Quick Start's 403 row
+still explains `Missing Authentication Token`, which is true until [[0309]]
+ships and rewrites it.
