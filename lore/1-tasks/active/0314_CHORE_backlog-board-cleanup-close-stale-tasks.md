@@ -2,7 +2,7 @@
 id: "0314"
 title: "Backlog board cleanup — close the 13 tasks that are already done, superseded or decided against"
 type: CHORE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0062", "0113", "0115", "0129", "0130", "0169", "0175", "0201", "0205", "0209", "0212", "0266", "0289", "0154", "0139", "0286"]
 tags: [layer-docs, priority-medium, effort-small, lore, board]
@@ -15,6 +15,10 @@ history:
       Created after a read-only triage of all 80 backlog tasks on 2026-09-24
       sorted them into stale (13), quick-check (13) and keep (54). This task
       closes the 13 stale ones in one PR.
+  - date: "2026-09-24"
+    status: active
+    who: okarcz
+    note: "Activated; the 13 closures go in one PR to develop."
 ---
 
 # Backlog board cleanup — close the stale tasks
