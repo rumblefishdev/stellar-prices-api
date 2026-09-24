@@ -684,6 +684,33 @@ machine's own disk. `dev_read`'s 4 TiB/hour quota was exhausted by other
 users on the morning of 09-24 until the 11:00 UTC reset; a check then waits
 for the next hour.
 
+**Campaign-machine read, 2026-09-24 13:22 local (11:22 UTC)** — the half prod
+cannot show:
+
+- **Loop healthy.** `status`: 16/99 months, every finished month `OK` with
+  SDEX trades equal before → after and `2/2` minute-aligned; 201703 at step
+  6/12 `sdex`, 5 of its 9 archive partitions indexed after 51 min.
+- **No `STOP` since the loop started.** The five in `run.log` are all
+  2026-09-23 12:16Z `no plan — run plan first` — the `watch … status` pane
+  started before `plan` had run. Harmless.
+- **The download is request-bound, not bandwidth-bound.** A 201703 partition
+  is 64 000 files / 26.9 MB: `aws s3 sync` 511 s (~7 500 files/min), indexing
+  1.6 s (5 trade ticks, 5 `order_book_fills`, 0 `offer_lookup_misses`).
+  Every partition holds 64 000 files, so the per-month time should stay near
+  the current **81 min average** until file sizes make bandwidth dominate.
+  The script's own figure, ~112 h remaining, would put stage A's end near
+  **2026-09-29**; the ~10-03..05 estimate above stands until the 2018–19
+  months show their real pace.
+- **Two `status` views are both right:** `16/130` counts the whole plan,
+  `16/99` the stage-A scope (`--to-month 202401`).
+- ⚠️ **`fishuser-hero`'s own disk: 52 GB free of 916 GB (95 % used).** The
+  campaign itself holds almost nothing (`.temp/sdex-backfill/` 2.4 MB; each
+  partition is deleted after indexing), but the next partition downloads
+  while the current one indexes, so up to two sit on disk at once — ~25 GB
+  at the ~12 GB partitions of ~2021. Enough, with a thin margin: free space
+  on the machine before the loop reaches ~2020.
+- **Releasable:** 201512 → 201702, all checked clean on prod at 11:08 UTC.
+
 **How it is watched.** The status pane (`watch -n5 … status`, second pane)
 shows the month, step and partitions indexed; each finished month lands in
 its table with a verdict and the aligned count. A `STOP — …` line in the
