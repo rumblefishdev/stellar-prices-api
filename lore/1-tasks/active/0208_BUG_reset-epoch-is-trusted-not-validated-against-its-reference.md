@@ -191,10 +191,10 @@ it). Unit fixtures that embedded `1612656000` as the USDT epoch now use
 
 ## Future Work
 
-- **Plain-mode (0182) pivot resets are not gated on refill inputs** (review
-  WR-04, pre-existing). An admitted epoch is a lower bound: rows with no USDC rate
-  or no reference inside `--pivot-window-s` are still zeroed and not refilled.
-  Documented as a caveat in the runbook and `--help`; gating it (e.g. reuse
-  `external_rate_day_pred` / `pivot_reference_day_pred` or
-  `assert_external_rates_are_loaded` in plain mode) → spawned as [[0312]]
-  (priority-low).
+- **Plain-mode (0182) pivot resets were not gated on refill inputs** (review
+  WR-04, pre-existing): an admitted epoch is only a lower bound — rows with no
+  USDC rate or no reference inside `--pivot-window-s` were still zeroed and not
+  refilled. Briefly spawned as 0312 on 2026-09-24, then deleted the same day:
+  Adam chose to fix it in PR #347 by refusing a plain-mode reset of a pivot leg
+  (XLM, USDT) and pointing the operator to the 0228 mode. In progress on the
+  branch.
