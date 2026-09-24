@@ -12,7 +12,7 @@ links:
   - "../../../packages/prices-clickhouse/schema/current.sql"
   - "../../../packages/prices-clickhouse/schema/views.sql"
 history:
-  - date: 2026-08-20
+  - date: "2026-08-20"
     status: backlog
     who: stkrolikiewicz
     note: >
@@ -115,6 +115,21 @@ history:
       transposed sequence, with the epoch-guard test still passing beside it).
       All suites green bar the known pre-existing endpoints_it
       backfill_status; bundle regenerated; nothing deployed.
+  - date: "2026-09-24"
+    status: active
+    who: akot
+    note: >
+      **The rollout left out `current_price_usd`.** `ROLLOUT-0216.md` had no step
+      for `views.sql`, and nothing applies it automatically. So on prod
+      `current_prices` and its MV had `as_of` / `price_status`, but the BE view
+      kept its 2026-09-11 definition (14 columns, ending at `method`). Found
+      during the [[0147]] rollout. Fixed the same day at 11:41 UTC: Adam applied
+      the single `CREATE OR REPLACE VIEW` from develop as dev_shared, after a
+      dry run as dev_read. Verified on prod: `as_of` is at position 15 and
+      `price_status` at 16. Of 5,913 assets, 3,890 are priced, 613 carried and
+      1,410 unpriced (epoch `as_of`). Canonical USDC reads priced; XLM reads
+      carried, waiting on the hourly USD pass. The API was never affected: it
+      reads `current_prices` directly.
 ---
 
 # Publish the price's age
@@ -376,6 +391,12 @@ Restored byte-for-byte; re-run green (`1 passed`).
     it open would have left the file asserting a gap that no longer exists.
 
 ## Issues Encountered
+
+- **Rollout gap (2026-09-24): `current_price_usd` was never re-created on
+  prod.** The runbook covered the ALTER, the MV and Compute, but not the view.
+  `views.sql` is applied only by hand, one statement per HTTP request. Applied
+  late, on 2026-09-24 (history entry above). For the next view change: every
+  rollout that touches `views.sql` needs its own apply step.
 
 - **`init_sql_parses_into_statements` and `views_it`'s column count are
   outside the brief's test list.** Two more ALTERs make the `init.sql`
