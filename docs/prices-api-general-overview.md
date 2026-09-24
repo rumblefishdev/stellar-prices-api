@@ -15,6 +15,7 @@ the API surface, or the cost / budget framing.
 
 | Date       | Sections touched                                                                                                                                                          | Driver                                                                                                                                                                                                                                                                                    | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-09-24 | §4 (intro, §4.1, §4.2, §4.3)                                                                                                                                              | [Task 0306](../lore/1-tasks/active/0306_DOCS_published-docs-drift-from-production.md) · [Task 0178](../lore/1-tasks/archive/0178_BUG_current-prices-cannot-publish-the-quote-asset.md)                                                                                                    | **§4 brought to what production answers**, next to the published API reference. The base URL is the production host, and a new note separates the two error bodies: the API's `{code, message}` and API Gateway's `{message}` for `403` and `429`, with the handler's own `401` not armed in production. The `/assets` and `/price` examples are the 2026-09-23 production snapshot (AQUA; XLM with its five venues) and carry `method`; `GET /assets/{asset_identifier}` and `POST /prices/batch` gain their response bodies. `volume_24h_usd` is defined as both sides of each trade (task 0178) against the base side in `sources` — the old example's venues summed exactly to the total, which production never shows. Recorded as not populated yet: `home_domain`, a classic asset's SAC in `contract_address`, and a Soroban token's `asset_code`.                                                                                                                                                                                                                                                                                                                                                                 |
 | 2026-09-16 | §3.2, §4.2 (`GET /ohlcv`)                                                                                                                                                 | [Task 0286](../lore/1-tasks/active/0286_BUG_candles-are-built-from-dust-fills-in-the-wrong-order.md) · [ADR 0287](../lore/2-adrs/0287_candle-prices-come-from-price-forming-fills-and-a-windowed-close.md)                                                                                | **A candle's prices come only from the price-forming trades of its own bucket** — `open`/`close` the first and last of them, `high`/`low` their extremes, nothing carried from a neighbouring bucket. A fill's price is the ratio of two integer stroop amounts, so a few-stroop fill prints an exact small fraction that is arithmetically right and can sit hundreds of percent off the market; such fills no longer set a price. The task-0116 guidance to filter dust **on the client** is replaced by the rule and by three new `/ohlcv` fields — `pf_trade_count` (`0` means the bucket has no price and every price field is `null`), `pf_vwap` (the price-forming mean) and `close_divergent` (`close` more than 1% from it). Added the three `pf_*` columns to the §3.2 DDL and re-cut the rollup sketch to the shipped generator's pf-gated form, with the month rolled from the day.                                                                                                                                                                                                                                                                                                                            |
 | 2026-09-02 | §5.7 (new)                                                                                                                                                                | [Task 0248](../lore/1-tasks/active/0248_DOCS_blend-is-named-in-the-rfp-but-is-not-a-price-source.md)                                                                                                                                                                                      | **Venue coverage recorded against the RFP's named markets.** The RFP's Price Aggregation bullet names four markets (Soroswap, Aquarius, SDEX, Blend); we ingest three of them plus Phoenix, which it does not name. New §5.7 states the count plainly and records why **Blend cannot be a price source**: it is a lending protocol with no swap, and a price is a property of a trade. The decisive point is that Blend pool creators choose an _oracle_ to price collateral, which places Blend downstream of a service like this one — a consumer of price data, not a producer. Its 80/20 BLND:USDC backstop AMM is the only part that trades and its volume is **unmeasured**, stated rather than implied. No extractor, no `Venue` arm, no registry seeding: pricing BLND from the backstop pool would be a feature of its own. Deliberately **not** generalised into a rule about lending protocols.                                                                                                                                                                                                                                                                                                                 |
 | 2026-05-20 | §0, §1.1, §1.2, §2.1, §2.3, §3, §4.5, §5.2–§5.4, §5.6, §6, §7, §8, §9, §10, §11 (all-table refresh)                                                                       | [ADR 0007](../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0045](../lore/1-tasks/archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/README.md) · [Task 0049](../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md) | **Live data sink flipped from Prices-owned RDS PostgreSQL to BE's shared Hetzner ClickHouse cluster** (separate `prices` database). All live OHLCV / current-prices / oracle / asset registry / backfill-progress data now lives in ClickHouse, written over HTTPS-mTLS to Caddy:443 by Lambdas running outside any VPC. The S3 → Lambda path gains an SNS topic between the bucket and both tenants' processors (one-time BE CDK change). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`); rollups become a CH materialised-view chain, **eliminating the OHLCV Rollup Lambda**. Prices-api VPC, NAT Gateway, and RDS line items removed; mTLS cert lifecycle added (per-env certs, 1-year manual rotation, CA-rotation revocation). Cost lines: $12/mo RDS removed; ~$1-2/env/mo Hetzner CH cost-share added (basis: [task 0046](../lore/1-tasks/archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md) empirical ~0.45 GB/yr, 14.8× compression). Local backfill sections (Stream 1 ADR 0001, Stream 2 ADR 0005) preserved — only their cloud-push targets shift RDS → CH. |
@@ -520,7 +521,23 @@ PARTITION` statements over HTTPS-mTLS to Caddy:443.
 
 ## 4. API Endpoints Design
 
-**Base URL:** `https://api.prices.stellar.example.com/v1`
+**Base URL:** `https://prices-api.sorobanscan.rumblefish.dev/v1`
+
+**Authentication and errors.** Every `/v1` request carries an `x-api-key` header, which API Gateway
+checks before the request reaches the handler (§1.1, §7). An error therefore has one of two bodies,
+depending on who answered it:
+
+| Answered by | Status                     | Body                                                                                                                                                                                         |
+| ----------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| the API     | `400`, `404`, `500`, `503` | `{"code": …, "message": …}` — `code` is stable and meant for programs (`invalid_id`, `invalid_query`, `invalid_body`, `not_found`, `db_error`, `quote_unavailable`); `message` is for people |
+| API Gateway | `403`                      | `{"message": "Forbidden"}` — the key is missing, unknown or not enabled for this API                                                                                                         |
+| API Gateway | `429`                      | `{"message": …}` — the key's rate limit or monthly quota is spent; no `Retry-After`                                                                                                          |
+
+The handler's own key check (`401 unauthorized`) is not armed in production, where the gateway
+rejects the request first. A path or method the API does not have is also the gateway's answer:
+`403 {"message": "Missing Authentication Token"}`, until task 0309 turns it into a `404`. The
+`/assets`, `/assets/{asset_identifier}` and `/price` examples below are production responses
+(2026-09-23 08:08 UTC), the snapshot the published API reference shows; the others are illustrative.
 
 ### 4.1 Assets
 
@@ -540,12 +557,13 @@ List all tracked assets with metadata and current price.
 
 **Cursor pagination mechanism:**
 
-The cursor is a Base64-encoded JSON object containing the sort column value and the asset ID of the
-last returned row (ID breaks ties when sort values are equal):
+The cursor is an unpadded Base64url-encoded JSON object holding the last returned row's sort
+column value, as a string (a decimal one for the numeric sorts), and its asset ID (ID breaks ties
+when sort values are equal):
 
 ```
-cursor = base64({ "volume_24h": 1523400.50, "id": 42 })
-       → "eyJ2b2x1bWVfMjRoIjoxNTIzNDAwLjUwLCJpZCI6NDJ9"
+cursor = base64url({ "v": "1570.90285200017593", "id": 87 })
+       → "eyJ2IjoiMTU3MC45MDI4NTIwMDAxNzU5MyIsImlkIjo4N30"
 ```
 
 On the first request (no cursor), the query is:
@@ -560,7 +578,7 @@ On subsequent requests, the server decodes the cursor and uses a **keyset condit
 
 ```sql
 SELECT * FROM current_prices JOIN assets ON assets.id = current_prices.asset_id
-WHERE (volume_24h, id) < (1523400.50, 42)  -- decoded from cursor
+WHERE (volume_24h, id) < (1570.90285200017593, 87)  -- decoded from cursor
 ORDER BY volume_24h DESC, id DESC
 LIMIT 51;
 ```
@@ -573,28 +591,39 @@ LIMIT 51;
 {
   "data": [
     {
-      "asset_code": "USDC",
+      "asset_code": "AQUA",
       "asset_type": "classic",
-      "issuer_address": "GA5ZSE...XYZ",
-      "contract_address": "CABC...DEF",
-      "home_domain": "centre.io",
-      "price_usd": "1.0001",
-      "change_24h_pct": "-0.02",
-      "change_7d_pct": "0.01",
-      "volume_24h_usd": "1523400.50",
-      "vwap_24h": "1.0002",
+      "issuer_address": "GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA",
+      "contract_address": "",
+      "home_domain": "",
+      "price_usd": "0.00037300596178",
+      "change_24h_pct": "2.124",
+      "change_7d_pct": "11.997",
+      "volume_24h_usd": "479235.22108659319489",
+      "vwap_24h": "0.00037306538294",
       "sources": {
-        "sdex": { "price": "1.0001", "volume_24h": "800000" },
-        "soroswap": { "price": "1.0002", "volume_24h": "500000" },
-        "aquarius": { "price": "1.0001", "volume_24h": "223400" }
+        "aquarius": {
+          "price": "0.00037307545161",
+          "volume_24h": "409795.80206351425926"
+        },
+        "sdex": {
+          "price": "0.00037300596178",
+          "volume_24h": "69438.16887823331656"
+        }
       },
-      "updated_at": "2026-02-10T12:00:00Z"
+      "updated_at": "2026-09-23T08:08:00Z",
+      "method": "traded"
     }
   ],
-  "cursor": "eyJpZCI6NTB9",
+  "cursor": "eyJ2IjoiMTU3MC45MDI4NTIwMDAxNzU5MyIsImlkIjo4N30",
   "has_more": true
 }
 ```
+
+A classic asset's `home_domain` and `contract_address` (its Stellar Asset Contract) are in the
+schema (§3.1) but not populated yet: both are `""` on every asset in production, and populating
+`home_domain` is part of task 0252. A Soroban token's `asset_code` is empty as well, so `search`
+cannot find it by its symbol and `sort=code` orders it as `""`.
 
 #### `GET /assets/{asset_identifier}`
 
@@ -603,6 +632,22 @@ Get single asset details. `asset_identifier` can be:
 - `{code}:{issuer}` for classic assets (e.g. `USDC:GA5ZSE...XYZ`)
 - `{contract_address}` for Soroban tokens (e.g. `CABC...DEF`)
 - `native` for XLM
+
+A classic asset's SAC address is not an identifier yet: it answers `404`.
+
+**Response:** `code` is the token's symbol for a Soroban token and `XLM` for `native`.
+
+```json
+{
+  "asset": "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+  "asset_kind": "credit",
+  "code": "USDC",
+  "issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+  "contract": "",
+  "home_domain": "",
+  "is_active": true
+}
+```
 
 ### 4.2 Prices / OHLCV
 
@@ -759,22 +804,46 @@ planning for: an asset can legitimately return a `price_usd` alongside an
 empty `sources` and a `vwap_24h` of `0` — we hold a price, but no venue is
 currently quoting. (Task 0135.)
 
+`volume_24h_usd` counts every trade the asset took part in, on either side of the pair, while a
+`sources` entry's `volume_24h` counts only the trades in which the asset is the base (task 0178).
+The venues therefore add up to less than the total — $7.32 M across five venues against $9.23 M in
+the example below — and USDC, which is only ever the quote, has all of its volume in
+`volume_24h_usd` and `{}` in `sources`.
+
 **Response:**
 
 ```json
 {
-  "asset": "USDC:GA5ZSE...XYZ",
-  "price_usd": "1.0001",
-  "price_xlm": "8.33",
-  "vwap_24h": "1.0002",
-  "volume_24h_usd": "1523400.50",
-  "change_24h_pct": "-0.02",
+  "asset": "native",
+  "price_usd": "0.22086251378147",
+  "price_xlm": "1",
+  "vwap_24h": "0.220818422853",
+  "volume_24h_usd": "9232178.49610106508283",
+  "change_24h_pct": "4.2307",
   "sources": {
-    "sdex": { "price": "1.0001", "volume_24h": "800000" },
-    "soroswap": { "price": "1.0002", "volume_24h": "500000" },
-    "aquarius": { "price": "1.0001", "volume_24h": "223400" }
+    "aquarius": {
+      "price": "0.22086251378147",
+      "volume_24h": "3496887.57491671686026"
+    },
+    "phoenix": {
+      "price": "0.21951246345991",
+      "volume_24h": "143.33960639826163"
+    },
+    "sdex": {
+      "price": "0.22080609088657",
+      "volume_24h": "3706994.74575814385738"
+    },
+    "soroswap": {
+      "price": "0.22083791103349",
+      "volume_24h": "12137.72993461573015"
+    },
+    "sushiswap": {
+      "price": "0.21972140395799",
+      "volume_24h": "98918.83560484752044"
+    }
   },
-  "updated_at": "2026-02-10T12:00:30Z"
+  "updated_at": "2026-09-23T08:08:00Z",
+  "method": "traded"
 }
 ```
 
@@ -789,6 +858,21 @@ Fetch current prices for multiple assets in one call.
 ```json
 {
   "assets": ["native", "USDC:GA5ZSE...XYZ", "CABC...DEF"]
+}
+```
+
+**Response:** `prices` holds the `GET /assets/{asset_identifier}/price` object of every identifier
+that has a current price, in the order of the request; `not_found` lists the rest, in canonical
+form. A request names 1 to 100 identifiers, a repeated one is answered each time, and a malformed
+body, an empty or over-long list or a single invalid identifier fails the whole request with `400`.
+
+```json
+{
+  "prices": [
+    { "asset": "native", ... },
+    { "asset": "USDC:GA5ZSE...XYZ", ... }
+  ],
+  "not_found": ["CABC...DEF"]
 }
 ```
 
