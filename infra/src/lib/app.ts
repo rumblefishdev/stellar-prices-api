@@ -39,10 +39,6 @@ export function createApp({ config }: CreateAppOptions): void {
     env,
     config,
     apiHandlerFunction: compute.apiHandlerFunction,
-    // The role, so ApiGatewayStack can grant the one control-plane action that
-    // needs the usage-plan id (task 0187). Same direction as the Function
-    // above, so it adds no new dependency and cannot create a cycle.
-    apiHandlerRole: compute.apiHandlerRole,
   });
 
   // No hosting stack for the portal. `PortalHostingStack` (task 0184) — a

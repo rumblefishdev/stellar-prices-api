@@ -456,13 +456,14 @@ is task 0191's revoke — see below), and three on `/usageplans` since task
 0311: `GET /usageplans` (`GetUsagePlans` by key — which plan a key is on),
 `GET /usageplans/*/usage` (`GetUsage` on the key's own plan, the dashboard's
 usage read) and `POST /usageplans/*/keys` (attaching a key to any plan — the
-free plan on a first issue, the previous key's plan on a rework). The three
-`/usageplans` grants are declared in `api-gateway-stack.ts` rather than
-`compute-stack.ts`, because that is where the policy has always lived —
-moving it is a delete in one stack and a create in the other, with a window in
-which key issuance breaks. No `DELETE` or `PATCH` on a plan or a plan key, and
-no `GET /usageplans/{id}`: moving a key between plans is an operator's job
-(`manual-api-key-tier.md`).
+free plan on a first issue, the previous key's plan on a rework). All eight
+are on the role's own policy in `compute-stack.ts`. The `/usageplans` grants
+used to be a standalone policy in `api-gateway-stack.ts`, because they named
+the free plan's id; since task 0311 they name no id and moved to the stack
+that ships the code using them, which deploys first — so the grant is in place
+before the new handler runs (`manual-api-key-tier.md`, "Rolling this out").
+No `DELETE` or `PATCH` on a plan or a plan key, and no `GET /usageplans/{id}`:
+moving a key between plans is an operator's job (`manual-api-key-tier.md`).
 
 Two of the six cannot be scoped any further, and one can but is not yet. All
 three are written out in full in `compute-stack.ts`; the short version:

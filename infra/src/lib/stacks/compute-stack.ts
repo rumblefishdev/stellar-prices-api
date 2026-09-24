@@ -521,16 +521,24 @@ export class ComputeStack extends cdk.Stack {
     // Self-service API keys (task 0187) — API Gateway CONTROL plane.
     // ---------------------------------------------------------------
     //
-    // Five of the eight calls the portal makes. The other three are the
-    // `/usageplans` grants — `GET /usageplans` (task 0311's `GetUsagePlans`
-    // by key), `GET /usageplans/*/usage` (`GetUsage` on the key's own plan)
-    // and `POST /usageplans/*/keys` (the attach) — and they are granted in
-    // `ApiGatewayStack`'s standalone policy. They once named the free plan's
-    // id, which lives there (importing it here would close the Compute ->
-    // Gateway -> Compute cycle described on `portalFreePlanParameterName`
-    // above); since task 0311 they name no id, and the policy stays there
-    // because moving it is a delete+create with a window in which key
-    // issuance breaks. Task 0194 audits the set as one policy.
+    // All eight calls the portal makes: five on `/apikeys`, and the three
+    // `/usageplans` grants at the end of this section — `GET /usageplans`
+    // (task 0311's `GetUsagePlans` by key), `GET /usageplans/*/usage`
+    // (`GetUsage` on the key's own plan) and `POST /usageplans/*/keys` (the
+    // attach). Task 0194 audits the set as one policy.
+    //
+    // The `/usageplans` three used to live in `ApiGatewayStack`, as the
+    // standalone policy `PortalAttachKeyToFreePlan`, because they named the
+    // free plan's id and importing it here would close the Compute -> Gateway
+    // -> Compute cycle described on `portalFreePlanParameterName` above. Since
+    // task 0311 they name no id, and they MUST be here: the new handler calls
+    // `GetUsagePlans` on every sign-in and every dashboard load, and this stack
+    // deploys FIRST (the Makefile's cross-stack rule, and `deploy --all`'s own
+    // order). A grant in `ApiGatewayStack` would reach IAM only after the code
+    // that needs it — every sign-in and dashboard broken for the whole
+    // ApiGateway deploy, and for good if that deploy rolled back (review
+    // CR-01). Here, the role's default policy and the Function are one
+    // CloudFormation update, and CDK makes the Function depend on the policy.
     //
     // Control-plane ARNs carry no account id — `arn:aws:apigateway:<region>::`
     // with a doubled colon — and the resource is the API's own path.
@@ -617,10 +625,9 @@ export class ComputeStack extends cdk.Stack {
     //    this is again exposure under code execution, not feature behaviour.
     //
     // What is deliberately NOT here: `apigateway:*`, `PUT /tags/*` on anything
-    // but API keys, and any grant on `/usageplans` — the three this feature
-    // takes (list by key, any plan's usage, attach to any plan) live in
-    // `ApiGatewayStack`'s standalone policy, which also states what is not
-    // granted there (`GET /usageplans/{id}`, `DELETE`, `PATCH`).
+    // but API keys, and any grant on `/usageplans` beyond the three below
+    // (list by key, any plan's usage, attach to any plan) — each states there
+    // what it does not reach (`GET /usageplans/{id}`, `DELETE`, `PATCH`).
     //
     // `DELETE` **is** here, and it is this slice's: the reconciler removes
     // duplicate keys after a double-submit ("keep the earliest createdDate,
@@ -698,6 +705,62 @@ export class ComputeStack extends cdk.Stack {
         conditions: {
           StringEquals: { 'aws:ResourceTag/ManagedBy': 'prices-portal' },
         },
+      }),
+    );
+
+    // The portal's `/usageplans` grants (tasks 0187, 0188, widened by 0311).
+    // Three statements, and they are the whole set. Task 0188's decision 1 was
+    // "one plan's ARN, nothing wider"; task 0311 widens it deliberately,
+    // because the dashboard must state the key's OWN plan and the usage counted
+    // on it, and a rework must keep a paid user on their paid plan:
+    //
+    // - `GET /usageplans` is `GetUsagePlans?keyId=` — which plans hold this
+    //   key. The keyId filter is a query parameter, not a resource, so this
+    //   cannot be scoped below the collection. Read-only; it reveals plan
+    //   names and limits, never another key.
+    // - `GET /usageplans/*/usage` is `GetUsage` on whichever plan the key is
+    //   on — paid, free or hand-made. The usage sub-resource does NOT permit
+    //   reading a plan itself, listing its keys or changing it.
+    // - `POST /usageplans/*/keys` attaches a key. The code only ever attaches
+    //   to the free plan or to a previous (revoked) key's plan — and only one
+    //   that `GetUsagePlans` reported on OUR API stage (`resolve_target_plan`
+    //   in `portal/keys/mod.rs`). Hand-made plans have no ARN known at synth,
+    //   hence the wildcard.
+    //
+    // Deliberately NOT granted:
+    // - `GET /usageplans/{id}` to validate the plan at cold start. 0187's
+    //   decision 22 rejected cold-start validation (a warm container still
+    //   misses a plan that changes under it, and the attach path
+    //   disambiguates a dead plan id into `PlanNotFound` loudly), and
+    //   `GetUsagePlans` already returns every figure the dashboard shows.
+    // - `DELETE`/`PATCH` on a plan or a plan key. The code never moves a key
+    //   between plans or changes limits; an operator does, by hand
+    //   (docs/runbooks/manual-api-key-tier.md).
+    // - `GET /usageplans/*/keys`. Nothing lists a plan's members.
+    //
+    // A `sid` on every statement is load-bearing: cdk.json enables
+    // `@aws-cdk/aws-iam:minimizePolicies`, which merges sid-less statements —
+    // the two GETs would collapse into one and the set would stop reading as
+    // three.
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalListUsagePlansByKey',
+        actions: ['apigateway:GET'],
+        resources: [`arn:aws:apigateway:${awsRegion}::/usageplans`],
+      }),
+    );
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalReadAnyPlanUsage',
+        actions: ['apigateway:GET'],
+        resources: [`arn:aws:apigateway:${awsRegion}::/usageplans/*/usage`],
+      }),
+    );
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalAttachKeyToAnyPlan',
+        actions: ['apigateway:POST'],
+        resources: [`arn:aws:apigateway:${awsRegion}::/usageplans/*/keys`],
       }),
     );
 
@@ -842,7 +905,9 @@ export class ComputeStack extends cdk.Stack {
         //    The same deploy-order caveat as read 2: `ApiGatewayStack`
         //    publishes it and deploys AFTER this stack. It has existed since
         //    the gateway's first deploy, so this bites only a fresh
-        //    environment — where read 2 already does
+        //    environment — where read 2 already closes the portal until
+        //    `ApiGatewayStack` has deployed once, so this read adds no new
+        //    failure there.
         //
         // A failed read CLOSES the portal in that execution environment and
         // logs `portal closed at cold start` on the api-handler; it does NOT
@@ -912,9 +977,11 @@ export class ComputeStack extends cdk.Stack {
         // Since task 0311 the signed-in dashboard no longer states this: it
         // reads the key's OWN plan through `GetUsagePlans` (0311 took the
         // grant 0188 had declined) and shows that plan's figures. This stays
-        // for what has no key to ask about — the no-key state, the landing
-        // page, and the fallback while the usage call is unanswered. A
-        // literal in the bundle would go stale the moment the limit changed.
+        // for what has no key to ask about — the no-key state and the landing
+        // page. While the usage call is unanswered (or failed) the dashboard
+        // states no figure at all rather than this one, which a paid key
+        // would read as its own (task 0311's review, WR-01). A literal in the
+        // bundle would go stale the moment the limit changed.
         // Not a secret, and not conditional on `PORTAL_ENABLED` — same
         // one-word-diff reasoning as the two names above.
         PORTAL_RATE_LIMIT: String(config.pricingApiFreePlanRateLimit),
@@ -964,6 +1031,18 @@ export class ComputeStack extends cdk.Stack {
       value: this.ingestDlq.queueUrl,
       description: `Prices ingest DLQ URL (${envName})`,
     });
+    // ⚠️ Keeps the api-handler role's name exported although, since task
+    // 0311, nothing in this app imports it. `ApiGatewayStack`'s deployed
+    // template still does — its old `PortalAttachKeyToFreePlan` policy names
+    // the role through `Fn::ImportValue` — and this stack deploys FIRST.
+    // Without this line CDK would drop the auto-generated export, and
+    // CloudFormation refuses to delete an export another stack still imports:
+    // the Compute deploy would fail before ApiGateway ever removed the policy.
+    // The export name is the one CDK generated for the automatic reference,
+    // so the template does not change here. Remove it one release after
+    // `ApiGatewayStack` has deployed without the policy.
+    this.exportValue(this.apiHandlerRole.roleName);
+
     new cdk.CfnOutput(this, 'ApiHandlerRoleArn', {
       value: this.apiHandlerRole.roleArn,
       description: `API Handler Lambda execution role ARN (${envName})`,

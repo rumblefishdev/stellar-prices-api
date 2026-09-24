@@ -2,7 +2,6 @@ import * as cdk from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import type * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as iam from 'aws-cdk-lib/aws-iam';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as targets from 'aws-cdk-lib/aws-route53-targets';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
@@ -30,21 +29,6 @@ export interface ApiGatewayStackProps extends cdk.StackProps {
    * Passed in from `ComputeStack` (cross-stack reference).
    */
   readonly apiHandlerFunction: lambda.IFunction;
-  /**
-   * The api-handler's execution role, so the one control-plane grant that needs
-   * the usage-plan id can be declared here (task 0187).
-   *
-   * The other four `apigateway:` grants live in `ComputeStack`, on resources
-   * that need no id from this stack. This one cannot: `usagePlan.usagePlanId`
-   * is created below, and a policy in `ComputeStack` referencing it would make
-   * ComputeStack import an export of ApiGatewayStack — while ApiGatewayStack
-   * already imports the Lambda from ComputeStack. That is a cycle, and
-   * CloudFormation refuses it.
-   *
-   * Declaring the policy HERE and attaching it to the passed-in role keeps the
-   * reference pointing the one way that works: ApiGateway -> Compute.
-   */
-  readonly apiHandlerRole: iam.IRole;
 }
 
 /**
@@ -372,7 +356,7 @@ export class ApiGatewayStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ApiGatewayStackProps) {
     super(scope, id, props);
 
-    const { config, apiHandlerFunction, apiHandlerRole } = props;
+    const { config, apiHandlerFunction } = props;
     const cacheEnabled = config.apiGatewayCacheEnabled;
 
     this.api = new apigateway.RestApi(this, 'Api', {
@@ -951,77 +935,15 @@ export class ApiGatewayStack extends cdk.Stack {
       description: `Usage plan ID for pricing-api-free-${config.envName} (key issuance + GetUsage)`,
     });
 
-    // The portal's `/usageplans` grants (tasks 0187, 0188, widened by 0311).
-    // Declared here rather than in `ComputeStack`, beside their five siblings
-    // there, for a reason that outlived the one it started with.
-    //
-    // It started as the cycle: the grants named the free plan's id, and
-    // `iam.Policy` rather than `apiHandlerRole.addToPrincipalPolicy` because
-    // the latter appends to the role's default policy — a resource of
-    // ComputeStack — so the plan id would have travelled as an export of THIS
-    // stack imported by that one. Since task 0311 no statement references the
-    // plan id, but the policy STAYS here with its construct id and policyName:
-    // moving it to ComputeStack is a delete in one stack and a create in
-    // another, with a window in which the Lambda can attach no key and key
-    // issuance breaks. Renaming it is a replacement for the same cosmetic gain.
-    //
-    // Three statements, and they are the whole set. Task 0188's decision 1 was
-    // "one plan's ARN, nothing wider"; task 0311 widens it deliberately,
-    // because the dashboard must state the key's OWN plan and the usage counted
-    // on it, and a rework must keep a paid user on their paid plan:
-    //
-    // - `GET /usageplans` is `GetUsagePlans?keyId=` — which plans hold this
-    //   key. The keyId filter is a query parameter, not a resource, so this
-    //   cannot be scoped below the collection. Read-only; it reveals plan
-    //   names and limits, never another key.
-    // - `GET /usageplans/*/usage` is `GetUsage` on whichever plan the key is
-    //   on — paid, free or hand-made. The usage sub-resource still does NOT
-    //   permit reading a plan itself, listing its keys or changing it.
-    // - `POST /usageplans/*/keys` attaches a key. The code only ever attaches
-    //   to the free plan, the key's own plan, or the previous (revoked) key's
-    //   plan — and only one that `GetUsagePlans` reported on OUR API stage.
-    //   Hand-made plans have no ARN known at synth, hence the wildcard.
-    //
-    // Deliberately NOT granted:
-    // - `GET /usageplans/{id}` to validate the plan at cold start. 0187's
-    //   decision 22 rejected cold-start validation (a warm container still
-    //   misses a plan that changes under it, and the attach path
-    //   disambiguates a dead plan id into `PlanNotFound` loudly), and
-    //   `GetUsagePlans` already returns every figure the dashboard shows.
-    // - `DELETE`/`PATCH` on a plan or a plan key. The code never moves a key
-    //   between plans or changes limits; an operator does, by hand.
-    // - `GET /usageplans/*/keys`. Nothing lists a plan's members.
-    //
-    // A `sid` on every statement is load-bearing: cdk.json enables
-    // `@aws-cdk/aws-iam:minimizePolicies`, which merges sid-less statements —
-    // the two GETs would collapse into one and the set would stop reading as
-    // three. Task 0194's audit should read this policy as "the portal's
-    // `/usageplans` grants", whatever the name says.
-    new iam.Policy(this, 'PortalAttachKeyToFreePlan', {
-      policyName: `prices-${config.envName}-portal-attach-key`,
-      roles: [apiHandlerRole],
-      statements: [
-        new iam.PolicyStatement({
-          sid: 'PortalListUsagePlansByKey',
-          actions: ['apigateway:GET'],
-          resources: [`arn:aws:apigateway:${config.awsRegion}::/usageplans`],
-        }),
-        new iam.PolicyStatement({
-          sid: 'PortalReadAnyPlanUsage',
-          actions: ['apigateway:GET'],
-          resources: [
-            `arn:aws:apigateway:${config.awsRegion}::/usageplans/*/usage`,
-          ],
-        }),
-        new iam.PolicyStatement({
-          sid: 'PortalAttachKeyToAnyPlan',
-          actions: ['apigateway:POST'],
-          resources: [
-            `arn:aws:apigateway:${config.awsRegion}::/usageplans/*/keys`,
-          ],
-        }),
-      ],
-    });
+    // The portal's `/usageplans` grants (tasks 0187, 0188, widened by 0311)
+    // used to be a standalone `iam.Policy` here, `PortalAttachKeyToFreePlan`,
+    // because they named the free plan's id and importing that id into
+    // ComputeStack would have closed a cycle. Since task 0311 they name no id
+    // (`/usageplans`, `/usageplans/*/usage`, `/usageplans/*/keys`), so they
+    // live on the api-handler role's own policy in `ComputeStack` — the stack
+    // that ships the code using them, and deploys FIRST: the grants reach IAM
+    // in the same CloudFormation update as the Lambda that needs them, never
+    // after it. See the control-plane section of `compute-stack.ts`.
 
     // CORS on the gateway's OWN error answers (task 0194): a `429` from the
     // throttle above, a `504` when the Lambda runs out of time. Neither
