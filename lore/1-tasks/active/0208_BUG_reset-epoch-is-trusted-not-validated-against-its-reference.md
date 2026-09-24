@@ -196,5 +196,5 @@ it). Unit fixtures that embedded `1612656000` as the USDT epoch now use
   or no reference inside `--pivot-window-s` are still zeroed and not refilled.
   Documented as a caveat in the runbook and `--help`; gating it (e.g. reuse
   `external_rate_day_pred` / `pivot_reference_day_pred` or
-  `assert_external_rates_are_loaded` in plain mode) is proposed as a follow-up,
-  pending Adam's decision.
+  `assert_external_rates_are_loaded` in plain mode) → spawned as [[0312]]
+  (priority-low).
