@@ -512,8 +512,12 @@ def require_transport_flag(a):
     Shared by the Comet binary probe and the `amm` step, so a binary without the
     flag is reported as exactly that — never as a pre-0300 binary (PR #345 review).
     """
-    probe = subprocess.run(shlex.split(a.events_backfill) + ["--help"],
-                           capture_output=True, text=True)
+    try:
+        probe = subprocess.run(shlex.split(a.events_backfill) + ["--help"],
+                               capture_output=True, text=True)
+    except OSError as e:
+        # A missing or non-executable binary must fail the gate, not crash preflight.
+        raise Stop(f"{a.events_backfill} cannot be run: {e}") from e
     if "--transport" not in (probe.stdout + probe.stderr):
         raise Stop(
             f"{a.events_backfill} has no --transport flag, so --amm mtls cannot run. "
