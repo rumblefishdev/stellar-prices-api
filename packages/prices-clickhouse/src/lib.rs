@@ -775,16 +775,20 @@ mod tests {
     }
 
     #[test]
-    fn views_sql_has_six_create_view_statements() {
-        // series + reference at 1d and 1h, the SAC read-seam resolver, and the
-        // live-spot view.
+    fn views_sql_has_eight_create_view_statements() {
+        // series + reference + coverage at 1d and 1h, the SAC read-seam
+        // resolver, and the live-spot view. Was six until task 0147 added the
+        // two coverage views — a withheld bucket is ABSENT from the series, so
+        // without them "not published" and "never traded" are the same reading.
         let stmts = split_statements(VIEWS_SQL);
-        assert_eq!(stmts.len(), 6, "got {}", stmts.len());
+        assert_eq!(stmts.len(), 8, "got {}", stmts.len());
         for v in [
             "prices.usd_reference AS",
             "prices.price_usd_series AS",
             "prices.usd_reference_1h",
             "prices.price_usd_series_1h",
+            "prices.price_usd_series_coverage AS",
+            "prices.price_usd_series_coverage_1h",
             "prices.identity_by_contract",
             "prices.current_price_usd",
         ] {
@@ -807,7 +811,7 @@ mod tests {
     #[test]
     fn views_sql_uses_create_or_replace_for_every_view() {
         let stmts = split_statements(VIEWS_SQL);
-        assert_eq!(stmts.len(), 6, "guard is vacuous if the file is empty");
+        assert_eq!(stmts.len(), 8, "guard is vacuous if the file is empty");
 
         for stmt in &stmts {
             let head: String = stmt.chars().take(80).collect();
@@ -1318,28 +1322,378 @@ mod tests {
         ]
     }
 
-    /// Tasks 0171 / 0198. Every weighted-average surface admits a candle only
-    /// with `volume_base > 0`, so `sum(w)` can never be 0 for a group that
-    /// exists and `CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))` can
-    /// never see NULL — which on 26.3.10.60 it silently turns into
-    /// Decimal128::MIN (≈ -1.7e24) flagged `traded`. The behavioural proof is
-    /// `#[ignore]` in tests/views_it.rs; this pins the predicate in CI, on
-    /// all four statements, so a fix that reaches only one grain fails here.
+    /// Task 0147 (D-01), carrying tasks 0171 / 0198 forward.
+    ///
+    /// Every weighted-average surface spells ONE priced predicate — the same
+    /// one `/ohlcv` applies to the same row (`queries_ch.rs::usd_projection`):
+    /// the `1e-12` precision floor on both price columns, `pf_trade_count > 0`,
+    /// and a POSITIVE PRICE-FORMING WEIGHT.
+    ///
+    /// The weight term is the 0171/0198 guard and is why it survived the 0147
+    /// rewrite. `CAST(… / …)` over a group with no weight does not yield NULL
+    /// on 26.3.10.60: the target is non-Nullable, so the CAST either raises
+    /// code 349 (interpreted) or silently publishes Decimal128::MIN (≈ -1.7e24)
+    /// flagged `traded` (JIT-compiled). A cold server raises, a warm one lies.
+    /// Task 0147 moved the predicate from a `WHERE` into conditional sums — the
+    /// denominator now counts the UNPRICED rows too, which is the whole point —
+    /// so the arithmetic guard moved with it, INSIDE the CAST's argument
+    /// (`if(pw > 0, pv / pw, 0)`), and the gate lives in the outer `WHERE`.
+    ///
+    /// ⚠️ `0.000000000001` must appear as a LITERAL, not as a re-derived
+    /// constant: `PRECISION_FLOOR` in `prices-api` is defined as
+    /// [`PRICE_FLOOR_SQL`], so pinning both files to this string is what makes
+    /// "one predicate" checkable without a ClickHouse. The behavioural proof is
+    /// `#[ignore]` in tests/views_it.rs; this runs on every push.
     #[test]
-    fn views_sql_every_weighted_surface_admits_only_candles_with_volume() {
-        for (name, stmt) in series_grains() {
+    fn views_sql_every_weighted_surface_spells_the_one_priced_predicate() {
+        for (name, stmt) in series_grains().into_iter().chain(reference_grains()) {
             assert!(
-                stmt.contains("WHERE p.close_usd > 0 AND p.volume_base > 0"),
-                "{name}: arm A must require volume_base > 0 beside close_usd > 0 \
-                 (tasks 0171/0198), got no such predicate"
+                stmt.contains(PRICE_FLOOR_SQL),
+                "{name}: the priced predicate must compare against the shared \
+                 precision floor literal `{PRICE_FLOOR_SQL}` (task 0147 D-01) — \
+                 a bare `> 0` is what published 9e-14 closes beside real ones"
+            );
+            assert!(
+                stmt.contains("p.pf_trade_count > 0"),
+                "{name}: the priced predicate must require a PRICE-FORMING trade \
+                 (task 0147 D-01); a bucket of dust fills is not a price"
+            );
+            assert!(
+                stmt.contains("p.pf_volume > 0"),
+                "{name}: a positive price-forming weight must survive (tasks \
+                 0171/0198) — without it a group with no weight reaches the CAST \
+                 and publishes Decimal128::MIN flagged `traded`"
+            );
+            assert!(
+                !stmt.contains("WHERE p.close_usd > 0 AND p.volume_base > 0"),
+                "{name}: arm A's pre-0147 filter removed the unpriced rows BEFORE \
+                 the weighting, which is exactly what made a dust print 100 % of \
+                 a bucket's weight — it must not come back"
             );
         }
-        for (name, stmt) in reference_grains() {
+        // The convertibility term is `/ohlcv`'s too, but only the series views
+        // carry it: `usd_reference*` read the XLM/USDC `close` and no USD leg.
+        // Without it a row whose enrichment copied `close` into `close_usd`
+        // unconverted (a non-USDC quote) would count as priced (review N-04).
+        for (name, stmt) in series_grains() {
             assert!(
-                stmt.contains("AND p.close > 0 AND p.volume_base > 0"),
-                "{name}: the reference must require volume_base > 0 beside close > 0 \
-                 (task 0171 audit), got no such predicate"
+                stmt.contains("AND (p.quote_asset_id IN ( SELECT u.asset_id"),
+                "{name}: a row quoted in canonical USDC must be priced as-is \
+                 (task 0147 D-01's convertibility term)"
             );
+            assert!(
+                stmt.contains("OR p.close_usd != p.close)) AS is_priced"),
+                "{name}: any other quote is priced only once `close_usd` was \
+                 converted away from `close` (task 0147 D-01's convertibility term)"
+            );
+        }
+    }
+
+    /// Task 0147 phase 2 (2026-09-23) — X is measured and there is NO absolute
+    /// USD floor. Phase 1 shipped both as `⚠️ PLACEHOLDER` constants; the
+    /// measurement (views.sql header) kept X = 0.5 and removed the floor, because
+    /// a per-bucket dollar floor withheld 82–97 % of today's buckets without
+    /// predicting a bad price. This keeps a placeholder from coming back
+    /// unnoticed and the floor from creeping back into a gate or a status.
+    ///
+    /// ⚠️ Reads the RAW `VIEWS_SQL` for the marker: `split_statements` strips
+    /// `-- …` comments, so a marker is invisible to every statement-level test.
+    #[test]
+    fn views_sql_has_no_placeholder_constant_and_no_absolute_usd_floor() {
+        assert!(
+            !VIEWS_SQL.contains("PLACEHOLDER"),
+            "views.sql still marks a constant as an unmeasured placeholder"
+        );
+        assert_eq!(
+            header_constant("X"),
+            "0.5",
+            "X was measured at 0.5 on 2026-09-23 (task 0147 phase 2); a new value \
+             needs a new measurement recorded in the views.sql header"
+        );
+        for (name, stmt) in series_grains().into_iter().chain(coverage_grains()) {
+            for floor in ["pusd >=", "sum(rpusd) >=", "FLOOR_USD"] {
+                assert!(
+                    !stmt.contains(floor),
+                    "{name}: `{floor}` — the absolute USD floor was removed by \
+                     measurement (task 0147 phase 2); `priced_volume_usd` is \
+                     published for the consumer and gates nothing"
+                );
+            }
+        }
+    }
+
+    /// The value of a gate constant as the `views.sql` header states it, e.g.
+    /// `--   X         = 0.5    -- …` → `"0.5"`. Exactly one such line each.
+    fn header_constant(name: &str) -> String {
+        let prefix = format!("-- {name} = ");
+        let lines: Vec<String> = VIEWS_SQL
+            .lines()
+            .map(squash)
+            .filter(|l| l.starts_with(&prefix))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "the views.sql header must state `{name}` exactly once, got {lines:?}"
+        );
+        lines[0][prefix.len()..]
+            .split_whitespace()
+            .next()
+            .unwrap_or_else(|| panic!("`{name}` has no value in the header: {lines:?}"))
+            .to_string()
+    }
+
+    /// Task 0147 — the gate's X is spelled in FOUR places: the publish `WHERE`
+    /// of each series grain and the `priced` branch of each coverage grain's
+    /// `status`. A view cannot read a settings table, so nothing but this test
+    /// keeps the four in step with the header. To change X: edit the header
+    /// line, and this names every copy still carrying the old value. A coverage
+    /// copy left behind would report `priced` for a bucket the series withholds,
+    /// or `pending` for one it publishes — two answers to one question.
+    #[test]
+    fn views_sql_gate_constants_agree_between_the_header_the_gates_and_the_coverage_status() {
+        let x = header_constant("X");
+        for (name, stmt) in series_grains() {
+            let token = format!("pw / ew >= {x})");
+            assert_eq!(
+                stmt.matches(&token).count(),
+                1,
+                "{name}: the publish gate must spell `{token}` once, as the \
+                 views.sql header states (X = {x})"
+            );
+        }
+        for (name, stmt) in coverage_grains() {
+            let token = format!("sum(rpw) / sum(rew) >= {x},");
+            assert_eq!(
+                stmt.matches(&token).count(),
+                1,
+                "{name}: the `priced` status must spell `{token}` once, as the \
+                 views.sql header and the series gate do (X = {x})"
+            );
+        }
+    }
+
+    /// The single-grain-edit guard for task 0147, modelled on 0267's. Every
+    /// token the gate introduced must occur the SAME number of times in both
+    /// grain statements — a threshold changed on the daily view and forgotten
+    /// on the hourly one would publish two different rules, silently.
+    #[test]
+    fn views_sql_both_series_grains_agree_on_every_task_0147_token() {
+        let grains = series_grains();
+        let (daily_name, daily) = &grains[0];
+        let (hourly_name, hourly) = &grains[1];
+        for token in [
+            "AS priced_volume_share",
+            "AS pv",
+            "AS pw",
+            "AS ew",
+            "CAST(if(sum(rpw) > 0, sum(rpv) / sum(rpw), toFloat64(0)) AS Decimal(38, 14))",
+            "if(sum(rew) > 0, sum(rpw) / sum(rew), toFloat64(0))",
+            "pw / ew >= 0.5",
+            "AS is_priced",
+            "AS is_eligible",
+            "p.pf_trade_count > 0",
+            "p.pf_volume > 0",
+            "toFloat64(p.pf_volume)",
+            "toFloat64(p.volume_quote_usd)",
+        ] {
+            assert_eq!(
+                daily.matches(token).count(),
+                hourly.matches(token).count(),
+                "`{token}` occurs a different number of times in {daily_name} \
+                 than in {hourly_name} — the grains have drifted apart"
+            );
+            assert!(
+                daily.contains(token),
+                "{daily_name}: task 0147 token `{token}` is missing entirely"
+            );
+        }
+    }
+
+    /// `priced_volume_share` is APPENDED LAST, after `method` (D-05). BE decodes
+    /// positionally off `SELECT *`, so arity may change and ORDER may not — the
+    /// same rule task 0165 wrote down when it appended `method`.
+    #[test]
+    fn views_sql_appends_priced_volume_share_after_method_at_both_grains() {
+        for (name, stmt) in series_grains() {
+            let method_at = stmt
+                .find("AS method")
+                .unwrap_or_else(|| panic!("{name}: no `AS method` in the projection"));
+            let share_at = stmt
+                .find("AS priced_volume_share")
+                .unwrap_or_else(|| panic!("{name}: no `AS priced_volume_share`"));
+            assert!(
+                share_at > method_at,
+                "{name}: priced_volume_share must come AFTER method — inserting \
+                 it anywhere else re-orders a positionally-decoded surface"
+            );
+        }
+    }
+
+    /// The coverage views publish the full `priced | pending | unpriceable`
+    /// vocabulary and never name `prices.price_usd_series` in executable SQL —
+    /// `series_grains()` takes the FIRST statement containing that substring, so
+    /// a coverage body that read the series view would silently become the
+    /// subject of every assertion above.
+    #[test]
+    fn views_sql_coverage_views_publish_the_status_vocabulary_at_both_grains() {
+        let stmts = split_statements(VIEWS_SQL);
+        for needle in [
+            "prices.price_usd_series_coverage AS",
+            "prices.price_usd_series_coverage_1h AS",
+        ] {
+            let stmt = stmts
+                .iter()
+                .find(|s| s.contains(needle))
+                .unwrap_or_else(|| panic!("no view statement containing `{needle}`"));
+            for word in ["'priced'", "'pending'", "'unpriceable'"] {
+                assert!(
+                    stmt.contains(word),
+                    "{needle}: the status vocabulary must include {word}"
+                );
+            }
+            assert!(
+                stmt.contains("AS priced_volume_usd"),
+                "{needle}: a withheld bucket is explained by its priced USD \
+                 volume as well as its share"
+            );
+            assert!(
+                !stmt.contains("prices.price_usd_series AS")
+                    && !stmt.contains("FROM prices.price_usd_series"),
+                "{needle}: a coverage body must never read the series view — \
+                 `series_grains()` matches on that substring"
+            );
+        }
+    }
+
+    /// The two `price_usd_series_coverage` grain statements, squashed — the
+    /// series views' companions, which must describe the same bucket the same
+    /// way or a consumer gets two answers for one question.
+    fn coverage_grains() -> Vec<(&'static str, String)> {
+        let stmts = split_statements(VIEWS_SQL);
+        let find = |needle: &str| -> String {
+            squash(
+                stmts
+                    .iter()
+                    .find(|s| s.contains(needle))
+                    .unwrap_or_else(|| panic!("no view statement containing `{needle}`")),
+            )
+        };
+        vec![
+            (
+                "price_usd_series_coverage",
+                find("prices.price_usd_series_coverage AS"),
+            ),
+            (
+                "price_usd_series_coverage_1h",
+                find("prices.price_usd_series_coverage_1h AS"),
+            ),
+        ]
+    }
+
+    /// Arm A's executable text for one view statement: the base-leg projection
+    /// through the candle join that closes the arm. Comment-stripped and
+    /// squashed by the caller, so this compares SQL and not layout.
+    fn arm_a(name: &str, stmt: &str) -> String {
+        const START: &str = "SELECT multiIf( a.contract_address";
+        const END: &str = "INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id";
+        let start = stmt
+            .find(START)
+            .unwrap_or_else(|| panic!("{name}: no arm-A base-leg projection (`{START}`)"));
+        let end = stmt
+            .find(END)
+            .unwrap_or_else(|| panic!("{name}: no arm-A candle join (`{END}`)"));
+        assert!(
+            end > start,
+            "{name}: the arm-A candle join precedes its projection — the \
+             markers this helper slices on no longer delimit arm A"
+        );
+        stmt[start..end + END.len()].to_string()
+    }
+
+    /// Task 0147 review SF-04. Arm A is spelled FOUR times — once per series
+    /// grain and once per coverage grain — and the two surfaces' whole job is to
+    /// describe the same bucket. Edit the priced predicate, the eligible set or
+    /// a conditional sum in the series view and forget the coverage view, and
+    /// they disagree about that bucket SILENTLY: no existing test reads both.
+    ///
+    /// That is the precise failure mode task 0165 wrote `series_grains()` to
+    /// prevent between the grains; this closes the same hole between the series
+    /// and its coverage companion. The behavioural half is `#[ignore]` in
+    /// tests/views_it.rs; this runs on every push.
+    #[test]
+    fn views_sql_arm_a_is_identical_between_each_series_view_and_its_coverage_view() {
+        for ((series_name, series), (coverage_name, coverage)) in
+            series_grains().into_iter().zip(coverage_grains())
+        {
+            let series_arm = arm_a(series_name, &series);
+            let coverage_arm = arm_a(coverage_name, &coverage);
+            assert_eq!(
+                series_arm, coverage_arm,
+                "{series_name} and {coverage_name} no longer share ONE arm A. \
+                 The share, the priced predicate and the eligible set must be \
+                 spelled identically in both, or the series publishes a bucket \
+                 the coverage view explains with different arithmetic"
+            );
+        }
+    }
+
+    /// Task 0147 review SF-05. The canonical USDT issuer is a HAND-SYNCED copy
+    /// of [`USDT_ISSUER`] — SQL cannot reference a Rust const — and the file's
+    /// own header says in bold to change it here and in that const together.
+    /// Nothing checked it.
+    ///
+    /// The repo has a measured incident of exactly this class: tasks 0172/0173,
+    /// a rate filed under the wrong issuer, ~7.4x on 44,657 candles across 495
+    /// base assets. The same scan covers [`USDC_ISSUER`], which carried the same
+    /// gap for longer.
+    ///
+    /// Counts are asserted as well as values: a copy DELETED from one of the
+    /// four `eligible_quotes` blocks would silently drop USDT-quoted volume out
+    /// of that grain's coverage denominator, and every surviving literal would
+    /// still be correct.
+    #[test]
+    fn views_sql_hand_synced_issuer_literals_equal_this_crates_consts() {
+        let executable = split_statements(VIEWS_SQL).join(";\n");
+
+        for (code, issuer, expected) in [
+            ("'USDT'", USDT_ISSUER, 4usize),
+            ("'USDC'", USDC_ISSUER, 14usize),
+        ] {
+            assert_eq!(
+                executable.matches(issuer).count(),
+                expected,
+                "views.sql must spell the {code} issuer literal exactly \
+                 {expected} times in EXECUTABLE SQL — a deleted copy drops that \
+                 quote leg out of one surface while every surviving literal \
+                 stays correct"
+            );
+            assert_eq!(
+                executable.matches(code).count(),
+                expected,
+                "every {code} asset-code literal is paired with an issuer \
+                 literal, so the two counts must match"
+            );
+
+            for (at, _) in executable.match_indices(code) {
+                // The issuer always follows its asset code within the same
+                // predicate; bound the window so a MISSING issuer cannot be
+                // satisfied by the next block's.
+                let window = &executable[at..executable.len().min(at + 200)];
+                let key = "issuer_address = '";
+                let from = window.find(key).unwrap_or_else(|| {
+                    panic!("views.sql: a {code} literal with no issuer_address beside it: {window}")
+                }) + key.len();
+                let len = window[from..]
+                    .find('\'')
+                    .unwrap_or_else(|| panic!("views.sql: unterminated issuer literal: {window}"));
+                assert_eq!(
+                    &window[from..from + len],
+                    issuer,
+                    "views.sql spells a {code} issuer that is not this crate's \
+                     const — the views and the writer have diverged (0172/0173)"
+                );
+            }
         }
     }
 

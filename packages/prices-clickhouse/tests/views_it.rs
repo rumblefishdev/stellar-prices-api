@@ -95,9 +95,9 @@ async fn views_expose_usd_series_and_reference() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
              (1620000000, 1, 2,'sdex',    0.30,0.30,0.30,0.30, 1000,300,300,0.30,0.30,1,1), \
-             (1620000000,10, 2,'sdex',    5,5,5,5,             10, 50, 50, 5,   5,   1,1), \
-             (1620000000,10, 1,'phoenix', 16.6667,16.6667,16.6667,16.6667, 5,83,25,5,16.6667,1,1), \
-             (1620000000,30, 2,'soroswap',2,2,2,2,             3,  6,  6,  2,   2,   1,1), \
+             (1620000000,10, 2,'sdex',    5,5,5,5,             10, 50, 500, 5,   5,   1,1), \
+             (1620000000,10, 1,'phoenix', 16.6667,16.6667,16.6667,16.6667, 5,83,250,5,16.6667,1,1), \
+             (1620000000,30, 2,'soroswap',2,2,2,2,             3,  6,  600,  2,   2,   1,1), \
              (1620000000,10,20,'sdex',    9,9,9,9,             1,  9,  0,  0,   9,   1,1)"
         ))
         .execute()
@@ -219,8 +219,8 @@ async fn views_expose_usd_series_and_reference() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1620003600, 1, 2,'sdex', 0.31,0.31,0.31,0.31, 100,31,31,0.31,0.31,1,1), \
-             (1620007200, 1, 2,'sdex', 0.32,0.32,0.32,0.32, 100,32,32,0.32,0.32,1,1)"
+             (1620003600, 1, 2,'sdex', 0.31,0.31,0.31,0.31, 100,31,310,0.31,0.31,1,1), \
+             (1620007200, 1, 2,'sdex', 0.32,0.32,0.32,0.32, 100,32,320,0.32,0.32,1,1)"
         ))
         .execute()
         .await
@@ -560,8 +560,9 @@ async fn backfill_progress_seed_is_idempotent() {
 /// `setup_scratch` builds on a freshly-created database, so every other
 /// assertion in this file lands on a target with no pre-existing view and would
 /// pass identically under the old `CREATE VIEW IF NOT EXISTS` form. This test
-/// rewinds all six views to a one-column stub first and re-applies, which is the
-/// actual production upgrade path — ch-prod-01 already holds all six.
+/// rewinds every view to a one-column stub first and re-applies, which is the
+/// actual production upgrade path — ch-prod-01 already holds the six that
+/// predate task 0147.
 ///
 /// The `IF NOT EXISTS` half is the control: it pins *why* the statement form is
 /// load-bearing, so a revert to that form fails here rather than as a silent
@@ -578,6 +579,8 @@ async fn views_sql_replaces_every_existing_view() {
         ("price_usd_series", "close_usd"),
         ("usd_reference_1h", "xlm_usd"),
         ("price_usd_series_1h", "close_usd"),
+        ("price_usd_series_coverage", "status"),
+        ("price_usd_series_coverage_1h", "status"),
         ("identity_by_contract", "contract"),
         ("current_price_usd", "vwap_24h"),
     ];
@@ -625,7 +628,7 @@ async fn views_sql_replaces_every_existing_view() {
         );
     }
 
-    // The shipped form replaces all six in place.
+    // The shipped form replaces every one of them in place.
     prices_clickhouse::apply_sql(&client, &rewrite(prices_clickhouse::VIEWS_SQL, db))
         .await
         .unwrap();
@@ -708,10 +711,10 @@ async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1620000000,10, 2,'sdex', 5,5,5,5,             10, 50, 50, 5,    5,    1,1), \
+             (1620000000,10, 2,'sdex', 5,5,5,5,             10, 50, 500, 5,    5,    1,1), \
              (1620000000, 1, 2,'sdex', 0.30,0.30,0.30,0.30, 1000,300,300,0.30,0.30, 1,1), \
-             (1620000000, 3, 2,'sdex', 0.97,0.97,0.97,0.97, 100, 97, 97, 0.97, 0.97, 1,1), \
-             (1620000000,10, 3,'sdex', 5.15,5.15,5.15,5.15, 4,  20.6,20.6,5,  5.15, 1,1)"
+             (1620000000, 3, 2,'sdex', 0.97,0.97,0.97,0.97, 100, 97, 970, 0.97, 0.97, 1,1), \
+             (1620000000,10, 3,'sdex', 5.15,5.15,5.15,5.15, 4,  20.6,206,5,  5.15, 1,1)"
         ))
         .execute()
         .await
@@ -861,8 +864,8 @@ async fn peg_member_that_also_trades_as_a_base_keeps_its_market_value() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1620000000,10, 2,'sdex', 5,5,5,5,             10, 50,  50,  5,    5,    1,1), \
-             (1620000000, 2, 1,'sdex', 3.2,3.2,3.2,3.2,     50, 160, 52,  1.04, 3.2,  1,1)"
+             (1620000000,10, 2,'sdex', 5,5,5,5,             10, 50,  500,  5,    5,    1,1), \
+             (1620000000, 2, 1,'sdex', 3.2,3.2,3.2,3.2,     50, 160, 520,  1.04, 3.2,  1,1)"
         ))
         .execute()
         .await
@@ -973,7 +976,7 @@ async fn peg_asset_with_only_zero_volume_candles_falls_back_instead_of_publishin
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
              (1620000000, 2,10,'sdex', 0.97,0.97,0.97,0.97, 0,0,0,0.97,0.97,1,1), \
-             (1620000000,10, 2,'sdex', 5,5,5,5,                7,35,35,5,5,1,1)"
+             (1620000000,10, 2,'sdex', 5,5,5,5,                7,35,350,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1061,8 +1064,8 @@ async fn usdt_quote_only_gets_no_peg_fallback_but_usdc_still_does() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1620000000,10, 2,'sdex', 5,5,5,5,             10,50,  50,  5,5,   1,1), \
-             (1620000000,10, 3,'sdex', 5.15,5.15,5.15,5.15,  4,20.6,20.6,5,5.15,1,1)"
+             (1620000000,10, 2,'sdex', 5,5,5,5,             10,50,  500,  5,5,   1,1), \
+             (1620000000,10, 3,'sdex', 5.15,5.15,5.15,5.15,  4,20.6,206,5,5.15,1,1)"
         ))
         .execute()
         .await
@@ -1219,9 +1222,9 @@ async fn peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one() 
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-03-01 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2026-08-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2026-03-01 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2026-08-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1243,8 +1246,8 @@ async fn peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one() 
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-10 09:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2026-08-10 23:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2026-08-10 09:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2026-08-10 23:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1442,7 +1445,7 @@ async fn an_oracle_row_outranks_an_imported_row_in_the_same_bucket() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1452,7 +1455,7 @@ async fn an_oracle_row_outranks_an_imported_row_in_the_same_bucket() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-10 23:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2026-08-10 23:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1522,7 +1525,7 @@ async fn an_oracle_row_outranks_an_imported_row_in_the_same_bucket() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1626,10 +1629,10 @@ async fn price_usd_series_1h_publishes_the_imported_rate_of_each_hour() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2023-03-11 07:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2023-03-11 23:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2023-03-12 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2023-03-11 07:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2023-03-11 23:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2023-03-12 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1694,7 +1697,7 @@ async fn price_usd_series_1h_publishes_the_imported_rate_of_each_hour() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1775,7 +1778,7 @@ async fn a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains()
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-12 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2026-08-12 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1788,8 +1791,8 @@ async fn a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains()
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-12 09:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2026-08-12 23:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2026-08-12 09:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2026-08-12 23:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1910,8 +1913,8 @@ async fn a_measured_rate_at_exactly_par_is_labelled_oracle_not_peg() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1), \
-             (toDateTime('2026-08-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,50,5,5,1,1)"
+             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2026-08-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -2028,7 +2031,7 @@ async fn seed_zero_volume_only_base(client: &Client, db: &str) {
                 "INSERT INTO {db}.{tbl} \
                  (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
                   volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-                 (1620000000,10, 2,'sdex', 5,5,5,5,           7,35,35,5,5,1,1), \
+                 (1620000000,10, 2,'sdex', 5,5,5,5,           7,35,350,5,5,1,1), \
                  (1620000000,11,10,'sdex', 0.5,0.5,0.5,0.5,   0,0,0,0.5,0.5,1,1)"
             ))
             .execute()
@@ -2039,6 +2042,14 @@ async fn seed_zero_volume_only_base(client: &Client, db: &str) {
 
 /// Tasks 0171 / 0198 — the non-peg zero-volume case, at both grains, in
 /// both JIT modes.
+///
+/// ⚠️ Since task 0147 this fixture is absent for TWO independent reasons, and
+/// the test still proves the 0198 one. BAR trades only against FOO, which is
+/// not an eligible quote (not USDC / XLM / USDT and with no prices.usd_rate
+/// row), so BAR's bucket now also has NO eligible volume — `ew = 0`, coverage
+/// `unpriceable`. That is a different mechanism from the zero-weight group this
+/// test was written for; what it pins either way is that BAR is ABSENT and that
+/// nothing raises or publishes a sentinel in either JIT mode.
 ///
 /// Before the fix BAR published Decimal128::MIN as `traded` (compiled) or the
 /// query raised code 349 (interpreted). After it BAR is absent in both modes,
@@ -2131,7 +2142,7 @@ async fn a_zero_volume_candle_beside_a_real_one_changes_nothing() {
                 "INSERT INTO {db}.{tbl} \
                  (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
                   volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-                 (1620000000,10,2,'sdex',    5,5,5,5, 7,35,35,5,5,1,1), \
+                 (1620000000,10,2,'sdex',    5,5,5,5, 7,35,350,5,5,1,1), \
                  (1620000000,10,2,'soroswap',4,4,4,4, 0,0,0,4,4,1,1)"
             ))
             .execute()
@@ -2216,6 +2227,778 @@ async fn usd_reference_omits_a_bucket_whose_reference_candles_have_no_volume() {
                 vec![(1620000000, 0.1)],
                 "{view}{jit}: the zero-volume bucket must be ABSENT (no_reference), \
                  not a sentinel"
+            );
+        }
+    }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+// ----------------------------------------------------------------------
+// Task 0147 — the priced-volume coverage gate.
+//
+// Arm A used to filter `close_usd > 0` BEFORE the weighted average, so
+// whichever rows enrichment happened to reach became 100 % of the weight. BE
+// measured the consequence on yXLM (2026-08-04 13:00): a single 0.764-unit
+// print at 1.3085 was the only enriched row in the bucket, and the view
+// published 1.3085 against a true ~0.170 — a 7.7x overstatement in the column
+// they multiply into TVL.
+//
+// The POPULATION was wrong, not the arithmetic. The unpriced rows are real
+// trades and belong in the denominator, so the fix makes the population
+// explicit: `priced_volume_share` is published on every row, and a bucket whose
+// priced volume does not clear the gate is ABSENT — with a row in
+// `price_usd_series_coverage{,_1h}` that says why.
+//
+// The fixtures below carry `volume_quote_usd` values scaled to clear a $100
+// floor that phase 1 had and phase 2 (2026-09-23) removed by measurement — see
+// the views.sql header. Nothing gates on that column any more; the values are
+// left as they were because they change no assertion.
+// ----------------------------------------------------------------------
+
+/// Task 0147 (a) — BE's yXLM case, RED→GREEN.
+///
+/// One 0.764-unit print is priced at 1.3085 beside 1000 unpriced units of the
+/// same identity in the same bucket. Before the gate the view published 1.3085,
+/// the dust print's own price, because the unpriced 99.92 % of the bucket was
+/// filtered out before the weighting. After it the bucket is WITHHELD, and
+/// `price_usd_series_coverage` reports `pending` with the share that explains
+/// the withholding. Enrich the 1000 units at their true 0.0065 and the bucket
+/// publishes — the gate withholds a bucket, it never deletes an identity.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_dust_print_cannot_price_a_bucket_whose_volume_is_unpriced() {
+    let db = "it_views_0147_dust_share";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // ⚠️ The pf columns are named EXPLICITLY. The 15-column idiom the rest of
+    // this file uses lets them fall back to their init.sql DEFAULTs
+    // (`pf_volume` = `volume_base`, `pf_trade_count` = `trade_count`), which is
+    // right for an ordinary fixture and silently destroys a dust one.
+    //
+    // sdex: the enriched dust print — 0.764 units at 1.3085, ~1 USD changed hands.
+    // soroswap: 1000 units at a true 0.0065 that enrichment has NOT reached
+    //           (`close_usd` = 0, and `volume_quote_usd` = 0 with it — the same
+    //           pass writes both).
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
+             (1620000000,10,2,'sdex',     1.3085,1.3085,1.3085,1.3085, 0.764,1.0,1.0,1.3085,1.3085,1, 1,0.764,1.0, 1), \
+             (1620000000,10,2,'soroswap', 0.0065,0.0065,0.0065,0.0065, 1000,6.5,0,0,0.0065,1,        1,1000,6.5, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let approx = |a: f64, b: f64| (a - b).abs() < 1e-6;
+
+    // --- WITHHELD ---------------------------------------------------------
+    // Both JIT modes: the withheld group reaches the outer CAST with a priced
+    // weight of 0.764 and an eligible weight of 1000.764, and a group made only
+    // of unpriced rows reaches it with NO priced weight at all — the 0171/0198
+    // zero-denominator hazard, re-armed by arm A no longer filtering.
+    for jit in JIT_MODES {
+        let published: Vec<(String, f64)> = client
+            .query(&format!(
+                "SELECT asset_code, toFloat64(close_usd) FROM {db}.price_usd_series \
+                 WHERE asset_code = 'FOO'{jit}"
+            ))
+            .fetch_all::<(String, f64)>()
+            .await
+            .unwrap_or_else(|e| panic!("price_usd_series{jit} must not raise: {e}"));
+        assert!(
+            published.is_empty(),
+            "price_usd_series{jit}: the only priced row in this bucket is a \
+             0.764-unit print holding 0.0763 % of its eligible volume, so the \
+             bucket must be WITHHELD — got {published:?} (1.3085 is the dust \
+             print's own price, BE's 7.7x yXLM defect)"
+        );
+    }
+
+    // ...and the coverage view says WHY it is missing, rather than leaving a
+    // withheld bucket indistinguishable from one that never traded.
+    for jit in JIT_MODES {
+        let cov: Vec<(f64, f64, String)> = client
+            .query(&format!(
+                "SELECT toFloat64(priced_volume_share), toFloat64(priced_volume_usd), status \
+                 FROM {db}.price_usd_series_coverage WHERE asset_code = 'FOO'{jit}"
+            ))
+            .fetch_all::<(f64, f64, String)>()
+            .await
+            .unwrap_or_else(|e| panic!("price_usd_series_coverage{jit} must not raise: {e}"));
+        assert_eq!(cov.len(), 1, "exactly one coverage row for (FOO, bucket)");
+        assert!(
+            approx(cov[0].0, 0.000763),
+            "coverage share = 0.764 / 1000.764 published as Decimal(10,6), got {}",
+            cov[0].0
+        );
+        assert!(
+            approx(cov[0].1, 1.0),
+            "priced_volume_usd is the PRICED leg's volume_quote_usd, got {}",
+            cov[0].1
+        );
+        assert_eq!(
+            cov[0].2, "pending",
+            "eligible volume exists and the share is short — `pending`, not `unpriceable`"
+        );
+    }
+
+    // --- ENRICHED ---------------------------------------------------------
+    // The same row, re-inserted at a higher `version` with its true price. Its
+    // `volume_quote_usd` arrives with `close_usd` (one enrichment pass writes
+    // both); its scale is a phase-1 leftover — see the block comment.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
+             (1620000000,10,2,'soroswap', 0.0065,0.0065,0.0065,0.0065, 1000,6.5,650,0.0065,0.0065,1, 1,1000,6.5, 2)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let (close, method, share): (f64, String, f64) = client
+        .query(&format!(
+            "SELECT toFloat64(close_usd), method, toFloat64(priced_volume_share) \
+             FROM {db}.price_usd_series WHERE asset_code = 'FOO'"
+        ))
+        .fetch_one::<(f64, String, f64)>()
+        .await
+        .unwrap();
+    // The bucket's volume-weighted mean over its NOW-COMPLETE population:
+    // (1.3085 x 0.764 + 0.0065 x 1000) / 1000.764. The dust print is a real
+    // trade and keeps its weight — 0.0764 % of the bucket, worth +0.001 on the
+    // published price. That residual is the point: before the gate the same
+    // print WAS the price.
+    assert!(
+        approx(close, 0.00749394),
+        "the enriched bucket publishes its weighted mean, got {close}"
+    );
+    assert_eq!(method, "traded");
+    assert!(
+        approx(share, 1.0),
+        "every eligible unit is priced now, got {share}"
+    );
+
+    let (cshare, cusd, cstatus): (f64, f64, String) = client
+        .query(&format!(
+            "SELECT toFloat64(priced_volume_share), toFloat64(priced_volume_usd), status \
+             FROM {db}.price_usd_series_coverage WHERE asset_code = 'FOO'"
+        ))
+        .fetch_one::<(f64, f64, String)>()
+        .await
+        .unwrap();
+    assert!(approx(cshare, 1.0), "coverage share, got {cshare}");
+    assert!(
+        approx(cusd, 651.0),
+        "1 USD priced + 650 USD enriched, got {cusd}"
+    );
+    assert_eq!(cstatus, "priced");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0147 (b) — a small bucket that is fully priced PUBLISHES: there is no
+/// absolute USD floor.
+///
+/// A bucket holding ONLY the 0.764-unit print is 100 % priced: every eligible
+/// unit that traded has a USD price. Phase 1 withheld it with a placeholder
+/// `FLOOR_USD = 100`; phase 2 (2026-09-23) measured that a per-bucket dollar
+/// floor withheld 82–97 % of today's buckets and did not predict a bad price,
+/// and removed it (views.sql header). The only trade of a bucket IS that
+/// bucket's price. What 0147 guards against is a small print standing in for
+/// UNPRICED volume — test (a) — not a small bucket.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_fully_priced_small_bucket_publishes_at_full_share() {
+    let db = "it_views_0147_floor";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
+             (1620000000,10,2,'sdex', 1.3085,1.3085,1.3085,1.3085, 0.764,1.0,1.0,1.3085,1.3085,1, 1,0.764,1.0, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let approx = |a: f64, b: f64| (a - b).abs() < 1e-6;
+
+    for jit in JIT_MODES {
+        let published: Vec<f64> = client
+            .query(&format!(
+                "SELECT toFloat64(close_usd) FROM {db}.price_usd_series \
+                 WHERE asset_code = 'FOO'{jit}"
+            ))
+            .fetch_all::<f64>()
+            .await
+            .unwrap_or_else(|e| panic!("price_usd_series{jit} must not raise: {e}"));
+        assert!(
+            published.len() == 1 && approx(published[0], 1.3085),
+            "price_usd_series{jit}: a fully-priced bucket publishes its own \
+             price whatever its dollar size (no absolute floor), got {published:?}"
+        );
+
+        let (share, usd, status): (f64, f64, String) = client
+            .query(&format!(
+                "SELECT toFloat64(priced_volume_share), toFloat64(priced_volume_usd), status \
+                 FROM {db}.price_usd_series_coverage WHERE asset_code = 'FOO'{jit}"
+            ))
+            .fetch_one::<(f64, f64, String)>()
+            .await
+            .unwrap_or_else(|e| panic!("coverage{jit} must not raise: {e}"));
+        assert!(
+            approx(share, 1.0),
+            "{jit}: nothing is unpriced here — the SHARE is 1, got {share}"
+        );
+        assert!(
+            approx(usd, 1.0),
+            "{jit}: one dollar changed hands, got {usd}"
+        );
+        assert_eq!(
+            status, "priced",
+            "{jit}: published by the series, so the coverage row says `priced`"
+        );
+    }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0147 (c) — UNPRICEABLE: no USD path at all.
+///
+/// Every row of the bucket is quoted in an asset that is neither the canonical
+/// USDC, native XLM nor the canonical USDT, and that has no `prices.usd_rate`
+/// row of its own. There is no eligible price-forming volume, so there is no
+/// denominator: the bucket is absent and the coverage row says `unpriceable`
+/// rather than `pending`, because nothing about enrichment would change it.
+///
+/// ⚠️ This is ONE of the two buckets that read `unpriceable` — the NO USD PATH
+/// one, which flips to `pending` retroactively the moment a `usd_rate` row
+/// appears for EXO (ADR 0292). The other is a bucket whose quote IS eligible
+/// but whose every candle is stroop-dust, so `pf_volume` sums to 0: no
+/// `usd_rate` row will ever move that one, only a real fill. The word means
+/// "no price-forming volume we could price", not "no USD path" — see the
+/// coverage header in views.sql.
+///
+/// ⚠️ The share is the LITERAL 0, never NULL (D-06). BE renders a NULL as a
+/// dash and drops the pool, so a zero denominator must not surface as one —
+/// which is also why the guard is an `if` rather than a `nullIf` that a
+/// non-Nullable CAST would turn into Decimal128::MIN or code 349.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_bucket_quoted_only_in_an_ineligible_asset_reads_unpriceable_with_a_zero_share() {
+    let db = "it_views_0147_unpriceable";
+    let client = setup_scratch(db).await;
+
+    // 20 = EXO: an ordinary credit asset, not in the eligible set by literal and
+    // with no usd_rate row. 2 = USDC is seeded only so the peg arm has its
+    // canonical identity to key on.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','',''), \
+             (20,'EXO','classic','GEXO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
+             (1620000000,10,20,'sdex', 9,9,9,9, 500,4500,0,0,9,1, 1,500,4500, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    for jit in JIT_MODES {
+        let published: Vec<f64> = client
+            .query(&format!(
+                "SELECT toFloat64(close_usd) FROM {db}.price_usd_series \
+                 WHERE asset_code = 'FOO'{jit}"
+            ))
+            .fetch_all::<f64>()
+            .await
+            .unwrap_or_else(|e| panic!("price_usd_series{jit} must not raise: {e}"));
+        assert!(
+            published.is_empty(),
+            "price_usd_series{jit}: nothing in this bucket is convertible, got {published:?}"
+        );
+
+        let (share, usd, status): (f64, f64, String) = client
+            .query(&format!(
+                "SELECT toFloat64(priced_volume_share), toFloat64(priced_volume_usd), status \
+                 FROM {db}.price_usd_series_coverage WHERE asset_code = 'FOO'{jit}"
+            ))
+            .fetch_one::<(f64, f64, String)>()
+            .await
+            .unwrap_or_else(|e| panic!("coverage{jit} must not raise: {e}"));
+        assert_eq!(
+            share, 0.0,
+            "{jit}: a zero denominator publishes the literal 0, never a NULL \
+             and never a sentinel"
+        );
+        assert_eq!(usd, 0.0, "{jit}: no priced USD volume");
+        assert_eq!(
+            status, "unpriceable",
+            "{jit}: no eligible volume at all — enrichment cannot change this, \
+             only a usd_rate row for EXO can (retroactively, per ADR 0292)"
+        );
+    }
+
+    // The column is non-Nullable, so `IS NULL` would be vacuously false —
+    // assert the TYPE instead, which is what BE's decoder actually sees.
+    let ty: String = client
+        .query(&format!(
+            "SELECT type FROM system.columns WHERE database = '{db}' \
+             AND table = 'price_usd_series_coverage' AND name = 'priced_volume_share'"
+        ))
+        .fetch_one::<String>()
+        .await
+        .unwrap();
+    assert!(
+        !ty.contains("Nullable"),
+        "priced_volume_share must never be Nullable on the wire, got {ty}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0147 (d) — dust changes nothing, in either direction.
+///
+/// A row with `pf_trade_count = 0` and `pf_volume = 0` carried real
+/// `volume_base` before task 0286 taught the pipeline to tell a price-forming
+/// fill from stroop-dust. It must now move neither the published `close_usd`
+/// nor `priced_volume_share`: it is not priced (no price-forming weight) and it
+/// is not eligible weight either (the eligible sum is over `pf_volume` too).
+///
+/// The control is BAR, an identity with the same real print and no dust beside
+/// it: the two must agree to the last digit.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn dust_rows_move_neither_the_published_close_nor_the_share() {
+    let db = "it_views_0147_dust_noop";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','',''), \
+             (11,'BAR','classic','GBAR','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // FOO: a real 7-unit print at 5, plus a dust row at a DIFFERENT price (4)
+    // carrying 1000 units of volume_base and 4000 USD of quote volume — every
+    // number that could perturb the mean or `priced_volume_usd`, priced to be
+    // unmistakable.
+    // BAR: the same real print, nothing else.
+    for tbl in ["price_ohlcv_1d", "price_ohlcv_1h"] {
+        client
+            .query(&format!(
+                "INSERT INTO {db}.{tbl} \
+                 (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+                  pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
+                 (1620000000,10,2,'sdex',     5,5,5,5, 7,35,350,5,5,1,       1,7,35, 1), \
+                 (1620000000,10,2,'soroswap', 4,4,4,4, 1000,4000,4000,4,4,3, 0,0,0,  1), \
+                 (1620000000,11,2,'sdex',     5,5,5,5, 7,35,350,5,5,1,       1,7,35, 1)"
+            ))
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    for view in ["price_usd_series", "price_usd_series_1h"] {
+        let rows: Vec<(String, f64, f64)> = client
+            .query(&format!(
+                "SELECT asset_code, toFloat64(close_usd), toFloat64(priced_volume_share) \
+                 FROM {db}.{view} WHERE asset_code IN ('FOO','BAR') ORDER BY asset_code"
+            ))
+            .fetch_all::<(String, f64, f64)>()
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "{view}: both identities must publish, got {rows:?}"
+        );
+        assert_eq!(
+            (rows[0].1, rows[0].2),
+            (rows[1].1, rows[1].2),
+            "{view}: the dust row must leave FOO reading exactly what BAR reads \
+             without it, got {rows:?}"
+        );
+        assert_eq!(rows[0].1, 5.0, "{view}: the real print is the price");
+        assert_eq!(rows[0].2, 1.0, "{view}: dust is not eligible weight either");
+    }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0147 (e) — the same withhold-then-publish at the HOURLY grain.
+///
+/// A fix applied to one grain and forgotten on the other is the exact defect the
+/// hourly variant carried before task 0165 found it in both. `views.sql`'s two
+/// bodies are kept in step by a text test in src/lib.rs; this is the
+/// behavioural half.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_gate_and_the_coverage_view_behave_the_same_at_the_hourly_grain() {
+    let db = "it_views_0147_hourly";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
+             (1620000000,10,2,'sdex',     1.3085,1.3085,1.3085,1.3085, 0.764,1.0,1.0,1.3085,1.3085,1, 1,0.764,1.0, 1), \
+             (1620000000,10,2,'soroswap', 0.0065,0.0065,0.0065,0.0065, 1000,6.5,0,0,0.0065,1,        1,1000,6.5, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let approx = |a: f64, b: f64| (a - b).abs() < 1e-6;
+
+    for jit in JIT_MODES {
+        let published: Vec<f64> = client
+            .query(&format!(
+                "SELECT toFloat64(close_usd) FROM {db}.price_usd_series_1h \
+                 WHERE asset_code = 'FOO'{jit}"
+            ))
+            .fetch_all::<f64>()
+            .await
+            .unwrap_or_else(|e| panic!("price_usd_series_1h{jit} must not raise: {e}"));
+        assert!(
+            published.is_empty(),
+            "price_usd_series_1h{jit}: the hourly grain must withhold the same \
+             bucket the daily one does, got {published:?}"
+        );
+
+        let (share, status): (f64, String) = client
+            .query(&format!(
+                "SELECT toFloat64(priced_volume_share), status \
+                 FROM {db}.price_usd_series_coverage_1h WHERE asset_code = 'FOO'{jit}"
+            ))
+            .fetch_one::<(f64, String)>()
+            .await
+            .unwrap_or_else(|e| panic!("coverage_1h{jit} must not raise: {e}"));
+        assert!(approx(share, 0.000763), "{jit}: hourly share, got {share}");
+        assert_eq!(status, "pending", "{jit}: hourly status");
+    }
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
+             (1620000000,10,2,'soroswap', 0.0065,0.0065,0.0065,0.0065, 1000,6.5,650,0.0065,0.0065,1, 1,1000,6.5, 2)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let (close, share): (f64, f64) = client
+        .query(&format!(
+            "SELECT toFloat64(close_usd), toFloat64(priced_volume_share) \
+             FROM {db}.price_usd_series_1h WHERE asset_code = 'FOO'"
+        ))
+        .fetch_one::<(f64, f64)>()
+        .await
+        .unwrap();
+    assert!(
+        approx(close, 0.00749394),
+        "hourly weighted mean, got {close}"
+    );
+    assert!(
+        approx(share, 1.0),
+        "hourly share after enrichment, got {share}"
+    );
+    let status: String = client
+        .query(&format!(
+            "SELECT status FROM {db}.price_usd_series_coverage_1h WHERE asset_code = 'FOO'"
+        ))
+        .fetch_one::<String>()
+        .await
+        .unwrap();
+    assert_eq!(status, "priced");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0147 (f) — `usd_reference{,_1h}` take the same predicate.
+///
+/// The reference is the XLM/USD signal every pivot-priced asset's status hangs
+/// off, so the rows it averages must clear the same bars the series' do: the
+/// `1e-12` precision floor (a 9e-14 close beside a real one is rounding noise,
+/// not a price) and a price-forming trade with price-forming weight.
+///
+/// Bucket A holds a real print PLUS one sub-floor row PLUS one dust row, and
+/// must publish exactly what the real print alone says. Buckets B and C hold
+/// only the sub-floor row and only the dust row respectively, and must be
+/// ABSENT — `no_reference` is a legitimate state, a garbage reference is not.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn usd_reference_ignores_sub_floor_and_dust_only_rows_at_both_grains() {
+    let db = "it_views_0147_reference";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (1,'XLM','native','','',''), \
+             (2,'USDC','classic','{USDC_ISSUER}','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    for tbl in ["price_ohlcv_1d", "price_ohlcv_1h"] {
+        client
+            .query(&format!(
+                "INSERT INTO {db}.{tbl} \
+                 (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+                  pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
+                 (1620000000,1,2,'sdex',     0.1,0.1,0.1,0.1, 100,10,10,0.1,0.1,1, 1,100,10, 1), \
+                 (1620000000,1,2,'soroswap', 0.0000000000001,0.0000000000001,0.0000000000001,0.0000000000001, 900,0,0,0,0,1, 1,900,0, 1), \
+                 (1620000000,1,2,'phoenix',  0.5,0.5,0.5,0.5, 900,450,450,0.5,0.5,5, 0,0,0, 1), \
+                 (1620086400,1,2,'soroswap', 0.0000000000001,0.0000000000001,0.0000000000001,0.0000000000001, 900,0,0,0,0,1, 1,900,0, 1), \
+                 (1620172800,1,2,'phoenix',  0.5,0.5,0.5,0.5, 900,450,450,0.5,0.5,5, 0,0,0, 1)"
+            ))
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    for view in ["usd_reference", "usd_reference_1h"] {
+        for jit in JIT_MODES {
+            let rows: Vec<(u32, f64)> = client
+                .query(&format!(
+                    "SELECT toUInt32(bucket), toFloat64(xlm_usd) FROM {db}.{view} \
+                     ORDER BY bucket{jit}"
+                ))
+                .fetch_all::<(u32, f64)>()
+                .await
+                .unwrap_or_else(|e| panic!("{view}{jit}: must not raise: {e}"));
+            assert_eq!(
+                rows,
+                vec![(1620000000, 0.1)],
+                "{view}{jit}: only the bucket with a real, price-forming, \
+                 above-floor print may publish, and its value must be that \
+                 print's — the sub-floor row (1e-13) and the dust row \
+                 (pf_trade_count = 0) carry no weight and form no bucket"
+            );
+        }
+    }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0147 review SF-01 — a PRICED row is always inside the share's
+/// denominator, whatever its quote leg is.
+///
+/// `is_priced` admits a row on `close_usd != close` for ANY quote; `is_eligible`
+/// names a QUOTE SET. The two are therefore not nested by definition, and before
+/// this fix a row that was priced against a quote outside the eligible set went
+/// into the numerator and not into the denominator. Measured on 26.3.10.60 with
+/// exactly this fixture: `priced_volume_share = 5000000` in a `Decimal(10, 6)`
+/// column `views.sql` documents as `[0, 1]` (CAST does not range-check `P`, so
+/// nothing raised), and a fully-priced $5,000 bucket read `unpriceable` beside
+/// `priced_volume_usd = 5000`.
+///
+/// `rew` now weights on `is_priced OR is_eligible`, so `priced ⊆ eligible` holds
+/// BY CONSTRUCTION — the share cannot leave `[0, 1]` no matter what a future
+/// writer puts in `close_usd`. Unreachable through today's write path
+/// (`TRACKED_SYMBOLS` and the enrichment identities are all eligible quotes);
+/// reachable the moment a symbol is tracked without being made eligible, which
+/// is task 0173's shape.
+///
+/// FOO holds the priced-but-ineligible row BESIDE a dust-sized eligible unpriced
+/// one — the combination that produced the 5000000. BAR holds the ineligible
+/// priced row ALONE — the combination that produced `unpriceable` with a priced
+/// USD volume. Both grains, both JIT modes.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_priced_row_outside_the_eligible_quote_set_stays_inside_the_share() {
+    let db = "it_views_0147_priced_not_eligible";
+    let client = setup_scratch(db).await;
+
+    // 20 = EXO: an ordinary credit asset, in neither the three eligible
+    // literals nor `prices.usd_rate`. 2 = USDC is the canonical eligible quote.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','',''), \
+             (11,'BAR','classic','GBAR','',''), \
+             (20,'EXO','classic','GEXO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    for tbl in ["price_ohlcv_1d", "price_ohlcv_1h"] {
+        client
+            .query(&format!(
+                "INSERT INTO {db}.{tbl} \
+                 (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+                  pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
+                 (1620000000,10,20,'sdex', 9,9,9,9, 500,4500,5000,2.5,9,7, 7,500,4500, 1), \
+                 (1620000000,10,2,'soroswap', 9,9,9,9, 0.0001,0.0009,0,0,9,1, 1,0.0001,0.0009, 1), \
+                 (1620000000,11,20,'sdex', 9,9,9,9, 500,4500,5000,2.5,9,7, 7,500,4500, 1)"
+            ))
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    for (series, coverage) in [
+        ("price_usd_series", "price_usd_series_coverage"),
+        ("price_usd_series_1h", "price_usd_series_coverage_1h"),
+    ] {
+        for jit in JIT_MODES {
+            let rows: Vec<(String, f64, f64, String)> = client
+                .query(&format!(
+                    "SELECT asset_code, toFloat64(priced_volume_share), \
+                            toFloat64(priced_volume_usd), status \
+                     FROM {db}.{coverage} WHERE asset_code IN ('FOO','BAR') \
+                     ORDER BY asset_code{jit}"
+                ))
+                .fetch_all::<(String, f64, f64, String)>()
+                .await
+                .unwrap_or_else(|e| panic!("{coverage}{jit} must not raise: {e}"));
+            assert_eq!(rows.len(), 2, "{coverage}{jit}: one row per identity");
+
+            for (code, share, usd, status) in &rows {
+                assert!(
+                    (0.0..=1.0).contains(share),
+                    "{coverage}{jit}: {code}'s share must stay inside the \
+                     [0, 1] this column is declared as — got {share}, which is \
+                     what a priced row outside the eligible quote set does to a \
+                     denominator that does not contain it"
+                );
+                assert_eq!(
+                    usd, &5000.0,
+                    "{coverage}{jit}: {code}'s priced USD volume is the \
+                     ineligible-quoted row's own 5000"
+                );
+                assert_eq!(
+                    status, "priced",
+                    "{coverage}{jit}: {code} is FULLY priced — every unit that \
+                     formed a price has a close_usd. `unpriceable` beside a \
+                     priced_volume_usd of 5000 is the contradiction this fixes"
+                );
+            }
+
+            let (foo_share, bar_share) = (rows[1].1, rows[0].1);
+            assert!(
+                foo_share > 0.99,
+                "{coverage}{jit}: FOO's 0.0001 eligible unpriced unit against \
+                 500 priced ones is a share just under 1, got {foo_share}"
+            );
+            assert_eq!(
+                bar_share, 1.0,
+                "{coverage}{jit}: BAR's only row is priced, so its share is \
+                 exactly 1 — the priced weight IS the eligible weight"
+            );
+
+            let published: Vec<(String, f64)> = client
+                .query(&format!(
+                    "SELECT asset_code, toFloat64(close_usd) FROM {db}.{series} \
+                     WHERE asset_code IN ('FOO','BAR') ORDER BY asset_code{jit}"
+                ))
+                .fetch_all::<(String, f64)>()
+                .await
+                .unwrap_or_else(|e| panic!("{series}{jit} must not raise: {e}"));
+            assert_eq!(
+                published,
+                vec![("BAR".to_string(), 2.5), ("FOO".to_string(), 2.5)],
+                "{series}{jit}: a bucket whose price-forming volume is entirely \
+                 priced must be PUBLISHED at that price — withholding a \
+                 fully-priced $5,000 bucket because its quote leg is not in a \
+                 literal set is the same defect seen from the other side"
             );
         }
     }

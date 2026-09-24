@@ -1921,6 +1921,47 @@ async fn seed_0246(db: &str, admin: &Client) {
         .execute()
         .await
         .unwrap();
+    // 🔑 Task 0147 (D-07h) — a NON-USDC, XLM-quoted bucket.
+    //
+    // Every arm above asks for `USDC:...`, i.e. the PEG arm, which the coverage
+    // gate does not touch: it has no traded weight, so it publishes on the
+    // gate's peg disjunct with a literal share of 1. That leaves the arm the
+    // gate actually governs — a traded base — unchecked across the two
+    // surfaces, which is exactly the isolation this test exists to break.
+    //
+    // ⚠️ EXACTLY ONE priced row in the bucket, deliberately. `/ohlcv`'s USD
+    // close is `argMaxIf(close_usd, volume_base, ...)` — the largest print —
+    // while the view's is a volume-weighted MEAN. The two are the same number
+    // only when the bucket holds one priced row, or every priced row carries
+    // the same price; a fixture with two different prices would fail here for
+    // a reason that is not a defect.
+    //
+    // ⚠️ And the view must PUBLISH it, or the comparison proves nothing: its
+    // one row is priced, so the share is 1 and clears X. There is no absolute
+    // USD floor (task 0147 phase 2); `volume_quote_usd = 250` is incidental.
+    // The XLM leg carries `close_usd != close`, which is what makes it
+    // convertible under the shared predicate.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (4, 'BAZ', 'credit', '{i}', '')",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-02-13 05:00:00', 4, 1, 'sdex', 10.0, 12.0, 9.0, 10.0, 100, 250, 2.5, 10.0, 7, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
     // The three values are the real 2023-03-11 shape, transplanted: the day
     // opens near par, troughs at 07:00 and closes at the daily close. Distinct
     // per hour on purpose — a surface that resolved the wrong hour's row would
@@ -1972,7 +2013,7 @@ async fn ohlcv_agrees_with_price_usd_series_on_the_same_bucket() {
          &end=2026-02-12T00:00:00Z&base_currency=USD",
         iss()
     );
-    let (status, json) = get(client, &uri).await;
+    let (status, json) = get(client.clone(), &uri).await;
     assert_eq!(status, StatusCode::OK, "body={json}");
     let data = json["data"].as_array().unwrap();
     assert_eq!(
@@ -2039,6 +2080,56 @@ async fn ohlcv_agrees_with_price_usd_series_on_the_same_bucket() {
         );
         approx(&row["close"], want);
     }
+
+    // 🔑 Task 0147 (D-07h) — the same agreement on a TRADED base with an XLM
+    // quote leg, i.e. the population the coverage gate governs. Asserted across
+    // the two surfaces, not against a literal, for the same reason the USDC
+    // loop above is.
+    //
+    // `method` is NOT compared here and that is deliberate: `/ohlcv` labels how
+    // one candle's QUOTE LEG was priced (task 0268's vocabulary) while the view
+    // labels how a BUCKET's close_usd was arrived at (task 0165's). views.sql's
+    // header says so in as many words — the two enums are not one enum.
+    let uri = format!(
+        "/v1/assets/BAZ:{}/ohlcv?granularity=1h&start=2026-02-13T05:00:00Z\
+         &end=2026-02-13T05:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "one XLM-quoted bucket: {json}");
+    let api_close: f64 = data[0]["close"].as_str().unwrap().parse().unwrap();
+
+    let (view_close, view_share): (String, String) = admin
+        .query(&format!(
+            "SELECT toString(close_usd), toString(priced_volume_share) \
+             FROM {db}.price_usd_series_1h \
+             WHERE asset_code = ? AND issuer_address = ? AND bucket = toDateTime(?)"
+        ))
+        .bind("BAZ")
+        .bind(iss())
+        .bind("2026-02-13 05:00:00")
+        .fetch_one::<(String, String)>()
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "the view must PUBLISH this bucket — one priced row, so its \
+                 share is 1 and clears X: {e}"
+            )
+        });
+    let view_close_f: f64 = view_close.parse().unwrap();
+    assert!(
+        (api_close - view_close_f).abs() < 1e-12,
+        "2026-02-13 05:00: /ohlcv published {api_close} but price_usd_series_1h \
+         published {view_close} — one priced predicate means one answer"
+    );
+    assert_eq!(
+        view_share.parse::<f64>().unwrap(),
+        1.0,
+        "every eligible unit in the bucket is priced, so the share is 1 — if it \
+         is not, the comparison above is comparing two different populations"
+    );
 
     teardown(db).await;
 }
