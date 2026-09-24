@@ -132,6 +132,8 @@ route matching runs before the key check):
 The same probes after the deploy settle AC 1–2; AC 3 once Compute and the
 portal sync have shipped the texts.
 
-⚠️ **Compute from `develop` now carries more than 0306:** #337 (0216) and #345
-(0300, the Comet venue in the ledger-processor) are merged and undeployed.
-Agree the Compute deploy with Adam before shipping.
+**Compute is current except for this task.** Adam's 0216 rollout (Compute,
+11:30 CEST) shipped `develop` with #343 and #345: the live `/api-docs-json`
+differs from this branch's extract in exactly the two descriptions above. So
+0309's Compute deploy carries those two plus whatever merges meanwhile — read
+the diff first.
