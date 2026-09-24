@@ -69,7 +69,7 @@ scope here; only the stale group moves.
 
 - [x] All 12 tasks archived with `status: completed` and a history entry citing the evidence
 - [x] 0115's open criteria noted on [[0154]] before 0115 closes; 0129's open criteria carried into [[0139]]
-- [ ] Merged to `develop`, so the board drops them (the PR that carries this entry)
+- [x] Merged to `develop`, so the board drops them (PR #352, merge `027f99ee`)
 
 ## Design Decisions
 
