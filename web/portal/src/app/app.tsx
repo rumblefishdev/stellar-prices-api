@@ -104,6 +104,8 @@ import {
   type PortalConfig,
   type PortalKey,
   type PortalKeyRevoked,
+  type PortalPlan,
+  type PortalPlanTier,
   type PortalSession,
   type PortalUsage,
 } from '../api/portal';
@@ -1420,10 +1422,16 @@ function Dashboard({
   // The quota `/usage` reported, so the key card's "Monthly quota" field can
   // state a number this page was actually told. `undefined` until the panel
   // below has an answer; the field is simply absent until then.
+  //
+  // `plan` (task 0311) feeds the Rate Limit card: `undefined` while `/usage`
+  // has not answered (or failed) — the card then states `/config`'s free
+  // figure as it always did — `null` for a key on no usage plan, and the
+  // plan's figures and pill otherwise.
   const [usageFacts, setUsageFacts] = useState<{
     quota: number | null;
     resetsAt: string | null;
-  }>({ quota: null, resetsAt: null });
+    plan: PortalPlan | null | undefined;
+  }>({ quota: null, resetsAt: null, plan: undefined });
 
   // ⚠️ **A revoked key replaces the whole dashboard** (Adam, 2026-08-26).
   //
@@ -1498,10 +1506,15 @@ function Dashboard({
             setUsageFacts({
               quota: usage?.limit ?? null,
               resetsAt: usage?.resets_at ?? null,
+              plan: usage?.plan,
             })
           }
         />
-        <RateLimitCard rateLimit={rateLimit} keyAbsent={keyAbsent} />
+        <RateLimitCard
+          rateLimit={rateLimit}
+          keyAbsent={keyAbsent}
+          plan={usageFacts.plan}
+        />
       </Box>
     </Stack>
   );
@@ -3311,10 +3324,10 @@ function ApiKey({
  * 0188's, `HTTP 429` on throttle is the Rate Limit card's constant — and
  * neither is re-worded here, only repeated where it now bites.
  *
- * "Contact us" is plain text under [`Legal`]'s rule, the same as the Rate Limit
- * card's identical offer two columns away: there is still no commercial-plans
- * destination, and this sentence is read by somebody who has just been cut off
- * — the worst possible moment to hand out a link that 404s.
+ * "Contact us" is plain text here. Since task 0311 there IS a destination —
+ * the Rate Limit card's tiered contact link two columns away points at
+ * `RUMBLEFISH_CONTACT` — and this strip's copy is left as it was (0311 scopes
+ * its contact change to that card).
  */
 function QuotaReachedNotice({ resetsAt }: { resetsAt: string }) {
   const at = new Date(resetsAt);
@@ -3340,8 +3353,8 @@ function QuotaReachedNotice({ resetsAt }: { resetsAt: string }) {
             the one place that decides it, rather than naming the hex a second
             time here — the same treatment `HTTP 429` gets, because the frame
             gives the two the same weight. Still underlined and still a
-            `<span>` inside it and not an `<a>`: there is no commercial-plans
-            destination, which is [`Legal`]'s rule. */}
+            `<span>` inside it and not an `<a>`: the link to
+            `RUMBLEFISH_CONTACT` is the Rate Limit card's (task 0311). */}
         <strong>
           <Box component="span" sx={{ ...UNDERLINED, color: 'inherit' }}>
             Contact us for higher limits.
@@ -3490,7 +3503,7 @@ function Usage({
    * the reset rule, which is the half the frame keeps; the lag is the half
    * that now goes unsaid.
    */
-  const resetCaption = (resetsAt?: string) => {
+  const resetCaption = (resetsAt?: string | null) => {
     if (!resetsAt) return null;
     const at = new Date(resetsAt);
     if (Number.isNaN(at.getTime())) return null;
@@ -3540,7 +3553,37 @@ function Usage({
         ))}
 
       {view.state === 'ok' &&
-        (view.usage.used === null ? (
+        (view.usage.plan === null ? (
+          // Task 0311: the key is on no usage plan for this API's stage —
+          // the "issued but dead" state the gateway answers `403` to. Stated,
+          // never rendered as zeros or as "nothing recorded yet".
+          <p data-testid="usage-no-plan">
+            No usage plan, so there is no quota to count against.
+          </p>
+        ) : view.usage.plan && view.usage.plan.quota_limit === null ? (
+          // Task 0311: a plan without a quota. Nothing is counted against
+          // it, so there is no meter to draw — "Unlimited" is the figure.
+          <p data-testid="usage-unlimited">
+            <strong>Unlimited</strong> — your plan has no monthly quota.
+          </p>
+        ) : view.usage.limit !== null && view.usage.resets_at === null ? (
+          // Task 0311: a quota whose period the backend does not compute
+          // (`WEEK`, or anything newer). The quota is stated; the counters
+          // are not, because the window they need would be a guess.
+          <>
+            <Figure
+              label="Quota"
+              value={view.usage.limit.toLocaleString('en-US')}
+              unit="requests"
+              testId="usage-period-quota"
+            />
+            <p data-testid="usage-unsupported-period">
+              Quota per{' '}
+              {(view.usage.plan?.quota_period ?? 'period').toLowerCase()}; usage
+              for this period is not shown.
+            </p>
+          </>
+        ) : view.usage.used === null ? (
           <>
             {/* AWS has no rows for the key yet. Not zeros: inventing
                 `remaining` and `limit` would be guessing, and the honest state
@@ -3608,7 +3651,8 @@ function Usage({
                 be dropping the notice exactly when it is most true. */}
             {view.usage.limit !== null &&
               view.usage.limit > 0 &&
-              view.usage.used >= view.usage.limit && (
+              view.usage.used >= view.usage.limit &&
+              view.usage.resets_at !== null && (
                 <QuotaReachedNotice resetsAt={view.usage.resets_at} />
               )}
           </>
@@ -3624,67 +3668,155 @@ function Usage({
 }
 
 /**
- * The Rate Limit card — the plan's two figures and what the gateway does when
- * you cross them.
+ * The Rate Limit card — the key's plan, its two figures, and what the gateway
+ * does when you cross them.
  *
- * The per-second figure comes from `/config` (task 0188 put it there so it
- * cannot drift from what API Gateway actually enforces); the per-minute one is
- * that number times sixty, computed rather than written down for the same
- * reason. Both HTTP codes are properties of the gateway, not of a plan, so they
- * are constants.
+ * **The figures are the key's OWN plan's** since task 0311: `/api/usage`
+ * reports the plan the key is on (`plan`), and the per-second figure is its
+ * `rate_limit_per_second`; the per-minute one is that times sixty, computed
+ * rather than written down. The plan's name rides beside "Active" as a second
+ * pill (`Free` … `Pro`, `Custom` for any other plan on our stage), and the
+ * contact line under the figures links to `RUMBLEFISH_CONTACT` with copy for
+ * the tier — contacting us is the only way to change plan, so it is shown on
+ * every tier.
+ *
+ * Three states besides that one:
+ *
+ * - **No plan** (`plan: null`): the key is on no usage plan for this API, so
+ *   the gateway answers it `403`. No pill — "Active" would be false — and the
+ *   state is said in words.
+ * - **Unlimited** (`rate_limit_per_second: null`): both figures read
+ *   "Unlimited", never a zero.
+ * - **Not answered yet** (`plan` undefined — `/usage` in flight or failed):
+ *   `/config`'s free-plan figure, as before 0311. `/config` stays the source
+ *   for that, for the no-key state and for the landing page.
  *
  * **The card always renders**, which is a change from the build that dropped
  * it whenever `/config` carried no limit (Adam, 2026-08-25: "brakuje całego
- * jednego kafelka"). A local run without `PORTAL_RATE_LIMIT` set was losing a
- * third of the dashboard, and a missing panel is a worse answer than a stated
- * one: the free plan's rate is 1 req/s (task 0157), the landing page says so
- * to every visitor before they sign in, and this card now says the same where
- * the deployment has not spoken.
+ * jednego kafelka"). A missing panel is a worse answer than a stated one: the
+ * free plan's rate is 1 req/s (task 0157), the landing page says so to every
+ * visitor before they sign in, and this card says the same where neither the
+ * key's plan nor the deployment has spoken.
  *
- * ⚠️ `/config` still WINS wherever it answers, which is every deployed
- * environment (`compute-stack.ts` passes `pricingApiFreePlanRateLimit`
- * unconditionally). The fallback is for the local case only, and if the free
- * plan's rate ever changes, this constant is one of the two places that must
- * change with it — the other being `FairAccess`.
+ * ⚠️ `/config` WINS over this constant wherever it answers, which is every
+ * deployed environment (`compute-stack.ts` passes `pricingApiFreePlanRateLimit`
+ * unconditionally), and the key's plan wins over both. The fallback is for the
+ * local case only, and if the free plan's rate ever changes, this constant is
+ * one of the two places that must change with it — the other being
+ * `FairAccess`.
  */
 const FREE_PLAN_RATE_LIMIT = 1;
+
+/** The pill label per tier (task 0311, decision 5). */
+const PLAN_LABEL: Record<PortalPlanTier, string> = {
+  free: 'Free',
+  basic: 'Basic',
+  analyst: 'Analyst',
+  lite: 'Lite',
+  pro: 'Pro',
+  custom: 'Custom',
+};
+
+/**
+ * The contact line's copy per tier (task 0311, decision 6): the lead-in, then
+ * the linked sentence.
+ */
+const CONTACT_COPY: Record<PortalPlanTier, readonly [string, string]> = {
+  free: ['Need higher limits?', 'Contact us about a paid plan.'],
+  basic: ['Need more?', 'Contact us to change your plan.'],
+  analyst: ['Need more?', 'Contact us to change your plan.'],
+  lite: ['Need more?', 'Contact us to change your plan.'],
+  pro: ['Need custom limits?', 'Contact us.'],
+  custom: ['Need custom limits?', 'Contact us.'],
+};
+
+/**
+ * The Rate Limit card's contact line (task 0311): a link to
+ * `RUMBLEFISH_CONTACT`, underlined like the OAuth card's "contact support",
+ * worded for the tier. It replaced a plain-text "Contact us for commercial
+ * plans." that had no destination to point at.
+ */
+function PlanContact({ tier }: { tier: PortalPlanTier }) {
+  const [lead, link] = CONTACT_COPY[tier];
+  return (
+    <Typography
+      variant="body2"
+      data-testid="rate-limit-contact"
+      sx={{ color: color.text.secondary }}
+    >
+      {lead}{' '}
+      <Box component="a" href={RUMBLEFISH_CONTACT} sx={UNDERLINED}>
+        {link}
+      </Box>
+    </Typography>
+  );
+}
 
 function RateLimitCard({
   rateLimit,
   keyAbsent = false,
+  plan,
 }: {
   rateLimit?: number;
   /**
    * The account has no key — the frame empties this card too. See the
    * dashboard's `keyAbsent`.
    *
-   * ⚠️ This card's figures do NOT depend on having a key: the free plan's rate
-   * is the free plan's rate, and every other state renders them. Emptying it
-   * here is the frame's call and it is defensible — a limit stated for a
-   * credential that does not exist is a number with nothing to apply to, and
-   * the frame wants nothing competing with the one button on the card above.
-   * **The green "Active" pill goes with it**, and that part is not merely
-   * defensible but required: "Active" is a claim about a key, and there is no
-   * key to make it about.
+   * ⚠️ Emptying it here is the frame's call and it is defensible — a limit
+   * stated for a credential that does not exist is a number with nothing to
+   * apply to, and the frame wants nothing competing with the one button on
+   * the card above. **The green "Active" pill goes with it**, and that part is
+   * not merely defensible but required: "Active" is a claim about a key, and
+   * there is no key to make it about.
    */
   keyAbsent?: boolean;
+  /**
+   * The key's plan, from `/api/usage` (task 0311): `undefined` until it
+   * answers (or when it failed), `null` for a key on no plan.
+   */
+  plan?: PortalPlan | null;
 }) {
-  const perSecond = rateLimit ?? FREE_PLAN_RATE_LIMIT;
-
   if (keyAbsent) return <DashboardCard title="Rate Limit" />;
 
+  if (plan === null) {
+    return (
+      <DashboardCard title="Rate Limit">
+        <p data-testid="rate-limit-no-plan">
+          This key is not on a usage plan for this API, so the API answers 403
+          to it.
+        </p>
+        <PlanContact tier="custom" />
+      </DashboardCard>
+    );
+  }
+
+  // `null` is a plan without a throttle: unlimited, stated as such.
+  const perSecond: number | null = plan
+    ? plan.rate_limit_per_second
+    : (rateLimit ?? FREE_PLAN_RATE_LIMIT);
+
   return (
-    <DashboardCard title="Rate Limit" status={{ label: 'Active', tone: 'ok' }}>
+    <DashboardCard
+      title="Rate Limit"
+      status={
+        plan
+          ? [
+              { label: 'Active', tone: 'ok' },
+              { label: PLAN_LABEL[plan.tier], tone: 'muted' },
+            ]
+          : { label: 'Active', tone: 'ok' }
+      }
+    >
       <Stack direction="row" spacing={4}>
         <Figure
           label="Per-second limit"
-          value={perSecond}
+          value={perSecond ?? 'Unlimited'}
           unit="req/s"
           testId="rate-limit"
         />
         <Figure
           label="Per-minute limit"
-          value={perSecond * 60}
+          value={perSecond === null ? 'Unlimited' : perSecond * 60}
           unit="req/min"
         />
       </Stack>
@@ -3694,23 +3826,30 @@ function RateLimitCard({
           Expanding an abbreviation is what this technique is for, and it lets
           0188's wording survive a change that was purely visual. */}
       <Box component="p" sx={visuallyHidden}>
-        Rate limit: {perSecond} request{perSecond === 1 ? '' : 's'} per second.
+        {perSecond === null ? (
+          <>Rate limit: unlimited.</>
+        ) : (
+          <>
+            Rate limit: {perSecond} request{perSecond === 1 ? '' : 's'} per
+            second.
+          </>
+        )}
       </Box>
       <Stack spacing={1} sx={{ pt: 1, borderTop: cardBorder }}>
         <ResponseRow label="Response on throttle" code="HTTP 429" />
         <ResponseRow label="Response on missing key" code="HTTP 403" />
       </Stack>
-      {/* "Contact us" is plain text, not a link: there is no commercial-plans
-          destination to point it at, and a link to a 404 beside the words
-          "commercial plans" is worse than none. */}
-      <Typography variant="body2" sx={{ color: color.text.secondary }}>
-        Need higher limits? Contact us for commercial plans.
-      </Typography>
+      {/* Until `/usage` names the plan the card states the free figure, so it
+          makes the free plan's offer. */}
+      <PlanContact tier={plan?.tier ?? 'free'} />
     </DashboardCard>
   );
 }
 
-/** One big yellow number with its unit, from the Rate Limit card. */
+/**
+ * One big yellow number with its unit, from the Rate Limit card. A string
+ * value ("Unlimited", task 0311) is the whole statement and takes no unit.
+ */
 function Figure({
   label,
   value,
@@ -3718,7 +3857,7 @@ function Figure({
   testId,
 }: {
   label: string;
-  value: number;
+  value: number | string;
   unit: string;
   testId?: string;
 }) {
@@ -3743,9 +3882,11 @@ function Figure({
         >
           {value}
         </Typography>
-        <Typography variant="body2" sx={{ color: color.text.secondary }}>
-          {unit}
-        </Typography>
+        {typeof value === 'number' && (
+          <Typography variant="body2" sx={{ color: color.text.secondary }}>
+            {unit}
+          </Typography>
+        )}
       </Stack>
     </Stack>
   );

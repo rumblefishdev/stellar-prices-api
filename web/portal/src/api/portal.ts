@@ -493,33 +493,71 @@ export interface PortalKey {
   last_updated_at?: string | null;
 }
 
+/** The tier of a usage plan, as the dashboard labels it (task 0311). */
+export type PortalPlanTier =
+  | 'free'
+  | 'basic'
+  | 'analyst'
+  | 'lite'
+  | 'pro'
+  | 'custom';
+
 /**
- * What `GET /api/usage` answers (task 0188).
+ * The key's usage plan on this API's stage (task 0311) — `PlanWire` in
+ * `packages/prices-api/src/portal/usage/mod.rs`.
+ *
+ * Every figure is `null` when the plan does not set it: a plan with no
+ * throttle or no quota is unlimited in that respect, and the page says
+ * "Unlimited" rather than rendering a zero.
+ */
+export interface PortalPlan {
+  /** `free`…`pro` for the five CDK plans; `custom` for any other plan on our stage. */
+  tier: PortalPlanTier;
+  /** The AWS plan name — what a Custom plan is known by. */
+  name: string;
+  /** Sustained requests per second per key. */
+  rate_limit_per_second: number | null;
+  /** Token-bucket capacity above the rate. */
+  burst_limit: number | null;
+  /** Requests per quota period. */
+  quota_limit: number | null;
+  /** `MONTH`, `DAY`, `WEEK`, or whatever else AWS answers, verbatim. */
+  quota_period: string | null;
+}
+
+/**
+ * What `GET /api/usage` answers (task 0188; the plan since task 0311).
  *
  * Mirrors `UsageResponse` in `packages/prices-api/src/portal/usage/mod.rs`, and
  * hand-written for the same reason every type above is: the portal's routes are
  * deliberately absent from the published OpenAPI document.
  *
- * The three counters are `null` **together** when AWS has recorded nothing for
- * the key yet — the ordinary state minutes after issuance, because `GetUsage`
- * lags. The page renders that as "nothing recorded yet" rather than inventing
- * zeros; the period and `as_of` are always present.
+ * `used` and `remaining` are `null` **together** when AWS has recorded nothing
+ * for the key yet — the ordinary state minutes after issuance, because
+ * `GetUsage` lags — and the page renders that as "nothing recorded yet"
+ * rather than inventing zeros. They are also `null`, with `limit` and the
+ * period fields, when the key is on no plan for this API's stage
+ * (`plan: null`) or on a plan without a quota; `limit` and the period are
+ * `null` too when the plan's quota period is one the backend does not compute
+ * (`WEEK`). `as_of` is always present.
  */
 export interface PortalUsage {
   /** Requests counted against the quota this period, per AWS. */
   used: number | null;
   /** Requests left, as of the latest day AWS has data for. */
   remaining: number | null;
-  /** The monthly quota, reconstructed as `used + remaining`. */
+  /** The plan's quota — `plan.quota_limit`. */
   limit: number | null;
-  /** First day of the current period, `YYYY-MM-DD` (our rule: calendar month, UTC). */
-  period_start: string;
+  /** First day of the current period, `YYYY-MM-DD` (MONTH: the calendar month, UTC; DAY: the UTC day). */
+  period_start: string | null;
   /** Last day of the current period, inclusive. */
-  period_end: string;
+  period_end: string | null;
   /** When the quota resets under our stated rule, RFC 3339. */
-  resets_at: string;
-  /** When the `GetUsage` behind this answer was made, RFC 3339. */
+  resets_at: string | null;
+  /** When the lookup behind this answer was made, RFC 3339. */
   as_of: string;
+  /** The key's plan on this API's stage; `null` when it is on none. */
+  plan: PortalPlan | null;
 }
 
 /**

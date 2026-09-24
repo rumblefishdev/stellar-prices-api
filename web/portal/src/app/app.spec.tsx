@@ -9,6 +9,7 @@ import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ROUTER_BASENAME } from '../base-path';
+import { RUMBLEFISH_CONTACT } from '../landing/links';
 import App from './app';
 import { FIXTURE } from '../docs/openapi.fixture';
 
@@ -95,9 +96,10 @@ const ISSUE_HREF = '/api/auth/login?action=issue';
  * The limit is part of every open-portal stub because it is part of every real
  * `/config`: `compute-stack.ts` sets `PORTAL_RATE_LIMIT` from
  * `pricingApiFreePlanRateLimit` unconditionally. `1` is what
- * `infra/envs/production.json` holds today — and the point of the field is that
- * changing that file changes the page, so the tests below assert the rendered
- * figure against THIS value rather than against a literal of their own.
+ * `infra/envs/production.json` holds today. Since task 0311 the signed-in
+ * dashboard states the key's OWN plan from `/api/usage`; `/config`'s figure
+ * feeds only the no-key state, the landing page, and the fallback while the
+ * usage call is unanswered or failed.
  */
 const openConfig = () => ({
   json: async () => ({ enabled: true, rate_limit_per_second: 1 }),
@@ -2994,6 +2996,16 @@ describe('usage against quota', () => {
     vi.unstubAllGlobals();
   });
 
+  /** The free plan as `/api/usage` reports it (task 0311). */
+  const FREE_PLAN = {
+    tier: 'free',
+    name: 'pricing-api-free-production',
+    rate_limit_per_second: 1,
+    burst_limit: 5,
+    quota_limit: 100000,
+    quota_period: 'MONTH',
+  };
+
   const USAGE = {
     used: 121,
     remaining: 99879,
@@ -3002,7 +3014,32 @@ describe('usage against quota', () => {
     period_end: '2026-08-31',
     resets_at: '2026-09-01T00:00:00Z',
     as_of: '2026-08-19T10:15:00Z',
+    plan: FREE_PLAN,
   };
+
+  /** A paid plan on our stage, named the way CDK names it (task 0311). */
+  const paidPlan = (
+    tier: string,
+    rate: number,
+    burst: number,
+    quota: number,
+  ) => ({
+    tier,
+    name: `pricing-api-${tier}-production`,
+    rate_limit_per_second: rate,
+    burst_limit: burst,
+    quota_limit: quota,
+    quota_period: 'MONTH',
+  });
+
+  /** A `/api/usage` answer on `plan`, with `overrides` on top (task 0311). */
+  const usageWith =
+    (plan: unknown, overrides: Record<string, unknown> = {}) =>
+    () => ({ json: async () => ({ ...USAGE, plan, ...overrides }) });
+
+  /** The Rate Limit card's `<section>`, once it has rendered. */
+  const rateLimitCard = async () =>
+    (await screen.findByText('Rate Limit')).closest('section') as HTMLElement;
 
   const signedInWithUsage = (
     usage: () => Partial<Response> & { json?: () => unknown } = () => ({
@@ -3177,10 +3214,11 @@ describe('usage against quota', () => {
   });
 
   /**
-   * AWS has no rows for the key yet — `used`/`remaining`/`limit` are `null`
-   * together. Not rendered as zeros: "0 used of 100000" would be an invented
-   * figure, and the honest state for a fresh key is "nothing recorded yet".
-   * The reset rule and rate limit still render — they are ours, not AWS's.
+   * AWS has no rows for the key yet — `used`/`remaining` are `null` together.
+   * Not rendered as zeros: "0 used of 100000" would be an invented figure,
+   * and the honest state for a fresh key is "nothing recorded yet". The reset
+   * rule and rate limit still render — they are ours, not AWS's. (`limit` is
+   * the plan's quota since task 0311, known before AWS records a row.)
    */
   it('says nothing is recorded yet instead of inventing zeros', async () => {
     signedInWithUsage(() => ({
@@ -3188,7 +3226,6 @@ describe('usage against quota', () => {
         ...USAGE,
         used: null,
         remaining: null,
-        limit: null,
       }),
     }));
     renderApp();
@@ -3381,16 +3418,14 @@ describe('usage against quota', () => {
   });
 
   /**
-   * The rate limit is the gateway's, not this bundle's (task 0188).
+   * The rate limit is the gateway's, not this bundle's (task 0188) — and since
+   * task 0311 it is the KEY'S OWN PLAN's, which `/api/usage` reports.
    *
-   * `pricingApiFreePlanRateLimit` is a per-env config value that
-   * `api-gateway-stack.ts` hands to `addUsagePlan` and `compute-stack.ts` hands
-   * to the backend. Raising it and deploying has to change what this panel
-   * says — with a literal here it would not, and the one section whose stated
-   * theme is rendering honestly would be quietly stating a limit nobody
-   * enforces any more.
+   * `/config` still carries the free plan's figure (5 here), but a key an
+   * operator moved to Basic is throttled at Basic's 3 req/s, and that is what
+   * the card must say: the plan's figure beats `/config`'s.
    */
-  it('states the rate limit the backend reports, not a built-in figure', async () => {
+  it("states the key's own plan's rate limit, not /config's", async () => {
     stubRoutes({
       [CONFIG_URL]: () => ({
         json: async () => ({ enabled: true, rate_limit_per_second: 5 }),
@@ -3414,12 +3449,21 @@ describe('usage against quota', () => {
           username: 'adam',
         }),
       }),
-      [USAGE_URL]: () => ({ json: async () => USAGE }),
+      [USAGE_URL]: usageWith(paidPlan('basic', 3, 15, 1000000), {
+        limit: 1000000,
+        remaining: 999879,
+      }),
     });
     renderApp();
 
     await screen.findByTestId('usage-used');
-    expect(screen.getByTestId('rate-limit').textContent).toBe('5');
+    await waitFor(() =>
+      expect(screen.getByTestId('rate-limit').textContent).toBe('3'),
+    );
+    expect(
+      within(await rateLimitCard()).getByText('180'),
+      'per-minute is the plan rate times sixty',
+    ).toBeTruthy();
     // Plural, because the figure is no longer the one the sentence was
     // written around.
     expect(screen.getByText(/requests per second/i)).toBeTruthy();
@@ -3512,7 +3556,13 @@ describe('usage against quota', () => {
           username: 'adam',
         }),
       }),
-      [USAGE_URL]: () => ({ json: async () => USAGE }),
+      // Failed, so the card has no plan to state (task 0311) and falls back
+      // to `/config` — which here says nothing, so to the built-in figure.
+      [USAGE_URL]: () => ({
+        ok: false,
+        status: 500,
+        json: async () => ({}),
+      }),
     });
     renderApp();
 
@@ -3522,10 +3572,276 @@ describe('usage against quota', () => {
     // (task 0157), the same figure the landing page states to every visitor.
     // A stated figure beats a third of the dashboard disappearing — and where
     // the deployment DOES answer, its value still wins (the test above).
-    await screen.findByTestId('usage-used');
+    await screen.findByText(/Could not load your usage/);
     expect((await screen.findByTestId('rate-limit')).textContent).toBe('1');
     expect(screen.getByText(/per-minute limit/i)).toBeTruthy();
     expect(screen.getByText(/request per second/i)).toBeTruthy();
+  });
+
+  // -------------------------------------------------------------------------
+  // The key's own plan (task 0311)
+  // -------------------------------------------------------------------------
+
+  /**
+   * The plan pill: a second pill beside "Active" in the Rate Limit card's
+   * header, on every tier — free included — and "Custom" for any other plan
+   * on our stage (decision 5).
+   */
+  it('shows the plan pill beside Active, per tier', async () => {
+    for (const [plan, label] of [
+      [FREE_PLAN, 'Free'],
+      [paidPlan('basic', 3, 15, 1000000), 'Basic'],
+      [paidPlan('analyst', 5, 25, 5000000), 'Analyst'],
+      [paidPlan('lite', 10, 50, 20000000), 'Lite'],
+      [paidPlan('pro', 25, 125, 50000000), 'Pro'],
+      [
+        {
+          ...paidPlan('custom', 150, 300, 1000000),
+          name: 'prices-production-loadtest-plan',
+        },
+        'Custom',
+      ],
+    ] as const) {
+      signedInWithUsage(usageWith(plan));
+      const view = renderApp();
+
+      const card = await rateLimitCard();
+      await waitFor(() => expect(within(card).getByText(label)).toBeTruthy());
+      expect(within(card).getByText('Active'), label).toBeTruthy();
+      expect(within(card).getByTestId('rate-limit').textContent, label).toBe(
+        String(plan.rate_limit_per_second),
+      );
+      view.unmount();
+    }
+  });
+
+  /**
+   * `/api/usage` failed: the card keeps its pre-0311 rendering — `/config`'s
+   * figure, the "Active" pill and no plan pill — and, since the figure it
+   * states is the free plan's, the free plan's contact copy (decision 6).
+   */
+  it("keeps /config's figure and the free contact copy when usage fails", async () => {
+    stubRoutes({
+      [CONFIG_URL]: () => ({
+        json: async () => ({ enabled: true, rate_limit_per_second: 5 }),
+      }),
+      [KEY_URL]: () => ({
+        json: async () => ({
+          key_id: 'rate-limit-suite-key',
+          name: 'discord-rate-limit-key',
+          value: 'aBcDeF0123456789aBcDeF0123456789aBcDeF01',
+        }),
+      }),
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [USAGE_URL]: () => ({ ok: false, status: 500, json: async () => ({}) }),
+    });
+    renderApp();
+
+    await screen.findByText(/Could not load your usage/);
+    const card = await rateLimitCard();
+    expect(within(card).getByTestId('rate-limit').textContent).toBe('5');
+    expect(within(card).getByText('Active')).toBeTruthy();
+    for (const label of ['Free', 'Basic', 'Analyst', 'Lite', 'Pro', 'Custom']) {
+      expect(within(card).queryByText(label), label).toBeNull();
+    }
+    expect(within(card).getByTestId('rate-limit-contact').textContent).toMatch(
+      /^Need higher limits\?/,
+    );
+    const link = within(card).getByRole('link', { name: /contact us/i });
+    expect(link.textContent).toBe('Contact us about a paid plan.');
+    expect(link.getAttribute('href')).toBe(RUMBLEFISH_CONTACT);
+  });
+
+  /**
+   * A key on no usage plan for this API (`plan: null`): stated in both cards,
+   * no "Active", no plan pill, and nothing that reads as a zero or as
+   * "nothing recorded yet" (decision 7a).
+   */
+  it('states the no-plan state in both cards, with no pill', async () => {
+    signedInWithUsage(
+      usageWith(null, {
+        used: null,
+        remaining: null,
+        limit: null,
+        period_start: null,
+        period_end: null,
+        resets_at: null,
+      }),
+    );
+    renderApp();
+
+    expect((await screen.findByTestId('rate-limit-no-plan')).textContent).toBe(
+      'This key is not on a usage plan for this API, so the API answers 403 to it.',
+    );
+    expect(screen.getByTestId('usage-no-plan').textContent).toBe(
+      'No usage plan, so there is no quota to count against.',
+    );
+    const card = await rateLimitCard();
+    expect(within(card).queryByText('Active')).toBeNull();
+    expect(within(card).queryByTestId('rate-limit')).toBeNull();
+    for (const label of ['Free', 'Basic', 'Analyst', 'Lite', 'Pro', 'Custom']) {
+      expect(within(card).queryByText(label), label).toBeNull();
+    }
+    expect(screen.queryByTestId('usage-used')).toBeNull();
+    expect(document.body.textContent).not.toMatch(/not recorded any usage/i);
+    expect(document.body.textContent).not.toMatch(/nothing recorded/i);
+  });
+
+  /**
+   * A plan without a throttle or a quota: both Rate Limit figures read
+   * "Unlimited", Monthly Usage says so with no meter, and the pill is
+   * "Custom" (decision 7b). Never a zero.
+   */
+  it('states Unlimited for a plan without limits', async () => {
+    signedInWithUsage(
+      usageWith(
+        {
+          tier: 'custom',
+          name: 'prices-production-acme-plan',
+          rate_limit_per_second: null,
+          burst_limit: null,
+          quota_limit: null,
+          quota_period: null,
+        },
+        {
+          used: null,
+          remaining: null,
+          limit: null,
+          period_start: null,
+          period_end: null,
+          resets_at: null,
+        },
+      ),
+    );
+    renderApp();
+
+    expect((await screen.findByTestId('usage-unlimited')).textContent).toMatch(
+      /Unlimited/,
+    );
+    const card = await rateLimitCard();
+    await waitFor(() => expect(within(card).getByText('Custom')).toBeTruthy());
+    expect(within(card).getByTestId('rate-limit').textContent).toBe(
+      'Unlimited',
+    );
+    expect(within(card).getAllByText('Unlimited')).toHaveLength(2);
+    expect(within(card).queryByText('0')).toBeNull();
+    expect(screen.queryByTestId('usage-used')).toBeNull();
+    expect(screen.queryByTestId('usage-limit')).toBeNull();
+  });
+
+  /**
+   * Monthly Usage takes its limit and its reset from the plan: a Basic key's
+   * meter is out of 1,000,000 and resets on the date the backend computed.
+   */
+  it("takes Monthly Usage's limit and reset from the plan", async () => {
+    signedInWithUsage(
+      usageWith(paidPlan('basic', 3, 15, 1000000), {
+        used: 5000,
+        remaining: 995000,
+        limit: 1000000,
+        period_start: '2026-09-01',
+        period_end: '2026-09-30',
+        resets_at: '2026-10-01T00:00:00Z',
+      }),
+    );
+    renderApp();
+
+    expect((await screen.findByTestId('usage-limit')).textContent).toBe(
+      '1000000',
+    );
+    expect(screen.getByTestId('usage-used').textContent).toBe('5000');
+    expect(screen.getByText('Resets 1 October')).toBeTruthy();
+  });
+
+  /** A quota period the backend does not compute is named, not guessed. */
+  it('names an unsupported quota period instead of guessing it', async () => {
+    signedInWithUsage(
+      usageWith(
+        {
+          tier: 'custom',
+          name: 'prices-production-weekly-plan',
+          rate_limit_per_second: 2,
+          burst_limit: 10,
+          quota_limit: 5000,
+          quota_period: 'WEEK',
+        },
+        {
+          used: null,
+          remaining: null,
+          limit: 5000,
+          period_start: null,
+          period_end: null,
+          resets_at: null,
+        },
+      ),
+    );
+    renderApp();
+
+    expect(
+      (await screen.findByTestId('usage-unsupported-period')).textContent,
+    ).toBe('Quota per week; usage for this period is not shown.');
+    expect(screen.getByTestId('usage-period-quota').textContent).toBe('5,000');
+    expect(screen.queryByTestId('usage-used')).toBeNull();
+  });
+
+  /**
+   * The contact line is a link to `RUMBLEFISH_CONTACT`, worded for the tier
+   * (decision 6): contacting us is the only way to change plan, so it is on
+   * every tier, paid ones included.
+   */
+  it('links the contact line to RUMBLEFISH_CONTACT with copy per tier', async () => {
+    for (const [plan, lead, linkText] of [
+      [FREE_PLAN, 'Need higher limits?', 'Contact us about a paid plan.'],
+      [
+        paidPlan('basic', 3, 15, 1000000),
+        'Need more?',
+        'Contact us to change your plan.',
+      ],
+      [
+        paidPlan('analyst', 5, 25, 5000000),
+        'Need more?',
+        'Contact us to change your plan.',
+      ],
+      [
+        paidPlan('lite', 10, 50, 20000000),
+        'Need more?',
+        'Contact us to change your plan.',
+      ],
+      [
+        paidPlan('pro', 25, 125, 50000000),
+        'Need custom limits?',
+        'Contact us.',
+      ],
+      [
+        { ...paidPlan('custom', 150, 300, 1000000), name: 'acme' },
+        'Need custom limits?',
+        'Contact us.',
+      ],
+    ] as const) {
+      signedInWithUsage(usageWith(plan));
+      const view = renderApp();
+
+      const card = await rateLimitCard();
+      await waitFor(() =>
+        expect(
+          within(card).getByRole('link', { name: /contact us/i }).textContent,
+          plan.tier,
+        ).toBe(linkText),
+      );
+      const link = within(card).getByRole('link', { name: /contact us/i });
+      expect(link.getAttribute('href'), plan.tier).toBe(RUMBLEFISH_CONTACT);
+      expect(
+        within(card).getByTestId('rate-limit-contact').textContent,
+        plan.tier,
+      ).toBe(`${lead} ${linkText}`);
+      view.unmount();
+    }
   });
 
   /**
