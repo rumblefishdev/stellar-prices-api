@@ -291,6 +291,28 @@ pub enum ChEnrichError {
         pivot: Vec<u32>,
     },
 
+    /// A plain-mode (task 0182) spec — neither `require_external_rate` nor
+    /// `require_pivot_usdc_rate` — on a PIVOT quote leg (task 0208 review
+    /// WR-04; BRIEF-0208 addendum, option (b)). The third mode's mirror of
+    /// [`ChEnrichError::ResetExternalRateLegIsNotUsdc`] and
+    /// [`ChEnrichError::ResetPivotRateLegIsNotAPivotReference`]: each mode
+    /// names the legs it may re-open, and the plain mode's is the peg leg.
+    #[error(
+        "USD reset refused: quote asset_id {quote_asset_id} is a PIVOT leg (XLM or \
+         USDT), and neither --reset-require-pivot-usdc-rate nor \
+         --reset-require-external-rate was passed (the plain task 0182 mode).\n\
+         The pivot refills a zeroed pivot-leg row only where its bucket has BOTH a \
+         USDC/USD rate (oracle or external) AND a reference candle inside \
+         --pivot-window-s. The plain mode checks neither, so it would zero rows \
+         anywhere above --reset-not-before that nothing can refill, leaving them \
+         at close_usd = 0.\n\
+         Re-run with --reset-require-pivot-usdc-rate (the task 0228 mode, see \
+         docs/runbooks/repair-coarse-usd-values.md Appendix C): it re-opens only \
+         days that have both, and the reset-epoch guard still applies. The plain \
+         mode is for the canonical USDC (peg) leg only."
+    )]
+    ResetPlainModeOnPivotLeg { quote_asset_id: u32 },
+
     /// A [`UsdResetSpec`] whose `[not_before, not_after)` window is empty (task
     /// 0268 review, WR-05). See [`UsdResetSpec::validate`] for why this is an
     /// error and not a no-op.
@@ -385,10 +407,16 @@ pub enum ChEnrichError {
     /// `prices.assets` at all (task 0208, D3; review IN-02 split it from
     /// [`ChEnrichError::ResetEpochHasNoReference`]). The pivot's reference
     /// market is keyed on USDC's `asset_id`, so without it the pivot never
-    /// runs, and no epoch is safe. Reachable in the plain 0182 mode; the 0228
-    /// mode refuses this earlier, as
-    /// [`ChEnrichError::ResetPivotRateLegIsNotAPivotReference`] with
-    /// `usdc_id: 0`.
+    /// runs, and no epoch is safe.
+    ///
+    /// Since task 0208 review WR-04 this is a backstop that no mode reaches
+    /// through [`ChEnrichmentPass::assert_reset_is_admissible`]: a plain-mode
+    /// pivot leg is refused as [`ChEnrichError::ResetPlainModeOnPivotLeg`], the
+    /// 0228 mode as [`ChEnrichError::ResetPivotRateLegIsNotAPivotReference`]
+    /// with `usdc_id: 0`, and the 0268 mode as
+    /// [`ChEnrichError::ResetExternalRateLegIsNotUsdc`]. It is kept so the epoch
+    /// guard does not depend on the list's order; the unit test
+    /// `the_epoch_guard_refuses_an_unresolved_usdc_on_its_own` pins it.
     #[error(
         "USD reset refused: canonical USDC (issuer {usdc_issuer}) does not resolve \
          in prices.assets, so the pivot has no USDC market to measure quote \
@@ -449,13 +477,16 @@ pub enum ChEnrichError {
 /// The statement additionally mirrors the pivot's own `volume_quote > 0` filter,
 /// so it will not zero a row the pivot is structurally unable to refill.
 ///
-/// ⚠️ Rows whose reference is missing or stale beyond `pivot_window_s`, or whose
-/// bucket has no USDC/USD rate for the pivot's `WHERE {rate} > 0` (task 0228),
-/// are still reset and *not* refilled — that residue cannot be predicted from
-/// the candidate side alone. The epoch guard
+/// ⚠️ The plain 0182 mode (neither `require_*` flag) is for the canonical USDC
+/// (peg) leg only. On a pivot leg (XLM, USDT) it is refused as
+/// [`ChEnrichError::ResetPlainModeOnPivotLeg`] (task 0208 review WR-04), because
+/// nothing in it gates on the two inputs the pivot needs to refill a row: a
+/// USDC/USD rate for the bucket and a reference inside `pivot_window_s`. The
+/// 0228 mode (`require_pivot_usdc_rate`) gates on both, but by DAY: a row whose
+/// reference is missing, or stale beyond `pivot_window_s`, inside a day the mode
+/// admits is still reset and *not* refilled. The epoch guard
 /// ([`ChEnrichError::ResetEpochBelowReference`]) bounds only where the reference
-/// BEGINS; in the plain 0182 mode nothing gates on either input (the 0228 mode
-/// does, by day). Run against a `FREEZE`d partition and check `zeros_after`.
+/// BEGINS. Run against a `FREEZE`d partition and check `zeros_after`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsdResetSpec {
     /// The quote `asset_id` whose candles get their USD columns zeroed.
@@ -491,7 +522,9 @@ pub struct UsdResetSpec {
     /// When true (task 0228), the candidate set is every already-written row of
     /// the named PIVOT quote leg for whose bucket a `method = 'external'` USDC
     /// rate exists — the same [`external_rate_day_pred`] the 0268 mode uses, and
-    /// nothing else appended.
+    /// nothing else appended. Since task 0208 review WR-04 it is the only mode
+    /// that re-opens a pivot leg: a plain-mode spec on one is refused as
+    /// [`ChEnrichError::ResetPlainModeOnPivotLeg`].
     ///
     /// ## Why no par signature, and what that costs
     ///
@@ -1036,6 +1069,34 @@ impl ReferenceIds {
     }
 }
 
+/// Refuse a plain-mode (task 0182) reset of a pivot leg (task 0208 review
+/// WR-04; BRIEF-0208 addendum, option (b)). Pure, so its truth table is a set
+/// of unit tests.
+///
+/// Plain mode = neither `require_external_rate` nor `require_pivot_usdc_rate`.
+/// The pivot refills a zeroed pivot-leg row only with a USDC/USD rate for the
+/// bucket AND a reference inside `pivot_window_s`; the plain mode checks
+/// neither, so it strands rows in the middle of history above any admitted
+/// epoch. The 0228 mode gates on both (by day), so it is the mode to use.
+///
+/// Keyed on [`ReferenceIds::pivot_ids`], not [`ReferenceIds::can_pivot`]: the
+/// plain mode is the wrong mode for a pivot leg whether or not USDC resolves,
+/// and with `can_pivot()` an unresolved USDC would fall through to the epoch
+/// guard's `ResetEpochUsdcUnresolved` backstop instead. A leg that is no
+/// reference at all returns `Ok` here: `assert_reset_target_is_priceable`
+/// refuses it first.
+fn check_plain_mode_leg(spec: &UsdResetSpec, refs: &ReferenceIds) -> Result<(), ChEnrichError> {
+    if spec.require_external_rate || spec.require_pivot_usdc_rate {
+        return Ok(());
+    }
+    if refs.pivot_ids().contains(&spec.quote_asset_id) {
+        return Err(ChEnrichError::ResetPlainModeOnPivotLeg {
+            quote_asset_id: spec.quote_asset_id,
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, clickhouse::Row, Deserialize)]
 struct RefAssetRow {
     asset_id: u32,
@@ -1431,6 +1492,12 @@ impl ChEnrichmentPass {
     /// The last step (task 0208) is `assert_reset_epoch_is_covered`: a
     /// pivot leg's `not_before` below the table's first priced reference
     /// candle is refused, because nothing could refill the rows in between.
+    ///
+    /// Right after the every-spec refusals, `check_plain_mode_leg` (task 0208
+    /// review WR-04) refuses the plain 0182 mode on a pivot leg: an admitted
+    /// epoch bounds only where the reference begins, and the plain mode checks
+    /// neither the rate nor the reference the pivot needs for every row above
+    /// it. Pivot legs go through the 0228 mode.
     pub async fn assert_reset_is_admissible(&self) -> Result<(), ChEnrichError> {
         let Some(spec) = self.cfg.usd_reset.as_ref() else {
             return Ok(());
@@ -1448,6 +1515,19 @@ impl ChEnrichmentPass {
         // re-apply the very rate the reset exists to replace.
         self.assert_reset_target_is_priceable(spec, &refs)?;
         self.assert_reset_not_shadowed_by_oracle(spec).await?;
+        // The plain 0182 mode's own leg check (task 0208 review WR-04): refused
+        // on a pivot leg. It sits where the other two modes' leg checks sit —
+        // after the every-spec refusals (priceable, oracle-shadow), at the head
+        // of the mode logic — so those keep their variant for a plain pivot-leg
+        // spec: `the_usd_reset_is_refused_by_an_oracle_row_that_forward_fills_into_it`
+        // and `the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_leg`
+        // still read `ResetBlockedByOracleRows`. It precedes the epoch guard under
+        // that guard's "more specific refusals first" rule: a wrong mode is fixed
+        // by switching mode, and the epoch is then measured again. Pinned by
+        // `a_plain_reset_of_a_pivot_leg_is_refused_before_any_write` (the literal
+        // 2026-08-18 invocation reads this variant, not `ResetEpochBelowReference`)
+        // and by `the_plain_reset_refuses_when_canonical_usdc_is_not_a_tracked_asset`.
+        check_plain_mode_leg(spec, &refs)?;
         // Task 0268's mode, whose refill path is the EXTERNAL tier.
         if spec.require_external_rate {
             // The external path is USDC-only, so a different quote leg cannot be
@@ -1514,9 +1594,11 @@ impl ChEnrichmentPass {
     ///
     /// Only pivot legs are checked (D1): a peg/USDC leg — including the 0268
     /// external mode — has no reference series for the pivot to start from.
-    /// `require_pivot_usdc_rate` is not consulted, so the plain 0182 mode and
-    /// the 0228 mode are both covered; the latter's `pivot_reference_day_pred`
-    /// is day-granular and admits the 00:00-vs-19:00 case on its own.
+    /// The mode is not consulted; since task 0208 review WR-04 only the 0228
+    /// mode reaches this on a pivot leg (the plain mode is refused earlier as
+    /// [`ChEnrichError::ResetPlainModeOnPivotLeg`]). It is still needed there:
+    /// that mode's `pivot_reference_day_pred` is day-granular and admits the
+    /// 00:00-vs-19:00 case on its own.
     async fn assert_reset_epoch_is_covered(
         &self,
         spec: &UsdResetSpec,
@@ -3393,6 +3475,9 @@ mod tests {
         );
     }
 
+    /// Pins the plain 0182 mode's SQL bytes, which the canonical USDC (peg) leg
+    /// still renders. On a real USDT leg the admission list refuses this spec
+    /// (`ResetPlainModeOnPivotLeg`, task 0208 review WR-04).
     fn usdt_reset() -> UsdResetSpec {
         // 2021-02-07 19:00 UTC, USDT/USDC's first reference candle on _1h (lore 0208).
         UsdResetSpec {
@@ -5107,5 +5192,133 @@ mod tests {
                 "the first-reference query must be unwindowed and unbound ({forbidden}): {first}"
             );
         }
+    }
+
+    // -- task 0208 review WR-04: the plain mode is refused on a pivot leg ---
+
+    /// XLM 1, USDC 2, USDT 3 — the ids every reset IT fixture uses.
+    fn wr04_refs() -> ReferenceIds {
+        ReferenceIds {
+            xlm: Some(1),
+            usdc: Some(2),
+            usdt: Some(3),
+        }
+    }
+
+    /// A spec on `quote` in the chosen mode.
+    fn wr04_spec(quote: u32, external: bool, pivot: bool) -> UsdResetSpec {
+        UsdResetSpec {
+            quote_asset_id: quote,
+            not_before: 1_612_724_400,
+            not_after: if external || pivot {
+                Some(1_773_237_600)
+            } else {
+                None
+            },
+            require_external_rate: external,
+            require_pivot_usdc_rate: pivot,
+        }
+    }
+
+    fn plain(quote: u32) -> UsdResetSpec {
+        wr04_spec(quote, false, false)
+    }
+
+    /// U1: the plain mode on either pivot leg is refused, naming the leg.
+    #[test]
+    fn the_plain_mode_is_refused_on_both_pivot_legs() {
+        for quote in [1u32, 3] {
+            assert!(
+                matches!(
+                    check_plain_mode_leg(&plain(quote), &wr04_refs()),
+                    Err(ChEnrichError::ResetPlainModeOnPivotLeg { quote_asset_id }) if quote_asset_id == quote
+                ),
+                "a plain reset of pivot leg {quote} must be refused"
+            );
+        }
+    }
+
+    /// U2: the plain mode on the peg leg (USDC) and on a leg that is no
+    /// reference at all is not this check's business. The latter is refused
+    /// first by `assert_reset_target_is_priceable`.
+    #[test]
+    fn the_plain_mode_is_admitted_on_the_peg_leg_and_on_a_non_reference_leg() {
+        for quote in [2u32, 10] {
+            assert!(
+                check_plain_mode_leg(&plain(quote), &wr04_refs()).is_ok(),
+                "a plain reset of leg {quote} must pass the leg check"
+            );
+        }
+    }
+
+    /// U3: both rate-gated modes pass on any leg. The 0268 mode on USDT is
+    /// `ResetExternalRateLegIsNotUsdc`'s case, not this one's.
+    #[test]
+    fn the_rate_gated_modes_pass_the_plain_mode_leg_check() {
+        for quote in [1u32, 3] {
+            assert!(
+                check_plain_mode_leg(&wr04_spec(quote, false, true), &wr04_refs()).is_ok(),
+                "the 0228 mode on pivot leg {quote} must pass"
+            );
+        }
+        assert!(check_plain_mode_leg(&wr04_spec(3, true, false), &wr04_refs()).is_ok());
+    }
+
+    /// U4: the verdict does not depend on USDC resolving — keyed on
+    /// `pivot_ids()`, not `can_pivot()`.
+    #[test]
+    fn the_plain_mode_is_refused_on_a_pivot_leg_even_without_usdc() {
+        let refs = ReferenceIds {
+            xlm: Some(1),
+            usdc: None,
+            usdt: Some(3),
+        };
+        assert!(!refs.can_pivot(), "fixture: no USDC, no pivot");
+        assert!(matches!(
+            check_plain_mode_leg(&plain(3), &refs),
+            Err(ChEnrichError::ResetPlainModeOnPivotLeg { quote_asset_id: 3 })
+        ));
+    }
+
+    /// U5: the message names the leg, both flags, the reason and the fix.
+    #[test]
+    fn the_plain_mode_refusal_tells_the_operator_which_mode_to_use() {
+        let msg = ChEnrichError::ResetPlainModeOnPivotLeg { quote_asset_id: 3 }.to_string();
+        for needle in [
+            "3",
+            "--reset-require-pivot-usdc-rate",
+            "--reset-require-external-rate",
+            "--pivot-window-s",
+            "Appendix C",
+            "peg",
+        ] {
+            assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
+        }
+    }
+
+    /// U6: `ResetEpochUsdcUnresolved` is a backstop no mode reaches through the
+    /// admission list any more (WR-04), so its branch is pinned here directly.
+    /// The guard returns it before any query, so no server is needed.
+    #[tokio::test]
+    async fn the_epoch_guard_refuses_an_unresolved_usdc_on_its_own() {
+        let pass = ChEnrichmentPass::new(ChEnrichConfig {
+            table: "price_ohlcv_1h".to_string(),
+            ..ChEnrichConfig::default()
+        });
+        let refs = ReferenceIds {
+            xlm: Some(1),
+            usdc: None,
+            usdt: Some(3),
+        };
+        let res = pass
+            .assert_reset_epoch_is_covered(&wr04_spec(3, false, true), &refs)
+            .await;
+        assert!(
+            matches!(
+                res,
+                Err(ChEnrichError::ResetEpochUsdcUnresolved { quote_asset_id: 3 })
+            ),
+            "an unresolved USDC must be refused by the epoch guard itself, got {res:?}"
+        );
     }
 }
