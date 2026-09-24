@@ -1579,8 +1579,9 @@ impl ChEnrichmentPass {
             // and runs for every spec, is what stops the oracle tier re-pricing
             // anything this mode re-opens.
         }
-        // Last, in BOTH modes (task 0208): a pivot leg's epoch must not sit
-        // below the first reference candle the pivot can refill from. The rule
+        // Last (task 0208; on a pivot leg only the 0228 mode gets here — plain is
+        // refused above): the epoch must not sit below the first reference
+        // candle the pivot can refill from. The rule
         // is "more specific refusals first": almost any wrong leg or missing
         // input ALSO leaves the pivot without a usable reference, so this check
         // is the most general one and would mask the defect that actually
