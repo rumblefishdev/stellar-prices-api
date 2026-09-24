@@ -212,8 +212,10 @@ struct EpochMark {
 /// A successful issue makes a cached "no key" answer false — and without this,
 /// provably wrong for a whole [`CACHE_TTL`]: the page's own refetch after the
 /// press, and any reload inside the window, would be served the stale `NoKey`
-/// and tell a key-holder they have no key. The handle can evict **only** that
-/// answer, nothing else: real usage entries stay cached (a reveal changes no
+/// and tell a key-holder they have no key. The same holds for a key on no
+/// plan (task 0311): the issue attaches it, and the page the sign-in lands on
+/// must not keep saying "not on a usage plan". The handle can evict **only**
+/// those two answers: real usage entries stay cached (a reveal changes no
 /// counter), and nothing outside this module can read or write anything.
 #[derive(Clone)]
 pub struct UsageCache(Arc<Mutex<CacheInner>>);
@@ -240,15 +242,15 @@ impl UsageCache {
         self.invalidate_no_key(sub);
     }
 
-    /// Drop a cached "no key" answer for `sub`, if that is what is cached —
-    /// and bump the caller's epoch either way, so an in-flight lookup that
+    /// Drop a cached "no key" or "no plan" answer for `sub`, if that is what
+    /// is cached ([`CachedAnswer::is_false_after_issue`]) — and bump the caller's epoch either way, so an in-flight lookup that
     /// snapshotted the keyless state cannot write it back afterwards (see
     /// [`CacheInner`]). The unconditional bump is the point: at the moment the
     /// race matters there is nothing cached to remove.
     pub fn invalidate_no_key(&self, sub: &str) {
         let mut cache = self.0.lock().expect("the usage cache lock is not poisoned");
         if let Some(entry) = cache.entries.get(sub)
-            && matches!(entry.answer, CachedAnswer::NoKey)
+            && entry.answer.is_false_after_issue()
         {
             cache.entries.remove(sub);
         }
@@ -477,6 +479,19 @@ enum CachedAnswer {
         rule: PeriodKind,
     },
     NoKey,
+}
+
+impl CachedAnswer {
+    /// An answer a successful issue makes false: "no key", and a key on no
+    /// plan of our stage (task 0311 — the issue attaches it). Both are
+    /// evicted by [`UsageCache::invalidate_no_key`] and guarded by the epoch
+    /// in [`remember`]; a real usage answer is neither.
+    fn is_false_after_issue(&self) -> bool {
+        match self {
+            CachedAnswer::NoKey => true,
+            CachedAnswer::Usage { body, .. } => body.plan.is_none(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -817,11 +832,13 @@ fn remember(state: &UsageState, sub: &str, answer: CachedAnswer, epoch: Option<u
         .cache
         .lock()
         .expect("the usage cache lock is not poisoned");
-    if matches!(answer, CachedAnswer::NoKey)
+    if answer.is_false_after_issue()
         && let Some(mark) = cache.epochs.get(sub)
         && Some(mark.value) != epoch
     {
-        tracing::debug!("a key was issued while this lookup ran; not caching its 'no key'");
+        tracing::debug!(
+            "a key was issued while this lookup ran; not caching its 'no key' or 'no plan'"
+        );
         return;
     }
     cache
@@ -916,7 +933,16 @@ mod tests {
                 period_end: Some("2026-08-31".to_string()),
                 resets_at: Some("2026-09-01T00:00:00Z".to_string()),
                 as_of: "2026-08-19T10:00:00Z".to_string(),
-                plan: None,
+                // A counted answer always has a plan; one without is the
+                // "no plan" state, which an issue evicts.
+                plan: Some(PlanWire {
+                    tier: Tier::Free,
+                    name: "pricing-api-free-production".to_string(),
+                    rate_limit_per_second: Some(1.0),
+                    burst_limit: Some(5),
+                    quota_limit: Some(3),
+                    quota_period: Some("MONTH".to_string()),
+                }),
             }),
             rule,
         }
@@ -1153,9 +1179,29 @@ mod tests {
         remember(&state, sub, usage_answer(ANY_PERIOD), stale_epoch);
         assert!(cached(&state, sub, CACHE_TTL, any_day()).is_some());
 
-        // And invalidating again does not evict it — only "no key" is the
-        // handle's to remove.
+        // And invalidating again does not evict it — only "no key" and "no
+        // plan" are the handle's to remove.
         state.cache_handle().invalidate_no_key(sub);
         assert!(cached(&state, sub, CACHE_TTL, any_day()).is_some());
+    }
+
+    /// A key on no plan (task 0311) is falsified by the issue that attaches
+    /// it, exactly as "no key" is by the issue that creates one: evicted by
+    /// the handle, and an in-flight lookup under an older epoch does not
+    /// store it.
+    #[test]
+    fn a_no_plan_answer_is_evicted_and_epoch_guarded_like_no_key() {
+        let state = UsageState::new(None, None);
+        let sub = "308994132968210433";
+
+        remember(&state, sub, without_counters(None), epoch_of(&state, sub));
+        assert!(cached(&state, sub, CACHE_TTL, any_day()).is_some());
+        state.cache_handle().invalidate_no_key(sub);
+        assert!(cached(&state, sub, CACHE_TTL, any_day()).is_none());
+
+        let stale_epoch = epoch_of(&state, sub);
+        state.cache_handle().invalidate_no_key(sub);
+        remember(&state, sub, without_counters(None), stale_epoch);
+        assert!(cached(&state, sub, CACHE_TTL, any_day()).is_none());
     }
 }

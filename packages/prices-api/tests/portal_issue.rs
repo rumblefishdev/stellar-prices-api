@@ -685,6 +685,41 @@ async fn a_successful_issue_evicts_the_cached_no_key() {
     );
 }
 
+/// A successful issue also evicts a cached "no plan" answer (task 0311).
+///
+/// A key on no usage plan of our stage is cached like any usage answer, and
+/// the page's copy for it tells the user that signing out and in again puts
+/// the key back on a plan. The sign-in does attach it — so without the
+/// eviction the dashboard it lands on would keep saying "not on a usage plan"
+/// for the rest of the TTL, and the advice would look like it failed.
+#[tokio::test]
+async fn a_successful_issue_evicts_the_cached_no_plan() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    // A live key on no plan at all — the "issued but dead" state.
+    gateway.with(|s| {
+        s.seed(&key_name(), 100);
+    });
+    let app = issue_app(&discord, &gateway);
+    let session = session_cookie(USER_ID);
+
+    let before = call_path(app.clone(), "GET", USAGE_PATH, Some(&session)).await;
+    assert_eq!(before.status, StatusCode::OK);
+    assert_eq!(before.json()["plan"], serde_json::Value::Null);
+
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
+    gateway.with(|s| assert_eq!(s.attach_calls, 1, "the sign-in attached the key"));
+
+    // Well inside the 60s TTL, so only the eviction can explain this.
+    let after = call_path(app, "GET", USAGE_PATH, Some(&session)).await;
+    assert_eq!(
+        after.json()["plan"]["tier"],
+        "free",
+        "a cached 'no plan' survived the issue that attached the key: {}",
+        String::from_utf8_lossy(&after.body)
+    );
+}
+
 /// The epic's non-goal, as a test: a user who has left the guild keeps their
 /// key — reveal and usage still work with the session alone, and **Discord is
 /// never consulted** on either route.
