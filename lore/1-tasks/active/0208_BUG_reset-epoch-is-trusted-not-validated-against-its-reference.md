@@ -29,6 +29,16 @@ history:
       /gsd-quick --full on branch fix/0208: refusal in
       assert_reset_is_admissible for pivot-reference legs, compared in seconds
       against the pivot's own reference predicate on the pass's table.
+  - date: "2026-09-24"
+    status: active
+    who: akot
+    note: >
+      Implemented on fix/0208, PR #347 (12 commits, not merged). All six
+      acceptance criteria met: guard last in assert_reset_is_admissible,
+      three new refusals, 1612656000 refused on _1h/_4h and admitted on
+      _1d/_1w/_1M. enrichment-worker lib 181/0, ch_enrich_it --ignored 66/0
+      (8 new). Review: 0 blockers, 4 warnings + 7 info, all fixed. Stays
+      active until #347 merges.
 ---
 
 # The reset epoch is an operator assertion the tool never checks
@@ -86,15 +96,105 @@ a defect three orders of magnitude below its own noise.
 
 ## Acceptance Criteria
 
-- [ ] A reset whose `not_before` is below the reference's first candle **refuses
+- [x] A reset whose `not_before` is below the reference's first candle **refuses
       before any write**, naming both timestamps and the correct epoch.
-- [ ] Verified non-vacuous: with the guard removed, a test reproducing the
+- [x] Verified non-vacuous: with the guard removed, a test reproducing the
       2026-08-18 shape (epoch at 00:00, reference from 19:00) leaves rows at
       `close_usd = 0` and the test fails.
-- [ ] Hour-granular — a case where epoch and first reference share a date but
+- [x] Hour-granular — a case where epoch and first reference share a date but
       differ by hours is still refused.
-- [ ] The exact epoch already in flight (`1612656000` vs a reference starting
+- [x] The exact epoch already in flight (`1612656000` vs a reference starting
       `2021-02-07 19:00`) is a named regression test.
-- [ ] Runbook and every recorded USDT epoch corrected to `1612724400`.
-- [ ] Post-run damage check in the runbook says **every table**, not the tables
+- [x] Runbook and every recorded USDT epoch corrected to `1612724400`.
+- [x] Post-run damage check in the runbook says **every table**, not the tables
       that warned — the sampling error that let this reach prod.
+
+## Implementation Notes
+
+PR #347, branch `fix/0208_reset-epoch-is-trusted-not-validated-against-its-reference`.
+Files: `packages/enrichment-worker/src/ch_enrich.rs`, `tests/ch_enrich_it.rs`,
+`src/bin/coarse-repair.rs`, `docs/runbooks/repair-coarse-usd-values.md`.
+
+- `pivot_reference_row_pred(ref_id, usdc_id)` is now the ONE definition of a usable
+  reference row; `pivot_sql`'s reference leg and the guard's
+  `SELECT toUInt32(minOrNull(timestamp)) … FINAL` are both rendered from it, and a
+  unit test pins both clauses exactly.
+- `assert_reset_epoch_is_covered` runs **last** in `assert_reset_is_admissible`, so
+  the repair driver hits it before month enumeration (dry run included) and
+  `reset_step` before `reset_sql`. The query has no month window and no watermark,
+  so the per-month re-check gives the same answer every month.
+- Pure `check_reset_epoch(not_before, first_reference)` compares seconds;
+  equality is admitted (the first reference candle refills itself).
+- New `ChEnrichError` variants: `ResetEpochBelowReference` (unix + UTC for both,
+  the stranded window, the epoch to re-run with), `ResetEpochHasNoReference`,
+  `ResetEpochUsdcUnresolved`.
+- `coarse-repair` prints a refusal's Display message and exits 1; before, `main`'s
+  `Result` printed the Debug form, so none of the operator guidance reached the
+  terminal (all eight refusals).
+- Measured per table against the incident's shape: `1612656000` refused on `_1h`
+  (first reference 1612724400) and `_4h` (16:00 bucket, 1612713600), admitted on
+  `_1d`/`_1w`/`_1M` — exactly the tables that did and did not lose candles.
+- Runbook: per-table epoch measurement with the guard's predicate (Appendix C,
+  now with the USDT id lookup), the 2026-08-18 worked example, damage/triage
+  queries take `<TABLE>` and must be run on every table, and a new section
+  "An admitted epoch is a lower bound, not a refill guarantee".
+
+**Tests:** lib 181/0; `ch_enrich_it --ignored` 66/0 on rootless ClickHouse
+26.3.10.60 (8 new ITs). Non-vacuity: with the guard call removed the incident IT
+fails with 19 rows stranded at `close_usd = 0`; six single mutations of the
+guard (empty set read as `Some(0)`, dropping `pf_trade_count > 0` / `close > 0` /
+`volume_base > 0`, unresolved USDC treated as pass, always reading `_1h`) each
+turn exactly one new IT red.
+
+**Modified existing tests:** the 15 `pivot_reset(DEPEG_DAY - 86_400)` calls in the
+0228 ITs used an epoch a day below their own fixture's first reference
+(`DEPEG_DAY + 43_200`), which the new guard refuses. They now use
+`PIVOT_FIRST_REF`; no asserted value changed (every subject row sits at or above
+it). Unit fixtures that embedded `1612656000` as the USDT epoch now use
+`1612724400`; where the old value is the refused case it is named
+`INCIDENT_EPOCH_0182`.
+
+## Design Decisions
+
+### From Plan
+
+1. **Pivot legs only (D1).** The peg/stable leg (USDC, incl. the 0268 external
+   mode) has no reference series; both plain and 0228 modes are checked, because
+   0228's `pivot_reference_day_pred` is day-granular and passes the 00:00→19:00 case.
+2. **The pivot's exact predicate on the pass's own table (D2).** Per-table is what
+   makes `_1d` admit the epoch `_1h` refuses.
+3. **No reference refuses (D3); seconds, never dates (D4); new variant with the
+   fix in the message (D5).**
+
+### Emerged
+
+4. **Guard runs last in the admissibility list.** Earlier would have changed the
+   refusal seven existing ITs expect; the more specific refusals win first.
+5. **`minOrNull` into `Option<u32>`** instead of `min`: ClickHouse's `min` over
+   zero rows is 1970, which would admit every epoch.
+6. **Separate `ResetEpochUsdcUnresolved`** (review IN-02) — "USDC missing from
+   `prices.assets`" and "no reference rows on this table" have different fixes.
+7. **Reference ids resolved once per admissibility check** (IN-03) and passed to
+   every check that needs them; the 0215 missing-reference warning no longer
+   repeats per check.
+8. **CLI prints Display, not Debug** — found by the verifier; outside the brief,
+   but without it AC1's "the message is the fix" never reaches the operator.
+
+## Issues Encountered
+
+- **Existing 0228 fixtures violated the invariant the guard enforces** — see
+  Modified existing tests. Not a regression: those ITs were resetting below their
+  own reference and passing only because the day-granular predicate masked it.
+- **Runbook damage queries hard-coded `price_ohlcv_1d`** while telling the
+  operator to check every table — the same sampling error as the incident.
+  Replaced with `<TABLE>`.
+
+## Future Work
+
+- **Plain-mode (0182) pivot resets are not gated on refill inputs** (review
+  WR-04, pre-existing). An admitted epoch is a lower bound: rows with no USDC rate
+  or no reference inside `--pivot-window-s` are still zeroed and not refilled.
+  Documented as a caveat in the runbook and `--help`; gating it (e.g. reuse
+  `external_rate_day_pred` / `pivot_reference_day_pred` or
+  `assert_external_rates_are_loaded` in plain mode) is proposed as a follow-up,
+  pending Adam's decision.
