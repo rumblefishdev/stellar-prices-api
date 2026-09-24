@@ -26,7 +26,10 @@ history:
     note: >
       Same root cause as [[0139]] (asset_id allocator collisions,
       canonical.rs:169-225), which owns the fix and is being re-measured;
-      linked from 0139's related_tasks. Closed in the backlog cleanup,
+      linked from 0139's related_tasks. Its four criteria that 0139 lacked
+      (count == countDistinct(asset_id) on assets FINAL, the two-query
+      cross-check, a uniqueness invariant, a full /assets cursor walk) are
+      carried into 0139's acceptance criteria. Closed in the backlog cleanup,
       [[0314]].
 ---
 

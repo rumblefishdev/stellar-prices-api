@@ -897,7 +897,8 @@ Phase 3:
       this is where it is); the count of XLM-quoted candles priced from a
       quantised XLM/USDC close (0278's before-figure: 22 760 / 143 577 /
       85 699 / 30 064 / 10 938 on 15m / 1h / 4h / 1d / 1w) is zero after the
-      re-ingest and pre-roll.
+      re-ingest and pre-roll. [[0266]] closed into this criterion (2026-09-24,
+      [[0314]]) — it is that task's only remaining check.
 - [ ] The whole history re-enriched (`close_usd > 0` wherever a reference
       exists) and `post_run_0228_it` green on the repaired reference; 0228's
       reset-mode campaign recorded as superseded, not run.
@@ -905,7 +906,7 @@ Phase 3:
       re-enrichment ([[0212]]'s query: `peg_written = 0`, `pivot_written > 0`,
       measured on 1m and on one coarse tier) — the re-ingest replaces the
       1.56 M rows 0172/0182 never reached, so 0212 closes here (re-ingest
-      runbook §7e).
+      runbook §7e). 0212 is archived pending this check ([[0314]]).
 
 ## Implementation Notes
 

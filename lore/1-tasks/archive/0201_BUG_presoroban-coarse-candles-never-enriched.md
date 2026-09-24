@@ -64,8 +64,12 @@ history:
     who: okarcz
     note: >
       Done — this task's own 2026-08-18 entry records the recovery: 53,965,024
-      rows as pass 1 of [[0182]]'s campaign. [[0286]] phase 3 re-enriches the
-      whole history again. Closed in the backlog cleanup, [[0314]].
+      rows as pass 1 of [[0182]]'s campaign. The recoverable window was
+      2022-04 -> 2024-01, not the title's 2021-02 -> 2024-01: rows below
+      2022-04 are exotic-quoted and stay at the permanent no_reference floor
+      (close_usd = 0 there is expected, not a regression). [[0286]] phase 3
+      re-enriches the whole history again. Closed in the backlog cleanup,
+      [[0314]].
 ---
 
 # 32M pre-Soroban coarse candles were never enriched

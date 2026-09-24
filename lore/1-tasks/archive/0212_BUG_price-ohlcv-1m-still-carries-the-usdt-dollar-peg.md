@@ -25,10 +25,12 @@ history:
     status: completed
     who: okarcz
     note: >
-      Moved into [[0286]] (4c7709e3, "close 0212 in the re-ingest"): the re-
-      ingest replaces the 1.56 M pegged rows and its phase-3 criterion
-      (runbook §7e, peg_written = 0, pivot_written > 0) is the check. Closed
-      in the backlog cleanup, [[0314]].
+      Moved into [[0286]], NOT yet verified (4c7709e3, "close 0212 in the
+      re-ingest"): the 1.56 M pegged _1m rows are still live until 0286
+      phase 3 (running on prod) replaces them. Tracking lives in 0286's
+      unchecked criterion (runbook §7e, peg_written = 0, pivot_written > 0);
+      if 0286 is re-scoped, that criterion must move with it. Closed in the
+      backlog cleanup, [[0314]].
 ---
 
 # 1.56M `_1m` rows still carry the USDT $1 peg
