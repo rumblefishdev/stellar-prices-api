@@ -740,16 +740,38 @@ Stage A command: `run --to-month 202401 --ack-phase1-measured --amm stop
 --skip-aws-check`. Each day: progress and disk read on prod, and `release`
 for every month that reconciled clean, to give the snapshot's disk back.
 
-**During stage A (about two weeks of buffer), before 202402:**
+**Before stage B (202402) — checklist, in order.** Stage A stops by itself at
+202401 (`--to-month 202401`), so a missed item costs waiting time, not data;
+the script also refuses each one it can detect before any DROP.
 
-- One script PR under 0286: the Soroban-era AMM step still parses
-  `events with no apply order:`, which [[0304]] removed, so the first AMM
-  month would die with a Python `AttributeError` AFTER `events-backfill`
-  wrote; the default `--amm mtls` cannot run because `events-backfill` on
-  `develop` has no `--transport` (use `--amm ssh`); add the Comet registry
-  gate for months ≥ 202405; correct the runbook's cleanup time.
-- `events-backfill --discover-pools` to the current tip.
-- The phase-1 measurement week recorded (AC 10).
+- [ ] **Script PR #350 merged** (`fix/0286_reingest-amm-step-after-0304`,
+      opened 2026-09-24). It reads the post-[[0304]] summary line
+      `negative apply order:` (the old `events with no apply order:` would
+      crash AFTER `events-backfill` wrote), after the `--dry-run` pass too;
+      checks the `--amm` mode in `preflight` and in each month's `gates` step,
+      before the snapshot and DROP; makes `--amm ssh` the default
+      (`events-backfill` on `develop` has no `--transport`); and corrects the
+      runbook's cleanup time to 03:00 UTC. The Comet registry gate for months
+      ≥ 202405 was already in, from [[0300]].
+- [ ] **`git pull` on `fishuser-hero`, only after stage A has finished** — the
+      running process keeps the script it started with, and the machine keeps
+      its own checkout.
+- [ ] **The `--ssh` target recorded here** — how `fishuser-hero` reaches the
+      ClickHouse host (the route the 0290 seed used on 2026-09-22). `--amm ssh`
+      without `--ssh` now stops in `preflight`.
+- [ ] **The host's `~/events-backfill` built from a `develop` that contains
+      [[0304]] and [[0300]].** The script proves both before any write (the
+      summary line; the Comet probe at ledger 51 500 460), but a stale binary
+      then costs a stopped month.
+- [ ] **`events-backfill --discover-pools` run to the current tip**, so
+      `pool_registry` holds every pool that exists — the re-ingest prices only
+      registered pools.
+- [ ] **The phase-1 measurement week recorded (AC 10)**, closes 2026-09-29.
+- [ ] **Stage B command:** `run --to-month 202404 --ack-phase1-measured
+      --skip-aws-check --ssh '<target from above>'` (`--amm ssh` is the
+      default; it asks for the CH `default` password once). Stage C (202405 →)
+      additionally needs [[0300]]'s Comet in `pool_registry` — the script's
+      gate refuses those months without it.
 
 **Stage C carries the [[0282]] check:** the days written live between
 2026-07-16 and 2026-09-17 12:04 UTC must come back HIGHER than the
