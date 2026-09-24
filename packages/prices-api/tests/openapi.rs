@@ -624,3 +624,68 @@ async fn every_published_text_is_present_and_reader_facing() {
         "only {described} texts checked — the document did not parse as expected"
     );
 }
+
+/// The reference renders every schema's example from its properties' own
+/// examples (task 0306), so a property without one prints as a type name —
+/// `"string"`, `0` — which is what it did for every field before. Each property
+/// must carry an example, or be one of the two reasons not to:
+///
+/// * it is a reference — to a component, through an optional one-of, or as
+///   the item type of an array — and takes its example from the component;
+/// * the API omits it when absent, so the rendered example must too. Those are
+///   listed by name, and must stay optional with no example.
+#[tokio::test]
+async fn every_property_has_an_example_or_a_reason() {
+    let (_, _, spec) = fetch_spec(&config_with(None, vec![])).await;
+    const OMITTED_WHEN_ABSENT: &[(&str, &str)] = &[
+        ("ErrorEnvelope", "details"),
+        ("OhlcvResponse", "backfill_note"),
+    ];
+
+    let is_reference = |p: &Value| {
+        p.get("$ref").is_some()
+            || p["items"].get("$ref").is_some()
+            || p["oneOf"]
+                .as_array()
+                .is_some_and(|v| v.iter().any(|s| s.get("$ref").is_some()))
+    };
+
+    let mut exemplified = 0usize;
+    for (name, schema) in spec["components"]["schemas"]
+        .as_object()
+        .expect("schemas")
+        .iter()
+    {
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .map(|r| r.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        for (field, property) in schema["properties"]
+            .as_object()
+            .unwrap_or(&serde_json::Map::new())
+            .iter()
+        {
+            let at = format!("{name}.{field}");
+            if OMITTED_WHEN_ABSENT.contains(&(name.as_str(), field.as_str())) {
+                assert!(
+                    property.get("example").is_none(),
+                    "{at} is omitted when absent; an example would show it"
+                );
+                assert!(
+                    !required.contains(&field.as_str()),
+                    "{at} is omitted when absent, so it cannot be required"
+                );
+            } else if is_reference(property) {
+                assert!(
+                    property.get("example").is_none(),
+                    "{at} is a reference; its component supplies the example"
+                );
+            } else {
+                assert!(property.get("example").is_some(), "{at} has no example");
+                exemplified += 1;
+            }
+        }
+    }
+    // Non-vacuous, as in the published-text test.
+    assert!(exemplified > 60, "only {exemplified} examples found");
+}
