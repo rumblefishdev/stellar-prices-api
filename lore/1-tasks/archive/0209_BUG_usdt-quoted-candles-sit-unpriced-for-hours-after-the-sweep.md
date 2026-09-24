@@ -2,7 +2,7 @@
 id: "0209"
 title: "The USDT pivot has NEVER priced a _1m row — the leg went dark on 2026-08-13 and no alarm saw it"
 type: BUG
-status: backlog
+status: completed
 related_adr: []
 related_tasks: ["0182", "0172", "0165", "0145", "0111", "0173", "0204", "0212", "0215"]
 tags: ["priority-high", "effort-medium", "clickhouse", "enrichment", "data-correctness", "milestone-M2"]
@@ -71,6 +71,13 @@ history:
       is LIMIT-bound and has never exhausted its candidates). The zero holds
       for USDT ALONE, which is 0215 and not a throughput problem at all.
       See 0111's 2026-08-21 measurement.
+  - date: "2026-09-24"
+    status: completed
+    who: okarcz
+    note: >
+      Fixed by [[0215]], which found the deployed Lambda never issued the USDT
+      pivot — "this closes the substance of [[0209]] and [[0212]]". The USDT
+      pivot has written since. Closed in the backlog cleanup, [[0314]].
 ---
 
 # USDT-quoted candles stay unpriced far longer than the sweep interval

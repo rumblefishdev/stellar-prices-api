@@ -2,7 +2,7 @@
 id: "0169"
 title: "deploy-board's schedule + workflow_dispatch triggers are inert — they exist only on develop, but GitHub reads them from the default branch (master)"
 type: BUG
-status: backlog
+status: completed
 related_adr: []
 related_tasks: ["0166", "0141"]
 tags: ["priority-medium", "effort-small", "ci", "github-actions", "tooling", "silent-failure", "branch-drift"]
@@ -21,6 +21,13 @@ history:
       workflow, and GitHub reads both triggers from the DEFAULT branch, which
       is master. Master still carries the pre-fix workflow. Confirmed by zero
       scheduled runs in three days where ~72 were due.
+  - date: "2026-09-24"
+    status: completed
+    who: okarcz
+    note: >
+      Fixed: deploy-board.yml on the default branch carries schedule +
+      workflow_dispatch (#308). Scheduled runs fire and succeed, most recently
+      2026-09-24 09:59Z. Closed in the backlog cleanup, [[0314]].
 ---
 
 # `deploy-board`'s recovery triggers never fire

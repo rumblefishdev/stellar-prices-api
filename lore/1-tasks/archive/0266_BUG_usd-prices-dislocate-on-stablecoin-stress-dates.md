@@ -2,7 +2,7 @@
 id: "0266"
 title: "Historical USD closes dislocate ~25% on USDC-stress dates — two unrelated assets move by an identical ratio, so the cause is shared, not per-market"
 type: BUG
-status: backlog
+status: completed
 related_adr: ["0011"]
 related_tasks: ["0127", "0265", "0172", "0197", "0128"]
 tags: [layer-backend, priority-medium, effort-medium, milestone-M3, pricing, enrichment, data-correctness, stablecoin]
@@ -18,6 +18,16 @@ history:
       independent exchange across 28 dates. 27 of 28 match to a fraction of a
       percent. The exception is not noise — it is two unrelated assets moving by
       the same ratio on the same day, which is a shared-cause signature.
+  - date: "2026-09-24"
+    status: completed
+    who: okarcz
+    note: >
+      Superseded — the shared factor was the XLM/USDC daily close printed by
+      dust fills (1/17 on 03-11, 4/57 on 03-15; 0276 notes R-production-
+      run-2026-09-11.md:151). ADR 0287 / [[0286]] fix it, and 0286's "seven
+      dust days within 5 % of Bitstamp" criterion verifies it. The yBTC
+      2023-03-18 thin-market close is [[0310]]'s case. Closed in the backlog
+      cleanup, [[0314]].
 ---
 
 # USD closes dislocate on stablecoin-stress dates

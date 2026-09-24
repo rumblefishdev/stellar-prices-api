@@ -2,7 +2,7 @@
 id: "0314"
 title: "Backlog board cleanup — close the 13 tasks that are already done, superseded or decided against"
 type: CHORE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0062", "0113", "0115", "0129", "0130", "0169", "0175", "0201", "0205", "0209", "0212", "0266", "0289", "0154", "0139", "0286"]
 tags: [layer-docs, priority-medium, effort-small, lore, board]
@@ -19,6 +19,14 @@ history:
     status: active
     who: okarcz
     note: "Activated; the 13 closures go in one PR to develop."
+  - date: "2026-09-24"
+    status: completed
+    who: okarcz
+    note: >
+      13 backlog tasks archived as completed, each with a history entry citing
+      its evidence (re-checked against the files and runs before closing).
+      0115's three unique criteria carried into 0154; 0129 linked from 0139.
+      Backlog 80 -> 67. Quick-check (13) and keep (54) groups untouched.
 ---
 
 # Backlog board cleanup — close the stale tasks
@@ -57,6 +65,19 @@ scope here; only the stale group moves.
 
 ## Acceptance Criteria
 
-- [ ] All 13 tasks archived with `status: completed` and a history entry citing the evidence
-- [ ] 0115's open criteria noted on [[0154]] before 0115 closes; 0129 pointed at [[0139]]
-- [ ] Merged to `develop`, so the board drops them
+- [x] All 13 tasks archived with `status: completed` and a history entry citing the evidence
+- [x] 0115's open criteria noted on [[0154]] before 0115 closes; 0129 pointed at [[0139]]
+- [x] Merged to `develop`, so the board drops them (the PR that carries this entry)
+
+## Design Decisions
+
+### Emerged
+
+1. **One PR, not direct pushes to `develop`.** Task documents normally go
+   straight to `develop`; the operator asked for a PR so the 13 closures are
+   reviewed together.
+2. **Two closures touch teammates' tasks** — 0205 (akot) and 0289
+   (stkrolikiewicz). Closed at the operator's explicit request; the PR is where
+   they can object.
+3. **Merged, not dropped:** 0115's criteria were copied into 0154 and 0129 was
+   linked from 0139 before either closed, so nothing they asked for is lost.

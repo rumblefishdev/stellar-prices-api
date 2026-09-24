@@ -2,7 +2,7 @@
 id: '0205'
 title: 'Deploy the portal gateway mapping and verify it live — three deploys 0184 merged but never shipped'
 type: CHORE
-status: backlog
+status: completed
 related_adr: []
 related_tasks: ['0184', '0183', '0185', '0186', '0194', '0141']
 tags:
@@ -57,6 +57,13 @@ history:
       (deploy a tree that includes [[0185]]) plus one thing to check live —
       [[0185]]'s decision 13, on whether `/api-tokens/` can hold a cache entry at
       all. −1 code change.
+  - date: "2026-09-24"
+    status: completed
+    who: okarcz
+    note: >
+      Done — archived [[0309]] (Future Work) records that the cdk diffs of
+      2026-09-23 and 24 showed no change to /api/{proxy+}: the greedy proxy
+      mapping is live on production. Closed in the backlog cleanup, [[0314]].
 ---
 
 # Deploy the portal gateway mapping and verify it live

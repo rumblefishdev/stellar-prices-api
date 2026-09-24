@@ -2,7 +2,7 @@
 id: "0175"
 title: "Bounded combined-mode re-run to recover Soroswap OHLCV — the registry was seeded AFTER the Soroban backfill, so soroswap candles are all missing"
 type: FEATURE
-status: backlog
+status: completed
 related_adr: ["0005"]
 related_tasks: ["0088", "0096", "0053", "0090"]
 tags: [layer-infra, priority-medium, effort-large, backfill, soroswap, soroban, operational]
@@ -20,6 +20,14 @@ history:
       a different root cause and a fresh multi-day operational campaign, so it
       was blocking 0088 from closing while sharing none of its subject matter.
       Root cause is already settled in 0096; only the operational re-run remains.
+  - date: "2026-09-24"
+    status: completed
+    who: okarcz
+    note: >
+      Stale — Soroswap history was completed by [[0097]]'s reprice (0101
+      README:154). The 07-06 → 07-11 hole belongs to [[0101]], and [[0286]]
+      phase 3 re-ingests the whole Soroban era with 235 soroswap pools
+      registered. Closed in the backlog cleanup, [[0314]].
 ---
 
 # Recover Soroswap OHLCV — bounded combined-mode re-run

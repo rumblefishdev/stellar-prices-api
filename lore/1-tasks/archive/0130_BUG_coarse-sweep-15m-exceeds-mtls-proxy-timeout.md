@@ -2,7 +2,7 @@
 id: "0130"
 title: "Coarse sweep can't scan price_ohlcv_15m — FINAL scan exceeds the ~30s mTLS-proxy timeout"
 type: BUG
-status: backlog
+status: completed
 related_adr: []
 related_tasks: ["0114", "0111"]
 tags: [clickhouse, enrichment, coarse-sweep, mtls, infra, priority-medium, effort-medium]
@@ -14,6 +14,13 @@ history:
     status: backlog
     who: okarcz
     note: "Spawned from 0114 — the recurring sweep's 15m coverage 504s on the mTLS proxy; 15m dropped at runtime as mitigation."
+  - date: "2026-09-24"
+    status: completed
+    who: okarcz
+    note: >
+      Fixed by [[0218]]: the coarse sweep runs in its own Lambda with 15m
+      listed in CDK (eventbridge-stack.ts:625), verified tables_swept=6
+      tables_failed=0 on 2026-08-24. Closed in the backlog cleanup, [[0314]].
 ---
 
 # Coarse sweep can't scan `price_ohlcv_15m` — FINAL scan exceeds the ~30s mTLS-proxy timeout
