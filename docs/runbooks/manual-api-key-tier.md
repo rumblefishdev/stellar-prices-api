@@ -9,7 +9,8 @@ hand in AWS).
 **Who:** anyone with `AdministratorAccess` on the shared AWS account
 (`750702271865`, `eu-central-1`). The portal's own Lambda cannot do any of this:
 it may list a key's plans, read usage and attach a key, but holds no `DELETE`
-or `PATCH` on a plan or a plan key (`api-gateway-stack.ts`).
+or `PATCH` on a plan or a plan key (`compute-stack.ts`, the `/usageplans`
+grants).
 
 ---
 
@@ -38,8 +39,9 @@ plan per stage, so moving a user up (or down) means moving their key from one
 plan to another — the procedure below. The dashboard reads whatever plan the
 key is on (`GetUsagePlans` by key) and shows that plan's pill, figures, quota
 and reset; the **name** is the contract: the tier is parsed from
-`pricing-api-<tier>-production`, and any other plan on our stage shows as
-**Custom** with its own name.
+`pricing-api-<tier>-production`, and any other plan on our stage shows the
+**Custom** pill (its name travels in `/api/usage`'s `plan.name` for support,
+but the page does not show it).
 
 ---
 
@@ -58,55 +60,105 @@ export TIER=basic               # free | basic | analyst | lite | pro
 **1. Find the key — by exact name.** A self-service key is named
 `discord-<id>-key` (`packages/prices-api/src/portal/keys/naming.rs`, `key_name`).
 `--name-query` is a **prefix** match (measured, task 0180), so the exact match
-is the JMESPath filter, and `enabled` drops a revocation record:
+is the JMESPath filter. List every record under the name, live and revoked:
 
 ```bash
 aws apigateway get-api-keys --name-query "discord-$ID-key" \
-  --query "items[?name=='discord-$ID-key' && enabled].id" --output text
+  --query "items[?name=='discord-$ID-key'].[id,enabled,lastUpdatedDate]" \
+  --output table
 ```
 
-Expect exactly **one** id. None: the user has no live key (never issued, or
-revoked — they issue one first). Two: a double-submit duplicate the next issue
-will sweep; ask the user to open the dashboard once (a sign-in reconciles) and
-look again. Then:
+- **One enabled record** — the ordinary case: `export K=<its id>`.
+- **Two enabled records** — a double-submit duplicate the next issue will
+  sweep; ask the user to open the dashboard once (a sign-in reconciles) and
+  look again.
+- **No enabled record, one or more disabled** — the user reworked ("Replace my
+  key", task 0191) and is waiting for the next period; their next key does not
+  exist yet. Move the **latest** disabled record (the newest `lastUpdatedDate`)
+  instead: `export K=<its id>`. When the period rolls, the issue attaches the
+  new key to the plan of the newest revoked record that is on a paid or Custom
+  plan of ours — free only if none is (task 0311, `resolve_target_plan`) — so
+  the new key lands on the target plan. A disabled key answers `403` whatever
+  its plan, so the move costs the user nothing. **For a downgrade** of such a
+  user, move **every** disabled record to free: a paid plan left on any one of
+  them would win.
+- **Nothing at all** — the user has never been issued a key. Ask them to sign
+  in to the portal first.
+
+**2. Find the two plans, and check them.** `FROM` is the key's plan **on our
+API** (a key may also sit on another API's plan — the partner plan `q7sd40` is
+one — which is not ours to move), `TO` the target by exact name:
 
 ```bash
-export K=<the one id>
-```
+API_ID=$(aws ssm get-parameter --name /prices/production/api-gateway-id \
+  --query 'Parameter.Value' --output text)
 
-**2. Find the two plans.** The key's current plan, and the target by exact name:
-
-```bash
 aws apigateway get-usage-plans --key-id "$K" \
-  --query "items[].[id,name,apiStages[0].apiId]" --output table
+  --query "items[].[id,name,join(',', apiStages[].apiId)]" --output table
 
-FROM=<the id of the plan above whose name is pricing-api-…-production>
-
+FROM=$(aws apigateway get-usage-plans --key-id "$K" \
+  --query "items[?apiStages[?apiId=='${API_ID}' && stage=='production']].id | [0]" \
+  --output text)
 TO=$(aws apigateway get-usage-plans \
   --query "items[?name=='pricing-api-${TIER}-production'].id | [0]" --output text)
-# `--output text` prints the literal "None" for an empty result — see
-# "Change or revoke a Custom key" below. Guard it rather than pass it on.
-[ "$TO" = "None" ] && { echo "no plan pricing-api-${TIER}-production"; unset TO; }
-echo "from ${FROM} to ${TO}"
+
+# An id is lowercase letters and digits. `--output text` prints the literal
+# "None" for an empty result, an unset variable is empty, and a typo in TIER
+# or a key on no plan produces one of the two — none of them may reach step 3.
+ok_id() { [[ "$1" =~ ^[a-z0-9]{6,}$ ]]; }
+if ok_id "$K" && ok_id "$FROM" && ok_id "$TO" && [ "$FROM" != "$TO" ]; then
+  echo "ready: move $K from $FROM to $TO"
+else
+  echo "STOP: K='$K' FROM='$FROM' TO='$TO' — fix this before step 3"
+fi
 ```
 
-A key may also sit on another API's plan (the partner plan, `q7sd40`, is on a
-different API); only the plan on our API — `/prices/production/api-gateway-id`
-— is the one to move.
+`FROM` empty or `None`: the key is on no plan of ours — it answers `403` right
+now. There is nothing to delete; skip step 3 and run only the create:
+`ok_id "$TO" && aws apigateway create-usage-plan-key --usage-plan-id "$TO" --key-id "$K" --key-type API_KEY`.
+`TO` `None`: `TIER` is misspelt, or the plan is not deployed. `FROM` = `TO`:
+nothing to do.
 
-**3. Move it: delete the plan key, then create it on the target plan.**
+**3. Move it: delete the plan key, then create it on the target plan** — and
+only after step 2 printed `ready`. The same check is repeated here, so a paste
+of this block alone cannot run the delete with a bad id:
 
 ```bash
-aws apigateway delete-usage-plan-key --usage-plan-id "$FROM" --key-id "$K"
-aws apigateway create-usage-plan-key --usage-plan-id "$TO" --key-id "$K" \
-  --key-type API_KEY
+if ok_id "$K" && ok_id "$FROM" && ok_id "$TO" && [ "$FROM" != "$TO" ]; then
+  aws apigateway delete-usage-plan-key --usage-plan-id "$FROM" --key-id "$K" &&
+    aws apigateway create-usage-plan-key --usage-plan-id "$TO" --key-id "$K" \
+      --key-type API_KEY
+else
+  echo "refusing: K='$K' FROM='$FROM' TO='$TO'"
+fi
 ```
 
 Delete first, because a key is on one plan per stage: creating it on the target
-while it is still on the old plan is refused. **Between the two commands the
-key answers `403`** — it exists but is on no plan — so run them back to back;
-it is a matter of seconds, and the data plane can take a few more to follow.
-The key's **value does not change**, so the user changes nothing.
+while it is still on the old plan is refused (`BadRequestException` "… cannot
+reference multiple Usage Plans with the same API Stage"). **Between the two
+commands the key answers `403`** — it exists but is on no plan — so run them
+back to back; it is a matter of seconds, and the data plane can take a few more
+to follow. The key's **value does not change**, so the user changes nothing.
+The `&&` means a failed delete never reaches the create.
+
+**If the create is refused or fails** — the key is now on no plan, or on one
+you did not choose. Look before acting:
+
+```bash
+aws apigateway get-usage-plans --key-id "$K" --query "items[].[id,name]" --output table
+```
+
+- **On free** (`pricing-api-free-production`): the user signed in during the
+  gap, and the portal — seeing a key on no plan — attached it to free (or to the
+  plan of a revoked record, if they have one). Nothing is broken; move it again:
+  `aws apigateway delete-usage-plan-key --usage-plan-id <that plan> --key-id "$K"`,
+  then the `create-usage-plan-key … "$TO"` above.
+- **On no plan of ours**: re-run the create. If `TO` itself is the problem,
+  put the key back where it was with
+  `aws apigateway create-usage-plan-key --usage-plan-id "$FROM" --key-id "$K" --key-type API_KEY`
+  and sort out `TO` afterwards — a key on no plan answers `403` until one of
+  the two creates succeeds. A sign-in by the user also recovers it (onto free,
+  or onto a revoked record's plan).
 
 **4. Verify.**
 
@@ -115,7 +167,8 @@ aws apigateway get-usage-plans --key-id "$K" --query "items[].name"
 ```
 
 Exactly the target plan (`["pricing-api-basic-production"]`), plus any plan on
-another API it was already on — never two plans of ours, and never none.
+another API it was already on — never two plans of ours, and never none. If it
+is anything else, go back to "If the create is refused or fails" above.
 
 **5. What the user sees.**
 
@@ -132,7 +185,8 @@ another API it was already on — never two plans of ours, and never none.
   user stays paid, and nothing needs doing here. The once-per-period rework cap
   is the same on every plan.
 
-**Downgrade** (a paid plan lapses): the same procedure with `TIER=free`.
+**Downgrade** (a paid plan lapses): the same procedure with `TIER=free` — and
+for a user waiting on a rework, every disabled record (step 1).
 
 **6. Record it.** Add a row to the "Issued manual keys" table at the bottom of
 this file (customer, plan, key id, date, who) and commit — the move is outside
@@ -140,15 +194,59 @@ CDK and this file is its only record.
 
 ---
 
+## Rolling task 0311 out
+
+**Deploy order: Compute, then ApiGateway** — the Makefile's cross-stack rule
+(`deploy-production-compute`, then `deploy-production-apigateway`), and the
+order `deploy --all` uses on its own. It is safe in that order, and only in
+that order, because of where each half lives:
+
+- **Compute** ships the new handler AND the three `/usageplans` grants on its
+  role's own policy (`GET /usageplans`, `GET /usageplans/*/usage`,
+  `POST /usageplans/*/keys`). They are one CloudFormation update, and the
+  Function depends on the role policy, so the handler never runs without the
+  grant it calls on every sign-in and dashboard load (`GetUsagePlans`).
+- **ApiGateway** adds the four paid plans and removes the old standalone
+  policy `PortalAttachKeyToFreePlan` (the two free-plan grants, a subset of the
+  new three). Its diff must show the free plan, its key and its SSM parameter
+  **unchanged**.
+- Compute keeps exporting the role's name (`exportValue` in
+  `compute-stack.ts`) although nothing imports it any more: the deployed
+  ApiGateway policy still does until ApiGateway deploys, and CloudFormation
+  refuses to drop an export in use — without it the Compute deploy fails.
+
+**If a deploy fails:** a failed Compute deploy rolls back to the old handler
+and the old role policy, and the old ApiGateway policy is still there — the old
+handler works as before. A failed ApiGateway deploy rolls back to the old
+policy; the new handler already holds its grants in Compute.
+
+**To revert the release after both deployed: move every key off the paid
+plans first, then ApiGateway, then Compute.** The reverted ApiGateway deletes
+the four paid plans. List their keys with `aws apigateway get-usage-plan-keys
+--usage-plan-id <tier-plan-id>` for each tier and move each one to free with
+the procedure above. A key still on a paid plan is left on no plan when that
+plan is deleted and answers `403`, or CloudFormation refuses the delete and the
+revert fails half-way.
+
+**Then ApiGateway FIRST, then Compute.** The reverted ApiGateway re-creates the free-plan policy; the
+reverted Compute then drops the new grants. Compute first would leave the old
+handler without its attach and usage grants until ApiGateway caught up.
+
+**The portal bundle after the backend.** `make -C infra sync-portal-explorer`
+only once Compute is live: against an old backend the new bundle gets no
+`plan` in `/api/usage` and shows the Rate Limit card's neutral "plan not
+loaded" state rather than any figure.
+
 ## Post-merge production verification (Adam)
 
 Task 0311's "on dev" checks are a production checklist — there is no dev
 environment (`infra/envs/` holds only `production.json` and `cicd.json`).
 
-1. Deploy Compute, then ApiGateway (the Lambda learns `PORTAL_API_ID_PARAM` /
-   `PORTAL_API_STAGE` in Compute; the four plans and the widened policy land in
-   ApiGateway). In the ApiGateway diff the free plan, its key and its SSM
-   parameter must show **no change** — only the four new plans and the policy.
+1. Deploy Compute, then ApiGateway, as above. In the ApiGateway diff the free
+   plan, its key and its SSM parameter must show **no change** — only the four
+   new plans and the removed `PortalAttachKeyToFreePlan` policy; in the
+   Compute diff, the role policy gains exactly the three `/usageplans`
+   statements (and the `api-gateway-id` read).
 2. `/config` answers `enabled: true` (the portal did not close at cold start).
 3. Move a test key free → Basic → Pro → free with the procedure above. After
    each step:
@@ -161,6 +259,9 @@ environment (`infra/envs/` holds only `production.json` and `cicd.json`).
    `pricing-api-basic-production`, and the revoked key is gone.
 5. A free key's dashboard looks as it did before, apart from the `Free` pill
    and the contact link.
+6. The upgrade procedure's recovery path, once, on the test key: run the
+   delete of step 3 alone, sign in to the portal as that user (the portal puts
+   the key on free), then follow "If the create is refused or fails".
 
 ---
 
