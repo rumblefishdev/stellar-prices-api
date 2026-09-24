@@ -31,6 +31,13 @@ history:
       header; the contact line becomes a RUMBLEFISH_CONTACT link with copy
       for each tier (0311 owns it, not 0307). Decisions gathered into one
       section.
+  - date: "2026-09-24"
+    status: backlog
+    who: akot
+    note: >
+      Rework keeps the plan (decision 7 reversed): the plan is read from the
+      previous key before the revoked keys are deleted, and the new key is
+      attached to it. Step 2b added; IAM gains POST /usageplans/*/keys.
 ---
 
 # Five usage plans, and the dashboard states the key's own plan
@@ -60,6 +67,11 @@ Details and measurements: [notes/R-coingecko-plans-and-aws-limits.md](notes/R-co
 - Issue flow: `attach_to_free_plan` (`keys/mod.rs:1225`) treats `Conflict` as
   "already on plan", so a key moved to a paid plan is not pulled back by
   issue/reveal.
+- Rework ([[0191]]): `POST` rework **disables** the key (`disable_all`), and
+  the disabled key stays on its plan. On the next issue after the period
+  rolls, `issue_for` **first deletes** the revoked keys (`keys/mod.rs` ~1080),
+  then creates a new key and attaches it to **free**. The plan membership
+  goes with the deleted key, so a paid user who reworks drops to free.
 
 ## Plans
 
@@ -93,6 +105,11 @@ reachable; burst is 5× the rate.
   deliberately; record it.
 - Pass the API id and stage to the Lambda so the backend can pick the plan
   for **this** stage (the loadtest plan and a partner plan share the account).
+- For rework (Step 2b): attaching must work on any plan, so
+  `apigateway:POST` on `/usageplans/*/keys`, widened from the free plan's
+  ARN. The code attaches only to the plan the previous key was on, and only
+  if that plan covers our API stage. Custom (hand-made) plans need the
+  wildcard; the five CDK plans alone could be listed by ARN.
 
 ### Step 2: Backend — which plan the key is on, then usage on that plan
 - `Gateway::plan_of(key_id)`: `GetUsagePlans` with `keyId`, keep the plans
@@ -112,6 +129,29 @@ reachable; burst is 5× the rate.
   zeros, no "nothing recorded yet" for either.
 - Cache the plan inside the same `UsageCache` entry (60 s TTL). A plan change
   shows up within a minute. No cache invalidation from outside.
+
+### Step 2b: A rework keeps the plan (decision 7)
+- `attach_to_free_plan` becomes `attach_to_plan(key_id, plan_id)`. The issue
+  flow decides the target plan as follows:
+  1. the plan of the caller's **previous key** (the revoked one, or a live
+     one being reconciled) for our stage, via `plan_of`;
+  2. otherwise free (a first issue, or a previous key on no plan).
+- **Read the plan before anything is deleted.** Today the revoked keys are
+  deleted before the create (`issue_for`, period rolled), and a deleted key
+  takes its plan membership with it.
+- Prefer deleting revoked keys only **after** the new key is attached. Step 5
+  of the flow already deletes "any revoked key left beside a live one", so the
+  early delete may be unnecessary. Settle this against [[0191]]'s reasons for
+  the early delete. If it must stay, a crash between delete and attach loses
+  the plan: the retry sees no previous key and issues on free. That window
+  has to be closed or accepted explicitly.
+- Step 4 of the flow (the winner is attached "however it came to exist")
+  attaches to the winner's own plan if it has one for our stage, not to free.
+  Today the `Conflict` on free only hides this by accident.
+- The once-per-period cap ([[0191]]) is unchanged. A paid plan does not buy
+  extra reworks.
+- The new key counts from zero on the plan (usage is per (plan, key) pair),
+  as for any new key.
 
 ### Step 3: Frontend — show the plan the key is on
 - `PortalUsage` (`web/portal/src/api/portal.ts`) mirrors the new `plan`.
@@ -135,7 +175,7 @@ reachable; burst is 5× the rate.
    The key answers `403` for the seconds in between; its value does not change.
 3. Verify: `get-usage-plans --key-id <K>` → exactly the target plan.
 4. The new plan counts from zero (usage is per (plan, key) pair).
-5. **Warn the user:** a rework ([[0191]]) mints a new key on the free plan.
+5. A rework ([[0191]]) keeps the plan (Step 2b); nothing to warn about.
 
 ### Step 5: Verification
 - Unit: plan selection by stage (several plans, other API, none), reset per
@@ -154,7 +194,12 @@ reachable; burst is 5× the rate.
 - [ ] A key moved to any tier: both cards show that tier's figures within
       60 s. Free keys look as they do today.
 - [ ] No-plan and unlimited/custom-plan keys render stated, distinct states.
-- [ ] IAM widened only to `GET /usageplans` and `GET /usageplans/*/usage`.
+- [ ] IAM widened only to `GET /usageplans`, `GET /usageplans/*/usage` and
+      `POST /usageplans/*/keys`.
+- [ ] A rework on a paid (and on a custom) plan issues the new key on the
+      **same** plan; tested in unit tests (plan read before delete) and on dev
+      (Basic key → rework → next period → new key on Basic). A free key's
+      rework stays on free.
 - [ ] Runbook for upgrading a user (Step 4) in the wiki or ops docs.
 - [ ] Rate Limit card header shows the plan pill (`Free`…`Pro`, `Custom`)
       beside "Active", asserted per tier in `app.spec.tsx`.
@@ -199,11 +244,11 @@ reachable; burst is 5× the rate.
    removes that reason and owns this line. 0307 keeps its two revoked-card
    affordances. The two tasks touch different cards and share only the
    `RUMBLEFISH_CONTACT` constant.
-7. **A rework keeping the plan is out of scope** (2026-09-23), see below.
+7. **A rework keeps the key on the same plan** (2026-09-24). This supersedes
+   the 2026-09-23 "not now": with paid keys being issued, a rework must not
+   be a silent downgrade to free. See Step 2b.
 
 ## Out of scope
 
-- A rework ([[0191]]) keeping the plan: the new key lands on free. Adam
-  2026-09-23: not now. Once paid keys are issued, this is a real downgrade path.
 - Billing, a pricing page, self-service upgrade, a plan registry in DynamoDB.
 - Enterprise: per-customer plans made by hand, reported as `custom`.
