@@ -451,13 +451,17 @@ ALTER TABLE prices.<table> ATTACH PARTITION <month>
 > runs only on the canonical USDC (peg) leg.** The plain mode is
 > `--reset-quote-asset-id` + `--reset-not-before` with neither
 > `--reset-require-*` flag. On an XLM or USDT (pivot) leg it is refused right
-> after connecting, dry run included (`ResetPlainModeOnPivotLeg`): the pivot
-> refills such a row only with a USDC/USD rate and a reference inside
-> `--pivot-window-s`, and the plain mode checks neither. The 0182 USDT campaign
-> this appendix was written for is finished, so read its USDT procedure as
-> history. To re-price an XLM or USDT leg, use Appendix C
-> (`--reset-require-pivot-usdc-rate`). The epoch, oracle-purge, damage-check and
-> run-it-once rules below apply to every mode.
+> after connecting, before the oracle-shadow check and dry run included
+> (`ResetPlainModeOnPivotLeg`): the pivot refills such a row only with a
+> USDC/USD rate and a reference inside `--pivot-window-s`, and the plain mode
+> checks neither. The 0182 USDT campaign this appendix was written for is
+> finished, so read its USDT procedure as history. To re-price an XLM or USDT
+> leg, use Appendix C (`--reset-require-pivot-usdc-rate`). The epoch,
+> damage-check and run-it-once rules below apply to every mode. The oracle
+> rule does too, but its 2026-08 remedy does not: USDT's purge (task 0196)
+> removed mis-attributed rows and is history; for a polled leg, bound the
+> window below its first reading instead (see "Oracle rows in the window"
+> below and Appendix C precondition 5).
 
 Everything above fills zeros and is purely additive. This appendix covers the one
 mode that **discards a stored value**. Read it in full before using the flags.
@@ -594,22 +598,32 @@ The tool now refuses that invocation twice over. The plain mode on the USDT leg
 is refused (`ResetPlainModeOnPivotLeg`), and the same epoch in the 0228 mode is
 refused too (`ResetEpochBelowReference`).
 
-### Prerequisite: purge the oracle rows FIRST
+### Oracle rows in the window
 
 The oracle tier runs **before** the peg-pivot tier and wins where it applies. If
-`prices.oracle_prices` still holds rows for the quote leg, the reset is undone by
+`prices.oracle_prices` holds rows for the quote leg inside the reset's window
+(widened one `--window-s` below `--reset-not-before`), the reset is undone by
 the next statement in the same pass, and the run reports a healthy repair over
 unchanged values — now labelled `method = 'oracle'`, which reads as _more_
 authoritative than what it replaced.
 
-The tool refuses rather than letting that happen:
+The tool refuses rather than letting that happen, in every mode:
 
 ```
-USD reset refused: prices.oracle_prices still holds N row(s) for quote asset_id …
+USD reset refused: prices.oracle_prices holds N row(s) for quote asset_id …
 ```
 
-That is task 0196 (done for USDT on 2026-08-13). If you see this error, purge and
-verify 0 before re-running — do not work around it.
+**Do not purge a polled leg's readings to get past it.** Canonical USDC and XLM
+have held live Reflector readings since 2026-03-11; deleting them cannot be
+undone, and it is never what the refusal needs. The fix is the window: pass
+`--reset-not-after` at or below the leg's first reading, so the reset stays
+below the span the oracle tier prices (the rate-gated modes default it to
+`USDC_ORACLE_EPOCH_S`; Appendix C precondition 5 says when that default is not
+enough). The plain mode has no default upper bound, so on canonical USDC it
+always needs one.
+
+The 2026-08-13 purge (task 0196) was a different case: those USDT rows were
+mis-attributed, not live readings. Purge only rows you have shown to be wrong.
 
 ### Extra verification, beyond Step 5
 
