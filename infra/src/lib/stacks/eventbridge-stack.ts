@@ -3,7 +3,6 @@ import * as cw_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
@@ -162,7 +161,7 @@ export class EventBridgeStack extends cdk.Stack {
 
     this.assetDiscoveryRule = new events.Rule(this, 'AssetDiscoveryRule', {
       ruleName: `prices-${env}-asset-discovery`,
-      description: `Periodic asset-registry maintenance (${env})`,
+      description: `Hourly Soroban symbol resolution + asset seed (${env})`,
       schedule: events.Schedule.expression(schedules.assetDiscovery),
     });
 
@@ -260,25 +259,14 @@ export class EventBridgeStack extends cdk.Stack {
 
     // -----------------------------------------------------------------
     // Asset Discovery worker Lambda (task 0054) + its rule target.
-    // No VPC (ADR 0007 §6); mTLS to ClickHouse + S3 read on BE's ledger
-    // bucket, mirroring the ledger processor's conventions.
+    // No VPC (ADR 0007 §6); mTLS to ClickHouse and the public Soroban RPC —
+    // nothing else. It read BE's ledger bucket only for the ledger scan, which
+    // task 0256 removed, so it holds no S3 grant.
     // -----------------------------------------------------------------
     const base = `/platform/${env}`;
     const chDomain = ssm.StringParameter.valueForStringParameter(
       this,
       `${base}/ch-domain`,
-    );
-    const networkPassphrase = ssm.StringParameter.valueForStringParameter(
-      this,
-      `${base}/stellar-network-passphrase`,
-    );
-    const ledgerBucketName = ssm.StringParameter.valueForStringParameter(
-      this,
-      `${base}/stellar-ledger-data-bucket-name`,
-    );
-    const ledgerBucketArn = ssm.StringParameter.valueForStringParameter(
-      this,
-      `${base}/stellar-ledger-data-bucket-arn`,
     );
 
     // Writes prices.assets → the same `ingestion`-class mTLS identity the
@@ -299,39 +287,25 @@ export class EventBridgeStack extends cdk.Stack {
       name: 'asset-discovery',
       errorAlarmActions: [opsAlarmAction],
       assetDir: ASSET_DISCOVERY_ASSET_DIR,
+      // Loads the whole asset registry to seed against it: ~153 MB measured
+      // at 209k assets (2026-09-21), and the registry only grows. That load is
+      // what the worker does today, not what the seed needs (~20 identities) —
+      // task 0140 tracks the targeted read; revisit this number with it.
       memorySize: 512,
-      // Bounded by MAX_LEDGERS in the binary; a catch-up run fetches+decodes
-      // many S3 objects, so allow generous headroom under the 1h cadence.
+      // The symbol stage is the long one, bounded in the binary at
+      // MAX_CONTRACTS_PER_RUN × RPC_TIMEOUT_SECS = 25 × 5 s; a quiet run
+      // takes ~3 s.
       timeout: cdk.Duration.minutes(5),
       secretsExtensionLayer,
       chDomain,
       rule: this.assetDiscoveryRule,
-      environment: {
-        // Source bucket for ledger XDR objects (Galexie key scheme).
-        BUCKET_NAME: ledgerBucketName,
-        STELLAR_NETWORK_PASSPHRASE: networkPassphrase,
-        // NB: INITIAL_DISCOVERY_LEDGER is intentionally NOT set here — the
-        // binary seeds gracefully without it and only scans once a
-        // `prices.discovery_state` cursor exists. Operator activates the
-        // ledger scan as a deploy-prep step (seed the cursor or set the
-        // env), so synth is not gated on an operator value.
-      },
-      // Informational — registry maintenance is non-critical (a failed run
-      // just defers new-asset pickup to the next hour).
+      // Informational — a failed run just defers a new contract's symbol to
+      // the next hour.
       alarmDescription:
-        'Asset Discovery Lambda invocation errors (informational; registry maintenance is non-critical).',
+        'Asset Discovery Lambda invocation errors (informational; symbol resolution and the asset seed are non-critical).',
       alarmPeriod: cdk.Duration.hours(1),
     });
     this.assetDiscoveryFunction = discovery.function;
-
-    // S3 read on BE's ledger bucket (same-account → plain IAM grant, no
-    // bucket policy from BE). Imported by attributes; the bucket is SSE-S3
-    // (BE task 0306/0278), so no kms:Decrypt is needed.
-    const ledgerBucket = s3.Bucket.fromBucketAttributes(this, 'LedgerBucket', {
-      bucketArn: ledgerBucketArn,
-      bucketName: ledgerBucketName,
-    });
-    ledgerBucket.grantRead(discovery.role);
 
     // -----------------------------------------------------------------
     // Cleanup worker Lambda (task 0039) + its cron target. CH-only (no S3,

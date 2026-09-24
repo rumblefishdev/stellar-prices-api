@@ -188,7 +188,7 @@ export const WORKERS_WITHOUT_HEALTH_ALARMS: Readonly<
   cleanup:
     'its EventBridge rule is disabled on purpose (task 0200), so zero invocations is the intended state and a liveness alarm would fire forever',
   'asset-discovery':
-    "deliberately deferred to task 0256, which is deciding whether the worker's scan stage survives at all — alarming the liveness of a stage that may be removed is not coverage",
+    'still deferred to task 0256: that task removed the ledger scan, leaving the symbol stage and the seed, and whether what remains gets liveness alarms is its one open decision',
   'coverage-sweep-probe':
     "it runs weekly (task 0100), and a -no-invocations alarm needs three cadences (21 days), over CloudWatch's 7-day evaluation limit; confirm a run from its Monday 'coverage sweep complete' log line",
 };
@@ -355,8 +355,8 @@ export interface WorkerLambda {
  * into a single factory.
  *
  * Returns the `function` and `role` so callers can attach worker-specific
- * permissions afterwards (e.g. asset-discovery grants S3 read on BE's
- * ledger bucket via `role`).
+ * permissions afterwards (e.g. the oracle worker adds its namespaced
+ * `cloudwatch:PutMetricData` statement via `role`).
  */
 export function createWorkerLambda(
   scope: Construct,

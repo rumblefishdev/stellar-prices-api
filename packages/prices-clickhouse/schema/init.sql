@@ -600,20 +600,12 @@ ALTER TABLE prices.backfill_progress ADD COLUMN IF NOT EXISTS earliest_data_avai
 ALTER TABLE prices.backfill_progress ADD COLUMN IF NOT EXISTS newest_data_available Nullable(DateTime) AFTER earliest_data_available;
 
 -- ---------------------------------------------------------------------
--- Asset Discovery high-water-mark (task 0054). One row per worker tracking
--- the highest ledger sequence the hourly discovery scan has processed, so
--- the next invocation resumes at last_ledger + 1 rather than re-scanning.
--- Single-writer = the asset-discovery worker. ReplacingMergeTree on the
--- worker key; read with FINAL.
+-- `prices.discovery_state` (task 0054) used to be created here: the cursor of
+-- asset-discovery's hourly ledger scan. The scan never ran in production and
+-- task 0256 removed it, so a fresh database no longer gets the table. This file
+-- is CREATE-IF-NOT-EXISTS only and never drops anything: on a database that
+-- already has the (empty) table, dropping it is an operator step — see 0256.
 -- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS prices.discovery_state (
-    worker        LowCardinality(String),   -- 'asset-discovery'
-    last_ledger   UInt64,                    -- highest ledger sequence scanned
-    updated_at    DateTime      DEFAULT now()
-)
-ENGINE = ReplacingMergeTree(updated_at)
-ORDER BY (worker)
-SETTINGS index_granularity = 8192;
 
 -- ---------------------------------------------------------------------
 -- Unresolved AMM pools (task 0053, decision #3). One row per
@@ -708,8 +700,8 @@ SETTINGS index_granularity = 8192;
 -- (`ENRICH_LIVE_PARTITIONS`); the historical drain walks the rest one partition
 -- at a time, and this is how it remembers where it got to across invocations.
 --
--- Fourth instance of the pattern `ingest_cursor` / `backfill_progress` /
--- `discovery_state` already establish here: a tiny ReplacingMergeTree state
+-- Third instance of the pattern `ingest_cursor` / `backfill_progress`
+-- already establish here: a tiny ReplacingMergeTree state
 -- table in `prices`, written by our own workers. ~102 partitions × 6 tiers is
 -- under 700 rows and well under 100 KB permanently — on a disk we are 3.3% of.
 -- Not a materialized view, not in the rollup chain, and NOT in the cleanup
