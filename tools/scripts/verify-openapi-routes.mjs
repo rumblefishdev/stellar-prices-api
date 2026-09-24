@@ -382,15 +382,15 @@ for (const entry of ['...portalSettings', 'apiDocsSettings']) {
 // --- 3. The skip is not covering an empty set. ---
 // If the gateway ever stops mapping anything under the prefix, the two checks
 // above still pass — they only prove the CDN would route it — while every
-// portal call 403s at the gateway. Non-vacuous, same stance as the
+// portal call 404s at the gateway. Non-vacuous, same stance as the
 // `gatewayRoutes.size === 0` guard further down.
 if (portalGatewayRoutes.length === 0) {
   fail(
     `error: API Gateway maps no route under ${PORTAL_API_PREFIX}, so this ` +
       `check's portal skip covers nothing.`,
     '  → the portal backend is unreachable in production: the bundle calls ' +
-      'the API host directly and the gateway answers 403 Missing ' +
-      'Authentication Token. ' +
+      'the API host directly and the gateway answers its own ' +
+      '404 (task 0309). ' +
       'Restore the `/api/{proxy+}` methods in ' +
       'infra/src/lib/stacks/api-gateway-stack.ts.',
   );
@@ -779,6 +779,41 @@ for (const [envVar, expected] of Object.entries(ELIGIBILITY_PARAMS)) {
   }
 }
 
+// --- 8. Task 0309: an unmapped route answers 404, in the ErrorEnvelope shape. ---
+// API Gateway's own answer for a path or verb it does not map is `403 Missing
+// Authentication Token`, which a caller reads as a bad key. One gateway
+// response turns it into the handler's `not_found`; lose it in a refactor and
+// every check above still passes while callers get the 403 back.
+{
+  const overrides = resourcesOfType(
+    template,
+    'AWS::ApiGateway::GatewayResponse',
+  ).filter(
+    ([, r]) => r.Properties?.ResponseType === 'MISSING_AUTHENTICATION_TOKEN',
+  );
+  const props = overrides.length === 1 ? overrides[0][1].Properties : undefined;
+  let body;
+  try {
+    body = JSON.parse(props?.ResponseTemplates?.['application/json']);
+  } catch {
+    // Absent or not JSON: `body` stays undefined and fails below.
+  }
+  if (
+    props?.StatusCode !== '404' ||
+    body?.code !== 'not_found' ||
+    typeof body?.message !== 'string'
+  ) {
+    fail(
+      'error: expected one MISSING_AUTHENTICATION_TOKEN gateway response ' +
+        'answering 404 {"code": "not_found", "message": …}, found ' +
+        `${JSON.stringify(overrides.map(([, r]) => r.Properties))}.`,
+      '  → without it an unmapped path or verb answers `403 Missing ' +
+        'Authentication Token` again (task 0309). Restore `UnknownRoute` in ' +
+        'infra/src/lib/stacks/api-gateway-stack.ts.',
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Spec side.
 // ---------------------------------------------------------------------------
@@ -871,7 +906,7 @@ if (undocumented.length || unroutable.length) {
   if (unroutable.length) {
     console.error(
       'error: the OpenAPI document describes routes API Gateway does not map ' +
-        '(every reader following them gets a 403):',
+        '(every reader following them gets a 404):',
     );
     for (const r of unroutable.sort()) console.error(`  ${r}`);
     console.error('  → map them in infra/src/lib/stacks/api-gateway-stack.ts');

@@ -653,13 +653,13 @@ const ERROR_CODES: readonly {
     status: 403,
     tone: 'error',
     when: 'Missing or invalid x-api-key header — body { "message": "Forbidden" }, from the gateway',
-    fix: 'Check that your key is correct and the header name matches exactly. A 403 with "Missing Authentication Token" means the PATH is wrong, not the key.',
+    fix: 'Check that your key is correct and the header name matches exactly.',
   },
   {
     status: 404,
     tone: 'muted',
-    when: 'No such asset, or no price for it yet — body { "code": "not_found", "message": … }',
-    fix: 'List /assets (with ?search=) to find the identifier; an asset with no recent trades has no current price.',
+    when: 'No such asset, no price for it yet, or no such route — body { "code": "not_found", "message": … }',
+    fix: 'A "no such route" message means the path or method is wrong — check it against the API reference. Otherwise list /assets (with ?search=) to find the identifier; an asset with no recent trades has no current price.',
   },
   {
     status: 429,

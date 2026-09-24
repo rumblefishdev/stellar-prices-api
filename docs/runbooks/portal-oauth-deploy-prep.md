@@ -295,8 +295,9 @@ finishing a slice. Before it happens, both must be true:
 - The gateway maps the portal prefix as a greedy `{proxy+}`. The four sign-in
   routes are at **depth 3** (`auth/login`), and the deployed mapping at the time
   of writing is the intermediate `{proxy}` + `{proxy}/{sub}` pair, which answers
-  `403 Missing Authentication Token` at that depth. Task 0205 ships the committed
-  shape. (Task 0187's `/key` is at depth 3 as well, so it is the same deploy.)
+  `403 Missing Authentication Token` at that depth (`404 {"code": "not_found"}`
+  since task 0309). Task 0205 ships the committed shape. (Task 0187's `/key` is
+  at depth 3 as well, so it is the same deploy.)
 - **`ApiGatewayStack` has deployed at least once since task 0187 merged**, so
   that `/prices/production/pricing-api-free-plan-id` exists. See §7 — if it does
   not, opening the portal fails Lambda init and takes `/v1` down with it.
