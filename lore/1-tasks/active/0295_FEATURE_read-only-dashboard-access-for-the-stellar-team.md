@@ -138,7 +138,9 @@ access does not. This task builds the access and records how a reviewer uses it.
       `DescribeAlarms` with `mfaAuthenticated=true` at 13:21:37, log groups
       access denied (`logs:DescribeMetricFilters` AccessDenied) → §5 removed
       13:24:14, `list-users` empty. Three runbook defects → PR #356.
-- [ ] Access instructions are in the evidence package's access table
+- [x] Access instructions are in the evidence package's access table
+      → `docs/scf/milestone-3-evidence.md` AC 8 + access table, on the 0294
+      branch (PR #354, `8e7b9a8f`)
 - [ ] On the review date every `prices-production-*` alarm is OK, or each
       exception is named with its cause
 
