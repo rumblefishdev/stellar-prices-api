@@ -33,6 +33,8 @@ before creating anything.
 ## 2. Create the user — operator, `AWS_PROFILE=soroban-admin`
 
 ```bash
+export AWS_PROFILE=soroban-admin
+aws sts get-caller-identity --query Account --output text      # must print 750702271865 — stop otherwise
 export VIEWER=prices-production-viewer-<surname>          # lowercase, ASCII
 PW=$(openssl rand -base64 24)                              # shown once at the end; never in a log, a ticket or a task file
 aws iam create-user --user-name "$VIEWER" \
@@ -40,8 +42,13 @@ aws iam create-user --user-name "$VIEWER" \
 aws iam put-user-policy --user-name "$VIEWER" --policy-name prices-production-dashboard-read \
   --policy-document file://dashboard-read.json
 aws iam create-login-profile --user-name "$VIEWER" --password "$PW" --password-reset-required
-echo "$PW"; unset PW    # copy it into the second channel of §3, then let it go
+echo "$PW"; unset PW    # copy it into the second channel of §3, then `clear` the terminal
 ```
+
+The first two lines exist because a block pasted without an exported profile
+runs against the shell's default credentials: on 2026-09-25 that created the
+user in the operator's personal account, and the sign-in at this account's URL
+failed with "Authentication failed".
 
 `dashboard-read.json` — the scoped policy task 0125 wrote (deep-review CR-01:
 **not** `CloudWatchReadOnlyAccess`, which also grants `logs:*` and `xray:Get*`
