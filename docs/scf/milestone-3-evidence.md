@@ -38,17 +38,17 @@ State of the nine Tranche 3 acceptance criteria **as of 2026-09-25** (this table
 is rewritten on submission day; the rows say what is claimed, not what is
 hoped):
 
-| AC  | Criterion (short)                                           | State on 2026-09-25                                                                                                                  |
-| --- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| 1   | `/backfill/status`: running, fresh push, depth ≤ 2018-01-01 | **Depth met — 2015-11-18.** Liveness graded on amended wording (deviations §1): the archive completed 2026-07-27                     |
-| 2   | OpenAPI lints clean; Swagger UI deployed                    | Lint is a CI job (`npm run openapi:lint`, Redocly CLI 2.44.0); reference rendered at `…/api/docs`. _To fill: lint output on the day_ |
-| 3   | Portal accessible; self-service key flow works              | Portal public since 09-23. _Open:_ end-to-end proof on production (task 0164); sign-in still through the test Discord guild (0179)   |
-| 4   | Integration suite passes on CI, link provided               | **Met.** CI starts ClickHouse and runs the integration suite on every Rust change since PR #327 (2026-09-22); run linked in §5       |
-| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met 2026-09-18 — p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`                                |
-| 6   | Security checklist signed off                               | mTLS-only ClickHouse, secrets in Secrets Manager, inputs validated. _Open:_ 11 `resources: ['*']` IAM statements to name (see §5)    |
-| 7   | Repo public; `cdk deploy` from README in a fresh account    | **Repo PUBLIC** (2026-09-16). _Open:_ the fresh-account rehearsal (task 0297) or a declared definition of "works" (deviations §3)    |
-| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, 65 alarms, all OK on 09-25. _Open:_ the read-only access for the Stellar team (task 0295)    |
-| 9   | 7-day post-launch report                                    | Window **2026-09-23 09:40 → 2026-09-30 09:40 CEST** agreed; report written after the window (task 0296); two metrics obsolete (§4)   |
+| AC  | Criterion (short)                                           | State on 2026-09-25                                                                                                                                  |
+| --- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `/backfill/status`: running, fresh push, depth ≤ 2018-01-01 | **Depth met — 2015-11-18.** Liveness graded on amended wording (deviations §1): the archive completed 2026-07-27                                     |
+| 2   | OpenAPI lints clean; Swagger UI deployed                    | Lint is a CI job (`npm run openapi:lint`, Redocly CLI 2.44.0); reference rendered at `…/api/docs`. _To fill: lint output on the day_                 |
+| 3   | Portal accessible; self-service key flow works              | Portal public since 09-23. _Open:_ end-to-end proof on production (task 0164); sign-in still through the test Discord guild (0179)                   |
+| 4   | Integration suite passes on CI, link provided               | **Met.** CI starts ClickHouse and runs the integration suite on every Rust change since PR #327 (2026-09-22); run linked in §5                       |
+| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met 2026-09-18 — p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`                                                |
+| 6   | Security checklist signed off                               | mTLS-only ClickHouse, secrets in Secrets Manager, inputs validated, no wildcard **actions**; the 23 `Resource: "*"` statements are inventoried in §5 |
+| 7   | Repo public; `cdk deploy` from README in a fresh account    | **Repo PUBLIC** (2026-09-16). _Open:_ the fresh-account rehearsal (task 0297) or a declared definition of "works" (deviations §3)                    |
+| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, 65 alarms, all OK on 09-25. Access **on request to a named reviewer, MFA enforced** (deviations §4)          |
+| 9   | 7-day post-launch report                                    | Window **2026-09-23 09:40 → 2026-09-30 09:40 CEST** agreed; report written after the window (task 0296); two metrics obsolete (§4)                   |
 
 The Tranche 3 work items with no numbered criterion are listed in §6, the known
 issues this submission declares in §7, and what it deliberately does not claim
@@ -108,7 +108,7 @@ are pointers, not summaries.
 | 1   | AC 1: `sdex.status: "running"`, `last_push_at` fresh                      | the archive completed on 2026-07-27; liveness graded on the ingestion alarms and `realtime_tip_ledger` (carried from M2)                   | disclosed, delivered early |
 | 2   | AC 9: report "SDEX push cadence and `earliest_data_available` trajectory" | both are flat by construction since 2026-07-27; the report carries ledger-processor lag and rollup freshness instead                       | disclosed                  |
 | 3   | AC 7: `cdk deploy` from README "works in a fresh AWS account"             | _pending task 0297_: "works" defined against the inputs a fresh account cannot hold (mTLS material, ClickHouse tenancy, OAuth bundle, DNS) | to be decided              |
-| 4   | AC 8: "read-only IAM role" for the Stellar team                           | _pending task 0295_: an IAM role if the team has an AWS account to assume from, otherwise a declared alternative                           | to be decided              |
+| 4   | AC 8: "read-only IAM role" for the Stellar team                           | no standing identity: a read-only IAM user is created for a named reviewer on request, MFA enforced, and removed after the review          | disclosed                  |
 | 5   | AC 3: self-service key flow                                               | _candidate_: sign-in runs on the project's test Discord guild until the Stellar guild integration (task 0179) is agreed                    | to be decided              |
 
 ## 5. Acceptance-criteria evidence
@@ -233,19 +233,27 @@ loaded box. State the date beside any re-run.
 **Verdict: _open_ — three of four items have evidence, the wildcard-IAM
 inventory does not.** The checklist as the design document states it:
 
-| Item                                                 | Evidence                                                                                                                                                                                           | State                              |
-| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| ClickHouse reachable only via mTLS through Caddy:443 | every client is an mTLS identity mapped by certificate CN; the API's identity is `prices_reader` (SELECT on `prices.*` only), workers `prices_writer`                                              | met (M1/M2)                        |
-| mTLS cert + key in Secrets Manager, not env vars     | `prices/production/clickhouse-mtls-prices-{api,ingestion}-production`; Lambdas read them through the Parameters and Secrets extension                                                              | met (M1)                           |
-| All inputs validated                                 | every invalid input answers a 400 in the error envelope (task 0119); unknown routes answer 404 in the same envelope (0309)                                                                         | met (M2, M3)                       |
-| No wildcard IAM                                      | **11** `resources: ['*']` statements in `infra/src/lib/stacks/*.ts` on 2026-09-25 (2 Compute, 8 EventBridge, 1 Observability): X-Ray `Put*`, `cloudwatch:PutMetricData` (namespace-conditioned), … | _to fill_: name each, or narrow it |
+| Item                                                 | Evidence                                                                                                                                                                                                                                                                                                                       | State            |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------- |
+| ClickHouse reachable only via mTLS through Caddy:443 | every client is an mTLS identity mapped by certificate CN; the API's identity is `prices_reader` (SELECT on `prices.*` only), workers `prices_writer`                                                                                                                                                                          | met (M1/M2)      |
+| mTLS cert + key in Secrets Manager, not env vars     | `prices/production/clickhouse-mtls-prices-{api,ingestion}-production`; Lambdas read them through the Parameters and Secrets extension                                                                                                                                                                                          | met (M1)         |
+| All inputs validated                                 | every invalid input answers a 400 in the error envelope (task 0119); unknown routes answer 404 in the same envelope (0309)                                                                                                                                                                                                     | met (M2, M3)     |
+| No wildcard IAM                                      | **No wildcard actions anywhere** — no `actions: ['*']`, no `service:*`, no administrative managed policy (the reading the explorer's Milestone 3 checklist also uses). The synthesized production templates hold **23** statements with `Resource: "*"`, every one an action that has no resource ARN: see the inventory below | met, inventoried |
 
 Audit of the portal's attack surface: task 0194 (archived).
 
-_To fill:_ the per-statement table (statement, why `*`, whether a condition
-bounds it — e.g. `cloudwatch:namespace`), plus the two identities added since
-M2 (`prices_admin`, scoped to `prices.*` for the re-ingest; the explorer's
-`api_reader` / `ingestion_writer` grants are the explorer's, tracked as 0258).
+**Inventory of the 23 `Resource: "*"` statements** (from the synthesized
+templates of 2026-09-25, not from a source grep — CDK adds some itself):
+
+| group                                               | count | who                                                                                                      | why `*`                                                                                    | what bounds it                                                                                                                                                    |
+| --------------------------------------------------- | ----- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `xray:PutTraceSegments`, `xray:PutTelemetryRecords` | 13    | every traced Lambda (api-handler, ledger-processor, ten scheduled workers)                               | X-Ray has no resource ARNs for these actions; CDK adds the statement for `tracing: ACTIVE` | write-only trace upload. The ledger-processor carries it twice (an explicit `XRayWrite` next to the automatic one) — a redundancy, not a widening                 |
+| `cloudwatch:PutMetricData`                          | 8     | ledger-processor, oracle, enrichment, coarse-sweep, both freshness probes, mtls-notafter, coverage-sweep | `PutMetricData` has no resource-level scoping                                              | `StringEquals cloudwatch:namespace = Prices/<Ingest, Oracle, Enrichment, Backfill, Rollup, Mtls, Coverage>` — each worker can publish only to its own namespace   |
+| `cloudwatch:DescribeAlarms`                         | 1     | mtls-notafter probe (the daily stuck-alarm digest, task 0214)                                            | read-only; a prefix ARN would deny at runtime and page the ops channel                     | reads names and states only; the `prices-production-` filter is in the code                                                                                       |
+| CloudWatch read set (`Get*`, `List*`, `Describe*`)  | 1 → 0 | the reviewer identity of task 0125                                                                       | these read actions have no resource ARNs                                                   | **removed by task 0295** (PR #355): no standing identity remains in any template; the same nine actions are granted on request, per person, with an MFA condition |
+
+_To fill on submission day:_ re-run the inventory on that day's templates and
+state the count (22 once 0295 is deployed).
 
 ### AC 7 — GitHub repository public; `cdk deploy` from README works in a fresh AWS account
 
@@ -265,18 +273,35 @@ of "works" in deviations §3.
 
 ### AC 8 — CloudWatch dashboard accessible to the Stellar team (read-only IAM role); all alarms OK
 
-**Verdict: _open_ on access; alarms OK on 2026-09-25.** The dashboard is
-`prices-production-overview` in `eu-central-1`; **65** `prices-production-*`
-alarms stand behind it (up from 53 at Milestone 2), including — since 2026-09-22
-— error and portal-closed alarms on the api-handler and liveness/duration alarms
-on every scheduled worker. On 2026-09-25 09:20 CEST every alarm read OK except
+**Verdict: met on the amended wording (deviations §4); alarms OK on
+2026-09-25.** The dashboard is `prices-production-overview` in `eu-central-1`;
+**65** `prices-production-*` alarms stand behind it (up from 53 at Milestone 2),
+including — since 2026-09-22 — error and portal-closed alarms on the
+api-handler and liveness/duration alarms on every scheduled worker. On
+2026-09-25 09:20 CEST every alarm read OK except
 `prices-production-coverage-sweep-unclassified`, in `INSUFFICIENT_DATA` until
 its weekly probe's first run.
 
-No read-only IAM role for an external team exists in `infra/` (task 0295). _To
-fill:_ the mechanism (cross-account role with the Stellar team's account id and
-an external id, or a declared alternative), its CDK definition, and the alarm
-table on the review day.
+**Access is granted on request, to a named person, with MFA — not through a
+standing role or user.** The account is shared with the Soroban Block Explorer
+and is otherwise SSO-only; no external principal is known that a cross-account
+role could trust. A reviewer asks by name (first name, surname, e-mail, purpose
+and end date); the operator creates a read-only IAM user for that person with
+the scoped policy in
+[`docs/runbooks/0295-dashboard-access-on-request.md`](../runbooks/0295-dashboard-access-on-request.md)
+(nine CloudWatch read actions, denied without MFA), hands over a one-time
+password, and deletes the user after the review. This is the model the block
+explorer's Milestone 3 package used for its equivalent criterion.
+
+What changed for this submission: task 0125 had created a standing viewer user
+(`prices-production-stellar-viewer`, 2026-09-03) with a console login and no
+MFA; the login was deleted and the user removed from the stack on 2026-09-25
+(task 0295, PR #355), and the synth verifier now fails on any IAM identity in
+the template.
+
+_To fill on submission day:_ the alarm table; the dates of one end-to-end walk
+of the runbook on a throwaway name (create → MFA → dashboard renders → log
+groups denied → remove).
 
 ### AC 9 — 7-day post-launch monitoring report
 
@@ -328,14 +353,14 @@ Milestone 3 is the last tranche, so this section has nowhere to push things:
 each row is closed, declared as a deviation, or handed to post-delivery with a
 name on it.
 
-| Item                                                        | Disposition                                                                                         |
-| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Completion of the history re-computation (0286 phase 3)     | _post-delivery_, operator-run; stage A of four started 2026-09-23; values change, coverage does not |
-| Fresh-account deploy rehearsal (AC 7)                       | _to decide_: rehearsed in a sandbox, or declared with the out-of-band inputs named (deviations §3)  |
-| Read-only dashboard access for the Stellar team (AC 8)      | _to decide_: cross-account role, or a declared alternative (deviations §4)                          |
-| Self-service sign-in on the Stellar Discord guild (AC 3)    | _to decide_: agreed with SDF (task 0179), or declared (deviations §5)                               |
-| Paid usage plans and a dashboard that states the key's plan | In progress (task 0311); the free plan is what the criteria cover                                   |
-| Content-Security-Policy on the portal                       | Not shipped; tracked as a backlog task (id pending)                                                 |
+| Item                                                        | Disposition                                                                                                      |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Completion of the history re-computation (0286 phase 3)     | _post-delivery_, operator-run; stage A of four started 2026-09-23; values change, coverage does not              |
+| Fresh-account deploy rehearsal (AC 7)                       | _to decide_: rehearsed in a sandbox, or declared with the out-of-band inputs named (deviations §3)               |
+| A standing read-only identity for the Stellar team (AC 8)   | _declared_: none exists by design; access is created per named reviewer on request, MFA enforced (deviations §4) |
+| Self-service sign-in on the Stellar Discord guild (AC 3)    | _to decide_: agreed with SDF (task 0179), or declared (deviations §5)                                            |
+| Paid usage plans and a dashboard that states the key's plan | In progress (task 0311); the free plan is what the criteria cover                                                |
+| Content-Security-Policy on the portal                       | Not shipped; tracked as a backlog task (id pending)                                                              |
 
 ## 9. Live endpoints and access
 

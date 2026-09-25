@@ -95,24 +95,49 @@ and deliberately not automated.
 _To decide_ — the question is whether a sandbox account can be had before
 submission. Either outcome is recorded here and in task 0297.
 
-## 4. AC 8: the read-only "IAM role" for the Stellar team — _to decide_
+## 4. AC 8: no standing "read-only IAM role" — access on request, per person, with MFA
 
 ### The wording
 
 _"CloudWatch dashboard accessible to Stellar team (read-only IAM role); all
-alarms OK."_ No such role exists in `infra/` (task 0295).
+alarms OK."_
 
-### What it depends on
+### The deviation
 
-A cross-account role needs the Stellar team's AWS account id (and an external
-id) to trust; if the team has no account to assume from, the alternatives are a
-shared dashboard link (CloudWatch's public-share feature, which exposes the
-dashboard alone) or per-person read-only IAM users, each with its own trade-off.
+No standing role or user exists for the Stellar team in `infra/`, by decision
+of the operator on 2026-09-25. A read-only IAM **user** is created for a named
+reviewer when they ask — first name, surname, e-mail, purpose and end date — with
+a one-time password and a policy that denies every read unless the session is
+MFA-authenticated; the user is removed after the review
+([`docs/runbooks/0295-dashboard-access-on-request.md`](../runbooks/0295-dashboard-access-on-request.md)).
+
+### Why
+
+- **There is no external principal to trust.** A cross-account role needs the
+  reviewer's AWS account id; none has been named. A role that trusts nobody is
+  not access.
+- **The account is shared** with the Soroban Block Explorer and is otherwise
+  SSO-only. A standing credential that nobody asked for is exactly what the
+  same package's AC 6 (least privilege) argues against; the block explorer's
+  Milestone 3 took the same position ("available on request") for its
+  equivalent criterion.
+- **What was there before was worse than nothing:** task 0125 had shipped a
+  standing viewer user with a console login and no MFA (2026-09-03/04). It was
+  removed on 2026-09-25 (task 0295), and the synth verifier now refuses any IAM
+  identity in the template.
+
+### What a reviewer gets
+
+Exactly the dashboard, its metrics and the alarm states — the nine CloudWatch
+read actions of task 0125's scoped policy — and nothing that can read a log
+group, a trace, a secret or a Lambda's configuration. The read actions cannot
+be scoped per dashboard, so the explorer's dashboard in the same account is
+visible too; stated rather than hidden.
 
 ### Status
 
-_To decide_ — one question to the Stellar team settles the mechanism; the CDK
-change follows. If the outcome is not an IAM role, this section declares why.
+Disclosed. The runbook's create → verify → remove walk is recorded in task 0295
+once it has been done on a throwaway name.
 
 ## 5. AC 3: which Discord guild gates self-service — _candidate_
 
