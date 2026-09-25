@@ -15,6 +15,18 @@ history:
     status: active
     who: claude
     note: >
+      Runbook walked on a throwaway name, 12:40:33 create → 12:41:16 delete.
+      simulate-principal-policy: the nine cloudwatch reads allowed only with
+      aws:MultiFactorAuthPresent=true; logs, xray, secretsmanager, lambda,
+      iam:ListUsers implicitDeny either way; self-service IAM actions allowed
+      on the user's own ARN, denied on another user's. Defect: §2 generated
+      the password inline and never displayed it — fixed in PR #356 (draft),
+      which also adds the simulator check to §4. Not walked: console sign-in
+      and MFA enrolment (needs a person with an authenticator).
+  - date: 2026-09-25
+    status: active
+    who: claude
+    note: >
       Removal deployed: PR #355 merged (4ccaf532), Prices-production-Observability
       UPDATE_COMPLETE 12:30:20 CEST from origin/develop — policy and user
       deleted by CloudFormation; `aws iam list-users` returns nothing in the
@@ -101,9 +113,13 @@ access does not. This task builds the access and records how a reviewer uses it.
       IAM user, access key or login profile in the template
 - [x] The removal is deployed to production and `aws iam list-users` shows no
       `prices-*` user
-- [ ] The runbook was walked once end to end on a throwaway name (create →
+- [x] The runbook was walked once end to end on a throwaway name (create →
       MFA → dashboard renders → log groups denied → remove), with the dates in
       this task
+      → walked 2026-09-25 12:40–12:41 on `prices-production-viewer-throwaway`
+      (§2 create → IAM-simulator check → §5 remove; `list-users` empty after).
+      The console sign-in + MFA enrolment half of §4 was not walked. Defect
+      found and fixed in PR #356: §2 never showed the generated password.
 - [ ] Access instructions are in the evidence package's access table
 - [ ] On the review date every `prices-production-*` alarm is OK, or each
       exception is named with its cause
