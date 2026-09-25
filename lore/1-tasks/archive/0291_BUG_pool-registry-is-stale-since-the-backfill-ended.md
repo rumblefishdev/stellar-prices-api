@@ -2,7 +2,7 @@
 id: "0291"
 title: "pool_registry has not learned a pool since 2026-07-06 — live forgets newer pools on every cold start and drops their trades"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0285", "0286", "0282", "0078", "0101", "0256", "0069", "0080", "0290"]
 tags: [layer-indexing, priority-high, effort-small, amm, aquarius, soroswap, ingestion, data-correctness, clickhouse]
@@ -131,7 +131,23 @@ history:
       entries — the last two after 0290's 133-pool seed) and no "persisted
       discovered pool registry" line, i.e. no pool has been created on a
       tracked venue since. It closes on the first one.
+  - date: "2026-09-25"
+    status: completed
+    who: okarcz
+    note: >
+      AC 2 met on production. Live persisted three new Aquarius pools within
+      ~3 s of their deployment on 2026-09-25 (CCBGBYDC… 06:59:24 → 06:59:26,
+      CDSY2XU7… 07:24:39 → 07:24:41, CCB5P7TX… 07:25:39 → 07:25:42 UTC), plus
+      one on 2026-09-24 13:44:41. Cold starts carry them: 903 entries through
+      09-24 12:37, 904 from 14:35 (10 starts), 905 at 2026-09-25 07:10:34,
+      which equals the table's 907 rows minus the two saved after it. All four
+      criteria met; task complete.
+
 ---
+
+## 📊 STATUS — 2026-09-25 · COMPLETED · all four criteria met on prod
+
+> **2026-09-25:** AC 2 met. The first pools created after the deploy were persisted by live within ~3 s and loaded by the next cold start (see the AC and the completion record). The entries below are kept for the record.
 
 ## 📊 STATUS — 2026-09-23 · ACTIVE · AC 1, 3, 4 DONE on prod — AC 2 waits for the first new pool
 
@@ -264,8 +280,25 @@ Missing today (live era, see [[0285]]'s note):
       rows (aquarius 515, phoenix 20, soroswap 235), 0 duplicate `contract_id`,
       token convention preserved (soroswap populated, aquarius/phoenix empty —
       matching all 728 pre-existing rows). Independent of any Lambda.
-- [ ] A pool created after deploy is in the table within one reconcile run, and
+- [x] A pool created after deploy is in the table within one reconcile run, and
       survives a forced cold start (test + prod check).
+      → ✅ **MET on production 2026-09-25.** Evidence from `pool_registry` joined
+      to BE's `soroban_contracts`/`ledgers` (as `dev_read`), and from the
+      processor's CloudWatch logs:
+
+      | pool (aquarius) | deployed (UTC) | persisted by live |
+      |---|---|---|
+      | `CCBGBYDCMLHLI5P7…` | 06:59:24 (ledger 64,606,757) | 06:59:26 |
+      | `CDSY2XU75EORE3XS…` | 07:24:39 (ledger 64,607,060) | 07:24:41 |
+      | `CCB5P7TX6NCNYS72…` | 07:25:39 (ledger 64,607,072) | 07:25:42 |
+
+      Cold starts (`loaded discovered pool registry from ClickHouse`): `903`
+      in every start from 2026-09-22 14:41 to 09-24 12:37; a pool persisted
+      09-24 13:44:41; then `904` in all ten starts from 14:35 on; then `905`
+      at 2026-09-25 07:10:34, 11 min after `CCBGBYDC…` was saved. The table
+      holds 907 rows (aquarius 519, phoenix 20, soroswap 235, sushiswap 133),
+      and 907 minus the two saved after 07:10 is exactly 905. The cold starts
+      are natural Lambda recycles, not forced ones; they test the same path.
       → ✅ test (`tests/pool_registry_persist.rs`); ⛔ **blocked** — the code is
       merged but cannot be deployed until [[0286]]'s schema lands (see the
       incident below). Not deferred, not abandoned: it ships with 0286's ingest
@@ -664,3 +697,22 @@ is never typed.
 **Final test** (local machine → prod CH host): run step 3 unchanged. The
 registry covers the live era when it prints `to_write=0`; together with step 7's
 `0` / `"OK"`, the durable fix is live.
+
+## Completion record (2026-09-25)
+
+All four acceptance criteria are met on production. AC 1 (the 42-pool seed,
+2026-09-18), AC 3 (the unregistered-pool counter and alarm, 2026-09-23) and
+AC 4 (Aquarius raw = stored, 2026-09-21) were already done. AC 2 closed today
+on the first pools created after the 2026-09-22 ingest deploy.
+
+- **What was built:** live persists every pool it discovers to
+  `prices.pool_registry`, and every cold start preloads the table, so a
+  restart no longer forgets a pool and drops its trades. The code shipped
+  with [[0286]] phase 1's ingest step.
+- **Emerged:** the "forced cold start" in AC 2 was satisfied by natural Lambda
+  recycles (roughly every 2 h). A recycle runs the same preload path, so no
+  forced restart was needed on production.
+- **Note for later measurements:** `pool_registry.updated_at` is re-stamped by
+  every reconcile, so it cannot date a pool's first appearance. Use the
+  `persisted discovered pool registry` log line, or join `contract_id` to BE's
+  `soroban_contracts.deployed_at_ledger`.
