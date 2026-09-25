@@ -10,8 +10,13 @@ build:
 # CfnOutput — wire it into the GitHub Environment secret as
 # AWS_DEPLOY_ROLE_ARN.
 
+# A bare `cdk bootstrap` synthesizes the app in cdk.json first, and the
+# production app cannot synth on a fresh clone (no dist/, no Lambda assets).
+# Naming the environment and passing a no-op app skips that (task 0297): the
+# account is the active credentials', the region the one production.json pins.
 bootstrap:
-	npx cdk bootstrap
+	npx cdk bootstrap --app "node -e ''" \
+		aws://$$(aws sts get-caller-identity --query Account --output text)/$$(node -p "require('./envs/production.json').awsRegion")
 
 synth-cicd: build
 	npx cdk --app "$(CICD_APP)" synth
