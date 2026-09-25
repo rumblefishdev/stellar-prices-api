@@ -13,6 +13,21 @@ links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../../docs/prices-api-load-test-100rps.md"
 history:
+  - date: 2026-09-25
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Launch date for row 9 recorded: 2026-09-23 09:40 CEST (07:40:45 UTC),
+      the moment the explorer's basic auth came off /api/* and the portal
+      became public — agreed at the 2026-09-24 daily, carried in [[0296]]
+      with the window 09-23 09:40 → 09-30 09:40. Deltas since the 09-18 table
+      (the table itself is kept as that day's snapshot): row 4 — [[0275]]
+      merged 2026-09-22 (#327), CI now runs the ClickHouse integration
+      suite; row 3 — portal public since 09-23, [[0249]]'s alarms live since
+      09-22 and fired for real on 09-24; row 6 — `prices_admin` (explorer
+      0567) is a scoped admin identity, no new wildcard. The "Freshness"
+      bullet corrected: the re-ingest started 09-23, not 09-21. A running
+      list of known issues to declare is opened below.
   - date: 2026-09-18
     status: backlog
     who: stkrolikiewicz
@@ -111,9 +126,26 @@ ledger-processor; `tracingEnabled` on the stage, checked 2026-09-16);
   UI, portal, dashboard (with the read-only role once it exists), repo.
 - **Form answers and video scenario** — mirror the M2 files; the scenario stays
   on the deployed API and the public portal, as before.
-- **Freshness.** Re-run every cited figure close to submission. A month-long
-  backfill starts 2026-09-21 on the shared box — latency and load figures taken
-  during it describe a different box from the 2026-09-18 load-test numbers.
+- **Freshness.** Re-run every cited figure close to submission. [[0286]]'s
+  phase-3 re-ingest runs on the shared box from 2026-09-23 16:10 CEST (stage A;
+  ~22–28 days in total) — latency and load figures taken during it describe a
+  different box from the 2026-09-18 load-test numbers.
+- **Launch, for row 9 and the evidence narrative:** 2026-09-23 09:40 CEST, the
+  explorer's basic auth off `/api/*` ([[0305]], explorer 0574). The 7-day
+  window and its incident log live in [[0296]].
+
+### Known issues to declare — running list (opened 2026-09-25)
+
+Each row is either fixed-and-verified by submission or declared as a known
+issue with its task. Kept here so the package is not written from memory.
+
+| issue | state | task |
+|---|---|---|
+| Candles built from every fill, dust included, in the wrong intra-ledger order; live Aquarius ingestion dropped ~50 % of its trades | fix live since 2026-09-22 (phase 1), 09-19/20 measured at exactly zero loss; history re-ingest in progress from 2026-09-23 (stage A 16/99 months on 09-24) | [[0282]], [[0286]] |
+| `pool_registry` had not learned a pool since 2026-07-06; 42 pools missing | seeded 2026-09-18, live persistence deployed 2026-09-22, alarm live; the "first new pool" production check still open | [[0291]] |
+| Portal closes itself in an execution environment when Parameter Store throttles its cold start (account default 40 TPS); happened 2026-09-24 under a teammate's request burst | alarm caught it ([[0249]]); rule agreed, retry-at-cold-start task proposed | [[0249]], 0194 |
+| Oracle OOMs while the re-ingest re-emits the asset registry (reads without `FINAL`) | one 5-minute tick lost per ~1.5 h cycle until the backfill writes deltas | [[0226]], [[0140]] |
+| Load-test latency describes a box that is now also running the re-ingest | declared beside the 0293 figures | [[0293]], [[0047]] |
 - **The three gaps that had no owner now have tasks**: [[0295]] (AC 8,
   read-only dashboard access), [[0296]] (AC 9, 7-day report) and [[0297]]
   (AC 7, fresh-account deploy). Each may end as a declared deviation rather
