@@ -2,7 +2,7 @@
 id: "0256"
 title: "asset-discovery's ledger scan has never run on production — the worker re-seeds hourly and scans nothing"
 type: BUG
-status: active
+status: done
 related_adr: []
 related_tasks: ["0210", "0054", "0218", "0223", "0226", "0241", "0140", "0291", "0069"]
 tags: [layer-backend, priority-high, effort-small, milestone-M2, ingest, defect]
@@ -110,6 +110,19 @@ history:
       on a tracked venue since 2026-09-22 14:40 UTC); the gate that replaced
       the dormant scan is 0291's unregistered-pool alarm, live and OK. Still
       open, and the last thing before archive: the [[0223]] liveness question.
+  - date: "2026-09-25"
+    status: done
+    who: claude
+    note: >
+      Closed. #349 (liveness alarms) merged and deployed 09:19/09:20; the
+      worker left WORKERS_WITHOUT_HEALTH_ALARMS and gained -no-invocations
+      (3/3 hourly, BREACHING) and -duration-near-timeout (2/2, 240 s).
+      Induction 0222-style: rule disabled 09:22:15 → ALARM 12:18:25 after
+      three empty cadences → enabled 12:19:22 → run 12:19:50 (a re-enabled
+      rate rule fires at once) → OK 12:21:25; both transitions reached the
+      ops-alarms topic. Whole task: ledger scan removed (#331, 2026-09-24,
+      bootstrap 13.98 → 7.07 MB, discovery_state dropped), 3 of 4 criteria
+      met, the 4th not applicable (scan not kept). The seed stage stays.
 ---
 
 # The ledger scan is dead code in production
@@ -669,11 +682,15 @@ see `-no-invocations` go ALARM, enable, see OK — recorded here when done.
 | rule disabled | `prices-production-asset-discovery` `DISABLED` 09:22:15, after the 09:17 run |
 | three empty cadences | 10:17, 11:17, 12:17 — no invocation |
 | ALARM | `-no-invocations` `OK → ALARM` **12:18:25**, 2 h 56 min after the disable: three hourly windows, each `BREACHING` on missing data, exactly the 3-of-3 the alarm asks for |
-| rule enabled | 12:19:22, `ENABLED`, `rate(1 hour)`; a `rate` rule restarts from the enable time, so the next run is expected ~13:19 |
-| back to OK | _pending — recorded on the first non-empty window_ |
+| rule enabled | 12:19:22, `ENABLED`, `rate(1 hour)`. A re-enabled `rate` rule fires **at once**, not an interval later: the worker ran at 12:19:50 (`symbols_considered 0`, `assets_total 209,927`, 3.5 s, 160 MB, 0 errors) |
+| back to OK | `ALARM → OK` **12:21:25**, on that one invocation. Both transitions executed the `prices-production-ops-alarms` SNS action ("Successfully executed action" at 12:18:25 and 12:21:25), so the Slack thread carries ALARM then OK |
 
 `-duration-near-timeout` and `-errors` stayed OK throughout (nothing ran, so
 nothing was slow or failed — `notBreaching` on missing data for both, by design).
+
+All three asset-discovery alarms OK at 12:25. The worker is the symbol stage
+plus the seed; the seed stays (free since PR #319, writes nothing at steady
+state — the "Still open" item above is closed by leaving it).
 
 ## Acceptance Criteria
 
