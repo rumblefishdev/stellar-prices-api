@@ -2,7 +2,7 @@
 id: "0295"
 title: "Tranche 3 AC 8 asks for a read-only IAM role giving the Stellar team the CloudWatch dashboard — no such role exists in infra"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0294", "0249", "0214", "0223"]
 tags: [layer-infra, priority-high, effort-small, milestone-M3, observability, iam, scf]
@@ -11,6 +11,23 @@ links:
   - "../../../infra/src/lib/stacks/observability-stack.ts"
   - "../../../docs/prices-api-general-overview.md"
 history:
+  - date: 2026-09-25
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated, and RE-SCOPED by the operator: no standing access. Access to
+      the account is granted on request from a named person (name, surname,
+      e-mail) with MFA enforced, and removed after the review — the model the
+      Soroban Block Explorer used for its D3 AC 3 (explorer task 0129, closed
+      without implementation; their package says "available on request").
+      What this task found: 0125 had already created `prices-production-
+      stellar-viewer` (IAM user, 9 read actions, 2026-09-03) and Adam created
+      its console login on 2026-09-04 — a standing credential, no MFA, in an
+      account with no password policy, the only IAM user in an SSO-only
+      account. Login profile deleted 2026-09-25 12:0x CEST; this task removes
+      the user from the Observability stack and keeps the scoped read policy
+      in the runbook as the template for an on-request grant. The deviation
+      (on-request user instead of a standing role) is declared in 0294.
   - date: 2026-09-18
     status: backlog
     who: stkrolikiewicz
