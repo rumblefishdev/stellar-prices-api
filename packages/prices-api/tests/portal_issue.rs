@@ -1072,10 +1072,12 @@ async fn attaching_to_a_paid_plan_puts_the_key_on_it() {
     );
 }
 
-/// AWS's two "already on a plan" refusals are both `AlreadyOnAPlan` (task
-/// 0311, review WR-05): `409` for the same plan, and `400` "cannot reference
-/// multiple Usage Plans with the same API Stage" for another plan on the
-/// stage. Neither moves the key, and neither is an error.
+/// AWS's two "already on a plan" refusals (task 0311, review WR-05; PR #351
+/// review): `409` means the key is already on THE plan asked for, so it is
+/// `OnPlan` — the refusal names the plan and needs no read-back — while `400`
+/// "cannot reference multiple Usage Plans with the same API Stage" means
+/// ANOTHER plan on the stage, `AlreadyOnAPlan`. Neither moves the key, and
+/// neither is an error.
 #[tokio::test]
 async fn both_already_on_a_plan_refusals_are_reported_as_such() {
     use prices_api::portal::keys::gateway::Attachment;
@@ -1087,10 +1089,13 @@ async fn both_already_on_a_plan_refusals_are_reported_as_such() {
     });
     let client = test_gateway(&gateway.base);
 
-    for plan in [BASIC_PLAN_ID, PLAN_ID] {
+    for (plan, expected) in [
+        (BASIC_PLAN_ID, Attachment::OnPlan),
+        (PLAN_ID, Attachment::AlreadyOnAPlan),
+    ] {
         assert_eq!(
             client.attach_to_plan(&key, plan).await.expect(plan),
-            Attachment::AlreadyOnAPlan,
+            expected,
             "{plan}"
         );
     }

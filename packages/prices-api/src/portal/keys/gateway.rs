@@ -132,20 +132,19 @@ impl std::fmt::Debug for KeyValue {
 /// to find out rather than assume (task 0311).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Attachment {
-    /// This call put the key on the usage plan it was given.
+    /// The key is on the usage plan it was given: this call put it there, or
+    /// AWS answered `409 ConflictException` — by its own wording the key
+    /// "already exists in the usage plan", i.e. THIS plan. A `409` names the
+    /// plan, so it is not read back: `GetUsagePlans` can lag the attach, and
+    /// waiting for it to catch up turned a double-submit into `?issue=failed`
+    /// for a key that works (PR #351 review).
     OnPlan,
-    /// The key was already on a usage plan for this API stage, so AWS refused
-    /// the attach (task 0311). Two refusals land here:
-    ///
-    /// - `409 ConflictException` — by AWS's own wording "already exists in the
-    ///   usage plan", i.e. THIS plan;
-    /// - `400 BadRequestException` "… cannot reference multiple Usage Plans
-    ///   with the same API Stage" — ANOTHER plan on the same stage, since a
-    ///   key belongs to one plan per stage.
-    ///
-    /// Neither status code is trusted to say which plan: the caller asks
-    /// [`Gateway::plan_of`]. A key a concurrent issue, or an operator, put on
-    /// a plan a moment ago is a working key, not a failure.
+    /// The key is on ANOTHER usage plan for this API stage: AWS refused the
+    /// attach with `400 BadRequestException` "… cannot reference multiple
+    /// Usage Plans with the same API Stage", since a key belongs to one plan
+    /// per stage (task 0311). The refusal does not say which plan, so the
+    /// caller asks [`Gateway::plan_of`]. A key an operator, or a concurrent
+    /// issue, put on a plan a moment ago is a working key, not a failure.
     AlreadyOnAPlan,
     /// The key no longer exists, so there was nothing to attach.
     KeyGone,
@@ -790,11 +789,12 @@ impl Gateway {
     /// **Idempotent**, and that is what lets the caller run it on every key it
     /// is about to hand out rather than only on keys it just created. API
     /// Gateway answers `409 ConflictException` when the key is already on the
-    /// plan, and `400 BadRequestException` ("cannot reference multiple Usage
-    /// Plans with the same API Stage") when it is already on ANOTHER plan for
-    /// the same stage. Neither is a failure: both are
-    /// [`Attachment::AlreadyOnAPlan`], and the caller asks [`Self::plan_of`]
-    /// which plan that is (task 0311). Any other `400` is still an error.
+    /// plan — [`Attachment::OnPlan`], as for a fresh attach — and
+    /// `400 BadRequestException` ("cannot reference multiple Usage Plans with
+    /// the same API Stage") when it is already on ANOTHER plan for the same
+    /// stage — [`Attachment::AlreadyOnAPlan`], and the caller asks
+    /// [`Self::plan_of`] which plan that is (task 0311). Any other `400` is
+    /// still an error.
     ///
     /// A `404` is **ambiguous** and is resolved before it is acted on. API
     /// Gateway answers `NotFoundException` both when the key is gone and when
@@ -823,9 +823,10 @@ impl Gateway {
             Err(e) => {
                 let message = sdk_message(&e);
                 let service_error = e.into_service_error();
-                if service_error.is_conflict_exception()
-                    || (service_error.is_bad_request_exception()
-                        && is_same_stage_refusal(service_error.message()))
+                if service_error.is_conflict_exception() {
+                    Ok(Attachment::OnPlan)
+                } else if service_error.is_bad_request_exception()
+                    && is_same_stage_refusal(service_error.message())
                 {
                     Ok(Attachment::AlreadyOnAPlan)
                 } else if service_error.is_not_found_exception() {

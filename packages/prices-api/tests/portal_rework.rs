@@ -1516,8 +1516,10 @@ async fn an_attach_refused_for_another_plan_on_the_stage_keeps_that_plan() {
 
 /// The double-submit rework: the other invocation already put the new key on
 /// Basic (the previous key's plan) but this one's `GetUsagePlans` for it
-/// lags. It resolves Basic from the revoked record, attaches, is refused with
-/// `409` — already on THIS plan — confirms Basic and carries on to the sweep.
+/// lags — and keeps lagging. It resolves Basic from the revoked record,
+/// attaches, is refused with `409` — already on THIS plan — and settles on
+/// that alone: no read-back that the lag could stall into `?issue=failed`
+/// for a key that works (PR #351 review), and the sweep still runs.
 #[tokio::test]
 async fn a_conflict_on_the_same_plan_is_settled_and_the_sweep_still_runs() {
     let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
@@ -1530,7 +1532,7 @@ async fn a_conflict_on_the_same_plan_is_settled_and_the_sweep_still_runs() {
     );
     let new = gateway.with(|s| {
         let new = s.seed_on_plan(&key_name(), 2_000, BASIC_PLAN_ID);
-        s.plans_hidden_for.insert(new.clone(), 1);
+        s.plans_hidden_for.insert(new.clone(), usize::MAX);
         new
     });
     let app = app_with_discord(&discord, &gateway);

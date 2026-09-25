@@ -1319,12 +1319,16 @@ enum Settled {
 
 /// Attach `key_id` to `plan_id`, and settle what AWS answered (task 0311).
 ///
-/// [`Attachment::AlreadyOnAPlan`] is the interesting case. A `409` (this
-/// plan) or the `400` "cannot reference multiple Usage Plans with the same
-/// API Stage" (another plan) means the key is ALREADY usable — some writer got
-/// there first: the other half of a double-submit, a sign-in that ran inside
-/// an operator's delete→create gap, or the operator. Which plan it is, is
-/// asked of [`Gateway::plan_of`] rather than inferred from the status code:
+/// A `409` (already on THIS plan) arrives as [`Attachment::OnPlan`]: the
+/// refusal names the plan, so it is settled without a read-back that
+/// `GetUsagePlans` could lag (PR #351 review).
+///
+/// [`Attachment::AlreadyOnAPlan`] is the interesting case. The `400` "cannot
+/// reference multiple Usage Plans with the same API Stage" (another plan)
+/// means the key is ALREADY usable — some writer got there first: a sign-in
+/// that ran inside an operator's delete→create gap, the operator, or a
+/// concurrent issue that resolved a different plan. Which plan it is, is
+/// asked of [`Gateway::plan_of`], since the refusal does not name it:
 ///
 /// - on a plan for our stage → [`Settled::Ready`]; if that is not the plan
 ///   this attempt wanted, the key is left where it is (this code has no grant
