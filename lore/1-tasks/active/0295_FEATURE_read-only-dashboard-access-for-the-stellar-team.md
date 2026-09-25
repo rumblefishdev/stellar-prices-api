@@ -13,6 +13,16 @@ links:
 history:
   - date: 2026-09-25
     status: active
+    who: claude
+    note: >
+      Removal deployed: PR #355 merged (4ccaf532), Prices-production-Observability
+      UPDATE_COMPLETE 12:30:20 CEST from origin/develop — policy and user
+      deleted by CloudFormation; `aws iam list-users` returns nothing in the
+      account; get-user on the old name is NoSuchEntity. Login profile had
+      been deleted by hand at 11:57:03. Left: the runbook walk on a throwaway
+      name, the access table in the package, alarms on the review date.
+  - date: 2026-09-25
+    status: active
     who: stkrolikiewicz
     note: >
       Activated, and RE-SCOPED by the operator: no standing access. Access to
@@ -89,7 +99,7 @@ access does not. This task builds the access and records how a reviewer uses it.
 - [x] No standing identity in `infra/`: the viewer user and its policy are
       removed from the Observability stack, and the synth verifier fails on any
       IAM user, access key or login profile in the template
-- [ ] The removal is deployed to production and `aws iam list-users` shows no
+- [x] The removal is deployed to production and `aws iam list-users` shows no
       `prices-*` user
 - [ ] The runbook was walked once end to end on a throwaway name (create →
       MFA → dashboard renders → log groups denied → remove), with the dates in
