@@ -142,6 +142,13 @@ answers with an access-denied banner, and the explorer's dashboard
 `production-soroban-explorer` opens too (the read actions cannot be scoped per
 dashboard — say so in the evidence rather than pretend otherwise).
 
+CloudTrail for the user will show `AccessDenied` noise from the console itself
+— `cloudwatch:ListAlarmMuteRules` once per alarm widget, `DescribeInsightRules`,
+`oam:ListSinks`, `logs:DescribeMetricFilters`, cost and health widgets on the
+console home. The dashboard renders regardless (walked 2026-09-25 with a
+passkey: `GetDashboard`, `ListDashboards`, `DescribeAlarms` allowed with
+`mfaAuthenticated=true`). Do not widen the policy for that noise.
+
 ## 5. Remove after the review
 
 ```bash
