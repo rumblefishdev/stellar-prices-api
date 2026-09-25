@@ -111,6 +111,7 @@ use super::keys::cap::{self, Cap};
 use super::keys::gateway::{Gateway, GatewayError, PlanInfo, Tier};
 use super::keys::naming::{current_key, exact_matches, key_name, revocation_instant};
 use super::period::Period;
+use super::sources::{Loaded, PortalSources};
 
 /// The one route. `GET` only — reading a counter must not share a path shape
 /// with anything that writes.
@@ -155,17 +156,18 @@ const STALE_KEEP: Duration = Duration::from_secs(15 * 60);
 /// request-level bound (`list_named` and `usage_of` each page with a budget
 /// per call), and the alternative to answering `503` is Lambda killing the
 /// invocation with no response at all.
-const USAGE_DEADLINE: Duration = Duration::from_secs(10);
+pub(crate) const USAGE_DEADLINE: Duration = Duration::from_secs(10);
 
 /// What the usage route needs, cloned per request. The `Arc`s are shared
 /// across clones, which is what makes the cache one cache.
 #[derive(Clone)]
 pub struct UsageState {
-    /// Verifies the session cookie — the same secret sign-in issued it with.
-    oauth: Option<Arc<OauthSecret>>,
-    /// The control-plane client, carrying the free plan id and our API stage. `None` while the
-    /// portal is closed, exactly as `KeysState` holds it.
-    gateway: Option<Arc<Gateway>>,
+    /// The OAuth secret, which verifies the session cookie (the same secret
+    /// sign-in issued it with), and the control-plane client, carrying the
+    /// free plan id and our API stage — loaded on the first portal request
+    /// that needs them, exactly as `KeysState` holds them. The cache below is
+    /// process state, not a source, and stays outside.
+    sources: PortalSources,
     /// The last good answer per caller (session `sub`), plus the per-caller
     /// eviction epochs. See the module docs and [`CacheInner`].
     cache: Arc<Mutex<CacheInner>>,
@@ -276,8 +278,11 @@ impl UsageCache {
 impl UsageState {
     pub fn new(oauth: Option<OauthSecret>, gateway: Option<Gateway>) -> Self {
         Self {
-            oauth: oauth.map(Arc::new),
-            gateway: gateway.map(Arc::new),
+            sources: PortalSources::ready(Loaded {
+                oauth: oauth.map(Arc::new),
+                gateway: gateway.map(Arc::new),
+                ..Loaded::default()
+            }),
             cache: Arc::new(Mutex::new(CacheInner::default())),
             ttl: CACHE_TTL,
             deadline: USAGE_DEADLINE,
@@ -301,6 +306,13 @@ impl UsageState {
     #[cfg(not(feature = "lambda"))]
     pub fn with_deadline(mut self, deadline: Duration) -> Self {
         self.deadline = deadline;
+        self
+    }
+
+    /// Read the secret and the client from `sources` instead of the
+    /// constructor's arguments — how [`super::apply`] shares one cell.
+    pub(crate) fn with_sources(mut self, sources: PortalSources) -> Self {
+        self.sources = sources;
         self
     }
 
@@ -503,10 +515,13 @@ struct CacheEntry {
 /// The whole route: authenticate, consult the cache, look the key up, ask AWS,
 /// answer.
 async fn usage(State(state): State<UsageState>, headers: HeaderMap) -> Response {
-    let Some(oauth) = state.oauth.as_ref() else {
+    let Some(loaded) = state.sources.get().await else {
         return unconfigured();
     };
-    let Some(gateway) = state.gateway.as_ref() else {
+    let Some(oauth) = loaded.oauth.as_ref() else {
+        return unconfigured();
+    };
+    let Some(gateway) = loaded.gateway.as_ref() else {
         return unconfigured();
     };
 
@@ -889,7 +904,8 @@ fn no_store(mut response: Response) -> Response {
     response
 }
 
-/// `503` for a deployment that reached this route with nothing wired.
+/// `503` for a deployment that reached this route with nothing wired, or
+/// whose sources failed to load for this request.
 fn unconfigured() -> Response {
     no_store(errors::service_unavailable(
         USAGE_UNCONFIGURED,

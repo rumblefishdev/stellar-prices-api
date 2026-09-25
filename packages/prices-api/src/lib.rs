@@ -46,7 +46,35 @@ pub use state::AppState;
 /// 2. Stamp `servers` from `config.base_url`, expose the spec at
 ///    `GET /api-docs-json`.
 /// 3. Layer the in-app API-key gate (armed only when `API_KEYS` is set).
+///
+/// Building it reads nothing: with the portal open and no source supplied,
+/// the portal's sources load on the first portal request that needs them
+/// (`portal::sources`).
 pub fn app(config: &AppConfig, state: AppState) -> Router {
+    app_inner(config, state, portal::sources::sources_for(config))
+}
+
+/// [`app`], with the portal's sources supplied by the caller — already loaded
+/// ([`portal::sources::PortalSources::ready`]) or behind a loader of the
+/// test's choosing ([`portal::sources::PortalSources::lazy`]).
+///
+/// Compiled out of the Lambda, like `Gateway::against` and
+/// `IssueDeps::with_deadline`: the deployed build contains one loader, the one
+/// that reads the environment.
+#[cfg(not(feature = "lambda"))]
+pub fn app_with_portal(
+    config: &AppConfig,
+    state: AppState,
+    sources: portal::sources::PortalSources,
+) -> Router {
+    app_inner(config, state, sources)
+}
+
+fn app_inner(
+    config: &AppConfig,
+    state: AppState,
+    sources: portal::sources::PortalSources,
+) -> Router {
     let (router, mut spec) = openapi::register_routes()
         .with_state(state)
         .split_for_parts();
@@ -127,7 +155,7 @@ pub fn app(config: &AppConfig, state: AppState) -> Router {
     // Portal routes before the key gate, and exempt from it: a visitor signing
     // in has no API key by definition (task 0183). The gate inside `portal`
     // decides whether they are served at all.
-    let router = portal::apply(router, config);
+    let router = portal::apply_with(router, config, sources);
 
     auth::apply(router, config)
 }

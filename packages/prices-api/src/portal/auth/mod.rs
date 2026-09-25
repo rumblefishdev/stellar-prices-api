@@ -72,6 +72,7 @@ use crate::common::extract::ValidatedQuery;
 use crate::common::{cache_control, errors};
 
 use super::eligibility;
+use super::sources::{Loaded, PortalSources};
 use secret::OauthSecret;
 use session::Session;
 use state_token::{Action, StateError};
@@ -175,15 +176,14 @@ const SIGN_IN_MISCONFIGURED: &str = "sign_in_misconfigured";
 
 /// Everything the four handlers share, cloned per request.
 ///
-/// `oauth` is `Option` because the api-handler must boot without it. Production
-/// runs with `PORTAL_ENABLED=false` for the whole of the build, and a cold start
-/// that insisted on reading a secret nobody has created yet would fail Lambda
-/// init and take out `/v1` — the data API — to protect a portal that answers
-/// `404` regardless. [`crate::AppConfig::load_portal_oauth`] therefore only
-/// loads when the portal is open, and only then is a missing secret fatal.
+/// The OAuth secret lives in `sources`, which the api-handler loads on the
+/// first portal request that needs it rather than at cold start — so `/v1`
+/// never waits on it, and a failed read costs one request (see
+/// `crate::portal::sources`). Each handler asks `sources` FIRST and answers a
+/// failed load in its own words.
 #[derive(Clone)]
 pub struct AuthState {
-    oauth: Option<std::sync::Arc<OauthSecret>>,
+    sources: PortalSources,
     endpoints: std::sync::Arc<discord::Endpoints>,
     http: reqwest::Client,
     /// What the `action=issue` round-trip needs beyond sign-in (task 0189).
@@ -199,7 +199,10 @@ pub struct AuthState {
 impl AuthState {
     pub fn new(oauth: Option<OauthSecret>, endpoints: discord::Endpoints) -> Self {
         Self {
-            oauth: oauth.map(std::sync::Arc::new),
+            sources: PortalSources::ready(Loaded {
+                oauth: oauth.map(std::sync::Arc::new),
+                ..Loaded::default()
+            }),
             endpoints: std::sync::Arc::new(endpoints),
             http: discord::build_client(),
             issue: issue::IssueDeps::default(),
@@ -220,6 +223,14 @@ impl AuthState {
         if let Some(origin) = origin {
             self.home = format!("{origin}{PORTAL_HOME}").into();
         }
+        self
+    }
+
+    /// Read the OAuth secret from `sources` instead of the constructor's
+    /// argument — how [`super::apply`] hands every portal state one shared
+    /// cell.
+    pub(crate) fn with_sources(mut self, sources: PortalSources) -> Self {
+        self.sources = sources;
         self
     }
 
@@ -289,22 +300,31 @@ async fn login(
         },
     };
 
+    // The sources could not be loaded for this request: the same landings an
+    // unprovisioned deployment gets, and the next press loads again. The
+    // failure itself was logged by `get`.
+    let Some(loaded) = state.sources.get().await else {
+        return match action {
+            Action::Issue => issue::refuse_issue_start(&state.home, false, false, false),
+            _ => unconfigured(&state.home),
+        };
+    };
+
     // An issue round-trip on a deployment with no credentials, no control
     // plane or no eligibility parameters cannot end in a key — refuse before
-    // sending the visitor to Discord. Only reachable with the portal open and
-    // issuance unprovisioned: `load_portal_oauth` and `load_portal_eligibility`
-    // both fail the cold start on that combination, so this is the second
-    // line, not the first.
-    if action == Action::Issue && (state.oauth.is_none() || !state.issue.is_wired()) {
+    // sending the visitor to Discord. The production load yields all three or
+    // fails, so this is reachable only with a partial fixture.
+    let wiring = state.issue.loaded().await;
+    if action == Action::Issue && (loaded.oauth.is_none() || !issue::is_wired(&wiring)) {
         return issue::refuse_issue_start(
             &state.home,
-            state.oauth.is_some(),
-            state.issue.gateway.is_some(),
-            state.issue.settings.is_some(),
+            loaded.oauth.is_some(),
+            wiring.gateway.is_some(),
+            wiring.settings.is_some(),
         );
     }
 
-    let Some(oauth) = state.oauth.as_ref() else {
+    let Some(oauth) = loaded.oauth.as_deref() else {
         return unconfigured(&state.home);
     };
 
@@ -429,7 +449,14 @@ async fn callback(
     let started = std::time::Instant::now();
     let home = state.home.as_ref();
 
-    let Some(oauth) = state.oauth.as_ref() else {
+    // A failed load lands on `?signin=failed`: which flow this was cannot be
+    // known before `state` is verified, and verifying it needs the very
+    // secret that failed to load. The pending cookie is left alone, as on
+    // every refusal before verification; the next attempt loads again.
+    let Some(loaded) = state.sources.get().await else {
+        return redirect(&format!("{home}{FAILED_QUERY}"), vec![]);
+    };
+    let Some(oauth) = loaded.oauth.as_deref() else {
         return unconfigured(home);
     };
 
@@ -537,6 +564,26 @@ async fn callback(
         }
     }
 
+    // A lazy load in front of this callback (the first portal request in
+    // this environment) spent time the arithmetic on `discord::REQUEST_TIMEOUT`
+    // does not have. Past `issue::SOURCES_ALLOWANCE` the exchange and the
+    // three reads after it could outlive the invocation, so land a
+    // retryable failure now, before any Discord call: the next attempt finds
+    // the sources loaded.
+    if started.elapsed() > issue::SOURCES_ALLOWANCE {
+        let query = match accepted.action {
+            Action::Issue => issue::ISSUE_FAILED_QUERY,
+            _ => FAILED_QUERY,
+        };
+        tracing::warn!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            landing = query,
+            "sign-in callback spent its allowance loading the portal sources; \
+             landing a retryable failure before the token exchange"
+        );
+        return redirect(&format!("{home}{query}"), vec![drop_pending]);
+    }
+
     let token = match discord::exchange_code(
         &state.http,
         &state.endpoints,
@@ -601,8 +648,8 @@ async fn callback(
     // members included, over a value the sign-in itself never consults. The
     // age read failing now costs the visitor the key half only: they are
     // signed in, land plain, and the dashboard's issue control re-asks.
-    let (checked, min_age): (Option<discord::MemberLookup>, Option<u64>) = match state
-        .issue
+    let wiring = state.issue.loaded().await;
+    let (checked, min_age): (Option<discord::MemberLookup>, Option<u64>) = match wiring
         .settings
         .as_deref()
     {
@@ -734,12 +781,21 @@ struct MeResponse {
     username: Option<String>,
 }
 
+/// Error code for `/auth/me` when the portal's sources could not be loaded
+/// for this request.
+const SESSION_UNAVAILABLE: &str = "session_unavailable";
+
 /// Report the caller's session.
 ///
 /// `200` with `authenticated: false` rather than `401`, deliberately. This is
 /// the question "am I signed in?", and refusing to answer it while signed out is
 /// as circular as [0183]'s `/config` refusing to say the portal is closed. The
 /// page asks it on every load and renders plain text either way.
+///
+/// The one `503`: the sources failed to load for this request (task 0311).
+/// Without the signing key no cookie can be checked, and "signed out" would
+/// be a lie to a visitor who is signed in — the page renders its failure
+/// state instead, and the next call loads again.
 async fn me(State(state): State<AuthState>, headers: HeaderMap) -> Response {
     let signed_out = MeResponse {
         authenticated: false,
@@ -747,7 +803,13 @@ async fn me(State(state): State<AuthState>, headers: HeaderMap) -> Response {
         username: None,
     };
 
-    let Some(oauth) = state.oauth.as_ref() else {
+    let Some(loaded) = state.sources.get().await else {
+        return no_store(errors::service_unavailable(
+            SESSION_UNAVAILABLE,
+            "portal sign-in is temporarily unavailable",
+        ));
+    };
+    let Some(oauth) = loaded.oauth.as_deref() else {
         // Not `unconfigured()`: a deployment with no credentials has no
         // sessions, which is a truthful answer to this question and lets the
         // page render rather than showing an error it can do nothing about.
@@ -848,12 +910,9 @@ fn no_store(mut response: Response) -> Response {
     response
 }
 
-/// Land a deployment that reached these routes with no credentials.
-///
-/// Only reachable if `PORTAL_ENABLED` is true and the secret is missing —
-/// `AppConfig::load_portal_or_close` closes the portal on exactly that
-/// combination, so the gate answers first and this is a second line rather
-/// than the first.
+/// Land a deployment that reached these routes with no credentials — the
+/// portal open, and its sources either loaded without a secret (a test
+/// fixture) or, on `login`, failed to load for this request.
 ///
 /// **A landing, not the `503 sign_in_unconfigured` envelope it used to be**
 /// (task 0194's review). Both call sites are reached by a browser following a

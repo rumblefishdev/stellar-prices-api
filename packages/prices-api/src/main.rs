@@ -24,43 +24,14 @@ async fn main() {
         .with_target(false)
         .init();
 
-    let mut config = AppConfig::from_env();
+    let config = AppConfig::from_env();
 
-    // The portal's three sources, read through the same Parameters & Secrets
-    // extension as the mTLS bundle below — so no secret VALUE is ever an
-    // environment variable (ADR 0007, Tranche 3 AC 6):
-    //
-    // - sign-in credentials (task 0186): the Discord OAuth secret;
-    // - key issuance (task 0187): the `pricing-api-free` usage-plan id from
-    //   SSM, plus the API Gateway control-plane client built from the
-    //   execution role's credentials;
-    // - the eligibility gate (task 0189): the SSM parameter NAMES for the guild
-    //   id and the minimum account age — resolved per issuance so operator
-    //   changes need no redeploy — each probed once here so a mis-seeded
-    //   parameter is found now and not at a visitor's click.
-    //
-    // A no-op while `PORTAL_ENABLED` is false; with it true (task 0194) all
-    // three are read at every cold start, and the reads are four: one secret,
-    // three parameters. See the deploy-gate note on `PORTAL_ENABLED` in
-    // `compute-stack.ts`.
-    //
-    // **Closed, not crashed.** A failed read closes the portal in this
-    // execution environment and is logged here; it does not panic init. This
-    // Lambda also serves `/v1`, and an init panic is a `502` to the next data
-    // API caller — for sources `/v1` never uses, read with no retry against a
-    // 40 TPS account-wide Parameter Store budget. The reasoning and the cost
-    // are on `AppConfig::load_portal_or_close`. The log line below is one
-    // signal a misconfigured or throttled deploy leaves; `/config` answering
-    // `enabled: false` is the other, and it is the probe the deploy runbook
-    // makes.
-    if let Err(err) = config.load_portal_or_close().await {
-        tracing::error!(
-            error = %err,
-            "portal closed at cold start: a portal source failed to load; /v1 is \
-             unaffected, and the portal answers as closed in this execution \
-             environment until it is recycled"
-        );
-    }
+    // The cold start reads one source: the mTLS bundle below. The portal's
+    // five (the Discord OAuth secret and four SSM parameters) load on the
+    // first portal request that needs them (`prices_api::portal::sources`),
+    // so a burst of `/v1` cold starts makes no Parameter Store read, and a
+    // failed portal read costs that one request rather than the environment
+    // (task 0311).
 
     // Build the CH client eagerly at cold start; it is Arc-backed and shared via
     // AppState across warm invocations. `client_from_lambda_env` reads

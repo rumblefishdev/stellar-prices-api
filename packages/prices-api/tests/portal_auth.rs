@@ -1682,9 +1682,10 @@ async fn logout_is_not_reachable_by_a_get() {
 // ---------------------------------------------------------------------------
 
 /// An open portal with no credentials must say so, not present a sign-in that
-/// silently 404s. `AppConfig::load_portal_oauth` fails at cold start on this
-/// combination, so reaching here means something bypassed it — the routes are
-/// still mounted and still honest.
+/// silently 404s. With nothing supplied on the config the router loads the
+/// portal's sources from the environment on the first portal request (task
+/// 0311), and a test process has none of them, so every request here is a
+/// failed load — the state a throttled or unprovisioned deployment is in.
 ///
 /// Since task 0194's review it says so on the page: `/auth/login` is opened as
 /// a top-level navigation (a popup, in the bundle), so `503 JSON` was raw text
@@ -1713,11 +1714,130 @@ async fn an_open_portal_with_no_credentials_lands_on_the_closed_card() {
     assert_eq!(login.status, StatusCode::SEE_OTHER);
     assert_eq!(login.location(), "/api/?signin=not_open");
 
-    // `/auth/me` is the exception: "nobody is signed in" is true and lets the
-    // page render.
+    // `/auth/me` cannot check a cookie without the signing key, and "nobody
+    // is signed in" would be false for a visitor who is: a `503` the page
+    // renders as its failure state, never cached.
     let me = fetch(&router, ME_PATH, &[]).await;
-    assert_eq!(me.status, StatusCode::OK);
-    assert_eq!(me.json()["authenticated"], json!(false));
+    assert_eq!(me.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(me.json()["code"], json!("session_unavailable"));
+    assert!(
+        me.headers
+            .get(header::CACHE_CONTROL)
+            .is_some_and(|v| v.to_str().unwrap().contains("no-store"))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A slow lazy load in front of the callback (task 0311)
+// ---------------------------------------------------------------------------
+
+/// Every source a round-trip needs, already loaded: the OAuth secret, a
+/// control plane that is never reached, and the eligibility settings.
+fn full_sources() -> prices_api::portal::sources::Loaded {
+    use std::sync::Arc;
+    prices_api::portal::sources::Loaded {
+        oauth: Some(Arc::new(oauth_secret())),
+        gateway: Some(Arc::new(test_gateway("http://127.0.0.1:9"))),
+        settings: Some(Arc::new(eligibility_settings())),
+    }
+}
+
+/// A router against `mock` whose sources are `sources`.
+fn router_with_sources(
+    mock: &MockDiscord,
+    sources: prices_api::portal::sources::PortalSources,
+) -> Router {
+    let config = AppConfig {
+        ch_enabled: false,
+        base_url: None,
+        api_keys: vec![],
+        portal_enabled: true,
+        portal_oauth: None,
+        portal_endpoints: Endpoints {
+            api_base: mock.base.clone(),
+            ..Endpoints::default()
+        },
+        portal_keys: None,
+        portal_eligibility: None,
+        portal_rate_limit: None,
+        portal_web_origin: None,
+    };
+    prices_api::app_with_portal(&config, AppState::without_ch(), sources)
+}
+
+/// Sources that take 1.5 s to load — well past `issue::SOURCES_ALLOWANCE`,
+/// which the budget test keeps under a second — and then succeed.
+fn slow_sources() -> prices_api::portal::sources::PortalSources {
+    use prices_api::portal::sources::{LoadFuture, PortalSources};
+    PortalSources::lazy(std::sync::Arc::new(|| -> LoadFuture {
+        Box::pin(async {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            Ok(full_sources())
+        })
+    }))
+}
+
+/// Login on one environment (loaded), callback on another that has to load
+/// first — the common shape once `/v1` warms most environments. The load
+/// eats the callback's allowance, so it lands on a retryable failure before
+/// the token exchange, and drops the pending cookie as a verified callback
+/// does.
+#[tokio::test]
+async fn a_callback_that_spent_its_allowance_loading_lands_on_signin_failed() {
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let loaded = router_with_sources(
+        &mock,
+        prices_api::portal::sources::PortalSources::ready(full_sources()),
+    );
+    let cold = router_with_sources(&mock, slow_sources());
+
+    let started = start_login(&loaded).await;
+    let reply = fetch(
+        &cold,
+        &format!("{CALLBACK_PATH}?code=an-auth-code&state={}", started.state),
+        &[(cookies::PENDING_COOKIE, &started.pending)],
+    )
+    .await;
+
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.location(), "/api/?signin=failed");
+    assert!(reply.clears(cookies::PENDING_COOKIE));
+    assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
+    assert_eq!(mock.exchanges(), 0, "the token exchange must not start");
+}
+
+/// The same on an issue round-trip: its own failure landing.
+#[tokio::test]
+async fn an_issue_callback_that_spent_its_allowance_loading_lands_on_issue_failed() {
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let loaded = router_with_sources(
+        &mock,
+        prices_api::portal::sources::PortalSources::ready(full_sources()),
+    );
+    let cold = router_with_sources(&mock, slow_sources());
+
+    let login = fetch(&loaded, &format!("{LOGIN_PATH}?action=issue"), &[]).await;
+    assert_eq!(login.status, StatusCode::SEE_OTHER);
+    let pending = login
+        .cookie(cookies::PENDING_COOKIE)
+        .expect("login must set the pending-login cookie");
+    let query = login.location().split_once('?').unwrap().1.to_string();
+    let state = form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == "state")
+        .map(|(_, v)| v.into_owned())
+        .expect("the authorize URL must carry `state`");
+
+    let reply = fetch(
+        &cold,
+        &format!("{CALLBACK_PATH}?code=an-auth-code&state={state}"),
+        &[(cookies::PENDING_COOKIE, &pending)],
+    )
+    .await;
+
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.location(), "/api/?issue=failed");
+    assert!(reply.clears(cookies::PENDING_COOKIE));
+    assert_eq!(mock.exchanges(), 0, "the token exchange must not start");
 }
 
 /// The routes are keyless — `crate::auth::is_exempt` exempts the whole prefix

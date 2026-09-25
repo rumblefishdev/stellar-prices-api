@@ -109,6 +109,7 @@ use crate::common::{cache_control, errors};
 
 use super::auth::secret::OauthSecret;
 use super::period::Period;
+use super::sources::{Loaded, PortalSources};
 use cap::Cap;
 use gateway::{Attachment, Disable, Gateway, GatewayError, KeyValue};
 use naming::{
@@ -194,18 +195,19 @@ pub(crate) const RECONCILE_DEADLINE: Duration = Duration::from_secs(10);
 
 /// What both handlers need, cloned per request.
 ///
-/// Both fields are `Option` for the same reason `AuthState::oauth` is: the
-/// api-handler must boot with the portal closed and nothing provisioned. The
-/// routes are mounted regardless, and answer `503` rather than not existing, so
+/// The OAuth secret and the control-plane client live in `sources`, loaded on
+/// the first portal request that needs them (`crate::portal::sources`). The
+/// routes are mounted regardless, and answer `503` rather than not existing —
+/// when the load failed for this request, and when it yielded no client — so
 /// that a deployment which opens the portal without wiring the usage plan says
 /// so instead of looking like a portal with no key issuance.
 #[derive(Clone)]
 pub struct KeysState {
-    /// Verifies the session cookie. The same secret sign-in issued it with —
-    /// there is one signing key and [`super::auth::crypto`]'s domain separation
-    /// is what keeps its three token kinds apart.
-    oauth: Option<Arc<OauthSecret>>,
-    gateway: Option<Arc<Gateway>>,
+    /// The OAuth secret — which verifies the session cookie, the same secret
+    /// sign-in issued it with; there is one signing key and
+    /// [`super::auth::crypto`]'s domain separation is what keeps its three
+    /// token kinds apart — and the control-plane client.
+    sources: PortalSources,
     /// [`RECONCILE_DEADLINE`], overridable only outside the Lambda build.
     deadline: Duration,
     /// Task 0188's usage cache, so a successful issue can evict a cached
@@ -223,12 +225,22 @@ pub struct KeysState {
 impl KeysState {
     pub fn new(oauth: Option<OauthSecret>, gateway: Option<Gateway>) -> Self {
         Self {
-            oauth: oauth.map(Arc::new),
-            gateway: gateway.map(Arc::new),
+            sources: PortalSources::ready(Loaded {
+                oauth: oauth.map(Arc::new),
+                gateway: gateway.map(Arc::new),
+                ..Loaded::default()
+            }),
             deadline: RECONCILE_DEADLINE,
             usage_cache: None,
             web_origin: None,
         }
+    }
+
+    /// Read the secret and the client from `sources` instead of the
+    /// constructor's arguments — how [`super::apply`] shares one cell.
+    pub(crate) fn with_sources(mut self, sources: PortalSources) -> Self {
+        self.sources = sources;
+        self
     }
 
     /// Name the bundle's origin, so a revoke from it — same-site, not
@@ -330,10 +342,13 @@ async fn key(State(state): State<KeysState>, headers: HeaderMap) -> Response {
 /// The whole of the route: authenticate, look up, answer. Read-only — see the
 /// module docs for why that is [0189]'s invariant, not an optimisation.
 async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
-    let Some(oauth) = state.oauth.as_ref() else {
+    let Some(loaded) = state.sources.get().await else {
         return unconfigured();
     };
-    let Some(gateway) = state.gateway.as_ref() else {
+    let Some(oauth) = loaded.oauth.as_ref() else {
+        return unconfigured();
+    };
+    let Some(gateway) = loaded.gateway.as_ref() else {
         return unconfigured();
     };
 
@@ -579,10 +594,13 @@ struct RevokeResponse {
 /// | `404 no_key` | nothing to revoke |
 /// | `401` / `502` / `503` | as the reveal |
 async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response {
-    let Some(oauth) = state.oauth.as_ref() else {
+    let Some(loaded) = state.sources.get().await else {
         return unconfigured();
     };
-    let Some(gateway) = state.gateway.as_ref() else {
+    let Some(oauth) = loaded.oauth.as_ref() else {
+        return unconfigured();
+    };
+    let Some(gateway) = loaded.gateway.as_ref() else {
         return unconfigured();
     };
     // Before the session is even read: the one write a session can cause
@@ -1421,7 +1439,8 @@ fn no_store(mut response: Response) -> Response {
     response
 }
 
-/// `503` for a deployment that reached these routes with nothing wired.
+/// `503` for a deployment that reached these routes with nothing wired, or
+/// whose sources failed to load for this request.
 fn unconfigured() -> Response {
     no_store(errors::service_unavailable(
         KEYS_UNCONFIGURED,
