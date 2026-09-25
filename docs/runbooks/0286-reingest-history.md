@@ -443,29 +443,56 @@ worker, including the measured USDC rate on the pivot.
   and none of them applies to this step. That covers `--snapshots-verified`,
   the `--pivot-window-s` floor, the plain-reset-on-a-pivot-leg refusal and the
   task-0208 epoch check (`assert_reset_is_admissible` returns at once).
-- **`--skip-snapshot` is required, and here it is safe.** It is required
-  because `prices_writer` cannot `FREEZE` (precondition 7). Without the flag
-  the first month fails with `FreezeDenied`. It is safe because this mode only
-  writes rows still at `close_usd = 0` and never discards a value. It is also
-  safe because §4g and §7a can rebuild every month's coarse rows from its
-  re-ingested `1m`. The tool warns "only safe when the 1m source can rebuild
-  this coarse table", and that condition is true here. **Exception:** a month
-  recorded as un-re-ingested (§5, precondition 9) whose `1m` is gone. Its
-  coarse partitions are the only copy, so freeze them before the run with
-  `repair-coarse-usd-values.md` Step 3b's script, using the `repair_0286_`
-  prefix and that month as the range.
+- **Run with `--skip-snapshot`. The tool's own snapshot cannot be used as a
+  rollback here.** That snapshot is
+  `ALTER TABLE prices.<table> FREEZE PARTITION <YYYYMM> WITH NAME 'repair_0114_…'`
+  (`repair.rs`, `freeze_partition`). It lands in the CH host's `shadow/`, and
+  the only way back from `shadow/` is `ATTACH PARTITION … FROM '/path/'`. That
+  needs filesystem access on the host, which no mTLS identity has, including
+  `prices_admin` (task 0286, "Rollback amendment"). Skipping it is safe for
+  two reasons. This mode only writes rows still at `close_usd = 0` and never
+  discards a value. And §4g/§7a can rebuild every month's coarse rows from its
+  re-ingested `1m`, so the tool's warning ("only safe when the 1m source can
+  rebuild this coarse table") is satisfied. **Exception:** a month recorded as
+  un-re-ingested (§5, precondition 9) whose `1m` is gone. Its coarse rows are
+  the only copy. Before the run, copy them into a backup table as
+  `prices_admin`, in the same shell as ① (the phase-1 rollout's idiom,
+  `0286-candle-definitions-rollout.md` §3):
+
+  ```bash
+  M=202607   # the un-re-ingested month, as YYYYMM
+  for T in 15m 1h 4h 1d 1w 1M; do
+    chadmin "CREATE TABLE IF NOT EXISTS prices.coarse_0286_bak_$T AS prices.price_ohlcv_$T"
+    chadmin "INSERT INTO prices.coarse_0286_bak_$T SELECT * FROM prices.price_ohlcv_$T WHERE toYYYYMM(timestamp) = $M"
+  done
+  ```
+
+  To restore a month from that copy, run
+  `chadmin "ALTER TABLE prices.price_ohlcv_$T REPLACE PARTITION $M FROM prices.coarse_0286_bak_$T"`.
+
 - **Go from fine to coarse, one table at a time:** `15m`, `1h`, `4h`, `1d`,
   `1w`, `1M`. The `1d→1w` (60 d) and `1d→1M` (400 d) MVs re-roll recent buckets
   from `1d`. Once `1d` is priced, those re-rolls carry its rate rather than a
   zero.
 
-**① [operator box, in `tmux`] Build, and set the range.**
+**① [fishuser-hero, in `tmux`] Build, set the range, and define `chadmin`.**
+Every step below runs in this one shell. `coarse-repair` writes as
+`prices_writer`. Every read goes over mTLS as `prices_admin`, the uncapped
+identity that already serves as the 0286 script's `--reader-cert`. Nothing here
+goes through the CH host's own shell.
 
 ```bash
+ssh fishuser-hero
 tmux new -s coarse0286
 
 cd ~/stellar-prices-api && git checkout develop && git pull --ff-only
 cargo build --release -p enrichment-worker --features aws-mtls --bin coarse-repair
+
+chadmin() { curl -sS --cacert ~/prices-mtls/ca.crt \
+  --cert ~/prices-mtls/prices-admin-production.crt \
+  --key ~/prices-mtls/prices-admin-production.key \
+  "https://ch.sorobanscan.rumblefish.dev/" --data-binary "$1"; }
+chadmin "SELECT currentUser() FORMAT TSV"   # must print prices_admin
 
 export CH_DOMAIN=ch.sorobanscan.rumblefish.dev
 export MTLS_CERT_PATH=$HOME/prices-mtls/prices_writer.crt
@@ -483,7 +510,7 @@ pivot_window() { case "$1" in price_ohlcv_1w) echo 604800 ;; price_ohlcv_1M) ech
 `--start-month 201501` below is the lowest month the tool accepts. The tool
 lists only months that hold enrichable zeros, so an empty month costs nothing.
 
-**② [operator box] Dry run, all six tables. It writes nothing.**
+**② [fishuser-hero, same `tmux`] Dry run, all six tables. It writes nothing.**
 
 ```bash
 for TBL in price_ohlcv_15m price_ohlcv_1h price_ohlcv_4h price_ohlcv_1d price_ohlcv_1w price_ohlcv_1M; do
@@ -503,16 +530,15 @@ already priced to explain it. Budget the run from the dry run's total: the rate
 measured under task 0276 was ~7 k rows/s, and the repair runbook's Appendix C
 explains why that is a floor. Time the first month and re-plan from that.
 
-**③ [CH host, via SSH] Baseline.** Keep the output. This script is also the
-after-check in ⑤.
+**③ [fishuser-hero, same `tmux`] Baseline, as `prices_admin`.** Keep the
+output. This function is also the after-check in ⑤.
 
 ```bash
-cat > /tmp/0286_coarse_zeros.sh <<'EOF'
-#!/bin/sh
 # Per coarse tier: every close_usd = 0 row OLDER than the coarse sweep's
 # two-month lookback, split by why it is zero. Read-only.
+coarse_zeros() {
 for TBL in price_ohlcv_15m price_ohlcv_1h price_ohlcv_4h price_ohlcv_1d price_ohlcv_1w price_ohlcv_1M; do
-clickhouse-client --format PrettyCompactNoEscapes -q "
+chadmin "
 WITH
   (SELECT any(asset_id) FROM prices.assets FINAL
     WHERE asset_code = 'XLM' AND issuer_address = '' AND contract_address = '') AS xlm,
@@ -541,20 +567,18 @@ SELECT
             OR (quote_asset_id = xlm  AND timestamp >= xlm_ref_from)
             OR (quote_asset_id = usdt AND timestamp >= usdt_ref_from))) AS reachable_left
 FROM prices.$TBL FINAL
-WHERE timestamp < toStartOfMonth(now() - INTERVAL 1 MONTH)"
+WHERE timestamp < toStartOfMonth(now() - INTERVAL 1 MONTH)
+FORMAT PrettyCompactNoEscapes"
 done
-EOF
+}
 
-scp -i ~/.ssh/sorban-prod_ed25519 /tmp/0286_coarse_zeros.sh deploy@168.119.73.161:/tmp/
-ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
-  'docker cp /tmp/0286_coarse_zeros.sh app-clickhouse-1:/tmp/ && docker exec app-clickhouse-1 sh /tmp/0286_coarse_zeros.sh' \
-  | tee /tmp/0286_coarse_zeros_before.txt
+coarse_zeros | tee /tmp/0286_coarse_zeros_before.txt
 ```
 
 The cutoff, `toStartOfMonth(now() - INTERVAL 1 MONTH)`, is the first instant
 the sweep covers. Everything below it belongs to this step.
 
-**④ [operator box, same `tmux`] The real run, one table per command.** Read
+**④ [fishuser-hero, same `tmux`] The real run, one table per command.** Read
 each summary before you start the next table.
 
 ```bash
@@ -576,8 +600,8 @@ either of these:
 - `enriched 0` on any month from 2021-03 on. Every such month holds
   USDC-quoted candles, so a zero there is a silent no-op.
 
-**⑤ [CH host, via SSH] After-check, per tier.** Re-run ③ and write the output
-to `/tmp/0286_coarse_zeros_after.txt`. Per table:
+**⑤ [fishuser-hero, same `tmux`] After-check, per tier.** Run
+`coarse_zeros | tee /tmp/0286_coarse_zeros_after.txt`. Per table:
 
 | Column             | Meaning                                                                                                   | Required after the run                                                               |
 | ------------------ | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
@@ -588,10 +612,11 @@ to `/tmp/0286_coarse_zeros_after.txt`. Per table:
 | `no_volume`        | `volume_quote = 0`, which no tier prices.                                                                 | Unchanged.                                                                           |
 | `zero_usd`         | The sum of the five above.                                                                                | Roughly the baseline minus the total the run's summary lines report as enriched.     |
 
-If `reachable_left` is not ~0, list where the rows sit. Swap in the table (run
-it in `clickhouse-client` on the CH host):
+If `reachable_left` is not ~0, list where the rows sit. Run this on
+fishuser-hero, same shell, as `prices_admin`, and swap in the table:
 
-```sql
+```bash
+chadmin "
 WITH
   (SELECT any(asset_id) FROM prices.assets FINAL
     WHERE asset_code = 'XLM' AND issuer_address = '' AND contract_address = '') AS xlm,
@@ -613,7 +638,8 @@ WHERE timestamp < toStartOfMonth(now() - INTERVAL 1 MONTH)
   AND (quote_asset_id = usdc
     OR (quote_asset_id = xlm  AND timestamp >= xlm_ref_from)
     OR (quote_asset_id = usdt AND timestamp >= usdt_ref_from))
-GROUP BY month, quote_asset_id ORDER BY candles DESC LIMIT 30;
+GROUP BY month, quote_asset_id ORDER BY candles DESC LIMIT 30
+FORMAT PrettyCompactNoEscapes"
 ```
 
 Two shapes are an explained residue:
