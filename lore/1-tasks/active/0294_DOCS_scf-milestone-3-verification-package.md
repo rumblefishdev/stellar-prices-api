@@ -156,7 +156,7 @@ issue with its task. Kept here so the package is not written from memory.
 |---|---|---|
 | Candles built from every fill, dust included, in the wrong intra-ledger order; live Aquarius ingestion dropped ~50 % of its trades | fix live since 2026-09-22 (phase 1), 09-19/20 measured at exactly zero loss; history re-ingest in progress from 2026-09-23 (stage A 16/99 months on 09-24) | [[0282]], [[0286]] |
 | `pool_registry` had not learned a pool since 2026-07-06; 42 pools missing | seeded 2026-09-18, live persistence deployed 2026-09-22, alarm live; the "first new pool" production check still open | [[0291]] |
-| Portal closes itself in an execution environment when Parameter Store throttles its cold start (account default 40 TPS); happened 2026-09-24 under a teammate's request burst | alarm caught it ([[0249]]); rule agreed, retry-at-cold-start task proposed | [[0249]], 0194 |
+| Portal closes itself in an execution environment when Parameter Store throttles its cold start (account default 40 TPS); happened 2026-09-24 under a teammate's request burst and again 2026-09-25 under a teammate's k6 run for 0311 (concurrency 200) | alarm caught it ([[0249]]); rule agreed, retry-at-cold-start task proposed | [[0249]], 0194 |
 | Oracle OOMs while the re-ingest re-emits the asset registry (reads without `FINAL`) | one 5-minute tick lost per ~1.5 h cycle until the backfill writes deltas | [[0226]], [[0140]] |
 | Load-test latency describes a box that is now also running the re-ingest | declared beside the 0293 figures | [[0293]], [[0047]] |
 - **The three gaps that had no owner now have tasks**: [[0295]] (AC 8,

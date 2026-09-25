@@ -2700,54 +2700,21 @@ export class ObservabilityStack extends cdk.Stack {
     );
 
     // -----------------------------------------------------------------
-    // Read-only viewer identity for the Stellar reviewer (Tranche 3 AC 8).
+    // No standing viewer identity for the Stellar reviewer (Tranche 3 AC 8).
     //
-    // An IAM *user*, not a cross-account role: there is no external principal
-    // to trust — none is known. A named substitution, like Decision A above.
-    //
-    // A hand-written read policy, not `CloudWatchReadOnlyAccess`: that managed
-    // policy also grants `logs:FilterLogEvents` / `logs:Get*` and `xray:Get*`
-    // on every log group and trace in the account — which is shared with the
-    // block explorer. The dashboard has no log widgets, so the viewer needs
-    // exactly the dashboard, metric and alarm read calls below and nothing
-    // that can read log contents (task 0125 deep review CR-01). These
-    // CloudWatch read actions do not support resource-level scoping.
-    //
-    // NO password is passed: `iam.User` creates a login profile only when one is
-    // supplied, and a password in the template is precisely what is being
-    // avoided. Creating the console login is an out-of-band operator step
-    // (`aws iam create-login-profile --password-reset-required`).
+    // Task 0125 created `prices-<env>-stellar-viewer` here — an IAM user with
+    // a scoped CloudWatch read policy and an out-of-band console login — as
+    // the substitute for the "read-only IAM role" the criterion names, since
+    // no external principal was known. Task 0295 removed it: access to this
+    // account is granted ON REQUEST, to a named person, with MFA enforced,
+    // and removed after the review — the same model the block explorer
+    // recorded for its D3 AC 3. A standing credential that nobody asked for,
+    // in an account that is otherwise SSO-only, is what AC 6 ("no wildcard
+    // IAM", least privilege) is graded against. The scoped read policy lives
+    // in `docs/runbooks/0295-dashboard-access-on-request.md`, ready to attach
+    // to the user created for that request. `verify-dashboard-synth.mjs`
+    // asserts this template creates no IAM user at all.
     // -----------------------------------------------------------------
-    const stellarViewer = new iam.User(this, 'StellarDashboardViewer', {
-      userName: `prices-${config.envName}-stellar-viewer`,
-    });
-    stellarViewer.attachInlinePolicy(
-      new iam.Policy(this, 'StellarDashboardViewerPolicy', {
-        policyName: `prices-${config.envName}-dashboard-read`,
-        statements: [
-          new iam.PolicyStatement({
-            sid: 'ReadDashboardsMetricsAndAlarms',
-            actions: [
-              'cloudwatch:GetDashboard',
-              'cloudwatch:ListDashboards',
-              'cloudwatch:GetMetricData',
-              'cloudwatch:GetMetricStatistics',
-              'cloudwatch:ListMetrics',
-              'cloudwatch:GetMetricWidgetImage',
-              'cloudwatch:DescribeAlarms',
-              'cloudwatch:DescribeAlarmHistory',
-              'cloudwatch:DescribeAlarmsForMetric',
-            ],
-            resources: ['*'],
-          }),
-        ],
-      }),
-    );
-
-    new cdk.CfnOutput(this, 'StellarViewerUserName', {
-      value: stellarViewer.userName,
-      description: `Read-only CloudWatch viewer IAM user for ${config.envName} (console login is created out of band)`,
-    });
 
     assertAlarmDescriptionsFitCloudWatch(this);
   }

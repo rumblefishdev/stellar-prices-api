@@ -13,6 +13,42 @@ links:
 history:
   - date: 2026-09-25
     status: active
+    who: claude
+    note: >
+      Console half walked by the operator on prices-production-viewer-krolikiewicz:
+      create 13:13:42, password reset 13:14:19 (no GetAccountPasswordPolicy
+      needed), passkey MFA 13:20:22, dashboard renders and log groups denied at
+      13:21:37 with mfaAuthenticated=true, removed 13:24:14. First attempt had
+      created the user in the operator's personal account (shell without an
+      exported AWS_PROFILE) — cleaned there, redone here. Runbook fixes in PR
+      #356: §2 shows the generated password and checks the account first, §4
+      gains the simulator check and names the console's AccessDenied noise, §5
+      tolerates a passkey MFA device. Left: access table in the package
+      (docs/0294 branch) and alarms on the review date.
+  - date: 2026-09-25
+    status: active
+    who: claude
+    note: >
+      Runbook walked on a throwaway name, 12:40:33 create → 12:41:16 delete.
+      simulate-principal-policy: the nine cloudwatch reads allowed only with
+      aws:MultiFactorAuthPresent=true; logs, xray, secretsmanager, lambda,
+      iam:ListUsers implicitDeny either way; self-service IAM actions allowed
+      on the user's own ARN, denied on another user's. Defect: §2 generated
+      the password inline and never displayed it — fixed in PR #356 (draft),
+      which also adds the simulator check to §4. Not walked: console sign-in
+      and MFA enrolment (needs a person with an authenticator).
+  - date: 2026-09-25
+    status: active
+    who: claude
+    note: >
+      Removal deployed: PR #355 merged (4ccaf532), Prices-production-Observability
+      UPDATE_COMPLETE 12:30:20 CEST from origin/develop — policy and user
+      deleted by CloudFormation; `aws iam list-users` returns nothing in the
+      account; get-user on the old name is NoSuchEntity. Login profile had
+      been deleted by hand at 11:57:03. Left: the runbook walk on a throwaway
+      name, the access table in the package, alarms on the review date.
+  - date: 2026-09-25
+    status: active
     who: stkrolikiewicz
     note: >
       Activated, and RE-SCOPED by the operator: no standing access. Access to
@@ -57,33 +93,57 @@ access does not. This task builds the access and records how a reviewer uses it.
 - The account is shared with soroban-block-explorer. Whatever is granted must be
   scoped to this project's dashboard and metrics, not the account.
 
-## Implementation
+## Implementation — re-scoped 2026-09-25: access on request, no standing identity
 
-- Decide the mechanism and record why: a **cross-account IAM role** (needs the
-  Stellar team's AWS account id and an external id — the letter of the AC), or
-  **CloudWatch dashboard sharing** (no AWS account needed on their side, but not
-  "an IAM role"). If sharing is chosen, declare it as a deviation in [[0294]].
-- Least privilege: `cloudwatch:GetDashboard` / `ListDashboards` / `GetMetricData`
-  / `DescribeAlarms` and nothing that lists the rest of the account. No wildcard
-  resource where a dashboard ARN will do — AC 6 is graded on the same package.
-- CDK, in the Observability stack, behind config so staging does not get it.
-- Verify as the reviewer would: assume the role (or open the shared link) from
-  outside the account and load the dashboard; confirm it cannot read anything
-  of the explorer's.
-- Write the access instructions for the evidence package's access table.
+- **Mechanism, decided by the operator:** no standing role or user. A reviewer
+  asks by name (first name, surname, e-mail, purpose and end date); the
+  operator creates an IAM user for that person with the scoped dashboard-read
+  policy, MFA enforced by an `aws:MultiFactorAuthPresent` condition, a
+  one-time password, and deletes the user after the review. Same model as the
+  explorer's D3 AC 3 (their task 0129, "available on request"). Declared in
+  [[0294]] as the substitution for the criterion's "read-only IAM role".
+- **Remove what 0125 left:** `prices-production-stellar-viewer` — the IAM user
+  in the Observability stack and its console login (created out of band on
+  2026-09-04, no MFA, in an account with no password policy). Login profile
+  deleted 2026-09-25 11:57 CEST; the user leaves the stack with this task.
+- **Keep the rule in code:** `verify-dashboard-synth.mjs` asserts the template
+  creates no `AWS::IAM::User`, `AccessKey` or `LoginProfile` — replacing its
+  earlier "exactly one viewer user" check.
+- **Runbook:** `docs/runbooks/0295-dashboard-access-on-request.md` — the
+  request fields, the create/hand-over/verify/remove commands, and the policy
+  (0125's nine CloudWatch read actions + the MFA condition + the self-service
+  statements a user needs to enrol a device).
+- **Evidence:** AC 8 in `milestone-3-evidence.md` states the dashboard, the
+  alarm state and "available on request, named reviewer, MFA"; deviations §4
+  declares the substitution.
 
 ## Acceptance Criteria
 
-- [ ] The mechanism is chosen and the reason recorded; a deviation is declared
-      in [[0294]] if it is not an IAM role
-- [ ] Access is defined in CDK and deployed to production
-- [ ] Verified from outside the account: the dashboard loads, nothing else does
-- [ ] No `resources: ['*']` added without a named reason (AC 6)
-- [ ] Access instructions written for the evidence package
+- [x] The mechanism is chosen and the reason recorded; the deviation is
+      declared in [[0294]] → on-request named user with MFA; history entry
+      2026-09-25; deviations §4 (PR #354)
+- [x] No standing identity in `infra/`: the viewer user and its policy are
+      removed from the Observability stack, and the synth verifier fails on any
+      IAM user, access key or login profile in the template
+- [x] The removal is deployed to production and `aws iam list-users` shows no
+      `prices-*` user
+- [x] The runbook was walked once end to end on a throwaway name (create →
+      MFA → dashboard renders → log groups denied → remove), with the dates in
+      this task
+      → walked twice on 2026-09-25. Headless, 12:40–12:41 on
+      `prices-production-viewer-throwaway` (§2 → IAM simulator → §5). Then by
+      the operator in a browser, `prices-production-viewer-krolikiewicz`:
+      create 13:13:42 → forced password change 13:14:19 → passkey MFA 13:20:22
+      → re-login → dashboard renders, `GetDashboard`/`ListDashboards`/
+      `DescribeAlarms` with `mfaAuthenticated=true` at 13:21:37, log groups
+      access denied (`logs:DescribeMetricFilters` AccessDenied) → §5 removed
+      13:24:14, `list-users` empty. Three runbook defects → PR #356.
+- [ ] Access instructions are in the evidence package's access table
 - [ ] On the review date every `prices-production-*` alarm is OK, or each
       exception is named with its cause
 
 ## Notes
 
-- Needs one input from outside the team: the Stellar team's AWS account id, or
-  their preference for a shared link. Ask early — it is the long pole.
+- ~~Needs one input from outside the team: the Stellar team's AWS account id.~~
+  No longer: nothing is built until a named person asks, and then the request
+  itself carries every input.
