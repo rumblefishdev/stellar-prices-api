@@ -2,7 +2,7 @@
 id: "0295"
 title: "Tranche 3 AC 8 asks for a read-only IAM role giving the Stellar team the CloudWatch dashboard — no such role exists in infra"
 type: FEATURE
-status: active
+status: done
 related_adr: []
 related_tasks: ["0294", "0249", "0214", "0223"]
 tags: [layer-infra, priority-high, effort-small, milestone-M3, observability, iam, scf]
@@ -11,6 +11,20 @@ links:
   - "../../../infra/src/lib/stacks/observability-stack.ts"
   - "../../../docs/prices-api-general-overview.md"
 history:
+  - date: 2026-09-25
+    status: done
+    who: claude
+    note: >
+      Closed. Mechanism: access on request per named person, IAM user with
+      the nine-action CloudWatch read policy under an MFA condition, removed
+      after the review. Shipped: login of the 0125 viewer deleted 11:57,
+      user removed from the stack (PR #355, Observability UPDATE_COMPLETE
+      12:30, account has no IAM user), synth verifier refuses any IAM
+      identity, runbook docs/runbooks/0295-dashboard-access-on-request.md
+      (PR #356 with four fixes from the walks). Walked headless and by the
+      operator in a browser the same day (password reset, passkey, dashboard
+      renders, log groups denied, removed 13:24). 5 of 6 criteria met; the
+      review-date alarm check is 0294's submission-day checklist.
   - date: 2026-09-25
     status: active
     who: claude
@@ -143,6 +157,52 @@ access does not. This task builds the access and records how a reviewer uses it.
       branch (PR #354, `8e7b9a8f`)
 - [ ] On the review date every `prices-production-*` alarm is OK, or each
       exception is named with its cause
+      → handed to [[0294]]: its submission-day checklist re-runs every cited
+      figure, the alarm table included. On 2026-09-25 13:30 all 65 were OK.
+
+## Design Decisions
+
+### From Plan
+
+1. **No standing identity, access per named person on request.** The operator's
+   call on 2026-09-25, mirroring explorer task 0129. A cross-account role has
+   nobody to trust; a standing user nobody asked for is a liability in a shared,
+   otherwise SSO-only account.
+2. **MFA as a policy condition, not a hope.** `aws:MultiFactorAuthPresent` on
+   the read statement, so a leaked password alone opens only the MFA setup page.
+3. **The policy lives in the runbook, deliberately outside CDK**, and the synth
+   verifier refuses any IAM identity in the template — no deploy can recreate
+   a standing user.
+
+### Emerged
+
+4. **An IAM user, not a role, per request.** The reviewer has no AWS principal
+   to assume a role from; a user with a console login is the only thing a
+   person without an AWS account can use.
+5. **Self-service IAM statements scoped to `${aws:username}`** — the console
+   needs them to enrol MFA and change the password; the simulator showed them
+   allowed on the user's own ARN and denied on another's.
+6. **Passkeys count as MFA.** The operator enrolled a passkey (`u2f/…`), not a
+   TOTP; §5 of the runbook removes either.
+
+## Issues Encountered
+
+- **The runbook's first version never showed the password it generated**
+  (`--password "$(openssl rand …)"` inline) — found on the first walk, fixed in
+  PR #356 with `$PW` printed once.
+- **The operator's first create landed in their personal account**: the shell
+  had `AWS_PROFILE=soroban-adminAWS_PROFILE=soroban-admin` (no `export`), so
+  the CLI used default credentials and the sign-in at this account's URL failed
+  with "Authentication failed". Cleaned there, redone here; §2 now starts with
+  `export` + `sts get-caller-identity`.
+- **`delete-virtual-mfa-device` fails on a passkey** — the removal loop now
+  deletes the virtual device only for `…:mfa/…` serials.
+- **CloudTrail is noisy for this user**: the console calls
+  `ListAlarmMuteRules` per alarm widget, `DescribeInsightRules`, `oam:ListSinks`
+  and cost/health widgets, all `AccessDenied`. The dashboard renders regardless;
+  the runbook says not to widen the policy for it.
+- `gh pr edit` fails on the Projects-classic deprecation; the PR was edited
+  through the REST API.
 
 ## Notes
 
