@@ -661,6 +661,20 @@ yet); EventBridge changes one alarm description. Induction after the deploy,
 0222-style: disable `prices-production-asset-discovery` for three cadences,
 see `-no-invocations` go ALARM, enable, see OK — recorded here when done.
 
+### Deployed and inducted — 2026-09-25
+
+| step | evidence (CEST) |
+|---|---|
+| #349 merged, deployed | `Prices-production-Observability` 09:19 and `Prices-production-EventBridge` 09:20, both from `origin/develop`, diff read first: Observability `+` the two asset-discovery alarms + dashboard row, and as the stowaway [[0100]]'s `coverage-sweep-unclassified` alarm + row; EventBridge one description change on `-errors`. Both new alarms `INSUFFICIENT_DATA → OK` at 09:20:25 |
+| rule disabled | `prices-production-asset-discovery` `DISABLED` 09:22:15, after the 09:17 run |
+| three empty cadences | 10:17, 11:17, 12:17 — no invocation |
+| ALARM | `-no-invocations` `OK → ALARM` **12:18:25**, 2 h 56 min after the disable: three hourly windows, each `BREACHING` on missing data, exactly the 3-of-3 the alarm asks for |
+| rule enabled | 12:19:22, `ENABLED`, `rate(1 hour)`; a `rate` rule restarts from the enable time, so the next run is expected ~13:19 |
+| back to OK | _pending — recorded on the first non-empty window_ |
+
+`-duration-near-timeout` and `-errors` stayed OK throughout (nothing ran, so
+nothing was slow or failed — `notBreaching` on missing data for both, by design).
+
 ## Acceptance Criteria
 
 - [x] A recorded decision on whether the ledger scan is still needed
