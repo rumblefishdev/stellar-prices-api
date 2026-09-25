@@ -34,11 +34,13 @@ before creating anything.
 
 ```bash
 export VIEWER=prices-production-viewer-<surname>          # lowercase, ASCII
+PW=$(openssl rand -base64 24)                              # shown once at the end; never in a log, a ticket or a task file
 aws iam create-user --user-name "$VIEWER" \
   --tags Key=Project,Value=stellar-prices-api Key=Purpose,Value=tranche3-review Key=Requester,Value="<name surname>"
 aws iam put-user-policy --user-name "$VIEWER" --policy-name prices-production-dashboard-read \
   --policy-document file://dashboard-read.json
-aws iam create-login-profile --user-name "$VIEWER" --password "$(openssl rand -base64 24)" --password-reset-required
+aws iam create-login-profile --user-name "$VIEWER" --password "$PW" --password-reset-required
+echo "$PW"; unset PW    # copy it into the second channel of §3, then let it go
 ```
 
 `dashboard-read.json` — the scoped policy task 0125 wrote (deep-review CR-01:
@@ -108,6 +110,23 @@ Then the dashboard URL:
 `https://eu-central-1.console.aws.amazon.com/cloudwatch/home?region=eu-central-1#dashboards:name=prices-production-overview`
 
 ## 4. Verify as the reviewer would
+
+Before the hand-over, the operator can check the policy headlessly — the IAM
+simulator honours the MFA condition and the `${aws:username}` variable:
+
+```bash
+ARN=arn:aws:iam::750702271865:user/$VIEWER
+for mfa in true false; do
+  aws iam simulate-principal-policy --policy-source-arn $ARN \
+    --action-names cloudwatch:GetDashboard cloudwatch:DescribeAlarms logs:GetLogEvents secretsmanager:GetSecretValue \
+    --context-entries "ContextKeyName=aws:MultiFactorAuthPresent,ContextKeyValues=$mfa,ContextKeyType=boolean" \
+    --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+done
+```
+
+Expected: the two `cloudwatch:` actions `allowed` only with `true`; `logs:` and
+`secretsmanager:` `implicitDeny` both times. (Walked 2026-09-25 on a throwaway
+name — task 0295.)
 
 From a browser that is not signed in to anything else: sign in, enrol MFA, open
 the dashboard URL — every widget renders. Then confirm the boundary:
