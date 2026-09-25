@@ -169,25 +169,33 @@ const PROBE_TIMEOUT_MS = 10_000;
 /**
  * How long the page waits on the key reveal.
  *
- * Longer than {@link PROBE_TIMEOUT_MS}, because this call is not a probe: a cold
- * Lambda resolves credentials, reads an SSM parameter and then walks a
- * paginated listing plus a read. The api-handler's own Lambda timeout is 15s
- * and API Gateway cuts everything off at 29s, so 20s is inside the window
- * where an answer — including a `502` — is still possible.
+ * Longer than {@link PROBE_TIMEOUT_MS}, because this call is not a probe: it
+ * can be the first portal request in an execution environment, so it may load
+ * the portal's sources first (up to 4s, `LOAD_BUDGET` in
+ * `portal/sources.rs`), and then it walks a paginated listing plus a read
+ * under the reconciliation's 10s (`RECONCILE_DEADLINE`) — 14s at worst. The
+ * api-handler's own Lambda timeout is 15s and API Gateway cuts everything off
+ * at 29s, so 20s is past any answer the backend can still give — including a
+ * `502` from a killed invocation — and inside the gateway's cap.
  */
 const KEY_TIMEOUT_MS = 20_000;
 
 /**
  * How long the page waits on the usage read.
  *
- * Between the other two, because the call is: the backend's own wall-clock
- * deadline on the lookup is 10s (`USAGE_DEADLINE` in `portal/usage/mod.rs`),
- * after which it answers a `503` that names the condition. Waiting only
- * {@link PROBE_TIMEOUT_MS} would tie with that deadline and the page would
- * report its own timeout instead of the backend's more useful answer; 15s
- * leaves the answer time to arrive while staying inside the gateway's 29s cap.
+ * The same as {@link KEY_TIMEOUT_MS}, for the same arithmetic. The backend's
+ * own wall-clock deadline on the lookup is 10s (`USAGE_DEADLINE` in
+ * `portal/usage/mod.rs`), after which it answers a `503` that names the
+ * condition — but `/usage` can be the first portal request in an execution
+ * environment, and then the sources load first (up to 4s, `LOAD_BUDGET`), so
+ * that `503` can arrive at 14s (task 0311; pinned by
+ * `the_load_budget_fits_in_front_of_every_route`). It was 15s, which left the
+ * page one second over a 14s answer before network and gateway latency — a tie
+ * in which the page reports its own timeout instead of the backend's more
+ * useful answer. 20s clears the 15s Lambda timeout, past which nothing can
+ * answer, and stays inside the gateway's 29s cap.
  */
-const USAGE_TIMEOUT_MS = 15_000;
+const USAGE_TIMEOUT_MS = 20_000;
 
 /** Whether a rejection from `fetch` is this timeout firing. See the call site. */
 const isTimeout = (error: unknown): boolean =>
