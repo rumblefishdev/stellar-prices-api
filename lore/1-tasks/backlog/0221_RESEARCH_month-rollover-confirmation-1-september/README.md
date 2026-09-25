@@ -29,6 +29,14 @@ history:
       09-01 (0 of 1.46M records). The instant within 09-01 is unobservable
       with current logging. ADR 0010 correction #2 restated. Left open for
       a one-request probe at the 2026-10-01 boundary.
+  - date: "2026-09-25"
+    status: backlog
+    who: okarcz
+    note: >
+      Decided: pin the instant with the 2026-10-01 one-request probe before
+      the M3 evidence is submitted, instead of closing on the day-level
+      result. Added as an acceptance criterion.
+
 ---
 
 # Confirm the MONTH rollover instant on production
@@ -73,7 +81,26 @@ plan.
       1st), and resets at midnight in any timezone east of UTC are ruled out.
       The time within the day is unobserved (no gateway access log; the
       handler doesn't log the calling key). See the measurement below.
-      Closes with the 2026-10-01 probe, or by accepting the day-level result.
+      Closes with the 2026-10-01 probe (next criterion). Decided 2026-09-25:
+      the day-level result isn't enough; the instant is pinned before the M3
+      evidence ([[0294]]) is submitted.
+- [ ] **The 2026-10-01 probe is run and recorded** (decided 2026-09-25, before
+      the M3 evidence goes out):
+  - [ ] **[local machine] 2026-09-30:** choose a key the operator owns on a
+        `MONTH` plan, with September usage (balance below its limit). Record its
+        id, plan and `get-usage` balance for 09-30.
+  - [ ] **[local machine] 2026-10-01 00:05 UTC (02:05 CEST):** send exactly
+        **one** keyed request, and nothing else with that key that day:
+        `curl -si -H "x-api-key: $KEY" https://prices-api.sorobanscan.rumblefish.dev/v1/assets/native/price`.
+        Record the UTC time and the status (must be 200).
+  - [ ] **[local machine] 2026-10-02:**
+        `aws apigateway get-usage --profile soroban-readonly --region eu-central-1 --usage-plan-id <plan> --key-id <key> --start-date 2026-09-30 --end-date 2026-10-01`.
+        `remaining = limit − 1` on 10-01 ==> AWS reset before 00:05 UTC, and
+        our rule matches within 5 minutes. `remaining = 09-30 balance − 1` ==>
+        the reset is later; bracket it with one more request at a later hour
+        on the next boundary.
+  - [ ] Result written here and in ADR 0010 correction #2, with the date and
+        the raw `get-usage` output.
 - [x] ADR 0010 correction #2 updated: either closed with the measured value, or
       restated with what is now known. Restated 2026-09-25, and the stale
       "`DAY`-period proxy" line (abandoned 2026-08-24) is replaced.
