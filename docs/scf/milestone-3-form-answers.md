@@ -26,8 +26,10 @@ linked once, not paraphrased.
 
 ## Field 4 — Support Needed
 
-_To fill._ The two asks that depend on the Stellar side: the Discord guild
-integration (task 0179) and the read-only dashboard access mechanism (task 0295) — stated as questions with the options.
+_To fill._ The one ask that depends on the Stellar side: the Discord guild
+integration (task 0179) — stated as a question with the options. Dashboard
+access is not an ask: it is granted on request to a named reviewer with MFA
+(deviations §4), so this field names the address to send the request to.
 
 ## Pre-submission checklist
 
