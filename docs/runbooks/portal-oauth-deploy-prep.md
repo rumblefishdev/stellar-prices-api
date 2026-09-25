@@ -247,14 +247,17 @@ Both must print `prices/production/portal-discord-oauth`.
 
 `PORTAL_ENABLED` is still `false` at this point and the routes still answer an
 empty `404`. That is correct: **the api-handler does not read this secret while
-the portal is closed** (see `AppConfig::load_portal_oauth`), so creating it does
-not change any behaviour, and forgetting to create it before opening the portal
-closes the portal again at the _next_ cold start — `/config` answers
-`enabled: false` and the api-handler logs `portal closed at cold start` naming
-`PORTAL_OAUTH_SECRET_NAME`, which also pages as
-`prices-production-api-handler-portal-closed` (task 0249) — rather than
-silently serving a broken sign-in (`AppConfig::load_portal_or_close`). `/v1`
-is unaffected either way.
+the portal is closed** (see `packages/prices-api/src/portal/sources.rs`), so
+creating it does not change any behaviour. Forgetting to create it before
+opening the portal fails the portal's load on the first portal request per
+execution environment (the `/config` probe triggers it): that `/config` answers
+`enabled: false` and the api-handler logs `portal sources failed to load`
+naming `PORTAL_OAUTH_SECRET_NAME`, which pages as
+`prices-production-api-handler-portal-load-failed` (tasks 0249, 0311) — rather
+than silently serving a broken sign-in. The next request retries, so creating
+the secret fixes it without a redeploy. A successful load is kept for the
+execution environment's life, so changing the secret's VALUE later still needs
+a recycle, as before. `/v1` is unaffected either way.
 
 ## 4. Verify locally before opening production
 
@@ -429,21 +432,23 @@ openapi:verify-routes` asserts exactly this against the synthesized templates,
 so a drift fails CI rather than a deploy — but the _existence_ of the deployed
 parameter is not something CI can see.
 
-**If the parameter is missing when `PORTAL_ENABLED` becomes `true`, the
-api-handler closes the portal at cold start** — `/config` answers
-`enabled: false` and the log carries `portal closed at cold start` naming
-`PORTAL_FREE_PLAN_PARAM` — and `/v1` is unaffected. It used to fail init
-instead, which took `/v1` down with it (one router serves every route group,
-ADR 0008); task 0194's PR review is where that changed, and the reasoning is on
-`AppConfig::load_portal_or_close`. The shape is still "found only at the moment
-of opening", as with the OAuth secret in §3, and the alternative it avoids is
-still a portal with a key button that answers `503` — a closed portal answers
-before any button renders. What it costs: the closure pages as
-`prices-production-api-handler-portal-closed` (task 0249), but only when a
-cold start happens, so the `/config` probe after the deploy stays the check
-that runs _now_, not an optional confirmation; the alarm is what catches a
-closure in a LATER cold start (a throttled Parameter Store read in a
-scale-out).
+**If the parameter is missing when `PORTAL_ENABLED` becomes `true`, every load
+of the portal's sources fails** — each `/config` answers `enabled: false` and
+the log carries `portal sources failed to load` naming `PORTAL_FREE_PLAN_PARAM`
+— and `/v1` is unaffected: since task 0311 the sources load on the first
+portal request per execution environment, never at cold start. It used to fail
+init, which took `/v1` down with it (one router serves every route group, ADR
+0008), and then (task 0194) to close the portal in that environment for its
+life. Now a failed load costs that one request, and the next retries, so
+publishing the parameter fixes it without a redeploy or a recycle. The shape is
+still "found only at the moment of opening", as with the OAuth secret in §3,
+and the alternative it avoids is still a portal with a key button that answers
+`503` — `/config` says the portal is not open before any button renders. Each
+failed load pages as `prices-production-api-handler-portal-load-failed` (tasks
+0249, 0311), so the alarm keeps firing while the parameter is missing; the
+`/config` probe after the deploy stays the check that runs _now_ (it triggers
+the load itself), not an optional confirmation, and the alarm is what catches a
+LATER failed load (a throttled Parameter Store read under portal traffic).
 
 While the portal is closed the handler reads neither, so nothing here changes
 any behaviour until the flag moves.

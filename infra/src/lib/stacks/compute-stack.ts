@@ -203,8 +203,9 @@ export class ComputeStack extends cdk.Stack {
    * here would close a Compute -> Gateway -> Compute cycle — the same shape of
    * problem `apiBaseUrl` has. And it must not be hard-coded, because AWS
    * generates the id and it changes if the plan is ever replaced. So the
-   * handler reads it at cold start through the Parameters and Secrets extension
-   * already attached below, exactly as it reads secret VALUES by NAME.
+   * handler reads it on the first portal request per execution environment
+   * (task 0311) through the Parameters and Secrets extension already attached
+   * below, exactly as it reads secret VALUES by NAME.
    *
    * Two siblings since task 0311, set beside it on the Function env and for
    * the same reason: `PORTAL_API_ID_PARAM`, the NAME of the parameter holding
@@ -497,12 +498,12 @@ export class ComputeStack extends cdk.Stack {
     //
     // The grant is on the by-name wildcard ARN, so it does not require the
     // secret to exist at synth time. That WAS harmless because a closed portal
-    // never asked; with `PORTAL_ENABLED` true (task 0194) the read happens at
-    // every cold start, and a missing or misnamed secret closes the portal in
-    // that execution environment with a `portal closed at cold start` error
-    // log — not an init panic, because the Lambda also serves `/v1`. See the
-    // deploy-gate note on `PORTAL_ENABLED` below and
-    // `AppConfig::load_portal_or_close`.
+    // never asked; with `PORTAL_ENABLED` true (task 0194) the read happens on
+    // the first portal request per execution environment (task 0311), and a
+    // missing or misnamed secret answers that request as unavailable with a
+    // `portal sources failed to load` error log; the next request retries,
+    // and nothing stays closed. See the deploy-gate note on `PORTAL_ENABLED`
+    // below and `packages/prices-api/src/portal/sources.rs`.
     this.apiHandlerRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'ReadPortalOauthSecret',
@@ -764,14 +765,15 @@ export class ComputeStack extends cdk.Stack {
       }),
     );
 
-    // The usage-plan id, read at cold start.
+    // The usage-plan id, read on the first portal request per execution
+    // environment (task 0311).
     //
     // **Currently redundant, and kept deliberately.** The baseline role already
     // carries `ReadSsmNamespaces`, which grants `ssm:GetParameter` across the
     // whole `/prices/${envName}/*` namespace — so this statement adds no access
     // today. It names the one parameter this feature depends on, so that
     // narrowing that baseline (which task 0194 may well want to) does not
-    // silently break key issuance at the next cold start. Stated rather than
+    // silently break key issuance at the next portal load. Stated rather than
     // left implicit, because an IAM statement that looks like the reason
     // something works, while something broader is the actual reason, is worse
     // than no statement at all.
@@ -785,14 +787,14 @@ export class ComputeStack extends cdk.Stack {
       }),
     );
 
-    // The REST API id, read at cold start (task 0311) — `plan_of` keeps only
+    // The REST API id, read with the plan id (task 0311) — `plan_of` keeps only
     // the usage plans whose apiStages name this API + stage. Currently
     // redundant and kept deliberately, for exactly the reason stated on
     // `PortalReadFreePlanIdParameter` above: the baseline's
     // `ReadSsmNamespaces` already covers `/prices/${envName}/*`, and this
     // statement names the parameter the portal depends on, stated rather than
-    // implied, so a narrowed baseline cannot silently close the portal at the
-    // next cold start.
+    // implied, so a narrowed baseline cannot silently fail every portal load
+    // from the next one on.
     this.apiHandlerRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'PortalReadApiGatewayIdParameter',
@@ -804,7 +806,7 @@ export class ComputeStack extends cdk.Stack {
     );
 
     // The eligibility gate's two knobs (task 0189), read at runtime — per
-    // issuance, not at cold start alone. The same currently-redundant-and-kept
+    // issuance, not at the portal's load alone. The same currently-redundant-and-kept
     // reasoning as `PortalReadFreePlanIdParameter` above: the baseline's
     // `ReadSsmNamespaces` already covers `/prices/${envName}/*`, and this
     // statement names the two parameters the gate depends on so a narrowed
@@ -844,8 +846,8 @@ export class ComputeStack extends cdk.Stack {
     //
     // No `loggingFormat`: the function logs in Lambda's Text format, so each
     // JSON line the tracing subscriber writes reaches CloudWatch untouched,
-    // and ObservabilityStack's portal-closed metric filter (task 0249)
-    // matches it on `$.fields.message`. AWS documents that JSON format does
+    // and ObservabilityStack's portal-load-failed metric filter (tasks 0249,
+    // 0311) matches it on `$.fields.message`. AWS documents that JSON format does
     // not re-encode lines that are already JSON, so switching would likely
     // still match — but that is a claim, not a measurement: after ANY change
     // to how this function's logs reach CloudWatch, re-prove the filter with
@@ -882,12 +884,15 @@ export class ComputeStack extends cdk.Stack {
         // opening creates has to be unwound to close it again.
         //
         // ⚠️ **This value is a deploy gate, not just a flag.** With it true the
-        // handler resolves the portal's configuration AT COLD START, from FIVE
-        // reads, and the portal opens only if every one of them succeeds:
+        // handler resolves the portal's configuration on the first portal
+        // request per execution environment (the `/config` probe triggers
+        // it; task 0311), from FIVE concurrent reads — `load_portal_sources`
+        // in `config.rs`, called by `portal/sources.rs` — and the portal
+        // answers as open only once every one of them has succeeded:
         //
-        // 1. `load_portal_oauth` (`config.rs`) on the Discord OAuth secret
+        // 1. `portal_oauth_from_env` (`config.rs`) on the Discord OAuth secret
         //    named by `PORTAL_OAUTH_SECRET_NAME` — operator-created, runbook §2
-        // 2. `load_portal_keys` (`config.rs`) on the SSM parameter named by
+        // 2. `portal_keys_from_env` (`config.rs`) on the SSM parameter named by
         //    `PORTAL_FREE_PLAN_PARAM`, i.e.
         //    `/prices/{env}/pricing-api-free-plan-id`. This one is NOT
         //    operator-seeded and is easy to miss: it is published by
@@ -896,32 +901,33 @@ export class ComputeStack extends cdk.Stack {
         //    plan is replaced or renamed, this stack can be live with the flag
         //    true while the parameter does not yet exist. Deploy order matters
         //    here
-        // 3. + 4. the eligibility probe (`portal/eligibility.rs`) on
+        // 3. + 4. `portal_eligibility_from_env`'s probe (`portal/eligibility.rs`) on
         //    `/prices/{env}/discord-guild-id` and
         //    `/prices/{env}/min-account-age-minutes` — operator-seeded,
         //    runbook §2a
-        // 5. `load_portal_keys` again (task 0311), on the SSM parameter named
+        // 5. `portal_keys_from_env` again (task 0311), on the SSM parameter named
         //    by `PORTAL_API_ID_PARAM`, i.e. `/prices/{env}/api-gateway-id`.
         //    The same deploy-order caveat as read 2: `ApiGatewayStack`
         //    publishes it and deploys AFTER this stack. It has existed since
         //    the gateway's first deploy, so this bites only a fresh
-        //    environment — where read 2 already closes the portal until
+        //    environment — where read 2 already fails the load until
         //    `ApiGatewayStack` has deployed once, so this read adds no new
         //    failure there.
         //
-        // A failed read CLOSES the portal in that execution environment and
-        // logs `portal closed at cold start` on the api-handler; it does NOT
-        // panic init, because this Lambda also serves `/v1` and an init panic
-        // is a `502` to the next data-API caller (task 0194's PR review,
-        // finding 1; the reasoning is on `AppConfig::load_portal_or_close`).
-        // So deploying this ahead of the operator steps ships a portal whose
-        // `/config` says `enabled: false`, not a data-API outage — and a
-        // closure pages as `prices-${env}-api-handler-portal-closed`
-        // (ObservabilityStack, task 0249), but only once a cold start
-        // happens, so the runbook's `/config` probe after the deploy is
-        // still the check that runs at deploy time. Runbook
-        // `portal-oauth-deploy-prep.md` §2, §2a and §5 are the steps; task
-        // 0194's audit is what verifies they were run.
+        // A failed read answers THAT request as unavailable (`/config`
+        // `enabled: false`, `503` on the portal's other routes) and logs
+        // `portal sources failed to load`, naming the variable, on the
+        // api-handler; the next portal request retries, so nothing stays
+        // closed and no recycle is needed. It never touches init: `/v1` cold
+        // starts read none of these (task 0311). So deploying this ahead of
+        // the operator steps ships a portal whose `/config` answers
+        // `enabled: false` on each call until the missing source exists, not
+        // a data-API outage — and each failed load pages as
+        // `prices-${env}-api-handler-portal-load-failed` (ObservabilityStack,
+        // tasks 0249, 0311). The runbook's `/config` probe after the deploy
+        // remains the deploy-time check, and it now itself triggers the
+        // load. Runbook `portal-oauth-deploy-prep.md` §2, §2a and §5 are the
+        // steps; task 0194's audit is what verifies they were run.
         PORTAL_ENABLED: 'true',
         // The NAME of the portal's Discord OAuth bundle, never its value
         // (task 0186; ADR 0007's precedent, audited by Tranche 3 AC 6). The
@@ -932,15 +938,16 @@ export class ComputeStack extends cdk.Stack {
         // Set unconditionally, which is what kept opening the portal to the
         // one-word diff above rather than a two-line change made under time
         // pressure. With the flag now true the read is no longer conditional:
-        // this name resolving to a missing secret is read 1 of the five fatal
-        // cold-start reads listed on `PORTAL_ENABLED`.
+        // this name resolving to a missing secret fails read 1 of the five
+        // portal-load reads listed on `PORTAL_ENABLED`.
         PORTAL_OAUTH_SECRET_NAME: this.portalOauthSecretName,
         // The NAME of the SSM parameter holding the `pricing-api-free` usage
         // plan id (task 0187) — see `portalFreePlanParameterName` for why it is
         // a name, why it is not a cross-stack reference, and why it is not
-        // hard-coded. Read through the same extension layer, at cold start —
-        // with `PORTAL_ENABLED` now true the control-plane client IS built in
-        // every process, and this read is read 2 of the five listed on
+        // hard-coded. Read through the same extension layer, on the first
+        // portal request per execution environment — with `PORTAL_ENABLED`
+        // now true the control-plane client is built in every process that
+        // serves the portal, and this read is read 2 of the five listed on
         // `PORTAL_ENABLED`, the one whose parameter `ApiGatewayStack` publishes
         // after this stack deploys.
         //

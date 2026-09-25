@@ -911,7 +911,7 @@ export class ApiGatewayStack extends cdk.Stack {
     });
     usagePlan.addApiKey(apiKey);
 
-    // Also read by the portal backend at cold start (task 0311,
+    // Also read by the portal backend when its sources load (task 0311,
     // `PORTAL_API_ID_PARAM`): `plan_of` keeps only the plans whose apiStages
     // name this API + stage. Through SSM for the same cycle reason as the plan
     // id below.

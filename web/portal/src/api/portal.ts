@@ -159,9 +159,10 @@ function failureMessage(
  * portal is open…" with no end, which is exactly the spinner that never resolves
  * the failure branch exists to avoid.
  *
- * Ten seconds is well past a cold Lambda behind this route (the handler reads a
- * cached SSM parameter and returns a single boolean) and well short of a
- * visitor's patience.
+ * Ten seconds is well past a cold Lambda behind this route and well short of a
+ * visitor's patience. On the first call in an execution environment `/config`
+ * loads the portal's sources, bounded at 4 s by the backend; after that it
+ * returns a cached answer and a single boolean.
  */
 const PROBE_TIMEOUT_MS = 10_000;
 

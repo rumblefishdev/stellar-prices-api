@@ -66,7 +66,7 @@ export function createApp({ config }: CreateAppOptions): void {
   // stack: alarms key on function names, queue names and log-group names
   // as plain strings, so it stays deployable on its own. One of its
   // resources still needs another stack's resource to EXIST: the
-  // portal-closed metric filter (task 0249) is created on the api-handler
+  // portal-load-failed metric filter (tasks 0249, 0311) is created on the api-handler
   // log group ComputeStack owns, and `fromLogGroupName` emits no
   // dependency for it. `addDependency` orders Compute first under
   // `deploy --all` without adding a reference; the `--exclusively` target

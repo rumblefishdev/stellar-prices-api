@@ -247,7 +247,8 @@ environment (`infra/envs/` holds only `production.json` and `cicd.json`).
    new plans and the removed `PortalAttachKeyToFreePlan` policy; in the
    Compute diff, the role policy gains exactly the three `/usageplans`
    statements (and the `api-gateway-id` read).
-2. `/config` answers `enabled: true` (the portal did not close at cold start).
+2. `/config` answers `enabled: true` (the portal's sources loaded; that call
+   triggers the load).
 3. Move a test key free → Basic → Pro → free with the procedure above. After
    each step:
    - `get-usage-plans --key-id` shows exactly the target plan;
