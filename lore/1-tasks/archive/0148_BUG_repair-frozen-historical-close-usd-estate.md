@@ -2,9 +2,9 @@
 id: "0148"
 title: "Repair the historical close_usd estate the argMax fix cannot reach"
 type: BUG
-status: backlog
+status: completed
 related_adr: []
-related_tasks: ["0144", "0146", "0145", "0114", "0149", "0136", "0088"]
+related_tasks: ["0144", "0146", "0145", "0114", "0149", "0136", "0088", "0286"]
 tags:
   ["priority-medium", "effort-medium", "clickhouse", "data-correctness", "enrichment", "milestone-M2"]
 milestone: 2
@@ -18,6 +18,15 @@ history:
       Spawned from [[0144]] future work (phase 4). The [[0146]] fix corrects
       coarse rows from the moment it lands; it does not retroactively repair
       rows already zeroed and aged out of the MV re-aggregation windows.
+  - date: 2026-09-25
+    status: completed
+    who: okarcz
+    note: >
+      Closed into [[0286]]. Its phase 3 re-ingests all history, and the
+      runbook's new §7b-2 (PR #353) re-prices every coarse tier over the
+      full range with coarse-repair after the 1m drain. The per-tier check
+      is 0286's "Coarse history re-priced" criterion. No separate repair
+      is run.
 ---
 
 # Repair the frozen historical `close_usd` estate
@@ -71,3 +80,17 @@ row still carries the repaired value after a full MV refresh cycle.
       assumed from [[0149]]'s window argument.
 - [ ] Un-repairable spans explicitly written off with the reason recorded.
 - [ ] No collision with the [[0136]] / [[0088]] pre-roll schedules.
+
+## Completion record (2026-09-25)
+
+Closed without its own run: superseded by [[0286]]. Phase 3 rewrites the
+whole `price_ohlcv_1m` history, and runbook step §7b-2
+(`docs/runbooks/0286-reingest-history.md`, PR #353) then re-prices all six
+coarse tiers from 2015-01 to two months back with `coarse-repair` in plain
+mode. The acceptance check lives in 0286's "Coarse history re-priced"
+criterion (per tier, before and after).
+
+Found 2026-09-24: without that step the 0286 runbook left coarse history
+unpriced. Enrichment prices `1m` only
+(`infra/src/lib/stacks/eventbridge-stack.ts:483`), and the coarse sweep looks
+back two months (`:627`).

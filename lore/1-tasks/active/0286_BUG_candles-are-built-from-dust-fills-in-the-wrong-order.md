@@ -4,7 +4,7 @@ title: "Candles take every fill at equal weight, including stroop-dust, in the w
 type: BUG
 status: active
 related_adr: ["0287"]
-related_tasks: ["0278", "0276", "0266", "0228", "0146", "0142", "0137", "0200", "0088", "0282", "0285", "0300", "0304"]
+related_tasks: ["0278", "0276", "0266", "0228", "0146", "0142", "0137", "0200", "0088", "0282", "0285", "0300", "0304", "0148"]
 tags: [layer-backend, priority-high, effort-large, ohlcv, ingest, enrichment, clickhouse, data-correctness, api-contract]
 links:
   - "../../2-adrs/0287_candle-prices-come-from-price-forming-fills-and-a-windowed-close.md"
@@ -180,6 +180,15 @@ history:
       snapshot, 2/2 minute-aligned, two order-book fills repriced from the
       resting offer as phase 2 intends). Its snapshot released. Stage A
       (201512 → 202401) started ~16:10 local; 201512 in flight.
+  - date: "2026-09-25"
+    status: active
+    who: okarcz
+    note: >
+      Runbook §7b did not re-price coarse history (enrichment is 1m-only,
+      the coarse sweep looks back 2 months), so every coarse row older than
+      that would keep close_usd = 0 after phase 3. Added step §7b-2
+      (full-range coarse-repair after the 1m drain, PR #353) and a per-tier
+      criterion. 0148 closed into it.
 ---
 
 # Candles are built from dust fills in the wrong order
@@ -902,6 +911,23 @@ Phase 3:
 - [ ] The whole history re-enriched (`close_usd > 0` wherever a reference
       exists) and `post_run_0228_it` green on the repaired reference; 0228's
       reset-mode campaign recorded as superseded, not run.
+- [ ] Coarse history re-priced (runbook §7b-2, PR #353; [[0148]] closed into
+      this criterion 2026-09-25). Enrichment prices `1m` only and the coarse
+      sweep looks back two months, so without this step every coarse row older
+      than that keeps `close_usd = 0`. Checks:
+  - [ ] The 1m drain finished before the coarse re-price started
+        (`EnrichmentFrontierMonthsPending` = 0).
+  - [ ] Dry run recorded for all six coarse tables. Every table lists months
+        up to END (two months back), and none reports 0 months.
+  - [ ] `coarse-repair` run in plain mode (no `--reset-*`) on `price_ohlcv_15m`,
+        `_1h`, `_4h`, `_1d`, `_1w`, `_1M`, `--start-month 201501
+        --end-month <END>`. Each table's summary is recorded, with no
+        200000-capped month and no `enriched 0` month from 2021-03 on.
+  - [ ] Per tier, for rows older than two months, before and after recorded:
+        `reachable_left` ~0 (any remainder explained through the drill-down);
+        `before_reference`, `no_price` and `no_volume` unchanged; `other_quote`
+        not higher than the baseline.
+  - [ ] `post_run_0228_it` green after this step.
 - [ ] No USDT-quoted `price_ohlcv_1m` row carries the $1 peg after the
       re-enrichment ([[0212]]'s query: `peg_written = 0`, `pivot_written > 0`,
       measured on 1m and on one coarse tier) — the re-ingest replaces the
