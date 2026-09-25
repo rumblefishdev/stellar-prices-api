@@ -6,6 +6,12 @@
   "pricingApiFreePlanRateLimit": 1,
   "pricingApiFreePlanBurstLimit": 5,
   "pricingApiFreePlanMonthlyQuota": 100000,
+  "pricingApiPaidPlans": {
+    "basic": { "rateLimit": 3, "burstLimit": 15, "monthlyQuota": 1000000 },
+    "analyst": { "rateLimit": 5, "burstLimit": 25, "monthlyQuota": 5000000 },
+    "lite": { "rateLimit": 10, "burstLimit": 50, "monthlyQuota": 20000000 },
+    "pro": { "rateLimit": 25, "burstLimit": 125, "monthlyQuota": 50000000 }
+  },
   "apiGatewayCacheEnabled": true,
   "coverageSweepEnabled": true,
   "apiBaseUrl": "https://prices-api.sorobanscan.rumblefish.dev",

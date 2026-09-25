@@ -114,14 +114,50 @@ pub fn revocation_instant(revoked: &[KeyRecord]) -> Option<u64> {
         .max()
 }
 
+/// The revoked records, newest revocation first (task 0311) — the order a
+/// rework walks them in to find the plan the new key keeps.
+///
+/// Newest first by `lastUpdatedDate`, the same "latest revocation governs"
+/// rule as [`revocation_instant`]. An undated record sorts after every dated
+/// one (it is skipped by [`revocation_instant`] for the same reason); ties —
+/// including all-undated — go to the smaller id first, so every invocation
+/// walks the same order. Empty in, empty out, and the caller falls back to
+/// the free plan.
+///
+/// All of them rather than only the latest, because the records under one
+/// name can disagree about plans: a double-submit duplicate, or an
+/// undeletable record from an earlier period, can be the latest and sit on
+/// free (or on no plan) beside the record an operator moved to Basic. Which
+/// one wins is the caller's rule — see `super::resolve_target_plan`.
+pub fn revoked_newest_first(revoked: &[KeyRecord]) -> Vec<&KeyRecord> {
+    let mut ordered: Vec<&KeyRecord> = revoked.iter().collect();
+    ordered.sort_by(|a, b| {
+        // `Option`'s order puts `None` first; reversed, the undated go last.
+        b.last_updated_at
+            .cmp(&a.last_updated_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    ordered
+}
+
 /// The key the owner currently holds, among `records`: the earliest **enabled**
-/// key if there is one, otherwise the earliest key of any state (task 0191).
+/// key if there is one (task 0191), otherwise the most recently **revoked**
+/// one (task 0311).
 ///
 /// Enabled keys win over disabled ones whatever their dates, because a
 /// disabled key is a revocation record and an enabled one is a credential: if
 /// both exist (a console re-enable, a duplicate), the credential is what the
-/// visitor is holding and what a revoke must act on. Among keys of one state
-/// the rule is [`choose_winner`]'s, so both sides of a double-submit agree.
+/// visitor is holding and what a revoke must act on. Among enabled keys the
+/// rule is [`choose_winner`]'s, so both sides of a double-submit agree.
+///
+/// Among revoked keys the newest revocation is the key the owner last held,
+/// not the earliest-created record. Two revoked records sit under one name
+/// when a previous revocation outlived the issue that replaced it (a listing
+/// that lagged the create, or an undeletable record) and the replacement was
+/// then revoked too. "Earliest" picked the older record, and the usage route
+/// reported ITS counter — empty for the period — instead of the replacement's.
+/// [`revoked_newest_first`] breaks ties by id, so the choice is still the same
+/// on every invocation.
 ///
 /// The reveal, the revoke and the usage route all select through this, so the
 /// key whose value is handed out, the key a revoke disables and the key whose
@@ -129,7 +165,7 @@ pub fn revocation_instant(revoked: &[KeyRecord]) -> Option<u64> {
 pub fn current_key(records: &[KeyRecord]) -> Option<&KeyRecord> {
     let enabled: Vec<&KeyRecord> = records.iter().filter(|r| r.enabled).collect();
     if enabled.is_empty() {
-        choose_winner(records)
+        revoked_newest_first(records).into_iter().next()
     } else {
         enabled.into_iter().min_by_key(|r| rank(r))
     }
@@ -195,10 +231,10 @@ mod tests {
     }
 
     /// A credential beats a revocation record whatever their dates; among
-    /// credentials the earliest wins; with no credential the earliest record
-    /// is what the re-issue cap is read from.
+    /// credentials the earliest wins; with no credential the most recently
+    /// revoked record is the key the owner last held (task 0311).
     #[test]
-    fn the_current_key_is_the_earliest_enabled_one_or_else_the_earliest_record() {
+    fn the_current_key_is_the_earliest_enabled_one_or_else_the_latest_revoked() {
         let records = vec![
             disabled("revoked-early", "n", Some(10)),
             record("live-late", "n", Some(200)),
@@ -206,11 +242,31 @@ mod tests {
         ];
         assert_eq!(current_key(&records).unwrap().id, "live-early");
 
+        // A rework's replacement revoked beside the record it replaced: the
+        // revocation date decides, not the creation date.
         let only_disabled = vec![
-            disabled("later", "n", Some(20)),
-            disabled("earlier", "n", Some(10)),
+            KeyRecord {
+                last_updated_at: Some(500),
+                ..disabled("created-later-revoked-later", "n", Some(20))
+            },
+            KeyRecord {
+                last_updated_at: Some(400),
+                ..disabled("created-earlier-revoked-earlier", "n", Some(10))
+            },
         ];
-        assert_eq!(current_key(&only_disabled).unwrap().id, "earlier");
+        assert_eq!(
+            current_key(&only_disabled).unwrap().id,
+            "created-later-revoked-later"
+        );
+
+        let undated_beside_dated = vec![
+            disabled("undated", "n", Some(5)),
+            KeyRecord {
+                last_updated_at: Some(400),
+                ..disabled("dated", "n", Some(10))
+            },
+        ];
+        assert_eq!(current_key(&undated_beside_dated).unwrap().id, "dated");
         assert!(current_key(&[]).is_none());
     }
 
@@ -245,6 +301,37 @@ mod tests {
         // Nothing datable at all is the one undatable case.
         assert_eq!(revocation_instant(&[undated]), None);
         assert_eq!(revocation_instant(&[]), None);
+    }
+
+    /// Newest revocation first; an undated record last; a tie goes to the
+    /// smaller id first; nothing → nothing (task 0311).
+    #[test]
+    fn revoked_records_are_walked_newest_first() {
+        let at = |id: &str, when: Option<u64>| KeyRecord {
+            last_updated_at: when,
+            ..disabled(id, "n", Some(1))
+        };
+        let ids = |records: &[KeyRecord]| -> Vec<String> {
+            revoked_newest_first(records)
+                .into_iter()
+                .map(|r| r.id.clone())
+                .collect()
+        };
+        let older = at("a", Some(10));
+        let newer = at("b", Some(20));
+        let undated = at("c", None);
+        let tie_high = at("z", Some(20));
+        assert_eq!(
+            ids(&[older.clone(), undated.clone(), newer.clone()]),
+            ["b", "a", "c"]
+        );
+        assert_eq!(
+            ids(&[tie_high.clone(), older.clone(), newer.clone()]),
+            ["b", "z", "a"]
+        );
+        assert_eq!(ids(&[newer, tie_high]), ["b", "z"]);
+        assert_eq!(ids(&[undated.clone(), at("0", None)]), ["0", "c"]);
+        assert!(revoked_newest_first(&[]).is_empty());
     }
 
     #[test]

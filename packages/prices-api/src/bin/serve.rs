@@ -50,11 +50,14 @@ async fn main() {
 
     // Self-service key issuance (task 0187). This build has no Parameters and
     // Secrets extension client, so the plan id comes from `PORTAL_FREE_PLAN_ID`
-    // — a local-only variable that is compiled out of the Lambda. The AWS
-    // credentials are whatever the ambient profile provides, and they are real:
+    // and the REST API id from `PORTAL_API_ID` (task 0311) — local-only
+    // variables that are compiled out of the Lambda — and the stage from
+    // `PORTAL_API_STAGE`, which the Lambda reads too. The AWS credentials are
+    // whatever the ambient profile provides, and they are real:
     //
     //     PORTAL_ENABLED=true PORTAL_OAUTH_SECRET_FILE=.portal-oauth.json \
-    //       PORTAL_FREE_PLAN_ID=<plan id> AWS_PROFILE=<profile> \
+    //       PORTAL_FREE_PLAN_ID=<plan id> PORTAL_API_ID=<rest api id> \
+    //       PORTAL_API_STAGE=production AWS_PROFILE=<profile> \
     //       cargo run -p prices-api --features local-server --bin serve
     //
     // **Every key this creates and deletes is a production key** — there is one

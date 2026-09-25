@@ -41,11 +41,20 @@ async fn send(req: Request<Body>) -> StatusCode {
 }
 
 async fn send_with(config: &AppConfig, req: Request<Body>) -> StatusCode {
-    app(config, AppState::without_ch())
-        .oneshot(req)
-        .await
-        .unwrap()
-        .status()
+    // An open portal with nothing supplied would load its sources from the
+    // process environment on the first portal request (task 0311), making
+    // these tests depend on the developer's shell. The gate is what is under
+    // test here, so an open portal gets sources already loaded, and empty.
+    let router = if config.portal_enabled {
+        prices_api::app_with_portal(
+            config,
+            AppState::without_ch(),
+            prices_api::portal::sources::PortalSources::ready(Default::default()),
+        )
+    } else {
+        app(config, AppState::without_ch())
+    };
+    router.oneshot(req).await.unwrap().status()
 }
 
 #[tokio::test]

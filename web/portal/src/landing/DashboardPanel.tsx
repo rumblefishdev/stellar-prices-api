@@ -484,6 +484,9 @@ function RawFigure({ testId, value }: { testId: string; value: number }) {
   );
 }
 
+/** One header pill: a label and a tone. */
+export type Pill = { label: string; tone: 'ok' | 'muted' | 'bad' };
+
 /**
  * The dashboard's card shell — a titled header band over a body.
  *
@@ -498,7 +501,11 @@ export function DashboardCard({
   sx,
 }: {
   title: string;
-  status?: { label: string; tone: 'ok' | 'muted' | 'bad' };
+  /**
+   * One pill, or several side by side — the Rate Limit card shows "Active"
+   * and the key's plan (task 0311).
+   */
+  status?: Pill | readonly Pill[];
   /**
    * Omitted for the deliberately empty tile — the `Dashboard - no key` frame
    * gives Monthly Usage and Rate Limit a header band over an empty body while
@@ -546,7 +553,10 @@ export function DashboardCard({
         <Typography variant="h4" component="h2" color="text.primary">
           {title}
         </Typography>
-        {status && <StatusPill {...status} />}
+        {status &&
+          (Array.isArray(status) ? status : [status as Pill]).map((pill) => (
+            <StatusPill key={pill.label} {...pill} />
+          ))}
       </Stack>
       <Stack
         spacing={2.5}

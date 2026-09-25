@@ -112,6 +112,10 @@ pub const DEFAULT_API_BASE: &str = "https://discord.com/api";
 /// either constant, or adding a fourth call, needs this sum redone and
 /// `timeoutSeconds` in `infra/envs/production.json` checked against it —
 /// `issue::tests::budget_arithmetic_fits_the_lambda` does the sum.
+///
+/// Since task 0311 the exchange's 4 s also pays for a lazy load of the
+/// portal's sources in front of it: the callback passes [`exchange_code`] what
+/// the load left of this timeout, so the sum above is unchanged.
 pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Endpoints, separated from the credentials so tests can point them at a
@@ -269,16 +273,23 @@ impl TokenResponse {
 /// endpoint documents it. `client_secret_post` rather than HTTP Basic is
 /// Discord's own example; both are RFC 6749-legal and the difference is not
 /// security-relevant over TLS.
+///
+/// `timeout` replaces the client's [`REQUEST_TIMEOUT`] for this one call: the
+/// callback gives the exchange what a lazy load of the portal's sources left
+/// of it (task 0311), so the two together never exceed the one term the
+/// callback's budget has for them.
 pub async fn exchange_code(
     client: &reqwest::Client,
     endpoints: &Endpoints,
     secret: &super::secret::OauthSecret,
     code: &str,
     code_verifier: &str,
+    timeout: Duration,
 ) -> Result<AccessToken, DiscordError> {
     let url = endpoints.token_url();
     let response = client
         .post(&url)
+        .timeout(timeout)
         .form(&[
             ("grant_type", "authorization_code"),
             ("code", code),
@@ -379,7 +390,7 @@ const NOT_MEMBER_CODES: [u64; 2] = [10_007, 10_004];
 /// which is what validates the operator's seed. Those two were allowed to
 /// disagree, and the disagreement had a cost: `guild_id` checked only for
 /// emptiness, so `stellar_test` — the value the task's own parameter table
-/// named for the build period — passed the cold-start probe, deployed green,
+/// named for the build period — passed the load-time probe, deployed green,
 /// and then answered "we could not verify your Discord membership" to every
 /// visitor forever, because the check ran here instead and produced
 /// [`MemberLookup::Unknown`] once per request. One predicate, so the seed

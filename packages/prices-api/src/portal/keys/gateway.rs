@@ -1,9 +1,10 @@
-//! The API Gateway **control plane**, wrapped down to seven calls (task 0187,
-//! task 0188's `GetUsage`, task 0191's `UpdateApiKey`).
+//! The API Gateway **control plane**, wrapped down to eight calls (task 0187,
+//! task 0188's `GetUsage`, task 0191's `UpdateApiKey`, task 0311's
+//! `GetUsagePlans`).
 //!
 //! Not the data plane. These are `GetApiKeys`, `CreateApiKey`,
 //! `CreateUsagePlanKey`, `GetApiKey`, `DeleteApiKey`, `UpdateApiKey`
-//! (disable only) and `GetUsage` — the API
+//! (disable only), `GetUsage` and `GetUsagePlans` (filtered by key) — the API
 //! the console drives — and they are the reason this slice needs no database:
 //! **API Gateway is the source of truth for whether a key exists** (task 0158's
 //! own argument, restated in 0187's context), and for how much it has been
@@ -57,6 +58,9 @@ use std::time::Duration;
 
 use aws_sdk_apigateway::Client;
 use aws_sdk_apigateway::config::timeout::TimeoutConfig;
+use aws_sdk_apigateway::error::ProvideErrorMetadata;
+use aws_sdk_apigateway::types::UsagePlan;
+use serde::Serialize;
 
 use super::naming::KeyRecord;
 
@@ -118,18 +122,44 @@ impl std::fmt::Debug for KeyValue {
     }
 }
 
-/// What [`Gateway::attach_to_free_plan`] observed.
+/// What [`Gateway::attach_to_plan`] observed.
 ///
-/// Two outcomes rather than `()` because the caller has to act on the second
-/// one: a key that vanished between the listing and the attach is the same race
-/// [`Gateway::value_of`] reports with `None`, and the answer to it is to run the
-/// reconciliation again, not to tell the caller the control plane is broken.
+/// Three outcomes rather than `()` because the caller has to act on the last
+/// two: a key that vanished between the listing and the attach is the same
+/// race [`Gateway::value_of`] reports with `None`, and the answer to it is to
+/// run the reconciliation again, not to tell the caller the control plane is
+/// broken; and a key already on a plan is on SOME plan, which the caller has
+/// to find out rather than assume (task 0311).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Attachment {
-    /// The key is on the usage plan — this call put it there, or it already was.
+    /// The key is on the usage plan it was given: this call put it there, or
+    /// AWS answered `409 ConflictException` — by its own wording the key
+    /// "already exists in the usage plan", i.e. THIS plan. A `409` names the
+    /// plan, so it is not read back: `GetUsagePlans` can lag the attach, and
+    /// waiting for it to catch up turned a double-submit into `?issue=failed`
+    /// for a key that works (PR #351 review).
     OnPlan,
+    /// The key is on ANOTHER usage plan for this API stage: AWS refused the
+    /// attach with `400 BadRequestException` "… cannot reference multiple
+    /// Usage Plans with the same API Stage", since a key belongs to one plan
+    /// per stage (task 0311). The refusal does not say which plan, so the
+    /// caller asks [`Gateway::plan_of`]. A key an operator, or a concurrent
+    /// issue, put on a plan a moment ago is a working key, not a failure.
+    AlreadyOnAPlan,
     /// The key no longer exists, so there was nothing to attach.
     KeyGone,
+}
+
+/// Whether a `400 BadRequestException` from `CreateUsagePlanKey` is the
+/// "already on another plan for this stage" refusal (task 0311), rather than
+/// any other malformed request — which stays an error.
+///
+/// Matched on the message, because AWS gives this case no error type of its
+/// own. The phrase is AWS's ("API Key … cannot reference multiple Usage Plans
+/// with the same API Stage: <apiId>:<stage>"); matched case-insensitively and
+/// on its distinctive tail only, so a reworded prefix still lands here.
+fn is_same_stage_refusal(message: Option<&str>) -> bool {
+    message.is_some_and(|m| m.to_ascii_lowercase().contains("same api stage"))
 }
 
 /// What [`Gateway::disable`] observed (task 0191).
@@ -149,11 +179,14 @@ pub enum Disable {
 /// One key's consumption over a queried period, as AWS reports it.
 ///
 /// Derived from `GetUsage`'s daily `[used, remaining]` pairs rather than read
-/// off a single field: the response carries no `limit` of its own, so the limit
-/// is reconstructed as `used + remaining` — the same arithmetic task 0157's
-/// close verified against the live plan (`[121, 99879]` against a 100 000
-/// quota). Kept here instead of in the handler so the shape of the AWS response
-/// stays a concern of this module.
+/// off a single field. The response carries no `limit` of its own; since task
+/// 0311 the limit the dashboard states is the plan's own quota
+/// ([`PlanInfo::quota_limit`], from `GetUsagePlans`), and [`Self::limit`] —
+/// `used + remaining`, the same arithmetic task 0157's close verified against
+/// the live plan (`[121, 99879]` against a 100 000 quota) — survives only as a
+/// cross-check the usage route logs a warning on when the two disagree. Kept
+/// here instead of in the handler so the shape of the AWS response stays a
+/// concern of this module.
 ///
 /// That reconstruction is sound only while `used` and `remaining` describe the
 /// same AWS quota period — which the queried range does not guarantee, since
@@ -173,7 +206,9 @@ pub struct KeyUsage {
 }
 
 impl KeyUsage {
-    /// The plan's quota, reconstructed. See the type docs.
+    /// The plan's quota, reconstructed as `used + remaining` — a cross-check
+    /// against [`PlanInfo::quota_limit`], never the figure rendered. See the
+    /// type docs.
     pub fn limit(&self) -> u64 {
         self.used.saturating_add(self.remaining)
     }
@@ -202,11 +237,17 @@ pub enum GatewayError {
     TooManyPages,
     #[error(
         "API Gateway says usage plan `{plan_id}` does not exist; the key was created but could \
-         not be attached to a plan, so it will not work against /v1/. Check the SSM parameter \
-         named by PORTAL_FREE_PLAN_PARAM (or PORTAL_FREE_PLAN_ID on a local run) against the \
-         plan ApiGatewayStack publishes"
+         not be attached to it, so it will not work against /v1/. The free plan comes from the \
+         SSM parameter named by PORTAL_FREE_PLAN_PARAM (or PORTAL_FREE_PLAN_ID on a local run) \
+         — check it against the plan ApiGatewayStack publishes; a paid or custom plan is the \
+         previous key's plan as GetUsagePlans reported it, so check that plan still exists"
     )]
     PlanNotFound { plan_id: String },
+    #[error(
+        "API Gateway returned more than {MAX_PAGES} pages of usage plans for one key; refusing \
+         to pick a plan from a partial list"
+    )]
+    TooManyPlanPages,
     #[error("API Gateway `{operation}` answered without the `{field}` field")]
     Incomplete {
         operation: &'static str,
@@ -214,23 +255,169 @@ pub enum GatewayError {
     },
 }
 
-/// The five calls, plus the usage plan they attach to.
+/// A plan's tier, as the dashboard names it (task 0311).
+///
+/// Parsed from the plan's NAME, because the name is the one contract CDK and
+/// this code share: `pricing-api-<tier>-<stage>` for the five CDK plans
+/// (`api-gateway-stack.ts`). Anything else on our stage — the loadtest plan, a
+/// hand-made Enterprise plan — is [`Tier::Custom`]. The dashboard labels every
+/// one of those `Custom`; the plan's own name still travels in `plan.name` on
+/// `/api/usage`, for a support conversation, but is not rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tier {
+    Free,
+    Basic,
+    Analyst,
+    Lite,
+    Pro,
+    Custom,
+}
+
+impl Tier {
+    /// The five CDK tiers, and the name segment each is published under.
+    const NAMED: [(Tier, &'static str); 5] = [
+        (Tier::Free, "free"),
+        (Tier::Basic, "basic"),
+        (Tier::Analyst, "analyst"),
+        (Tier::Lite, "lite"),
+        (Tier::Pro, "pro"),
+    ];
+
+    /// The tier a plan named `name` is, on stage `stage`.
+    ///
+    /// **Exact** match against `pricing-api-<tier>-<stage>`, not a prefix or a
+    /// pattern: the right prefix with the wrong stage (`pricing-api-pro-staging`
+    /// seen from `production`) is somebody else's plan, and an unknown tier
+    /// (`pricing-api-gold-production`) is one nobody told this code about —
+    /// both are [`Tier::Custom`], stated with their name, rather than a guess.
+    pub fn from_plan_name(name: &str, stage: &str) -> Tier {
+        Self::NAMED
+            .iter()
+            .find(|(_, segment)| name == format!("pricing-api-{segment}-{stage}"))
+            .map(|(tier, _)| *tier)
+            .unwrap_or(Tier::Custom)
+    }
+}
+
+/// The usage plan a key is on, for our API stage, as `GetUsagePlans` reports
+/// it (task 0311).
+///
+/// Every figure is optional because every figure is optional in AWS: a plan
+/// can carry no throttle and no quota at all (the "unlimited" state the
+/// dashboard must state, not render as zeros).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanInfo {
+    pub id: String,
+    pub name: String,
+    pub tier: Tier,
+    /// Sustained requests/second per key, `throttle.rateLimit`.
+    pub rate_limit: Option<f64>,
+    /// Token-bucket capacity, `throttle.burstLimit`.
+    pub burst_limit: Option<i32>,
+    /// Requests per quota period, `quota.limit`.
+    pub quota_limit: Option<u64>,
+    /// `quota.period` as AWS spells it: `DAY`, `WEEK`, `MONTH` — or whatever a
+    /// newer service answers, carried verbatim rather than guessed at.
+    pub quota_period: Option<String>,
+    /// `quota.offset`. Reported for diagnostics ONLY: it is "the number of
+    /// requests subtracted from the given limit in the initial time period"
+    /// (the SDK's own doc), a request count — never a shift of the period's
+    /// start day, and nothing here reads it as one.
+    pub quota_offset: Option<i32>,
+}
+
+impl PlanInfo {
+    /// Read one SDK plan. `None` for a plan with no id — it cannot be read or
+    /// attached to, so it cannot be anybody's plan in any useful sense.
+    fn from_sdk(plan: &UsagePlan, stage: &str) -> Option<Self> {
+        let id = plan.id()?.to_string();
+        let name = plan.name().unwrap_or_default().to_string();
+        let tier = Tier::from_plan_name(&name, stage);
+        let quota = plan.quota();
+        Some(Self {
+            id,
+            name,
+            tier,
+            rate_limit: plan.throttle().map(|t| t.rate_limit()),
+            burst_limit: plan.throttle().map(|t| t.burst_limit()),
+            quota_limit: quota.and_then(|q| u64::try_from(q.limit()).ok()),
+            // `.as_str()` rather than matching the enum: `Unknown` is
+            // deprecated as a pattern, and a period this SDK does not know is
+            // exactly the one to carry verbatim.
+            quota_period: quota
+                .and_then(|q| q.period())
+                .map(|p| p.as_str().to_string()),
+            quota_offset: quota.map(|q| q.offset()),
+        })
+    }
+}
+
+/// The plan, among `plans`, that is on OUR API stage — `(api_id, stage)` in
+/// its `apiStages` (task 0311).
+///
+/// `GetUsagePlans?keyId=` answers every plan holding the key across every API
+/// in the account; the loadtest plan and a partner plan share it. A plan on
+/// another API, or on no stage at all, says nothing about what our gateway
+/// enforces for this key and is ignored.
+///
+/// AWS allows a key on one plan per stage, so more than one match cannot
+/// happen. If it does anyway it is logged as an error and the LOWEST id is
+/// picked — deterministic, so every reader agrees, and never a panic in a
+/// handler that also serves `/v1`.
+fn select_plan(plans: &[UsagePlan], api_id: &str, stage: &str) -> Option<PlanInfo> {
+    let mut matching: Vec<PlanInfo> = plans
+        .iter()
+        .filter(|plan| {
+            plan.api_stages()
+                .iter()
+                .any(|s| s.api_id() == Some(api_id) && s.stage() == Some(stage))
+        })
+        .filter_map(|plan| {
+            let info = PlanInfo::from_sdk(plan, stage);
+            if info.is_none() {
+                tracing::warn!("GetUsagePlans listed a plan with no id; skipped");
+            }
+            info
+        })
+        .collect();
+    matching.sort_by(|a, b| a.id.cmp(&b.id));
+    if matching.len() > 1 {
+        tracing::error!(
+            plans = ?matching.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            "a key is on more than one usage plan for this API stage, which AWS should not \
+             allow; using the lowest id"
+        );
+    }
+    matching.into_iter().next()
+}
+
+/// The eight calls, plus the free usage plan and the API stage they are
+/// scoped to.
 #[derive(Clone)]
 pub struct Gateway {
     client: Client,
-    /// The `pricing-api-free` usage plan id, read from SSM at cold start —
-    /// never hard-coded and never a cross-stack reference. See
-    /// [`crate::AppConfig::load_portal_keys`].
+    /// The `pricing-api-free` usage plan id, read from SSM when the portal
+    /// sources load (`crate::portal::sources`) — never hard-coded and never a
+    /// cross-stack reference. See `crate::config::portal_keys_from_env`. The target of a first issue,
+    /// and of a rework that finds no previous plan (task 0311).
     free_plan_id: String,
+    /// Our REST API id (task 0311), read from SSM when the portal sources load, like the plan
+    /// id — [`Self::plan_of`] keeps only plans on `(api_id, stage)`.
+    api_id: String,
+    /// Our stage name (task 0311) — `envName`, passed as `PORTAL_API_STAGE`.
+    stage: String,
 }
 
-/// Prints the plan id and nothing else. The plan id is not a secret (it is in
-/// an SSM parameter any operator can read) and it is the one field worth seeing
-/// in a diagnostic.
+/// Prints the plan id, the API id and the stage, and nothing else. None of
+/// them is a secret (the ids are in SSM parameters any operator can read) and
+/// they are the fields worth seeing in a diagnostic.
 impl std::fmt::Debug for Gateway {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Gateway")
             .field("free_plan_id", &self.free_plan_id)
+            .field("api_id", &self.api_id)
+            .field("stage", &self.stage)
             .finish_non_exhaustive()
     }
 }
@@ -239,11 +426,12 @@ impl Gateway {
     /// Build a client from the ambient AWS configuration — in the Lambda, the
     /// execution role's credentials from the environment.
     ///
-    /// Only ever called when the portal is open — which, since task 0194
-    /// flipped `PORTAL_ENABLED`, is every production cold start. With the flag
-    /// off (tests, or a reverted deploy) this resolves no credentials and opens
-    /// no connections. See [`crate::AppConfig::load_portal_keys`].
-    pub async fn from_ambient_config(free_plan_id: String) -> Self {
+    /// Only ever called when the portal is open — in the Lambda, when the
+    /// portal sources load on the first portal request per execution
+    /// environment (task 0311). With the flag off (tests, or a reverted
+    /// deploy) this resolves no credentials and opens no connections. See
+    /// `crate::config::portal_keys_from_env`.
+    pub async fn from_ambient_config(free_plan_id: String, api_id: String, stage: String) -> Self {
         let shared =
             aws_config::load_defaults(aws_sdk_apigateway::config::BehaviorVersion::latest()).await;
 
@@ -264,7 +452,7 @@ impl Gateway {
             if let Err(error) = provider.provide_credentials().await {
                 tracing::warn!(
                     error = %error,
-                    "could not resolve AWS credentials at cold start; every control-plane \
+                    "could not resolve AWS credentials while loading the portal sources; every control-plane \
                      call will retry the resolution"
                 );
             }
@@ -276,6 +464,8 @@ impl Gateway {
         Self {
             client: Client::from_conf(config),
             free_plan_id,
+            api_id,
+            stage,
         }
     }
 
@@ -292,7 +482,12 @@ impl Gateway {
     /// handed the execution role's SigV4 signature on requests that create and
     /// delete production API keys.
     #[cfg(not(feature = "lambda"))]
-    pub fn against(endpoint_url: &str, free_plan_id: String) -> Self {
+    pub fn against(
+        endpoint_url: &str,
+        free_plan_id: String,
+        api_id: String,
+        stage: String,
+    ) -> Self {
         let config = aws_sdk_apigateway::config::Builder::new()
             .behavior_version(aws_sdk_apigateway::config::BehaviorVersion::latest())
             .region(aws_sdk_apigateway::config::Region::new("eu-central-1"))
@@ -309,12 +504,74 @@ impl Gateway {
         Self {
             client: Client::from_conf(config),
             free_plan_id,
+            api_id,
+            stage,
         }
     }
 
-    /// The usage plan new keys are attached to.
+    /// The usage plan a first issue attaches to — and the fallback when a
+    /// rework finds no previous plan on our stage (task 0311).
     pub fn free_plan_id(&self) -> &str {
         &self.free_plan_id
+    }
+
+    /// The usage plan `key_id` is on for OUR API stage, or `None` if it is on
+    /// none (task 0311).
+    ///
+    /// `GetUsagePlans` filtered by `keyId`, paged to exhaustion like
+    /// [`Self::list_named`] and for the same reason: picking from page one
+    /// could miss the one plan that matters. Past [`MAX_PAGES`] it errors
+    /// ([`GatewayError::TooManyPlanPages`]) rather than truncating. The pages
+    /// are then narrowed to our `(api_id, stage)` by [`select_plan`].
+    ///
+    /// A throttle is [`GatewayError::Throttled`], like `GetUsage`'s, so the
+    /// usage route's stale-serve branch covers this call too. A `404` is
+    /// `Ok(None)`: the only thing it can mean with a `keyId` filter is that
+    /// the key is not there, and the attach that follows on the issue path
+    /// disambiguates a vanished key through [`Self::exists`].
+    pub async fn plan_of(&self, key_id: &str) -> Result<Option<PlanInfo>, GatewayError> {
+        let mut plans: Vec<UsagePlan> = Vec::new();
+        let mut position: Option<String> = None;
+
+        for _ in 0..MAX_PAGES {
+            let mut request = self
+                .client
+                .get_usage_plans()
+                .key_id(key_id)
+                .limit(PAGE_LIMIT);
+            if let Some(position) = position.as_ref() {
+                request = request.position(position);
+            }
+
+            let page = match request.send().await {
+                Ok(page) => page,
+                Err(e) => {
+                    let message = sdk_message(&e);
+                    let service_error = e.into_service_error();
+                    if service_error.is_too_many_requests_exception() {
+                        return Err(GatewayError::Throttled {
+                            operation: "GetUsagePlans",
+                        });
+                    }
+                    if service_error.is_not_found_exception() {
+                        return Ok(None);
+                    }
+                    return Err(GatewayError::Call {
+                        operation: "GetUsagePlans",
+                        message,
+                    });
+                }
+            };
+
+            plans.extend(page.items().iter().cloned());
+
+            match page.position() {
+                Some(next) if !next.is_empty() => position = Some(next.to_string()),
+                _ => return Ok(select_plan(&plans, &self.api_id, &self.stage)),
+            }
+        }
+
+        Err(GatewayError::TooManyPlanPages)
     }
 
     /// Every key whose name starts with `prefix`, across **all** pages.
@@ -520,18 +777,24 @@ impl Gateway {
         }
     }
 
-    /// Attach a key to the free usage plan, which is what makes it work against
-    /// `/v1/`. A key that exists but is on no plan authenticates and is then
-    /// refused by the plan check — the confusing half-state this call closes.
+    /// Attach a key to usage plan `plan_id`, which is what makes it work
+    /// against `/v1/`. A key that exists but is on no plan authenticates and is
+    /// then refused by the plan check — the confusing half-state this call
+    /// closes.
+    ///
+    /// Which plan is the caller's decision (task 0311): the free plan for a
+    /// first issue, the previous key's plan for a rework — see
+    /// `super::resolve_target_plan`.
     ///
     /// **Idempotent**, and that is what lets the caller run it on every key it
     /// is about to hand out rather than only on keys it just created. API
     /// Gateway answers `409 ConflictException` when the key is already on the
-    /// plan; that is the desired state, so it is a success. Without this the
-    /// caller would need to *know* whether a key is attached, and there is no
-    /// cheap way to know: `GetApiKey` does not report usage-plan membership, and
-    /// asking `GetUsagePlanKeys` would be an extra call and an extra IAM grant
-    /// to learn what this call can simply assert.
+    /// plan — [`Attachment::OnPlan`], as for a fresh attach — and
+    /// `400 BadRequestException` ("cannot reference multiple Usage Plans with
+    /// the same API Stage") when it is already on ANOTHER plan for the same
+    /// stage — [`Attachment::AlreadyOnAPlan`], and the caller asks
+    /// [`Self::plan_of`] which plan that is (task 0311). Any other `400` is
+    /// still an error.
     ///
     /// A `404` is **ambiguous** and is resolved before it is acted on. API
     /// Gateway answers `NotFoundException` both when the key is gone and when
@@ -542,11 +805,15 @@ impl Gateway {
     /// make a hand-deleted key a dead end again); the second is a deployment
     /// that will never work, and reporting it as a transient race hides it
     /// forever. [`Self::exists`] separates them.
-    pub async fn attach_to_free_plan(&self, key_id: &str) -> Result<Attachment, GatewayError> {
+    pub async fn attach_to_plan(
+        &self,
+        key_id: &str,
+        plan_id: &str,
+    ) -> Result<Attachment, GatewayError> {
         match self
             .client
             .create_usage_plan_key()
-            .usage_plan_id(&self.free_plan_id)
+            .usage_plan_id(plan_id)
             .key_id(key_id)
             .key_type("API_KEY")
             .send()
@@ -558,6 +825,10 @@ impl Gateway {
                 let service_error = e.into_service_error();
                 if service_error.is_conflict_exception() {
                     Ok(Attachment::OnPlan)
+                } else if service_error.is_bad_request_exception()
+                    && is_same_stage_refusal(service_error.message())
+                {
+                    Ok(Attachment::AlreadyOnAPlan)
                 } else if service_error.is_not_found_exception() {
                     // `NotFoundException` here means EITHER "that key is gone"
                     // OR "that usage plan does not exist", and the error carries
@@ -574,7 +845,7 @@ impl Gateway {
                     // rather than in a support conversation three days later.
                     if self.exists(key_id).await? {
                         Err(GatewayError::PlanNotFound {
-                            plan_id: self.free_plan_id.clone(),
+                            plan_id: plan_id.to_string(),
                         })
                     } else {
                         Ok(Attachment::KeyGone)
@@ -649,9 +920,14 @@ impl Gateway {
         }
     }
 
-    /// One key's usage against the free plan's quota between `start_date` and
+    /// One key's usage against plan `plan_id`'s quota between `start_date` and
     /// `end_date` (inclusive, `YYYY-MM-DD`), or `None` if AWS has recorded
     /// nothing for it in that window (task 0188).
+    ///
+    /// `plan_id` is the key's OWN plan, as [`Self::plan_of`] found it (task
+    /// 0311): usage is counted per `(plan, key)` pair, so reading it on the free
+    /// plan for a key an operator moved answers an empty map — which is what
+    /// the dashboard showed for every paid key before 0311.
     ///
     /// `None` is a real and **common** state, not an edge case: `GetUsage` is
     /// not a read-after-write surface (measured 2026-08-12, archived
@@ -675,6 +951,7 @@ impl Gateway {
     /// the case where AWS's own period rolls partway through the range.
     pub async fn usage_of(
         &self,
+        plan_id: &str,
         key_id: &str,
         start_date: &str,
         end_date: &str,
@@ -686,7 +963,7 @@ impl Gateway {
             let mut request = self
                 .client
                 .get_usage()
-                .usage_plan_id(&self.free_plan_id)
+                .usage_plan_id(plan_id)
                 .key_id(key_id)
                 .start_date(start_date)
                 .end_date(end_date)
@@ -946,12 +1223,162 @@ mod tests {
     }
 
     /// A `Gateway` can end up in a diagnostic by way of `AppConfig`; nothing in
-    /// it may be a credential. The plan id is not one.
+    /// it may be a credential. The plan id, API id and stage are not.
     #[test]
     fn a_gateway_prints_only_its_plan_id() {
-        let gateway = Gateway::against("http://127.0.0.1:1", "plan-abc".into());
+        let gateway = Gateway::against(
+            "http://127.0.0.1:1",
+            "plan-abc".into(),
+            "api-xyz".into(),
+            "production".into(),
+        );
         let printed = format!("{gateway:?}");
         assert!(printed.contains("plan-abc"), "{printed}");
+        assert!(printed.contains("api-xyz"), "{printed}");
+        assert!(printed.contains("production"), "{printed}");
         assert!(!printed.contains("portal-keys-test"), "{printed}");
+    }
+
+    use aws_sdk_apigateway::types::{ApiStage, QuotaPeriodType, QuotaSettings, ThrottleSettings};
+
+    const API: &str = "02mabge71l";
+    const STAGE: &str = "production";
+
+    fn plan(id: &str, name: &str, stages: &[(&str, &str)]) -> UsagePlan {
+        let mut builder = UsagePlan::builder().id(id).name(name);
+        for (api_id, stage) in stages {
+            builder = builder.api_stages(ApiStage::builder().api_id(*api_id).stage(*stage).build());
+        }
+        builder
+            .throttle(
+                ThrottleSettings::builder()
+                    .rate_limit(3.0)
+                    .burst_limit(15)
+                    .build(),
+            )
+            .quota(
+                QuotaSettings::builder()
+                    .limit(1_000_000)
+                    .offset(0)
+                    .period(QuotaPeriodType::Month)
+                    .build(),
+            )
+            .build()
+    }
+
+    /// AWS's "already on another plan for this stage" refusal is recognised
+    /// by its wording; any other `400`, and no message at all, is not
+    /// (task 0311).
+    #[test]
+    fn only_the_same_stage_refusal_is_already_on_a_plan() {
+        assert!(is_same_stage_refusal(Some(
+            "API Key abc123 cannot reference multiple Usage Plans with the same API Stage: \
+             02mabge71l:production"
+        )));
+        assert!(is_same_stage_refusal(Some(
+            "… WITH THE SAME API STAGE: x:y"
+        )));
+        assert!(!is_same_stage_refusal(Some("Bad Request")));
+        assert!(!is_same_stage_refusal(Some("Invalid key type")));
+        assert!(!is_same_stage_refusal(None));
+    }
+
+    /// The five CDK names parse to their tiers on the matching stage.
+    #[test]
+    fn each_cdk_plan_name_is_its_tier() {
+        for (name, tier) in [
+            ("pricing-api-free-production", Tier::Free),
+            ("pricing-api-basic-production", Tier::Basic),
+            ("pricing-api-analyst-production", Tier::Analyst),
+            ("pricing-api-lite-production", Tier::Lite),
+            ("pricing-api-pro-production", Tier::Pro),
+        ] {
+            assert_eq!(Tier::from_plan_name(name, STAGE), tier, "{name}");
+        }
+    }
+
+    /// Anything else is Custom: a hand-made plan, the right prefix on the
+    /// wrong stage, and a tier nobody told this code about.
+    #[test]
+    fn any_other_plan_name_is_custom() {
+        for name in [
+            "prices-production-loadtest-plan",
+            "pricing-api-pro-staging",
+            "pricing-api-gold-production",
+            "pricing-api-free-production-old",
+            "",
+        ] {
+            assert_eq!(Tier::from_plan_name(name, STAGE), Tier::Custom, "{name}");
+        }
+    }
+
+    /// Only the plan on OUR (api id, stage) is chosen; one on another API
+    /// and one on no stage at all are ignored.
+    #[test]
+    fn only_the_plan_on_our_stage_is_chosen() {
+        let plans = [
+            plan(
+                "q7sd40",
+                "production-partner-plan",
+                &[("6l9k06w4pl", STAGE)],
+            ),
+            plan("nostage", "pricing-api-pro-production", &[]),
+            plan("basic1", "pricing-api-basic-production", &[(API, STAGE)]),
+            plan(
+                "otherstage",
+                "pricing-api-lite-production",
+                &[(API, "staging")],
+            ),
+        ];
+        let chosen = select_plan(&plans, API, STAGE).expect("one plan is on our stage");
+        assert_eq!(chosen.id, "basic1");
+        assert_eq!(chosen.tier, Tier::Basic);
+        assert_eq!(chosen.rate_limit, Some(3.0));
+        assert_eq!(chosen.burst_limit, Some(15));
+        assert_eq!(chosen.quota_limit, Some(1_000_000));
+        assert_eq!(chosen.quota_period.as_deref(), Some("MONTH"));
+        assert_eq!(chosen.quota_offset, Some(0));
+    }
+
+    /// No plan on our stage is `None` — the "issued but dead" state.
+    #[test]
+    fn no_plan_on_our_stage_is_none() {
+        let plans = [plan(
+            "q7sd40",
+            "production-partner-plan",
+            &[("6l9k06w4pl", STAGE)],
+        )];
+        assert_eq!(select_plan(&plans, API, STAGE), None);
+        assert_eq!(select_plan(&[], API, STAGE), None);
+    }
+
+    /// Two plans on our stage cannot happen in AWS; if it does, the lowest id
+    /// wins, whatever order the pages came in, and nothing panics.
+    #[test]
+    fn two_plans_on_our_stage_pick_the_lowest_id() {
+        let plans = [
+            plan("zzz", "pricing-api-pro-production", &[(API, STAGE)]),
+            plan("aaa", "prices-production-loadtest-plan", &[(API, STAGE)]),
+        ];
+        let chosen = select_plan(&plans, API, STAGE).expect("a plan is chosen");
+        assert_eq!(chosen.id, "aaa");
+        assert_eq!(chosen.tier, Tier::Custom);
+    }
+
+    /// A plan without throttle or quota reports every figure as absent —
+    /// the unlimited state, never zeros.
+    #[test]
+    fn a_plan_without_limits_reports_none_not_zero() {
+        let bare = UsagePlan::builder()
+            .id("custom1")
+            .name("prices-production-acme-plan")
+            .api_stages(ApiStage::builder().api_id(API).stage(STAGE).build())
+            .build();
+        let info = select_plan(&[bare], API, STAGE).expect("on our stage");
+        assert_eq!(info.tier, Tier::Custom);
+        assert_eq!(info.rate_limit, None);
+        assert_eq!(info.burst_limit, None);
+        assert_eq!(info.quota_limit, None);
+        assert_eq!(info.quota_period, None);
     }
 }

@@ -102,3 +102,7 @@ tower = { version = "0.5", features = ["util"] }
 # see it and a test built on it would pass against the bug. Exact decimal
 # comparison is the only way to make that assertion non-vacuous.
 rust_decimal = { workspace = true }
+# Task 0311: `#[tokio::test(start_paused = true)]` for the portal's load budget
+# and retry backoff, so those tests assert time without spending it. Test
+# builds only; the workspace's `full` does not include `test-util`.
+tokio = { workspace = true, features = ["test-util"] }

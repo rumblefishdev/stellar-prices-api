@@ -10,9 +10,22 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::routing::get;
+use prices_api::portal::sources::{Loaded, PortalSources};
 use prices_api::portal::{CONFIG_PATH, OPENAPI_PATH, PortalGate, gate_portal};
-use prices_api::{AppConfig, AppState, app};
+use prices_api::{AppConfig, AppState};
 use tower::ServiceExt;
+
+/// The router under test, with the portal's sources already loaded (and
+/// empty).
+///
+/// Since task 0311 `/config` answers `enabled: true` only when the flag is on
+/// AND the sources loaded, and `prices_api::app` would load them from the
+/// environment — which a test process does not have. Handing it loaded
+/// sources keeps every flag assertion below meaning "flag on, sources
+/// loaded". What the LOAD decides is pinned in `tests/portal_lazy_load.rs`.
+fn app(config: &AppConfig, state: AppState) -> Router {
+    prices_api::app_with_portal(config, state, PortalSources::ready(Loaded::default()))
+}
 
 fn config(portal_enabled: bool) -> AppConfig {
     config_with_keys(portal_enabled, vec![])

@@ -75,6 +75,7 @@ use super::session::{self, Session};
 use super::state_token;
 use super::{AuthState, cookies, redirect};
 use crate::portal::keys::gateway::Gateway;
+use crate::portal::sources::{Loaded, PortalSources};
 
 /// See the module table. Literals, like `?signin=…` — the dynamic one is
 /// [`too_young_query`], whose only variable part is a `u64` rendered in
@@ -132,9 +133,11 @@ pub(super) fn capped_query(next_eligible_date: &str) -> String {
 /// service is" — which is exactly true here, and true *before* any check ran,
 /// which is why that state's copy does not claim eligibility passed.
 ///
-/// Loud in CloudWatch, because this is a deployment fault and nothing else
-/// reports it: the cold-start probes are supposed to make it unreachable, so
-/// one of these lines means a container came up in a state they did not catch.
+/// Loud in CloudWatch, because this is a deployment fault: the production
+/// load yields all three sources or fails, and a failed load never reaches
+/// here — `login` lands it on `?issue=failed` itself, after `get`'s one
+/// `portal sources failed to load` line (review WR-04). So this line means a
+/// partial fixture, or a state the load did not catch.
 pub(super) fn refuse_issue_start(
     home: &str,
     oauth: bool,
@@ -213,6 +216,28 @@ pub(super) fn refuse_issue_discord(
 /// [`RECONCILE_FLOOR`] for what happens when that is not enough.
 const ISSUE_BUDGET: Duration = Duration::from_secs(12);
 
+/// How much of the token exchange's [`discord::REQUEST_TIMEOUT`] a lazy load
+/// of the portal's sources may spend (task 0311), measured from arrival like
+/// [`ISSUE_BUDGET`].
+///
+/// The sources load on the first portal request an execution environment
+/// sees, and the callback can be that request: login and callback often land
+/// on different environments. The arithmetic on `discord::REQUEST_TIMEOUT`
+/// already spends 14 s of the 15 s invocation on the exchange, the parameter
+/// reads and two Discord reads, leaving 1 s for the redirect and the runtime.
+/// So the load does not get a term of its own: it comes OUT of the exchange,
+/// which is given `REQUEST_TIMEOUT` minus the time already spent (review
+/// WR-03). Load plus exchange stay 4 s, the sum stays 14 s, the margin 1 s.
+///
+/// Two seconds, not the 500 ms it first was: under the SSM slowness this
+/// task exists for, a successful load (five reads, credentials, a retry)
+/// routinely passes half a second, and every callback on a fresh environment
+/// then failed. Past two seconds the exchange would get less than two, and a
+/// callback lands on a retryable failure BEFORE the exchange instead. The
+/// next attempt finds the sources loaded only if it reaches this execution
+/// environment. `budget_arithmetic_fits_the_lambda` pins all of it.
+pub(super) const SOURCES_ALLOWANCE: Duration = Duration::from_secs(2);
+
 /// The least time worth starting a reconciliation with.
 ///
 /// A reconciliation needs at least a list, and then either an adoption (one
@@ -240,16 +265,15 @@ const _: () = assert!(
 
 /// Everything the issue arm needs beyond what sign-in already carries.
 ///
-/// All optional, like `AuthState::oauth` and `KeysState::gateway`, and for the
-/// same reason: the api-handler boots with the portal closed and nothing
-/// provisioned. `config::load_portal_or_close` closes the portal at cold start
-/// when it is *open* with these missing, so a `None` here in production
-/// means the portal is closed and the gate answers before any handler does.
+/// The control-plane client and the eligibility settings live in `sources`,
+/// the same lazily loaded cell `AuthState` holds (see `crate::portal::sources`).
+/// Read only after the handler's own `AuthState` read succeeded, so in
+/// production it is already loaded and answers at once; a fixture with
+/// neither is "unwired", which every caller already refuses in its own words.
 #[derive(Clone)]
 pub struct IssueDeps {
-    pub(super) gateway: Option<Arc<Gateway>>,
+    sources: PortalSources,
     pub(super) usage_cache: Option<UsageCache>,
-    pub(super) settings: Option<Arc<EligibilitySettings>>,
     /// The same wall-clock ceiling 0187's handler put on the reconciliation.
     pub(super) deadline: Duration,
 }
@@ -257,9 +281,8 @@ pub struct IssueDeps {
 impl Default for IssueDeps {
     fn default() -> Self {
         Self {
-            gateway: None,
+            sources: PortalSources::ready(Loaded::default()),
             usage_cache: None,
-            settings: None,
             deadline: keys::RECONCILE_DEADLINE,
         }
     }
@@ -272,11 +295,27 @@ impl IssueDeps {
         settings: Option<EligibilitySettings>,
     ) -> Self {
         Self {
-            gateway: gateway.map(Arc::new),
+            sources: PortalSources::ready(Loaded {
+                gateway: gateway.map(Arc::new),
+                settings: settings.map(Arc::new),
+                ..Loaded::default()
+            }),
             usage_cache,
-            settings: settings.map(Arc::new),
             deadline: keys::RECONCILE_DEADLINE,
         }
+    }
+
+    /// Read the client and the settings from `sources` instead of the
+    /// constructor's arguments — how `portal::apply` shares one cell.
+    pub(crate) fn with_sources(mut self, sources: PortalSources) -> Self {
+        self.sources = sources;
+        self
+    }
+
+    /// The loaded sources, or none. Called only after the caller's own
+    /// `AuthState` read succeeded, which in production is this same cell.
+    pub(super) async fn loaded(&self) -> Loaded {
+        self.sources.get().await.cloned().unwrap_or_default()
     }
 
     /// Shorten the deadline for tests — compiled out of the Lambda for the
@@ -288,11 +327,11 @@ impl IssueDeps {
         self.deadline = deadline;
         self
     }
+}
 
-    /// Whether an issue round-trip could complete on this deployment.
-    pub(super) fn is_wired(&self) -> bool {
-        self.gateway.is_some() && self.settings.is_some()
-    }
+/// Whether an issue round-trip could complete with these sources.
+pub(super) fn is_wired(loaded: &Loaded) -> bool {
+    loaded.gateway.is_some() && loaded.settings.is_some()
 }
 
 /// Finish an `action=issue` callback: check, then issue, then land.
@@ -318,7 +357,8 @@ pub(super) async fn complete_issue(
     // honoured without a redeploy. Failure is `unknown`, not a 5xx: the
     // visitor is mid-navigation, the fault is ours, and "could not verify"
     // is the honest refusal that does not accuse them of anything.
-    let verified = match state.issue.settings.as_deref() {
+    let wiring = state.issue.loaded().await;
+    let verified = match wiring.settings.as_deref() {
         None => {
             // `login` refuses `action=issue` on an unwired deployment, so
             // arriving here means the deployment changed under an in-flight
@@ -467,7 +507,8 @@ use Landing::*;
 ///
 /// `started` is stamped when the **request** arrived — see [`ISSUE_BUDGET`].
 async fn issue(state: &AuthState, user_id: &str, started: Instant) -> Landing {
-    let Some(gateway) = state.issue.gateway.as_deref() else {
+    let wiring = state.issue.loaded().await;
+    let Some(gateway) = wiring.gateway.as_deref() else {
         return Unwired;
     };
 
@@ -603,17 +644,38 @@ mod tests {
     /// Gateway's bare `502` in place of every screen this module lands on.
     /// The 15 is `apiHandler.timeoutSeconds` in `infra/envs/production.json`;
     /// raise either constant, or add a call, and this is what fails first.
+    ///
+    /// Since task 0311 a lazy load of the portal's sources can precede all of
+    /// it. It adds no term: it is paid out of the exchange's own
+    /// `REQUEST_TIMEOUT` (the callback passes the exchange what is left), and
+    /// past [`SOURCES_ALLOWANCE`] the callback lands before the exchange. A
+    /// load that fails outright is followed only by a redirect, so the whole
+    /// `sources::LOAD_BUDGET` has to fit too.
+    ///
+    /// Pinned with the margin, not only `< 15 s` (review WR-03): the redirect
+    /// has to be serialised and sent, and the runtime has overhead of its
+    /// own, after the last timeout expires.
     #[test]
     fn budget_arithmetic_fits_the_lambda() {
-        const LAMBDA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-        let worst = discord::REQUEST_TIMEOUT * 3 + crate::portal::eligibility::PARAMETER_TIMEOUT;
+        const LAMBDA_TIMEOUT: Duration = Duration::from_secs(15);
+        const REDIRECT_MARGIN: Duration = Duration::from_secs(1);
+        // Load + exchange, then the parameter reads, membership and identity.
+        let worst = discord::REQUEST_TIMEOUT
+            + crate::portal::eligibility::PARAMETER_TIMEOUT
+            + discord::REQUEST_TIMEOUT * 2;
         assert!(
-            worst < LAMBDA_TIMEOUT,
-            "worst case {worst:?} does not fit inside {LAMBDA_TIMEOUT:?}"
+            worst + REDIRECT_MARGIN <= LAMBDA_TIMEOUT,
+            "worst case {worst:?} leaves less than {REDIRECT_MARGIN:?} of {LAMBDA_TIMEOUT:?}"
+        );
+        // The allowance leaves the exchange a real timeout: at least half.
+        assert!(
+            discord::REQUEST_TIMEOUT.saturating_sub(SOURCES_ALLOWANCE)
+                >= discord::REQUEST_TIMEOUT / 2
         );
         // And the reconciler's share is measured from arrival, so it cannot
         // extend the callback past the same line.
-        assert!(ISSUE_BUDGET < LAMBDA_TIMEOUT);
+        assert!(ISSUE_BUDGET + REDIRECT_MARGIN <= LAMBDA_TIMEOUT);
+        assert!(crate::portal::sources::LOAD_BUDGET + REDIRECT_MARGIN <= LAMBDA_TIMEOUT);
     }
 
     /// Every landing state is a distinct literal under the portal home,
@@ -661,10 +723,10 @@ mod tests {
         assert!(value.bytes().all(|b| b.is_ascii_digit()));
     }
 
-    #[test]
-    fn issue_deps_default_to_unwired_with_the_production_deadline() {
+    #[tokio::test]
+    async fn issue_deps_default_to_unwired_with_the_production_deadline() {
         let deps = IssueDeps::default();
-        assert!(!deps.is_wired());
+        assert!(!is_wired(&deps.loaded().await));
         assert_eq!(deps.deadline, keys::RECONCILE_DEADLINE);
     }
 }

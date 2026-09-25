@@ -247,14 +247,19 @@ Both must print `prices/production/portal-discord-oauth`.
 
 `PORTAL_ENABLED` is still `false` at this point and the routes still answer an
 empty `404`. That is correct: **the api-handler does not read this secret while
-the portal is closed** (see `AppConfig::load_portal_oauth`), so creating it does
-not change any behaviour, and forgetting to create it before opening the portal
-closes the portal again at the _next_ cold start — `/config` answers
-`enabled: false` and the api-handler logs `portal closed at cold start` naming
-`PORTAL_OAUTH_SECRET_NAME`, which also pages as
-`prices-production-api-handler-portal-closed` (task 0249) — rather than
-silently serving a broken sign-in (`AppConfig::load_portal_or_close`). `/v1`
-is unaffected either way.
+the portal is closed** (see `packages/prices-api/src/portal/sources.rs`), so
+creating it does not change any behaviour. Forgetting to create it before
+opening the portal fails the portal's load on the first portal request per
+execution environment (the `/config` probe triggers it): that `/config` answers
+`enabled: false` and the api-handler logs `portal sources failed to load`
+naming `PORTAL_OAUTH_SECRET_NAME`, which pages as
+`prices-production-api-handler-portal-load-failed` (tasks 0249, 0311) — rather
+than silently serving a broken sign-in. A failed load is remembered for a 2 s
+cooldown (requests inside it answer the same way without reading anything), and
+the first request after it retries, so creating the secret fixes it without a
+redeploy. A successful load is kept for the
+execution environment's life, so changing the secret's VALUE later still needs
+a recycle, as before. `/v1` is unaffected either way.
 
 ## 4. Verify locally before opening production
 
@@ -430,34 +435,43 @@ openapi:verify-routes` asserts exactly this against the synthesized templates,
 so a drift fails CI rather than a deploy — but the _existence_ of the deployed
 parameter is not something CI can see.
 
-**If the parameter is missing when `PORTAL_ENABLED` becomes `true`, the
-api-handler closes the portal at cold start** — `/config` answers
-`enabled: false` and the log carries `portal closed at cold start` naming
-`PORTAL_FREE_PLAN_PARAM` — and `/v1` is unaffected. It used to fail init
-instead, which took `/v1` down with it (one router serves every route group,
-ADR 0008); task 0194's PR review is where that changed, and the reasoning is on
-`AppConfig::load_portal_or_close`. The shape is still "found only at the moment
-of opening", as with the OAuth secret in §3, and the alternative it avoids is
-still a portal with a key button that answers `503` — a closed portal answers
-before any button renders. What it costs: the closure pages as
-`prices-production-api-handler-portal-closed` (task 0249), but only when a
-cold start happens, so the `/config` probe after the deploy stays the check
-that runs _now_, not an optional confirmation; the alarm is what catches a
-closure in a LATER cold start (a throttled Parameter Store read in a
-scale-out).
+**If the parameter is missing when `PORTAL_ENABLED` becomes `true`, every load
+of the portal's sources fails** — each `/config` answers `enabled: false` and
+the log carries `portal sources failed to load` naming `PORTAL_FREE_PLAN_PARAM`
+— and `/v1` is unaffected: since task 0311 the sources load on the first
+portal request per execution environment, never at cold start. It used to fail
+init, which took `/v1` down with it (one router serves every route group, ADR
+0008), and then (task 0194) to close the portal in that environment for its
+life. Now a failed load costs that one request, and the next retries, so
+publishing the parameter fixes it without a redeploy or a recycle. The shape is
+still "found only at the moment of opening", as with the OAuth secret in §3,
+and the alternative it avoids is still a portal with a key button that answers
+`503` — `/config` says the portal is not open before any button renders. Each
+failed load pages as `prices-production-api-handler-portal-load-failed` (tasks
+0249, 0311), so the alarm keeps firing while the parameter is missing; the
+`/config` probe after the deploy stays the check that runs _now_ (it triggers
+the load itself), not an optional confirmation, and the alarm is what catches a
+LATER failed load (a throttled Parameter Store read under portal traffic).
 
 While the portal is closed the handler reads neither, so nothing here changes
 any behaviour until the flag moves.
 
 ### The IAM, and the three limits that come with it
 
-CDK grants the api-handler role seven control-plane actions and nothing else:
+CDK grants the api-handler role eight control-plane actions and nothing else:
 `GET`/`POST` on `/apikeys`, `GET`/`PATCH`/`DELETE` on `/apikeys/*` (`PATCH`
-is task 0191's revoke — see below), `POST` on
-`/usageplans/{the free plan}/keys`, and — task 0188 — `GET` on
-`/usageplans/{the free plan}/usage` (`GetUsage`, the dashboard's usage read).
-The last two are declared in `api-gateway-stack.ts` rather than
-`compute-stack.ts`, because that is the only stack that knows the plan id.
+is task 0191's revoke — see below), and three on `/usageplans` since task
+0311: `GET /usageplans` (`GetUsagePlans` by key — which plan a key is on),
+`GET /usageplans/*/usage` (`GetUsage` on the key's own plan, the dashboard's
+usage read) and `POST /usageplans/*/keys` (attaching a key to any plan — the
+free plan on a first issue, the previous key's plan on a rework). All eight
+are on the role's own policy in `compute-stack.ts`. The `/usageplans` grants
+used to be a standalone policy in `api-gateway-stack.ts`, because they named
+the free plan's id; since task 0311 they name no id and moved to the stack
+that ships the code using them, which deploys first — so the grant is in place
+before the new handler runs (`manual-api-key-tier.md`, "Rolling this out").
+No `DELETE` or `PATCH` on a plan or a plan key, and no `GET /usageplans/{id}`:
+moving a key between plans is an operator's job (`manual-api-key-tier.md`).
 
 Two of the six cannot be scoped any further, and one can but is not yet. All
 three are written out in full in `compute-stack.ts`; the short version:
