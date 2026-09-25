@@ -2,7 +2,7 @@
 id: "0294"
 title: "SCF Milestone 3 verification package — evidence doc, form answers, video scenario, deviations"
 type: DOCS
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0102", "0128", "0293", "0260", "0275", "0164", "0249", "0179", "0233", "0239", "0194", "0047", "0295", "0296", "0297"]
 tags: [layer-docs, priority-high, effort-medium, milestone-M3, scf, submission, evidence]
@@ -13,6 +13,19 @@ links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../../docs/prices-api-load-test-100rps.md"
 history:
+  - date: 2026-09-25
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated. The package files did not exist a week after the task was
+      filed; the launch is now dated (09-23 09:40) and AC 5, AC 4 (CI runs the
+      ClickHouse suite since #327) and AC 7's first half (repo PUBLIC) have
+      evidence in the repo, so the skeleton can be written from facts rather
+      than placeholders. Branch docs/0294_scf-milestone-3-verification-package:
+      milestone-3-evidence.md in the M2 layout, milestone-3-rfp-deviations.md,
+      and stubs for the form answers and the video scenario. (The file move
+      went out one commit earlier with the status still `backlog` — a script
+      assertion tripped on a repeated phrase; corrected here.)
   - date: 2026-09-25
     status: backlog
     who: stkrolikiewicz
