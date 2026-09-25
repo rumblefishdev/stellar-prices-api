@@ -299,9 +299,19 @@ MFA; the login was deleted and the user removed from the stack on 2026-09-25
 (task 0295, PR #355), and the synth verifier now fails on any IAM identity in
 the template.
 
-_To fill on submission day:_ the alarm table; the dates of one end-to-end walk
-of the runbook on a throwaway name (create → MFA → dashboard renders → log
-groups denied → remove).
+The runbook was walked end to end on 2026-09-25 by the operator, on a
+throwaway name (`prices-production-viewer-krolikiewicz`): user created 13:13:42
+→ forced password change on first sign-in 13:14:19 → passkey enrolled as the
+MFA device 13:20:22 → re-login → the dashboard renders (`GetDashboard`,
+`ListDashboards`, `DescribeAlarms` in CloudTrail with `mfaAuthenticated=true`,
+13:21:37) → the log-groups page answers access denied
+(`logs:DescribeMetricFilters` AccessDenied) → user removed 13:24:14,
+`aws iam list-users` empty. The same policy, checked headlessly with
+`simulate-principal-policy`: the nine CloudWatch reads `allowed` only with
+`aws:MultiFactorAuthPresent=true`; `logs:*`, `xray:*`, `secretsmanager:*`,
+`lambda:*`, `iam:ListUsers` `implicitDeny` either way.
+
+_To fill on submission day:_ the alarm table.
 
 ### AC 9 — 7-day post-launch monitoring report
 
@@ -364,20 +374,20 @@ name on it.
 
 ## 9. Live endpoints and access
 
-| Resource                 | URL / address                                                                                                                  | Access                                                   |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
-| Production API base      | `https://prices-api.sorobanscan.rumblefish.dev`                                                                                | `x-api-key`, reviewer key as in M2                       |
-| OpenAPI document         | `…/api-docs-json`                                                                                                              | **Anonymous**                                            |
-| Health probe             | `…/health`                                                                                                                     | Anonymous                                                |
-| `/v1` route groups       | `…/v1/assets`, `…/v1/assets/{id}`, `…/price`, `…/ohlcv`, `POST …/v1/prices/batch`, `…/v1/oracles/{id}`, `…/v1/backfill/status` | `x-api-key`                                              |
-| Unknown route            | any other path or method                                                                                                       | 404 `not_found` in the error envelope (since 09-24)      |
-| Onboarding portal        | `https://sorobanscan.rumblefish.dev/api/`                                                                                      | **Anonymous** since 2026-09-23; Discord sign-in for keys |
-| API reference (rendered) | `https://sorobanscan.rumblefish.dev/api/docs`                                                                                  | Anonymous                                                |
-| Privacy policy           | `https://sorobanscan.rumblefish.dev/privacy-policy`                                                                            | Anonymous                                                |
-| Production ClickHouse    | `ch.sorobanscan.rumblefish.dev`, database `prices`                                                                             | mTLS, client certificate on request                      |
-| CloudWatch dashboard     | `prices-production-overview`, `eu-central-1`                                                                                   | IAM — see AC 8                                           |
-| Production alarms        | `prices-production-*`, `eu-central-1`                                                                                          | IAM, read-only                                           |
-| GitHub repository        | `https://github.com/rumblefishdev/stellar-prices-api`                                                                          | **Public**                                               |
+| Resource                 | URL / address                                                                                                                  | Access                                                                                                                                                                                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Production API base      | `https://prices-api.sorobanscan.rumblefish.dev`                                                                                | `x-api-key`, reviewer key as in M2                                                                                                                                                                                                       |
+| OpenAPI document         | `…/api-docs-json`                                                                                                              | **Anonymous**                                                                                                                                                                                                                            |
+| Health probe             | `…/health`                                                                                                                     | Anonymous                                                                                                                                                                                                                                |
+| `/v1` route groups       | `…/v1/assets`, `…/v1/assets/{id}`, `…/price`, `…/ohlcv`, `POST …/v1/prices/batch`, `…/v1/oracles/{id}`, `…/v1/backfill/status` | `x-api-key`                                                                                                                                                                                                                              |
+| Unknown route            | any other path or method                                                                                                       | 404 `not_found` in the error envelope (since 09-24)                                                                                                                                                                                      |
+| Onboarding portal        | `https://sorobanscan.rumblefish.dev/api/`                                                                                      | **Anonymous** since 2026-09-23; Discord sign-in for keys                                                                                                                                                                                 |
+| API reference (rendered) | `https://sorobanscan.rumblefish.dev/api/docs`                                                                                  | Anonymous                                                                                                                                                                                                                                |
+| Privacy policy           | `https://sorobanscan.rumblefish.dev/privacy-policy`                                                                            | Anonymous                                                                                                                                                                                                                                |
+| Production ClickHouse    | `ch.sorobanscan.rumblefish.dev`, database `prices`                                                                             | mTLS, client certificate on request                                                                                                                                                                                                      |
+| CloudWatch dashboard     | `prices-production-overview`, `eu-central-1`                                                                                   | **On request** to a named reviewer: read-only IAM user, MFA enforced, removed after the review — `docs/runbooks/0295-dashboard-access-on-request.md`; request to the operator by e-mail with name, surname, e-mail, purpose and end date |
+| Production alarms        | `prices-production-*`, `eu-central-1`                                                                                          | same identity as the dashboard (`DescribeAlarms`, `DescribeAlarmHistory`)                                                                                                                                                                |
+| GitHub repository        | `https://github.com/rumblefishdev/stellar-prices-api`                                                                          | **Public**                                                                                                                                                                                                                               |
 
 _Table — live verification endpoints and the access model for reviewers._
 
