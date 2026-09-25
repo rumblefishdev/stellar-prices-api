@@ -2,11 +2,12 @@
 id: "0297"
 title: "Tranche 3 AC 7 says `cdk deploy` from the README works in a fresh AWS account — nobody has ever tried it"
 type: TEST
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0294", "0239", "0141"]
 tags: [layer-infra, priority-medium, effort-medium, milestone-M3, deploy, docs, scf]
 milestone: 3
+assignee: okarcz
 links:
   - "../../../README.md"
   - "../../../infra/README.md"
@@ -19,6 +20,12 @@ history:
       2026-09-16). The fresh-account half has no owner — [[0239]] was linked to
       it by mistake; it covers two macOS prerequisites of a local deploy, which
       is adjacent but not this.
+  - date: 2026-09-25
+    status: active
+    who: okarcz
+    note: >
+      Activated and taken by the operator for M3 AC 7 (fresh-account
+      `cdk deploy` from the README). Implementation instructions to follow.
 ---
 
 # `cdk deploy` from the README in a fresh AWS account
