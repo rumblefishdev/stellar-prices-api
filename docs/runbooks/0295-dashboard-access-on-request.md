@@ -148,7 +148,7 @@ dashboard — say so in the evidence rather than pretend otherwise).
 aws iam delete-login-profile --user-name "$VIEWER"
 for m in $(aws iam list-mfa-devices --user-name "$VIEWER" --query 'MFADevices[].SerialNumber' --output text); do
   aws iam deactivate-mfa-device --user-name "$VIEWER" --serial-number "$m"
-  aws iam delete-virtual-mfa-device --serial-number "$m"
+  case "$m" in *:mfa/*) aws iam delete-virtual-mfa-device --serial-number "$m";; esac   # a passkey (…:u2f/…) has nothing to delete
 done
 aws iam delete-user-policy --user-name "$VIEWER" --policy-name prices-production-dashboard-read
 aws iam delete-user --user-name "$VIEWER"
