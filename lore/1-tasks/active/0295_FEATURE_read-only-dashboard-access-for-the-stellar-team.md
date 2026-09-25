@@ -15,6 +15,20 @@ history:
     status: active
     who: claude
     note: >
+      Console half walked by the operator on prices-production-viewer-krolikiewicz:
+      create 13:13:42, password reset 13:14:19 (no GetAccountPasswordPolicy
+      needed), passkey MFA 13:20:22, dashboard renders and log groups denied at
+      13:21:37 with mfaAuthenticated=true, removed 13:24:14. First attempt had
+      created the user in the operator's personal account (shell without an
+      exported AWS_PROFILE) — cleaned there, redone here. Runbook fixes in PR
+      #356: §2 shows the generated password and checks the account first, §4
+      gains the simulator check and names the console's AccessDenied noise, §5
+      tolerates a passkey MFA device. Left: access table in the package
+      (docs/0294 branch) and alarms on the review date.
+  - date: 2026-09-25
+    status: active
+    who: claude
+    note: >
       Runbook walked on a throwaway name, 12:40:33 create → 12:41:16 delete.
       simulate-principal-policy: the nine cloudwatch reads allowed only with
       aws:MultiFactorAuthPresent=true; logs, xray, secretsmanager, lambda,
@@ -116,10 +130,14 @@ access does not. This task builds the access and records how a reviewer uses it.
 - [x] The runbook was walked once end to end on a throwaway name (create →
       MFA → dashboard renders → log groups denied → remove), with the dates in
       this task
-      → walked 2026-09-25 12:40–12:41 on `prices-production-viewer-throwaway`
-      (§2 create → IAM-simulator check → §5 remove; `list-users` empty after).
-      The console sign-in + MFA enrolment half of §4 was not walked. Defect
-      found and fixed in PR #356: §2 never showed the generated password.
+      → walked twice on 2026-09-25. Headless, 12:40–12:41 on
+      `prices-production-viewer-throwaway` (§2 → IAM simulator → §5). Then by
+      the operator in a browser, `prices-production-viewer-krolikiewicz`:
+      create 13:13:42 → forced password change 13:14:19 → passkey MFA 13:20:22
+      → re-login → dashboard renders, `GetDashboard`/`ListDashboards`/
+      `DescribeAlarms` with `mfaAuthenticated=true` at 13:21:37, log groups
+      access denied (`logs:DescribeMetricFilters` AccessDenied) → §5 removed
+      13:24:14, `list-users` empty. Three runbook defects → PR #356.
 - [ ] Access instructions are in the evidence package's access table
 - [ ] On the review date every `prices-production-*` alarm is OK, or each
       exception is named with its cause
