@@ -1,159 +1,330 @@
 # AWS CDK Infrastructure
 
 CDK stacks for stellar-prices-api. Aligned to ADR 0007: Lambdas run
-outside any VPC and reach BE's Hetzner ClickHouse over HTTPS-mTLS,
-with the client cert + key material held in AWS Secrets Manager.
-No RDS, no VPC, no NAT.
+outside any VPC and reach the platform's Hetzner ClickHouse over
+HTTPS-mTLS, with the client cert + key material held in AWS Secrets
+Manager. No RDS, no VPC, no NAT.
 
 This directory mirrors `soroban-block-explorer/infra/` conventions
 (TypeScript CDK, per-env JSON config, one stack per file, separate
 `cicd` entrypoint) so the two infra surfaces feel familiar to anyone
 who has worked on either.
 
-## Account topology
+## Stacks
 
-Both `soroban-block-explorer` (BE) and `stellar-prices-api` deploy
-into **the same AWS account**. There is no cross-account boundary
-between the two services.
+| Stack                             | File                            | What it holds                                                                                                                                                         |
+| --------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Prices-Cicd`                     | `stacks/cicd-stack.ts`          | GitHub OIDC provider + the `stellar-prices-api-production-deploy` role. Separate app (`src/bin/cicd.ts`), optional — see [CI/CD role](#cicd-role-optional)            |
+| `Prices-production-Secrets`       | `stacks/secrets-stack.ts`       | **No secrets.** Publishes the three secret _names_ to SSM; the operator creates the values                                                                            |
+| `Prices-production-Compute`       | `stacks/compute-stack.ts`       | ledger-processor Lambda + its SQS queue/DLQ subscribed to the platform's ledger-events topic, S3 read on the ledger bucket, the api-handler Lambda, roles, log groups |
+| `Prices-production-ApiGateway`    | `stacks/api-gateway-stack.ts`   | REST API, usage plan + key, ACM certificate, custom domain and its records in your hosted zone. Depends on Compute                                                    |
+| `Prices-production-EventBridge`   | `stacks/eventbridge-stack.ts`   | The scheduled workers and probes (enrichment, rollup sweep, oracle, supply, asset discovery, freshness probes) and their rules                                        |
+| `Prices-production-Observability` | `stacks/observability-stack.ts` | ops-alarms SNS topic, optional Slack delivery through AWS Chatbot, alarms, dashboard. Depends on Compute                                                              |
 
-Consequences:
+`deploy --all` resolves the order itself (Secrets and Compute first).
 
-- **S3 bucket access** — the ledger processor Lambda reads from
-  BE's `stellar-ledger-data` bucket via a standard IAM policy on
-  the Lambda execution role. No bucket policy amendment from BE
-  is required; same-account IAM evaluation grants access.
-- **SNS subscription** — the Lambda subscribes to BE's SNS topic
-  with a standard `sns:Subscribe` + Lambda resource policy. No
-  cross-account SNS topic policy needed.
-- **SSM Parameter Store** — both `/platform/{env}/*` (BE-owned)
-  and `/prices/{env}/*` (prices-api-owned) live in the same
-  account. Standard IAM scoping enforces the single-writer
-  contract per namespace.
-- **Secrets Manager** — mTLS secrets and the Lambda roles that
-  read them share the same account. No cross-account `kms:Decrypt`
-  grants needed.
-- **CicdStack isolation** — each service has its own OIDC deploy
-  role (BE's is prefixed `soroban-explorer-*`, prices-api's is
-  `stellar-prices-api-*`). The GitHub Environment condition on
-  each role ensures one service's CI cannot assume the other's
-  deploy role.
-- **CloudFormation stack naming** — prices-api stacks are prefixed
-  `Prices-*`, BE stacks are prefixed differently. No collision.
+## Fresh-account deployment
 
-## Stack architecture (target)
+This section takes an AWS account that has never seen the project to a serving
+API. Commands run from the repo root unless a step says otherwise.
 
-```
-CicdStack            (one-time, per AWS account — GitHub OIDC + deploy roles)
+### What "fresh account" means here
 
-SecretsStack         (mTLS cert + key Secrets Manager slots, /prices/{env}/* SSM outputs)
-    |
-ComputeStack         (no-VPC Lambdas + IAM roles)
-    |
-    +-- ApiGatewayStack    (REST API + usage plan)
-    +-- EventBridgeStack   (scheduler rules for periodic workers)
+stellar-prices-api is a **tenant of the Soroban Block Explorer platform**
+([`rumblefishdev/soroban-block-explorer`](https://github.com/rumblefishdev/soroban-block-explorer)).
+It does not stand up its own ledger bucket, ledger-events topic or database
+server. It reads them from the platform through five SSM parameters, and it
+owns one database (`prices`) on the platform's ClickHouse server. So a fresh
+account takes three parts, in this order:
 
-ObservabilityStack   (CloudWatch dashboard scaffold; alarms land in task 0056)
-```
+1. **The platform:** its AWS stacks plus a Hetzner dedicated server running
+   ClickHouse behind a Caddy mTLS proxy.
+2. **The `prices` tenant on that server:** client certificates, the
+   certificate-to-user map, and the schema.
+3. **This app:** secrets, seeds, `cdk deploy`.
 
-**Currently implemented:** all six stacks called for by task
-0011's spec:
+**Manual by design** (the platform's runbook has the same list for its side):
 
-- `CicdStack` — GitHub OIDC + per-env deploy roles.
-- `SecretsStack` — mTLS material slots + SSM outputs.
-- `ComputeStack` — IAM roles + log groups for the two anchor Lambdas;
-  helpers (`createPricesLambdaRole`, etc.) reusable by 0039 / 0055.
-- `ApiGatewayStack` — REST API with `/health` mock + UsagePlan/ApiKey;
-  real `/v1/prices/...` routes land in 0040.
-- `EventBridgeStack` — 4 rule shells for the periodic workers;
-  Lambda targets land in 0039.
-- `ObservabilityStack` — empty dashboard scaffold; widgets + alarms
-  land in 0056.
+- Ordering the Hetzner dedicated server and its Storage Box. It's a hardware
+  order, so no code can do it.
+- Issuing client certificates from the platform's CA. The CA key lives in a
+  password manager and never touches CDK or CI.
+- Creating the three Secrets Manager values and seeding four SSM parameters.
+  CDK owns only the names, so a deploy can never overwrite live credentials
+  (see [Secrets](#secrets-cdk-owns-the-name-the-operator-owns-the-value)).
+- Registering the Discord application that gates API key sign-up.
+- A Route 53 hosted zone for your domain.
 
-Each subsequent task slots its real resources into the
-already-deployable container these stacks provide.
+### 1. Prerequisites
 
-## Prerequisites
+| Tool                 | Version              | Why                                                                               |
+| -------------------- | -------------------- | --------------------------------------------------------------------------------- |
+| AWS CLI v2           | any                  | a profile with admin rights in the target account: `export AWS_PROFILE=<profile>` |
+| Node.js              | `22.22.0` (`.nvmrc`) | `nvm use && npm ci` at the repo root (Nx + `aws-cdk` come from the lockfile)      |
+| Rust                 | `1.97.1`             | the pin CI uses; rustc ≥ 1.98 fails every aarch64 link under zig                  |
+| cargo-lambda         | `1.9.1`              | `pip3 install cargo-lambda==1.9.1`                                                |
+| zig                  | any                  | only on x86 machines: the Lambdas are cross-compiled to arm64                     |
+| jq, openssl, python3 | any                  | asset verification and the secret bundles below                                   |
 
-- AWS CLI with a configured profile pointing at the shared AWS account
-- Node.js (see `.nvmrc` at repo root)
-- `export AWS_PROFILE=<shared-account-profile>`
+Check which account you are in before every command in this section. The
+account comes from your credentials (`CDK_DEFAULT_ACCOUNT`), so nothing pins
+the deploy to one account. `aws sts get-caller-identity` is the check.
 
-## First-time setup
+The region is `eu-central-1` (`envs/production.json`). The Parameters and
+Secrets Lambda Extension layer is mapped only for `eu-central-1` and
+`us-east-1` (`src/lib/mtls.ts`). Any other region fails at synth until its
+layer ARN is added.
 
-### 1. Bootstrap the CDK toolkit
+### 2. The platform (AWS stacks and the Hetzner ClickHouse server)
 
-Once per AWS account + region:
+Follow the platform's fresh-account runbook:
+
+- **AWS stacks:** `soroban-block-explorer/infra/README.md` and
+  `docs/deployment.md`. Prerequisites, then `make bootstrap`, then
+  `make deploy-production`.
+- **Hetzner ClickHouse:** `soroban-block-explorer/infra-hetzner/README.md`,
+  "First-time setup":
+  1. Order the dedicated server and a BX21 Storage Box by hand.
+  2. Bootstrap the mTLS CA (`infra-hetzner/ca/generate-ca.sh`).
+  3. Fill the Ansible environment file and inventory.
+  4. Run `ansible-playbook -i inventory.ini site.yml`. This installs
+     ClickHouse, Caddy (Let's Encrypt plus mTLS), the firewall and weekly
+     Borg backups.
+  5. Publish the server's IPv4 to SSM (`/soroban/production/ch-ip`) and
+     deploy the platform's DNS stack.
+
+When the platform is up, the account holds the five parameters this app reads.
+Its Compute stack publishes them:
 
 ```bash
-npm run infra:bootstrap
+aws ssm get-parameters-by-path --path /platform/production --query 'Parameters[].Name'
+# /platform/production/ch-domain
+# /platform/production/ledger-events-topic-arn
+# /platform/production/stellar-ledger-data-bucket-name
+# /platform/production/stellar-ledger-data-bucket-arn
+# /platform/production/stellar-network-passphrase
 ```
 
-This provisions the `cdk-hnb659fds-*` roles that the GitHub Actions
-deploy role assumes for CloudFormation operations.
+The platform also defines this app's ClickHouse users already: `prices_writer`,
+`prices_reader`, `prices_admin` and `dev_read`, in its
+`crates/db-clickhouse/users.d/services.xml`, with grants confined to
+`prices.*` (`docs/architecture/security/clickhouse-rbac.md`). There is nothing
+to create on the server except the certificate mapping in step 3.
 
-### 2. Deploy the CicdStack manually
+### 3. The `prices` tenant on ClickHouse
 
-The CicdStack is deployed by a human operator (you), once per AWS
-account, **before** any GitHub Actions workflow can deploy anything:
+**Certificates.** In the platform checkout, issue one client certificate per
+AWS identity. The CN decides the ClickHouse user:
+
+| CN                            | ClickHouse user | Used by                          |
+| ----------------------------- | --------------- | -------------------------------- |
+| `prices-ingestion-production` | `prices_writer` | ledger-processor and the workers |
+| `prices-api-production`       | `prices_reader` | api-handler                      |
 
 ```bash
-npm run infra:deploy:cicd
+# [platform checkout]
+infra-hetzner/ca/issue-client-cert.sh prices-ingestion-production
+infra-hetzner/ca/issue-client-cert.sh prices-api-production
 ```
 
-CDK prints one CfnOutput:
+Append both pairs to `CLICKHOUSE_CN_USER_MAP` in the platform's Ansible
+environment file, then reload Caddy:
 
-- `Prices-Cicd.ProductionDeployRoleArn`
+```bash
+# [platform checkout] CLICKHOUSE_CN_USER_MAP gains:
+#   prices-ingestion-production:prices_writer,prices-api-production:prices_reader
+source ~/.config/soroban-prod.env
+cd infra-hetzner/ansible && ansible-playbook -i inventory.ini site.yml --tags caddy_reload
+```
 
-### 3. Wire role ARN into the GitHub Environment
+**Schema.** DDL is applied by the server's `default` user over its loopback
+HTTP port, never through the mTLS proxy: the scoped users cannot `DROP VIEW`,
+which `views.sql` needs (see `packages/prices-clickhouse/README.md`). Open a
+tunnel and run the applier from this repo:
 
-In `https://github.com/rumblefishdev/stellar-prices-api/settings/environments`:
+```bash
+ssh -N -L 8123:127.0.0.1:8123 deploy@<clickhouse-server> &   # the server binds 8123 to loopback only
+export CLICKHOUSE_URL=http://localhost:8123
+export CLICKHOUSE_USER=default
+export CLICKHOUSE_PASSWORD=<CLICKHOUSE_PASSWORD from the platform's Ansible env>
+cargo run -p prices-clickhouse --bin prices-clickhouse-init              # database, tables, seed, views
+cargo run -p prices-clickhouse --bin prices-clickhouse-init -- --rollups # the rollup materialized views
+```
 
-- Create environment `production`. Add secret `AWS_DEPLOY_ROLE_ARN` =
-  the production output ARN. Add required reviewers if the team
-  wants gated production deploys.
+`schema/current.sql` (the `current_prices` view) is applied **later**, in
+step 8. It must not go on before enrichment has run, or it serves zero USD
+prices.
 
-Staging is intentionally absent — the eu-central-1 environment is
-initially deployed under the `production` name with conservative
-test-sized parameters (mirrors BE task 0239); production sizing is
-swapped in via `envs/production.json` once the service is
-exercised in anger.
+### 4. Secrets
 
-The CI workflow (task 0008) consumes this secret to assume the
-deploy role via OIDC.
+Create the three values CDK only names. Each mTLS secret is one JSON bundle,
+`{cert, key, ca}` in PEM, staged in tmpfs so no plaintext key reaches
+persistent disk:
 
-## SSM Key Contract
+```bash
+# [platform checkout] once per CN: prices-ingestion-production, prices-api-production
+CN=prices-ingestion-production
+mkdir -p -m 0700 /dev/shm/prices-cert && cp infra-hetzner/ca/out/$CN/{$CN.crt,$CN.key,ca.crt} /dev/shm/prices-cert/
+python3 - "$CN" > /dev/shm/prices-cert/bundle.json <<'PY'
+import json, pathlib, sys
+cn, d = sys.argv[1], pathlib.Path("/dev/shm/prices-cert")
+print(json.dumps({"cert": (d/f"{cn}.crt").read_text(), "key": (d/f"{cn}.key").read_text(), "ca": (d/"ca.crt").read_text()}))
+PY
+aws secretsmanager create-secret --name "prices/production/clickhouse-mtls-$CN" \
+    --secret-string file:///dev/shm/prices-cert/bundle.json
+shred -u /dev/shm/prices-cert/* && rmdir /dev/shm/prices-cert
+```
 
-The infra is the integration boundary with `soroban-block-explorer`.
-Both services deploy into the same AWS account (see "Account
-topology" above), so the namespace split is enforced by IAM policy,
-not by account boundaries. Two SSM namespaces, single-writer per
-namespace:
+Resulting names, which must match what `src/lib/mtls.ts` computes:
+`prices/production/clickhouse-mtls-prices-ingestion-production` and
+`prices/production/clickhouse-mtls-prices-api-production`.
 
-### Inputs — `/platform/{env}/...` (BE publishes, prices-api reads)
+The third secret, `prices/production/portal-discord-oauth`, holds the key
+portal's Discord application. Register the application and create it as in
+[`docs/runbooks/portal-oauth-deploy-prep.md`](../docs/runbooks/portal-oauth-deploy-prep.md)
+§1–§2.
 
-| Key                                              | Value                                                                  | Published by |
-| ------------------------------------------------ | ---------------------------------------------------------------------- | ------------ |
-| `/platform/{env}/ch-endpoint`                    | `https://ch.{env}.sorobanscan.rumblefish.dev:443` (mTLS Caddy address) | BE task 0050 |
-| `/platform/{env}/ch-database`                    | `prices`                                                               | BE task 0050 |
-| `/platform/{env}/ch-user`                        | CH username scoped to `prices` DB                                      | BE task 0050 |
-| `/platform/{env}/stellar-ledger-data-sns-arn`    | SNS topic ARN for S3 PutObject fan-out                                 | BE task 0050 |
-| `/platform/{env}/stellar-ledger-data-bucket-arn` | BE-owned bucket ARN (read-only IAM scope)                              | BE task 0050 |
+### 5. SSM seeds
 
-### Outputs — `/prices/{env}/...` (prices-api publishes, downstream reads)
+Four parameters the stacks or the running Lambdas read, and which CDK
+deliberately never creates:
 
-| Key                                         | Value                                                     | Consumer                 |
-| ------------------------------------------- | --------------------------------------------------------- | ------------------------ |
-| `/prices/{env}/mtls-cert-secret-arn`        | Secrets Manager ARN holding mTLS client cert PEM          | task 0052 Lambdas        |
-| `/prices/{env}/mtls-key-secret-arn`         | Secrets Manager ARN holding mTLS client key PEM           | task 0052 Lambdas        |
-| `/prices/{env}/ledger-processor-lambda-arn` | Live ingest Lambda ARN (for BE SNS subscription)          | BE task 0050 / task 0038 |
-| `/prices/{env}/api-gateway-id`              | REST API ID (for downstream domain wiring)                | task 0040                |
-| `/prices/{env}/pricing-api-free-plan-id`    | Usage plan ID for key issuance + `GetUsage`               | task 0160 / 0187         |
-| `/prices/{env}/portal-oauth-secret-name`    | Secrets Manager NAME of the portal's Discord OAuth bundle | task 0186                |
+```bash
+# Ledger where live ingestion starts (a ledger sequence). The processor seeds its
+# durable cursor from it on the first cold start, then never reads it again.
+aws ssm put-parameter --type String --name /prices/production/ledger-processor/initial-cursor \
+    --value "$(curl -s https://horizon.stellar.org | jq .history_latest_ledger)"
 
-**Boundary rule:** the deploy role's IAM scope enforces this — it
-can `Get` both namespaces but `Put`/`Delete` only under `/prices/*`.
-Cross-team mistakes that would silently overwrite BE values are
-caught at the IAM layer, not at code review.
+# API-key sign-up gate: the Discord guild a visitor must belong to, and the
+# minimum Discord account age. Values and reasoning: portal-oauth-deploy-prep.md §2a.
+aws ssm put-parameter --type String --name /prices/production/discord-guild-id --value <guild-id>
+aws ssm put-parameter --type String --name /prices/production/min-account-age-minutes --value 5
+```
+
+**Slack delivery for alarms (optional).** `envs/production.json` →
+`opsAlarms.slack` names two parameters, `/prices/production/slack-workspace-id`
+and `/prices/production/slack-channel-id`. It also needs the workspace
+authorized in AWS Chatbot. Either seed both, or delete the `slack` key to
+deploy the alarms topic with no subscriber.
+
+### 6. Environment config
+
+`envs/production.json` carries this deployment's domain. For your own account,
+change:
+
+| Key                                                  | Set to                                    |
+| ---------------------------------------------------- | ----------------------------------------- |
+| `apiBaseUrl`, `apiDomain.domainName`                 | the API hostname, inside your hosted zone |
+| `apiDomain.hostedZoneId`, `apiDomain.hostedZoneName` | your Route 53 hosted zone in this account |
+| `portalWebOrigin`                                    | where the portal is served (CORS origin)  |
+
+For the CI/CD app only, `envs/cicd.json` → `githubRepo` is the repository the
+OIDC role trusts.
+
+### 7. Bootstrap and deploy
+
+```bash
+npm run infra:bootstrap           # once per account + region; needs no build
+npm run infra:diff:production     # builds the CDK app + all Lambdas, shows the diff
+npm run infra:deploy:production   # builds, deploys every stack, flushes the API cache
+```
+
+`infra:deploy:production` builds the Lambda assets from the working tree first
+(`tools/scripts/build-lambda-assets.sh`), then checks that each is a distinct
+aarch64 binary. Deploy through these targets: a raw `npx cdk deploy` ships
+whatever sits in `target/lambda/`.
+
+### 8. After the deploy
+
+1. **Portal cold start.** The api-handler reads the usage-plan id that
+   ApiGateway publishes, and ApiGateway deploys after Compute. So on a first
+   deploy the handler's first cold start finds no id and closes the portal;
+   `/v1` is unaffected. Check `curl -s https://<api-host>/api/config`. If it
+   says `"enabled":false`, recycle the handler so its next cold start finds the id:
+   `aws lambda update-function-configuration --function-name prices-production-api-handler --description "recycle $(date -u +%FT%TZ)"`.
+   The next deploy resets the description. The ordering is in
+   `portal-oauth-deploy-prep.md` §7.
+2. **Portal bundle.** The portal is hosted by the platform's web
+   distribution. `make -C infra sync-portal-explorer EXPLORER_PORTAL_BUCKET=<bucket> EXPLORER_DISTRIBUTION_ID=<id>`
+   uploads it to `/api/` on that distribution.
+3. **`current_prices`.** Once the enrichment worker has run (hourly), apply
+   `packages/prices-clickhouse/schema/current.sql` over the same tunnel as step 3.
+4. **Verify.** Take a key from the API Gateway console (usage plan
+   `pricing-api-free-production`), or sign up through the portal:
+
+   ```bash
+   curl -s -H "x-api-key: $KEY" https://<api-host>/v1/assets/native/price
+   aws cloudwatch describe-alarms --state-value ALARM --alarm-name-prefix prices-production
+   ```
+
+   Freshness alarms can sit in ALARM until the first candles land.
+
+A fresh deployment serves prices from the ledger in `initial-cursor` onward.
+Loading history is a separate, days-long operation. See
+[`docs/runbooks/backfill-sdex.md`](../docs/runbooks/backfill-sdex.md) and
+[`docs/runbooks/continue-soroban-backfill.md`](../docs/runbooks/continue-soroban-backfill.md).
+
+### Tear-down
+
+```bash
+make -C infra destroy-production
+make -C infra destroy-cicd        # only if you deployed it
+aws secretsmanager delete-secret --force-delete-without-recovery --secret-id <each of the three>
+aws ssm delete-parameters --names <the four seeds>
+```
+
+Log groups are removed with their stacks. The CDK bootstrap stack
+(`CDKToolkit`) is left in place.
+
+## CI/CD role (optional)
+
+`Prices-Cicd` creates a GitHub OIDC provider and a deploy role whose trust is
+limited to this repository's `production` GitHub Environment. **No workflow
+deploys today.** Every deploy is an operator running the make targets above,
+so the stack exists for a future deploy workflow. To create it:
+
+```bash
+npm run infra:deploy:cicd   # prints Prices-Cicd.ProductionDeployRoleArn
+```
+
+The OIDC provider is a per-account singleton. In an account that already has
+one, such as an account shared with the platform, the stack fails until
+the provider is imported instead of created.
+
+## SSM key contract
+
+Both services deploy into the same AWS account, so the namespace split is
+enforced by IAM, not by account boundaries: the deploy role can `Get` both
+namespaces but `Put`/`Delete` only under `/prices/*`.
+
+### Inputs — `/platform/{env}/...` (the platform publishes, prices-api reads at deploy)
+
+| Key                                               | Value                                           |
+| ------------------------------------------------- | ----------------------------------------------- |
+| `/platform/{env}/ch-domain`                       | ClickHouse hostname behind the Caddy mTLS proxy |
+| `/platform/{env}/ledger-events-topic-arn`         | SNS topic fed by new ledger files               |
+| `/platform/{env}/stellar-ledger-data-bucket-name` | ledger bucket (read-only IAM grant)             |
+| `/platform/{env}/stellar-ledger-data-bucket-arn`  | same bucket, ARN form                           |
+| `/platform/{env}/stellar-network-passphrase`      | public network passphrase                       |
+
+### Operator seeds — `/prices/{env}/...` (never created by CDK)
+
+| Key                                                    | Read by                                                |
+| ------------------------------------------------------ | ------------------------------------------------------ |
+| `/prices/{env}/ledger-processor/initial-cursor`        | Compute, at deploy (ledger-processor `INITIAL_CURSOR`) |
+| `/prices/{env}/discord-guild-id`                       | api-handler, at runtime                                |
+| `/prices/{env}/min-account-age-minutes`                | api-handler, at runtime                                |
+| `/prices/{env}/slack-workspace-id`, `slack-channel-id` | Observability, at deploy (optional)                    |
+
+### Outputs — `/prices/{env}/...` (prices-api publishes)
+
+| Key                                        | Value                                                   |
+| ------------------------------------------ | ------------------------------------------------------- |
+| `/prices/{env}/mtls-ingestion-secret-name` | Secrets Manager name of the writer bundle               |
+| `/prices/{env}/mtls-api-secret-name`       | Secrets Manager name of the reader bundle               |
+| `/prices/{env}/portal-oauth-secret-name`   | Secrets Manager name of the Discord OAuth bundle        |
+| `/prices/{env}/api-gateway-id`             | REST API id                                             |
+| `/prices/{env}/pricing-api-free-plan-id`   | usage plan id, read by the api-handler for key issuance |
 
 ## Commands
 
@@ -162,7 +333,7 @@ From repo root:
 ```bash
 # One-time
 npm run infra:bootstrap         # CDK bootstrap (per AWS account + region)
-npm run infra:deploy:cicd       # CicdStack — OIDC + deploy role
+npm run infra:deploy:cicd       # optional: CicdStack — OIDC + deploy role
 
 # Production (the only AWS environment)
 npm run infra:synth:production  # Synth env template
@@ -194,61 +365,23 @@ CI runs, followed by a check that each bootstrap is a distinct aarch64 ELF
 disk. And do not read `GET /health` as proof of a deploy: it is a gateway mock
 that never reaches a Lambda.
 
-## Uploading the real mTLS PEMs
+## Secrets: CDK owns the name, the operator owns the value
 
-`SecretsStack` provisions the two Secrets Manager slots with random
-CDK-generated placeholder values. The real cert + key come from BE
-task 0050's per-AWS-service issuance script. To upload them after a
-deploy:
+`SecretsStack` creates no secrets. It publishes three **names**, and
+`ComputeStack` grants each Lambda read on exactly the one it needs:
 
-```bash
-aws secretsmanager put-secret-value \
-    --secret-id prices/production/clickhouse-mtls-cert \
-    --secret-string "$(cat path/to/production-client.cert.pem)"
+| Secret                                                | Holds                                                             | Created in                       |
+| ----------------------------------------------------- | ----------------------------------------------------------------- | -------------------------------- |
+| `prices/{env}/clickhouse-mtls-prices-ingestion-{env}` | `{cert,key,ca}` for CN `prices-ingestion-{env}` → `prices_writer` | fresh-account step 4             |
+| `prices/{env}/clickhouse-mtls-prices-api-{env}`       | `{cert,key,ca}` for CN `prices-api-{env}` → `prices_reader`       | fresh-account step 4             |
+| `prices/{env}/portal-discord-oauth`                   | `{client_id, client_secret, redirect_uri, session_signing_key}`   | `portal-oauth-deploy-prep.md` §2 |
 
-aws secretsmanager put-secret-value \
-    --secret-id prices/production/clickhouse-mtls-key \
-    --secret-string "$(cat path/to/production-client.key.pem)"
-```
-
-Subsequent `cdk deploy` invocations will NOT overwrite the uploaded
-PEMs — CDK manages the resource (and `generateSecretString`
-parameters), not the secret value itself, once it has been replaced
-out-of-band.
-
-## The portal's Discord OAuth secret
-
-Same rule, third secret (task 0186). `prices/{env}/portal-discord-oauth`
-holds `{client_id, client_secret, redirect_uri, session_signing_key}`
-for the onboarding portal's sign-in. CDK computes the **name**
-(`portalOauthSecretName` in `src/lib/mtls.ts`), grants the api-handler
-role read on exactly that ARN, and sets `PORTAL_OAUTH_SECRET_NAME` —
-never the value, which the operator creates and updates by hand.
-
-Here the out-of-band ownership is load-bearing for a second reason: the
-`redirect_uri` field is re-pointed whenever the backend's hostname changes
-(it did on 2026-08-31, task 0194), and a
-CloudFormation-managed value would be restored to the committed one by
-the next deploy, breaking sign-in silently some time afterwards.
-
-Registration, provisioning and the cutover ordering are in
-[`../docs/runbooks/portal-oauth-deploy-prep.md`](../docs/runbooks/portal-oauth-deploy-prep.md).
-
-## Where each downstream task plugs in
-
-Per BE's pattern, one downstream task ≈ one chunk of real content
-attached to the skeleton:
-
-| Task                             | Where it plugs in                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `0008` (CI workflow)             | Adds `.github/workflows/deploy.yml` that assumes the per-env CicdStack deploy role via OIDC and runs `make deploy-{env}`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `0038` (Ledger Processor Lambda) | Adds a `RustFunction` to ComputeStack, references `ledgerProcessorRole` + `ledgerProcessorLogGroup`, attaches SNS subscription, adds `s3:GetObject` on BE's bucket (same-account — IAM grant only, no bucket policy needed), publishes Lambda ARN to `/prices/{env}/ledger-processor-lambda-arn`.                                                                                                                                                                                                                                                                                                                                                   |
-| `0039` (Periodic workers)        | Adds 4 `RustFunction`s in ComputeStack, calls `rule.addTarget(...)` on each `EventBridgeStack` rule, uses `createPricesLambdaRole` for the per-worker IAM roles.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `0040` (API handlers)            | Adds a `RustFunction` to ComputeStack, attaches as Lambda proxy integration onto ApiGatewayStack's REST API root, adds `/v1/prices/...` resources, wires custom domain + Route 53 A-record + ACM cert.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `0055` (Backfill status)         | Adds a `RustFunction` to ComputeStack using `createPricesLambdaRole`, adds `/backfill/status` resource to ApiGatewayStack.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `0186` (Portal sign-in)          | Adds `portalOauthSecretName` to `lib/mtls.ts`, a `secretsmanager:GetSecretValue` grant + `PORTAL_OAUTH_SECRET_NAME` on the api-handler in ComputeStack, and publishes the secret name from SecretsStack. Nothing in the template holds a secret value; the operator provisions it per the deploy-prep runbook.                                                                                                                                                                                                                                                                                                                                      |
-| `0187` (Self-service keys)       | Adds four `apigateway:` grants on `/apikeys` + `/apikeys/*` and `PORTAL_FREE_PLAN_PARAM` on the api-handler in ComputeStack, plus a standalone `iam.Policy` in ApiGatewayStack granting `POST` on the free plan's `/keys`. The last one lives there because the plan id does: a policy in ComputeStack referencing it would make Compute import an export of ApiGateway, while ApiGateway already imports the Lambda from Compute — a cycle. `POST` and `GET` on `/apikeys` cannot be scoped further; `DELETE /apikeys/*` can be, with a tag condition, and is not yet — task 0194 owns it. All three limits are written out in `compute-stack.ts`. |
-| `0056` (Alarms)                  | Adds `cloudwatch.Alarm` constructs to ObservabilityStack referencing ComputeStack log groups + ApiGatewayStack stage metrics + Lambda function metrics. Attaches widgets to the dashboard.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+A CloudFormation-managed value would need a placeholder the runtime cannot
+parse, would collide with the operator's `create-secret`, and would be
+restored to the committed value by the next deploy. That last one bites the
+OAuth bundle: its `redirect_uri` is re-pointed by hand whenever the backend's
+hostname changes (it did on 2026-08-31, task 0194). Rotating a certificate is
+`aws secretsmanager put-secret-value` on the same name. No deploy is needed.
 
 ## The portal's usage-plan handshake
 
