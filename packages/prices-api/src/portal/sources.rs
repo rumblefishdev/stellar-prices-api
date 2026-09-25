@@ -17,23 +17,33 @@
 //! reads only the mTLS bundle, and the portal pays for its own sources on its
 //! own first request.
 //!
-//! # Why a failure is not cached
+//! # Why a failure is kept for at most a cooldown
 //!
 //! The lifetime closure was the defect. A failed load answers **that request**
 //! as unavailable (`/config` `enabled: false`, `503` on `/key`, `/usage` and
-//! `/me`, a failure landing on sign-in) and the next portal request loads
-//! again; a success is kept for the environment's life. Still closed, not
-//! crashed: the load never panics, because a panic here would be a `502` on
-//! the function that also serves `/v1`, over sources `/v1` does not use.
+//! `/me`, a failure landing on sign-in); a success is kept for the
+//! environment's life. Still closed, not crashed: the load never panics,
+//! because a panic here would be a `502` on the function that also serves
+//! `/v1`, over sources `/v1` does not use.
 //!
-//! # Single flight, for success only
+//! A failure is remembered for [`LOAD_FAILURE_COOLDOWN`] and no longer (review
+//! WR-02). Inside it, a portal request answers as unavailable **without**
+//! loading and without a second alarm-prefixed ERROR line; the first request
+//! after it loads again. Without the cooldown, `/config` — anonymous, and
+//! called on every page view — re-ran all five reads with their retries on
+//! every request while SSM was throttling, prolonging the very throttle this
+//! task escapes. Two seconds bounds that to one load per environment per
+//! cooldown and still leaves nothing broken for longer than a reload.
+//!
+//! # Single flight
 //!
 //! [`tokio::sync::OnceCell::get_or_try_init`] runs one init at a time and
-//! hands a success to every waiter. A failure goes to its own caller only, and
-//! the next waiter starts another attempt — so N waiters on a failing load run
-//! N loads in turn. [`LOAD_BUDGET`] wraps the whole wait, which bounds each of
-//! them. Standard Lambda runs one request per environment at a time, so in
-//! production this bites only `serve` and the tests.
+//! hands a success to every waiter. A failure goes to its own caller only;
+//! the waiters queued behind it then find the cooldown recorded and answer
+//! unavailable without a load of their own — the failure is recorded inside
+//! the init, before the next waiter can start one. [`LOAD_BUDGET`] wraps the
+//! whole wait. Standard Lambda runs one request per environment at a time,
+//! so in production queued waiters exist only in `serve` and the tests.
 //!
 //! The load is awaited inside the handler, never `tokio::spawn`ed: Lambda
 //! freezes spawned work after the response. And the loader must never call
@@ -44,10 +54,11 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::OnceCell;
+use tokio::time::Instant;
 
 use crate::config::{AppConfig, PortalLoadError};
 use crate::portal::auth::secret::OauthSecret;
@@ -62,6 +73,14 @@ use crate::portal::keys::gateway::Gateway;
 /// slowest route after it inside the 15 s invocation — pinned below for
 /// `/usage` and `/key`, and in `auth::issue` for the callback.
 pub(crate) const LOAD_BUDGET: Duration = Duration::from_secs(4);
+
+/// How long a failed load is remembered: inside it, [`PortalSources::get`]
+/// answers unavailable without loading (see the module doc).
+///
+/// Two seconds: long enough that a burst of page views — `/config` fires on
+/// every one — costs one load per environment rather than one each, short
+/// enough that a visitor who reloads after a transient fault finds it gone.
+pub const LOAD_FAILURE_COOLDOWN: Duration = Duration::from_secs(2);
 
 /// What a load produced.
 ///
@@ -100,6 +119,43 @@ pub type Loader = Arc<dyn Fn() -> LoadFuture + Send + Sync>;
 pub struct PortalSources {
     cell: Arc<OnceCell<Loaded>>,
     loader: Option<Loader>,
+    /// When the last load failed, for [`LOAD_FAILURE_COOLDOWN`]. Shared by
+    /// every clone, like the cell.
+    last_failure: Arc<Mutex<Option<Instant>>>,
+}
+
+/// Why one ask came back without the sources.
+enum Unavailable {
+    /// A load ran and failed.
+    Failed(PortalLoadError),
+    /// A load failed this long ago, inside the cooldown; none was started.
+    CoolingDown(Duration),
+}
+
+/// Records a failure when dropped, unless disarmed by a success.
+///
+/// A drop rather than a line after the `await`, so a load cancelled by
+/// [`LOAD_BUDGET`] is recorded too — and recorded while the cell's init
+/// permit is still held, before the next waiter can start a load of its own.
+/// A load cancelled because its request went away counts as well: it starts
+/// a cooldown without an ERROR line, which errs toward loading less.
+struct FailureRecorder<'a> {
+    last_failure: &'a Mutex<Option<Instant>>,
+    armed: bool,
+}
+
+impl Drop for FailureRecorder<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            *lock(self.last_failure) = Some(Instant::now());
+        }
+    }
+}
+
+/// The failure clock's lock. A poisoned one still holds a valid instant: the
+/// only writer stores one value and cannot panic half-way.
+fn lock(m: &Mutex<Option<Instant>>) -> std::sync::MutexGuard<'_, Option<Instant>> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl PortalSources {
@@ -109,6 +165,7 @@ impl PortalSources {
         PortalSources {
             cell: Arc::new(OnceCell::new_with(Some(loaded))),
             loader: None,
+            last_failure: Arc::default(),
         }
     }
 
@@ -128,23 +185,49 @@ impl PortalSources {
         PortalSources {
             cell: Arc::new(OnceCell::new()),
             loader: Some(loader),
+            last_failure: Arc::default(),
         }
     }
 
     /// The sources, loading them if this is the first ask (or every earlier
-    /// ask failed). `None` means this request answers as unavailable; the
-    /// failure is logged here, once per failed load, and the next call
-    /// retries.
+    /// ask failed). `None` means this request answers as unavailable.
+    ///
+    /// A failed load logs one alarm-prefixed ERROR here. An ask inside the
+    /// [`LOAD_FAILURE_COOLDOWN`] after it starts no load and logs one WARN
+    /// without the prefix, so the alarm counts loads, not requests.
     pub async fn get(&self) -> Option<&Loaded> {
         if let Some(loaded) = self.cell.get() {
             return Some(loaded);
         }
         // A ready cell is always initialised, so only a lazy one gets here.
         let loader = self.loader.as_ref()?;
-        let attempt = self.cell.get_or_try_init(|| loader());
+        let attempt = self.cell.get_or_try_init(|| async {
+            // Checked inside the init, not before it: a request queued behind
+            // a failing load gets here after that failure was recorded.
+            if let Some(ago) = self.failed_within_cooldown() {
+                return Err(Unavailable::CoolingDown(ago));
+            }
+            let mut recorder = FailureRecorder {
+                last_failure: &self.last_failure,
+                armed: true,
+            };
+            let loaded = loader().await.map_err(Unavailable::Failed)?;
+            recorder.armed = false;
+            Ok(loaded)
+        });
         let err = match tokio::time::timeout(LOAD_BUDGET, attempt).await {
             Ok(Ok(loaded)) => return Some(loaded),
-            Ok(Err(err)) => err,
+            Ok(Err(Unavailable::Failed(err))) => err,
+            Ok(Err(Unavailable::CoolingDown(ago))) => {
+                // Not the alarm's prefix: this request started no load.
+                tracing::warn!(
+                    failed_ms_ago = ago.as_millis() as u64,
+                    cooldown_ms = LOAD_FAILURE_COOLDOWN.as_millis() as u64,
+                    "portal request answered as unavailable without a load: the last load \
+                     failed inside the cooldown"
+                );
+                return None;
+            }
             Err(_) => PortalLoadError::TimedOut(LOAD_BUDGET),
         };
         // The alarm's string: `prices-${env}-api-handler-portal-load-failed`
@@ -152,10 +235,17 @@ impl PortalSources {
         // `tools/scripts/portal-load-failed-filter-guard.test.mjs`.
         tracing::error!(
             error = %err,
-            "portal sources failed to load; this request answers as unavailable and the next \
-             portal request retries; /v1 is unaffected"
+            "portal sources failed to load; this request answers as unavailable and the first \
+             portal request after a short cooldown retries; /v1 is unaffected"
         );
         None
+    }
+
+    /// How long ago the last load failed, if that is inside the cooldown.
+    fn failed_within_cooldown(&self) -> Option<Duration> {
+        let failed_at = (*lock(&self.last_failure))?;
+        let ago = failed_at.elapsed();
+        (ago < LOAD_FAILURE_COOLDOWN).then_some(ago)
     }
 }
 
@@ -237,17 +327,18 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_failure_is_not_cached_and_a_success_is() {
+    async fn a_failure_is_kept_only_for_the_cooldown_and_a_success_for_good() {
         let (loader, calls) = scripted(&[Step::Fail, Step::Succeed], Duration::ZERO);
         let sources = PortalSources::lazy(loader);
         assert!(sources.get().await.is_none());
+        tokio::time::advance(LOAD_FAILURE_COOLDOWN).await;
         assert!(sources.get().await.is_some());
         assert!(sources.get().await.is_some());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_load_past_the_budget_gives_up_and_the_next_ask_loads_again() {
+    async fn a_load_past_the_budget_gives_up_and_the_first_ask_after_the_cooldown_loads_again() {
         let (loader, calls) = scripted(&[Step::Hang, Step::Succeed], Duration::ZERO);
         let sources = PortalSources::lazy(loader);
         let started = tokio::time::Instant::now();
@@ -257,8 +348,56 @@ mod tests {
             waited >= LOAD_BUDGET && waited < LOAD_BUDGET + Duration::from_millis(50),
             "{waited:?}"
         );
+        // A timed-out load is a failed one: it starts the cooldown too.
+        assert!(sources.get().await.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        tokio::time::advance(LOAD_FAILURE_COOLDOWN).await;
         assert!(sources.get().await.is_some());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// Review WR-02. Inside the cooldown an ask starts no load — the retry
+    /// storm against a throttled SSM is bounded to one load per cooldown —
+    /// and the first ask after it loads. That it adds no alarm-prefixed
+    /// ERROR line is asserted in `tests/portal_load_logs.rs`, a binary of its
+    /// own: `tracing`'s callsite cache makes a log capture beside parallel
+    /// tests unreliable (see that file).
+    #[tokio::test(start_paused = true)]
+    async fn inside_the_cooldown_an_ask_does_not_load() {
+        let (loader, calls) = scripted(&[Step::Fail, Step::Succeed], Duration::ZERO);
+        let sources = PortalSources::lazy(loader);
+
+        assert!(sources.get().await.is_none());
+        for _ in 0..5 {
+            tokio::time::advance(LOAD_FAILURE_COOLDOWN / 10).await;
+            assert!(sources.get().await.is_none());
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a load ran inside the cooldown"
+        );
+
+        tokio::time::advance(LOAD_FAILURE_COOLDOWN).await;
+        assert!(sources.get().await.is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// Requests queued behind a failing load do not each run one of their
+    /// own: the failure is recorded before the next waiter's init starts.
+    #[tokio::test(start_paused = true)]
+    async fn waiters_behind_a_failing_load_do_not_load_again() {
+        let (loader, calls) = scripted(&[Step::Fail], Duration::from_millis(50));
+        let sources = PortalSources::lazy(loader);
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let sources = sources.clone();
+            set.spawn(async move { sources.get().await.is_some() });
+        }
+        while let Some(loaded) = set.join_next().await {
+            assert!(!loaded.unwrap());
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -266,6 +405,36 @@ mod tests {
         let sources = PortalSources::ready(Loaded::default());
         assert!(sources.loader.is_none());
         assert!(sources.get().await.is_some());
+    }
+
+    fn config(portal_enabled: bool) -> AppConfig {
+        AppConfig {
+            ch_enabled: false,
+            base_url: None,
+            api_keys: vec![],
+            portal_enabled,
+            portal_oauth: None,
+            portal_endpoints: Default::default(),
+            portal_keys: None,
+            portal_eligibility: None,
+            portal_rate_limit: None,
+            portal_web_origin: None,
+        }
+    }
+
+    /// Review WR-05. What keeps a closed Lambda from ever building a
+    /// control-plane client (`Gateway::from_ambient_config`) is that
+    /// `sources_for` gives it no loader at all — the gate's `404` is the
+    /// second line, not the first. Only an open portal with nothing supplied
+    /// gets the environment loader.
+    #[tokio::test]
+    async fn a_closed_portal_never_gets_a_loader() {
+        let closed = sources_for(&config(false));
+        assert!(closed.loader.is_none(), "a closed portal holds a loader");
+        let loaded = closed.get().await.expect("a closed portal's cell is ready");
+        assert!(loaded.oauth.is_none() && loaded.gateway.is_none() && loaded.settings.is_none());
+
+        assert!(sources_for(&config(true)).loader.is_some());
     }
 
     /// A load in front of the slowest routes must still leave the answer

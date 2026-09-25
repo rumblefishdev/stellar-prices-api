@@ -501,9 +501,10 @@ export class ComputeStack extends cdk.Stack {
     // never asked; with `PORTAL_ENABLED` true (task 0194) the read happens on
     // the first portal request per execution environment (task 0311), and a
     // missing or misnamed secret answers that request as unavailable with a
-    // `portal sources failed to load` error log; the next request retries,
-    // and nothing stays closed. See the deploy-gate note on `PORTAL_ENABLED`
-    // below and `packages/prices-api/src/portal/sources.rs`.
+    // `portal sources failed to load` error log; the first request after a
+    // 2 s cooldown retries, and nothing stays closed. See the deploy-gate
+    // note on `PORTAL_ENABLED` below and
+    // `packages/prices-api/src/portal/sources.rs`.
     this.apiHandlerRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'ReadPortalOauthSecret',
@@ -917,8 +918,8 @@ export class ComputeStack extends cdk.Stack {
         // A failed read answers THAT request as unavailable (`/config`
         // `enabled: false`, `503` on the portal's other routes) and logs
         // `portal sources failed to load`, naming the variable, on the
-        // api-handler; the next portal request retries, so nothing stays
-        // closed and no recycle is needed. It never touches init: `/v1` cold
+        // api-handler; the first portal request after a 2 s cooldown
+        // retries, so nothing stays closed and no recycle is needed. It never touches init: `/v1` cold
         // starts read none of these (task 0311). So deploying this ahead of
         // the operator steps ships a portal whose `/config` answers
         // `enabled: false` on each call until the missing source exists, not

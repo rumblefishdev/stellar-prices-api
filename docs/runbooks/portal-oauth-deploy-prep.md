@@ -254,8 +254,10 @@ execution environment (the `/config` probe triggers it): that `/config` answers
 `enabled: false` and the api-handler logs `portal sources failed to load`
 naming `PORTAL_OAUTH_SECRET_NAME`, which pages as
 `prices-production-api-handler-portal-load-failed` (tasks 0249, 0311) — rather
-than silently serving a broken sign-in. The next request retries, so creating
-the secret fixes it without a redeploy. A successful load is kept for the
+than silently serving a broken sign-in. A failed load is remembered for a 2 s
+cooldown (requests inside it answer the same way without reading anything), and
+the first request after it retries, so creating the secret fixes it without a
+redeploy. A successful load is kept for the
 execution environment's life, so changing the secret's VALUE later still needs
 a recycle, as before. `/v1` is unaffected either way.
 

@@ -334,8 +334,10 @@ pub(crate) fn cors_layer(web_origin: Option<&str>) -> CorsLayer {
 /// Open means the flag is on AND the portal's sources are loaded. This is
 /// usually the first portal request an execution environment sees (the page
 /// asks it on every load), so it is what triggers the load. A failed load
-/// answers `enabled: false` for this response only and the next call loads
-/// again; the reason is in the log line and the alarm, not in the answer.
+/// answers `enabled: false`, as does every call inside the short cooldown
+/// after it (`sources::LOAD_FAILURE_COOLDOWN`, which starts no load); the
+/// first call after that loads again. The reason is in the log line and the
+/// alarm, not in the answer.
 /// The flag is checked FIRST, so a closed portal never loads anything.
 async fn config_handler(State(gate): State<PortalGate>) -> Response {
     let enabled = gate.enabled && gate.sources.get().await.is_some();
@@ -344,8 +346,8 @@ async fn config_handler(State(gate): State<PortalGate>) -> Response {
         rate_limit_per_second: gate.rate_limit,
     })
     .into_response();
-    // Never cached: the flag changes on deploy and a failed load changes on
-    // the next call, and a CDN or browser holding a stale `enabled: false`
+    // Never cached: the flag changes on deploy and a failed load changes
+    // within seconds, and a CDN or browser holding a stale `enabled: false`
     // would keep the portal dark for its viewers long after it opened — with
     // nothing on screen to suggest why.
     cache_control::attach(&mut resp, cache_control::NO_STORE);

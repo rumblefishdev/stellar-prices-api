@@ -8,7 +8,8 @@
 // alarm goes quiet for good with every check green. Asserted here:
 //
 //   - the filter reads `$.fields.message` and matches by the exact prefix;
-//   - `sources.rs` has a `tracing::error!` whose message starts with it;
+//   - `sources.rs` has a `tracing::error!` whose message (its last literal,
+//     not a field value) starts with it;
 //   - the subscriber in `main.rs` is `fmt().json()` and not flattened;
 //   - the alarm takes its metric from that filter, under its own name;
 //   - the alarm's description fits CloudWatch's 1024-character limit.
@@ -78,10 +79,25 @@ const alarmDescription = (block) => {
   return found ? (found[1] ?? found[2] ?? found[3]) : undefined;
 };
 
-// Does some `tracing::error!(…)` carry a message literal starting with `prefix`?
+// The message of one `tracing::error!(…)` body: its LAST string literal, and
+// only when nothing but a trailing comma follows it. Fields come first in
+// `tracing`'s macro syntax, so a prefix sitting in a field value
+// (`reason = "portal sources failed to load"`) is not the message, and the
+// filter on `$.fields.message` would never see it.
+const messageLiteral = (body) => {
+  // `\\[\s\S]`, not `\\.`: a Rust line continuation is a backslash and a
+  // newline, which `.` does not match.
+  const literals = [...body.matchAll(/"((?:[^"\\]|\\[\s\S])*)"/g)];
+  const last = literals.at(-1);
+  if (!last) return undefined;
+  const after = body.slice(last.index + last[0].length);
+  return /^\s*,?\s*$/.test(after) ? last[1] : undefined;
+};
+
+// Does some `tracing::error!(…)` carry a MESSAGE starting with `prefix`?
 const logsErrorStartingWith = (source, prefix) =>
-  [...source.matchAll(/tracing::error!\(([\s\S]*?)\);/g)].some(([, body]) =>
-    body.includes(`"${prefix}`),
+  [...source.matchAll(/tracing::error!\(([\s\S]*?)\);/g)].some(
+    ([, body]) => messageLiteral(body)?.startsWith(prefix) ?? false,
   );
 
 const subscriberPutsMessageUnderFields = (source) => {
@@ -152,6 +168,18 @@ test('a reworded log line is refused', () => {
 
   assert.notEqual(reworded, sourcesSource);
   assert.equal(logsErrorStartingWith(reworded, PREFIX), false);
+});
+
+test('the prefix in a field value, beside a reworded message, is refused', () => {
+  // The message is reworded and the old words survive as a field: the
+  // metric filter reads `$.fields.message`, so this alarms on nothing.
+  const moved = sourcesSource.replace(
+    `error = %err,\n            "${PREFIX}`,
+    `error = %err,\n            reason = "${PREFIX}",\n            "the portal could not load`,
+  );
+
+  assert.notEqual(moved, sourcesSource);
+  assert.equal(logsErrorStartingWith(moved, PREFIX), false);
 });
 
 test('a flattened subscriber is refused', () => {

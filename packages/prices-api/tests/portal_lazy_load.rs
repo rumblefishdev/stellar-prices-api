@@ -6,15 +6,21 @@
 //!
 //! - building the router and serving `/health` and `/v1` read nothing;
 //! - `/config` loads, answers `enabled` by the outcome, and a success is kept;
-//! - a failure is not kept: the next request loads again;
-//! - a portal route answers `503` on a failed load and works on the next;
+//! - a failure is kept only for `LOAD_FAILURE_COOLDOWN`: inside it a request
+//!   answers unavailable without loading, and the first after it loads again;
+//! - a portal route answers `503` on a failed load and works after the cooldown;
 //! - with `PORTAL_ENABLED=false` the portal is a `404` and nothing loads;
 //! - concurrent first requests share one successful load;
-//! - a sign-in callback on a failed or slow load lands on a retryable failure
-//!   (the slow case with a real login is in `tests/portal_auth.rs`);
+//! - login on a failed load lands on a retryable failure;
+//! - a callback on a failed load lands where its flow renders a failure (the
+//!   cases with a real login, and the slow load, are in `tests/portal_auth.rs`);
 //! - `main.rs` performs no portal load.
 //!
-//! The retry around each read is unit-tested in `portal::extension`.
+//! The tests that load twice run on tokio's paused clock, so the cooldown is
+//! skipped with `advance` rather than slept through.
+//!
+//! The retry around each read is unit-tested in `portal::extension`; the log
+//! lines a failed load and its cooldown write are in `tests/portal_load_logs.rs`.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,7 +33,7 @@ use axum::http::{HeaderMap, Request, StatusCode, header};
 use prices_api::config::PortalLoadError;
 use prices_api::portal::auth::secret::{OauthSecret, SecretError};
 use prices_api::portal::keys::gateway::Gateway;
-use prices_api::portal::sources::{Loaded, Loader, PortalSources};
+use prices_api::portal::sources::{LOAD_FAILURE_COOLDOWN, Loaded, Loader, PortalSources};
 use prices_api::{AppConfig, AppState, app_with_portal};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -225,11 +231,11 @@ fn main_rs_performs_no_portal_load() {
 }
 
 // ---------------------------------------------------------------------------
-// /config answers by the load's outcome, and a failure is not kept
+// /config answers by the load's outcome; a failure is kept for the cooldown
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn config_says_closed_on_a_failed_load_and_open_on_the_next() {
+#[tokio::test(start_paused = true)]
+async fn config_says_closed_on_a_failed_load_and_open_after_the_cooldown() {
     let (sources, calls) = scripted(
         vec![Step::Fail, Step::Succeed(Loaded::default())],
         Duration::ZERO,
@@ -241,17 +247,33 @@ async fn config_says_closed_on_a_failed_load_and_open_on_the_next() {
     assert_eq!(failed.json()["enabled"], json!(false));
     assert!(failed.no_store(), "a closed answer must never be cached");
 
+    // Inside the cooldown (review WR-02): the same answer, and no load — an
+    // anonymous page view must not re-run five retried reads against a
+    // throttled SSM.
+    let cooling = get(&router, "/api/config").await;
+    assert_eq!(cooling.json()["enabled"], json!(false));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a load ran inside the cooldown"
+    );
+
+    tokio::time::advance(LOAD_FAILURE_COOLDOWN).await;
     let recovered = get(&router, "/api/config").await;
     assert_eq!(recovered.json()["enabled"], json!(true));
-    assert_eq!(calls.load(Ordering::SeqCst), 2, "the failure was kept");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the failure outlived the cooldown"
+    );
 }
 
 // ---------------------------------------------------------------------------
 // Portal routes: 503 on a failed load, working on the next
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn usage_is_503_on_a_failed_load_and_answers_on_the_next() {
+#[tokio::test(start_paused = true)]
+async fn usage_is_503_on_a_failed_load_and_answers_after_the_cooldown() {
     let (sources, _) = scripted(
         vec![Step::Fail, Step::Succeed(loaded_with_keys())],
         Duration::ZERO,
@@ -264,12 +286,13 @@ async fn usage_is_503_on_a_failed_load_and_answers_on_the_next() {
     assert!(failed.no_store());
 
     // Past the unprovisioned branch: no session cookie is now the answer.
+    tokio::time::advance(LOAD_FAILURE_COOLDOWN).await;
     let next = get(&router, "/api/usage").await;
     assert_eq!(next.status, StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
-async fn key_is_503_on_a_failed_load_and_answers_on_the_next() {
+#[tokio::test(start_paused = true)]
+async fn key_is_503_on_a_failed_load_and_answers_after_the_cooldown() {
     let (sources, _) = scripted(
         vec![Step::Fail, Step::Succeed(loaded_with_keys())],
         Duration::ZERO,
@@ -281,14 +304,15 @@ async fn key_is_503_on_a_failed_load_and_answers_on_the_next() {
     assert_eq!(failed.json()["code"], json!("keys_unconfigured"));
     assert!(failed.no_store());
 
+    tokio::time::advance(LOAD_FAILURE_COOLDOWN).await;
     let next = get(&router, "/api/key").await;
     assert_eq!(next.status, StatusCode::UNAUTHORIZED);
 }
 
 /// `/me` does not say "signed out" when it cannot check: that would be a lie
 /// to a visitor who is signed in.
-#[tokio::test]
-async fn me_is_503_on_a_failed_load_and_answers_on_the_next() {
+#[tokio::test(start_paused = true)]
+async fn me_is_503_on_a_failed_load_and_answers_after_the_cooldown() {
     let (sources, _) = scripted(
         vec![Step::Fail, Step::Succeed(loaded_with_keys())],
         Duration::ZERO,
@@ -300,6 +324,7 @@ async fn me_is_503_on_a_failed_load_and_answers_on_the_next() {
     assert_eq!(failed.json()["code"], json!("session_unavailable"));
     assert!(failed.no_store());
 
+    tokio::time::advance(LOAD_FAILURE_COOLDOWN).await;
     let next = get(&router, "/api/auth/me").await;
     assert_eq!(next.status, StatusCode::OK);
     assert_eq!(next.json()["authenticated"], json!(false));
@@ -351,11 +376,13 @@ async fn concurrent_first_requests_share_one_load() {
 // The sign-in callback
 // ---------------------------------------------------------------------------
 
-/// The action is not known before `state` is verified with the secret that
-/// failed to load, so the landing is sign-in's failure, and the pending
-/// cookie is left alone as on every refusal before verification.
+/// A callback that claims no action — no pending cookie, a `state` that is
+/// not one of ours — lands on sign-in's failure, and the pending cookie is
+/// left alone as on every refusal before verification. The issue and
+/// sign-in round-trips on a failed load, with real tokens, are in
+/// `tests/portal_auth.rs`.
 #[tokio::test]
-async fn a_callback_on_a_failed_load_lands_on_signin_failed() {
+async fn a_callback_on_a_failed_load_that_claims_no_action_lands_on_signin_failed() {
     let (sources, _) = scripted(vec![Step::Fail], Duration::ZERO);
     let router = router(true, sources);
 
@@ -363,4 +390,29 @@ async fn a_callback_on_a_failed_load_lands_on_signin_failed() {
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
     assert_eq!(reply.location(), "/api/?signin=failed");
     assert!(reply.headers.get(header::SET_COOKIE).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Login on a failed load (review WR-04)
+// ---------------------------------------------------------------------------
+
+/// A failed load is transient, so login lands it on a failure the visitor
+/// can retry — sign-in's card for a sign-in, the dashboard for an issue
+/// press — never on `?signin=not_open`'s "not yet available", which states a
+/// permanent condition. That it earns exactly ONE ERROR line (the alarm's,
+/// with no "deployment that cannot complete one" line beside it) is asserted
+/// in `tests/portal_load_logs.rs`, a binary of its own.
+#[tokio::test]
+async fn login_on_a_failed_load_lands_on_a_retryable_failure() {
+    for (uri, landing) in [
+        ("/api/auth/login", "/api/?signin=failed"),
+        ("/api/auth/login?action=issue", "/api/?issue=failed"),
+    ] {
+        let (sources, _) = scripted(vec![Step::Fail], Duration::ZERO);
+        let router = router(true, sources);
+        let reply = get(&router, uri).await;
+        assert_eq!(reply.status, StatusCode::SEE_OTHER, "{uri}");
+        assert_eq!(reply.location(), landing, "{uri}");
+        assert!(reply.headers.get(header::SET_COOKIE).is_none(), "{uri}");
+    }
 }

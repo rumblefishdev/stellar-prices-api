@@ -323,7 +323,8 @@ export class ObservabilityStack extends cdk.Stack {
   /**
    * api-handler `portal sources failed to load` alarm (tasks 0249, 0311): a
    * portal source failed to load for one request, which answered as
-   * unavailable. Nothing stays closed; the next portal request retries.
+   * unavailable. Nothing stays closed; the first portal request after a
+   * 2 s cooldown retries.
    */
   public readonly apiHandlerPortalLoadFailedAlarm: cloudwatch.Alarm;
   /**
@@ -1288,7 +1289,7 @@ export class ObservabilityStack extends cdk.Stack {
           statistic: 'Sum',
           period: cdk.Duration.minutes(5),
         }),
-        alarmDescription: `The api-handler logged "portal sources failed to load": a portal request (the first in an execution environment, or /config) could not load a portal source (the Discord OAuth secret, the free-plan id, the API id, the guild id or the min account age) after its retries. That one request answered as unavailable (/config enabled: false; /key, /usage and /me 503; sign-in lands on a failure page) and the next portal request retries, so no recycle is needed. /v1 is unaffected. Fix: read the line's error field, which names the failing variable. A persistent misconfiguration logs on every portal request, so the alarm keeps firing while it lasts. Runbook docs/runbooks/portal-oauth-deploy-prep.md; tasks 0249, 0311.`,
+        alarmDescription: `The api-handler logged "portal sources failed to load": a portal request (the first in an execution environment, or /config) could not load a portal source (the Discord OAuth secret, the free-plan id, the API id, the guild id or the min account age) after its retries. That one request answered as unavailable (/config enabled: false; /key, /usage and /me 503; sign-in lands on a failure page) and the first portal request after a 2 s cooldown retries, so no recycle is needed. /v1 is unaffected. Fix: read the line's error field, which names the failing variable. A persistent misconfiguration logs on every load (at most one per environment per cooldown), so the alarm keeps firing while it lasts. Runbook docs/runbooks/portal-oauth-deploy-prep.md; tasks 0249, 0311.`,
         threshold: 1,
         evaluationPeriods: 1,
         datapointsToAlarm: 1,

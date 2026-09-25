@@ -61,12 +61,28 @@ pub fn app(config: &AppConfig, state: AppState) -> Router {
 /// Compiled out of the Lambda, like `Gateway::against` and
 /// `IssueDeps::with_deadline`: the deployed build contains one loader, the one
 /// that reads the environment.
+///
+/// **`sources` is the only source of the portal's sources here** (review
+/// IN-04). `config.portal_oauth`, `portal_keys` and `portal_eligibility` are
+/// what [`app`] builds a ready cell from, and this seam does not read them —
+/// so a caller must leave them `None` (debug-asserted) rather than have them
+/// silently dropped. `config.portal_enabled` still decides the gate: a closed
+/// portal answers `404` whatever `sources` holds, but only [`app`] guarantees
+/// it holds no loader (`sources::sources_for`), so a test that wants that
+/// guarantee goes through [`app`].
 #[cfg(not(feature = "lambda"))]
 pub fn app_with_portal(
     config: &AppConfig,
     state: AppState,
     sources: portal::sources::PortalSources,
 ) -> Router {
+    debug_assert!(
+        config.portal_oauth.is_none()
+            && config.portal_keys.is_none()
+            && config.portal_eligibility.is_none(),
+        "app_with_portal ignores the config's portal sources; pass them in `sources` \
+         (PortalSources::ready) or call `app`"
+    );
     app_inner(config, state, sources)
 }
 
