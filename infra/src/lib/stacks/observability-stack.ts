@@ -1875,6 +1875,22 @@ export class ObservabilityStack extends cdk.Stack {
           'run length is a wall-clock budget (240 s of a 300 s timeout), not a symptom',
       },
       {
+        // Task 0256 settled the question 0223 parked there: the ledger scan
+        // is gone (removed 2026-09-24), and what remains — the Soroban symbol
+        // stage (0210) and the asset seed — is real hourly work, so it gets
+        // the standard pair. Measured 2026-09-24 before the first deploy:
+        // 1 invocation every hour for 48 h, Duration.Maximum 5.4 s against a
+        // 300 s timeout (threshold 240 s), 0 errors — neither alarm can latch
+        // on a healthy run.
+        name: 'asset-discovery',
+        idPrefix: 'AssetDiscovery',
+        functionName: workerFunctionName(config.envName, 'asset-discovery'),
+        timeout: cdk.Duration.minutes(5),
+        cadence: cdk.Duration.hours(1),
+        impact:
+          'a Soroban token that starts trading gets no symbol() lookup, so it lists with an empty code until the worker is back; the seed of the major assets stops being re-asserted.',
+      },
+      {
         name: 'enrichment',
         idPrefix: 'Enrichment',
         functionName: workerFunctionName(config.envName, 'enrichment'),
