@@ -189,6 +189,14 @@ history:
       that would keep close_usd = 0 after phase 3. Added step §7b-2
       (full-range coarse-repair after the 1m drain, PR #353) and a per-tier
       criterion. 0148 closed into it.
+  - date: "2026-09-25"
+    status: active
+    who: okarcz
+    note: >
+      PR #353 merged (e382bd46). Its last commit (aa254eed) made "1m drain
+      finished" need two readings, because the frontier gauge skips months
+      still marked exhausted from before the re-ingest. The criterion above
+      now matches.
 ---
 
 # Candles are built from dust fills in the wrong order
@@ -915,8 +923,12 @@ Phase 3:
       this criterion 2026-09-25). Enrichment prices `1m` only and the coarse
       sweep looks back two months, so without this step every coarse row older
       than that keeps `close_usd = 0`. Checks:
-  - [ ] The 1m drain finished before the coarse re-price started
-        (`EnrichmentFrontierMonthsPending` = 0).
+  - [ ] The 1m drain finished before the coarse re-price started, on both
+        readings of runbook §7b-2: `EnrichmentFrontierMonthsPending` = 0, AND
+        no `price_ohlcv_1m` row in `prices.enrichment_frontier` is
+        non-`exhausted` or swept before `T7` (the last §4e re-ingest's end).
+        The gauge alone reads 0 for a re-ingested month still marked
+        `exhausted`.
   - [ ] Dry run recorded for all six coarse tables. Every table lists months
         up to END (two months back), and none reports 0 months.
   - [ ] `coarse-repair` run in plain mode (no `--reset-*`) on `price_ohlcv_15m`,
