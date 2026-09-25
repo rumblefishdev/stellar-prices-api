@@ -379,7 +379,7 @@ const NOT_MEMBER_CODES: [u64; 2] = [10_007, 10_004];
 /// which is what validates the operator's seed. Those two were allowed to
 /// disagree, and the disagreement had a cost: `guild_id` checked only for
 /// emptiness, so `stellar_test` — the value the task's own parameter table
-/// named for the build period — passed the cold-start probe, deployed green,
+/// named for the build period — passed the load-time probe, deployed green,
 /// and then answered "we could not verify your Discord membership" to every
 /// visitor forever, because the check ran here instead and produced
 /// [`MemberLookup::Unknown`] once per request. One predicate, so the seed

@@ -44,6 +44,7 @@
 
 pub mod auth;
 pub mod eligibility;
+pub(crate) mod extension;
 pub mod keys;
 pub mod period;
 pub mod sources;

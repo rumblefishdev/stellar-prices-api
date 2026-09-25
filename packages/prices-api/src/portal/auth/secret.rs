@@ -182,7 +182,7 @@ impl OauthSecret {
     /// doing so.
     #[cfg(feature = "aws-mtls")]
     async fn from_secrets_manager(name: &str) -> Result<Self, SecretError> {
-        let json = prices_clickhouse::mtls::fetch_secret_string(name)
+        let json = crate::portal::extension::secret_string(name)
             .await
             .map_err(|e| SecretError::Fetch {
                 name: name.to_string(),
@@ -203,8 +203,8 @@ impl OauthSecret {
 
     /// Parse and validate. Split out from both loaders so the validation is
     /// testable without a file or an AWS runtime — it is the part that decides
-    /// whether a misconfiguration is caught at cold start or at a visitor's
-    /// callback.
+    /// whether a misconfiguration is caught when the portal's sources load or
+    /// at a visitor's callback.
     pub fn parse(json: &str) -> Result<Self, SecretError> {
         let parsed: SecretJson =
             serde_json::from_str(json).map_err(|e| SecretError::Malformed(e.to_string()))?;

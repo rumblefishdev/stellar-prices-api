@@ -56,8 +56,9 @@ use crate::portal::keys::gateway::Gateway;
 
 /// The whole load's ceiling, the five reads concurrent inside it.
 ///
-/// Each read is bounded at 2 s by the extension client, so the budget leaves
-/// room for a second attempt at a read that failed fast. Four seconds keeps a load plus the
+/// Each read is bounded at 2 s by the extension client and tried up to three
+/// times (`portal::extension`), so a fast failure gets its retries and a hung
+/// read about two attempts. Four seconds keeps a load plus the
 /// slowest route after it inside the 15 s invocation — pinned below for
 /// `/usage` and `/key`, and in `auth::issue` for the callback.
 pub(crate) const LOAD_BUDGET: Duration = Duration::from_secs(4);

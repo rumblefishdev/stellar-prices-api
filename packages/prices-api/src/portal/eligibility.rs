@@ -72,6 +72,11 @@ const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 ///
 /// A read that exceeds it is [`EligibilityError::Fetch`], which every caller
 /// already renders as "could not verify" rather than as an accusation.
+///
+/// It bounds the whole retried read (`crate::portal::extension`), not one
+/// attempt, which is what keeps the callback's arithmetic unchanged (task
+/// 0311). The retry sits inside the 2 s, so only fast failures — a quick
+/// non-2xx, say — get a second attempt; a hung call spends the whole bound.
 /// Only the extension client can be slow — the `Direct` source is a value
 /// already in memory, and the build without the client fails immediately — so
 /// the constant lives with the code that can actually wait.
@@ -86,7 +91,7 @@ pub(crate) const PARAMETER_TIMEOUT: std::time::Duration = std::time::Duration::f
 #[derive(Debug, Clone)]
 pub enum ParamSource {
     /// A literal value, for local runs and tests. Only constructed from the
-    /// environment in non-`lambda` builds — see `config::load_portal_eligibility`.
+    /// environment in non-`lambda` builds — see `config::portal_eligibility_from_env`.
     Direct(String),
     /// The **name** of an SSM parameter, fetched per action so an operator's
     /// change takes effect without a redeploy.
@@ -127,15 +132,16 @@ impl EligibilitySettings {
         // caller uses to build the member URL, so the two cannot drift.
         //
         // Checking only for emptiness here is what let a guild *name* through:
-        // `stellar_test` passed the cold-start probe, so the deploy that
+        // `stellar_test` passed the load-time probe, so the deploy that
         // opened the portal came up green, and the refusal happened once per
         // visitor instead — as `Unknown`, which is the arm that deliberately
         // says nothing about anybody's membership. Every member would have
         // been told "we could not verify", indefinitely, with the actual fault
         // one `put-parameter` away. This is the failure the probe exists to
-        // turn into a cold-start error — a closed portal and a
-        // `portal closed at cold start` log line, per
-        // `AppConfig::load_portal_or_close`.
+        // turn into a failed portal load — a `portal sources failed to load`
+        // line naming the parameter, and `/config` answering
+        // `enabled: false` for that request and loading again on the next
+        // (`crate::portal::sources`).
         if !crate::portal::auth::discord::is_snowflake(&id) {
             return Err(EligibilityError::NotSnowflake {
                 what: "discord-guild-id",
@@ -155,8 +161,8 @@ impl EligibilitySettings {
 
 /// Why a parameter could not be resolved.
 ///
-/// At cold start (the probe in `config::load_portal_eligibility`) any of these
-/// is fatal; at action time they all land in [`Eligibility::Unknown`] — the
+/// At load (the probe in `config::portal_eligibility_from_env`) any of these
+/// fails the portal's load; at action time they all land in [`Eligibility::Unknown`] — the
 /// visitor is refused without accusation, and the log names the real fault.
 #[derive(Debug, thiserror::Error)]
 pub enum EligibilityError {
@@ -178,10 +184,13 @@ pub enum EligibilityError {
 /// secret and the plan id already use. The extension's cache is what bounds
 /// how quickly an operator's change is honoured (~5 min), and is also why a
 /// per-action read does not call Systems Manager on a warm container.
+///
+/// The retry (`crate::portal::extension`) runs INSIDE [`PARAMETER_TIMEOUT`],
+/// so a per-issuance read still costs at most its 2 s.
 #[cfg(feature = "aws-mtls")]
 async fn fetch_parameter(name: &str) -> Result<String, EligibilityError> {
-    let fetch = prices_clickhouse::mtls::fetch_parameter_string(name);
-    match tokio::time::timeout(PARAMETER_TIMEOUT, fetch).await {
+    use crate::portal::extension;
+    match tokio::time::timeout(PARAMETER_TIMEOUT, extension::parameter_string(name)).await {
         Ok(result) => result.map_err(|e| EligibilityError::Fetch {
             name: name.to_string(),
             message: e.to_string(),
@@ -513,7 +522,7 @@ mod tests {
         );
     }
 
-    /// The cold-start probe must refuse a guild **name**.
+    /// The load-time probe must refuse a guild **name**.
     ///
     /// `stellar_test` is the value the task's own parameter table named for
     /// the build period, and before this check it passed: the deploy came up

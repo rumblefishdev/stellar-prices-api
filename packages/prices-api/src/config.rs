@@ -531,11 +531,12 @@ fn api_stage() -> Result<String, PortalKeysError> {
 /// secret already use, so a warm container never calls Systems Manager on the
 /// path that issues a key.
 ///
-/// The error is the message alone; the caller wraps it in the variant naming
-/// which parameter it was reading.
+/// Retried on a transient failure (`crate::portal::extension`). The error is
+/// the message alone; the caller wraps it in the variant naming which
+/// parameter it was reading.
 #[cfg(feature = "aws-mtls")]
 async fn fetch_parameter(name: &str) -> Result<String, String> {
-    prices_clickhouse::mtls::fetch_parameter_string(name)
+    crate::portal::extension::parameter_string(name)
         .await
         .map_err(|e| e.to_string())
 }

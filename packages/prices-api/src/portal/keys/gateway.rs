@@ -398,12 +398,12 @@ fn select_plan(plans: &[UsagePlan], api_id: &str, stage: &str) -> Option<PlanInf
 #[derive(Clone)]
 pub struct Gateway {
     client: Client,
-    /// The `pricing-api-free` usage plan id, read from SSM at cold start —
-    /// never hard-coded and never a cross-stack reference. See
-    /// [`crate::AppConfig::load_portal_keys`]. The target of a first issue,
+    /// The `pricing-api-free` usage plan id, read from SSM when the portal
+    /// sources load (`crate::portal::sources`) — never hard-coded and never a
+    /// cross-stack reference. See `crate::config::portal_keys_from_env`. The target of a first issue,
     /// and of a rework that finds no previous plan (task 0311).
     free_plan_id: String,
-    /// Our REST API id (task 0311), read from SSM at cold start like the plan
+    /// Our REST API id (task 0311), read from SSM when the portal sources load, like the plan
     /// id — [`Self::plan_of`] keeps only plans on `(api_id, stage)`.
     api_id: String,
     /// Our stage name (task 0311) — `envName`, passed as `PORTAL_API_STAGE`.
@@ -427,10 +427,11 @@ impl Gateway {
     /// Build a client from the ambient AWS configuration — in the Lambda, the
     /// execution role's credentials from the environment.
     ///
-    /// Only ever called when the portal is open — which, since task 0194
-    /// flipped `PORTAL_ENABLED`, is every production cold start. With the flag
-    /// off (tests, or a reverted deploy) this resolves no credentials and opens
-    /// no connections. See [`crate::AppConfig::load_portal_keys`].
+    /// Only ever called when the portal is open — in the Lambda, when the
+    /// portal sources load on the first portal request per execution
+    /// environment (task 0311). With the flag off (tests, or a reverted
+    /// deploy) this resolves no credentials and opens no connections. See
+    /// `crate::config::portal_keys_from_env`.
     pub async fn from_ambient_config(free_plan_id: String, api_id: String, stage: String) -> Self {
         let shared =
             aws_config::load_defaults(aws_sdk_apigateway::config::BehaviorVersion::latest()).await;
@@ -452,7 +453,7 @@ impl Gateway {
             if let Err(error) = provider.provide_credentials().await {
                 tracing::warn!(
                     error = %error,
-                    "could not resolve AWS credentials at cold start; every control-plane \
+                    "could not resolve AWS credentials while loading the portal sources; every control-plane \
                      call will retry the resolution"
                 );
             }
