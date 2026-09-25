@@ -33,13 +33,22 @@ before creating anything.
 ## 2. Create the user — operator, `AWS_PROFILE=soroban-admin`
 
 ```bash
+export AWS_PROFILE=soroban-admin
+aws sts get-caller-identity --query Account --output text      # must print 750702271865 — stop otherwise
 export VIEWER=prices-production-viewer-<surname>          # lowercase, ASCII
+PW=$(openssl rand -base64 24)                              # shown once at the end; never in a log, a ticket or a task file
 aws iam create-user --user-name "$VIEWER" \
   --tags Key=Project,Value=stellar-prices-api Key=Purpose,Value=tranche3-review Key=Requester,Value="<name surname>"
 aws iam put-user-policy --user-name "$VIEWER" --policy-name prices-production-dashboard-read \
   --policy-document file://dashboard-read.json
-aws iam create-login-profile --user-name "$VIEWER" --password "$(openssl rand -base64 24)" --password-reset-required
+aws iam create-login-profile --user-name "$VIEWER" --password "$PW" --password-reset-required
+echo "$PW"; unset PW    # copy it into the second channel of §3, then `clear` the terminal
 ```
+
+The first two lines exist because a block pasted without an exported profile
+runs against the shell's default credentials: on 2026-09-25 that created the
+user in the operator's personal account, and the sign-in at this account's URL
+failed with "Authentication failed".
 
 `dashboard-read.json` — the scoped policy task 0125 wrote (deep-review CR-01:
 **not** `CloudWatchReadOnlyAccess`, which also grants `logs:*` and `xray:Get*`
@@ -109,6 +118,23 @@ Then the dashboard URL:
 
 ## 4. Verify as the reviewer would
 
+Before the hand-over, the operator can check the policy headlessly — the IAM
+simulator honours the MFA condition and the `${aws:username}` variable:
+
+```bash
+ARN=arn:aws:iam::750702271865:user/$VIEWER
+for mfa in true false; do
+  aws iam simulate-principal-policy --policy-source-arn $ARN \
+    --action-names cloudwatch:GetDashboard cloudwatch:DescribeAlarms logs:GetLogEvents secretsmanager:GetSecretValue \
+    --context-entries "ContextKeyName=aws:MultiFactorAuthPresent,ContextKeyValues=$mfa,ContextKeyType=boolean" \
+    --query 'EvaluationResults[].[EvalActionName,EvalDecision]' --output text
+done
+```
+
+Expected: the two `cloudwatch:` actions `allowed` only with `true`; `logs:` and
+`secretsmanager:` `implicitDeny` both times. (Walked 2026-09-25 on a throwaway
+name — task 0295.)
+
 From a browser that is not signed in to anything else: sign in, enrol MFA, open
 the dashboard URL — every widget renders. Then confirm the boundary:
 `https://eu-central-1.console.aws.amazon.com/cloudwatch/home?region=eu-central-1#logsV2:log-groups`
@@ -116,13 +142,20 @@ answers with an access-denied banner, and the explorer's dashboard
 `production-soroban-explorer` opens too (the read actions cannot be scoped per
 dashboard — say so in the evidence rather than pretend otherwise).
 
+CloudTrail for the user will show `AccessDenied` noise from the console itself
+— `cloudwatch:ListAlarmMuteRules` once per alarm widget, `DescribeInsightRules`,
+`oam:ListSinks`, `logs:DescribeMetricFilters`, cost and health widgets on the
+console home. The dashboard renders regardless (walked 2026-09-25 with a
+passkey: `GetDashboard`, `ListDashboards`, `DescribeAlarms` allowed with
+`mfaAuthenticated=true`). Do not widen the policy for that noise.
+
 ## 5. Remove after the review
 
 ```bash
 aws iam delete-login-profile --user-name "$VIEWER"
 for m in $(aws iam list-mfa-devices --user-name "$VIEWER" --query 'MFADevices[].SerialNumber' --output text); do
   aws iam deactivate-mfa-device --user-name "$VIEWER" --serial-number "$m"
-  aws iam delete-virtual-mfa-device --serial-number "$m"
+  case "$m" in *:mfa/*) aws iam delete-virtual-mfa-device --serial-number "$m";; esac   # a passkey (…:u2f/…) has nothing to delete
 done
 aws iam delete-user-policy --user-name "$VIEWER" --policy-name prices-production-dashboard-read
 aws iam delete-user --user-name "$VIEWER"
