@@ -49,7 +49,8 @@ account takes three parts, in this order:
   order, so no code can do it.
 - Issuing client certificates from the platform's CA. The CA key lives in a
   password manager and never touches CDK or CI.
-- Creating the three Secrets Manager values and seeding four SSM parameters.
+- Creating the three Secrets Manager values and seeding three SSM parameters
+  (five with optional Slack alarm delivery).
   CDK owns only the names, so a deploy can never overwrite live credentials
   (see [Secrets](#secrets-cdk-owns-the-name-the-operator-owns-the-value)).
 - Registering the Discord application that gates API key sign-up.
@@ -186,7 +187,7 @@ portal's Discord application. Register the application and create it as in
 
 ### 5. SSM seeds
 
-Four parameters the stacks or the running Lambdas read, and which CDK
+Three parameters the stacks or the running Lambdas read, and which CDK
 deliberately never creates:
 
 ```bash
@@ -197,9 +198,18 @@ aws ssm put-parameter --type String --name /prices/production/ledger-processor/i
 
 # API-key sign-up gate: the Discord guild a visitor must belong to, and the
 # minimum Discord account age. Values and reasoning: portal-oauth-deploy-prep.md §2a.
-aws ssm put-parameter --type String --name /prices/production/discord-guild-id --value <guild-id>
+aws ssm put-parameter --type String --name /prices/production/discord-guild-id \
+    --value "$(sed -n "s/^export const STELLAR_DISCORD_GUILD_ID = '\([0-9]*\)';/\1/p" web/portal/src/landing/links.ts)"
 aws ssm put-parameter --type String --name /prices/production/min-account-age-minutes --value 5
 ```
+
+**The guild id must equal `STELLAR_DISCORD_GUILD_ID` in
+`web/portal/src/landing/links.ts`.** The portal's "join the server" button
+opens the guild named there, and step 8.2's upload runs
+`verify-portal-guild`, which refuses the upload when the two differ. The
+command above reuses the committed guild (Stellar Developers). To gate on a
+guild of your own, change `STELLAR_DISCORD_GUILD_ID` and
+`STELLAR_DISCORD_INVITE` in `links.ts` to that guild first, then seed its id.
 
 **Slack delivery for alarms (optional).** `envs/production.json` →
 `opsAlarms.slack` names two parameters, `/prices/production/slack-workspace-id`
@@ -248,7 +258,16 @@ whatever sits in `target/lambda/`.
    distribution. `make -C infra sync-portal-explorer EXPLORER_PORTAL_BUCKET=<bucket> EXPLORER_DISTRIBUTION_ID=<id>`
    uploads it to `/api/` on that distribution.
 3. **`current_prices`.** Once the enrichment worker has run (hourly), apply
-   `packages/prices-clickhouse/schema/current.sql` over the same tunnel as step 3.
+   `packages/prices-clickhouse/schema/current.sql`. The file is a `DROP VIEW`
+   plus a `CREATE`, which the HTTP port and `prices-clickhouse-init` cannot
+   run as one, so feed it to `clickhouse-client` inside the server's
+   ClickHouse container (the `default` user, as in step 3):
+
+   ```bash
+   ssh deploy@<clickhouse-server> 'docker exec -i app-clickhouse-1 clickhouse-client --multiquery' \
+       < packages/prices-clickhouse/schema/current.sql
+   ```
+
 4. **Verify.** Take a key from the API Gateway console (usage plan
    `pricing-api-free-production`), or sign up through the portal:
 
@@ -270,7 +289,10 @@ Loading history is a separate, days-long operation. See
 make -C infra destroy-production
 make -C infra destroy-cicd        # only if you deployed it
 aws secretsmanager delete-secret --force-delete-without-recovery --secret-id <each of the three>
-aws ssm delete-parameters --names <the four seeds>
+aws ssm delete-parameters --names /prices/production/ledger-processor/initial-cursor \
+    /prices/production/discord-guild-id /prices/production/min-account-age-minutes
+# only if you seeded Slack delivery:
+aws ssm delete-parameters --names /prices/production/slack-workspace-id /prices/production/slack-channel-id
 ```
 
 Log groups are removed with their stacks. The CDK bootstrap stack

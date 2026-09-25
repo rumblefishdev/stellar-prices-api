@@ -63,7 +63,7 @@ a deployment into a fresh AWS account. In short:
    (CNs `prices-ingestion-<env>` and `prices-api-<env>`) and map them to
    `prices_writer` and `prices_reader`. Then apply the `prices` schema.
 3. **Secrets and seeds.** Upload the two mTLS bundles and the Discord OAuth
-   bundle to Secrets Manager, and seed four SSM parameters.
+   bundle to Secrets Manager, and seed three SSM parameters.
 4. **`cdk deploy`.** Run `npm run infra:bootstrap`, then
    `npm run infra:deploy:production`.
 
