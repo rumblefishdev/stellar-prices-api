@@ -404,6 +404,236 @@ NOT include. For scale: task 0268's campaign re-priced 9.94 M candles in ~24 min
 0228 estimated ~190 M candles at ~4 h 40 m. This is all of them, and it runs on
 the same worker under the same concurrency.
 
+**7b-2. Re-price the coarse tiers. The drain above never reaches them.** The
+enrichment worker prices `price_ohlcv_1m` and nothing else
+(`CLICKHOUSE_TABLE: 'price_ohlcv_1m'`,
+`infra/src/lib/stacks/eventbridge-stack.ts:483`). The coarse sweep covers only
+the current and the previous month (`COARSE_SWEEP_LOOKBACK_MONTHS: '2'`, same
+file `:627`). The rollup MVs re-aggregate only a recent window (`rollups.sql`).
+Every coarse row that §4g and §7a rolled was built from a `1m` that had not been
+priced yet, so it was written with `close_usd = 0`. Without this step every
+15m/1h/4h/1d/1w/1M row older than two months keeps that zero for good, and
+~130 unguarded `argMax(close_usd, …)` sites read it as a price.
+
+The fix is the ordinary fill-the-zeros mode of `coarse-repair`
+([`repair-coarse-usd-values.md`](repair-coarse-usd-values.md), Steps 1–5), run
+over the whole history on all six tables. It does not read `1m`. It prices each
+coarse row from that table's own reference candles, with the same tiers as the
+worker, including the measured USDC rate on the pivot.
+
+- **Start only when the `1m` drain is finished.** Both passes load the same
+  shared cluster, and 7c/7e measure the finished state. "Finished" means the
+  frontier gauge reads `0`. Run this from the local machine:
+
+  ```bash
+  aws cloudwatch get-metric-statistics \
+    --namespace Prices/Enrichment --metric-name EnrichmentFrontierMonthsPending \
+    --dimensions Name=Environment,Value=production \
+    --statistics Maximum --period 3600 \
+    --start-time "$(date -u -d '-3 hour' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)"
+  ```
+
+  You need at least one datapoint, and every datapoint must read
+  `Maximum` = `0`. An empty `Datapoints` list means the drain has stopped
+  publishing. It does not mean the drain is done.
+
+- **Pass NO `--reset-*` flag.** A reset discards stored values. Here nothing
+  is wrong, only missing, and 7d already rules the 0228 reset out. Every refusal
+  the reset modes carry is skipped when no `--reset-quote-asset-id` is given,
+  and none of them applies to this step. That covers `--snapshots-verified`,
+  the `--pivot-window-s` floor, the plain-reset-on-a-pivot-leg refusal and the
+  task-0208 epoch check (`assert_reset_is_admissible` returns at once).
+- **`--skip-snapshot` is required, and here it is safe.** It is required
+  because `prices_writer` cannot `FREEZE` (precondition 7). Without the flag
+  the first month fails with `FreezeDenied`. It is safe because this mode only
+  writes rows still at `close_usd = 0` and never discards a value. It is also
+  safe because §4g and §7a can rebuild every month's coarse rows from its
+  re-ingested `1m`. The tool warns "only safe when the 1m source can rebuild
+  this coarse table", and that condition is true here. **Exception:** a month
+  recorded as un-re-ingested (§5, precondition 9) whose `1m` is gone. Its
+  coarse partitions are the only copy, so freeze them before the run with
+  `repair-coarse-usd-values.md` Step 3b's script, using the `repair_0286_`
+  prefix and that month as the range.
+- **Go from fine to coarse, one table at a time:** `15m`, `1h`, `4h`, `1d`,
+  `1w`, `1M`. The `1d→1w` (60 d) and `1d→1M` (400 d) MVs re-roll recent buckets
+  from `1d`. Once `1d` is priced, those re-rolls carry its rate rather than a
+  zero.
+
+**① [operator box, in `tmux`] Build, and set the range.**
+
+```bash
+tmux new -s coarse0286
+
+cd ~/stellar-prices-api && git checkout develop && git pull --ff-only
+cargo build --release -p enrichment-worker --features aws-mtls --bin coarse-repair
+
+export CH_DOMAIN=ch.sorobanscan.rumblefish.dev
+export MTLS_CERT_PATH=$HOME/prices-mtls/prices_writer.crt
+export MTLS_KEY_PATH=$HOME/prices-mtls/prices_writer.key
+export MTLS_CA_PATH=$HOME/prices-mtls/ca.crt
+
+# The sweep owns the current and the previous month, so stop two months back.
+END=$(date -u -d "$(date -u +%Y-%m-15) -2 month" +%Y%m); echo "END=$END"
+
+# A 1w/1M row's reference can be the previous bucket, which a one-day ASOF
+# window silently drops (coarse-repair --help, --pivot-window-s).
+pivot_window() { case "$1" in price_ohlcv_1w) echo 604800 ;; price_ohlcv_1M) echo 2678400 ;; *) echo 86400 ;; esac; }
+```
+
+`--start-month 201501` below is the lowest month the tool accepts. The tool
+lists only months that hold enrichable zeros, so an empty month costs nothing.
+
+**② [operator box] Dry run, all six tables. It writes nothing.**
+
+```bash
+for TBL in price_ohlcv_15m price_ohlcv_1h price_ohlcv_4h price_ohlcv_1d price_ohlcv_1w price_ohlcv_1M; do
+  echo "===== $TBL ====="
+  ./target/release/coarse-repair \
+    --transport hetzner --table "$TBL" \
+    --start-month 201501 --end-month "$END" \
+    --pivot-window-s "$(pivot_window "$TBL")" \
+    --dry-run
+done 2>&1 | tee /tmp/0286_coarse_dry.log
+```
+
+Expect every month from the table's first candle to `$END`, with `zeros_before`
+close to the month's count of candles that have volume. **A table that reports
+`0 month(s)` is a STOP**, not an all-clear. After a re-ingest there is nothing
+already priced to explain it. Budget the run from the dry run's total: the rate
+measured under task 0276 was ~7 k rows/s, and the repair runbook's Appendix C
+explains why that is a floor. Time the first month and re-plan from that.
+
+**③ [CH host, via SSH] Baseline.** Keep the output. This script is also the
+after-check in ⑤.
+
+```bash
+cat > /tmp/0286_coarse_zeros.sh <<'EOF'
+#!/bin/sh
+# Per coarse tier: every close_usd = 0 row OLDER than the coarse sweep's
+# two-month lookback, split by why it is zero. Read-only.
+for TBL in price_ohlcv_15m price_ohlcv_1h price_ohlcv_4h price_ohlcv_1d price_ohlcv_1w price_ohlcv_1M; do
+clickhouse-client --format PrettyCompactNoEscapes -q "
+WITH
+  (SELECT any(asset_id) FROM prices.assets FINAL
+    WHERE asset_code = 'XLM' AND issuer_address = '' AND contract_address = '') AS xlm,
+  (SELECT any(asset_id) FROM prices.assets FINAL
+    WHERE asset_code = 'USDC' AND contract_address = ''
+      AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN') AS usdc,
+  (SELECT any(asset_id) FROM prices.assets FINAL
+    WHERE asset_code = 'USDT' AND contract_address = ''
+      AND issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V') AS usdt,
+  (SELECT ifNull(minOrNull(timestamp), toDateTime('2106-01-01 00:00:00')) FROM prices.$TBL FINAL
+    WHERE asset_id = xlm  AND quote_asset_id = usdc AND close > 0) AS xlm_ref_from,
+  (SELECT ifNull(minOrNull(timestamp), toDateTime('2106-01-01 00:00:00')) FROM prices.$TBL FINAL
+    WHERE asset_id = usdt AND quote_asset_id = usdc AND close > 0) AS usdt_ref_from
+SELECT
+  '$TBL' AS tbl,
+  countIf(close_usd = 0) AS zero_usd,
+  countIf(close_usd = 0 AND volume_quote = 0) AS no_volume,
+  countIf(close_usd = 0 AND volume_quote > 0 AND close = 0) AS no_price,
+  countIf(close_usd = 0 AND volume_quote > 0 AND close > 0
+          AND quote_asset_id NOT IN (xlm, usdc, usdt)) AS other_quote,
+  countIf(close_usd = 0 AND volume_quote > 0 AND close > 0
+          AND ((quote_asset_id = xlm  AND timestamp < xlm_ref_from)
+            OR (quote_asset_id = usdt AND timestamp < usdt_ref_from))) AS before_reference,
+  countIf(close_usd = 0 AND volume_quote > 0 AND close > 0
+          AND (quote_asset_id = usdc
+            OR (quote_asset_id = xlm  AND timestamp >= xlm_ref_from)
+            OR (quote_asset_id = usdt AND timestamp >= usdt_ref_from))) AS reachable_left
+FROM prices.$TBL FINAL
+WHERE timestamp < toStartOfMonth(now() - INTERVAL 1 MONTH)"
+done
+EOF
+
+scp -i ~/.ssh/sorban-prod_ed25519 /tmp/0286_coarse_zeros.sh deploy@168.119.73.161:/tmp/
+ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+  'docker cp /tmp/0286_coarse_zeros.sh app-clickhouse-1:/tmp/ && docker exec app-clickhouse-1 sh /tmp/0286_coarse_zeros.sh' \
+  | tee /tmp/0286_coarse_zeros_before.txt
+```
+
+The cutoff, `toStartOfMonth(now() - INTERVAL 1 MONTH)`, is the first instant
+the sweep covers. Everything below it belongs to this step.
+
+**④ [operator box, same `tmux`] The real run, one table per command.** Read
+each summary before you start the next table.
+
+```bash
+TBL=price_ohlcv_15m   # then price_ohlcv_1h, _4h, _1d, _1w, _1M
+./target/release/coarse-repair \
+  --transport hetzner --table "$TBL" \
+  --start-month 201501 --end-month "$END" \
+  --pivot-window-s "$(pivot_window "$TBL")" \
+  --skip-snapshot 2>&1 | tee "/tmp/0286_coarse_${TBL}.log"
+```
+
+The repair runbook's "Log lines that look like failures but are not" applies
+unchanged. In particular, every month before XLM/USDC's first candle
+(2021-02) reports `enriched 0`, because nothing can price it. **Stop** on
+either of these:
+
+- a month reporting exactly `200000` enriched, which means `one_shot` did not
+  take effect;
+- `enriched 0` on any month from 2021-03 on. Every such month holds
+  USDC-quoted candles, so a zero there is a silent no-op.
+
+**⑤ [CH host, via SSH] After-check, per tier.** Re-run ③ and write the output
+to `/tmp/0286_coarse_zeros_after.txt`. Per table:
+
+| Column             | Meaning                                                                                                   | Required after the run                                                               |
+| ------------------ | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `reachable_left`   | Quoted in USDC, or in XLM/USDT from that leg's first USDC candle on. A tier can price these.              | **~0.** Every remaining row must be explained with the drill-down below.             |
+| `before_reference` | Quoted in XLM/USDT before that leg's own USDC market exists in this table. Nothing can price them.        | Unchanged from the baseline. This is the explained residue (the task-0208 boundary). |
+| `other_quote`      | No peg or pivot path. From 2025-09 the oracle tier prices some; the rest is the `no_reference` floor.     | Equal to the baseline or lower. Never higher.                                        |
+| `no_price`         | `close = 0`: a bucket with no price-forming fill. `0` is the correct USD value (ADR 0287, `rollups.sql`). | Unchanged. The repair cannot and must not touch it.                                  |
+| `no_volume`        | `volume_quote = 0`, which no tier prices.                                                                 | Unchanged.                                                                           |
+| `zero_usd`         | The sum of the five above.                                                                                | Roughly the baseline minus the total the run's summary lines report as enriched.     |
+
+If `reachable_left` is not ~0, list where the rows sit. Swap in the table (run
+it in `clickhouse-client` on the CH host):
+
+```sql
+WITH
+  (SELECT any(asset_id) FROM prices.assets FINAL
+    WHERE asset_code = 'XLM' AND issuer_address = '' AND contract_address = '') AS xlm,
+  (SELECT any(asset_id) FROM prices.assets FINAL
+    WHERE asset_code = 'USDC' AND contract_address = ''
+      AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN') AS usdc,
+  (SELECT any(asset_id) FROM prices.assets FINAL
+    WHERE asset_code = 'USDT' AND contract_address = ''
+      AND issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V') AS usdt,
+  (SELECT ifNull(minOrNull(timestamp), toDateTime('2106-01-01 00:00:00')) FROM prices.price_ohlcv_1h FINAL
+    WHERE asset_id = xlm  AND quote_asset_id = usdc AND close > 0) AS xlm_ref_from,
+  (SELECT ifNull(minOrNull(timestamp), toDateTime('2106-01-01 00:00:00')) FROM prices.price_ohlcv_1h FINAL
+    WHERE asset_id = usdt AND quote_asset_id = usdc AND close > 0) AS usdt_ref_from
+SELECT toYYYYMM(timestamp) AS month, quote_asset_id, count() AS candles,
+       min(close) AS min_close, max(close) AS max_close
+FROM prices.price_ohlcv_1h FINAL
+WHERE timestamp < toStartOfMonth(now() - INTERVAL 1 MONTH)
+  AND close_usd = 0 AND volume_quote > 0 AND close > 0
+  AND (quote_asset_id = usdc
+    OR (quote_asset_id = xlm  AND timestamp >= xlm_ref_from)
+    OR (quote_asset_id = usdt AND timestamp >= usdt_ref_from))
+GROUP BY month, quote_asset_id ORDER BY candles DESC LIMIT 30;
+```
+
+Two shapes are an explained residue:
+
+- the leg's USDC market was silent for longer than `--pivot-window-s` before
+  the bucket (a thin month of 2021–2022, clustered by month);
+- a `close` so small that `close × rate` truncates to 0 at 14 decimal places.
+  `max_close` shows this, as in the repair runbook's Appendix A triage.
+
+Anything else is a defect. This mode only ever selects rows still at zero, so
+re-running ④ for that table is safe. It re-prices only what is still
+missing.
+
+Record the before and after tables on task 0286. 7c's `post_run_0228_it` reads
+the coarse tiers, so it can pass only after this step.
+
+**Rollback.** Nothing was discarded. To undo one table-month, `DROP` that
+coarse partition and re-run §4g for the month (§7a for `1w`/`1M`). The re-roll
+now reads a priced `1m`.
+
 **7c. The 0228 after-check**, on the now-repaired XLM/USDC pivot reference.
 Capture the `VERSION_BEFORE` values **before** the enrichment campaign starts:
 
@@ -474,7 +704,9 @@ The phase-3 criteria of lore task 0286, in the order they can be checked:
    was 22 760 / 143 577 / 85 699 / 30 064 / 10 938 candles on
    15m / 1h / 4h / 1d / 1w. After the re-ingest and pre-roll it is **zero**.
 5. **The whole history re-enriched** — `close_usd > 0` wherever a reference
-   exists — and `post_run_0228_it` green.
+   exists, on `1m` (7b's drain) AND on every coarse tier (step 7b-2:
+   `reachable_left` ~0 on each of the six tables, every other column
+   explained) — and `post_run_0228_it` green.
 6. **No USDT-quoted `1m` row carries the $1 peg** (step 7e): `peg_written = 0`
    and `pivot_written > 0` on `1m`, and on one coarse tier. This closes task 0212.
 
