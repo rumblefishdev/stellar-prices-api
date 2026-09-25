@@ -264,6 +264,42 @@ pub fn accept(
     })
 }
 
+/// The action a `state` or pending-login token **claims**, read WITHOUT
+/// verifying it.
+///
+/// For one caller and one decision: which failure landing a callback takes
+/// when the portal's sources failed to load (task 0311, review CR-01), so the
+/// signing key that would verify the token is exactly what is missing. The
+/// two landings render in different places — `?issue=failed` on the signed-in
+/// dashboard an issue round-trip started from, `?signin=failed` on the sign-in
+/// card — and a landing the visitor's page does not render is a press that
+/// ends with nothing on screen.
+///
+/// ⚠️ **This authorises nothing and must never be used to.** It chooses
+/// between two fixed literals, both failures, both reachable by anyone who
+/// types `/api/?issue=failed` into a link — so a forged claim buys an
+/// attacker nothing they did not already have. Everything a claim could
+/// matter for goes through [`accept`], which verifies both halves before
+/// reading a byte of either. `None` on anything that is not a token of ours
+/// in shape: the caller then falls back to the sign-in landing.
+pub fn claimed_action(token: &str) -> Option<Action> {
+    /// Only the one field; the rest of either claims type is ignored.
+    #[derive(Deserialize)]
+    struct Claimed {
+        action: Action,
+    }
+    // Ours are ~200 bytes; a bound keeps an unauthenticated decode small.
+    const MAX_TOKEN_BYTES: usize = 1024;
+    if token.len() > MAX_TOKEN_BYTES {
+        return None;
+    }
+    let (encoded, _unverified_mac) = token.split_once('.')?;
+    let payload = crypto::b64_decode(encoded)?;
+    serde_json::from_slice::<Claimed>(&payload)
+        .ok()
+        .map(|claimed| claimed.action)
+}
+
 /// Seconds since the Unix epoch.
 ///
 /// Saturating rather than `expect`: a clock before 1970 is not a reason to panic
@@ -509,6 +545,32 @@ mod tests {
             .action,
             Action::TestOther
         );
+    }
+
+    /// Review CR-01: both halves claim their action, readable without the
+    /// key; anything not shaped like our token claims nothing.
+    #[test]
+    fn a_claimed_action_is_read_from_either_half_and_nothing_else() {
+        for action in [Action::SignIn, Action::Issue] {
+            let started = start(KEY, action, NOW);
+            assert_eq!(claimed_action(&started.state_param), Some(action));
+            assert_eq!(claimed_action(&started.pending_cookie), Some(action));
+        }
+        let forged = format!("{}.not-a-mac", crypto::b64_encode(br#"{"action":"issue"}"#));
+        // Read, unverified — which is why it may only pick a failure landing.
+        assert_eq!(claimed_action(&forged), Some(Action::Issue));
+        for junk in [
+            "",
+            "s",
+            "no-dot-here",
+            ".",
+            "%%%.mac",
+            &format!("{}.mac", crypto::b64_encode(br#"{"action":"rework"}"#)),
+            &format!("{}.mac", crypto::b64_encode(b"not json")),
+            &format!("{}.mac", "A".repeat(2000)),
+        ] {
+            assert_eq!(claimed_action(junk), None, "claimed from {junk:?}");
+        }
     }
 
     #[test]

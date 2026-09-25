@@ -300,14 +300,17 @@ async fn login(
         },
     };
 
-    // The sources could not be loaded for this request: the same landings an
-    // unprovisioned deployment gets, and the next press loads again. The
-    // failure itself was logged by `get`.
+    // The sources could not be loaded for this request (review WR-04): a
+    // retryable failure, landed where the press came from — sign-in's card
+    // or the dashboard — and never `?signin=not_open`, whose closed-portal
+    // card states a permanent condition and offers nothing to press. Nothing
+    // is logged here: `get` already logged the one line this failure earns.
     let Some(loaded) = state.sources.get().await else {
-        return match action {
-            Action::Issue => issue::refuse_issue_start(&state.home, false, false, false),
-            _ => unconfigured(&state.home),
+        let query = match action {
+            Action::Issue => issue::ISSUE_FAILED_QUERY,
+            _ => FAILED_QUERY,
         };
+        return redirect(&format!("{}{query}", state.home), vec![]);
     };
 
     // An issue round-trip on a deployment with no credentials, no control
@@ -449,12 +452,27 @@ async fn callback(
     let started = std::time::Instant::now();
     let home = state.home.as_ref();
 
-    // A failed load lands on `?signin=failed`: which flow this was cannot be
-    // known before `state` is verified, and verifying it needs the very
-    // secret that failed to load. The pending cookie is left alone, as on
-    // every refusal before verification; the next attempt loads again.
+    // A failed load cannot verify `state` — verifying it needs the very
+    // secret that failed to load — but it still has to land where the
+    // visitor's page renders a failure (review CR-01). An issue round-trip
+    // started from the signed-in dashboard, which renders `?issue=…` and
+    // deliberately not `?signin=failed`; a sign-in renders `?signin=…` on its
+    // card. So the landing follows the action the round-trip CLAIMS — this
+    // browser's pending cookie first, then `state` — read unverified, which
+    // is safe only because it picks between two failure literals and
+    // authorises nothing (`state_token::claimed_action`). No claim: sign-in's.
+    // The pending cookie is left alone, as on every refusal before
+    // verification; a later attempt loads again.
     let Some(loaded) = state.sources.get().await else {
-        return redirect(&format!("{home}{FAILED_QUERY}"), vec![]);
+        let claimed = cookies::read(&headers, cookies::PENDING_COOKIE)
+            .as_deref()
+            .and_then(state_token::claimed_action)
+            .or_else(|| query.state.as_deref().and_then(state_token::claimed_action));
+        let landing = match claimed {
+            Some(Action::Issue) => issue::ISSUE_FAILED_QUERY,
+            _ => FAILED_QUERY,
+        };
+        return redirect(&format!("{home}{landing}"), vec![]);
     };
     let Some(oauth) = loaded.oauth.as_deref() else {
         return unconfigured(home);
@@ -565,18 +583,22 @@ async fn callback(
     }
 
     // A lazy load in front of this callback (the first portal request in
-    // this environment) spent time the arithmetic on `discord::REQUEST_TIMEOUT`
-    // does not have. Past `issue::SOURCES_ALLOWANCE` the exchange and the
-    // three reads after it could outlive the invocation, so land a
-    // retryable failure now, before any Discord call: the next attempt finds
-    // the sources loaded.
-    if started.elapsed() > issue::SOURCES_ALLOWANCE {
+    // this environment) spends time the arithmetic on
+    // `discord::REQUEST_TIMEOUT` does not have, so it comes out of the token
+    // exchange's own 4 s (review WR-03): the exchange gets what the load left
+    // of it, and load plus exchange stay one `REQUEST_TIMEOUT`. Past
+    // `issue::SOURCES_ALLOWANCE` what is left is too little to exchange a
+    // code in, so land a retryable failure now, before any Discord call. The
+    // next attempt finds the sources loaded only if it reaches this execution
+    // environment; another fresh one loads again, under the same allowance.
+    let elapsed = started.elapsed();
+    if elapsed > issue::SOURCES_ALLOWANCE {
         let query = match accepted.action {
             Action::Issue => issue::ISSUE_FAILED_QUERY,
             _ => FAILED_QUERY,
         };
         tracing::warn!(
-            elapsed_ms = started.elapsed().as_millis() as u64,
+            elapsed_ms = elapsed.as_millis() as u64,
             landing = query,
             "sign-in callback spent its allowance loading the portal sources; \
              landing a retryable failure before the token exchange"
@@ -590,6 +612,7 @@ async fn callback(
         oauth,
         code,
         &accepted.verifier,
+        discord::REQUEST_TIMEOUT.saturating_sub(elapsed),
     )
     .await
     {
@@ -795,7 +818,7 @@ const SESSION_UNAVAILABLE: &str = "session_unavailable";
 /// The one `503`: the sources failed to load for this request (task 0311).
 /// Without the signing key no cookie can be checked, and "signed out" would
 /// be a lie to a visitor who is signed in — the page renders its failure
-/// state instead, and the next call loads again.
+/// state instead, and a call after the load cooldown loads again.
 async fn me(State(state): State<AuthState>, headers: HeaderMap) -> Response {
     let signed_out = MeResponse {
         authenticated: false,
@@ -911,8 +934,9 @@ fn no_store(mut response: Response) -> Response {
 }
 
 /// Land a deployment that reached these routes with no credentials — the
-/// portal open, and its sources either loaded without a secret (a test
-/// fixture) or, on `login`, failed to load for this request.
+/// portal open, and its sources loaded without a secret (a test fixture). A
+/// load that FAILED is not this: it is transient and lands on a failure the
+/// visitor can retry (`?signin=failed` / `?issue=failed`, review WR-04).
 ///
 /// **A landing, not the `503 sign_in_unconfigured` envelope it used to be**
 /// (task 0194's review). Both call sites are reached by a browser following a

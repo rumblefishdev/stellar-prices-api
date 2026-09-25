@@ -477,21 +477,19 @@ async fn login_lands_an_unwired_issue_round_trip_on_failed() {
 /// both cases — so the sign-in arm now lands too, on `?signin=not_open`
 /// rather than the issue arm's `?issue=failed`. The two literals still differ,
 /// because the two flows start from different pages.
+///
+/// Sources loaded with nothing in them, supplied rather than left to the
+/// environment loader (review WR-06): that is the unprovisioned fixture this
+/// test is about, and a developer's exported `serve` variables cannot turn
+/// it into a successful load. A load that FAILS lands elsewhere — see
+/// `an_open_portal_whose_load_fails_lands_on_a_retryable_failure`.
 #[tokio::test]
 async fn neither_arm_503s_on_a_deployment_with_no_credentials() {
-    let config = AppConfig {
-        ch_enabled: false,
-        base_url: None,
-        api_keys: vec![],
-        portal_enabled: true,
-        portal_oauth: None,
-        portal_endpoints: Endpoints::default(),
-        portal_keys: None,
-        portal_eligibility: None,
-        portal_rate_limit: None,
-        portal_web_origin: None,
-    };
-    let router = app(&config, AppState::without_ch());
+    let router = prices_api::app_with_portal(
+        &open_portal_config(Endpoints::default()),
+        AppState::without_ch(),
+        prices_api::portal::sources::PortalSources::ready(Default::default()),
+    );
 
     let signin = fetch(&router, LOGIN_PATH, &[]).await;
     assert_eq!(signin.status, StatusCode::SEE_OTHER);
@@ -1681,25 +1679,15 @@ async fn logout_is_not_reachable_by_a_get() {
 // Misconfiguration
 // ---------------------------------------------------------------------------
 
-/// An open portal with no credentials must say so, not present a sign-in that
-/// silently 404s. With nothing supplied on the config the router loads the
-/// portal's sources from the environment on the first portal request (task
-/// 0311), and a test process has none of them, so every request here is a
-/// failed load — the state a throttled or unprovisioned deployment is in.
-///
-/// Since task 0194's review it says so on the page: `/auth/login` is opened as
-/// a top-level navigation (a popup, in the bundle), so `503 JSON` was raw text
-/// in a window with no way back. `?signin=not_open` renders [0183]'s
-/// closed-portal card, which is exactly what this deployment is.
-#[tokio::test]
-async fn an_open_portal_with_no_credentials_lands_on_the_closed_card() {
-    let config = AppConfig {
+/// A config for a router whose portal sources are supplied separately.
+fn open_portal_config(endpoints: Endpoints) -> AppConfig {
+    AppConfig {
         ch_enabled: false,
         base_url: None,
         api_keys: vec![],
         portal_enabled: true,
         portal_oauth: None,
-        portal_endpoints: Endpoints::default(),
+        portal_endpoints: endpoints,
         // Task 0187: the control-plane client for self-service keys. `None`
         // is what every non-portal test wants — with no client in the
         // config there is no code path here that can reach API Gateway.
@@ -1707,12 +1695,42 @@ async fn an_open_portal_with_no_credentials_lands_on_the_closed_card() {
         portal_eligibility: None,
         portal_rate_limit: None,
         portal_web_origin: None,
-    };
-    let router = app(&config, AppState::without_ch());
+    }
+}
+
+/// Sources whose every load fails — a throttled or unreadable extension.
+///
+/// Scripted rather than left to the environment loader (review WR-06): with
+/// nothing supplied, `prices_api::app` loads from the process environment,
+/// and a developer who has exported `serve`'s variables would get a
+/// successful load and a failing test.
+fn failing_sources() -> prices_api::portal::sources::PortalSources {
+    use prices_api::config::PortalLoadError;
+    use prices_api::portal::auth::secret::SecretError;
+    use prices_api::portal::sources::{LoadFuture, PortalSources};
+    PortalSources::lazy(std::sync::Arc::new(|| -> LoadFuture {
+        Box::pin(async { Err(PortalLoadError::Oauth(SecretError::NoSource)) })
+    }))
+}
+
+/// A failed load is transient, so it lands on a failure the visitor can
+/// retry — never on the closed-portal card below, which states a permanent
+/// condition (review WR-04).
+///
+/// Since task 0194's review login answers with a landing, not `503 JSON`:
+/// `/auth/login` is opened as a top-level navigation (a popup, in the
+/// bundle), so JSON was raw text in a window with no way back.
+#[tokio::test]
+async fn an_open_portal_whose_load_fails_lands_on_a_retryable_failure() {
+    let router = prices_api::app_with_portal(
+        &open_portal_config(Endpoints::default()),
+        AppState::without_ch(),
+        failing_sources(),
+    );
 
     let login = fetch(&router, LOGIN_PATH, &[]).await;
     assert_eq!(login.status, StatusCode::SEE_OTHER);
-    assert_eq!(login.location(), "/api/?signin=not_open");
+    assert_eq!(login.location(), "/api/?signin=failed");
 
     // `/auth/me` cannot check a cookie without the signing key, and "nobody
     // is signed in" would be false for a visitor who is: a `503` the page
@@ -1725,6 +1743,28 @@ async fn an_open_portal_with_no_credentials_lands_on_the_closed_card() {
             .get(header::CACHE_CONTROL)
             .is_some_and(|v| v.to_str().unwrap().contains("no-store"))
     );
+}
+
+/// An open portal whose sources loaded without credentials — only a fixture
+/// can build one, since the production load yields all three or fails — must
+/// say so, not present a sign-in that silently 404s. `?signin=not_open`
+/// renders [0183]'s closed-portal card, which is exactly what it is.
+#[tokio::test]
+async fn an_open_portal_loaded_without_credentials_lands_on_the_closed_card() {
+    let router = prices_api::app_with_portal(
+        &open_portal_config(Endpoints::default()),
+        AppState::without_ch(),
+        prices_api::portal::sources::PortalSources::ready(Default::default()),
+    );
+
+    let login = fetch(&router, LOGIN_PATH, &[]).await;
+    assert_eq!(login.status, StatusCode::SEE_OTHER);
+    assert_eq!(login.location(), "/api/?signin=not_open");
+
+    // No credentials means no sessions: a truthful "signed out".
+    let me = fetch(&router, ME_PATH, &[]).await;
+    assert_eq!(me.status, StatusCode::OK);
+    assert_eq!(me.json()["authenticated"], json!(false));
 }
 
 // ---------------------------------------------------------------------------
@@ -1747,34 +1787,122 @@ fn router_with_sources(
     mock: &MockDiscord,
     sources: prices_api::portal::sources::PortalSources,
 ) -> Router {
-    let config = AppConfig {
-        ch_enabled: false,
-        base_url: None,
-        api_keys: vec![],
-        portal_enabled: true,
-        portal_oauth: None,
-        portal_endpoints: Endpoints {
-            api_base: mock.base.clone(),
-            ..Endpoints::default()
-        },
-        portal_keys: None,
-        portal_eligibility: None,
-        portal_rate_limit: None,
-        portal_web_origin: None,
-    };
+    let config = open_portal_config(Endpoints {
+        api_base: mock.base.clone(),
+        ..Endpoints::default()
+    });
     prices_api::app_with_portal(&config, AppState::without_ch(), sources)
 }
 
-/// Sources that take 1.5 s to load — well past `issue::SOURCES_ALLOWANCE`,
-/// which the budget test keeps under a second — and then succeed.
-fn slow_sources() -> prices_api::portal::sources::PortalSources {
+/// Sources that take `millis` to load and then succeed.
+fn sources_loading_for(millis: u64) -> prices_api::portal::sources::PortalSources {
     use prices_api::portal::sources::{LoadFuture, PortalSources};
-    PortalSources::lazy(std::sync::Arc::new(|| -> LoadFuture {
-        Box::pin(async {
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    PortalSources::lazy(std::sync::Arc::new(move || -> LoadFuture {
+        Box::pin(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
             Ok(full_sources())
         })
     }))
+}
+
+/// Past `issue::SOURCES_ALLOWANCE` (2 s), inside `sources::LOAD_BUDGET` (4 s).
+fn slow_sources() -> prices_api::portal::sources::PortalSources {
+    sources_loading_for(2_500)
+}
+
+/// Start an `action=issue` round-trip on `router`: `(state, pending cookie)`.
+async fn start_issue_login(router: &Router) -> (String, String) {
+    let login = fetch(router, &format!("{LOGIN_PATH}?action=issue"), &[]).await;
+    assert_eq!(login.status, StatusCode::SEE_OTHER);
+    let pending = login
+        .cookie(cookies::PENDING_COOKIE)
+        .expect("login must set the pending-login cookie");
+    let query = login.location().split_once('?').unwrap().1.to_string();
+    let state = form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == "state")
+        .map(|(_, v)| v.into_owned())
+        .expect("the authorize URL must carry `state`");
+    (state, pending)
+}
+
+/// Review CR-01. An issue round-trip starts from the signed-in dashboard,
+/// which renders `?issue=…` and deliberately not `?signin=failed`; a callback
+/// on a failed load must land there, or the press of "Get my API key" ends
+/// with nothing on screen. `state` cannot be verified (the key is what failed
+/// to load), so the landing follows the action the round-trip claims.
+#[tokio::test]
+async fn an_issue_callback_on_a_failed_load_lands_on_issue_failed() {
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let loaded = router_with_sources(
+        &mock,
+        prices_api::portal::sources::PortalSources::ready(full_sources()),
+    );
+    let failing = router_with_sources(&mock, failing_sources());
+    let (state, pending) = start_issue_login(&loaded).await;
+    let callback = format!("{CALLBACK_PATH}?code=an-auth-code&state={state}");
+
+    // With this browser's pending cookie, and with `state` alone.
+    let with_cookie: &[(&str, &str)] = &[(cookies::PENDING_COOKIE, pending.as_str())];
+    let without: &[(&str, &str)] = &[];
+    for sent in [with_cookie, without] {
+        let reply = fetch(&failing, &callback, sent).await;
+        assert_eq!(reply.status, StatusCode::SEE_OTHER);
+        assert_eq!(reply.location(), "/api/?issue=failed");
+        assert!(
+            reply.headers.get(header::SET_COOKIE).is_none(),
+            "an unverified callback must leave the pending cookie alone"
+        );
+    }
+    assert_eq!(mock.exchanges(), 0);
+}
+
+/// The same failed load on a sign-in round-trip keeps sign-in's landing: its
+/// card is the one that renders `?signin=failed`.
+#[tokio::test]
+async fn a_sign_in_callback_on_a_failed_load_lands_on_signin_failed() {
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let loaded = router_with_sources(
+        &mock,
+        prices_api::portal::sources::PortalSources::ready(full_sources()),
+    );
+    let failing = router_with_sources(&mock, failing_sources());
+    let started = start_login(&loaded).await;
+
+    let reply = fetch(
+        &failing,
+        &format!("{CALLBACK_PATH}?code=an-auth-code&state={}", started.state),
+        &[(cookies::PENDING_COOKIE, &started.pending)],
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.location(), "/api/?signin=failed");
+    assert!(reply.headers.get(header::SET_COOKIE).is_none());
+    assert_eq!(mock.exchanges(), 0);
+}
+
+/// Review WR-03. A load inside the allowance no longer fails the callback:
+/// the exchange runs, on what the load left of its timeout. (The 500 ms
+/// allowance this replaced refused any load slower than half a second.)
+#[tokio::test]
+async fn a_callback_whose_load_fits_the_allowance_still_exchanges_the_code() {
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let loaded = router_with_sources(
+        &mock,
+        prices_api::portal::sources::PortalSources::ready(full_sources()),
+    );
+    let cold = router_with_sources(&mock, sources_loading_for(1_000));
+
+    let started = start_login(&loaded).await;
+    let reply = fetch(
+        &cold,
+        &format!("{CALLBACK_PATH}?code=an-auth-code&state={}", started.state),
+        &[(cookies::PENDING_COOKIE, &started.pending)],
+    )
+    .await;
+
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_ne!(reply.location(), "/api/?signin=failed");
+    assert_eq!(mock.exchanges(), 1, "the token exchange must run");
 }
 
 /// Login on one environment (loaded), callback on another that has to load
@@ -1816,16 +1944,7 @@ async fn an_issue_callback_that_spent_its_allowance_loading_lands_on_issue_faile
     );
     let cold = router_with_sources(&mock, slow_sources());
 
-    let login = fetch(&loaded, &format!("{LOGIN_PATH}?action=issue"), &[]).await;
-    assert_eq!(login.status, StatusCode::SEE_OTHER);
-    let pending = login
-        .cookie(cookies::PENDING_COOKIE)
-        .expect("login must set the pending-login cookie");
-    let query = login.location().split_once('?').unwrap().1.to_string();
-    let state = form_urlencoded::parse(query.as_bytes())
-        .find(|(k, _)| k == "state")
-        .map(|(_, v)| v.into_owned())
-        .expect("the authorize URL must carry `state`");
+    let (state, pending) = start_issue_login(&loaded).await;
 
     let reply = fetch(
         &cold,

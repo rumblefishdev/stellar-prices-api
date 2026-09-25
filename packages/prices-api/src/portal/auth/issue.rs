@@ -133,10 +133,11 @@ pub(super) fn capped_query(next_eligible_date: &str) -> String {
 /// service is" — which is exactly true here, and true *before* any check ran,
 /// which is why that state's copy does not claim eligibility passed.
 ///
-/// Loud in CloudWatch, because this is a deployment fault: the portal's load
-/// yields all its sources or fails, so one of these lines follows either a
-/// `portal sources failed to load` line for the same request (all three
-/// flags `false`) or a state the load did not catch.
+/// Loud in CloudWatch, because this is a deployment fault: the production
+/// load yields all three sources or fails, and a failed load never reaches
+/// here — `login` lands it on `?issue=failed` itself, after `get`'s one
+/// `portal sources failed to load` line (review WR-04). So this line means a
+/// partial fixture, or a state the load did not catch.
 pub(super) fn refuse_issue_start(
     home: &str,
     oauth: bool,
@@ -215,19 +216,27 @@ pub(super) fn refuse_issue_discord(
 /// [`RECONCILE_FLOOR`] for what happens when that is not enough.
 const ISSUE_BUDGET: Duration = Duration::from_secs(12);
 
-/// The callback's share of the invocation for loading the portal's sources
-/// (task 0311), measured from arrival like [`ISSUE_BUDGET`].
+/// How much of the token exchange's [`discord::REQUEST_TIMEOUT`] a lazy load
+/// of the portal's sources may spend (task 0311), measured from arrival like
+/// [`ISSUE_BUDGET`].
 ///
 /// The sources load on the first portal request an execution environment
 /// sees, and the callback can be that request: login and callback often land
 /// on different environments. The arithmetic on `discord::REQUEST_TIMEOUT`
 /// already spends 14 s of the 15 s invocation on the exchange, the parameter
-/// reads and two Discord reads, so the load gets what is left — under a
-/// second, with room for the redirect. A callback that arrives here later
-/// than this lands on a retryable failure BEFORE the token exchange, and the
-/// next attempt finds the sources loaded. `budget_arithmetic_fits_the_lambda`
-/// pins the sum.
-pub(super) const SOURCES_ALLOWANCE: Duration = Duration::from_millis(500);
+/// reads and two Discord reads, leaving 1 s for the redirect and the runtime.
+/// So the load does not get a term of its own: it comes OUT of the exchange,
+/// which is given `REQUEST_TIMEOUT` minus the time already spent (review
+/// WR-03). Load plus exchange stay 4 s, the sum stays 14 s, the margin 1 s.
+///
+/// Two seconds, not the 500 ms it first was: under the SSM slowness this
+/// task exists for, a successful load (five reads, credentials, a retry)
+/// routinely passes half a second, and every callback on a fresh environment
+/// then failed. Past two seconds the exchange would get less than two, and a
+/// callback lands on a retryable failure BEFORE the exchange instead. The
+/// next attempt finds the sources loaded only if it reaches this execution
+/// environment. `budget_arithmetic_fits_the_lambda` pins all of it.
+pub(super) const SOURCES_ALLOWANCE: Duration = Duration::from_secs(2);
 
 /// The least time worth starting a reconciliation with.
 ///
@@ -637,24 +646,36 @@ mod tests {
     /// raise either constant, or add a call, and this is what fails first.
     ///
     /// Since task 0311 a lazy load of the portal's sources can precede all of
-    /// it; past [`SOURCES_ALLOWANCE`] the callback lands before the exchange,
-    /// so the allowance is the term that load adds. A load that fails
-    /// outright is followed only by a redirect, so the whole
+    /// it. It adds no term: it is paid out of the exchange's own
+    /// `REQUEST_TIMEOUT` (the callback passes the exchange what is left), and
+    /// past [`SOURCES_ALLOWANCE`] the callback lands before the exchange. A
+    /// load that fails outright is followed only by a redirect, so the whole
     /// `sources::LOAD_BUDGET` has to fit too.
+    ///
+    /// Pinned with the margin, not only `< 15 s` (review WR-03): the redirect
+    /// has to be serialised and sent, and the runtime has overhead of its
+    /// own, after the last timeout expires.
     #[test]
     fn budget_arithmetic_fits_the_lambda() {
-        const LAMBDA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-        let worst = SOURCES_ALLOWANCE
-            + discord::REQUEST_TIMEOUT * 3
-            + crate::portal::eligibility::PARAMETER_TIMEOUT;
+        const LAMBDA_TIMEOUT: Duration = Duration::from_secs(15);
+        const REDIRECT_MARGIN: Duration = Duration::from_secs(1);
+        // Load + exchange, then the parameter reads, membership and identity.
+        let worst = discord::REQUEST_TIMEOUT
+            + crate::portal::eligibility::PARAMETER_TIMEOUT
+            + discord::REQUEST_TIMEOUT * 2;
         assert!(
-            worst < LAMBDA_TIMEOUT,
-            "worst case {worst:?} does not fit inside {LAMBDA_TIMEOUT:?}"
+            worst + REDIRECT_MARGIN <= LAMBDA_TIMEOUT,
+            "worst case {worst:?} leaves less than {REDIRECT_MARGIN:?} of {LAMBDA_TIMEOUT:?}"
+        );
+        // The allowance leaves the exchange a real timeout: at least half.
+        assert!(
+            discord::REQUEST_TIMEOUT.saturating_sub(SOURCES_ALLOWANCE)
+                >= discord::REQUEST_TIMEOUT / 2
         );
         // And the reconciler's share is measured from arrival, so it cannot
         // extend the callback past the same line.
-        assert!(ISSUE_BUDGET < LAMBDA_TIMEOUT);
-        assert!(crate::portal::sources::LOAD_BUDGET < LAMBDA_TIMEOUT);
+        assert!(ISSUE_BUDGET + REDIRECT_MARGIN <= LAMBDA_TIMEOUT);
+        assert!(crate::portal::sources::LOAD_BUDGET + REDIRECT_MARGIN <= LAMBDA_TIMEOUT);
     }
 
     /// Every landing state is a distinct literal under the portal home,
