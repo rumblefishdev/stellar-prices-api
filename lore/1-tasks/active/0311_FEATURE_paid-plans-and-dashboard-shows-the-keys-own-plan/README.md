@@ -43,6 +43,30 @@ history:
     who: akot
     note: >
       Activated; implementation starting.
+  - date: "2026-09-24"
+    status: active
+    who: akot
+    note: >
+      Compute + ApiGateway deployed from feat/0311 @ cfe3fce4; the four paid
+      plans are live (basic o9zex6, analyst 7azpdw, lite d3l658, pro f1e8cb).
+      The 60 s limit check on five temporary keys matched every plan within
+      ±4 %, but its cache-miss herd (69 cold starts) closed the portal in 7
+      execution environments and fired the portal-closed alarm.
+  - date: "2026-09-25"
+    status: active
+    who: akot
+    note: >
+      Five-plan herd and capacity test on production, run beside the 0286
+      backfill (notes/R-five-plan-herd-and-capacity-test.md). Root cause: SSM
+      throttling of the portal reads made at every cold start. SSM
+      high-throughput enabled. The portal sources now load lazily on the
+      first portal request, with retry, and the alarm is renamed
+      portal-load-failed. Six commits, then a /code-review pass: 1 blocker,
+      7 warnings and 6 info items, all fixed. Compute + Observability
+      deployed at a3ae084c. A replay of the 09-24 herd made 69 cold starts,
+      zero SSM reads and no alarm. Sign-in and dashboard tested live with
+      the key moved free → Basic → Pro → free (restored to Lite). PR #351
+      pushed at 0e0deb8e.
 ---
 
 # Five usage plans, and the dashboard states the key's own plan
@@ -192,24 +216,31 @@ reachable; burst is 5× the rate.
 
 ## Acceptance Criteria
 
-- [ ] Four paid plans exist in CDK with per-env config; the free plan is
-      untouched (no replacement in the CFN diff).
-- [ ] `/api/usage` reports the key's actual plan (tier, rate, burst, quota,
+- [x] Four paid plans exist in CDK with per-env config; the free plan is
+      untouched (no replacement in the CFN diff). Live since 2026-09-24;
+      free is still `71t9im`.
+- [x] `/api/usage` reports the key's actual plan (tier, rate, burst, quota,
       period) and the usage counted on that plan.
-- [ ] A key moved to any tier: both cards show that tier's figures within
-      60 s. Free keys look as they do today.
-- [ ] No-plan and unlimited/custom-plan keys render stated, distinct states.
-- [ ] IAM widened only to `GET /usageplans`, `GET /usageplans/*/usage` and
-      `POST /usageplans/*/keys`.
+- [x] A key moved to any tier: both cards show that tier's figures within
+      60 s. Free keys look as they do today. Seen live on 2026-09-25 for
+      free, Basic, Pro and Lite on Adam's key.
+- [x] No-plan and unlimited/custom-plan keys render stated, distinct states
+      (asserted in the portal specs; not observed live).
+- [x] IAM widened only to `GET /usageplans`, `GET /usageplans/*/usage` and
+      `POST /usageplans/*/keys`. The set is pinned by
+      `tools/scripts/verify-openapi-routes.mjs` §5b (0e0deb8e).
 - [ ] A rework on a paid (and on a custom) plan issues the new key on the
       **same** plan; tested in unit tests (plan read before delete) and on dev
       (Basic key → rework → next period → new key on Basic). A free key's
-      rework stays on free.
-- [ ] Runbook for upgrading a user (Step 4) in the wiki or ops docs.
-- [ ] Rate Limit card header shows the plan pill (`Free`…`Pro`, `Custom`)
+      rework stays on free. **Unit tests only.** The live half was skipped
+      by Adam's decision (2026-09-25): there is no dev environment, and a
+      rework would revoke Adam's only key until 2026-10-01.
+- [x] Runbook for upgrading a user (Step 4) in the wiki or ops docs
+      (`docs/runbooks/manual-api-key-tier.md`).
+- [x] Rate Limit card header shows the plan pill (`Free`…`Pro`, `Custom`)
       beside "Active", asserted per tier in `app.spec.tsx`.
-- [ ] The contact line links to `RUMBLEFISH_CONTACT`, with the copy for each
-      tier from decision 6.
+- [x] The contact line links to `RUMBLEFISH_CONTACT`, with the copy for each
+      tier from decision 6. Seen live for free, Basic and Pro.
 
 ## Decisions (Adam)
 
@@ -252,6 +283,49 @@ reachable; burst is 5× the rate.
 7. **A rework keeps the key on the same plan** (2026-09-24). This supersedes
    the 2026-09-23 "not now": with paid keys being issued, a rework must not
    be a silent downgrade to free. See Step 2b.
+8. **SSM high-throughput on** (2026-09-25). A stopgap for Parameter Store
+   throttling. It costs about $0.05 per 10 k calls, well under $1 a month.
+9. **Lazy portal load, and the alarm renamed** (2026-09-25).
+   - A cold start reads nothing for the portal.
+   - `/api/config` triggers the load (decision A). A failed load answers
+     `enabled:false` for that one response only.
+   - Other portal routes answer 503 while the load has failed.
+   - The alarm is `api-handler-portal-load-failed`; `portal-closed` is gone.
+   - `PORTAL_ENABLED` stays as the operator's kill switch.
+10. **No follow-up tasks** (2026-09-25) for the capacity risks found by the
+    test: the `prices_read` quota alarm, the Lambda throttle and concurrency
+    alarms, and a soak test after the 0286 backfill.
+
+## Portal load after 2026-09-25 (quick 260925-i0u)
+
+- **Commits.** Six commits, e8c1fc30..a3ae084c, on top of 34c2fae4:
+  - `portal/sources.rs` holds one shared, single-flight lazy handle. The
+    five reads run concurrently under a 4 s budget. A failed load is cached
+    for at most 2 s (`LOAD_FAILURE_COOLDOWN`).
+  - `portal/extension.rs` retries only transient reads: 3 attempts, with
+    backoff capped at 100 and 300 ms and full jitter.
+  - `mtls.rs` and the `/v1` cold path are unchanged.
+- **What the user sees on a failed load.**
+  - Sign-in callback: the load has a 2 s allowance, taken out of the token
+    exchange, so the worst case stays at 14 s against the 15 s Lambda
+    timeout. An issue flow lands on `?issue=failed`, anything else on
+    `?signin=failed`.
+  - `/me`, `/key` and `/usage` answer 503 (the frontend already renders
+    these). `USAGE_TIMEOUT_MS` was raised to 20 s.
+- **Tests.** 550 prices-api tests pass, with new `portal_lazy_load` and
+  `portal_load_logs` binaries. Infra 41/41, web portal 265. The guard test
+  was renamed `portal-load-failed-filter-guard.test.mjs`.
+- **Known limit.** `mtls.rs` errors carry only the HTTP status, not the
+  body. So a throttle that the extension reports as HTTP 400 is not
+  retried; hung reads are. SSM high-throughput covers this.
+- **Measured after the deploy.**
+
+  | Burst | Cold starts | SSM reads | Init p50 / max |
+  |---|---|---|---|
+  | `/price` burst | 193 | 0 | 213 / 436 ms |
+  | 09-24 herd replay | 69 | 0 | 215 / 274 ms |
+
+  Before the change, Init was 354–375 ms, with a tail up to 2.4 s.
 
 ## Out of scope
 
