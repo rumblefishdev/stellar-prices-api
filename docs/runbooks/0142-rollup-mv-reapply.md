@@ -403,19 +403,33 @@ SELECT view, status, last_success_time, last_success_duration_ms, exception
 FROM system.view_refreshes
 WHERE database = 'prices' AND view = 'mv_reconcile_1m_to_15m';
 
--- the pass's peak memory: refresh passes are logged as INSERTs
+-- the reconcile passes' peak memory, per target table
 SYSTEM FLUSH LOGS;
-SELECT event_time, query_duration_ms, formatReadableSize(memory_usage) AS peak
+SELECT extract(query, '^INSERT INTO prices\\.(\\w+)') AS target,
+       max(event_time) AS last_pass,
+       argMax(query_duration_ms, memory_usage) AS duration_ms,
+       formatReadableSize(max(memory_usage)) AS peak
 FROM system.query_log
 WHERE type = 'QueryFinish' AND query_kind = 'Insert'
   AND event_time >= now() - INTERVAL 15 MINUTE
-  AND query LIKE 'INSERT INTO prices.price_ohlcv_15m%'
-ORDER BY event_time DESC LIMIT 3;
+  AND query LIKE 'INSERT INTO prices.price_ohlcv_%'
+  AND query LIKE '%NOT IN (%'   -- only a reconcile body has it
+GROUP BY target
+ORDER BY max(memory_usage) DESC;
 ```
 
 `status = Scheduled`, `last_success_time` at or after the `CREATE`, an empty
 `exception`, and a peak well under the 5.59 GiB quota. The `15m` pass is the
 heaviest: it is the only one that reads `price_ohlcv_1m`.
+
+⚠️ **Keep the `NOT IN (` filter.** A refresh pass is logged as
+`INSERT INTO prices.<target> (<columns>) SELECT …`, and each fast MV writes the
+same target with the same prefix — `mv_ohlcv_1m_to_15m` every minute, so about
+15 fast inserts for every reconcile pass in a 15-minute window. Without the
+filter the query reports a small, healthy-looking fast pass instead of the
+heaviest one. Only a reconcile body contains `NOT IN (` (the unit test
+`only_the_reconcile_bodies_contain_not_in` pins that). Read the maximum
+(`ORDER BY max(memory_usage)`), not the latest.
 
 `system.view_refreshes.written_rows` reads **0 when a pass wrote nothing**. A
 non-zero value is not a row count on 26.3.10.60 (it was measured at 256 × the

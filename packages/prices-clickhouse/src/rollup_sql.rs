@@ -1316,6 +1316,26 @@ mod tests {
         }
     }
 
+    /// Runbook 0142 §2 reads a reconcile pass's peak memory from
+    /// `system.query_log` by `query LIKE '%NOT IN (%'` (review WR-01): a fast
+    /// MV writes the same target with the same `INSERT INTO` prefix, so that
+    /// filter is the only thing telling the two apart. It holds only while no
+    /// fast MV body contains the text and every reconcile body does.
+    #[test]
+    fn only_the_reconcile_bodies_contain_not_in() {
+        for tier in TIERS {
+            let fast = mv_ddl(&tier, "prices").expect("a checked rendering");
+            assert!(!fast.contains("NOT IN ("), "{}: {fast}", tier.mv);
+            let reconcile = reconcile_mv_ddl(&tier, "prices").expect("a checked rendering");
+            assert_eq!(
+                reconcile.matches("NOT IN (").count(),
+                1,
+                "{}",
+                tier.reconcile_mv
+            );
+        }
+    }
+
     /// `EVERY <n> <MINUTE|HOUR|DAY>` → seconds. Lives in the test on purpose:
     /// the API carries the number, and this is what ties it to the text.
     fn every_seconds(refresh: &str) -> u64 {
