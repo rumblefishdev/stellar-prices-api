@@ -31,6 +31,10 @@
 
 set -euo pipefail
 
+# BSD `realpath` (macOS) has no `-m`: both sides of the target-dir check below
+# would come out empty and the check would pass without checking (task 0239).
+realpath -m / >/dev/null 2>&1 || { echo "::error::needs GNU realpath (coreutils). On macOS see infra/README.md, Prerequisites." >&2; exit 1; }
+
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="${1:-$(cd "${here}/../.." && pwd)}"
 

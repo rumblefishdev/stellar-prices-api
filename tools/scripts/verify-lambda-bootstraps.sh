@@ -31,6 +31,9 @@
 
 set -euo pipefail
 
+# `[[ -v ]]`, `mapfile` and `declare -A` below are bash 4+; macOS ships 3.2 (task 0239).
+(( BASH_VERSINFO[0] >= 4 )) || { echo "::error::verify-lambda-bootstraps: needs bash >= 4, this is ${BASH_VERSION}. On macOS see infra/README.md, Prerequisites." >&2; exit 1; }
+
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="${1:-$(cd "${here}/../.." && pwd)}"
 

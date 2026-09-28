@@ -72,8 +72,73 @@ builds natively without zig.
 
 ## Acceptance Criteria
 
-- [ ] A runbook states the fd-limit and bash requirements and the lambda build
-      command, in the order an operator needs them
-- [ ] `lambda-assets.sh` either runs on bash 3.2 or fails naming the cause
-- [ ] The note that `deploy-production` does not build the bootstraps is
-      written where someone about to deploy will read it
+- [x] A runbook states the fd-limit and bash requirements and the lambda build
+      command, in the order an operator needs them — `infra/README.md` §1
+      Prerequisites, "On macOS", before the steps that need them (4 and 7);
+      the build command is `build-lambda-assets.sh`, which step 7 runs and
+      `deploy-ledger-processor.md` §1 documents (now pointing to §1)
+- [x] `lambda-assets.sh` either runs on bash 3.2 or fails naming the cause —
+      it fails naming bash ≥ 4 and the README section; so does
+      `verify-lambda-bootstraps.sh`
+- [x] ~~The note that `deploy-production` does not build the bootstraps~~ —
+      obsolete: since [[0141]] every target that can ship a Lambda runs
+      `build-lambdas` first, and `infra/README.md` step 7 says so
+
+## Implementation Notes
+
+Scope moved on 2026-09-28 from "the two walls of [[0118]]" to "the
+fresh-account runbook of [[0297]] passes on a Mac" (M3 AC 7). Proven on this
+MacBook (macOS 26.6, Apple Silicon), in a fresh worktree off `develop`:
+
+- `make -C infra build-lambdas` with the documented PATH and
+  `ulimit -n 61440` set from a 256 soft limit: 12 bootstraps built in
+  3m37s from scratch, all verified as distinct aarch64 ELFs. Re-run after
+  the script edits: cargo no-op, 12 verified.
+- `make -C infra synth-production` with `AWS_CONFIG_FILE` and
+  `AWS_SHARED_CREDENTIALS_FILE` set to `/dev/null`: 5 templates.
+- Step 4's macOS variant run end to end on dummy certificates: 4 MB RAM disk,
+  mode 700, bundle with `ca`/`cert`/`key`, `shred`, detach.
+- `/bin/bash` 3.2.57 on `lambda-assets.sh` and `verify-lambda-bootstraps.sh`:
+  both exit 1 naming bash ≥ 4. `node --test "tools/scripts/**/*.test.mjs"`:
+  41/41.
+- Not reproduced: `ProcessFdQuotaExceeded` itself (the build was not run at
+  256 to watch it fail); the evidence is [[0118]]'s deploy.
+
+Files: `infra/README.md` (zig row, "On macOS" paragraph, step 4 takes `D`
+and has a RAM-disk variant), `docs/runbooks/deploy-ledger-processor.md` (zig
+sentence), three guards in `tools/scripts/` (`lambda-assets.sh`,
+`verify-lambda-bootstraps.sh`, `build-lambda-assets.sh`).
+
+## Issues Encountered
+
+- **The runbook's zig row was wrong for every Mac.** "Only on x86 machines"
+  holds for Linux; macOS on Apple Silicon still cross-compiles darwin → linux
+  and needs zig. The same sentence was in `deploy-ledger-processor.md`.
+- **BSD `realpath` silently disabled a guard.** `build-lambda-assets.sh`
+  compares `realpath -m` of cargo's target dir and `<root>/target`; macOS's
+  `realpath` has no `-m`, both sides came out empty, and a mismatched
+  `CARGO_TARGET_DIR` passed unchecked (reproduced with the check from
+  `develop`: BSD → passes, GNU → refuses). Now refused up front, by name.
+- **Step 4 had two more macOS walls:** no `/dev/shm`, no `shred` without
+  coreutils.
+- **zsh keeps `hdiutil`'s trailing whitespace.** `hdiutil attach` prints the
+  device padded with spaces and tabs, and zsh does not word-split an unquoted
+  `$RD`, so `diskutil erasevolume … $RD` gets the padding; `awk '{print $1}'`.
+
+## Design Decisions
+
+### From Plan
+
+1. **Document, do not port.** Porting the three scripts to bash 3.2 / BSD is
+   ~10 spots plus the guard tests, in the CI guards of [[0070]] and [[0141]],
+   days before the M3 submission. Homebrew `bash` + `coreutils` + `zig` and
+   two shell lines cover all of it (decided 2026-09-28).
+
+### Emerged
+
+2. **Guards that name the cause, in three scripts rather than one.**
+   `verify-lambda-bootstraps.sh` has its own bash-4 constructs, and
+   `build-lambda-assets.sh`'s GNU dependency is the silent one.
+3. **Step 4 takes `D=${D:-/dev/shm/prices-cert}`** so one block serves both
+   systems; its closing `rmdir` was dropped (an empty directory in tmpfs is
+   harmless, and on macOS the mount point cannot be removed that way).
