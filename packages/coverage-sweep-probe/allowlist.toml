@@ -97,12 +97,6 @@ reason = "fee-taking split-route aggregator (swap_split, register_pool); 3/3 txs
 task = "0100"
 
 [[contract]]
-id = "CDYPJTUTGI7KG6JK3MJSXBBKO7XHAKWRKFFMP7AUW3UYEZGVFST5XF57"
-wasm = "1465e10012cc2aadb0236386dbbb67df108f7be71ff39f75e2c88787f930a62e"
-reason = "swap aggregator (sda / swap: fee_aggregator, fee_partner, quote_id, steps); its only swap (ledger 64575362) routed registered Soroswap and Aquarius pools"
-task = "0100"
-
-[[contract]]
 id = "CARVQXFP4JF5ELLXUMQ6DALR346YVGBMQOHB4ENA7SSVXAYABXLBDDC4"
 wasm = "437653282e9c93b0b4d736d8fde01bf002adefb61bfb75917e609f5336ee3190"
 reason = "fee-taking swap wrapper over routers (swap_exact_in, set_routers, treasury); its txs hold the pool swaps it wraps"
@@ -118,6 +112,12 @@ task = "0100"
 id = "CDE5MFAGZOUHFYEPPS2O7J3QO755NRZAK76K3XRBNMCF3AEGHTGKKLLO"
 wasm = "a317f5bd9fab28992f1d9548c60f462d1e90b0014e707f9f1c02a7afb22b780d"
 reason = "small swap router (swap, registry, fee_policy); low confidence, 1 event in the classification window"
+task = "0100"
+
+[[contract]]
+id = "CDYPJTUTGI7KG6JK3MJSXBBKO7XHAKWRKFFMP7AUW3UYEZGVFST5XF57"
+wasm = "1465e10012cc2aadb0236386dbbb67df108f7be71ff39f75e2c88787f930a62e"
+reason = "swap router, newer build of CDE5MFAG… (same deployer; sda/fee_policy, sda/swap) routing through per-venue adapters (CCKU4BSP…, CA475RRP…); 1/1 txs also hold a registered pool's swap"
 task = "0100"
 
 [[contract]]
