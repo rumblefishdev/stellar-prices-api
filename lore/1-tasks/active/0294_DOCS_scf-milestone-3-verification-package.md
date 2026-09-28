@@ -4,7 +4,7 @@ title: "SCF Milestone 3 verification package — evidence doc, form answers, vid
 type: DOCS
 status: active
 related_adr: []
-related_tasks: ["0102", "0128", "0293", "0260", "0275", "0164", "0249", "0179", "0233", "0239", "0194", "0047", "0295", "0296", "0297"]
+related_tasks: ["0102", "0128", "0293", "0260", "0275", "0164", "0249", "0179", "0233", "0239", "0194", "0047", "0295", "0296", "0297", "0311"]
 tags: [layer-docs, priority-high, effort-medium, milestone-M3, scf, submission, evidence]
 milestone: 3
 links:
@@ -13,6 +13,20 @@ links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../../docs/prices-api-load-test-100rps.md"
 history:
+  - date: 2026-09-28
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Measured with Logs Insights over the api-handler log: [[0293]]'s load
+      test of 2026-09-18 closed the portal 243 times, all in three bursts on
+      the 500/1000 req/s ramps (157, 278 and 255 cold starts within 1–2 s);
+      bursts of 26–68 cold starts per second closed nothing. The AC 5 run had
+      41 cold starts and no closure or SSM throttle, so 49.0 ms stands. The
+      side effect is in neither 0293 nor docs/loadtest-results — added to the
+      known-issues row and the AC 5 bullet. Not a reason to re-run. The cause
+      is fixed: [[0311]] moved the portal's source reads off the cold start,
+      live since 2026-09-25 14:47 CEST (PR #351, merged 09-28); 0 closures
+      and 0 failed loads since.
   - date: 2026-09-25
     status: active
     who: stkrolikiewicz
@@ -118,6 +132,15 @@ ledger-processor; `tracingEnabled` on the stage, checked 2026-09-16);
   from Poland, 45–90 ms at API Gateway; production today is ~4 % cache hits at
   0–1,100 requests a day. The 1000 req/s row is a ceiling, not a pass: the
   shared ClickHouse box saturates between 500 and ~900 req/s.
+  Beside the 500/1000 rows, declare a side effect 0293 did not record: their
+  ramps closed the portal in 243 execution environments (198 of a fleet
+  capped at 700 in the 1000 run) — see the portal row under Known issues.
+  `/v1` answered throughout. The AC-scenario run (09:33–09:44 UTC) had 41
+  cold starts, 0 closures and 0 SSM throttles, so the 49.0 ms is untouched.
+  No re-run for this. The fix is live since 2026-09-25 14:47 ([[0311]]), so
+  the next ramp is its verification (0 SSM reads at a `/v1` cold start);
+  run it after the launch window (09-30 09:40), and state that the box is
+  then running [[0286]]'s re-ingest.
 - **"7 endpoint groups"** (Work list and the conformance wording) vs **five** in
   §4 and in the OpenAPI tags — reconcile before submission; the criterion will
   be read against that number.
@@ -156,7 +179,7 @@ issue with its task. Kept here so the package is not written from memory.
 |---|---|---|
 | Candles built from every fill, dust included, in the wrong intra-ledger order; live Aquarius ingestion dropped ~50 % of its trades | fix live since 2026-09-22 (phase 1), 09-19/20 measured at exactly zero loss; history re-ingest in progress from 2026-09-23 (stage A 16/99 months on 09-24) | [[0282]], [[0286]] |
 | `pool_registry` had not learned a pool since 2026-07-06; 42 pools missing | seeded 2026-09-18, live persistence deployed 2026-09-22, alarm live; the "first new pool" production check still open | [[0291]] |
-| Portal closes itself in an execution environment when Parameter Store throttles its cold start (account default 40 TPS); happened 2026-09-24 under a teammate's request burst and again 2026-09-25 under a teammate's k6 run for 0311 (concurrency 200) | alarm caught it ([[0249]]); rule agreed, retry-at-cold-start task proposed | [[0249]], 0194 |
+| Portal closes itself in an execution environment when Parameter Store throttles its cold start (account default 40 TPS; each cold start reads 3 parameters, even one triggered by `/v1`); happened 2026-09-18 on [[0293]]'s 500/1000 req/s ramps (243 closures from bursts of 157, 278 and 255 cold starts in 1–2 s; 26–68 per second closed nothing — Logs Insights, read 2026-09-28), 2026-09-24 under a teammate's request burst (69 cold starts, 7 closures) and 2026-09-25 under a teammate's k6 run for 0311 (concurrency 200) | **fixed 2026-09-25 14:47 CEST** by [[0311]] (PR #351, merged 09-28): the cold start reads only the mTLS bundle; the portal's sources load on the first portal request, a failed load answers that request only and the next retries after a 2 s cooldown; alarm `portal-load-failed` replaced `portal-closed`. 0 closures and 0 failed loads since (Logs Insights, read 2026-09-28). 09-24 and 09-25 were caught by the old alarm ([[0249]]); 09-18 predates it, was found in the logs on 09-21 and never reached 0293's report | [[0249]], 0194, [[0311]] |
 | Oracle OOMs while the re-ingest re-emits the asset registry (reads without `FINAL`) | one 5-minute tick lost per ~1.5 h cycle until the backfill writes deltas | [[0226]], [[0140]] |
 | Load-test latency describes a box that is now also running the re-ingest | declared beside the 0293 figures | [[0293]], [[0047]] |
 - **The three gaps that had no owner now have tasks**: [[0295]] (AC 8,
