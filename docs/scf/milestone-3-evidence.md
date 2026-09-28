@@ -86,13 +86,13 @@ Unchanged in shape from Milestones 1 and 2; the full description is
 [`docs/prices-api-general-overview.md`](../prices-api-general-overview.md) §2
 and §3. What Tranche 3 added on top of the Milestone 2 platform:
 
-| Layer         | Addition                                                                                                                                                             |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Portal (SPA)  | Served under `/api/*` of the explorer's CloudFront distribution from its own S3 bucket; Discord OAuth sign-in, key issuance on the free plan, dashboard, quick start |
-| API Gateway   | 404 `not_found` in the error envelope for unknown routes (0309); usage plans for paid tiers in progress (0311)                                                       |
-| Lambda (axum) | Portal routes behind a gate that closes itself when a source fails at cold start (0194/0249); `as_of` and `price_status` beside every current price (0216)           |
-| ClickHouse    | Price-forming-fill candle definitions across all tiers (0286 phase 1–2, ADR 0287); scoped `prices_admin` identity for the history re-ingest (explorer 0567)          |
-| Observability | api-handler error and portal-closed alarms (0249); liveness and duration alarms on every scheduled worker (0223, 0256); weekly coverage sweep of swap venues (0100)  |
+| Layer         | Addition                                                                                                                                                                                            |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Portal (SPA)  | Served under `/api/*` of the explorer's CloudFront distribution from its own S3 bucket; Discord OAuth sign-in, key issuance on the free plan, dashboard, quick start                                |
+| API Gateway   | 404 `not_found` in the error envelope for unknown routes (0309); usage plans for paid tiers in progress (0311)                                                                                      |
+| Lambda (axum) | Portal routes whose sources load on the first portal request, never at cold start; a failed load costs that request only (0194, 0311); `as_of` and `price_status` beside every current price (0216) |
+| ClickHouse    | Price-forming-fill candle definitions across all tiers (0286 phase 1–2, ADR 0287); scoped `prices_admin` identity for the history re-ingest (explorer 0567)                                         |
+| Observability | api-handler error and 5xx alarms (0249) and portal-load-failed alarm (0311); liveness and duration alarms on every scheduled worker (0223, 0256); weekly coverage sweep of swap venues (0100)       |
 
 _To fill: the component table and a data-flow figure if the reviewer packet
 needs one; otherwise the pointer above stands._
@@ -211,6 +211,24 @@ ClickHouse box between 500 and ~900 req/s, not in Lambda or the gateway. The
 overload slowed the explorer's indexer for two minutes (its alarm paged and
 recovered; nothing lost) — recorded in the report as collateral.
 
+**A side effect the report does not record.** On the 500 and 1000 req/s ramps,
+three bursts of 157, 278 and 255 Lambda cold starts within 1–2 s throttled
+Parameter Store and closed the onboarding portal in 243 execution environments
+(§7); `/v1` answered throughout. Bursts of 26–68 cold starts per second closed
+nothing. The AC-scenario run (09:33–09:44 UTC) had 41 cold starts, no closure
+and no Parameter Store throttle, so its 49.0 ms is unaffected. The cause has
+been fixed since 2026-09-25 (§7): a `/v1` cold start no longer reads Parameter
+Store at all. Counted
+2026-09-28 with CloudWatch Logs Insights on `/aws/lambda/prices-production-api-handler`,
+per second over each ramp and in total over the AC run's window:
+
+```
+stats sum(strcontains(@message, "INIT_START")) as cold_starts,
+      sum(strcontains(@message, "portal closed at cold start")) as portal_closed,
+      sum(strcontains(@message, "ThrottlingException")) as ssm_throttled
+  by bin(1s)
+```
+
 #### Reproduce it
 
 ```sh
@@ -277,7 +295,9 @@ of "works" in deviations §3.
 2026-09-25.** The dashboard is `prices-production-overview` in `eu-central-1`;
 **65** `prices-production-*` alarms stand behind it (up from 53 at Milestone 2),
 including — since 2026-09-22 — error and portal-closed alarms on the
-api-handler and liveness/duration alarms on every scheduled worker. On
+api-handler (the portal-closed one replaced on the afternoon of 2026-09-25
+by `portal-load-failed`, task 0311) and liveness/duration alarms on every
+scheduled worker. On
 2026-09-25 09:20 CEST every alarm read OK except
 `prices-production-coverage-sweep-unclassified`, in `INSUFFICIENT_DATA` until
 its weekly probe's first run.
@@ -349,13 +369,13 @@ figure and its definition, the ingestion signals, the incident list.
 Each row is either fixed and verified by submission, or declared here with the
 task that owns it. Written from the task ledger, not from memory.
 
-| Issue                                                                                                                                   | State on 2026-09-25                                                                                                                              | Task       |
-| --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ---------- |
-| Candles were built from every fill, dust included, in the wrong intra-ledger order; live Aquarius ingestion dropped ~50 % of its trades | Fix live since 2026-09-22; 09-19/20 measured at exactly zero loss. History re-computation running since 2026-09-23 (stage A, pre-Soroban months) | 0282, 0286 |
-| `pool_registry` had not learned a pool since 2026-07-06; 42 pools missing                                                               | Seeded 2026-09-18; live persistence deployed 2026-09-22; alarm live; the "first new pool" production check open                                  | 0291       |
-| The portal closes itself in an execution environment when Parameter Store throttles its cold start (account default 40 TPS)             | Design trade-off from 0194; alarm caught the 2026-09-24 occurrence; retry-at-cold-start task proposed                                            | 0249, 0194 |
-| The oracle worker runs out of memory while the re-ingest re-emits the asset registry (it reads without `FINAL`)                         | One 5-minute tick lost per ~1.5 h cycle until the backfill writes deltas                                                                         | 0226, 0140 |
-| Load-test latency describes a box that is now also running the re-ingest                                                                | Declared beside the AC 5 figures                                                                                                                 | 0293, 0047 |
+| Issue                                                                                                                                   | State on 2026-09-25                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Task             |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------- |
+| Candles were built from every fill, dust included, in the wrong intra-ledger order; live Aquarius ingestion dropped ~50 % of its trades | Fix live since 2026-09-22; 09-19/20 measured at exactly zero loss. History re-computation running since 2026-09-23 (stage A, pre-Soroban months)                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | 0282, 0286       |
+| `pool_registry` had not learned a pool since 2026-07-06; 42 pools missing                                                               | Seeded 2026-09-18; live persistence deployed 2026-09-22; alarm live; the "first new pool" production check open                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | 0291             |
+| The portal closed itself in an execution environment when Parameter Store throttled its cold start (account default 40 TPS)             | **Fixed 2026-09-25 14:47 CEST.** The cold start now reads only the mTLS bundle; the portal's sources load on the first portal request, and a failed load answers that request only — the next retries after a 2 s cooldown. The alarm now watches failed loads (`portal-load-failed`). Before the fix it occurred on 2026-09-18 on the load test's 500/1000 req/s ramps (243 environments, found in the logs on 2026-09-21, before any alarm existed) and on 2026-09-24 and 2026-09-25 (both caught by the alarm); `/v1` was unaffected throughout. Since the fix: 0 closures and 0 failed loads (read 2026-09-28) | 0249, 0194, 0311 |
+| The oracle worker runs out of memory while the re-ingest re-emits the asset registry (it reads without `FINAL`)                         | One 5-minute tick lost per ~1.5 h cycle until the backfill writes deltas                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | 0226, 0140       |
+| Load-test latency describes a box that is now also running the re-ingest                                                                | Declared beside the AC 5 figures                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | 0293, 0047       |
 
 ## 8. What is deliberately not claimed
 
