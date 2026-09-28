@@ -557,8 +557,23 @@ the range overlaps the last 7 days, stop the reconcile MVs for the duration
 ### 6. Rollback
 
 If the probe Lambda and ObservabilityStack from this change are deployed, roll
-them back first, or expect `prices-production-mv-drift` (and the mismatch and
-refresh alarms) to fire while the MVs change.
+them back first (`make deploy-production-eventbridge` and
+`make deploy-production-observability` from the commit before this change),
+then run the steps below in the same session. What that order buys, and what it
+does not:
+
+- **It removes** the `prices-production-rollup-mismatch-*` and
+  `mv-refresh-*` alarms, which would otherwise judge a chain that is being
+  taken apart (a dropped reconcile MV's dependents wait, and the probe cannot
+  tell a rollback from a stall).
+- **It does NOT avoid `prices-production-mv-drift`.** The previous probe
+  embeds the six-MV `rollups.sql`, so while steps 1–2 run it sees the six
+  reconcile MVs as undeclared writers into the coarse tables and the five
+  `DEPENDS ON` clauses as refresh drift (up to 11 in `MvDriftCount`, none
+  critical). The alarm fires until step 2 finishes and clears within two probe
+  runs after. That is expected. Rolling the probe back LAST instead fires it
+  too (the new probe reads the rolled-back chain as five `DRIFT` + six
+  `MISSING`), so neither order avoids it — keep the window short.
 
 1. Drop the reconcile MVs **coarse to fine**, so no remaining reconcile MV is
    left waiting on a dropped one:
