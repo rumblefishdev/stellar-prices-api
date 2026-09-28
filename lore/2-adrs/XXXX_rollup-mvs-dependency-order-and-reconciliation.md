@@ -282,10 +282,16 @@ intermittent shape these outages normally take.
   coarse `close_usd` reads 0 until the next sweep pass. The sweep covers the
   current and previous month, which contains the window. The fast MVs already
   do the same inside their windows, so this is not new.
-- **Enrichment-only changes are not propagated, by design.** Enrichment does
-  not change `trade_count` or `volume_base`, so a `_1m` `version + 1` bump
-  triggers no reconcile write and loses no bucket (pinned). Pricing the coarse
-  tiers stays the sweep's job.
+- **Only count and volume changes are propagated.** The comparison is on
+  `trade_count` and `volume_base`, so a child rewritten with the same count
+  and volume but different prices (OHLC, `vwap`, `close_usd`) triggers no
+  rebuild. Enrichment is one such change, by design: a `_1m` `version + 1`
+  bump triggers no reconcile write and loses no bucket (pinned), and pricing
+  the coarse tiers stays the sweep's job. A price-only correction of `_1m` is
+  another, for example a candle-definition change like task 0286's or a
+  dust-ordering fix. It self-heals only inside the fast MVs' windows. Anything
+  older, even inside the 7-day window, still needs a bounded pre-roll
+  (`schema/preroll-live-gap.sql`, runbook 0142).
 
 ---
 
