@@ -653,3 +653,196 @@ async fn a_hand_edited_window_is_reported_as_drift() {
 
     drop_scratch(&client, db).await;
 }
+
+/// Re-point one live MV's refresh clause in place, the way an operator or a
+/// half-finished rollout would, and return the drift report.
+async fn modify_refresh_and_check(
+    client: &Client,
+    db: &str,
+    mv: &str,
+    clause: &str,
+) -> Vec<prices_clickhouse::drift::MvReport> {
+    client
+        .query(&format!("ALTER TABLE {db}.{mv} MODIFY REFRESH {clause}"))
+        .execute()
+        .await
+        .unwrap_or_else(|e| panic!("modify refresh {mv}: {e}"));
+    check_mv_drift(client, db, prices_clickhouse::ROLLUPS_SQL)
+        .await
+        .unwrap()
+}
+
+/// Assert `mv` alone drifted, on its refresh clause only, from `declared`
+/// to `live`; the other eleven compare clean.
+fn assert_only_refresh_drift(
+    reports: &[prices_clickhouse::drift::MvReport],
+    mv: &str,
+    declared: &str,
+    live: &str,
+) {
+    let report = reports.iter().find(|r| r.name == mv).expect("reported");
+    let MvStatus::Drifted(differences) = &report.status else {
+        panic!("{mv}: expected Refresh drift, got {:?}", report.status);
+    };
+    assert_eq!(
+        differences.len(),
+        1,
+        "{mv}: only the refresh clause changed"
+    );
+    assert_eq!(differences[0].field, DriftField::Refresh);
+    assert_eq!(differences[0].declared, declared);
+    assert_eq!(differences[0].live, live);
+    assert!(report.needs_attention());
+    assert_eq!(
+        reports
+            .iter()
+            .filter(|r| r.status == MvStatus::InSync)
+            .count(),
+        11,
+        "every other MV compares clean: {:?}",
+        reports
+            .iter()
+            .map(|r| (&r.name, &r.status))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Task 0143: a fast MV that lost its `DEPENDS ON` fires on its own clock
+/// again — the midnight race is back, and nothing errors. Losing it by an
+/// in-place `MODIFY REFRESH` (which REPLACES every refresh parameter) is the
+/// realistic way: the rollout statement typed without the clause.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_missing_depends_on_is_reported_as_refresh_drift() {
+    let db = "it_drift_no_depends";
+    let client = setup_scratch(db).await;
+
+    let reports =
+        modify_refresh_and_check(&client, db, "mv_ohlcv_4h_to_1d", "EVERY 4 HOUR APPEND").await;
+    assert_only_refresh_drift(
+        &reports,
+        "mv_ohlcv_4h_to_1d",
+        &format!("EVERY 4 HOUR DEPENDS ON {db}.mv_ohlcv_1h_to_4h APPEND"),
+        "EVERY 4 HOUR APPEND",
+    );
+
+    drop_scratch(&client, db).await;
+}
+
+/// A `DEPENDS ON` that names the WRONG MV orders nothing useful — the day MV
+/// would wait for the minute hop, not for the 4h tier it reads — and is just
+/// as silent. It must be drift, not "has a dependency, fine".
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_wrong_depends_on_is_reported_as_refresh_drift() {
+    let db = "it_drift_wrong_depends";
+    let client = setup_scratch(db).await;
+
+    let wrong = format!("EVERY 4 HOUR DEPENDS ON {db}.mv_ohlcv_1m_to_15m APPEND");
+    let reports = modify_refresh_and_check(&client, db, "mv_ohlcv_4h_to_1d", &wrong).await;
+    assert_only_refresh_drift(
+        &reports,
+        "mv_ohlcv_4h_to_1d",
+        &format!("EVERY 4 HOUR DEPENDS ON {db}.mv_ohlcv_1h_to_4h APPEND"),
+        &wrong,
+    );
+
+    drop_scratch(&client, db).await;
+}
+
+/// BRIEF §6: production gets the chain IN PLACE. The five dependent fast MVs
+/// already exist (bodies unchanged), so they gain `DEPENDS ON` with the
+/// generator's `mv_modify_refresh` statements, and the six reconciliation MVs
+/// are created from `reconcile_mv_ddl`. Starting from the pre-change shape
+/// (the fast six with no `DEPENDS ON`), exactly those statements must leave
+/// the database indistinguishable from `rollups.sql` to the drift check.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_modify_refresh_rollout_lands_the_generated_chain_in_sync() {
+    use prices_clickhouse::rollup_sql::{self, TIERS};
+
+    let db = "it_drift_rollout";
+    let client = Client::default().with_url(ch_url());
+    client
+        .query(&format!("DROP DATABASE IF EXISTS {db}"))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!("CREATE DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+    prices_clickhouse::apply_sql(&client, &rewrite(prices_clickhouse::INIT_SQL, db))
+        .await
+        .unwrap();
+
+    // The pre-change shape: today's six fast MVs, no DEPENDS ON, no reconcile.
+    for tier in TIERS {
+        let ddl = rollup_sql::mv_ddl(&tier, db).unwrap();
+        let before = match rollup_sql::dependency(&tier) {
+            Some(dep) => ddl.replace(&format!(" DEPENDS ON {db}.{}", dep.mv), ""),
+            None => ddl.clone(),
+        };
+        assert!(!before.contains("DEPENDS ON"), "{}: stripped", tier.mv);
+        client.query(&before).execute().await.unwrap();
+    }
+    let pre = check_mv_drift(&client, db, prices_clickhouse::ROLLUPS_SQL)
+        .await
+        .unwrap();
+    assert_eq!(
+        pre.iter()
+            .filter(|r| matches!(r.status, MvStatus::Drifted(_)))
+            .count(),
+        5,
+        "the starting point is the old chain: five fast MVs lack DEPENDS ON"
+    );
+    assert_eq!(
+        pre.iter().filter(|r| r.status == MvStatus::Missing).count(),
+        6,
+        "and no reconciliation MV exists yet"
+    );
+
+    // The rollout, verbatim from the generator.
+    let mut altered = 0;
+    for tier in TIERS {
+        if let Some(stmt) = rollup_sql::mv_modify_refresh(&tier, db).unwrap() {
+            client
+                .query(&stmt)
+                .execute()
+                .await
+                .unwrap_or_else(|e| panic!("{stmt}: {e}"));
+            altered += 1;
+        }
+    }
+    assert_eq!(altered, 5, "one MODIFY REFRESH per dependent fast MV");
+    for tier in TIERS {
+        let ddl = rollup_sql::reconcile_mv_ddl(&tier, db).unwrap();
+        client
+            .query(&ddl)
+            .execute()
+            .await
+            .unwrap_or_else(|e| panic!("{}: {e}", tier.reconcile_mv));
+    }
+
+    let reports = check_mv_drift(&client, db, prices_clickhouse::ROLLUPS_SQL)
+        .await
+        .unwrap();
+    assert_eq!(reports.len(), 12);
+    for report in &reports {
+        assert_eq!(
+            report.status,
+            MvStatus::InSync,
+            "{} must be in sync after the rollout, got {:?}",
+            report.name,
+            report.status
+        );
+        assert!(
+            report.live.as_ref().is_some_and(|f| f.is_append()),
+            "{} must still be APPEND",
+            report.name
+        );
+    }
+
+    drop_scratch(&client, db).await;
+}
