@@ -26,7 +26,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         visible_objects_query,
     };
     use rollup_freshness_probe::reconcile_mismatch::{
-        MismatchCount, mismatch_metric, mismatch_queries, publish_mismatch,
+        MISMATCH_MIN_READ_SECS, MISMATCH_RESERVE, MismatchCount, mismatch_metric, mismatch_queries,
+        mismatch_read_bound, publish_mismatch,
     };
     use rollup_freshness_probe::refresh_waits::{
         MV_REFRESH_DISABLED_METRIC, MV_REFRESH_UNREADABLE_METRIC, MV_REFRESH_WAITING_METRIC,
@@ -65,12 +66,17 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     let peg_query = Arc::new(peg_query());
     let zero_invariant_query = Arc::new(zero_invariant_query());
     let refresh_waits_query = Arc::new(refresh_waits_query("prices"));
-    let mismatch_queries = Arc::new(mismatch_queries());
     // The mismatch reads are the only ones here whose cost grows with a week
-    // of the child tier (the 15m read scans seven days of `_1m`). Each runs
-    // under a 10 s server-side bound, so one slow tier fails ITS read and
-    // leaves time for the rest inside the 60 s Lambda timeout.
-    let bounded_ch = Arc::new(prices_clickhouse::with_execution_bound((*ch).clone(), 10));
+    // of the child tier (the 15m read scans seven days of `_1m`: 0.7–4.0 s on
+    // 26.3.10.60 over ~3 M rows with 8 threads, unmeasured on prod, where the
+    // CPU is shared with the BE tenant). Six reads at a 10 s bound would be the
+    // whole 60 s Lambda timeout (eventbridge-stack.ts) on their own, after the
+    // freshness, disk, USD, drift (~2 round trips per declared MV, 12 now) and
+    // zero-invariant reads. So the per-read bound is NOT fixed: each read gets
+    // `min(10 s, time left − 5 s reserve)` from the invocation's deadline, and a
+    // read that would get under 2 s is skipped and recorded as a failure — see
+    // `reconcile_mismatch` (review WR-04).
+    let mismatch_queries = Arc::new(mismatch_queries());
 
     let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .load()
@@ -79,7 +85,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     let environment = Arc::new(prices_clickhouse::env::env_or("ENV_NAME", "unknown"));
     tracing::info!(environment = %environment, "rollup-freshness-probe cold start ready");
 
-    run(service_fn(move |_event: LambdaEvent<serde_json::Value>| {
+    run(service_fn(move |event: LambdaEvent<serde_json::Value>| {
         let ch = ch.clone();
         let cw = cw.clone();
         let query = query.clone();
@@ -88,8 +94,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         let zero_invariant_query = zero_invariant_query.clone();
         let refresh_waits_query = refresh_waits_query.clone();
         let mismatch_queries = mismatch_queries.clone();
-        let bounded_ch = bounded_ch.clone();
         let environment = environment.clone();
+        let deadline = event.context.deadline();
         async move {
             // ⚠️ EVERY CHECK RUNS, AND A FAILURE IN ONE MUST NOT SUPPRESS
             // ANOTHER. This is the invariant the whole invocation is built
@@ -369,16 +375,41 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             // The new tail, for the reason the zero invariants were last: these
             // are the reads whose cost grows with the data (a GROUP BY over a
             // week of the child tier; the 15m read scans seven days of `_1m`).
-            // A hard Lambda timeout loses only what has not been published, so
-            // they run after every other check, cheapest tier first (1M → 15m),
-            // each under a 10 s execution bound. One tier's error is recorded
-            // and the next tier still runs. A 0 here is a real reading — the
-            // query is scoped to closed buckets past the grace, so a healthy
-            // chain legitimately reads 0.
+            // They run after every other check, 15m FIRST (the heaviest, and
+            // where a `_1m` hole shows first), each bounded by what is left of
+            // the invocation (review WR-04): a tier that cannot get
+            // MISMATCH_MIN_READ_SECS is skipped and recorded as a failure, so
+            // the probe's -errors alarm speaks instead of a hard timeout that
+            // publishes nothing. One tier's error is recorded and the next
+            // tier still runs. A 0 here is a real reading — the query is
+            // scoped to closed buckets past the grace, so a healthy chain
+            // legitimately reads 0.
             let mut mismatch_detail: Vec<String> = Vec::new();
             for (table, sql) in mismatch_queries.iter() {
-                match bounded_ch.query(sql).fetch_one::<MismatchCount>().await {
-                    Ok(count) => {
+                let remaining = deadline
+                    .duration_since(std::time::SystemTime::now())
+                    .unwrap_or_default();
+                let Some(bound) = mismatch_read_bound(remaining) else {
+                    mismatch_detail.push(format!("{table}=skipped"));
+                    failures.push(format!(
+                        "rollup-mismatch {table} skipped: {:.1} s left of the invocation, \
+                         under the {} s reserve + {MISMATCH_MIN_READ_SECS} s a read needs",
+                        remaining.as_secs_f64(),
+                        MISMATCH_RESERVE.as_secs(),
+                    ));
+                    continue;
+                };
+                let bounded = prices_clickhouse::with_execution_bound((*ch).clone(), bound);
+                // The server bound is checked between blocks; this client-side
+                // guard (bound + 2 s, inside the reserve) is what makes the
+                // budget hold if the server does not answer at all.
+                let read = tokio::time::timeout(
+                    std::time::Duration::from_secs(bound + 2),
+                    bounded.query(sql).fetch_one::<MismatchCount>(),
+                )
+                .await;
+                match read {
+                    Ok(Ok(count)) => {
                         mismatch_detail.push(format!("{table}={}", count.mismatched));
                         let metric = mismatch_metric(table, &count);
                         if let Err(e) =
@@ -387,7 +418,19 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                             failures.push(format!("rollup-mismatch {table} publish: {e}"));
                         }
                     }
-                    Err(e) => failures.push(format!("rollup-mismatch {table} read: {e}")),
+                    Ok(Err(e)) => {
+                        mismatch_detail.push(format!("{table}=failed"));
+                        failures.push(format!(
+                            "rollup-mismatch {table} read (bound {bound} s): {e}"
+                        ));
+                    }
+                    Err(_) => {
+                        mismatch_detail.push(format!("{table}=failed"));
+                        failures.push(format!(
+                            "rollup-mismatch {table} read: no answer within {} s",
+                            bound + 2
+                        ));
+                    }
                 }
             }
             let mismatch_detail = mismatch_detail.join(", ");

@@ -540,6 +540,16 @@ ORDER BY view;
   part-way.
 - `SHOW GRANTS FOR prices_writer` includes `SELECT ON system.view_refreshes`;
   otherwise `prices-production-mv-refresh-unreadable` stays in ALARM.
+- **The probe's time budget.** Over the first day after §2b, read the
+  `prices-production-rollup-freshness-probe` Lambda's `Duration` (p95 and
+  maximum) against its 1-minute timeout, and check that
+  `prices-production-rollup-freshness-probe-duration-near-timeout` stays OK.
+  The six mismatch reads run last, 15m first, each bounded by what is left of
+  the invocation. A tier that cannot get 2 s is skipped: the invocation log
+  shows `rollup_mismatch=… price_ohlcv_1M=skipped` and the probe's errors alarm
+  fires with `rollup-mismatch … skipped`. If that happens, or Duration sits near
+  the timeout, raise the timeout of the probe in `eventbridge-stack.ts` as its
+  own change (that stack's deploy carries the CleanupRule hazard, task 0200).
 
 ### 5. An outage longer than 7 days
 

@@ -34,16 +34,26 @@
 //! a reconcile MV stuck or STOPped (see [`crate::refresh_waits`]) or a loss at
 //! a coarse level.
 //!
-//! ## Cost and order
+//! ## Cost, order and time budget (review WR-04)
 //!
 //! Each read is a `GROUP BY` over the 7-day window of the child tier. They run
-//! LAST in the invocation, cheapest first ([`mismatch_queries`]: 1M, 1w, 1d,
-//! 4h, 1h, 15m — the 15m read scans a week of `_1m`), each under an execution
-//! bound, so a slow read loses only the tiers after it rather than any other
-//! check.
+//! LAST in the invocation, so a slow read can cost only the tiers after it,
+//! never another check.
+//!
+//! - **15m first** ([`mismatch_queries`]: 15m, 1h, 4h, 1d, 1w, 1M). It is the
+//!   heaviest read (a week of `_1m`), and it is where a `_1m` hole shows
+//!   first — the one tier the phase must not lose to a slow day.
+//! - **A budget, not only a per-read bound.** Six reads at a 10 s bound are the
+//!   whole 60 s Lambda timeout on their own, after the reads before them. So
+//!   each read gets `min(10 s, time left − 5 s reserve)` as its server-side
+//!   `max_execution_time` ([`mismatch_read_bound`]); a read that would get less
+//!   than 2 s is SKIPPED and recorded as a failure of the invocation (the
+//!   probe's `-errors` alarm), instead of a hard Lambda timeout that publishes
+//!   nothing and leaves the MISSING-data mismatch alarms holding their old state.
 
 use crate::Metric;
 use prices_clickhouse::rollup_sql::{TIERS, reconcile_mismatch_select};
+use std::time::Duration;
 
 /// Per-tier count of closed coarse buckets that disagree with their source,
 /// published with `Environment` + `Table` dimensions. Watched by
@@ -56,12 +66,32 @@ pub struct MismatchCount {
     pub mismatched: u64,
 }
 
-/// One `(target table, SQL)` per coarse tier, cheapest first: 1M, 1w, 1d, 4h,
-/// 1h, 15m. The SQL is qualified with the probe's constant `prices` database.
+/// The server-side bound on ONE mismatch read, in seconds, when time allows.
+pub const MISMATCH_READ_BOUND_SECS: u64 = 10;
+
+/// Kept back from the invocation deadline for publishing, logging and
+/// returning — a read may never eat into it.
+pub const MISMATCH_RESERVE: Duration = Duration::from_secs(5);
+
+/// A read offered fewer seconds than this is skipped. `max_execution_time` is
+/// whole seconds, and the measured 15m read ran 0.7–4 s on 26.3.10.60 (about
+/// 3 M `_1m` rows), so less than this would only produce a timeout error.
+pub const MISMATCH_MIN_READ_SECS: u64 = 2;
+
+/// The `max_execution_time` for the next mismatch read, given the time left in
+/// the invocation — or `None` to skip it (and record the skip as a failure).
+pub fn mismatch_read_bound(remaining: Duration) -> Option<u64> {
+    let usable = remaining.checked_sub(MISMATCH_RESERVE)?.as_secs();
+    let bound = usable.min(MISMATCH_READ_BOUND_SECS);
+    (bound >= MISMATCH_MIN_READ_SECS).then_some(bound)
+}
+
+/// One `(target table, SQL)` per coarse tier, fine to coarse: 15m FIRST (the
+/// heaviest read, and where a `_1m` hole shows first), then 1h, 4h, 1d, 1w,
+/// 1M. The SQL is qualified with the probe's constant `prices` database.
 pub fn mismatch_queries() -> Vec<(&'static str, String)> {
     TIERS
         .iter()
-        .rev()
         .map(|tier| {
             (
                 tier.target,
@@ -127,21 +157,60 @@ pub async fn publish_mismatch(
 mod tests {
     use super::*;
 
+    /// Review WR-04: the 15m read goes first — a slow day must not cost the
+    /// one tier where a `_1m` hole shows first.
     #[test]
-    fn six_queries_one_per_coarse_target_cheapest_first() {
+    fn six_queries_one_per_coarse_target_15m_first() {
         let q = mismatch_queries();
         let tables: Vec<&str> = q.iter().map(|(t, _)| *t).collect();
         assert_eq!(
             tables,
             [
-                "price_ohlcv_1M",
-                "price_ohlcv_1w",
-                "price_ohlcv_1d",
-                "price_ohlcv_4h",
-                "price_ohlcv_1h",
                 "price_ohlcv_15m",
+                "price_ohlcv_1h",
+                "price_ohlcv_4h",
+                "price_ohlcv_1d",
+                "price_ohlcv_1w",
+                "price_ohlcv_1M",
             ]
         );
+    }
+
+    /// Plenty of time: the full per-read bound. Less: what is left after the
+    /// reserve. Too little (or past the deadline): skip, never a 0 or 1 s bound.
+    #[test]
+    fn the_read_bound_is_capped_by_the_time_left_and_skips_below_the_minimum() {
+        let s = Duration::from_secs;
+        assert_eq!(mismatch_read_bound(s(55)), Some(MISMATCH_READ_BOUND_SECS));
+        assert_eq!(mismatch_read_bound(s(15)), Some(10));
+        assert_eq!(mismatch_read_bound(s(12)), Some(7));
+        assert_eq!(mismatch_read_bound(Duration::from_millis(7_900)), Some(2));
+        assert_eq!(mismatch_read_bound(Duration::from_millis(6_999)), None);
+        assert_eq!(mismatch_read_bound(s(5)), None);
+        assert_eq!(mismatch_read_bound(s(0)), None);
+    }
+
+    /// The whole phase fits the reserve: however the time is spent, reads that
+    /// each take their full bound (plus the 2 s client guard `main.rs` puts
+    /// around each) never run past the deadline.
+    #[test]
+    fn six_reads_at_their_bound_never_outlive_the_invocation() {
+        for start in [60_u64, 45, 30, 20, 12, 8, 3] {
+            let mut left = Duration::from_secs(start);
+            for _ in mismatch_queries() {
+                match mismatch_read_bound(left) {
+                    Some(bound) => {
+                        let spent = Duration::from_secs(bound + 2);
+                        assert!(
+                            spent < left,
+                            "start {start}: a read outlived the invocation"
+                        );
+                        left -= spent;
+                    }
+                    None => break,
+                }
+            }
+        }
     }
 
     /// The probe runs the generator's SQL verbatim — it must not fork the
