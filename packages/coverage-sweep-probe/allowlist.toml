@@ -97,6 +97,12 @@ reason = "fee-taking split-route aggregator (swap_split, register_pool); 3/3 txs
 task = "0100"
 
 [[contract]]
+id = "CDYPJTUTGI7KG6JK3MJSXBBKO7XHAKWRKFFMP7AUW3UYEZGVFST5XF57"
+wasm = "1465e10012cc2aadb0236386dbbb67df108f7be71ff39f75e2c88787f930a62e"
+reason = "swap aggregator (sda / swap: fee_aggregator, fee_partner, quote_id, steps); its only swap (ledger 64575362) routed registered Soroswap and Aquarius pools"
+task = "0100"
+
+[[contract]]
 id = "CARVQXFP4JF5ELLXUMQ6DALR346YVGBMQOHB4ENA7SSVXAYABXLBDDC4"
 wasm = "437653282e9c93b0b4d736d8fde01bf002adefb61bfb75917e609f5336ee3190"
 reason = "fee-taking swap wrapper over routers (swap_exact_in, set_routers, treasury); its txs hold the pool swaps it wraps"
