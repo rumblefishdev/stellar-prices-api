@@ -41,6 +41,50 @@ phase-1 rollout. This runbook assumes everything in it is done and green.
 
 ---
 
+### 1a. Stop the reconcile MVs (tasks 0143 + 0203)
+
+**Before the first month**, if the target holds the six hourly reconciliation
+MVs (`SELECT count() FROM system.tables WHERE database = 'prices' AND name LIKE
+'mv_reconcile_%'` reads 6; it reads 0 on a target where tasks 0143 + 0203 have
+not been rolled out, and then this step does not apply):
+
+```sql
+SYSTEM STOP VIEW prices.mv_reconcile_1m_to_15m;
+SYSTEM STOP VIEW prices.mv_reconcile_15m_to_1h;
+SYSTEM STOP VIEW prices.mv_reconcile_1h_to_4h;
+SYSTEM STOP VIEW prices.mv_reconcile_4h_to_1d;
+SYSTEM STOP VIEW prices.mv_reconcile_1d_to_1w;
+SYSTEM STOP VIEW prices.mv_reconcile_1d_to_1M;
+
+SELECT view, status FROM system.view_refreshes
+WHERE database = 'prices' AND view LIKE 'mv_reconcile_%' ORDER BY view;
+```
+
+Six rows, every one `Disabled`. Stop all six, not only the lowest: a stopped
+dependency leaves the rest `WaitingForDependencies`, which reads as a stall
+rather than as a deliberate stop.
+
+**Why.** Each reconcile MV re-rolls every bucket of the last 7 days whose
+`trade_count` or `volume_base` disagrees with the tier below. Mid-re-ingest that
+source is partial (the month's `1m` partition was just dropped and is being
+refilled), and it carries a lower `sum(version)` than the old, enriched coarse
+rows. The reconcile rows then lose in the `ReplacingMergeTree`, are re-emitted
+every hour, the mismatch never converges, and the `prices-production-rollup-mismatch-*`
+alarms fire. A pass that did win would write coarse buckets from a
+half-refilled month. Only months overlapping the last 7 days are exposed, but
+stop them for the whole run: it costs nothing, and a forgotten START is alarmed.
+
+- ⚠️ **`prices-production-mv-refresh-disabled` fires while they are stopped.**
+  That is expected for the whole run and clears after the START in §7f. Do not
+  silence it: it is what catches a STOP that is never undone.
+- ⚠️ **`SYSTEM STOP VIEW` is lost on a server restart.** After any ClickHouse
+  restart during the run, re-run the `system.view_refreshes` check above and
+  re-issue the six STOPs if any view reads `Scheduled`.
+- The fast MVs keep running. They only re-roll their own recent windows, which
+  §4g and §7a already account for.
+
+---
+
 ## 2. Why the loop has the shape it has
 
 ```
@@ -794,6 +838,28 @@ WHERE quote_asset_id = 111 AND close > 0 AND close_usd > 0;
 Expected: `peg_written = 0`, `pivot_written > 0` over the same span. Run it once
 more on `price_ohlcv_1h` to confirm the pre-roll carried no peg value up.
 
+**7f. Start the reconcile MVs again (tasks 0143 + 0203).**
+
+Only if §1a stopped them, and only after the last month, §7a and §7b-2 are done:
+
+```sql
+SYSTEM START VIEW prices.mv_reconcile_1m_to_15m;
+SYSTEM START VIEW prices.mv_reconcile_15m_to_1h;
+SYSTEM START VIEW prices.mv_reconcile_1h_to_4h;
+SYSTEM START VIEW prices.mv_reconcile_4h_to_1d;
+SYSTEM START VIEW prices.mv_reconcile_1d_to_1w;
+SYSTEM START VIEW prices.mv_reconcile_1d_to_1M;
+
+SELECT view, status, next_refresh_time, exception FROM system.view_refreshes
+WHERE database = 'prices' AND view LIKE 'mv_reconcile_%' ORDER BY view;
+```
+
+Six rows, none `Disabled`. `prices-production-mv-refresh-disabled` returns to OK
+on the next probe run, and `RollupMismatchBuckets` should read 0 on every coarse
+table within one to two hourly passes. A mismatch that persists after that
+means a coarse tier disagrees with the re-ingested `1m` inside the last 7 days:
+compare that tier with the one below before assuming the alarm is wrong.
+
 ---
 
 ## 8. Acceptance
@@ -841,6 +907,12 @@ ALTER TABLE prices.price_ohlcv_1m ATTACH PARTITION <month>
 Same for each coarse table dropped in 4g. The completion markers cleared in 4d do
 NOT need restoring — they are backfill bookkeeping, and the restored rows are
 already the indexed result.
+
+Keep the reconcile MVs STOPped (§1a) until every restored partition is back:
+while a month is half-restored, its `1m` and coarse partitions disagree, and a
+pass would re-roll the coarse side from whichever `1m` is there at the moment.
+Then START them as in §7f. A server restart during the rollback un-stops them;
+re-check.
 
 Release a month's snapshots only once you are certain, and only after its
 reconciliation is recorded:
