@@ -29,7 +29,7 @@ linked once, not paraphrased.
 _To fill._ The one ask that depends on the Stellar side: the Discord guild
 integration (task 0179) — stated as a question with the options. Dashboard
 access is not an ask: it is granted on request to a named reviewer with MFA
-(deviations §4), so this field names the address to send the request to.
+(deviations §3), so this field names the address to send the request to.
 
 ## Pre-submission checklist
 
@@ -37,5 +37,8 @@ access is not an ask: it is granted on request to a named reviewer with MFA
       the evidence package
 - [ ] Every deviation the package declares is mentioned in Field 3 by number
 - [ ] The reviewer key still works and is on the free plan
+- [ ] `develop` released to `master`: the repository's default branch shows
+      the root `README.md` and the fresh-account runbook (AC 7). On
+      2026-09-28 `master` still had neither
 - [ ] The video was recorded against the public deployment, no secrets on
       screen (see the scenario's ⚠️ section)

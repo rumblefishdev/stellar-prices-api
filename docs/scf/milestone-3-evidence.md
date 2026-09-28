@@ -38,17 +38,17 @@ State of the nine Tranche 3 acceptance criteria **as of 2026-09-25** (this table
 is rewritten on submission day; the rows say what is claimed, not what is
 hoped):
 
-| AC  | Criterion (short)                                           | State on 2026-09-25                                                                                                                                  |
-| --- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `/backfill/status`: running, fresh push, depth ≤ 2018-01-01 | **Depth met — 2015-11-18.** Liveness graded on amended wording (deviations §1): the archive completed 2026-07-27                                     |
-| 2   | OpenAPI lints clean; Swagger UI deployed                    | Lint is a CI job (`npm run openapi:lint`, Redocly CLI 2.44.0); reference rendered at `…/api/docs`. _To fill: lint output on the day_                 |
-| 3   | Portal accessible; self-service key flow works              | Portal public since 09-23. _Open:_ end-to-end proof on production (task 0164); sign-in still through the test Discord guild (0179)                   |
-| 4   | Integration suite passes on CI, link provided               | **Met.** CI starts ClickHouse and runs the integration suite on every Rust change since PR #327 (2026-09-22); run linked in §5                       |
-| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met 2026-09-18 — p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`                                                |
-| 6   | Security checklist signed off                               | mTLS-only ClickHouse, secrets in Secrets Manager, inputs validated, no wildcard **actions**; the 23 `Resource: "*"` statements are inventoried in §5 |
-| 7   | Repo public; `cdk deploy` from README in a fresh account    | **Repo PUBLIC** (2026-09-16). _Open:_ the fresh-account rehearsal (task 0297) or a declared definition of "works" (deviations §3)                    |
-| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, 65 alarms, all OK on 09-25. Access **on request to a named reviewer, MFA enforced** (deviations §4)          |
-| 9   | 7-day post-launch report                                    | Window **2026-09-23 09:40 → 2026-09-30 09:40 CEST** agreed; report written after the window (task 0296); two metrics obsolete (§4)                   |
+| AC  | Criterion (short)                                           | State on 2026-09-25                                                                                                                                            |
+| --- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `/backfill/status`: running, fresh push, depth ≤ 2018-01-01 | **Depth met — 2015-11-18.** Liveness graded on amended wording (deviations §1): the archive completed 2026-07-27                                               |
+| 2   | OpenAPI lints clean; Swagger UI deployed                    | Lint is a CI job (`npm run openapi:lint`, Redocly CLI 2.44.0); reference rendered at `…/api/docs`. _To fill: lint output on the day_                           |
+| 3   | Portal accessible; self-service key flow works              | Portal public since 09-23. _Open:_ end-to-end proof on production (task 0164); sign-in still through the test Discord guild (0179)                             |
+| 4   | Integration suite passes on CI, link provided               | **Met.** CI starts ClickHouse and runs the integration suite on every Rust change since PR #327 (2026-09-22); run linked in §5                                 |
+| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met 2026-09-18 — p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`                                                          |
+| 6   | Security checklist signed off                               | mTLS-only ClickHouse, secrets in Secrets Manager, inputs validated, no wildcard **actions**; the 23 `Resource: "*"` statements are inventoried in §5           |
+| 7   | Repo public; `cdk deploy` from README in a fresh account    | **Met on the fresh-account runbook** (0297, PR #357): repo PUBLIC, `README.md` → `infra/README.md`; macOS via 0239 (PR #360). Not run in an empty account (§5) |
+| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, 65 alarms, all OK on 09-25. Access **on request to a named reviewer, MFA enforced** (deviations §3)                    |
+| 9   | 7-day post-launch report                                    | Window **2026-09-23 09:40 → 2026-09-30 09:40 CEST** agreed; report written after the window (task 0296); two metrics obsolete (§4)                             |
 
 The Tranche 3 work items with no numbered criterion are listed in §6, the known
 issues this submission declares in §7, and what it deliberately does not claim
@@ -68,7 +68,7 @@ Validation**, weeks 10 to 13. The work it names, and where each stands:
 | Security review checklist: IAM least privilege, no secrets in env, inputs | Audit in task 0194; the wildcard-IAM inventory is the open half (§5, AC 6)                                                                                   |
 | X-Ray tracing end-to-end                                                  | `TracingConfig.Mode: Active` on api-handler, oracle, enrichment and ledger-processor (§6)                                                                    |
 | CloudWatch dashboards: latency, errors, ingestion lag, CH write latency…  | `prices-production-overview`; 65 `prices-production-*` alarms, 64 on its alarm strip (§6)                                                                    |
-| GitHub repository public with README, architecture docs, deploy steps     | PUBLIC since 2026-09-16; the README's fresh-account deploy is task 0297 (AC 7)                                                                               |
+| GitHub repository public with README, architecture docs, deploy steps     | PUBLIC since 2026-09-16; root `README.md` and the fresh-account runbook in `infra/README.md` since 2026-09-25 (PR #357, task 0297; AC 7)                     |
 
 **The backfill milestone for the tranche** — SDEX history to ~January 2018 —
 was overtaken during Tranche 2: the archive walked to genesis and reports
@@ -103,13 +103,12 @@ Each is set out in full, with its measurements and reasoning, in
 [`milestone-3-rfp-deviations.md`](milestone-3-rfp-deviations.md). The rows below
 are pointers, not summaries.
 
-| #   | Wording says                                                              | We deliver                                                                                                                                 | Kind                       |
-| --- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------- |
-| 1   | AC 1: `sdex.status: "running"`, `last_push_at` fresh                      | the archive completed on 2026-07-27; liveness graded on the ingestion alarms and `realtime_tip_ledger` (carried from M2)                   | disclosed, delivered early |
-| 2   | AC 9: report "SDEX push cadence and `earliest_data_available` trajectory" | both are flat by construction since 2026-07-27; the report carries ledger-processor lag and rollup freshness instead                       | disclosed                  |
-| 3   | AC 7: `cdk deploy` from README "works in a fresh AWS account"             | _pending task 0297_: "works" defined against the inputs a fresh account cannot hold (mTLS material, ClickHouse tenancy, OAuth bundle, DNS) | to be decided              |
-| 4   | AC 8: "read-only IAM role" for the Stellar team                           | no standing identity: a read-only IAM user is created for a named reviewer on request, MFA enforced, and removed after the review          | disclosed                  |
-| 5   | AC 3: self-service key flow                                               | _candidate_: sign-in runs on the project's test Discord guild until the Stellar guild integration (task 0179) is agreed                    | to be decided              |
+| #   | Wording says                                                              | We deliver                                                                                                                        | Kind                       |
+| --- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| 1   | AC 1: `sdex.status: "running"`, `last_push_at` fresh                      | the archive completed on 2026-07-27; liveness graded on the ingestion alarms and `realtime_tip_ledger` (carried from M2)          | disclosed, delivered early |
+| 2   | AC 9: report "SDEX push cadence and `earliest_data_available` trajectory" | both are flat by construction since 2026-07-27; the report carries ledger-processor lag and rollup freshness instead              | disclosed                  |
+| 3   | AC 8: "read-only IAM role" for the Stellar team                           | no standing identity: a read-only IAM user is created for a named reviewer on request, MFA enforced, and removed after the review | disclosed                  |
+| 4   | AC 3: self-service key flow                                               | _candidate_: sign-in runs on the project's test Discord guild until the Stellar guild integration (task 0179) is agreed           | to be decided              |
 
 ## 5. Acceptance-criteria evidence
 
@@ -159,7 +158,7 @@ the key's plan and usage.
 _To fill:_ the end-to-end proof on production (task 0164) — a sign-in, a key
 issued, a `/v1` call with it, the key revoked — with timestamps; and the state
 of task 0179 (which Discord guild gates eligibility). If the Stellar guild is
-not agreed by submission, deviations §5 applies.
+not agreed by submission, deviations §4 applies.
 
 ### AC 4 — Integration test suite: all tests pass on CI, link provided
 
@@ -275,23 +274,51 @@ state the count (22 once 0295 is deployed).
 
 ### AC 7 — GitHub repository public; `cdk deploy` from README works in a fresh AWS account
 
-**Verdict: first half met, second half _open_.** `gh repo view` reports
-`visibility: PUBLIC` for `https://github.com/rumblefishdev/stellar-prices-api`
-(since 2026-09-16), with README, architecture docs and deploy instructions in
-`docs/` and `infra/`.
+**Verdict: met on the fresh-account runbook, the way the Soroban Block
+Explorer claimed its equivalent criterion. The runbook has not been executed
+in an empty AWS account; what the claim rests on, and what was not done, is
+below.**
 
-The fresh-account rehearsal has not been done (task 0297). Milestone 1 graded
-its sibling criterion — _"`cdk deploy` from a clean AWS account produces the
-full stack with no manual steps"_ — by `cdk synth` plus a stated list of
-out-of-band prerequisites (the mTLS client certificates from the explorer's CA,
-the `prices` tenancy on the shared ClickHouse). Tranche 3's wording adds the
-README and a stranger's hands. _To fill:_ either the transcript of the rehearsal
-in a sandbox account with every README defect fixed, or the declared definition
-of "works" in deviations §3.
+- **Public repository:** `https://github.com/rumblefishdev/stellar-prices-api`,
+  `gh repo view` → `visibility: PUBLIC` since 2026-09-16 (re-checked
+  2026-09-28).
+- **From README:** the root [`README.md`](../../README.md) (new on 2026-09-25,
+  PR #357) leads to the runbook in [`infra/README.md`](../../infra/README.md)
+  §"Fresh-account deployment": prerequisites → the platform (the Soroban Block
+  Explorer's AWS stacks and its Hetzner ClickHouse server, by that project's
+  own runbook) → the `prices` tenant (client certificates, CN → user map,
+  schema) → secrets and SSM seeds → domain config → `npm run infra:bootstrap`
+  → `npm run infra:deploy:production` → post-deploy checks → tear-down
+  (task 0297).
+- **Manual by design, and named in the runbook:** ordering the Hetzner server
+  and its Storage Box; issuing client certificates from the platform CA, whose
+  key never touches CDK or CI; creating the three Secrets Manager values and
+  seeding three SSM parameters (CDK owns only the names, so a deploy cannot
+  overwrite live credentials); registering the Discord application; a Route 53
+  hosted zone.
+
+#### What the claim rests on
+
+| Observable                                                                                                                                  | Evidence                                                                                                                                                                                 | Checked    |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| The CDK app synthesizes with no AWS account or credentials: every SSM read is a deploy-time `valueForStringParameter`, no context lookups   | CI step "Synth production app", [run 36396870253](https://github.com/rumblefishdev/stellar-prices-api/actions/runs/36396870253) (PR #358; its `infra/` tree is identical to `develop`'s) | 2026-09-28 |
+| Every name the runbook has an operator create or read matches the code: five `/platform/*` inputs, three secrets, three seeds, five outputs | read against `infra/src/lib/stacks/compute-stack.ts`, `infra/src/lib/mtls.ts`, `infra/Makefile`                                                                                          | 2026-09-28 |
+| `make bootstrap` works on a fresh clone                                                                                                     | fixed in PR #357: it names the environment and no longer synthesizes the app, which cannot synth without built assets; exercised up to the credential call                               | 2026-09-25 |
+| The build, synth and secrets steps work on macOS, not only on the Linux CI runner                                                           | on macOS 26.6: 12 aarch64 Lambda bootstraps built and verified, `synth-production` with no credentials, step 4's RAM-disk variant on dummy certificates (task 0239, PR #360)             | 2026-09-28 |
+
+**What was not done.** No `cdk bootstrap` or `cdk deploy` has been run in an
+empty account. A run needs more than an AWS account: the platform this API is
+a tenant of — the explorer's AWS stacks and a hand-ordered Hetzner server with
+its Storage Box — would have to be stood up first, at its hardware cost and
+lead time. Every production deploy so far has gone to the one account.
+Milestone 1 graded the sibling criterion — _"`cdk deploy` from a clean AWS
+account produces the full stack with no manual steps"_ — on a synth of the
+stacks and deploys to the existing account, with the out-of-band prerequisites
+named as a caveat.
 
 ### AC 8 — CloudWatch dashboard accessible to the Stellar team (read-only IAM role); all alarms OK
 
-**Verdict: met on the amended wording (deviations §4); alarms OK on
+**Verdict: met on the amended wording (deviations §3); alarms OK on
 2026-09-25.** The dashboard is `prices-production-overview` in `eu-central-1`;
 **65** `prices-production-*` alarms stand behind it (up from 53 at Milestone 2),
 including — since 2026-09-22 — error and portal-closed alarms on the
@@ -362,7 +389,7 @@ figure and its definition, the ingestion signals, the incident list.
 | X-Ray tracing enabled end-to-end        | `TracingConfig.Mode: Active` on `api-handler`, `oracle`, `enrichment`, `ledger-processor`; the gateway stage traces too (client IPs are in X-Ray for 30 days, as the privacy policy states)    |
 | CloudWatch dashboards                   | `prices-production-overview`: API latency and error rate, ingestion lag, ClickHouse write latency, mTLS NotAfter, backfill progress, worker duration/errors, alarm strip (64 of the 65 alarms) |
 | Security review checklist               | see AC 6                                                                                                                                                                                       |
-| README, architecture docs, deploy steps | `README.md`, `docs/prices-api-general-overview.md`, `docs/runbooks/`, `infra/README` — the fresh-account rehearsal is AC 7                                                                     |
+| README, architecture docs, deploy steps | `README.md`, `docs/prices-api-general-overview.md`, `docs/runbooks/`, `infra/README.md` (the fresh-account runbook, AC 7)                                                                      |
 
 ## 7. Known issues declared with this submission
 
@@ -383,14 +410,14 @@ Milestone 3 is the last tranche, so this section has nowhere to push things:
 each row is closed, declared as a deviation, or handed to post-delivery with a
 name on it.
 
-| Item                                                        | Disposition                                                                                                      |
-| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Completion of the history re-computation (0286 phase 3)     | _post-delivery_, operator-run; stage A of four started 2026-09-23; values change, coverage does not              |
-| Fresh-account deploy rehearsal (AC 7)                       | _to decide_: rehearsed in a sandbox, or declared with the out-of-band inputs named (deviations §3)               |
-| A standing read-only identity for the Stellar team (AC 8)   | _declared_: none exists by design; access is created per named reviewer on request, MFA enforced (deviations §4) |
-| Self-service sign-in on the Stellar Discord guild (AC 3)    | _to decide_: agreed with SDF (task 0179), or declared (deviations §5)                                            |
-| Paid usage plans and a dashboard that states the key's plan | In progress (task 0311); the free plan is what the criteria cover                                                |
-| Content-Security-Policy on the portal                       | Not shipped; tracked as a backlog task (id pending)                                                              |
+| Item                                                        | Disposition                                                                                                                                              |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Completion of the history re-computation (0286 phase 3)     | _post-delivery_, operator-run; stage A of four started 2026-09-23; values change, coverage does not                                                      |
+| A run of the runbook in an empty AWS account (AC 7)         | _not claimed_: AC 7 rests on the runbook (§5); a run needs the explorer platform and a Hetzner server first. On a reviewer's request: task 0297 reopened |
+| A standing read-only identity for the Stellar team (AC 8)   | _declared_: none exists by design; access is created per named reviewer on request, MFA enforced (deviations §3)                                         |
+| Self-service sign-in on the Stellar Discord guild (AC 3)    | _to decide_: agreed with SDF (task 0179), or declared (deviations §4)                                                                                    |
+| Paid usage plans and a dashboard that states the key's plan | In progress (task 0311); the free plan is what the criteria cover                                                                                        |
+| Content-Security-Policy on the portal                       | Not shipped; tracked as a backlog task (id pending)                                                                                                      |
 
 ## 9. Live endpoints and access
 
@@ -421,6 +448,7 @@ _Table — live verification endpoints and the access model for reviewers._
 | Route/auth/TTL table and reviewer SQL               | `docs/scf/api-endpoints.md`, `docs/scf/ch-demo-queries.sql`                           |
 | CI workflow and the integration-test harness (AC 4) | `.github/workflows/ci.yml`, `tools/scripts/ignored-tests.sh`                          |
 | OpenAPI lint (AC 2)                                 | `redocly.yaml`, `npm run openapi:lint`                                                |
+| Fresh-account deployment runbook (AC 7)             | `README.md` → `infra/README.md` §"Fresh-account deployment"                           |
 | REST API, portal, ClickHouse schema, CDK app        | `packages/prices-api/`, `web/portal/`, `packages/prices-clickhouse/schema/`, `infra/` |
 | Operator runbooks and ADRs                          | `docs/runbooks/`, `lore/2-adrs/`                                                      |
 | Task ledger for this package                        | `lore/1-tasks/active/0294_DOCS_scf-milestone-3-verification-package.md`               |

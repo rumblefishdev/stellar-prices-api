@@ -57,8 +57,12 @@ body and the ingestion signals that replaced the push cadence (AC 1, AC 9).
 
 ## Scene 6 — Repository and deploy (~0:30)
 
-_To fill._ The public repository, README deploy section, and the AC 7 outcome
-as decided (rehearsed or declared).
+The public repository, logged out, on `master`. The root `README.md` "Deploy"
+section, then `infra/README.md` §"Fresh-account deployment" scrolled from the
+three parts (platform, tenant, this app) to the manual-by-design list. One
+sentence, said plainly: the runbook has not been run in an empty account; the
+claim rests on the runbook, the credential-free synth in CI and the name-by-name
+check against the code (AC 7).
 
 ## Scene 7 — Deviations and what is not claimed (~0:25)
 

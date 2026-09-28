@@ -54,48 +54,7 @@ gateway-side metrics, with the queries beside them (task 0296).
 Disclosed here; the report (task 0296) is written after the window closes on
 2026-09-30 09:40 CEST.
 
-## 3. AC 7: what "works in a fresh AWS account" can mean — _to decide_
-
-### The wording
-
-_"GitHub repository public; `cdk deploy` from README works in a fresh AWS
-account."_ The repository is public. The second half has never been rehearsed
-(task 0297).
-
-### Why it cannot be literal
-
-A fresh account cannot hold four inputs the stack depends on, none of which our
-CDK app can create without secrets it must not have:
-
-| Input                                             | Where it comes from                                                               |
-| ------------------------------------------------- | --------------------------------------------------------------------------------- |
-| mTLS client certificate and key (Secrets Manager) | issued out of band from the Soroban Block Explorer's CA; never in version control |
-| The `prices` tenancy on the shared ClickHouse     | provisioned by the explorer team on their box (explorer tasks 0314, 0567)         |
-| The Discord OAuth application bundle              | created in the Discord developer portal; secret value uploaded by the operator    |
-| DNS for the custom domain                         | the explorer's zone                                                               |
-
-Milestone 1 graded the sibling criterion (_"from a clean AWS account … no
-manual steps"_) exactly this way: the stack deploys end to end; two
-prerequisites are operator actions performed once and out of band, documented,
-and deliberately not automated.
-
-### Options
-
-1. **Rehearse it.** An empty sandbox account in the organisation; follow the
-   README as a stranger; fix every defect found; declare the four inputs as
-   documented prerequisites. Result for the package: _works as written, with
-   the declared prerequisites_.
-2. **Declare it.** No sandbox available in time: state the reason, the
-   definition of "works" (synth and deploy succeed with placeholder inputs; a
-   serving API needs the four inputs above), and what the README says about
-   each.
-
-### Status
-
-_To decide_ — the question is whether a sandbox account can be had before
-submission. Either outcome is recorded here and in task 0297.
-
-## 4. AC 8: no standing "read-only IAM role" — access on request, per person, with MFA
+## 3. AC 8: no standing "read-only IAM role" — access on request, per person, with MFA
 
 ### The wording
 
@@ -139,7 +98,7 @@ visible too; stated rather than hidden.
 Disclosed. The runbook's create → verify → remove walk is recorded in task 0295
 once it has been done on a throwaway name.
 
-## 5. AC 3: which Discord guild gates self-service — _candidate_
+## 4. AC 3: which Discord guild gates self-service — _candidate_
 
 ### The wording
 
