@@ -21,6 +21,18 @@ history:
       stack. The new policy text comes from its owner and lands byte for byte,
       as in [[0303]]. Merge and deploy wait for that text. This reverses the
       "no third-party scripts, ever" rule from [[0162]] and [[0193]].
+  - date: "2026-09-28"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Snippet, footer "Cookie settings" link and corrected comments committed
+      on `feat/0316_…` (portal 266 tests, typecheck, lint and build green; not
+      pushed). Measured: the explorer's GTM fires GA and sets `_ga` before any
+      consent, with no Consent Mode signal (Context). Open decision: gate
+      consent in the portal's own page (a consent default of denied plus a
+      HubSpot listener that updates it), in the GTM container and HubSpot
+      settings for the whole host, or both. The explorer has the same defect
+      today.
 ---
 
 # Add Google Analytics to the portal through the explorer's GTM container and HubSpot consent banner
@@ -59,9 +71,16 @@ Verified on 2026-09-28:
   returns to `/api/auth/callback`, which is handled by the backend and answers
   303 to `/api/`. The SPA's own query parameters (`?issue=`, `?signin=`) carry
   nothing secret.
-- **Unverified:** whether the GA tag waits for consent. That is configured in
-  the GTM container, outside every repo. It is an acceptance criterion below,
-  measured in a browser.
+- **The explorer's GTM does not wait for consent** (measured 2026-09-28 in a
+  browser in Poland). The setup: cookies cleared, `sorobanscan.rumblefish.dev/`
+  reloaded, HubSpot banner visible and untouched. The page still sent a GA4
+  `page_view` (`region1.google-analytics.com/g/collect`,
+  `tid=G-DFMXSJQ9DR`), set `_ga` and `_ga_DFMXSJQ9DR`, and HubSpot sent
+  `track.hubspot.com/__ptq.gif`. The dataLayer holds no `consent default`,
+  and `gcd=13l3l3l2l1l1` means no Consent Mode signal at all. The explorer's
+  own policy says analytics are "activated only after you provide consent",
+  so it is already out of step with it. Copying the container 1:1 would give
+  the portal the same defect.
 
 ## Implementation Plan
 
