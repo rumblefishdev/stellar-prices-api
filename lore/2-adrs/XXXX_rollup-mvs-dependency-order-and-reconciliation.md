@@ -242,10 +242,34 @@ intermittent shape these outages normally take.
   even one missing child exceeds a sweep-bumped (`+1`) partial by about 6·10¹⁰.
   The ITs use ledger-scale versions and pin that a complete re-roll beats a
   sweep-bumped partial in every tier.
-- **A tie exists only with toy versions.** With child versions 1, 2, 3, a stale
-  partial at `S + 1` can tie with a complete re-roll at `S + 1`. RMT's
-  tie-break is not contractual. Real versions never produce this, which is why
-  the ITs do not use toy versions.
+- **An equal-version tie goes to the last insert.** ClickHouse documents it
+  for `ReplacingMergeTree(ver)`: among rows with the same sorting key and the
+  same maximum `ver`, the last inserted one is kept. A reconcile row written
+  after the stale row it ties with therefore wins, until a later writer
+  (a fast MV, the sweep) replaces it.
+- **Adding a missing child always wins; replacing one may not.** A re-roll
+  that adds a child outranks the partial by that child's whole version. A
+  re-roll that only REPLACES children (same minutes, different `trade_count`
+  or `volume_base`) outranks the stale row only by the replaced children's
+  version delta, and the stale row may carry coarse bumps on top of its old
+  sum: `+1` per sweep run, `+2` per `coarse-repair` run. So with real
+  versions:
+  - delta greater than the bumps: the re-roll wins, as intended;
+  - delta equal to the bumps: a tie, which the re-roll wins as the last
+    insert;
+  - delta smaller than the bumps: **the re-roll loses on every pass.** An
+    equal-version whole-minute rewrite of `_1m` under a bumped coarse row is
+    one such case. The bucket is re-emitted every hour and never converges,
+    so its mismatch alarm fires permanently.
+
+  This needs existing minutes rewritten at nearly the same version under a
+  bumped coarse row, for example the same ledgers re-processed with a
+  different candle definition. A back-fill that adds fills does not produce
+  it. It is unlikely, but not impossible with real versions. The permanent
+  mismatch is the signal. A pre-roll of that bucket loses the same way, so
+  the repair is manual: write the child at a higher version, or delete the
+  stale coarse row. The ITs pin the "adds a child" case with ledger-scale
+  versions and do not use toy versions, where small sums make ties common.
 - **The loss case is a re-ingest.** When the source is rewritten at a lower
   `sum(version)` than the enriched coarse rows (task 0286's re-ingest drops a
   `_1m` month and refills it), the reconcile rows lose in the RMT. They are
@@ -290,8 +314,15 @@ intermittent shape these outages normally take.
   are never compared. Pre-roll them with `schema/preroll-live-gap.sql`
   (runbook 0142).
 - **The window is bounded by `_1m` retention (task 0200).** Nothing heals from
-  data that was dropped. If cleanup returns with a retention shorter than 7
-  days, the effective window shrinks with it. Couple the two decisions.
+  data that was dropped. **A `_1m` retention shorter than 7 days makes the 15m
+  mismatch alarm fire permanently** unless `RECONCILE_WINDOW` is lowered with
+  it. The 15m bucket that straddles the cleanup cutoff has only part of its
+  source left. Its re-roll has a lower `sum(version)` than the stored row, so
+  it loses on every hourly pass and is re-emitted, and
+  `RollupMismatchBuckets{price_ohlcv_15m}` never reaches 0. Cleanup moves the
+  cutoff every run, so there is always such a bucket. Whoever turns cleanup
+  back on lowers `RECONCILE_WINDOW` below the retention, less one 15m bucket
+  and one cleanup interval, in the same change.
 - **Every re-ingest must STOP the reconcile MVs, and STOP is lost on a server
   restart.** A forgotten STOP is alarmed (`MvRefreshDisabledCount`), which
   means that alarm also fires, as expected, during every planned re-ingest.
