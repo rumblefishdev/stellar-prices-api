@@ -2079,3 +2079,219 @@ async fn the_ohlc_band_scan_counts_only_rows_outside_the_band_on_every_tier() {
 
     reset_ohlc_band_tables(&c).await;
 }
+
+/// Seed the one healthy `_1m` row every arm test needs so the scan is not
+/// refused as empty, and return the shared `now() - 3 HOUR` timestamp.
+async fn seed_healthy_1m(c: &Client) -> u32 {
+    let ts = ts_ago(c, "INTERVAL 3 HOUR").await;
+    insert_ohlc_row(c, "price_ohlcv_1m", ts, 30, ("5", "5", "5", "5"), 1, 1).await;
+    ts
+}
+
+fn band_only(
+    band: u64,
+    nonpositive: u64,
+    scanned: u64,
+) -> rollup_freshness_probe::ohlc_band::OhlcBandCounts {
+    rollup_freshness_probe::ohlc_band::OhlcBandCounts {
+        band,
+        nonpositive,
+        scanned,
+    }
+}
+
+/// The arm `high < greatest(open, close)`, and ONLY that arm: `o4 h4.5 l3 c5`
+/// has `low (3) <= least (4)` and `low <= high`. RED without the arm.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_ohlc_band_scan_catches_a_high_below_the_close() {
+    let c = client();
+    reset_ohlc_band_tables(&c).await;
+    let ts = seed_healthy_1m(&c).await;
+    insert_ohlc_row(&c, "price_ohlcv_1m", ts, 31, ("4", "4.5", "3", "5"), 2, 1).await;
+
+    let readings = read_ohlc_band(&c).await;
+    assert_eq!(
+        reading(&readings, "price_ohlcv_1m"),
+        band_only(1, 0, 2),
+        "high 4.5 below close 5 is outside the band"
+    );
+
+    reset_ohlc_band_tables(&c).await;
+}
+
+/// The arm `low > least(open, close)`, and ONLY that arm: `o3 h6 l4 c5` has
+/// `high (6) >= greatest (5)` and `low <= high`. RED without the arm.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_ohlc_band_scan_catches_a_low_above_the_open() {
+    let c = client();
+    reset_ohlc_band_tables(&c).await;
+    let ts = seed_healthy_1m(&c).await;
+    insert_ohlc_row(&c, "price_ohlcv_1m", ts, 32, ("3", "6", "4", "5"), 2, 1).await;
+
+    let readings = read_ohlc_band(&c).await;
+    assert_eq!(
+        reading(&readings, "price_ohlcv_1m"),
+        band_only(1, 0, 2),
+        "low 4 above open 3 is outside the band"
+    );
+
+    reset_ohlc_band_tables(&c).await;
+}
+
+/// `low > high` — `o5 h4 l6 c5` — counted ONCE although it fires all three band
+/// arms (countIf counts rows). The arm is implied by the other two (if
+/// `low > high`, either `low > least(o, c)`, or `least(o, c) >= low > high` and
+/// then `greatest(o, c) > high`), so this goes RED only with all three band arms
+/// removed; it pins that the literal invariant is caught and counted once.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_ohlc_band_scan_catches_a_low_above_the_high_once() {
+    let c = client();
+    reset_ohlc_band_tables(&c).await;
+    let ts = seed_healthy_1m(&c).await;
+    insert_ohlc_row(&c, "price_ohlcv_1m", ts, 33, ("5", "4", "6", "5"), 2, 1).await;
+
+    let readings = read_ohlc_band(&c).await;
+    assert_eq!(
+        reading(&readings, "price_ohlcv_1m"),
+        band_only(1, 0, 2),
+        "a low above the high is one bad row"
+    );
+
+    reset_ohlc_band_tables(&c).await;
+}
+
+/// `low = 0` beside a positive close — the shape most of the prod baseline was
+/// made of, and the one `zero_invariants` cannot see (its invariant 3 reads
+/// `close = 0`). Non-positive, not band: the classes are disjoint. RED without
+/// `low <= 0`.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_ohlc_band_scan_catches_a_zero_low_beside_a_positive_close() {
+    let c = client();
+    reset_ohlc_band_tables(&c).await;
+    let ts = seed_healthy_1m(&c).await;
+    insert_ohlc_row(&c, "price_ohlcv_1m", ts, 34, ("4", "6", "0", "5"), 2, 1).await;
+
+    let readings = read_ohlc_band(&c).await;
+    assert_eq!(
+        reading(&readings, "price_ohlcv_1m"),
+        band_only(0, 1, 2),
+        "a priced low of 0 is a non-positive price"
+    );
+
+    reset_ohlc_band_tables(&c).await;
+}
+
+/// BRIEF point 4, the regression it exists for: a `_1w` bucket starting 5 days
+/// ago and a `_1M` bucket starting 12 days ago both overlap the last two days
+/// once each is widened by its own length, and a FLAT 2-day window never sees
+/// them. RED with the widening removed. Only the terminal sinks `_1w`/`_1M`
+/// are used (fed daily from `_1d`, which is empty here), and both sit days away
+/// from either window edge.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_ohlc_band_scan_reads_each_coarse_tier_over_its_own_bucket_window() {
+    use rollup_freshness_probe::ohlc_band::ohlc_band_metric;
+
+    let c = client();
+    reset_ohlc_band_tables(&c).await;
+    seed_healthy_1m(&c).await;
+    let week = ts_ago(&c, "INTERVAL 5 DAY").await;
+    let month = ts_ago(&c, "INTERVAL 12 DAY").await;
+    insert_ohlc_row(&c, "price_ohlcv_1w", week, 35, ("5", "4.5", "3", "5"), 2, 1).await;
+    insert_ohlc_row(&c, "price_ohlcv_1M", month, 36, ("3", "6", "4", "5"), 2, 1).await;
+
+    let readings = read_ohlc_band(&c).await;
+    assert_eq!(
+        reading(&readings, "price_ohlcv_1w"),
+        band_only(1, 0, 1),
+        "a week bucket older than 2 days but inside its widened window"
+    );
+    assert_eq!(
+        reading(&readings, "price_ohlcv_1M"),
+        band_only(1, 0, 1),
+        "a month bucket older than 2 days but inside its widened window"
+    );
+    assert_eq!(reading(&readings, "price_ohlcv_1m"), band_only(0, 0, 1));
+    assert_eq!(ohlc_band_metric(&readings).unwrap().value, 2.0);
+
+    reset_ohlc_band_tables(&c).await;
+}
+
+/// The window has an edge. A `_1m` violation an hour beyond 2 days and a `_1w`
+/// violation an hour beyond `2 days + 1 week` are NOT counted — nor scanned.
+/// RED with the WHERE removed (the legacy pre-0286 residue would page forever).
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_ohlc_band_scan_ignores_violations_outside_the_window() {
+    let c = client();
+    reset_ohlc_band_tables(&c).await;
+    seed_healthy_1m(&c).await;
+    let old_minute = ts_ago(&c, "INTERVAL 2 DAY - INTERVAL 1 HOUR").await;
+    let old_week = ts_ago(&c, "INTERVAL 2 DAY - INTERVAL 1 WEEK - INTERVAL 1 HOUR").await;
+    insert_ohlc_row(
+        &c,
+        "price_ohlcv_1m",
+        old_minute,
+        37,
+        ("5", "4.5", "3", "5"),
+        2,
+        1,
+    )
+    .await;
+    insert_ohlc_row(
+        &c,
+        "price_ohlcv_1w",
+        old_week,
+        38,
+        ("4", "6", "0", "5"),
+        2,
+        1,
+    )
+    .await;
+
+    let readings = read_ohlc_band(&c).await;
+    assert_eq!(
+        reading(&readings, "price_ohlcv_1m"),
+        band_only(0, 0, 1),
+        "only the healthy seed is inside the 1m window"
+    );
+    assert_eq!(
+        reading(&readings, "price_ohlcv_1w"),
+        band_only(0, 0, 0),
+        "a week bucket starting before now - 2d - 1w is outside"
+    );
+    for (table, counts) in &readings {
+        assert_eq!(counts.violations(), 0, "{table}");
+    }
+
+    reset_ohlc_band_tables(&c).await;
+}
+
+/// The alarm must stop once the data is fixed: a bad row re-inserted good at a
+/// higher `version` on the same key is superseded, so `FINAL` neither counts
+/// nor scans the bad version. The unrepaired neighbour still counts. RED
+/// without `FINAL` (the superseded version is read as a second row).
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_repaired_candle_stops_counting_in_the_ohlc_band_scan() {
+    let c = client();
+    reset_ohlc_band_tables(&c).await;
+    let ts = seed_healthy_1m(&c).await;
+    let m = "price_ohlcv_1m";
+    insert_ohlc_row(&c, m, ts, 40, ("5", "4.5", "3", "5"), 2, 1).await; // bad
+    insert_ohlc_row(&c, m, ts, 40, ("4", "6", "3", "5"), 2, 2).await; // its repair
+    insert_ohlc_row(&c, m, ts, 41, ("5", "4.5", "3", "5"), 2, 1).await; // left bad
+
+    let readings = read_ohlc_band(&c).await;
+    assert_eq!(
+        reading(&readings, m),
+        band_only(1, 0, 3),
+        "the superseded version is neither counted nor scanned"
+    );
+
+    reset_ohlc_band_tables(&c).await;
+}
