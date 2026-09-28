@@ -898,7 +898,11 @@ mod tests {
                 rollup_sql::mv_modify_refresh(t, PROD_DATABASE).expect("a checked rendering")
             })
             .collect();
-        assert_eq!(statements.len(), 5, "guard is vacuous without the five dependents");
+        assert_eq!(
+            statements.len(),
+            5,
+            "guard is vacuous without the five dependents"
+        );
 
         for stmt in &statements {
             assert!(
