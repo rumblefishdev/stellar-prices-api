@@ -2,7 +2,7 @@
 id: "0164"
 title: "Self-service flow — end-to-end verification against production and Tranche 3 evidence"
 type: TEST
-status: backlog
+status: completed
 related_adr: ["0010"]
 related_tasks: ["0156", "0157", "0163", "0179", "0180", "0184", "0185", "0186", "0187", "0188", "0189", "0191", "0192", "0193", "0194", "0195"]
 tags: [layer-test, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, verification, scf-evidence]
@@ -63,6 +63,14 @@ history:
       Checklist re-pointed: the rework modal arms on `regenerate-key`, not
       `delete-key` ([[0191]] amendment, decision 41). A tester on the old
       wording would have reported the dialog as broken.
+  - date: "2026-09-28"
+    status: completed
+    who: akot
+    note: >
+      Closed in the backlog cleanup. The self-service flow (portal, Discord
+      sign-in, key issuance, dashboard) has been walked end to end against
+      production several times by several team members, and works. The
+      Tranche 3 write-up of that evidence belongs to [[0294]].
 ---
 
 # Self-service flow — end-to-end verification
@@ -252,3 +260,14 @@ omitted is a finding waiting for the reviewer.
 - The fresh-account run is destructive in one direction: it creates a real key
   on the production plan. Note the Discord ID used so the record can be cleaned
   up or kept deliberately as a test account.
+
+## Closing — 2026-09-28
+
+Closed by Adam's decision in the backlog cleanup. The portal and the whole
+self-service flow have been run end to end against production several times,
+by several people on the team, and work.
+
+The acceptance criteria above are **not ticked one by one**: the runs were done
+by hand and were not recorded check by check in `docs/scf/` in this task's
+format. The Milestone 3 evidence package (write-up, screenshots, video scenario)
+is owned by [[0294]], so it is not a follow-up of this task.
