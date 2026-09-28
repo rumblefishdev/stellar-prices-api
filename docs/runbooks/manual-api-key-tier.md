@@ -2,7 +2,12 @@
 
 > Claude sessions reach this file through the project skill
 > `.claude/skills/change-plan/SKILL.md`. It carries the rules for running the
-> procedure; the commands live here only.
+> procedure; the commands live here only. Every mutating `aws apigateway` call
+> below (plan keys, plans, API keys) is under a `permissions.ask` rule in
+> `.claude/settings.json`, so Claude Code prompts for it even in auto mode —
+> provided the profile is set with `export AWS_PROFILE=…`, as below, and not
+> with `--profile` or an inline `AWS_PROFILE=… aws …`, which the rule's
+> literal prefix does not match.
 
 **When:** a user's key needs limits other than the free plan's — they have
 agreed a paid plan, or negotiated custom limits, with us out of band. There is

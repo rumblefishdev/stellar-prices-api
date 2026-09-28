@@ -99,6 +99,14 @@ aws sts get-caller-identity --query '[Account,Arn]' --output text
 - Never `items[0]` a key lookup; always list and choose by the runbook's rules.
 - Only `discord-<id>-key` keys. A `prices-production-<customer>-key-…` key is
   a hand-made key: follow the runbook's Custom section and ask first.
+- **Set the profile only with a separate `export AWS_PROFILE=…`.** Never use
+  `aws --profile X apigateway …` or `AWS_PROFILE=X aws apigateway …`. The
+  project's `.claude/settings.json` has `permissions.ask` rules on every
+  mutating `aws apigateway` call (usage plans, plan keys, API keys). They
+  force a permission prompt even in auto mode, but they match the command's
+  literal prefix `aws apigateway <verb>`. A flag or env prefix in front of it
+  bypasses the prompt. The prompt is a second gate, not a replacement for
+  step 4.
 
 ## Out of scope (point to the runbook, ask before acting)
 
