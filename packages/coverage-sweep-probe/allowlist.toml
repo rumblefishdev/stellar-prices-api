@@ -115,6 +115,12 @@ reason = "small swap router (swap, registry, fee_policy); low confidence, 1 even
 task = "0100"
 
 [[contract]]
+id = "CDYPJTUTGI7KG6JK3MJSXBBKO7XHAKWRKFFMP7AUW3UYEZGVFST5XF57"
+wasm = "1465e10012cc2aadb0236386dbbb67df108f7be71ff39f75e2c88787f930a62e"
+reason = "swap router, newer build of CDE5MFAG… (same deployer; sda/fee_policy, sda/swap) routing through per-venue adapters (CCKU4BSP…, CA475RRP…); 1/1 txs also hold a registered pool's swap"
+task = "0100"
+
+[[contract]]
 id = "CDCNXZHYWRDHNAQEY5EX3WCF7BCWVJBS64ZBVUGRTQBFTHUKG6NAXFTR"
 wasm = "cbbb1bde44acab147b7e2eece89350ed37fe79f33c4b8938fba89c2583a6b52f"
 reason = "LI.FI swap/bridge aggregator (lifi_swap); routes through pools, prices nothing itself"
