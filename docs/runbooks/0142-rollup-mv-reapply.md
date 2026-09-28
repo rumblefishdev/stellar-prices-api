@@ -351,6 +351,11 @@ Everything below runs as the ClickHouse admin, as in
   rollout: five `DRIFT` (the `refresh` field of the five fast dependents) and
   six `MISSING` (the reconcile MVs). Anything else is a different job — see
   Step 1.
+- **Order, and one session.** The MVs change first (§1, §2), the probe Lambda
+  and ObservabilityStack from this change are deployed after them (§2b), and
+  §1 → §2 → §2b run in ONE session. `prices-production-mv-drift` fires for
+  the whole of that window from the probe deployed today, whichever order you
+  choose — see §2b for why, and for when it clears.
 
 ### 1. Preferred rollout — `MODIFY REFRESH` on the five fast dependents
 
@@ -439,6 +444,58 @@ number of rows. A pass rewrites only closed buckets that ended at least 2 h ago
 live system `0` is the normal steady state after the first pass, and a non-zero
 value means the pass repaired something (a back-fill, a missed bucket).
 
+### 2b. Deploy the probe and ObservabilityStack — after §1 and §2
+
+Only once the twelve MVs are in place, and in the same session as §1–§2.
+
+**Why after, and why in one session.** The probe deployed on production
+today embeds the OLD `rollups.sql` (six MVs, no `DEPENDS ON`). Its drift check
+counts refresh drift and undeclared writers in `MvDriftCount`, not in the
+critical count (the reconcile MVs keep `APPEND`). So:
+
+- from the first §1 statement it reports up to five refresh drifts, and from
+  the first §2 `CREATE` up to six undeclared writers into the coarse tables:
+  **`prices-production-mv-drift` fires** (up to 11), and stays in ALARM until
+  the new probe runs. That is expected; `-mv-drift-critical` stays OK;
+- deploying the new probe FIRST does not avoid it: the new probe declares
+  twelve MVs, so against the old chain it reports five `DRIFT` + six
+  `MISSING` and `prices-production-mv-drift` fires just the same (and the
+  mismatch and `mv-refresh-*` alarms would judge a chain that does not exist
+  yet).
+
+Either order has a `mv-drift` window; MVs first keeps it to the length of this
+session. Do not leave §1–§2 applied overnight with the old probe.
+
+**Steps.**
+
+1. `prices-clickhouse-drift` built from this change: exit 0, twelve lines
+   `ok`. `system.view_refreshes` (query in §4) shows twelve views, none
+   `WaitingForDependencies` or `Disabled`. Do not deploy on anything else.
+2. **The grant, again, before the stack:** `SHOW GRANTS FOR prices_writer`
+   includes `SELECT ON system.view_refreshes`. Without it the new probe
+   publishes `MvRefreshUnreadable = 1` and `prices-production-mv-refresh-unreadable`
+   fires as soon as the stack lands (by design: the waiting/disabled counts are
+   suppressed, not zero). If it is missing, deploy only when you accept that
+   alarm, and chase the grant with BE (task 0477).
+3. Deploy, reading the diff for removals first (`--require-approval
+broadening` prompts on IAM/security-group widening only, and the
+   EventBridge stack carries the CleanupRule hazard of task 0200, guarded at
+   synth by `assertCleanupRuleStaysDisabled` — still read it):
+
+   ```bash
+   make diff-production
+   make deploy-production-eventbridge     # the probe Lambda (rollup-freshness-probe)
+   make deploy-production-observability   # rollup-mismatch-*, mv-refresh-* alarms
+   ```
+
+   The probe first: that is what ends the `mv-drift` window.
+
+4. Expected afterwards: `prices-production-mv-drift` returns to OK within two
+   probe runs (≤ 30 min: the alarm is 1 of 2 fifteen-minute periods). The six
+   `prices-production-rollup-mismatch-*` and three `mv-refresh-*` alarms leave
+   `INSUFFICIENT_DATA` once the new probe has published, and read OK on a
+   healthy chain. Then continue with §4.
+
 ### 3. Fallback — DROP + CREATE with dependencies
 
 If `MODIFY REFRESH` is refused, or a body has to change as well, use Steps 2–5
@@ -474,7 +531,7 @@ ORDER BY view;
   of its own periods (a dependent waits a few seconds at every shared slot;
   that is the ordering working). Every `exception` empty.
 - `prices-clickhouse-drift` (built from this change): exit 0, twelve lines `ok`.
-- Once the probe is deployed: `RollupMismatchBuckets` reads 0 for every coarse
+- Once the probe is deployed (§2b): `RollupMismatchBuckets` reads 0 for every coarse
   table within one to two hourly cycles. It counts only closed buckets that
   ended at least 2 h ago. A `_1m` hole shows on `price_ohlcv_15m` first: each
   tier is compared only with the tier directly below, so the coarser tiers agree
