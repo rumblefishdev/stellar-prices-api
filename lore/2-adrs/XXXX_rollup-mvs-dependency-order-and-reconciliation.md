@@ -102,7 +102,14 @@ quiet hour.
      missing bucket and a disagreeing one;
    - **never compares `version`.** Enrichment re-inserts `_1m` at `version + 1`,
      and the coarse sweep bumps coarse rows `+1`, so version is not a
-     completeness test.
+     completeness test;
+   - **rewrites only closed buckets** whose end is at least `MISMATCH_GRACE`
+     (2 h) old. The open bucket of every tier stays the fast MV's alone, so the
+     reconcile pass never becomes the live writer of 1d/1w/1M, and on a live
+     system a pass that finds nothing missed writes nothing. Two hours is the
+     fast 15m window, so every 15m bucket has one writer or the other; every
+     coarser fast window is wider and carries a repaired child into the open
+     parent on its own next slot.
 
    The reconcile MVs are chained among themselves the same way
    (`mv_reconcile_15m_to_1h DEPENDS ON mv_reconcile_1m_to_15m`, …), so one
@@ -115,11 +122,14 @@ quiet hour.
 
 3. **Window and cadence are generator constants**, in one place:
    `RECONCILE_WINDOW = "INTERVAL 7 DAY"`, `RECONCILE_REFRESH = "EVERY 1 HOUR"`,
-   and `MISMATCH_GRACE = "INTERVAL 2 HOUR"` for the signal below.
+   and `MISMATCH_GRACE = "INTERVAL 2 HOUR"`, which bounds both the reconcile
+   pass and the signal below, so the signal counts exactly what the next pass
+   would write.
 
 4. **Completeness is observable.** `rollup-freshness-probe` publishes:
    - `RollupMismatchBuckets` per coarse table. This is the reconcile SELECT
-     wrapped in a `count()`, over closed buckets that ended at least 2 h ago.
+     wrapped in a `count()`, so it covers the same closed buckets that ended at
+     least 2 h ago.
      The SQL comes from the generator. One alarm per table fires at 6 of 6
      fifteen-minute periods, which is longer than one reconcile cycle.
    - `MvRefreshWaitingCount`: any of the 12 MVs in `WaitingForDependencies` for
@@ -148,8 +158,9 @@ quiet hour.
   the tip bound both lack.
 - **The overwrite safety already exists.** A superset of children has a higher
   `sum(version)` than a subset, so a complete re-roll outranks a partial row in
-  the RMT. Reconciliation changes which buckets are re-rolled, not how a row
-  wins. See the version analysis below.
+  the RMT. Reconciliation changes which closed buckets are re-rolled, not how
+  a row wins, and it leaves the open bucket to the fast MVs. See the version
+  analysis below.
 - **It stays inside ClickHouse**, where ADR 0007 put the rollups. There is no
   new runtime, no network hop and no second copy of the aggregation.
 - **Cost is bounded.** A second pass that finds nothing appends nothing (pinned
@@ -251,8 +262,10 @@ intermittent shape these outages normally take.
 
 ### Positive
 
-- A hole younger than 7 days heals with no operator action within one to two
-  hourly passes, whatever order the back-fill arrives in.
+- A hole younger than 7 days heals with no operator action, whatever order the
+  back-fill arrives in. Closed buckets heal within one to two hourly passes
+  once they are 2 h past their end. A still-open coarse bucket (today, this
+  week, this month) takes the repaired child on its fast MV's next slot.
 - The 00:00 race is gone: the dailies include the day `mv_ohlcv_4h_to_1d`
   writes in the same slot (pinned).
 - A hole behind a healthy tip is now visible (`RollupMismatchBuckets`). A `_1m`
@@ -284,6 +297,10 @@ intermittent shape these outages normally take.
   `SELECT ON prices.*`. Prod needs `SELECT ON system.view_refreshes` for the
   probe identity (`prices_writer`, XML-managed by BE, BE task 0477). Until then
   the unreadable alarm fires by design.
+- **A repair reaches an open coarse bucket only at its fast MV's cadence**:
+  within 4 h for the open day, and within a day for the open week and month.
+  The reconcile pass never writes an open bucket, by design (it must not
+  become the live writer of the coarse tiers).
 - **The first CREATE of each reconcile MV runs a full 7-day comparison at
   once**, because a new refreshable MV refreshes at creation even with
   `DEPENDS ON`. The runbook creates them one at a time, off-peak.

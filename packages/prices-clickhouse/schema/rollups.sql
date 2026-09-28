@@ -114,7 +114,9 @@
 --   source over the last 7 days, aligned to the tier's bucket, with the SAME
 --   aggregation as the fast MV, and appends ONLY the buckets whose
 --   `trade_count` or `volume_base` differ from what the target holds FINAL
---   (or that the target lacks). It never compares `version`: enrichment and
+--   (or that the target lacks) AND that closed at least 2 hours ago. The open
+--   bucket stays the fast MV's alone, so a live system's pass writes nothing
+--   unless something was missed. It never compares `version`: enrichment and
 --   the coarse sweep bump versions without changing completeness. The
 --   appended row wins because its `sum(version)` covers more children than
 --   the stale row did. The pass selects buckets by EVENT time, so arrival
@@ -377,7 +379,8 @@ FROM prices.price_ohlcv_1m AS t FINAL
 WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 15 MINUTE)
 GROUP BY timestamp, asset_id, quote_asset_id, source
 ) AS s
-WHERE (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
+WHERE timestamp + INTERVAL 15 MINUTE <= now() - INTERVAL 2 HOUR
+  AND (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
     SELECT d.timestamp, d.asset_id, d.quote_asset_id, d.source, d.trade_count, d.volume_base
     FROM prices.price_ohlcv_15m AS d FINAL
     WHERE d.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 15 MINUTE)
@@ -412,7 +415,8 @@ FROM prices.price_ohlcv_15m AS t FINAL
 WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 HOUR)
 GROUP BY timestamp, asset_id, quote_asset_id, source
 ) AS s
-WHERE (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
+WHERE timestamp + INTERVAL 1 HOUR <= now() - INTERVAL 2 HOUR
+  AND (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
     SELECT d.timestamp, d.asset_id, d.quote_asset_id, d.source, d.trade_count, d.volume_base
     FROM prices.price_ohlcv_1h AS d FINAL
     WHERE d.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 HOUR)
@@ -447,7 +451,8 @@ FROM prices.price_ohlcv_1h AS t FINAL
 WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 4 HOUR)
 GROUP BY timestamp, asset_id, quote_asset_id, source
 ) AS s
-WHERE (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
+WHERE timestamp + INTERVAL 4 HOUR <= now() - INTERVAL 2 HOUR
+  AND (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
     SELECT d.timestamp, d.asset_id, d.quote_asset_id, d.source, d.trade_count, d.volume_base
     FROM prices.price_ohlcv_4h AS d FINAL
     WHERE d.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 4 HOUR)
@@ -482,7 +487,8 @@ FROM prices.price_ohlcv_4h AS t FINAL
 WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 DAY)
 GROUP BY timestamp, asset_id, quote_asset_id, source
 ) AS s
-WHERE (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
+WHERE timestamp + INTERVAL 1 DAY <= now() - INTERVAL 2 HOUR
+  AND (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
     SELECT d.timestamp, d.asset_id, d.quote_asset_id, d.source, d.trade_count, d.volume_base
     FROM prices.price_ohlcv_1d AS d FINAL
     WHERE d.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 DAY)
@@ -517,7 +523,8 @@ FROM prices.price_ohlcv_1d AS t FINAL
 WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 WEEK)
 GROUP BY timestamp, asset_id, quote_asset_id, source
 ) AS s
-WHERE (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
+WHERE timestamp + INTERVAL 1 WEEK <= now() - INTERVAL 2 HOUR
+  AND (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
     SELECT d.timestamp, d.asset_id, d.quote_asset_id, d.source, d.trade_count, d.volume_base
     FROM prices.price_ohlcv_1w AS d FINAL
     WHERE d.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 WEEK)
@@ -552,7 +559,8 @@ FROM prices.price_ohlcv_1d AS t FINAL
 WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 MONTH)
 GROUP BY timestamp, asset_id, quote_asset_id, source
 ) AS s
-WHERE (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
+WHERE timestamp + INTERVAL 1 MONTH <= now() - INTERVAL 2 HOUR
+  AND (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
     SELECT d.timestamp, d.asset_id, d.quote_asset_id, d.source, d.trade_count, d.volume_base
     FROM prices.price_ohlcv_1M AS d FINAL
     WHERE d.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 MONTH)

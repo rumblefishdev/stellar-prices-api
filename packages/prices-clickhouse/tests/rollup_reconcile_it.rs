@@ -11,6 +11,12 @@
 //! disagree with the tier below, over the last seven days, chained with
 //! `DEPENDS ON` so one pass climbs 15m → 1h → 4h → 1d → {1w, 1M}.
 //!
+//! A pass rewrites only CLOSED buckets whose end is at least `MISMATCH_GRACE`
+//! old (review WR-06); the open bucket of every tier stays the fast MVs'. So
+//! the tests assert what ONE pass did on the buckets that were closed when it
+//! started, and let the fast chain carry the repair into any bucket still open
+//! (the week and month of a three-day-old hole, depending on the date).
+//!
 //! These tests run the REAL shipped file on a scratch database and drive the
 //! schedules deterministically:
 //!
@@ -295,8 +301,8 @@ async fn mismatched(client: &Client, db: &str, tier: &Tier) -> u64 {
         .unwrap_or_else(|e| panic!("mismatch {}: {e}", tier.name))
 }
 
-/// `count()` over `rollup_sql::reconcile_select` — every disagreeing bucket,
-/// open or closed: exactly what the next pass would write.
+/// `count()` over `rollup_sql::reconcile_select` — every disagreeing CLOSED
+/// bucket past the grace: exactly what the next pass would write.
 async fn unreconciled(client: &Client, db: &str, tier: &Tier) -> u64 {
     let sql = rollup_sql::reconcile_select(tier, db).expect("a checked rendering");
     client
@@ -320,6 +326,62 @@ async fn is_past_grace(client: &Client, tier: &Tier, at: i64) -> bool {
         .await
         .expect("bucket age");
     closed == 1
+}
+
+/// The server's `now()` as epoch seconds. Read right BEFORE a pass, it is an
+/// instant no later than the `now()` any of that pass's queries sees.
+async fn server_now(client: &Client) -> i64 {
+    let epoch: u32 = client
+        .query("SELECT toUInt32(toUnixTimestamp(now()))")
+        .fetch_one()
+        .await
+        .expect("now");
+    i64::from(epoch)
+}
+
+/// `(sum(trade_count), toString(sum(volume_base)))` over the rows of `table
+/// FINAL` whose `tier` bucket had closed at least `MISMATCH_GRACE` before `at`
+/// (epoch s) — the buckets a pass starting at or after `at` must rewrite.
+/// For the `_1m` source the rows are bucketed by the tier's interval.
+async fn closed_totals(
+    client: &Client,
+    db: &str,
+    table: &str,
+    tier: &Tier,
+    at: i64,
+) -> (u64, String) {
+    client
+        .query(&format!(
+            "SELECT toUInt64(sum(trade_count)), toString(sum(volume_base)) FROM {db}.{table} FINAL \
+             WHERE toStartOfInterval(timestamp, {i}) + {i} <= toDateTime({at}) - {g}",
+            i = tier.interval,
+            g = rollup_sql::MISMATCH_GRACE,
+        ))
+        .fetch_one()
+        .await
+        .unwrap_or_else(|e| panic!("closed totals {table}/{}: {e}", tier.name))
+}
+
+/// After ONE pass that started no earlier than `at`: in every tier, the
+/// buckets that were closed past the grace at `at` hold exactly `_1m FINAL`'s
+/// totals over the same buckets. A closed parent bucket's children are all
+/// closed too, and each reconcile view waits for the one below, so this holds
+/// for every tier after a single pass. Returns, per tier, whether those closed
+/// buckets held any source row at all (the caller asserts which must).
+async fn assert_closed_buckets_converged(
+    client: &Client,
+    db: &str,
+    at: i64,
+    what: &str,
+) -> Vec<bool> {
+    let mut held = Vec::new();
+    for tier in TIERS {
+        let want = closed_totals(client, db, "price_ohlcv_1m", &tier, at).await;
+        let got = closed_totals(client, db, tier.target, &tier, at).await;
+        assert_eq!(got, want, "{}: {what}", tier.target);
+        held.push(want.0 > 0);
+    }
+    held
 }
 
 /// 0203 AC 1 + AC 4. Rows back-dated three days — older than every fast window
@@ -446,15 +508,35 @@ async fn a_back_dated_hole_behind_a_healthy_tip_heals_through_every_tier_in_one_
         );
     }
 
-    // ONE reconcile pass, ordered by the DEPENDS ON chain.
+    // ONE reconcile pass, ordered by the DEPENDS ON chain. It converges every
+    // tier's CLOSED buckets — the hole's 15m, 1h, 4h and 1d buckets always
+    // (three days old), its week and month only once they have closed.
+    let at = server_now(&client).await;
     let slot = next_slot(&client).await;
     drive_reconcile_pass(&client, db, slot).await;
+    let held = assert_closed_buckets_converged(
+        &client,
+        db,
+        at,
+        "one reconcile pass must converge the tier to _1m FINAL",
+    )
+    .await;
+    for (tier, held) in TIERS.iter().zip(&held).take(4) {
+        assert!(
+            *held,
+            "{}: the three-day-old hole lies in closed buckets of this tier",
+            tier.target
+        );
+    }
 
+    // A still-open week or month is the fast MVs' to carry (review WR-06):
+    // they re-roll it from the repaired `_1d` on their own next slot.
+    drive_fast_chain(&client, db, &source).await;
     for tier in TIERS {
         assert_eq!(
             tier_totals(&client, db, tier.target).await,
             source,
-            "{}: one reconcile pass must converge the tier to _1m FINAL",
+            "{}: the repair reaches every bucket, closed by the pass, open by the fast MV",
             tier.target
         );
         assert_eq!(
@@ -561,26 +643,28 @@ fn back_dated_hole(now: i64) -> Vec<Seed> {
     hole
 }
 
-/// Seed [`back_dated_hole`], run ONE pass, and assert it converged every
-/// tier to `_1m FINAL` — the starting point of the idempotency and
-/// enrichment tests. Returns the pass's slot and the converged totals.
-async fn converge_a_back_dated_hole(client: &Client, db: &str) -> (u32, (u64, String)) {
+/// Seed [`back_dated_hole`], run ONE pass, assert it converged every tier's
+/// closed buckets, then let the fast chain carry the repair into any bucket
+/// still open, so every tier equals `_1m FINAL` — the starting point of the
+/// idempotency and enrichment tests. Returns the pass's slot, the converged
+/// totals, and per tier whether the pass had closed hole buckets to write.
+async fn converge_a_back_dated_hole(client: &Client, db: &str) -> (u32, (u64, String), Vec<bool>) {
     let now = now_minute(client).await;
     insert_1m(client, db, &back_dated_hole(now)).await;
     let source = tier_totals(client, db, "price_ohlcv_1m").await;
     assert!(source.0 > 0, "the hole landed in _1m");
 
+    let at = server_now(client).await;
     let slot = next_slot(client).await;
     drive_reconcile_pass(client, db, slot).await;
-    for tier in TIERS {
-        assert_eq!(
-            tier_totals(client, db, tier.target).await,
-            source,
-            "{}: the first pass must converge the tier",
-            tier.target
-        );
+    let held =
+        assert_closed_buckets_converged(client, db, at, "the first pass must converge the tier")
+            .await;
+    for (tier, held) in TIERS.iter().zip(&held).take(4) {
+        assert!(*held, "{}: the hole lies in closed buckets", tier.target);
     }
-    (slot, source)
+    drive_fast_chain(client, db, &source).await;
+    (slot, source, held)
 }
 
 /// 0203 AC 2. `_1m` rows arrive NEWEST event first — a tip, then events
@@ -657,14 +741,29 @@ async fn arrival_order_reversed_relative_to_event_order_still_converges() {
         );
     }
 
+    let at = server_now(&client).await;
     let slot = next_slot(&client).await;
     drive_reconcile_pass(&client, db, slot).await;
+    let held = assert_closed_buckets_converged(
+        &client,
+        db,
+        at,
+        "one reconcile pass must converge the tier to _1m FINAL whatever the arrival order",
+    )
+    .await;
+    for (tier, held) in TIERS.iter().zip(&held).take(4) {
+        assert!(*held, "{}: old events lie in closed buckets", tier.target);
+    }
 
+    // The events younger than a closed-past-grace bucket of the coarser tiers
+    // (three hours, a day) reach them through the fast chain, from the
+    // repaired tier below (review WR-06).
+    drive_fast_chain(&client, db, &source).await;
     for tier in TIERS {
         assert_eq!(
             tier_totals(&client, db, tier.target).await,
             source,
-            "{}: one reconcile pass must converge the tier to _1m FINAL whatever the arrival order",
+            "{}: every tier converges to _1m FINAL whatever the arrival order",
             tier.target
         );
         assert_eq!(
@@ -715,16 +814,22 @@ async fn a_partial_bucket_completed_later_is_rebuilt_even_after_a_sweep_bump() {
 
     insert_1m(&client, db, &present).await;
     let partial = tier_totals(&client, db, "price_ohlcv_1m").await;
+    let at = server_now(&client).await;
     let slot = next_slot(&client).await;
     drive_reconcile_pass(&client, db, slot).await;
-    for tier in TIERS {
-        assert_eq!(
-            tier_totals(&client, db, tier.target).await,
-            partial,
-            "{}: the first pass must roll the PARTIAL hour into the tier",
-            tier.target
-        );
+    let held = assert_closed_buckets_converged(
+        &client,
+        db,
+        at,
+        "the first pass must roll the PARTIAL hour into the tier",
+    )
+    .await;
+    for (tier, held) in TIERS.iter().zip(&held).take(4) {
+        assert!(*held, "{}: the hour lies in closed buckets", tier.target);
     }
+    // A still-open week or month gets the partial from the fast chain, so
+    // every tier holds a partial row for the sweep to bump.
+    drive_fast_chain(&client, db, &partial).await;
 
     // The coarse sweep's `+1` on every partial coarse row.
     for tier in TIERS {
@@ -753,7 +858,18 @@ async fn a_partial_bucket_completed_later_is_rebuilt_even_after_a_sweep_bump() {
     let complete = tier_totals(&client, db, "price_ohlcv_1m").await;
     assert_ne!(complete, partial, "the late minutes changed the source");
 
+    let at = server_now(&client).await;
     drive_reconcile_pass(&client, db, slot + 3_600).await;
+    assert_closed_buckets_converged(
+        &client,
+        db,
+        at,
+        "the complete re-roll must beat the bumped partial",
+    )
+    .await;
+    // In a still-open week or month the fast MV's complete re-roll must beat
+    // the bumped partial the same way.
+    drive_fast_chain(&client, db, &complete).await;
     for tier in TIERS {
         assert_eq!(
             tier_totals(&client, db, tier.target).await,
@@ -781,13 +897,16 @@ async fn a_partial_bucket_completed_later_is_rebuilt_even_after_a_sweep_bump() {
 async fn a_second_reconcile_pass_with_no_change_writes_nothing() {
     let db = "it_reconcile_idempotent";
     let client = setup(db).await;
-    let (slot, source) = converge_a_back_dated_hole(&client, db).await;
+    let (slot, source, held) = converge_a_back_dated_hole(&client, db).await;
 
-    // The reading method is live: the converging pass wrote in all six.
+    // The reading method is live: the converging pass wrote in every view
+    // whose tier had closed hole buckets (always 15m..1d).
     let first = reconcile_written(&client, db).await;
     assert_eq!(first.len(), 6, "six reconciliation views: {first:?}");
-    for (view, rows) in &first {
-        assert!(*rows > 0, "{view}: the converging pass wrote rows");
+    for ((view, rows), held) in first.iter().zip(&held) {
+        if *held {
+            assert!(*rows > 0, "{view}: the converging pass wrote rows");
+        }
     }
 
     drive_reconcile_pass(&client, db, slot + 3_600).await;
@@ -822,7 +941,7 @@ async fn a_second_reconcile_pass_with_no_change_writes_nothing() {
 async fn an_enrichment_version_bump_causes_no_rebuild_and_loses_no_bucket() {
     let db = "it_reconcile_enrichment";
     let client = setup(db).await;
-    let (slot, source) = converge_a_back_dated_hole(&client, db).await;
+    let (slot, source, _) = converge_a_back_dated_hole(&client, db).await;
 
     let mut rows_before = Vec::new();
     for tier in TIERS {
@@ -887,6 +1006,103 @@ async fn an_enrichment_version_bump_causes_no_rebuild_and_loses_no_bucket() {
             source,
             "{}: totals unchanged",
             tier.target
+        );
+    }
+
+    drop_scratch(&client, db).await;
+}
+
+/// Review WR-06: a pass rewrites only CLOSED buckets past `MISMATCH_GRACE` and
+/// never an open one — the fast MVs stay the only live writer of every tier,
+/// and on a live system a pass with nothing missed writes nothing.
+///
+/// The six fast MVs are STOPped, so nothing but the pass can write a coarse
+/// row. A row of the current minute (open in every tier) and a three-day-old
+/// row (closed in 15m..1d) are seeded. The pass must write the old row into
+/// every tier where its bucket is closed, and the current minute's bucket into
+/// NONE of them.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_reconcile_pass_leaves_the_open_bucket_to_the_fast_mvs() {
+    let db = "it_reconcile_open_bucket";
+    let client = setup(db).await;
+    for tier in TIERS {
+        client
+            .query(&format!("SYSTEM STOP VIEW {db}.{}", tier.mv))
+            .execute()
+            .await
+            .unwrap_or_else(|e| panic!("stop {}: {e}", tier.mv));
+    }
+
+    let now = now_minute(&client).await;
+    let open_at = now - 60;
+    let rows = [
+        Seed {
+            at: open_at,
+            asset: 1,
+            trades: 3,
+            version: LEDGER_VERSION + 50,
+        },
+        Seed {
+            at: open_at,
+            asset: 7,
+            trades: 4,
+            version: LEDGER_VERSION + 51,
+        },
+        Seed {
+            at: now - 3 * 86_400,
+            asset: 1,
+            trades: 2,
+            version: LEDGER_VERSION + 1,
+        },
+    ];
+    insert_1m(&client, db, &rows).await;
+
+    let at = server_now(&client).await;
+    let slot = next_slot(&client).await;
+    drive_reconcile_pass(&client, db, slot).await;
+
+    // The pass ran and wrote: the old row reached every tier where its bucket
+    // is closed.
+    let held = assert_closed_buckets_converged(
+        &client,
+        db,
+        at,
+        "the pass must converge the closed buckets",
+    )
+    .await;
+    let written = reconcile_written(&client, db).await;
+    for ((tier, held), (view, rows)) in TIERS.iter().zip(&held).zip(&written).take(4) {
+        assert!(
+            *held,
+            "{}: the old row lies in a closed bucket",
+            tier.target
+        );
+        assert!(*rows > 0, "{view}: the pass wrote the closed bucket");
+    }
+
+    // …and the current minute's bucket in NO tier. It stays open for at least
+    // the grace, so no clock movement during the test can close it.
+    for tier in TIERS {
+        let open_rows: u64 = client
+            .query(&format!(
+                "SELECT count() FROM {db}.{} FINAL \
+                 WHERE timestamp = toStartOfInterval(toDateTime({open_at}), {})",
+                tier.target, tier.interval
+            ))
+            .fetch_one()
+            .await
+            .unwrap_or_else(|e| panic!("open bucket {}: {e}", tier.target));
+        assert_eq!(
+            open_rows, 0,
+            "{}: a reconcile pass must never write the open bucket — that is the fast MV's",
+            tier.target
+        );
+        assert_eq!(
+            unreconciled(&client, db, &tier).await,
+            0,
+            "{}: the open bucket's disagreement is not the pass's to repair",
+            tier.name
         );
     }
 

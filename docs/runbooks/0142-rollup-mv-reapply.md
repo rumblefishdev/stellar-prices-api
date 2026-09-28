@@ -420,7 +420,10 @@ heaviest: it is the only one that reads `price_ohlcv_1m`.
 `system.view_refreshes.written_rows` reads **0 when a pass wrote nothing**. A
 non-zero value is not a row count on 26.3.10.60 (it was measured at 256 × the
 buckets appended), so read it as "something was written", never quote it as a
-number of rows.
+number of rows. A pass rewrites only closed buckets that ended at least 2 h ago
+(`MISMATCH_GRACE`), never the open bucket, which stays the fast MV's. So on a
+live system `0` is the normal steady state after the first pass, and a non-zero
+value means the pass repaired something (a back-fill, a missed bucket).
 
 ### 3. Fallback — DROP + CREATE with dependencies
 

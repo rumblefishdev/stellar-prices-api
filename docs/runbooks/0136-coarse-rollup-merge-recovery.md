@@ -315,8 +315,10 @@ again, the 07-21..recovery hole must be closed with a **bounded, incremental**
 pre-roll.
 
 > **Since tasks 0143 + 0203** the hourly `prices.mv_reconcile_*` MVs rebuild
-> any bucket of the last 7 days whose source disagrees, so a hole younger than
-> 7 days now heals within one to two hourly passes once the chain runs again.
+> any closed bucket of the last 7 days whose source disagrees, so a hole younger
+> than 7 days now heals within one to two hourly passes once the chain runs
+> again (buckets that ended at least 2 h ago; a still-open coarse bucket takes
+> the repair on its fast MV's next slot).
 > Only the part older than 7 days needs the bounded pre-roll below. During the
 > `DETACH` window a fast MV fails its refresh, and the MVs that `DEPENDS ON` it
 > wait (`WaitingForDependencies`, no error) meanwhile. After the `ATTACH`, check

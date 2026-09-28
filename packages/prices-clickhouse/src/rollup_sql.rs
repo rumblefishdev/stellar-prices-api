@@ -99,8 +99,9 @@ pub struct Tier {
     /// uses to tell a view that is merely between slots from one stuck
     /// `WaitingForDependencies` (task 0203). A unit test ties it to the text.
     pub refresh_seconds: u64,
-    /// The hourly reconciliation MV that rebuilds any of `target`'s buckets
-    /// that disagree with `child` over [`RECONCILE_WINDOW`] (task 0203).
+    /// The hourly reconciliation MV that rebuilds any of `target`'s CLOSED
+    /// buckets (past [`MISMATCH_GRACE`]) that disagree with `child` over
+    /// [`RECONCILE_WINDOW`] (task 0203).
     ///
     /// `mv_reconcile_<src>_to_<dst>`: greppable as `mv_reconcile_`, and it
     /// contains no fast MV name as a substring, so a `contains(tier.mv)`
@@ -201,22 +202,31 @@ pub const RECONCILE_WINDOW: &str = "INTERVAL 7 DAY";
 /// The cadence of every reconciliation MV — the ONE place it is spelled.
 ///
 /// Hourly is a backstop's cadence, not a live one: the fast MVs keep the tip
-/// fresh, and this pass only repairs what they missed. No `OFFSET`: its benefit
-/// (keeping off the `:00` minute) is unmeasured, its drift round-trip is
-/// unverified, and equal slots keep the reconcile `DEPENDS ON` chain aligned.
+/// fresh, and this pass only repairs what they missed. It never touches an
+/// OPEN bucket, or one closed less than [`MISMATCH_GRACE`] ago (review WR-06):
+/// those belong to the fast MVs, so on a live system a pass that finds nothing
+/// missed writes nothing. No `OFFSET`: its benefit (keeping off the `:00`
+/// minute) is unmeasured, its drift round-trip is unverified, and equal slots
+/// keep the reconcile `DEPENDS ON` chain aligned.
 pub const RECONCILE_REFRESH: &str = "EVERY 1 HOUR";
 
 /// [`RECONCILE_REFRESH`] in seconds — every reconciliation MV's own period
 /// (see [`Tier::refresh_seconds`]). A unit test ties it to the text.
 pub const RECONCILE_REFRESH_SECONDS: u64 = 3_600;
 
-/// How old a bucket's END must be before a disagreement counts as a mismatch
-/// ([`reconcile_mismatch_select`]).
+/// How old a bucket's END must be before the reconciliation pass may rewrite
+/// it ([`reconcile_select`]) — and therefore before a disagreement counts as a
+/// mismatch ([`reconcile_mismatch_select`] counts that same SELECT). ONE bound
+/// for both, so the metric is exactly what the next pass would write.
 ///
-/// The open bucket of every tier always disagrees with its source — the fast
-/// MVs roll it on their own cadence — and a closed one may lag by ingest delay,
-/// one hourly reconcile pass and the propagation up the chain inside that pass.
-/// Two hours covers all three. Without a grace the metric would never be zero.
+/// The open bucket of every tier always disagrees with its source for a
+/// while: the fast MVs roll it on their own cadence (1h every 15 min, 1d every
+/// 4 h, 1w/1M daily), and a just-closed one may still lag by ingest delay.
+/// Without this bound the reconcile pass would rewrite every tier's open
+/// bucket every hour and become the live writer of 1d/1w/1M (review WR-06).
+/// Two hours is the fast 15m window, so every 15m bucket is covered by one
+/// writer or the other; every coarser fast window is wider still, and carries
+/// a repaired child into the open parent on its own next slot.
 pub const MISMATCH_GRACE: &str = "INTERVAL 2 HOUR";
 
 /// Why a rendering refused to produce SQL. Every variant is an interpolation
@@ -512,6 +522,11 @@ pub fn mv_modify_refresh(tier: &Tier, db: &str) -> Result<Option<String>, Rollup
 ///   `drift::parse_fingerprint` forbid it).
 /// - Source and target are bounded by the SAME aligned lower bound, computed
 ///   once, so the two sides can never compare different buckets.
+/// - ONLY CLOSED buckets whose END is at least [`MISMATCH_GRACE`] old are
+///   emitted (review WR-06). The open bucket is the fast MVs' job; without
+///   this bound the pass rewrote every tier's open bucket hourly whenever its
+///   child had moved since the fast MV last ran — the hourly live writer of
+///   1d/1w/1M, with a non-zero `written_rows` on every pass.
 ///
 /// The emitted row wins in the `ReplacingMergeTree(version)` target because
 /// its `sum(version)` covers a superset of the children the stale row summed
@@ -528,10 +543,12 @@ pub fn reconcile_select(tier: &Tier, db: &str) -> Result<String, RollupSqlError>
         .join(",\n    ");
     Ok(format!(
         "SELECT\n    {columns}\nFROM (\n{body}\n) AS s\n\
-         WHERE (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (\n    \
+         WHERE timestamp + {interval} <= now() - {MISMATCH_GRACE}\n  \
+         AND (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (\n    \
          SELECT d.timestamp, d.asset_id, d.quote_asset_id, d.source, d.trade_count, d.volume_base\n    \
          FROM {db}.{target} AS d FINAL\n    \
          WHERE d.timestamp >= {lb}\n)",
+        interval = tier.interval,
         target = tier.target,
     ))
 }
@@ -568,14 +585,12 @@ pub fn reconcile_mv_ddl(tier: &Tier, db: &str) -> Result<String, RollupSqlError>
 /// right now — one row, one `UInt64` column `mismatched` (task 0203 AC 4).
 ///
 /// It is [`reconcile_select`] verbatim, counted, so the probe measures exactly
-/// what the reconcile MV would rewrite. Only buckets whose END is at least
-/// [`MISMATCH_GRACE`] old count: the open bucket always disagrees.
+/// what the reconcile MV would rewrite — including its [`MISMATCH_GRACE`]
+/// bound: the open bucket always disagrees for a while and is not counted.
 pub fn reconcile_mismatch_select(tier: &Tier, db: &str) -> Result<String, RollupSqlError> {
     let select = reconcile_select(tier, db)?;
     Ok(format!(
-        "SELECT count() AS mismatched FROM (\n{select}\n) AS m\n\
-         WHERE m.timestamp + {interval} <= now() - {MISMATCH_GRACE}",
-        interval = tier.interval,
+        "SELECT count() AS mismatched FROM (\n{select}\n) AS m"
     ))
 }
 
@@ -1246,9 +1261,23 @@ mod tests {
             );
 
             let (_, tail) = ddl.split_once(") AS s\n").expect("the outer filter");
-            assert!(tail.starts_with(
-                "WHERE (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN ("
-            ));
+            // Review WR-06: only closed buckets past the grace, never the open
+            // one — the fast MVs stay its only writer.
+            assert!(
+                tail.starts_with(&format!(
+                    "WHERE timestamp + {} <= now() - {MISMATCH_GRACE}\n  AND (timestamp, asset_id, \
+                     quote_asset_id, source, trade_count, volume_base) NOT IN (",
+                    tier.interval
+                )),
+                "{}: the reconcile pass must be bounded to closed buckets past the grace: {tail}",
+                tier.name
+            );
+            assert_eq!(
+                ddl.matches(&format!("now() - {MISMATCH_GRACE}")).count(),
+                1,
+                "{}: one grace bound",
+                tier.name
+            );
             assert!(tail.contains(&format!("FROM prices.{} AS d FINAL", tier.target)));
             assert!(
                 !tail.contains("version"),
@@ -1270,20 +1299,20 @@ mod tests {
         }
     }
 
-    /// The mismatch count is the reconcile SELECT verbatim, counted over
-    /// CLOSED buckets older than the grace — the probe measures exactly what
-    /// the MV would rewrite.
+    /// The mismatch count is the reconcile SELECT verbatim, counted — and
+    /// NOTHING else: the closed-bucket grace lives in the reconcile SELECT
+    /// itself (review WR-06), so the probe measures exactly what the MV would
+    /// rewrite, and a second grace here could only make the two disagree.
     #[test]
-    fn the_mismatch_select_counts_the_reconcile_select_past_the_grace() {
+    fn the_mismatch_select_counts_the_reconcile_select_verbatim() {
         for tier in TIERS {
             let sql = reconcile_mismatch_select(&tier, "prices").expect("a checked rendering");
             let select = reconcile_select(&tier, "prices").expect("a checked rendering");
-            assert!(sql.starts_with("SELECT count() AS mismatched FROM (\n"));
-            assert_eq!(sql.matches(&select).count(), 1);
-            assert!(sql.ends_with(&format!(
-                ") AS m\nWHERE m.timestamp + {} <= now() - {MISMATCH_GRACE}",
-                tier.interval
-            )));
+            assert_eq!(
+                sql,
+                format!("SELECT count() AS mismatched FROM (\n{select}\n) AS m")
+            );
+            assert_eq!(sql.matches(&format!("now() - {MISMATCH_GRACE}")).count(), 1);
         }
     }
 

@@ -15,15 +15,15 @@
 //!
 //! ## Why only closed buckets past a grace
 //!
-//! The open bucket of every tier always disagrees with its source: the fast
-//! MVs roll it on their own cadence (1h every 15 min, 1d every 4 h, 1w/1M
-//! daily). A just-closed one may still lag by ingest delay, one hourly
-//! reconciliation pass and the propagation up the chain inside that pass. So
-//! only buckets whose END is at least
-//! [`prices_clickhouse::rollup_sql::MISMATCH_GRACE`] (2 h) old count; without
-//! the grace the metric would never be zero. The alarm then holds for 90 min
-//! on top, longer than one reconcile cycle, so a back-dated arrival that the
-//! next pass heals does not page.
+//! The open bucket of every tier always disagrees with its source for a
+//! while: the fast MVs roll it on their own cadence (1h every 15 min, 1d every
+//! 4 h, 1w/1M daily), and a just-closed one may still lag by ingest delay. The
+//! reconciliation pass itself therefore rewrites only buckets whose END is at
+//! least [`prices_clickhouse::rollup_sql::MISMATCH_GRACE`] (2 h) old (review
+//! WR-06) — the open bucket stays the fast MVs' — and since this count IS that
+//! SELECT, it carries the same bound: without it the metric would never be
+//! zero. The alarm then holds for 90 min on top, longer than one reconcile
+//! cycle, so a back-dated arrival that the next pass heals does not page.
 //!
 //! ## Which tier shows a hole first
 //!
