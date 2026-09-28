@@ -54,6 +54,21 @@ async fn setup_scratch(db: &str) -> Client {
     client
 }
 
+/// The one statement of a (rewritten) rollups file that CREATES `mv`.
+///
+/// Matched on the object name in the head, not on a bare `contains(mv)`: since
+/// task 0143 a dependent's `DEPENDS ON` also names the MV it waits for, so a
+/// substring lookup would find whichever statement came first in the file.
+fn statement(sql: &str, db: &str, mv: &str) -> String {
+    let head = format!("EXISTS {db}.{mv}\n");
+    let mut found = sql.split(';').map(str::trim).filter(|s| s.contains(&head));
+    let stmt = found
+        .next()
+        .unwrap_or_else(|| panic!("no statement creates {mv}"));
+    assert!(found.next().is_none(), "two statements create {mv}");
+    stmt.to_string()
+}
+
 async fn drop_scratch(client: &Client, db: &str) {
     client
         .query(&format!("DROP DATABASE IF EXISTS {db}"))
@@ -297,12 +312,25 @@ async fn a_replace_mode_mv_is_reported_as_drift_and_as_not_append() {
         .execute()
         .await
         .unwrap();
-    let replace_mode = rewrite(prices_clickhouse::ROLLUPS_SQL, db)
-        .split(';')
-        .map(str::trim)
-        .find(|s| s.contains("mv_ohlcv_1d_to_1w"))
-        .expect("the weekly statement")
-        .replace("REFRESH EVERY 1 DAY APPEND", "REFRESH EVERY 1 DAY");
+    //
+    // Only ` APPEND` is removed, from the REFRESH line alone: since task 0143
+    // the line reads `REFRESH EVERY 1 DAY DEPENDS ON <db>.mv_ohlcv_4h_to_1d
+    // APPEND`, so the edit must not assume APPEND follows the cadence.
+    let weekly_stmt = statement(
+        &rewrite(prices_clickhouse::ROLLUPS_SQL, db),
+        db,
+        "mv_ohlcv_1d_to_1w",
+    );
+    let declared_refresh = format!("EVERY 1 DAY DEPENDS ON {db}.mv_ohlcv_4h_to_1d APPEND");
+    let replace_mode = weekly_stmt.replace(
+        &format!("\nREFRESH {declared_refresh}\n"),
+        &format!("\nREFRESH EVERY 1 DAY DEPENDS ON {db}.mv_ohlcv_4h_to_1d\n"),
+    );
+    assert_ne!(
+        replace_mode, weekly_stmt,
+        "the test's own edit must apply — if the weekly REFRESH line is reworded \
+         this test goes blind and must be updated, not deleted"
+    );
     client.query(&replace_mode).execute().await.unwrap();
 
     let reports = check_mv_drift(&client, db, prices_clickhouse::ROLLUPS_SQL)
@@ -318,8 +346,11 @@ async fn a_replace_mode_mv_is_reported_as_drift_and_as_not_append() {
     };
     assert_eq!(differences.len(), 1);
     assert_eq!(differences[0].field, DriftField::Refresh);
-    assert_eq!(differences[0].declared, "EVERY 1 DAY APPEND");
-    assert_eq!(differences[0].live, "EVERY 1 DAY");
+    assert_eq!(differences[0].declared, declared_refresh);
+    assert_eq!(
+        differences[0].live,
+        format!("EVERY 1 DAY DEPENDS ON {db}.mv_ohlcv_4h_to_1d")
+    );
 
     let live = weekly.live.as_ref().expect("live fingerprint");
     assert!(
@@ -577,12 +608,12 @@ async fn a_hand_edited_window_is_reported_as_drift() {
         .unwrap();
     // Widen the window by hand — plausible as an operator catch-up tweak, and
     // exactly the kind of change that must not silently persist unrecorded.
-    let widened = rewrite(prices_clickhouse::ROLLUPS_SQL, db)
-        .split(';')
-        .map(str::trim)
-        .find(|s| s.contains("mv_ohlcv_1h_to_4h"))
-        .expect("the 4h statement")
-        .replace("now() - INTERVAL 1 DAY", "now() - INTERVAL 7 DAY");
+    let widened = statement(
+        &rewrite(prices_clickhouse::ROLLUPS_SQL, db),
+        db,
+        "mv_ohlcv_1h_to_4h",
+    )
+    .replace("now() - INTERVAL 1 DAY", "now() - INTERVAL 7 DAY");
     client.query(&widened).execute().await.unwrap();
 
     let reports = check_mv_drift(&client, db, prices_clickhouse::ROLLUPS_SQL)

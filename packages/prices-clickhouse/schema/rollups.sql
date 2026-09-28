@@ -87,6 +87,21 @@
 --   gained the previous month's tail. Re-creating it is the one step of the
 --   rollout that also TRUNCATEs and re-rolls its target — see the 0286 runbook.
 --
+-- EACH MV WAITS FOR THE MV THAT WRITES ITS SOURCE (task 0143).
+--   Every MV that reads a coarse tier carries `DEPENDS ON` the MV that writes
+--   that tier, fully qualified (ClickHouse stores an unqualified name
+--   qualified, and the drift check compares the stored text). Without it each
+--   MV fired on its own clock: at 00:00 the day's MV and the two MVs that read
+--   the day all fired together, and the week and month could read the day
+--   before the day that just closed had been written. With it, a dependent's
+--   slot waits until its dependency has refreshed for the same slot. Only the
+--   MV reading the 1m tier has no dependency, because ingest writes that tier.
+--   A STOPPED, failing or misspelled dependency blocks its dependents forever
+--   in `system.view_refreshes.status = 'WaitingForDependencies'` with no
+--   error, which is why the freshness probe watches that status. A live MV is
+--   moved onto this clause in place with `ALTER TABLE … MODIFY REFRESH`, which
+--   must repeat the whole clause (see the 0142 runbook).
+--
 -- DEPLOY ORDER, NOT NEGOTIABLE (task 0286 / BRIEF §4.9; the same statement is
 --   in schema/init.sql): schema → enrichment + coarse sweep + prices-api → the
 --   MV re-CREATE below → ingest LAST. A pre-0286 MV meeting a post-0286 ingest
@@ -189,7 +204,7 @@ WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 2 HOUR, INTERVAL 15 MINU
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_ohlcv_15m_to_1h
-REFRESH EVERY 15 MINUTE APPEND
+REFRESH EVERY 15 MINUTE DEPENDS ON prices.mv_ohlcv_1m_to_15m APPEND
 TO prices.price_ohlcv_1h AS
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
@@ -213,7 +228,7 @@ WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 8 HOUR, INTERVAL 1 HOUR)
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_ohlcv_1h_to_4h
-REFRESH EVERY 1 HOUR APPEND
+REFRESH EVERY 1 HOUR DEPENDS ON prices.mv_ohlcv_15m_to_1h APPEND
 TO prices.price_ohlcv_4h AS
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
@@ -237,7 +252,7 @@ WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 1 DAY, INTERVAL 4 HOUR)
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_ohlcv_4h_to_1d
-REFRESH EVERY 4 HOUR APPEND
+REFRESH EVERY 4 HOUR DEPENDS ON prices.mv_ohlcv_1h_to_4h APPEND
 TO prices.price_ohlcv_1d AS
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
@@ -261,7 +276,7 @@ WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 DAY)
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_ohlcv_1d_to_1w
-REFRESH EVERY 1 DAY APPEND
+REFRESH EVERY 1 DAY DEPENDS ON prices.mv_ohlcv_4h_to_1d APPEND
 TO prices.price_ohlcv_1w AS
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 1 WEEK) AS timestamp,
@@ -285,7 +300,7 @@ WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 60 DAY, INTERVAL 1 WEEK)
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_ohlcv_1d_to_1M
-REFRESH EVERY 1 DAY APPEND
+REFRESH EVERY 1 DAY DEPENDS ON prices.mv_ohlcv_4h_to_1d APPEND
 TO prices.price_ohlcv_1M AS
 SELECT
     toStartOfInterval(t.timestamp, INTERVAL 1 MONTH) AS timestamp,

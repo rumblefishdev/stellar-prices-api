@@ -2,7 +2,10 @@
 //!
 //! Two statement kinds are rendered here, and nowhere else:
 //!
-//! - [`mv_ddl`] — the six refreshable `APPEND` MVs of `schema/rollups.sql`;
+//! - [`mv_ddl`] — the six refreshable `APPEND` MVs of `schema/rollups.sql`,
+//!   each waiting (`DEPENDS ON`) for the MV that writes the table it reads
+//!   ([`dependency`], task 0143), and [`mv_modify_refresh`], the in-place
+//!   `ALTER` that lands that refresh clause on a live MV;
 //! - [`rollup_insert`] — the same SELECT as a bounded or full `INSERT`, which
 //!   is what `schema/preroll.sql` and `schema/preroll-live-gap.sql` are.
 //!
@@ -367,17 +370,64 @@ GROUP BY timestamp, asset_id, quote_asset_id, source"
     ))
 }
 
+/// The tier whose MV WRITES this tier's child table — the fast MV this tier's
+/// fast MV must wait for (task 0143, BRIEF §3.1).
+///
+/// Derived from [`TIERS`], never hand-kept: `None` for 15m (its child,
+/// `price_ohlcv_1m`, is written by ingest, not by a rollup), and the day tier
+/// for BOTH the week and the month, which both read `price_ohlcv_1d`.
+pub fn dependency(tier: &Tier) -> Option<&'static Tier> {
+    TIERS.iter().find(|t| t.target == tier.child)
+}
+
+/// The text after `REFRESH` in a fast MV's head: its cadence, the fully
+/// qualified MV it waits for (if any), and `APPEND` — the ONE spelling both
+/// [`mv_ddl`] and [`mv_modify_refresh`] render.
+///
+/// Task 0143: every refreshable MV fired on its own clock, so at 00:00 the
+/// two dailies could read `_1d` before `mv_ohlcv_4h_to_1d` had written the day
+/// that just closed. `DEPENDS ON` makes a dependent's slot wait until its
+/// dependency has refreshed for the same slot. The name is FULLY qualified
+/// because ClickHouse stores an unqualified one qualified (BRIEF §2), and the
+/// drift check compares the stored text.
+fn refresh_clause(tier: &Tier, db: &str) -> Result<String, RollupSqlError> {
+    let db = qualifier(db)?;
+    Ok(match dependency(tier) {
+        Some(dep) => format!("{} DEPENDS ON {db}.{} APPEND", tier.refresh, dep.mv),
+        None => format!("{} APPEND", tier.refresh),
+    })
+}
+
 /// The tier's refreshable `APPEND` MV, exactly as `schema/rollups.sql` ships it.
 pub fn mv_ddl(tier: &Tier, db: &str) -> Result<String, RollupSqlError> {
     let body = rollup_select(tier, db, &Bounds::Window)?;
+    let refresh = refresh_clause(tier, db)?;
     let db = qualifier(db)?;
     Ok(format!(
-        "CREATE MATERIALIZED VIEW IF NOT EXISTS {db}.{mv}\nREFRESH {refresh} APPEND\nTO \
+        "CREATE MATERIALIZED VIEW IF NOT EXISTS {db}.{mv}\nREFRESH {refresh}\nTO \
          {db}.{target} AS\n{body}",
         mv = tier.mv,
-        refresh = tier.refresh,
         target = tier.target,
     ))
+}
+
+/// The in-place rollout of [`mv_ddl`]'s refresh clause onto a live fast MV
+/// (BRIEF §6): `ALTER TABLE … MODIFY REFRESH <the same clause>`.
+///
+/// `MODIFY REFRESH` REPLACES every refresh parameter, so the full clause is
+/// repeated — omitting `DEPENDS ON` would drop it, and ClickHouse refuses to
+/// add or remove `APPEND` this way (Code 48). `None` for the 15m tier, whose
+/// clause has no dependency and so never changes. Runbook
+/// `docs/runbooks/0142-rollup-mv-reapply.md` quotes these statements.
+pub fn mv_modify_refresh(tier: &Tier, db: &str) -> Result<Option<String>, RollupSqlError> {
+    let refresh = refresh_clause(tier, db)?;
+    let db = qualifier(db)?;
+    Ok(dependency(tier).map(|_| {
+        format!(
+            "ALTER TABLE {db}.{mv} MODIFY REFRESH {refresh}",
+            mv = tier.mv
+        )
+    }))
 }
 
 /// The same aggregation as a plain `INSERT … SELECT` over `bounds` — what the
@@ -764,10 +814,15 @@ mod tests {
                 "unexpected head: {}",
                 &ddl[..80.min(ddl.len())]
             );
+            let clause = match dependency(&tier) {
+                Some(dep) => format!("{} DEPENDS ON prices.{} APPEND", tier.refresh, dep.mv),
+                None => format!("{} APPEND", tier.refresh),
+            };
             assert!(
-                ddl.contains(&format!("\nREFRESH {} APPEND\n", tier.refresh)),
+                ddl.contains(&format!("\nREFRESH {clause}\n")),
                 "{}: a refreshable MV without APPEND replaces its whole target \
-                 on every refresh (task 0090/0095)",
+                 on every refresh (task 0090/0095), and a dependent must wait \
+                 for the MV writing its child (task 0143)",
                 tier.name
             );
             assert!(ddl.contains(&format!("\nTO prices.{}", tier.target)));
@@ -814,7 +869,113 @@ mod tests {
         let tier = tier_by_name("1d").expect("the 1d tier");
         let ddl = mv_ddl(tier, "scratch_42").expect("a checked rendering");
         assert!(!ddl.contains("prices."), "left a prices. qualifier: {ddl}");
-        assert_eq!(ddl.matches("scratch_42.").count(), 3);
+        // The MV, its DEPENDS ON, its TO target and the FROM child.
+        assert_eq!(ddl.matches("scratch_42.").count(), 4);
+        let alter = mv_modify_refresh(tier, "scratch_42")
+            .expect("a checked rendering")
+            .expect("the day tier has a dependency");
+        assert!(
+            !alter.contains("prices."),
+            "left a prices. qualifier: {alter}"
+        );
+        assert_eq!(alter.matches("scratch_42.").count(), 2);
+    }
+
+    /// Task 0143 / BRIEF §3.1: each fast MV waits for the MV that writes the
+    /// table it reads. The expected pairs are spelled out here, NOT derived
+    /// from [`dependency`] — a test that re-derived them would pass on any
+    /// lookup bug.
+    #[test]
+    fn each_fast_mv_depends_on_the_mv_writing_its_child() {
+        let expected: [(&str, Option<&str>); 6] = [
+            ("mv_ohlcv_1m_to_15m", None),
+            ("mv_ohlcv_15m_to_1h", Some("mv_ohlcv_1m_to_15m")),
+            ("mv_ohlcv_1h_to_4h", Some("mv_ohlcv_15m_to_1h")),
+            ("mv_ohlcv_4h_to_1d", Some("mv_ohlcv_1h_to_4h")),
+            ("mv_ohlcv_1d_to_1w", Some("mv_ohlcv_4h_to_1d")),
+            ("mv_ohlcv_1d_to_1M", Some("mv_ohlcv_4h_to_1d")),
+        ];
+        let got: Vec<(&str, Option<&str>)> = TIERS
+            .iter()
+            .map(|t| (t.mv, dependency(t).map(|d| d.mv)))
+            .collect();
+        assert_eq!(got, expected.to_vec());
+
+        for (tier, (_, dep)) in TIERS.iter().zip(expected) {
+            let ddl = mv_ddl(tier, "prices").expect("a checked rendering");
+            let head = ddl.lines().nth(1).expect("the REFRESH line");
+            match dep {
+                Some(dep) => assert_eq!(
+                    head,
+                    format!("REFRESH {} DEPENDS ON prices.{dep} APPEND", tier.refresh),
+                    "{}: the dependency must be fully qualified, on the REFRESH line",
+                    tier.name
+                ),
+                None => {
+                    assert_eq!(head, format!("REFRESH {} APPEND", tier.refresh));
+                    assert!(
+                        !ddl.contains("DEPENDS ON"),
+                        "{}: _1m is ingest's",
+                        tier.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every `DEPENDS ON` in a fast DDL names a FAST MV — the fix must never
+    /// delay fresh data behind anything else (Adam, 2026-09-28).
+    #[test]
+    fn a_fast_mv_depends_only_on_a_fast_mv() {
+        let fast: Vec<&str> = TIERS.iter().map(|t| t.mv).collect();
+        for tier in TIERS {
+            let ddl = mv_ddl(&tier, "prices").expect("a checked rendering");
+            for dep in depends_on_names(&ddl) {
+                let name = dep.strip_prefix("prices.").expect("a qualified dependency");
+                assert!(
+                    fast.contains(&name),
+                    "{}: fast MV depends on `{dep}`, which is not a fast MV",
+                    tier.name
+                );
+            }
+        }
+    }
+
+    /// The names every `DEPENDS ON` in `sql` lists (qualified, as rendered).
+    fn depends_on_names(sql: &str) -> Vec<&str> {
+        sql.match_indices("DEPENDS ON ")
+            .map(|(at, needle)| {
+                let rest = &sql[at + needle.len()..];
+                rest.split([' ', '\n', ',']).next().expect("a name")
+            })
+            .collect()
+    }
+
+    /// BRIEF §6: the in-place rollout repeats EXACTLY the clause the CREATE
+    /// renders (`MODIFY REFRESH` replaces every refresh parameter), and there is
+    /// nothing to modify on the 15m tier.
+    #[test]
+    fn the_modify_refresh_repeats_the_ddls_refresh_clause() {
+        for tier in TIERS {
+            let ddl = mv_ddl(&tier, "prices").expect("a checked rendering");
+            let alter = mv_modify_refresh(&tier, "prices").expect("a checked rendering");
+            match dependency(&tier) {
+                None => assert_eq!(alter, None, "{}: nothing to modify", tier.name),
+                Some(_) => {
+                    let alter = alter.expect("a dependent has a MODIFY REFRESH");
+                    let clause = ddl
+                        .lines()
+                        .nth(1)
+                        .and_then(|l| l.strip_prefix("REFRESH "))
+                        .expect("the REFRESH line");
+                    assert_eq!(
+                        alter,
+                        format!("ALTER TABLE prices.{} MODIFY REFRESH {clause}", tier.mv)
+                    );
+                    assert!(alter.ends_with(" APPEND"), "CH refuses to drop APPEND");
+                }
+            }
+        }
     }
 
     /// T-kpi-01 (ASVS V5). These renderers are `pub` in a workspace that has
@@ -836,6 +997,15 @@ mod tests {
         );
         assert_eq!(
             rollup_insert(tier, bad, &Bounds::Full, None),
+            Err(RollupSqlError::Database(bad.to_string()))
+        );
+        assert_eq!(
+            mv_modify_refresh(tier, bad),
+            Err(RollupSqlError::Database(bad.to_string()))
+        );
+        // The 15m tier renders no ALTER, and still refuses the qualifier.
+        assert_eq!(
+            mv_modify_refresh(tier_by_name("15m").expect("the 15m tier"), bad),
             Err(RollupSqlError::Database(bad.to_string()))
         );
 
