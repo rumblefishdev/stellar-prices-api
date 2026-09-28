@@ -23,5 +23,17 @@
         "repo": "rumblefishdev/rf-claude-marketplace"
       }
     }
+  },
+  "permissions": {
+    "ask": [
+      "Bash(aws apigateway create-usage-plan-key *)",
+      "Bash(aws apigateway delete-usage-plan-key *)",
+      "Bash(aws apigateway create-usage-plan *)",
+      "Bash(aws apigateway update-usage-plan *)",
+      "Bash(aws apigateway delete-usage-plan *)",
+      "Bash(aws apigateway create-api-key *)",
+      "Bash(aws apigateway update-api-key *)",
+      "Bash(aws apigateway delete-api-key *)"
+    ]
   }
 }

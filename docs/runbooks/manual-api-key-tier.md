@@ -1,4 +1,13 @@
-# Runbook: API key tiers — the five plans, upgrading a user, Custom plans
+# Runbook: API key tiers — the five plans, checking and changing a user's plan, Custom plans
+
+> Claude sessions reach this file through the project skill
+> `.claude/skills/change-plan/SKILL.md`. It carries the rules for running the
+> procedure; the commands live here only. Every mutating `aws apigateway` call
+> below (plan keys, plans, API keys) is under a `permissions.ask` rule in
+> `.claude/settings.json`, so Claude Code prompts for it even in auto mode —
+> provided the profile is set with `export AWS_PROFILE=…`, as below, and not
+> with `--profile` or an inline `AWS_PROFILE=… aws …`, which the rule's
+> literal prefix does not match.
 
 **When:** a user's key needs limits other than the free plan's — they have
 agreed a paid plan, or negotiated custom limits, with us out of band. There is
@@ -42,6 +51,49 @@ and reset; the **name** is the contract: the tier is parsed from
 `pricing-api-<tier>-production`, and any other plan on our stage shows the
 **Custom** pill (its name travels in `/api/usage`'s `plan.name` for support,
 but the page does not show it).
+
+---
+
+## Check a user's plan (read-only)
+
+"Which plan is Discord user X on?" — answer it before any move, and on its
+own when that is all that was asked. Nothing below changes anything.
+
+```bash
+export AWS_PROFILE=<shared-account-profile>
+export AWS_REGION=eu-central-1
+export ID=<the user's Discord id, a snowflake>
+
+API_ID=$(aws ssm get-parameter --name /prices/production/api-gateway-id \
+  --query 'Parameter.Value' --output text)
+
+# Every record under the exact name, live and revoked (`--name-query` is a
+# prefix match, so the JMESPath filter is the part that decides).
+aws apigateway get-api-keys --name-query "discord-$ID-key" \
+  --query "items[?name=='discord-$ID-key'].[id,enabled,lastUpdatedDate]" \
+  --output table
+
+# The plan of each record on OUR API stage.
+for K in $(aws apigateway get-api-keys --name-query "discord-$ID-key" \
+    --query "items[?name=='discord-$ID-key'].id" --output text); do
+  echo "== $K: $(aws apigateway get-usage-plans --key-id "$K" \
+    --query "items[?apiStages[?apiId=='${API_ID}' && stage=='production']].name" \
+    --output text)"
+done
+```
+
+Reading the result:
+
+- `pricing-api-<tier>-production` — the key is on that tier (the dashboard
+  shows its pill).
+- Any other name — a hand-made plan on our stage; the dashboard shows
+  **Custom**. See "Custom / Enterprise plans" below.
+- Nothing after the colon (or `None`) — the key is on **no plan of ours** and
+  answers `403`; the user's next sign-in attaches it (to free, or to a revoked
+  record's plan).
+- No records at all — the user has never been issued a key.
+- `enabled` = `False` — a revoked key (task 0191); see step 1 below for what
+  that means for a move.
 
 ---
 
@@ -186,11 +238,14 @@ is anything else, go back to "If the create is refused or fails" above.
   is the same on every plan.
 
 **Downgrade** (a paid plan lapses): the same procedure with `TIER=free` — and
-for a user waiting on a rework, every disabled record (step 1).
+for a user waiting on a rework, every disabled record (step 1). Record it like
+any other move (step 6).
 
-**6. Record it.** Add a row to the "Issued manual keys" table at the bottom of
-this file (customer, plan, key id, date, who) and commit — the move is outside
-CDK and this file is its only record.
+**6. Record it.** Add a row to the "Plan changes of self-service keys" table
+at the bottom of this file (Discord id, key id, from → to, date, who, note)
+and commit — the move is outside CDK and this file is its only record. One row
+per key moved: a downgrade of a user waiting on a rework is one row per
+disabled record. "Issued manual keys" is for hand-made keys only.
 
 ---
 
@@ -612,10 +667,25 @@ Then delete the row from the table below.
 
 ---
 
+## Plan changes of self-service keys
+
+Every move of a `discord-<id>-key` between plans ("Upgrade a user", step 6),
+upgrades and downgrades alike. Append only — a later move is a new row, not an
+edit of the old one, so the table reads as the key's plan history. A key's
+current plan is what `get-usage-plans --key-id` says ("Check a user's plan"),
+not the last row here.
+
+| Discord id | Key id | From → to | Date | By  | Note |
+| ---------- | ------ | --------- | ---- | --- | ---- |
+
+---
+
 ## Issued manual keys
 
 Keep this current. One row per **key**, so a customer mid-rotation has two;
 delete a row when its key is deleted, and the last one when the plan goes.
+Self-service `discord-` keys moved between plans do not belong here — they go
+in "Plan changes of self-service keys" above.
 
 | Customer                           | Plan name                                                          | Plan ID                                               | Key name                                              | Key ID       | Limits                                | Issued     | Issued by      |
 | ---------------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------- | ----------------------------------------------------- | ------------ | ------------------------------------- | ---------- | -------------- |
