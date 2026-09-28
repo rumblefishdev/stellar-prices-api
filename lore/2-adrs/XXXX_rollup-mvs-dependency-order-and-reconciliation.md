@@ -335,6 +335,13 @@ intermittent shape these outages normally take.
   `SELECT ON prices.*`. Prod needs `SELECT ON system.view_refreshes` for the
   probe identity (`prices_writer`, XML-managed by BE, BE task 0477). Until then
   the unreadable alarm fires by design.
+- **Reconciliation and the mismatch count are one-sided.** Both start from
+  the source aggregate, so they see a target bucket that is missing or
+  disagrees with its source, never an extra one. A target row with no source
+  rows in the window is neither counted nor repaired: one left by a removed or
+  rogue writer, or one whose source was deleted. The drift check catches an
+  undeclared writer; a stale row whose source was deleted needs a manual
+  delete.
 - **A repair reaches an open coarse bucket only at its fast MV's cadence**:
   within 4 h for the open day, and within a day for the open week and month.
   The reconcile pass never writes an open bucket, by design (it must not

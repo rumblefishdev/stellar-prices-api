@@ -11,7 +11,9 @@
 //! [`prices_clickhouse::rollup_sql::reconcile_mismatch_select`] verbatim — the
 //! reconciliation MV's own SELECT, counted — so the probe measures exactly
 //! what the hourly pass would rewrite: missing or disagreeing on
-//! `sum(trade_count)` / `sum(volume_base)`, never on `version`.
+//! `sum(trade_count)` / `sum(volume_base)`, never on `version`. It is
+//! source-driven, so an EXTRA target bucket (no source rows behind it) is not
+//! counted — see the generator's doc (review IN-04).
 //!
 //! ## Why only closed buckets past a grace
 //!

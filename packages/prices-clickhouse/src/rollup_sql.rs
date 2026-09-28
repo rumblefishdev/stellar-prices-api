@@ -587,6 +587,12 @@ pub fn reconcile_mv_ddl(tier: &Tier, db: &str) -> Result<String, RollupSqlError>
 /// It is [`reconcile_select`] verbatim, counted, so the probe measures exactly
 /// what the reconcile MV would rewrite — including its [`MISMATCH_GRACE`]
 /// bound: the open bucket always disagrees for a while and is not counted.
+///
+/// ⚠️ **One-sided (review IN-04).** Both this count and the reconcile pass
+/// start from the SOURCE aggregate, so they see a target bucket that is
+/// missing or disagrees, never an EXTRA one: a target row with no source rows
+/// in the window (left by a removed or rogue writer, or whose source was
+/// deleted) is neither counted nor repaired.
 pub fn reconcile_mismatch_select(tier: &Tier, db: &str) -> Result<String, RollupSqlError> {
     let select = reconcile_select(tier, db)?;
     Ok(format!(
