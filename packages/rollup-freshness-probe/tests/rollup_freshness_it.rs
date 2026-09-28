@@ -1550,12 +1550,23 @@ async fn a_stopped_dependency_is_reported_as_waiting_and_disabled() {
     );
     // Review WR-07: one stall is counted once — the waiting view's and the
     // STOPped view's stale successes belong to their own counts, not failing.
+    // Judged where both successes ARE stale (more than two own periods old),
+    // so only the waiting/disabled exclusion keeps them out of the count.
+    let last_success = |view: &str| {
+        find(view)
+            .last_success_unix
+            .unwrap_or_else(|| panic!("{view} succeeded at CREATE: {rows:?}"))
+    };
+    let stale_now = (slot + PERIOD + 1)
+        .max(last_success(DEPENDENT) + 2 * PERIOD + 1)
+        .max(last_success(DEPENDENCY) + 2 * 3_600 + 1);
+    let m = refresh_wait_metrics(&pair, stale_now);
+    assert_eq!(value_of(&m, MV_REFRESH_WAITING_METRIC), 1.0, "{m:?}");
+    assert_eq!(value_of(&m, MV_REFRESH_DISABLED_METRIC), 1.0, "{m:?}");
     assert_eq!(
-        value_of(
-            &refresh_wait_metrics(&pair, slot + PERIOD + 1),
-            MV_REFRESH_FAILING_METRIC
-        ),
-        0.0
+        value_of(&m, MV_REFRESH_FAILING_METRIC),
+        0.0,
+        "a waiting or STOPped view is never also failing, however old its last success: {m:?}"
     );
     for not_yet in [slot + 1, slot + PERIOD] {
         assert_eq!(
