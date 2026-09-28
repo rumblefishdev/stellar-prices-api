@@ -207,8 +207,8 @@ deploy-production-eventbridge: build-production build-lambdas
 destroy-production-eventbridge: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-EventBridge --force
 
-# Needs the api-handler log group to exist: the portal-closed metric filter
-# (task 0249) is created on `/aws/lambda/prices-production-api-handler`, which
+# Needs the api-handler log group to exist: the portal-load-failed metric
+# filter (tasks 0249, 0311) is created on `/aws/lambda/prices-production-api-handler`, which
 # Compute owns and `destroy-production-compute` deletes (the log removal
 # policy is DESTROY). On a fresh environment, or after a Compute destroy,
 # deploy Compute first or this target fails with "log group does not exist".

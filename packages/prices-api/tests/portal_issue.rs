@@ -32,7 +32,6 @@ use harness::*;
 use mock_discord::{GRANTED_SCOPE, MemberReply, MockDiscord};
 use prices_api::portal::auth::discord::Endpoints;
 use prices_api::portal::auth::{cookies, session::Session, state_token};
-use prices_api::portal::keys::gateway::Gateway;
 use prices_api::portal::usage::USAGE_PATH;
 
 /// Milliseconds since the Discord epoch, shifted into snowflake position —
@@ -58,7 +57,7 @@ fn issue_app_with(
 ) -> Router {
     build_app_with(
         true,
-        Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
+        Some(test_gateway(&gateway.base)),
         Endpoints {
             api_base: discord.base.clone(),
             ..Endpoints::default()
@@ -86,7 +85,7 @@ async fn everything_including_issue_is_an_empty_404_while_the_portal_is_closed()
     let gateway = MockGateway::start().await;
     let closed = build_app_with(
         false,
-        Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
+        Some(test_gateway(&gateway.base)),
         Endpoints {
             api_base: discord.base.clone(),
             ..Endpoints::default()
@@ -686,6 +685,41 @@ async fn a_successful_issue_evicts_the_cached_no_key() {
     );
 }
 
+/// A successful issue also evicts a cached "no plan" answer (task 0311).
+///
+/// A key on no usage plan of our stage is cached like any usage answer, and
+/// the page's copy for it tells the user that signing out and in again puts
+/// the key back on a plan. The sign-in does attach it — so without the
+/// eviction the dashboard it lands on would keep saying "not on a usage plan"
+/// for the rest of the TTL, and the advice would look like it failed.
+#[tokio::test]
+async fn a_successful_issue_evicts_the_cached_no_plan() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    // A live key on no plan at all — the "issued but dead" state.
+    gateway.with(|s| {
+        s.seed(&key_name(), 100);
+    });
+    let app = issue_app(&discord, &gateway);
+    let session = session_cookie(USER_ID);
+
+    let before = call_path(app.clone(), "GET", USAGE_PATH, Some(&session)).await;
+    assert_eq!(before.status, StatusCode::OK);
+    assert_eq!(before.json()["plan"], serde_json::Value::Null);
+
+    assert_eq!(issue_round_trip(&app).await.location(), "/api/?issue=ok");
+    gateway.with(|s| assert_eq!(s.attach_calls, 1, "the sign-in attached the key"));
+
+    // Well inside the 60s TTL, so only the eviction can explain this.
+    let after = call_path(app, "GET", USAGE_PATH, Some(&session)).await;
+    assert_eq!(
+        after.json()["plan"]["tier"],
+        "free",
+        "a cached 'no plan' survived the issue that attached the key: {}",
+        String::from_utf8_lossy(&after.body)
+    );
+}
+
 /// The epic's non-goal, as a test: a user who has left the guild keeps their
 /// key — reveal and usage still work with the session alone, and **Discord is
 /// never consulted** on either route.
@@ -984,4 +1018,106 @@ async fn a_duplicate_that_will_not_delete_does_not_withhold_the_key() {
         earliest,
         "the winner is still the earliest, and it is what the reveal hands out"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Attaching to a plan other than free (task 0311)
+// ---------------------------------------------------------------------------
+
+/// A plan the control plane does not know is `PlanNotFound` NAMING that plan
+/// — a paid or custom plan id comes from the previous key's `GetUsagePlans`
+/// answer, not from the SSM parameter, so a message that only pointed at
+/// `PORTAL_FREE_PLAN_PARAM` would send the operator to the wrong place.
+#[tokio::test]
+async fn attaching_to_an_unknown_plan_names_that_plan() {
+    use prices_api::portal::keys::gateway::GatewayError;
+
+    let gateway = MockGateway::start().await;
+    let key = gateway.with(|s| s.seed(&key_name(), 100));
+
+    let error = test_gateway(&gateway.base)
+        .attach_to_plan(&key, "vanishedplan9")
+        .await
+        .expect_err("the mock knows no plan `vanishedplan9`");
+    assert!(
+        matches!(&error, GatewayError::PlanNotFound { plan_id } if plan_id == "vanishedplan9"),
+        "{error:?}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("vanishedplan9"), "{message}");
+    assert!(message.contains("GetUsagePlans"), "{message}");
+    assert!(message.contains("PORTAL_FREE_PLAN_PARAM"), "{message}");
+    assert!(gateway.with(|s| s.plan_keys.is_empty()));
+}
+
+/// And a known paid plan is attached to like the free one.
+#[tokio::test]
+async fn attaching_to_a_paid_plan_puts_the_key_on_it() {
+    use prices_api::portal::keys::gateway::Attachment;
+
+    let gateway = MockGateway::start().await;
+    let key = gateway.with(|s| {
+        s.plans.push(StoredPlan::basic());
+        s.seed(&key_name(), 100)
+    });
+
+    let attached = test_gateway(&gateway.base)
+        .attach_to_plan(&key, BASIC_PLAN_ID)
+        .await
+        .expect("basic1 exists");
+    assert_eq!(attached, Attachment::OnPlan);
+    assert_eq!(
+        gateway.with(|s| s.plan_keys.clone()),
+        vec![(BASIC_PLAN_ID.to_string(), key)]
+    );
+}
+
+/// AWS's two "already on a plan" refusals (task 0311, review WR-05; PR #351
+/// review): `409` means the key is already on THE plan asked for, so it is
+/// `OnPlan` — the refusal names the plan and needs no read-back — while `400`
+/// "cannot reference multiple Usage Plans with the same API Stage" means
+/// ANOTHER plan on the stage, `AlreadyOnAPlan`. Neither moves the key, and
+/// neither is an error.
+#[tokio::test]
+async fn both_already_on_a_plan_refusals_are_reported_as_such() {
+    use prices_api::portal::keys::gateway::Attachment;
+
+    let gateway = MockGateway::start().await;
+    let key = gateway.with(|s| {
+        s.plans.push(StoredPlan::basic());
+        s.seed_on_plan(&key_name(), 100, BASIC_PLAN_ID)
+    });
+    let client = test_gateway(&gateway.base);
+
+    for (plan, expected) in [
+        (BASIC_PLAN_ID, Attachment::OnPlan),
+        (PLAN_ID, Attachment::AlreadyOnAPlan),
+    ] {
+        assert_eq!(
+            client.attach_to_plan(&key, plan).await.expect(plan),
+            expected,
+            "{plan}"
+        );
+    }
+    assert_eq!(
+        gateway.with(|s| s.plan_keys.clone()),
+        vec![(BASIC_PLAN_ID.to_string(), key)]
+    );
+}
+
+/// Any OTHER `400` from the attach stays an error — only AWS's same-stage
+/// wording means "already on a plan".
+#[tokio::test]
+async fn any_other_bad_request_from_the_attach_is_an_error() {
+    let gateway = MockGateway::start().await;
+    let key = gateway.with(|s| {
+        s.fail_next_attach = true;
+        s.seed(&key_name(), 100)
+    });
+
+    let error = test_gateway(&gateway.base)
+        .attach_to_plan(&key, PLAN_ID)
+        .await
+        .expect_err("a plain 400 is not a success");
+    assert!(error.to_string().contains("CreateUsagePlanKey"), "{error}");
 }

@@ -126,6 +126,30 @@ pub enum SecretError {
     RedirectUriMismatch { uri: String, expected: &'static str },
 }
 
+/// What a parse failure of the secret may say in a log line (review IN-02).
+///
+/// serde_json's own message echoes the offending VALUE for a type or value
+/// error — ``invalid type: integer `123…`, expected a string`` — and this
+/// error reaches the `portal sources failed to load` ERROR line, logged on
+/// every load while the secret stays malformed. So only what cannot carry
+/// secret material survives: a missing or duplicated field is named (the names
+/// are this struct's, not the secret's), and everything else is reduced to
+/// its category and position.
+fn describe_malformed(error: &serde_json::Error) -> String {
+    use serde_json::error::Category;
+    let message = error.to_string();
+    if message.starts_with("missing field `") || message.starts_with("duplicate field `") {
+        return message;
+    }
+    let what = match error.classify() {
+        Category::Syntax => "not valid JSON",
+        Category::Eof => "truncated JSON",
+        Category::Data => "a field of the wrong type or shape",
+        Category::Io => "unreadable",
+    };
+    format!("{what} at line {} column {}", error.line(), error.column())
+}
+
 /// The JSON as it sits in Secrets Manager.
 #[derive(Deserialize)]
 struct SecretJson {
@@ -182,7 +206,7 @@ impl OauthSecret {
     /// doing so.
     #[cfg(feature = "aws-mtls")]
     async fn from_secrets_manager(name: &str) -> Result<Self, SecretError> {
-        let json = prices_clickhouse::mtls::fetch_secret_string(name)
+        let json = crate::portal::extension::secret_string(name)
             .await
             .map_err(|e| SecretError::Fetch {
                 name: name.to_string(),
@@ -203,11 +227,11 @@ impl OauthSecret {
 
     /// Parse and validate. Split out from both loaders so the validation is
     /// testable without a file or an AWS runtime — it is the part that decides
-    /// whether a misconfiguration is caught at cold start or at a visitor's
-    /// callback.
+    /// whether a misconfiguration is caught when the portal's sources load or
+    /// at a visitor's callback.
     pub fn parse(json: &str) -> Result<Self, SecretError> {
-        let parsed: SecretJson =
-            serde_json::from_str(json).map_err(|e| SecretError::Malformed(e.to_string()))?;
+        let parsed: SecretJson = serde_json::from_str(json)
+            .map_err(|e| SecretError::Malformed(describe_malformed(&e)))?;
 
         for (field, value) in [
             ("client_id", &parsed.client_id),
@@ -319,6 +343,36 @@ mod tests {
             OauthSecret::parse("{}"),
             Err(SecretError::Malformed(_))
         ));
+    }
+
+    /// Review IN-02: a malformed secret's error reaches an ERROR line, so it
+    /// must not echo a value — only the field names this struct owns.
+    #[test]
+    fn a_malformed_secret_never_echoes_a_value() {
+        for json in [
+            r#"{"client_id": "c", "client_secret": 987654321987, "redirect_uri": "r", "session_signing_key": "k"}"#,
+            r#"{"client_id": "c", "client_secret": true, "redirect_uri": "r", "session_signing_key": "k"}"#,
+            r#"{"client_id": "c", "client_secret": ["sekrit-in-a-list"], "redirect_uri": "r", "session_signing_key": "k"}"#,
+            r#"["sekrit-in-a-list"]"#,
+            r#"{"client_secret": "sekrit-truncated"#,
+        ] {
+            let err = OauthSecret::parse(json).unwrap_err();
+            assert!(matches!(err, SecretError::Malformed(_)), "{json}");
+            let text = err.to_string();
+            for leaked in ["987654321987", "true", "sekrit"] {
+                assert!(!text.contains(leaked), "{text:?} echoes {leaked}");
+            }
+            assert!(text.contains("line 1 column"), "{text:?}");
+        }
+
+        // A missing field is still named: the name is ours, not the secret's.
+        let missing = OauthSecret::parse(r#"{"client_id": "c"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing.contains("missing field `client_secret`"),
+            "{missing}"
+        );
     }
 
     /// Nothing sensitive may reach a log line, a panic message or a trace.

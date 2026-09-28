@@ -20,11 +20,13 @@ import {
  * all: a developer deciding whether to build on this needs the quota BEFORE
  * they have a key, not after.
  *
- * ⚠️ **These are hard-coded and the dashboard's are not.** The dashboard reads
- * the rate limit from `/config` precisely so it cannot drift from what the
- * gateway enforces; a marketing section cannot, because it renders for visitors
- * with no session and often before the probe answers. If the free plan's limits
- * change, this file is one of the two places that must change with it.
+ * ⚠️ **These are hard-coded and the dashboard's are not.** The dashboard states
+ * the key's own plan as `/api/usage` reports it (task 0311), precisely so it
+ * cannot drift from what the gateway enforces; a marketing section cannot,
+ * because it renders for visitors with no session and often before the probe
+ * answers. If the free plan's limits change (`infra/envs/production.json`),
+ * this file must change with them — since task 0311 the dashboard carries no
+ * built-in copy of the free rate any more.
  */
 
 const REASONS: readonly string[] = [
