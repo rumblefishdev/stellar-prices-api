@@ -448,7 +448,7 @@ if (planParamWritten.length !== 1) {
     `error: expected exactly one SSM parameter ending in ` +
       `\`/pricing-api-free-plan-id\` in the ApiGateway template, found ` +
       `${planParamWritten.length}.`,
-    '  → task 0187 reads the usage-plan id from it at cold start. Without it ' +
+    '  → task 0187 reads the usage-plan id from it on the first portal request. Without it ' +
       'the portal cannot attach a key to a plan, and a key on no plan ' +
       'authenticates and is then refused.',
   );
@@ -460,8 +460,8 @@ if (planParamRead !== planParamWritten[0]) {
       `the plan id at ${JSON.stringify(planParamWritten[0])}.`,
     '  → the two stacks cannot reference each other (Compute -> Gateway ' +
       'would be a cycle), so this pair is two hand-typed strings. A mismatch ' +
-      'fails Lambda INIT on the deploy that opens the portal, which takes ' +
-      '/v1 down with it. Fix both in infra/src/lib/stacks/compute-stack.ts ' +
+      'fails every portal load on the deploy that opens the portal (the ' +
+      'portal-load-failed alarm). Fix both in infra/src/lib/stacks/compute-stack.ts ' +
       'and api-gateway-stack.ts.',
   );
 }
@@ -517,73 +517,111 @@ for (const st of apigatewayStatements) {
   }
 }
 
-// --- 5b. Task 0188: the GetUsage grant exists, and is the narrow form. ---
-// The dashboard's `GetUsage` needs `apigateway:GET` on the free plan's
-// `/usage` sub-resource — a statement in ApiGatewayStack's standalone policy,
-// because only that stack knows the plan id. A missing statement fails at
-// runtime with AccessDenied, only once the portal opens, and reads as a
-// backend bug; a broadened one (`/usageplans/*`, or the plan root) hands the
-// api-handler reads this feature never makes. The `apigateway:*` and
-// `Resource: "*"` refusals above already bound the worst case; this pins the
-// intended shape.
-const usageGrants = apigatewayStatements.filter((st) => {
-  const resources = [st.Resource ?? []].flat();
-  // The resource is an Fn::Join carrying the plan id ref, so it is matched as
-  // serialized JSON rather than as a string. `/usage"` — with the closing
-  // quote — is the sub-resource as a path SUFFIX; a bare `/usage` would also
-  // match every `/usageplans/…` ARN, 0187's `/keys` attach included.
-  return resources.some((r) => JSON.stringify(r).includes('/usage"'));
-});
-if (usageGrants.length !== 1) {
-  fail(
-    `error: expected exactly one IAM statement on the usage plan's /usage ` +
-      `sub-resource, found ${usageGrants.length}.`,
-    '  → task 0188 reads per-key usage with GetUsage, granted as ' +
-      '`apigateway:GET` on `/usageplans/{planId}/usage` in ' +
-      'api-gateway-stack.ts (the standalone portal policy — the plan id ' +
-      'lives in that stack). Without it every dashboard load fails with ' +
-      'AccessDenied once the portal opens.',
+// --- 5b. Tasks 0188 + 0311: the `/usageplans` grants are exactly three. ---
+// Task 0188 granted `GetUsage` on the free plan's `/usage` alone. Task 0311
+// widens that deliberately — the dashboard reads the key's OWN plan, and a
+// rework re-attaches a paid key to its paid plan — to three statements on the
+// api-handler role in ComputeStack (see `PortalListUsagePlansByKey` in
+// compute-stack.ts):
+//
+// - `apigateway:GET`  on `/usageplans`          (`GetUsagePlans?keyId=`)
+// - `apigateway:GET`  on `/usageplans/*/usage`  (`GetUsage` on the key's plan)
+// - `apigateway:POST` on `/usageplans/*/keys`   (attach a key to a plan)
+//
+// A missing one fails at runtime with AccessDenied, only once the portal
+// serves a key, and reads as a backend bug. Anything beyond them — a plan
+// root (`/usageplans/*`), `PATCH`/`DELETE`, a member listing — lets the
+// api-handler change the limits the whole service is metered by. So this pins
+// the set, and that none of it sits in the Gateway template (the grants name
+// no plan id since 0311, and ComputeStack deploys first, so the code never
+// runs ahead of its grants).
+const EXPECTED_USAGEPLAN_GRANTS = [
+  'apigateway:GET /usageplans',
+  'apigateway:GET /usageplans/*/usage',
+  'apigateway:POST /usageplans/*/keys',
+];
+// Paths a usage-plan grant can reach. A resource whose IAM glob matches any of
+// them counts as a `/usageplans` grant, whether or not it spells the prefix out
+// — `::/*` or `::/usage*` reaches every plan exactly as `/usageplans/*` does.
+const USAGEPLAN_PROBES = [
+  '/usageplans',
+  '/usageplans/p',
+  '/usageplans/p/usage',
+  '/usageplans/p/keys',
+  '/usageplans/p/keys/k',
+];
+const APIGATEWAY_ARN = /^arn:aws[a-z-]*:apigateway:[^:]*::/;
+/** Does an IAM resource glob (`*`, `?`) match any usage-plan path? */
+const reachesUsagePlans = (glob) => {
+  const re = new RegExp(
+    '^' +
+      glob
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*/g, '.*')
+        .replace(/\?/g, '.') +
+      '$',
   );
-}
+  return USAGEPLAN_PROBES.some((p) => re.test(p));
+};
+/** `ACTION /path` for every allowed (action, resource) pair that reaches `/usageplans`. */
+const usagePlanGrantsIn = (tpl) => {
+  const grants = [];
+  for (const [, policy] of resourcesOfType(tpl, 'AWS::IAM::Policy')) {
+    for (const st of policy.Properties?.PolicyDocument?.Statement ?? []) {
+      // A Deny grants nothing; NotAction/NotResource cannot be enumerated at
+      // all, so they are refused on sight rather than silently skipped.
+      if (st.Effect === 'Deny') continue;
+      if (st.NotAction !== undefined || st.NotResource !== undefined) {
+        fail(
+          `error: an IAM statement uses NotAction/NotResource: ` +
+            `${JSON.stringify(st)}.`,
+          '  → an allow-by-exclusion grant cannot be checked against the ' +
+            'usage-plan set below — it can reach every plan in the account. ' +
+            'List the actions and resources explicitly.',
+        );
+      }
+      const actions = [st.Action ?? []].flat().map(String);
+      if (!actions.some((a) => a.startsWith('apigateway:'))) continue;
+      for (const resource of [st.Resource ?? []].flat()) {
+        // The ARN is a plain string when the region is concrete; anything
+        // else (an Fn::Join) is reported as it serializes whenever it could
+        // name a plan, so it can never match the expected set by accident.
+        let path;
+        if (typeof resource === 'string') {
+          if (!APIGATEWAY_ARN.test(resource)) continue;
+          path = resource.replace(APIGATEWAY_ARN, '');
+          if (!reachesUsagePlans(path)) continue;
+        } else {
+          path = JSON.stringify(resource);
+          if (!/\/usageplans|::\/?\*|::\/usage/.test(path)) continue;
+        }
+        for (const action of actions) grants.push(`${action} ${path}`);
+      }
+    }
+  }
+  return grants;
+};
 {
-  const actions = [usageGrants[0].Action ?? []].flat().map(String);
-  if (actions.length !== 1 || actions[0] !== 'apigateway:GET') {
+  const inGateway = usagePlanGrantsIn(template);
+  if (inGateway.length !== 0) {
     fail(
-      `error: the /usage grant carries actions ${JSON.stringify(actions)}.`,
-      '  → GetUsage needs `apigateway:GET` and nothing else on this ' +
-        'resource. Anything more (PATCH is UpdateUsage — moving the quota ' +
-        'counter) is a different feature and a different decision.',
+      `error: \`/usageplans\` grants in the ApiGateway template: ` +
+        `${JSON.stringify(inGateway)}.`,
+      "  → since task 0311 the portal's usage-plan grants live on the " +
+        'api-handler role in compute-stack.ts, which deploys first. A copy in ' +
+        'ApiGatewayStack reaches IAM after the code that needs it.',
     );
   }
-  // The narrow form has two more properties the count and action cannot see:
-  // the resource names THIS plan (a wildcard `/usageplans/*/usage` would read
-  // every plan's usage and still count as one statement), and the statement
-  // lives in the GATEWAY template — only that stack knows the plan id, so a
-  // copy in ComputeStack would necessarily be hard-coded or wildcarded.
-  const serialized = JSON.stringify([usageGrants[0].Resource ?? []].flat());
-  if (serialized.includes('*')) {
+  const inCompute = usagePlanGrantsIn(computeTemplate).sort();
+  const expected = [...EXPECTED_USAGEPLAN_GRANTS].sort();
+  if (JSON.stringify(inCompute) !== JSON.stringify(expected)) {
     fail(
-      `error: the /usage grant's resource contains a wildcard: ${serialized}.`,
-      '  → the grant is meant to name the one pricing-api-free plan by ' +
-        'reference (api-gateway-stack.ts). A wildcard reads usage for every ' +
-        'plan in the account.',
-    );
-  }
-  const inCompute = resourcesOfType(computeTemplate, 'AWS::IAM::Policy').some(
-    ([, policy]) =>
-      (policy.Properties?.PolicyDocument?.Statement ?? []).some((st) =>
-        [st.Resource ?? []]
-          .flat()
-          .some((r) => JSON.stringify(r).includes('/usage"')),
-      ),
-  );
-  if (inCompute) {
-    fail(
-      'error: a /usage grant appears in the Compute template.',
-      '  → the GetUsage statement belongs in ApiGatewayStack’s standalone ' +
-        'portal policy, where the plan id is a reference rather than a ' +
-        'hand-typed string. See the cycle argument on `apiHandlerRole` in ' +
-        'api-gateway-stack.ts.',
+      `error: the api-handler's \`/usageplans\` grants are ` +
+        `${JSON.stringify(inCompute)}, expected ${JSON.stringify(expected)}.`,
+      '  → task 0311 grants exactly these three (compute-stack.ts, ' +
+        '`PortalListUsagePlansByKey` and the two after it). A missing one ' +
+        'fails the dashboard or the rework with AccessDenied; an extra one ' +
+        'lets the api-handler read or change plans it never needs to.',
     );
   }
 }

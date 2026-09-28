@@ -44,8 +44,10 @@
 
 pub mod auth;
 pub mod eligibility;
+pub(crate) mod extension;
 pub mod keys;
 pub mod period;
+pub mod sources;
 pub mod usage;
 
 use std::time::Duration;
@@ -110,17 +112,17 @@ pub const OPENAPI_PATH: &str = "/api/api-docs-json";
 pub struct PortalConfig {
     /// Whether the portal is open for business.
     pub enabled: bool,
-    /// The free plan's per-key rate limit in requests per second, for the
-    /// dashboard to state (task 0188).
+    /// The free plan's per-key rate limit in requests per second (task 0188).
     ///
     /// Served from here rather than written into the bundle because it is a
     /// per-env config value (`pricingApiFreePlanRateLimit`) that the gateway
-    /// enforces and the page merely reports: a literal in the frontend is the
-    /// one number on that panel that can drift from what is actually enforced.
-    /// It rides on `/config` rather than on `/usage` because the dashboard
-    /// states it in the no-key state too, and that state is a `404` with no
-    /// body to carry it — and because the limit is a property of the plan every
-    /// key joins, not of any one caller's key.
+    /// enforces and the page merely reports: a literal in the frontend would
+    /// drift from what is actually enforced. Since task 0311 a signed-in
+    /// caller WITH a key is shown their own plan's figures, from `/usage`
+    /// (`GetUsagePlans` on the key). This stays for what has no key to ask
+    /// about: the no-key state — a `404` with no body to carry a plan — and the
+    /// landing page. While the usage call is unanswered or failed the
+    /// dashboard states no figure rather than falling back to this one.
     ///
     /// Omitted from the JSON entirely when this deployment was not told what
     /// the limit is; the page then omits the line rather than inventing a
@@ -130,10 +132,15 @@ pub struct PortalConfig {
 }
 
 /// Cloneable gate state carried by the middleware.
+///
+/// `enabled` is the static `PORTAL_ENABLED` flag and is all [`gate_portal`]
+/// reads. `sources` is the portal's lazily loaded sources, the same cell every
+/// portal state holds; only [`config_handler`] consults it here.
 #[derive(Clone)]
 pub struct PortalGate {
     enabled: bool,
     rate_limit: Option<u32>,
+    sources: sources::PortalSources,
 }
 
 impl PortalGate {
@@ -147,11 +154,13 @@ impl PortalGate {
     /// 404 — and the whole suite stayed green with the gate deleted.
     /// Only [`gate_portal`] reads this state, and the gate turns on `enabled`
     /// alone — so the rate limit a test does not care about stays `None` here
-    /// rather than becoming a second argument at every call site.
+    /// rather than becoming a second argument at every call site, and the
+    /// sources are already loaded (with nothing in them).
     pub fn new(enabled: bool) -> Self {
         Self {
             enabled,
             rate_limit: None,
+            sources: sources::PortalSources::ready(sources::Loaded::default()),
         }
     }
 }
@@ -164,10 +173,27 @@ impl PortalGate {
 /// half-built portal to every integrator reading the spec. [0195]'s API
 /// reference describes the public API; the portal describes itself to its own
 /// bundle.
+///
+/// The sources come from [`sources::sources_for`]: lazily from the environment
+/// in the Lambda, already loaded when the caller supplied them.
 pub fn apply(router: Router, config: &AppConfig) -> Router {
+    apply_with(router, config, sources::sources_for(config))
+}
+
+/// [`apply`], with the sources chosen by the caller (`crate::app_with_portal`).
+///
+/// One [`sources::PortalSources`] is cloned into the gate and into all four
+/// route states, so they share one cell: the first portal request that needs
+/// the sources loads them for every route in this execution environment.
+pub(crate) fn apply_with(
+    router: Router,
+    config: &AppConfig,
+    sources: sources::PortalSources,
+) -> Router {
     let gate = PortalGate {
         enabled: config.portal_enabled,
         rate_limit: config.portal_rate_limit,
+        sources: sources.clone(),
     };
     // Merged as its own `Router` rather than `.route()`d onto the caller's:
     // by this point the data routes have had `AppState` applied and the router
@@ -179,22 +205,23 @@ pub fn apply(router: Router, config: &AppConfig) -> Router {
 
     // Usage against quota (task 0188), merged the same way and mounted under
     // the same conditions as everything below: unconditionally, answering
-    // `503` when nothing is provisioned rather than not existing. It shares
+    // `503` when nothing is provisioned — or when the sources failed to load
+    // for this request — rather than not existing. It shares
     // the key routes' control-plane client — usage is scoped to
     // `(usagePlanId, apiKeyId)` and the key id comes from the same lookup —
     // but carries a state of its own, because it also owns the in-process
     // cache that keeps dashboard refreshes off the account-wide control-plane
     // budget. Built first so sign-in and the key routes can hold the cache
     // handle below.
-    let usage_state =
-        usage::UsageState::new(config.portal_oauth.clone(), config.portal_keys.clone());
+    let usage_state = usage::UsageState::new(None, None).with_sources(sources.clone());
     let usage_cache = usage_state.cache_handle();
     let usage = usage::routes(usage_state);
 
     // Sign-in (task 0186) and the eligibility-checked issue round-trip
     // (task 0189), merged the same way and for the same reason. Mounted
     // UNCONDITIONALLY, including when no OAuth credentials were loaded: the
-    // handlers answer `503` in that case rather than the routes silently not
+    // handlers answer with their unprovisioned landing (or, on a failed load,
+    // a failure landing and `/me`'s `503`) rather than the routes silently not
     // existing, so a deployment that opens the portal without provisioning the
     // secret says so instead of looking like a portal with no sign-in. While the
     // portal is closed the gate below makes the distinction moot — every path
@@ -205,24 +232,26 @@ pub fn apply(router: Router, config: &AppConfig) -> Router {
     // (`keys::issue_for`) — the key ROUTE below is read-only, which is what
     // makes "issue is unreachable with a session cookie alone" structural.
     let sign_in = auth::routes(
-        auth::AuthState::new(config.portal_oauth.clone(), config.portal_endpoints.clone())
-            .with_issue(auth::issue::IssueDeps::new(
-                config.portal_keys.clone(),
-                Some(usage_cache.clone()),
-                config.portal_eligibility.clone(),
-            ))
+        auth::AuthState::new(None, config.portal_endpoints.clone())
+            .with_sources(sources.clone())
+            .with_issue(
+                auth::issue::IssueDeps::new(None, Some(usage_cache.clone()), None)
+                    .with_sources(sources.clone()),
+            )
             .with_web_origin(config.portal_web_origin.as_deref()),
     );
 
     // The key reveal (task 0187, read-only since task 0189), merged the same
     // way and mounted under the same conditions: unconditionally, answering
-    // `503` when nothing is provisioned rather than not existing. The state
+    // `503` when nothing is provisioned or the load failed, rather than not
+    // existing. The state
     // carries the OAuth secret because the session cookie is what authorizes a
     // reveal — showing the caller what already belongs to them, which is why a
     // session suffices here and does not for the issue above. The usage-cache
     // handle lets a successful reveal evict a cached "no key" (task 0188).
     let api_keys = keys::routes(
-        keys::KeysState::new(config.portal_oauth.clone(), config.portal_keys.clone())
+        keys::KeysState::new(None, None)
+            .with_sources(sources)
             .with_usage_cache(usage_cache)
             .with_web_origin(config.portal_web_origin.as_deref()),
     );
@@ -301,15 +330,26 @@ pub(crate) fn cors_layer(web_origin: Option<&str>) -> CorsLayer {
 /// Report whether the portal is open. Always answers, in both states — it is
 /// the question "is the portal open?", so refusing to answer it while closed
 /// would be circular.
+///
+/// Open means the flag is on AND the portal's sources are loaded. This is
+/// usually the first portal request an execution environment sees (the page
+/// asks it on every load), so it is what triggers the load. A failed load
+/// answers `enabled: false`, as does every call inside the short cooldown
+/// after it (`sources::LOAD_FAILURE_COOLDOWN`, which starts no load); the
+/// first call after that loads again. The reason is in the log line and the
+/// alarm, not in the answer.
+/// The flag is checked FIRST, so a closed portal never loads anything.
 async fn config_handler(State(gate): State<PortalGate>) -> Response {
+    let enabled = gate.enabled && gate.sources.get().await.is_some();
     let mut resp = Json(PortalConfig {
-        enabled: gate.enabled,
+        enabled,
         rate_limit_per_second: gate.rate_limit,
     })
     .into_response();
-    // Never cached: the flag changes on deploy, and a CDN or browser holding a
-    // stale `enabled: false` would keep the portal dark for its viewers long
-    // after it opened — with nothing on screen to suggest why.
+    // Never cached: the flag changes on deploy and a failed load changes
+    // within seconds, and a CDN or browser holding a stale `enabled: false`
+    // would keep the portal dark for its viewers long after it opened — with
+    // nothing on screen to suggest why.
     cache_control::attach(&mut resp, cache_control::NO_STORE);
     resp
 }

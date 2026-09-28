@@ -2,7 +2,7 @@
 id: "0216"
 title: "Publish how old the price is, so a consumer can apply its own freshness policy instead of inheriting ours"
 type: FEATURE
-status: active
+status: completed
 assignee: akot
 related_adr: ["0292"]
 related_tasks: ["0135", "0178", "0165", "0151", "0111", "0215"]
@@ -130,6 +130,16 @@ history:
       1,410 unpriced (epoch `as_of`). Canonical USDC reads priced; XLM reads
       carried, waiting on the hourly USD pass. The API was never affected: it
       reads `current_prices` directly.
+  - date: "2026-09-28"
+    status: completed
+    who: akot
+    note: >
+      Closed by Adam's decision with one criterion unmet. PR #337 merged
+      (d64c55e), rolled out 2026-09-22, current_price_usd applied 2026-09-24.
+      The prod before/after current_prices snapshot was never recorded, so
+      "adding the column changes no existing value" stays unticked (proven in
+      repo only). The API contract hand-off to the docs owner is outside the
+      criteria and remains Adam's. No follow-up task.
 ---
 
 # Publish the price's age
@@ -212,6 +222,8 @@ conversation.
       open** — the before/after snapshot runs on rollout day, scripted in
       `.planning/rollout-2026-09/13-0216-snapshot-before.sh` and
       `62-0216-snapshot-diff.sh`
+      — **2026-09-28: closed without it** (Adam). No prod snapshot result
+      was recorded; not done, not deferred to a task.
 - [x] The `TO(...)` list and the SELECT projection are asserted to match in a
       test, so the positional-insert trap cannot recur silently
 

@@ -82,10 +82,14 @@ jobs:
               - 'nx.json'
               - '.github/workflows/ci.yml'
               - 'tools/scripts/**'
-              # The portal-closed alarm's metric filter matches a log line this
-              # file writes (task 0249). The guard that ties the two together
-              # is `tools/scripts/portal-closed-filter-guard.test.mjs`, run by
-              # this job — so a PR that only rewords the line must run it.
+              # The portal-load-failed alarm's metric filter matches a log line
+              # `portal/sources.rs` writes, through the JSON subscriber
+              # `main.rs` sets up (tasks 0249, 0311). The guard that ties the
+              # three together is
+              # `tools/scripts/portal-load-failed-filter-guard.test.mjs`, run
+              # by this job — so a PR that only rewords the line, or only
+              # touches the subscriber, must run it.
+              - 'packages/prices-api/src/portal/sources.rs'
               - 'packages/prices-api/src/main.rs'
 
   typescript:

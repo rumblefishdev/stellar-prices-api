@@ -2,7 +2,8 @@
 id: "0239"
 title: "A local deploy from macOS hits two undocumented prerequisites — the fd limit and bash 4"
 type: DOCS
-status: backlog
+status: active
+assignee: stkrolikiewicz
 related_adr: []
 related_tasks: ["0118"]
 tags: [layer-infra, priority-medium, effort-small, deploy, tooling, docs]
@@ -18,6 +19,15 @@ history:
       Spawned from [[0118]]'s production deploy, which hit both walls in one
       session. Neither is in a runbook and CI cannot catch either — it builds
       on Ubuntu with bash 5, a high fd limit, and a native ARM runner.
+  - date: 2026-09-28
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Taken for M3 AC 7: the fresh-account runbook from [[0297]] (PR #357)
+      does not pass on a stock macOS and was meant to fold these two
+      prerequisites in. okarcz asked for macOS to be documented and
+      supported; decided 2026-09-28: document the macOS prerequisites in
+      infra/README.md rather than port the scripts to bash 3.2 / BSD.
 ---
 
 # Local deploy from macOS: two undocumented prerequisites

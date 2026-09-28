@@ -2,7 +2,7 @@
 id: "0300"
 title: "Index the Comet weighted pool (Blend backstop BLND/USDC, CAS3FL6T…) — 53k swaps since 2024-05 that never reached a candle"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0100", "0290", "0285", "0286"]
 tags: [layer-indexing, priority-medium, effort-medium, amm, ingestion, data-correctness]
@@ -42,6 +42,16 @@ history:
       candles == real swaps in every window, discover writes 1 row then 0,
       live path prices a real ledger from an empty registry. AC 1 met; AC 2–3
       wait for the deploy and 0286 phase 3, AC 4 for PR #332. Stays active.
+  - date: "2026-09-28"
+    status: completed
+    who: akot
+    note: >
+      Closed by Adam's decision with criteria unmet. PR #345 merged
+      2026-09-24 (9e68d4d6), not yet deployed. AC 1 met. AC 2 (live
+      candles) waits for the ledger-processor deploy and discover-pools
+      write; AC 3 (history re-priced) for the Comet months in 0286 phase 3
+      (Oskar); AC 4 (allow-list `until = "0300"` entry, still in
+      coverage-sweep-probe/allowlist.toml) is clean-up. No follow-up task.
 ---
 
 # Index the Comet weighted pool (Blend backstop BLND/USDC)

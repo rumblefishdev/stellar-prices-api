@@ -107,10 +107,7 @@ async fn no_key_value_ever_reaches_the_logs() {
     let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
     let app = build_app_with(
         true,
-        Some(prices_api::portal::keys::gateway::Gateway::against(
-            &mock.base,
-            PLAN_ID.to_string(),
-        )),
+        Some(test_gateway(&mock.base)),
         prices_api::portal::auth::discord::Endpoints {
             api_base: discord.base.clone(),
             ..Default::default()

@@ -15,6 +15,31 @@ export interface CicdConfig {
 }
 
 /**
+ * The four paid usage plans beside `pricing-api-free` (task 0311). The key is
+ * also the tier's segment of the AWS plan name, `pricing-api-${tier}-${envName}`
+ * — the portal backend parses the tier back out of exactly that name.
+ */
+export type PaidPlanTier = 'basic' | 'analyst' | 'lite' | 'pro';
+
+/** Every paid tier, in ascending order of limits. */
+export const PAID_PLAN_TIERS: readonly PaidPlanTier[] = [
+  'basic',
+  'analyst',
+  'lite',
+  'pro',
+];
+
+/** The three figures a paid usage plan carries (task 0311). */
+export interface PlanLimits {
+  /** Sustained requests/second per key (UsagePlan throttle.rateLimit). */
+  readonly rateLimit: number;
+  /** Token-bucket capacity above the rate (UsagePlan throttle.burstLimit). */
+  readonly burstLimit: number;
+  /** Requests per calendar month (UsagePlan quota.limit, Period.MONTH). */
+  readonly monthlyQuota: number;
+}
+
+/**
  * Per-environment configuration for the prices-api CDK app.
  *
  * Production is the only supported AWS environment — staging was
@@ -70,6 +95,22 @@ export interface EnvironmentConfig {
    * quota — encoding it makes the unit impossible to misread.
    */
   readonly pricingApiFreePlanMonthlyQuota: number;
+  /**
+   * The paid usage plans, one per tier (task 0311). Each becomes an AWS usage
+   * plan named `pricing-api-${tier}-${envName}` on the same stage as the free
+   * plan, with quota `Period.MONTH`, offset 0.
+   *
+   * Nobody is issued a paid key: an operator moves an existing key onto one of
+   * these plans by hand (docs/runbooks/manual-api-key-tier.md). The dashboard
+   * then reads whatever the key's plan says — these figures are per-env config,
+   * not something the portal code depends on.
+   *
+   * NOT held to the one-tenth-of-stage guard the free plan is (see
+   * `planVsStage` in `validateConfig`): that guard is about keys anybody can
+   * mint by signing in. A paid plan is only checked against the stage default
+   * itself, because a plan above the per-method default cannot be delivered.
+   */
+  readonly pricingApiPaidPlans: Readonly<Record<PaidPlanTier, PlanLimits>>;
   /**
    * Whether the API Gateway stage response cache (0.5 GB) is enabled. Per-route
    * TTLs are fixed in `ApiGatewayStack` per §2.1.
@@ -632,6 +673,66 @@ export function validateConfig(config: EnvironmentConfig): void {
       `pricingApiFreePlanMonthlyQuota must be a positive integer, got: ${config.pricingApiFreePlanMonthlyQuota}`,
     );
   }
+  // The paid plans (task 0311): the same three checks as the free plan, per
+  // tier, with the same `< 1` on the burst for the same reason — errors are
+  // accumulated, not short-circuited, so an invalid rate must not let an
+  // invalid burst through unreported.
+  const paid = config.pricingApiPaidPlans as
+    | Readonly<Record<string, PlanLimits | undefined>>
+    | undefined;
+  if (!paid || typeof paid !== 'object') {
+    errors.push('pricingApiPaidPlans missing or not an object');
+  } else {
+    for (const tier of PAID_PLAN_TIERS) {
+      const plan = paid[tier];
+      const field = `pricingApiPaidPlans.${tier}`;
+      if (!plan || typeof plan !== 'object') {
+        errors.push(`${field} missing or not an object`);
+        continue;
+      }
+      if (!Number.isInteger(plan.rateLimit) || plan.rateLimit < 1) {
+        errors.push(
+          `${field}.rateLimit must be a positive integer, got: ${plan.rateLimit}`,
+        );
+      }
+      if (
+        !Number.isInteger(plan.burstLimit) ||
+        plan.burstLimit < 1 ||
+        plan.burstLimit < plan.rateLimit
+      ) {
+        errors.push(
+          `${field}.burstLimit must be a positive integer >= ${field}.rateLimit (${plan.rateLimit}), got: ${plan.burstLimit}`,
+        );
+      }
+      if (!Number.isInteger(plan.monthlyQuota) || plan.monthlyQuota < 1) {
+        errors.push(
+          `${field}.monthlyQuota must be a positive integer, got: ${plan.monthlyQuota}`,
+        );
+      }
+      // A plan above the stage's per-method default cannot be delivered: the
+      // stage throttle 429s the key before the plan's own limit is reached
+      // (docs/runbooks/manual-api-key-tier.md). A plain `<=`, deliberately not
+      // the one-tenth guard below — see `planVsStage`.
+      if (
+        Number.isInteger(plan.rateLimit) &&
+        Number.isInteger(config.apiGatewayThrottleRate) &&
+        plan.rateLimit > config.apiGatewayThrottleRate
+      ) {
+        errors.push(
+          `${field}.rateLimit (${plan.rateLimit}) exceeds apiGatewayThrottleRate (${config.apiGatewayThrottleRate}): the stage default would throttle the key first`,
+        );
+      }
+      if (
+        Number.isInteger(plan.burstLimit) &&
+        Number.isInteger(config.apiGatewayThrottleBurst) &&
+        plan.burstLimit > config.apiGatewayThrottleBurst
+      ) {
+        errors.push(
+          `${field}.burstLimit (${plan.burstLimit}) exceeds apiGatewayThrottleBurst (${config.apiGatewayThrottleBurst}): the stage default would throttle the key first`,
+        );
+      }
+    }
+  }
   if (typeof config.coverageSweepEnabled !== 'boolean') {
     errors.push(
       `coverageSweepEnabled must be a boolean, got: ${config.coverageSweepEnabled}`,
@@ -756,6 +857,11 @@ export function validateConfig(config: EnvironmentConfig): void {
     }
   }
 
+  // Only the free plan is listed. The paid plans (`pricingApiPaidPlans`, task
+  // 0311) are deliberately absent: this guard is about keys anybody can mint by
+  // signing in, and a paid key is placed on its plan by an operator. Held to it,
+  // Lite and Pro could not exist at all (Pro's 25 req/s x 10 = 250 > 200). They
+  // are checked against the stage default with a plain `<=` above instead.
   const planVsStage: ReadonlyArray<readonly [string, number, string, number]> =
     [
       [
