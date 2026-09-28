@@ -46,8 +46,46 @@ fn ch_url() -> String {
 /// The probe binds the client to the `prices` database (`client_from_lambda_env
 /// ("prices")` in `main.rs`), which is why the query references tables
 /// unqualified. The IT must do the same so the exact production query resolves.
-fn client() -> Client {
-    Client::default().with_url(ch_url()).with_database("prices")
+///
+/// ⚠️ **It also STOPs the reconciliation MVs in the shared `prices` database**
+/// (review WR-05) — see [`stop_shared_reconcile`]. Every test here that uses
+/// the shared database comes through this function, so none can run while an
+/// hourly reconcile pass is free to rewrite the rows it seeded.
+async fn client() -> Client {
+    let c = Client::default().with_url(ch_url()).with_database("prices");
+    stop_shared_reconcile(&c).await;
+    c
+}
+
+/// `SYSTEM STOP VIEW` every `prices.mv_reconcile_*` that is not already
+/// stopped (review WR-05).
+///
+/// CI applies `schema/rollups.sql` to the shared `prices` database
+/// (`prices-clickhouse-init --rollups`), so it holds the six hourly
+/// reconciliation MVs on the REAL clock, reaching seven days back. These tests
+/// seed `_1m` and `_1h` independently, with deliberately different values, 3 h
+/// to 5 days old — rows no fast MV window reaches. A reconcile pass firing on a
+/// `:00` crossing mid-suite would roll the `_1m` seed up through every tier and
+/// overwrite or add the `_1h`/coarse rows the stranded, peg, freshness and
+/// zero-invariant assertions count: an hourly flake window.
+///
+/// Found LIVE, so a server without the reconcile MVs (a schema applied before
+/// task 0203) needs nothing. The views stay stopped afterwards: that is the
+/// state the whole shared-database suite wants, and STOP is lost on a server
+/// restart anyway (a fresh CI server, or `SYSTEM START VIEW` by hand locally).
+async fn stop_shared_reconcile(c: &Client) {
+    let views: Vec<String> = c
+        .query(
+            "SELECT view FROM system.view_refreshes \
+             WHERE database = 'prices' AND startsWith(view, 'mv_reconcile_') \
+               AND status != 'Disabled'",
+        )
+        .fetch_all()
+        .await
+        .expect("list the shared reconcile MVs");
+    for view in views {
+        exec(c, &format!("SYSTEM STOP VIEW prices.{view}")).await;
+    }
 }
 
 async fn exec(c: &Client, sql: &str) {
@@ -80,7 +118,7 @@ fn bound(table: &str) -> i64 {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn freshness_query_executes_deserializes_and_gates_empty_tiers() {
-    let c = client();
+    let c = client().await;
     prices_clickhouse::apply_sql(&c, prices_clickhouse::INIT_SQL)
         .await
         .expect("apply init schema");
@@ -207,7 +245,7 @@ async fn freshness_query_executes_deserializes_and_gates_empty_tiers() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn ungated_max_over_empty_tier_yields_the_epoch_not_null() {
-    let c = client();
+    let c = client().await;
     prices_clickhouse::apply_sql(&c, prices_clickhouse::INIT_SQL)
         .await
         .expect("apply init schema");
@@ -262,7 +300,7 @@ async fn disk_query_executes_and_deserializes() {
         DISK_FREE_PERCENT_METRIC, DiskUsage, disk_metrics, disk_query, free_percent,
     };
 
-    let c = client();
+    let c = client().await;
     let usage =
         c.query(disk_query()).fetch_one::<DiskUsage>().await.expect(
             "disk query must execute and deserialize into DiskUsage (two non-nullable u64)",
@@ -309,7 +347,7 @@ async fn disk_query_executes_and_deserializes() {
 async fn restricted_user_can_read_disk_headroom_but_not_system_disks() {
     use rollup_freshness_probe::disk::{DiskUsage, disk_query};
 
-    let admin = client();
+    let admin = client().await;
     exec(&admin, "DROP USER IF EXISTS rollup_probe_it").await;
     exec(
         &admin,
@@ -491,7 +529,7 @@ async fn read_peg(c: &Client) -> PegCounts {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -517,7 +555,7 @@ async fn usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn usd_sanity_counts_both_induced_defects() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -548,7 +586,7 @@ async fn usd_sanity_counts_both_induced_defects() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_freshly_written_zero_is_not_yet_stranded() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -570,7 +608,7 @@ async fn a_freshly_written_zero_is_not_yet_stranded() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -594,7 +632,7 @@ async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_exotic_quoted_zero_is_ignored_because_it_is_by_design() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -613,7 +651,7 @@ async fn an_exotic_quoted_zero_is_ignored_because_it_is_by_design() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -647,7 +685,7 @@ async fn a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it() 
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     // Deliberately no USDT identity seeded.
     insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
@@ -682,7 +720,7 @@ async fn an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_peg_row_only_in_1m_is_counted_although_every_coarse_tier_reads_clean() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -719,7 +757,7 @@ async fn a_peg_row_only_in_1m_is_counted_although_every_coarse_tier_reads_clean(
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn each_direction_only_scans_its_own_tier() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -759,7 +797,7 @@ async fn each_direction_only_scans_its_own_tier() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn the_peg_window_excludes_rows_a_cleanup_run_could_delete() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -785,7 +823,7 @@ async fn the_peg_window_excludes_rows_a_cleanup_run_could_delete() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_empty_peg_scan_does_not_suppress_the_stranded_metric() {
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
@@ -835,7 +873,7 @@ fn drift_value(metrics: &[DriftMetric], name: &str) -> f64 {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_freshly_applied_schema_reports_no_drift() {
-    let c = client();
+    let c = client().await;
     let visible: u64 = c
         .query(&visible_objects_query("prices"))
         .fetch_one()
@@ -873,7 +911,7 @@ async fn a_freshly_applied_schema_reports_no_drift() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_edited_declaration_is_detected_as_drift() {
-    let c = client();
+    let c = client().await;
     let visible: u64 = c
         .query(&visible_objects_query("prices"))
         .fetch_one()
@@ -919,7 +957,7 @@ async fn an_edited_declaration_is_detected_as_drift() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_live_mv_without_append_is_detected_as_critical() {
-    let c = client();
+    let c = client().await;
     exec(&c, "DROP VIEW IF EXISTS prices.mv_gap3_probe").await;
     exec(&c, "DROP TABLE IF EXISTS prices.gap3_probe_target").await;
     exec(
@@ -972,7 +1010,7 @@ async fn a_live_mv_without_append_is_detected_as_critical() {
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn an_invisible_database_suppresses_the_counts_instead_of_paging() {
-    let c = client();
+    let c = client().await;
     let visible: u64 = c
         .query(&visible_objects_query("no_such_database"))
         .fetch_one()
@@ -1239,7 +1277,7 @@ async fn read_zero_invariants(
 async fn the_zero_invariant_scan_counts_only_rows_that_break_an_invariant() {
     use rollup_freshness_probe::zero_invariants::{ZeroInvariantCounts, zero_invariant_metric};
 
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     let ts: u32 = c
         .query("SELECT toUnixTimestamp(now() - INTERVAL 2 MINUTE)")
@@ -1276,7 +1314,7 @@ async fn the_zero_invariant_scan_counts_only_rows_that_break_an_invariant() {
 async fn a_dust_minute_written_without_its_pf_column_is_a_zero_invariant_violation() {
     use rollup_freshness_probe::zero_invariants::ZeroInvariantCounts;
 
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
 
     // No pf_trade_count, pf_volume or pf_price_volume in the column list.
@@ -1310,7 +1348,7 @@ async fn a_dust_minute_written_without_its_pf_column_is_a_zero_invariant_violati
 async fn a_repaired_candle_stops_counting_as_a_zero_invariant_violation() {
     use rollup_freshness_probe::zero_invariants::ZeroInvariantCounts;
 
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     let ts: u32 = c
         .query("SELECT toUnixTimestamp(now() - INTERVAL 2 MINUTE)")
@@ -1344,7 +1382,7 @@ async fn a_violation_older_than_the_window_is_out_of_the_zero_invariant_scan() {
         ZERO_INVARIANT_LOOKBACK_SECONDS, ZeroInvariantCounts,
     };
 
-    let c = client();
+    let c = client().await;
     reset_sanity_tables(&c).await;
     let now: u32 = c
         .query("SELECT toUnixTimestamp(now())")
@@ -1538,7 +1576,7 @@ async fn view_refreshes_is_denied_to_a_prices_only_user_and_reads_as_unreadable(
         ViewRefreshRow, is_access_denied, metrics_for_read, refresh_waits_query, unreadable_metrics,
     };
 
-    let admin = client();
+    let admin = client().await;
     exec(&admin, "DROP USER IF EXISTS rollup_probe_waits_it").await;
     exec(
         &admin,
