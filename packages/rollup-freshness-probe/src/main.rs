@@ -41,7 +41,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     use rollup_freshness_probe::zero_invariants::{
         ZeroInvariantCounts, zero_invariant_metric, zero_invariant_query,
     };
-    use rollup_freshness_probe::{TableLag, freshness_query, lag_metrics, publish};
+    use rollup_freshness_probe::{
+        FAILED, SKIPPED_UNREADABLE, TableLag, freshness_query, lag_metrics, publish, reading,
+    };
     use std::sync::Arc;
 
     prices_clickhouse::observability::init_tracing();
@@ -255,8 +257,12 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             // no grant the probe does not already hold — but a narrowed grant or
             // a metadata hiccup here still must not cost the three checks above,
             // which is what the failure collection above guarantees.
-            let mut drift_critical = 0.0_f64;
-            let mut drift_count = 0.0_f64;
+            // `None` until a read succeeds, and left `None` when the schema is
+            // unreadable (the published 0 is then a suppression, not a count):
+            // the log line and the JSON result must never show a healthy 0
+            // for a reading the probe does not have (review IN-01).
+            let mut drift_critical: Option<f64> = None;
+            let mut drift_count: Option<f64> = None;
             let mut visible_objects: Option<u64> = None;
             let mut drift_detail = String::new();
             match ch
@@ -269,15 +275,12 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     match prices_clickhouse::drift::check_rollup_drift(&ch, "prices").await {
                         Ok(reports) => {
                             let drift = drift_metrics(&reports, visible);
-                            let value_of = |name: &str| {
-                                drift
-                                    .iter()
-                                    .find(|m| m.name == name)
-                                    .map(|m| m.value)
-                                    .unwrap_or_default()
-                            };
-                            drift_critical = value_of(MV_DRIFT_CRITICAL_METRIC);
-                            drift_count = value_of(MV_DRIFT_METRIC);
+                            let value_of =
+                                |name: &str| drift.iter().find(|m| m.name == name).map(|m| m.value);
+                            if visible > 0 {
+                                drift_critical = value_of(MV_DRIFT_CRITICAL_METRIC);
+                                drift_count = value_of(MV_DRIFT_METRIC);
+                            }
                             // Named per-MV, so an alarm can be diagnosed from the
                             // log line without re-running the drift CLI by hand.
                             drift_detail = describe(&reports);
@@ -310,17 +313,19 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             let mut refresh_waiting: Option<f64> = None;
             let mut refresh_disabled: Option<f64> = None;
             let mut refresh_failing: Option<f64> = None;
-            let mut refresh_unreadable = 0.0_f64;
+            // `None` = the read failed; the three counts stay `None` too when
+            // the table is unreadable (then nothing but the flag is published).
+            let mut refresh_unreadable: Option<f64> = None;
             let read = ch
                 .query(&refresh_waits_query)
                 .fetch_all::<ViewRefreshRow>()
                 .await;
             let refresh_failing_detail = match &read {
-                Ok(rows) => describe_failing(
+                Ok(rows) => Some(describe_failing(
                     rows,
                     rows.first().map(|r| r.db_now_unix).unwrap_or_default(),
-                ),
-                Err(_) => String::new(),
+                )),
+                Err(_) => None,
             };
             let refresh_metrics = match metrics_for_read(read) {
                 Ok(metrics) => Some(metrics),
@@ -335,7 +340,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                         MV_REFRESH_WAITING_METRIC => refresh_waiting = Some(m.value),
                         MV_REFRESH_DISABLED_METRIC => refresh_disabled = Some(m.value),
                         MV_REFRESH_FAILING_METRIC => refresh_failing = Some(m.value),
-                        MV_REFRESH_UNREADABLE_METRIC => refresh_unreadable = m.value,
+                        MV_REFRESH_UNREADABLE_METRIC => refresh_unreadable = Some(m.value),
                         _ => {}
                     }
                 }
@@ -450,28 +455,43 @@ async fn main() -> Result<(), lambda_runtime::Error> {
 
             // Log before deciding the invocation's fate: on a partial failure
             // this line is the only record of what the healthy checks measured.
+            //
+            // ⚠️ A reading the probe does not have is logged as `failed` (the
+            // read errored) or `unreadable` (suppressed: the grant or the
+            // schema is missing), NEVER as 0 — a 0 is the healthy shape, and
+            // this line is what the triage paragraphs point to (review IN-01).
+            let drift_missing = if visible_objects == Some(0) {
+                SKIPPED_UNREADABLE
+            } else {
+                FAILED
+            };
+            let refresh_missing = if refresh_unreadable == Some(1.0) {
+                SKIPPED_UNREADABLE
+            } else {
+                FAILED
+            };
             tracing::info!(
                 tiers,
-                current_prices_rows = current_age.map(|a| a.row_count).unwrap_or_default(),
-                current_prices_age_seconds = current_age.map(|a| a.age_seconds).unwrap_or_default(),
+                current_prices_rows = %reading(current_age.map(|a| a.row_count), FAILED),
+                current_prices_age_seconds = %reading(current_age.map(|a| a.age_seconds), FAILED),
                 checks_failed = failures.len(),
-                disk_free_percent = free_percent.unwrap_or_default(),
-                disk_available_bytes = disk_reading.map(|u| u.available_bytes).unwrap_or_default(),
-                usd_peg_applied = peg_counts.map(|c| c.peg_applied).unwrap_or_default(),
-                usd_peg_scanned = peg_counts.map(|c| c.scanned).unwrap_or_default(),
-                usd_stranded = stranded_counts.map(|c| c.stranded).unwrap_or_default(),
-                usd_stranded_scanned = stranded_counts.map(|c| c.scanned).unwrap_or_default(),
-                zero_invariant_violations = zero_counts.map(|c| c.violations).unwrap_or_default(),
-                zero_invariant_scanned = zero_counts.map(|c| c.scanned).unwrap_or_default(),
-                mv_drift_critical = drift_critical,
-                mv_drift = drift_count,
-                mv_visible_objects = visible_objects.unwrap_or_default(),
+                disk_free_percent = %reading(free_percent, FAILED),
+                disk_available_bytes = %reading(disk_reading.map(|u| u.available_bytes), FAILED),
+                usd_peg_applied = %reading(peg_counts.map(|c| c.peg_applied), FAILED),
+                usd_peg_scanned = %reading(peg_counts.map(|c| c.scanned), FAILED),
+                usd_stranded = %reading(stranded_counts.map(|c| c.stranded), FAILED),
+                usd_stranded_scanned = %reading(stranded_counts.map(|c| c.scanned), FAILED),
+                zero_invariant_violations = %reading(zero_counts.map(|c| c.violations), FAILED),
+                zero_invariant_scanned = %reading(zero_counts.map(|c| c.scanned), FAILED),
+                mv_drift_critical = %reading(drift_critical, drift_missing),
+                mv_drift = %reading(drift_count, drift_missing),
+                mv_visible_objects = %reading(visible_objects, FAILED),
                 mv_detail = %drift_detail,
-                mv_refresh_waiting = refresh_waiting.unwrap_or_default(),
-                mv_refresh_disabled = refresh_disabled.unwrap_or_default(),
-                mv_refresh_failing = refresh_failing.unwrap_or_default(),
-                mv_refresh_failing_views = %refresh_failing_detail,
-                mv_refresh_unreadable = refresh_unreadable,
+                mv_refresh_waiting = %reading(refresh_waiting, refresh_missing),
+                mv_refresh_disabled = %reading(refresh_disabled, refresh_missing),
+                mv_refresh_failing = %reading(refresh_failing, refresh_missing),
+                mv_refresh_failing_views = %reading(refresh_failing_detail.as_deref(), FAILED),
+                mv_refresh_unreadable = %reading(refresh_unreadable, FAILED),
                 rollup_mismatch = %mismatch_detail,
                 "rollup-freshness-probe run complete"
             );
