@@ -84,6 +84,22 @@ Four of those steps exist because of one fact and nothing else:
   cleared in step 4c are re-written per ledger as it completes, so a re-run of
   the same range picks up where it stopped (`--start` the same, it skips what is
   done).
+- `reingest_0286.py` retries a ClickHouse call that cannot connect (six waits,
+  5 s → 240 s, each logged to `run.log` as `ClickHouse unreachable`). A call
+  whose request already went out is not retried and still ends the run (exit 1),
+  and a gate still `STOP`s (exit 2). Wrap `run` so a crash resumes by itself
+  while a `STOP` stays down — on 2026-09-25 a single unreachable call left the
+  loop dead for 56 hours:
+
+  ```bash
+  for try in 1 2 3 4 5 6; do
+    python3 tools/scripts/reingest_0286.py run --to-month <M> <flags> --yes
+    code=$?; echo "$(date -u +%FT%TZ) exit=$code try=$try" | tee -a ~/reingest-0286/restarts.log
+    [ $code -eq 1 ] || break
+    sleep 300
+  done
+  ```
+
 - `events-backfill` reads `default.*` AND writes `prices.*`, so it runs **on the
   CH host as the `default` user** against `localhost:8123` — the prices mTLS user
   cannot read `default.*`

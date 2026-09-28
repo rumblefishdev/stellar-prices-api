@@ -77,6 +77,11 @@ COMET_PROBE_LEDGER = 51_500_460
 # Set once the events-backfill binary has been proven to route Comet (per process).
 COMET_BINARY_PROVEN = False
 BAK = "reingest_0286_bak_"
+# Waits between attempts when the campaign machine cannot reach ClickHouse at all
+# (~8 min of sleeps, plus up to ~2 min of kernel connect timeout per attempt). On
+# 2026-09-25 22:41 UTC one such blip — the server was serving BE and the Lambdas
+# throughout — ended the run between two DROP PARTITIONs and cost 56 hours.
+CONNECT_RETRY_DELAYS = (5, 15, 30, 60, 120, 240)
 
 
 class Stop(Exception):
@@ -113,12 +118,25 @@ class CH:
         if role != "reader":
             qs.update(settings or {})
         url = self.url + "/" + ("?" + urllib.parse.urlencode(qs) if qs else "")
-        req = urllib.request.Request(url, data=self._sql(sql).encode(), method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=timeout, context=self.ctx.get(role)) as r:
-                return r.read().decode()
-        except urllib.error.HTTPError as e:
-            raise Stop(f"ClickHouse refused ({role}): {e.read().decode()[:600]}\n--- {sql[:300]}")
+        for attempt, delay in enumerate(CONNECT_RETRY_DELAYS + (None,), 1):
+            req = urllib.request.Request(url, data=self._sql(sql).encode(), method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout, context=self.ctx.get(role)) as r:
+                    return r.read().decode()
+            except urllib.error.HTTPError as e:
+                raise Stop(f"ClickHouse refused ({role}): {e.read().decode()[:600]}\n--- {sql[:300]}")
+            except urllib.error.URLError as e:
+                # urlopen raises URLError only while resolving, connecting or sending
+                # the request, so ClickHouse never received a whole statement and a
+                # write is as safe to repeat as a read. A failure after the request
+                # went out (a timeout waiting for the answer, a dropped response)
+                # surfaces as a bare OSError instead and is NOT retried: that
+                # statement may have run, and only a `run` resume may repeat it.
+                if delay is None:
+                    raise
+                log(f"ClickHouse unreachable ({role}): {e.reason} — attempt {attempt} of "
+                    f"{len(CONNECT_RETRY_DELAYS) + 1}, next in {delay} s")
+                time.sleep(delay)
 
     def rows(self, role, sql, **kw):
         out = self.q(role, sql.rstrip().rstrip(";") + " FORMAT TabSeparated", **kw)
