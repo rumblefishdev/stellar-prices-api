@@ -473,3 +473,422 @@ async fn a_back_dated_hole_behind_a_healthy_tip_heals_through_every_tier_in_one_
 
     drop_scratch(&client, db).await;
 }
+
+/// Rows each reconciliation view's LAST refresh wrote, from
+/// `system.view_refreshes`, bottom-up. Read right after [`drive_reconcile_pass`]
+/// (which proves every view's last refresh is that pass), so this is what the
+/// pass itself appended. The fast MVs keep firing on their real schedule, so a
+/// target's row count cannot measure a pass; this can.
+async fn reconcile_written(client: &Client, db: &str) -> Vec<(String, u64)> {
+    let mut written = Vec::new();
+    for view in live_reconcile_views(client, db).await {
+        let rows: u64 = client
+            .query(&format!(
+                "SELECT written_rows FROM system.view_refreshes \
+                 WHERE database = '{db}' AND view = '{view}'"
+            ))
+            .fetch_one()
+            .await
+            .unwrap_or_else(|e| panic!("written_rows {view}: {e}"));
+        written.push((view, rows));
+    }
+    written
+}
+
+/// `count()` of `table FINAL` — one row per live bucket.
+async fn tier_rows(client: &Client, db: &str, table: &str) -> u64 {
+    client
+        .query(&format!("SELECT count() FROM {db}.{table} FINAL"))
+        .fetch_one()
+        .await
+        .unwrap_or_else(|e| panic!("rows {table}: {e}"))
+}
+
+/// Re-insert `table FINAL`'s rows matching `filter` at `version + 1`, with the
+/// named columns replaced by `overrides` — the shape both the enrichment
+/// worker (`ch_enrich.rs` `oracle_sql`: USD columns set, `p.version + 1`) and
+/// the coarse sweep write. Returns how many rows it re-inserted.
+async fn reinsert_bumped(
+    client: &Client,
+    db: &str,
+    table: &str,
+    overrides: &[(&str, &str)],
+    filter: &str,
+) -> u64 {
+    let before: u64 = client
+        .query(&format!(
+            "SELECT count() FROM {db}.{table} AS p FINAL WHERE {filter}"
+        ))
+        .fetch_one()
+        .await
+        .expect("rows to bump");
+    let columns = prices_clickhouse::CANDLE_COLUMNS.join(", ");
+    let select = prices_clickhouse::CANDLE_COLUMNS
+        .iter()
+        .map(|c| match overrides.iter().find(|(name, _)| name == c) {
+            Some((_, expr)) => format!("{expr} AS {c}"),
+            None if *c == "version" => "p.version + 1 AS version".to_string(),
+            None => format!("p.{c}"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    client
+        .query(&format!(
+            "INSERT INTO {db}.{table} ({columns}) \
+             SELECT {select} FROM {db}.{table} AS p FINAL WHERE {filter}"
+        ))
+        .execute()
+        .await
+        .unwrap_or_else(|e| panic!("bump {table}: {e}"));
+    before
+}
+
+/// A back-dated hole (three days old, outside every fast window) of two
+/// series over several 15m/1h/4h buckets, ledger-scale versions.
+fn back_dated_hole(now: i64) -> Vec<Seed> {
+    let hole_at = now - 3 * 86_400;
+    let mut hole = Vec::new();
+    for (n, minutes) in [0_i64, 7, 20, 45, 70, 110, 250].into_iter().enumerate() {
+        for asset in [1, 7] {
+            hole.push(Seed {
+                at: hole_at + minutes * 60,
+                asset,
+                trades: 1 + n as u32,
+                version: LEDGER_VERSION + 100 + n as u64,
+            });
+        }
+    }
+    hole
+}
+
+/// Seed [`back_dated_hole`], run ONE pass, and assert it converged every
+/// tier to `_1m FINAL` — the starting point of the idempotency and
+/// enrichment tests. Returns the pass's slot and the converged totals.
+async fn converge_a_back_dated_hole(client: &Client, db: &str) -> (u32, (u64, String)) {
+    let now = now_minute(client).await;
+    insert_1m(client, db, &back_dated_hole(now)).await;
+    let source = tier_totals(client, db, "price_ohlcv_1m").await;
+    assert!(source.0 > 0, "the hole landed in _1m");
+
+    let slot = next_slot(client).await;
+    drive_reconcile_pass(client, db, slot).await;
+    for tier in TIERS {
+        assert_eq!(
+            tier_totals(client, db, tier.target).await,
+            source,
+            "{}: the first pass must converge the tier",
+            tier.target
+        );
+    }
+    (slot, source)
+}
+
+/// 0203 AC 2. `_1m` rows arrive NEWEST event first — a tip, then events
+/// further and further back (three hours, a day, three days, six days) — the
+/// order a stalled ingest back-fills in when it resumes from the tip. The fast
+/// chain runs after every arrival and misses each older event: none lies in
+/// the 15m hop's two-hour window, and the coarser hops only read the tier
+/// below. Two minutes of one old 15m bucket also arrive later-minute-first,
+/// in separate arrivals. Every arrival lies inside the seven-day window. ONE reconcile pass then makes every tier equal
+/// `_1m FINAL`: the reconciliation is keyed on event time, not arrival order.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn arrival_order_reversed_relative_to_event_order_still_converges() {
+    let db = "it_reconcile_reversed";
+    let client = setup(db).await;
+    let now = now_minute(&client).await;
+
+    // Event times (epoch s), one arrival each, NEWEST event first. `old` is a
+    // whole 15m bucket about three days back: its minute 11 arrives BEFORE its
+    // minute 4. The version follows EVENT order (ledger order), so the
+    // late-arriving old events carry the LOWER versions, as a real back-fill
+    // does.
+    let old = (now - 3 * 86_400) / 900 * 900 - 900;
+    let oldest = now - 6 * 86_400;
+    let arrivals: [i64; 6] = [
+        now - 3 * 60,
+        now - 180 * 60,
+        now - 26 * 3_600,
+        old + 11 * 60,
+        old + 4 * 60,
+        oldest,
+    ];
+    assert!(
+        arrivals.windows(2).all(|w| w[0] > w[1]),
+        "arrival order must be strictly newest event first"
+    );
+    let seed = |at: i64, asset: u32| Seed {
+        at,
+        asset,
+        trades: 1 + ((at / 60) % 5) as u32,
+        version: LEDGER_VERSION + ((at - oldest) / 60) as u64,
+    };
+
+    let tip = [seed(arrivals[0], 1), seed(arrivals[0], 7)];
+    let mut fast_sees: Option<(u64, String)> = None;
+    for (i, &at) in arrivals.iter().enumerate() {
+        let rows = [seed(at, 1), seed(at, 7)];
+        insert_1m(&client, db, &rows).await;
+        if i == 0 {
+            // The tip is inside every fast window: the fast chain must carry
+            // it to the top, which proves the drive runs.
+            let totals = tier_totals(&client, db, "price_ohlcv_1m").await;
+            assert_eq!(
+                totals.0,
+                tip.iter().map(|r| u64::from(r.trades)).sum::<u64>()
+            );
+            fast_sees = Some(totals);
+        }
+        drive_fast_chain(&client, db, fast_sees.as_ref().expect("tip first")).await;
+    }
+
+    let source = tier_totals(&client, db, "price_ohlcv_1m").await;
+    let fast_sees = fast_sees.expect("tip totals");
+    assert_ne!(
+        source, fast_sees,
+        "_1m holds the old events the fast path cannot see"
+    );
+    for tier in TIERS {
+        assert_eq!(
+            tier_totals(&client, db, tier.target).await,
+            fast_sees,
+            "{}: the fast path must have missed every old event",
+            tier.target
+        );
+    }
+
+    let slot = next_slot(&client).await;
+    drive_reconcile_pass(&client, db, slot).await;
+
+    for tier in TIERS {
+        assert_eq!(
+            tier_totals(&client, db, tier.target).await,
+            source,
+            "{}: one reconcile pass must converge the tier to _1m FINAL whatever the arrival order",
+            tier.target
+        );
+        assert_eq!(
+            unreconciled(&client, db, &tier).await,
+            0,
+            "{}: nothing left to rewrite",
+            tier.name
+        );
+    }
+
+    drop_scratch(&client, db).await;
+}
+
+/// 0203 AC 3 — the 0202 failure mode — and BRIEF §3.3 on the version scale
+/// ingest really writes. A back-dated hour first holds only a SUBSET of its
+/// minutes, and a reconcile pass rolls that partial into every tier. The
+/// coarse sweep then re-inserts every partial coarse row at `version + 1`.
+/// The missing minutes arrive; ONE pass later every tier's FINAL equals the
+/// complete totals: the complete re-roll's `sum(version)` covers a superset of
+/// the children, so it outranks the bumped partial by a ledger-scale margin
+/// (a `+1` bump could only tie it with toy versions).
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_partial_bucket_completed_later_is_rebuilt_even_after_a_sweep_bump() {
+    let db = "it_reconcile_partial";
+    let client = setup(db).await;
+    let now = now_minute(&client).await;
+    let hour = (now - 3 * 86_400) / 3_600 * 3_600;
+
+    // Present now: minutes 0 and 5 (15m bucket :00) and 20 (bucket :15).
+    // Late: 10 (bucket :00), 25 (bucket :15) and 50 (a new bucket :45, same
+    // hour). Every tier from 15m up therefore holds a partial that the late
+    // minutes complete — some as a changed bucket, one as a new one.
+    let at = |minute: i64, asset: u32, n: u64| Seed {
+        at: hour + minute * 60,
+        asset,
+        trades: 1 + n as u32,
+        version: LEDGER_VERSION + 10 * n + u64::from(asset),
+    };
+    let present: Vec<Seed> = [(0, 0), (5, 1), (20, 2)]
+        .into_iter()
+        .flat_map(|(m, n)| [at(m, 1, n), at(m, 7, n)])
+        .collect();
+    let late: Vec<Seed> = [(10, 3), (25, 4), (50, 5)]
+        .into_iter()
+        .flat_map(|(m, n)| [at(m, 1, n), at(m, 7, n)])
+        .collect();
+
+    insert_1m(&client, db, &present).await;
+    let partial = tier_totals(&client, db, "price_ohlcv_1m").await;
+    let slot = next_slot(&client).await;
+    drive_reconcile_pass(&client, db, slot).await;
+    for tier in TIERS {
+        assert_eq!(
+            tier_totals(&client, db, tier.target).await,
+            partial,
+            "{}: the first pass must roll the PARTIAL hour into the tier",
+            tier.target
+        );
+    }
+
+    // The coarse sweep's `+1` on every partial coarse row.
+    for tier in TIERS {
+        let before: u64 = client
+            .query(&format!(
+                "SELECT max(version) FROM {db}.{} FINAL",
+                tier.target
+            ))
+            .fetch_one()
+            .await
+            .expect("version before bump");
+        let bumped = reinsert_bumped(&client, db, tier.target, &[], "1").await;
+        assert!(bumped > 0, "{}: the sweep bump found rows", tier.target);
+        let after: u64 = client
+            .query(&format!(
+                "SELECT max(version) FROM {db}.{} FINAL",
+                tier.target
+            ))
+            .fetch_one()
+            .await
+            .expect("version after bump");
+        assert_eq!(after, before + 1, "{}: the bump landed", tier.target);
+    }
+
+    insert_1m(&client, db, &late).await;
+    let complete = tier_totals(&client, db, "price_ohlcv_1m").await;
+    assert_ne!(complete, partial, "the late minutes changed the source");
+
+    drive_reconcile_pass(&client, db, slot + 3_600).await;
+    for tier in TIERS {
+        assert_eq!(
+            tier_totals(&client, db, tier.target).await,
+            complete,
+            "{}: the complete re-roll must beat the bumped partial",
+            tier.target
+        );
+        assert_eq!(
+            unreconciled(&client, db, &tier).await,
+            0,
+            "{}: nothing left to rewrite",
+            tier.name
+        );
+    }
+
+    drop_scratch(&client, db).await;
+}
+
+/// A pass with nothing to repair writes NOTHING. After a converging pass the
+/// next one appends 0 rows in every reconciliation view (`written_rows` of
+/// each view's last refresh), and the totals do not move. Without this an
+/// hourly backstop would re-append seven days of buckets every hour.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_second_reconcile_pass_with_no_change_writes_nothing() {
+    let db = "it_reconcile_idempotent";
+    let client = setup(db).await;
+    let (slot, source) = converge_a_back_dated_hole(&client, db).await;
+
+    // The reading method is live: the converging pass wrote in all six.
+    let first = reconcile_written(&client, db).await;
+    assert_eq!(first.len(), 6, "six reconciliation views: {first:?}");
+    for (view, rows) in &first {
+        assert!(*rows > 0, "{view}: the converging pass wrote rows");
+    }
+
+    drive_reconcile_pass(&client, db, slot + 3_600).await;
+    let second = reconcile_written(&client, db).await;
+    assert_eq!(second.len(), 6);
+    for (view, rows) in &second {
+        assert_eq!(
+            *rows, 0,
+            "{view}: a pass with nothing to repair must append nothing ({second:?})"
+        );
+    }
+    for tier in TIERS {
+        assert_eq!(
+            tier_totals(&client, db, tier.target).await,
+            source,
+            "{}: unchanged",
+            tier.target
+        );
+    }
+
+    drop_scratch(&client, db).await;
+}
+
+/// Enrichment re-inserts a `_1m` child at `version + 1` with only its USD
+/// columns set (`ch_enrich.rs`). That changes neither `trade_count` nor
+/// `volume_base`, so the reconciliation must neither rebuild the bucket
+/// (which a version comparison would do, every time a price lands) nor lose
+/// it: the next pass writes 0 rows in all six views and every tier keeps its
+/// buckets and totals.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn an_enrichment_version_bump_causes_no_rebuild_and_loses_no_bucket() {
+    let db = "it_reconcile_enrichment";
+    let client = setup(db).await;
+    let (slot, source) = converge_a_back_dated_hole(&client, db).await;
+
+    let mut rows_before = Vec::new();
+    for tier in TIERS {
+        rows_before.push(tier_rows(&client, db, tier.target).await);
+    }
+
+    // Enrich ONE child: the earliest minute of asset 7.
+    let child: (u32, u64) = client
+        .query(&format!(
+            "SELECT toUInt32(toUnixTimestamp(min(timestamp))), argMin(version, timestamp) \
+             FROM {db}.price_ohlcv_1m FINAL WHERE asset_id = 7"
+        ))
+        .fetch_one()
+        .await
+        .expect("child to enrich");
+    let filter = format!("p.asset_id = 7 AND p.timestamp = toDateTime({})", child.0);
+    let bumped = reinsert_bumped(
+        &client,
+        db,
+        "price_ohlcv_1m",
+        &[
+            ("close_usd", "p.close"),
+            ("volume_quote_usd", "p.volume_quote"),
+        ],
+        &filter,
+    )
+    .await;
+    assert_eq!(bumped, 1, "exactly one child enriched");
+    let enriched: (u64, String) = client
+        .query(&format!(
+            "SELECT version, toString(close_usd) FROM {db}.price_ohlcv_1m AS p FINAL WHERE {filter}"
+        ))
+        .fetch_one()
+        .await
+        .expect("enriched child");
+    assert_eq!(enriched.0, child.1 + 1, "the child now wins at version + 1");
+    assert_ne!(enriched.1, "0", "and carries a USD close");
+    assert_eq!(
+        tier_totals(&client, db, "price_ohlcv_1m").await,
+        source,
+        "enrichment leaves the counted columns alone"
+    );
+
+    drive_reconcile_pass(&client, db, slot + 3_600).await;
+    let written = reconcile_written(&client, db).await;
+    assert_eq!(written.len(), 6);
+    for (view, rows) in &written {
+        assert_eq!(
+            *rows, 0,
+            "{view}: an enrichment bump must not trigger a rebuild ({written:?})"
+        );
+    }
+    for (tier, before) in TIERS.iter().zip(rows_before) {
+        assert_eq!(
+            tier_rows(&client, db, tier.target).await,
+            before,
+            "{}: no bucket lost or added",
+            tier.target
+        );
+        assert_eq!(
+            tier_totals(&client, db, tier.target).await,
+            source,
+            "{}: totals unchanged",
+            tier.target
+        );
+    }
+
+    drop_scratch(&client, db).await;
+}
