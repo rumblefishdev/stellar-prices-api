@@ -879,6 +879,36 @@ mod tests {
         );
     }
 
+    /// Tasks 0143 + 0203 (BRIEF §6): the five fast dependents gain `DEPENDS ON`
+    /// in place, by hand, with `ALTER TABLE … MODIFY REFRESH`. That statement
+    /// REPLACES every refresh parameter, so a runbook copy that drifts from the
+    /// generator (a missing `DEPENDS ON`, a wrong dependency, a changed cadence)
+    /// would silently land the wrong chain on prod. Read at test time, so an
+    /// edit to either side without the other fails here.
+    #[test]
+    fn the_reapply_runbook_quotes_every_generated_modify_refresh_statement() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/runbooks/0142-rollup-mv-reapply.md");
+        let runbook = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+
+        let statements: Vec<String> = rollup_sql::TIERS
+            .iter()
+            .filter_map(|t| {
+                rollup_sql::mv_modify_refresh(t, PROD_DATABASE).expect("a checked rendering")
+            })
+            .collect();
+        assert_eq!(statements.len(), 5, "guard is vacuous without the five dependents");
+
+        for stmt in &statements {
+            assert!(
+                runbook.contains(stmt.as_str()),
+                "docs/runbooks/0142-rollup-mv-reapply.md must quote the generated \
+                 rollout statement verbatim — copy it from here:\n{stmt};"
+            );
+        }
+    }
+
     /// `close_usd` is baked by a separate, lagging enrichment pass onto a
     /// non-nullable `Decimal(38,14) DEFAULT 0` column, so an unguarded
     /// `argMax(close_usd, t.timestamp)` hands a coarse bucket a fabricated zero
