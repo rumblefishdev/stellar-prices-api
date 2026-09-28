@@ -2,7 +2,7 @@
 id: "0203"
 title: "Rollups should self-heal by comparing event-time completeness against the source, instead of trusting a 2-hour clock window"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0202", "0142", "0137", "0095", "0200", "0111", "0064"]
 tags:
@@ -21,6 +21,18 @@ history:
       from now(). Operator proposed resuming from where the output stops rather
       than from the clock; refined to comparing event-time completeness against
       the source, which is the only form immune to out-of-order arrival.
+  - date: "2026-09-28"
+    status: active
+    who: akot
+    note: >
+      Activated together with [[0143]], one branch and one PR (Adam,
+      2026-09-28). Decisions: reconciliation MVs in ClickHouse, one per tier,
+      compare source vs target per (asset, quote, source, bucket) on
+      sum(trade_count) and volume — not version — and append only disagreeing
+      buckets; default window 7 days, cadence 1 hour (parameters); chained
+      with DEPENDS ON. Mismatch-count metric + alarm in
+      rollup-freshness-probe. New ADR. Implementation via /gsd-quick --full.
+      Deploy after 0286 phase 3 via the 0142 runbook.
 ---
 
 # Rollups self-heal by event-time completeness, not by a clock window
