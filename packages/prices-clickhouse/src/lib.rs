@@ -913,6 +913,122 @@ mod tests {
         }
     }
 
+    /// Read a runbook under `docs/runbooks/` at test time.
+    fn runbook(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/runbooks")
+            .join(name);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
+    /// Byte offsets of each needle in `haystack`, asserting each occurs
+    /// exactly once — so an order check below compares real positions.
+    fn positions(haystack: &str, file: &str, needles: &[String]) -> Vec<usize> {
+        needles
+            .iter()
+            .map(|n| {
+                assert_eq!(
+                    haystack.matches(n.as_str()).count(),
+                    1,
+                    "docs/runbooks/{file} must quote this generated statement exactly \
+                     once — copy it from here:\n{n}"
+                );
+                haystack.find(n.as_str()).expect("counted above")
+            })
+            .collect()
+    }
+
+    /// Review IN-02: the ROLLBACK side of runbook 0142 §6 — the five
+    /// `MODIFY REFRESH` clauses WITHOUT `DEPENDS ON` — is the generated
+    /// forward clause with its dependency removed, dailies first (the reverse
+    /// of the rollout). A cadence change in the generator would otherwise
+    /// leave a rollback that silently lands a stale cadence.
+    #[test]
+    fn the_reapply_runbook_rollback_is_the_generated_clause_without_depends_on() {
+        let text = runbook("0142-rollup-mv-reapply.md");
+        let rollback: Vec<String> = rollup_sql::TIERS
+            .iter()
+            .rev()
+            .filter_map(|t| {
+                rollup_sql::mv_modify_refresh(t, PROD_DATABASE).expect("a checked rendering")
+            })
+            .map(|forward| {
+                let (head, tail) = forward
+                    .split_once(" DEPENDS ON ")
+                    .expect("every dependent's clause declares its dependency");
+                let (_dependency, rest) = tail.split_once(' ').expect("a clause after the name");
+                format!("{head} {rest};")
+            })
+            .collect();
+        assert_eq!(
+            rollback.len(),
+            5,
+            "guard is vacuous without the five dependents"
+        );
+        for stmt in &rollback {
+            assert!(
+                !stmt.contains("DEPENDS ON") && stmt.ends_with(" APPEND;"),
+                "{stmt}"
+            );
+        }
+        let at = positions(&text, "0142-rollup-mv-reapply.md", &rollback);
+        assert!(
+            at.windows(2).all(|w| w[0] < w[1]),
+            "runbook 0142's rollback must take the dependencies off the dailies first, \
+             in this order:\n{}",
+            rollback.join("\n")
+        );
+    }
+
+    /// Review IN-02: every hand-typed list of the reconcile MVs names exactly
+    /// the six the generator declares — the runbook 0142 §6 DROPs (coarse to
+    /// fine) and the re-ingest STOP (§1a) / START (§7f) lists. A renamed
+    /// `reconcile_mv` would otherwise leave an operator a statement naming a
+    /// view that does not exist, or miss one that does.
+    #[test]
+    fn the_runbooks_name_exactly_the_generated_reconcile_mvs() {
+        let names: Vec<&str> = rollup_sql::TIERS.iter().map(|t| t.reconcile_mv).collect();
+        assert_eq!(
+            names.len(),
+            6,
+            "guard is vacuous without the six reconcile MVs"
+        );
+
+        let reapply = runbook("0142-rollup-mv-reapply.md");
+        let drops: Vec<String> = names
+            .iter()
+            .rev()
+            .map(|n| format!("DROP VIEW {PROD_DATABASE}.{n};"))
+            .collect();
+        let at = positions(&reapply, "0142-rollup-mv-reapply.md", &drops);
+        assert!(
+            at.windows(2).all(|w| w[0] < w[1]),
+            "runbook 0142 must drop the reconcile MVs coarse to fine:\n{}",
+            drops.join("\n")
+        );
+        assert_eq!(
+            reapply.matches("DROP VIEW prices.mv_reconcile_").count(),
+            6,
+            "no DROP of a reconcile MV the generator does not declare"
+        );
+
+        let reingest = runbook("0286-reingest-history.md");
+        for verb in ["STOP", "START"] {
+            let stmts: Vec<String> = names
+                .iter()
+                .map(|n| format!("SYSTEM {verb} VIEW {PROD_DATABASE}.{n};"))
+                .collect();
+            positions(&reingest, "0286-reingest-history.md", &stmts);
+            assert_eq!(
+                reingest
+                    .matches(&format!("SYSTEM {verb} VIEW prices.mv_reconcile_"))
+                    .count(),
+                6,
+                "no {verb} of a reconcile MV the generator does not declare"
+            );
+        }
+    }
+
     /// `close_usd` is baked by a separate, lagging enrichment pass onto a
     /// non-nullable `Decimal(38,14) DEFAULT 0` column, so an unguarded
     /// `argMax(close_usd, t.timestamp)` hands a coarse bucket a fabricated zero
