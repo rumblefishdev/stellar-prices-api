@@ -2,7 +2,7 @@
 id: "0311"
 title: "Five usage plans (free + Basic/Analyst/Lite/Pro), and the dashboard states the limits and usage of the key's own plan"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0157", "0180", "0187", "0188", "0191", "0193", "0293", "0307"]
 tags: ["portal", "self-onboarding", "api-gateway", "usage-plans", "effort-medium", "priority-medium"]
@@ -67,6 +67,16 @@ history:
       zero SSM reads and no alarm. Sign-in and dashboard tested live with
       the key moved free → Basic → Pro → free (restored to Lite). PR #351
       pushed at 0e0deb8e.
+  - date: "2026-09-28"
+    status: completed
+    who: akot
+    note: >
+      Closed. The PR review found a 409 attach read back via plan_of, which
+      could end ?issue=failed under GetUsagePlans lag; fixed in 1a8aac96
+      (409 settles as on-plan, plan_of only for the 400 refusal). Approved,
+      deployed, PR #351 merged to develop as 5df6e2db. 8 of 9 criteria met;
+      the rework criterion stays open as unit-tested only (live half skipped
+      by Adam's decision 2026-09-25). No follow-up tasks (decision 10).
 ---
 
 # Five usage plans, and the dashboard states the key's own plan
