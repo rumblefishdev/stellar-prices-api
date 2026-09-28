@@ -628,8 +628,9 @@ mod tests {
     }
 
     #[test]
-    fn rollups_and_preroll_each_have_six_statements() {
-        assert_eq!(split_statements(ROLLUPS_SQL).len(), 6);
+    fn rollups_has_twelve_statements_and_preroll_six() {
+        // Six fast MVs, then six reconciliation MVs (task 0203).
+        assert_eq!(split_statements(ROLLUPS_SQL).len(), 12);
         assert_eq!(split_statements(PREROLL_SQL).len(), 6);
     }
 
@@ -846,7 +847,7 @@ mod tests {
     #[test]
     fn rollups_sql_keeps_if_not_exists_and_references_the_reapply_runbook() {
         let stmts = split_statements(ROLLUPS_SQL);
-        assert_eq!(stmts.len(), 6, "guard is vacuous if the file is empty");
+        assert_eq!(stmts.len(), 12, "guard is vacuous if the file is empty");
 
         for stmt in &stmts {
             let head: String = stmt.chars().take(80).collect();
@@ -1125,15 +1126,70 @@ mod tests {
     }
 
     #[test]
-    fn rollups_sql_is_exactly_the_generators_six_mv_ddls() {
-        assert_generated(
-            "rollups.sql",
-            ROLLUPS_SQL,
-            rollup_sql::TIERS
-                .iter()
-                .map(|t| rollup_sql::mv_ddl(t, PROD_DATABASE).expect("a checked rendering"))
-                .collect(),
-        );
+    fn rollups_sql_is_exactly_the_generators_fast_then_reconcile_ddls() {
+        let fast = rollup_sql::TIERS
+            .iter()
+            .map(|t| rollup_sql::mv_ddl(t, PROD_DATABASE).expect("a checked rendering"));
+        let reconcile = rollup_sql::TIERS
+            .iter()
+            .map(|t| rollup_sql::reconcile_mv_ddl(t, PROD_DATABASE).expect("a checked rendering"));
+        assert_generated("rollups.sql", ROLLUPS_SQL, fast.chain(reconcile).collect());
+    }
+
+    /// Tasks 0143 + 0203: each shipped statement's REFRESH line waits for
+    /// exactly the MV `rollup_sql::dependency` implies — a fast MV for the MV
+    /// writing its child, a reconcile MV for the reconcile MV of its child —
+    /// and the cadence is the tier's own, or `RECONCILE_REFRESH`, verbatim.
+    /// Spelled from the raw file, so a hand edit of one line is caught even if
+    /// the generator comparison were ever loosened.
+    #[test]
+    fn every_shipped_rollup_statement_declares_the_dependency_its_tier_implies() {
+        let stmts = split_statements(ROLLUPS_SQL);
+        assert_eq!(stmts.len(), 12);
+        let (fast, reconcile) = stmts.split_at(6);
+        for (tier, (f, r)) in rollup_sql::TIERS.iter().zip(fast.iter().zip(reconcile)) {
+            let dep = rollup_sql::dependency(tier);
+            let refresh_line = |stmt: &str| {
+                stmt.lines()
+                    .find(|l| l.starts_with("REFRESH "))
+                    .expect("a REFRESH line")
+                    .to_string()
+            };
+
+            assert!(f.contains(&format!("EXISTS prices.{}\n", tier.mv)));
+            assert_eq!(
+                refresh_line(f),
+                match dep {
+                    Some(d) =>
+                        format!("REFRESH {} DEPENDS ON prices.{} APPEND", tier.refresh, d.mv),
+                    None => format!("REFRESH {} APPEND", tier.refresh),
+                },
+                "{}",
+                tier.mv
+            );
+
+            assert!(r.contains(&format!("EXISTS prices.{}\n", tier.reconcile_mv)));
+            assert_eq!(
+                refresh_line(r),
+                match dep {
+                    Some(d) => format!(
+                        "REFRESH {} DEPENDS ON prices.{} APPEND",
+                        rollup_sql::RECONCILE_REFRESH,
+                        d.reconcile_mv
+                    ),
+                    None => format!("REFRESH {} APPEND", rollup_sql::RECONCILE_REFRESH),
+                },
+                "{}",
+                tier.reconcile_mv
+            );
+            assert_eq!(
+                r.matches(&format!("now() - {}", rollup_sql::RECONCILE_WINDOW))
+                    .count(),
+                2,
+                "{}: the window comes from RECONCILE_WINDOW, on both sides",
+                tier.reconcile_mv
+            );
+        }
     }
 
     #[test]
@@ -1186,7 +1242,7 @@ mod tests {
     #[test]
     fn rollups_sql_respects_the_drift_detectors_file_constraints() {
         let stmts = split_statements(ROLLUPS_SQL);
-        assert_eq!(stmts.len(), 6);
+        assert_eq!(stmts.len(), 12);
         for stmt in &stmts {
             assert!(
                 stmt.starts_with("CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_"),
@@ -1209,12 +1265,13 @@ mod tests {
             .next()
             .expect("header");
         for tier in rollup_sql::TIERS {
-            assert!(
-                !header.contains(tier.mv),
-                "the header must not name {} — the per-statement lookups in \
-                 rollup_drift_it.rs would match the comment block",
-                tier.mv
-            );
+            for mv in [tier.mv, tier.reconcile_mv] {
+                assert!(
+                    !header.contains(mv),
+                    "the header must not name {mv} — the per-statement lookups in \
+                     rollup_drift_it.rs would match the comment block",
+                );
+            }
         }
         assert!(
             !header.contains(';'),

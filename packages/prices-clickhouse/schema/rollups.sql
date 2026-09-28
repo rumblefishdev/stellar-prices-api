@@ -1,7 +1,9 @@
 -- prices rollup chain — PRODUCTION refreshable MV design (task 0051/0059/0095).
 --
 -- ⚠️ GENERATED. Every statement below is rendered by
--- `src/rollup_sql.rs::mv_ddl`, and unit tests in `src/lib.rs` assert this file
+-- `src/rollup_sql.rs` — the six fast MVs by `mv_ddl`, then the six
+-- reconciliation MVs by `reconcile_mv_ddl`, each group fine to coarse — and
+-- unit tests in `src/lib.rs` assert this file
 -- equals that rendering whitespace-normalised. Edit the generator, re-render,
 -- and commit both — an edit made here alone fails the build, and an edit made
 -- there alone leaves the operator copy and the drift detector reading stale SQL.
@@ -13,7 +15,7 @@
 -- ⚠️ EDITING A BODY BELOW DOES NOT LAND ON A PROVISIONED TARGET (task 0142).
 --   Every statement here is `CREATE MATERIALIZED VIEW IF NOT EXISTS`, and
 --   `IF NOT EXISTS` does not redefine an object that already exists. On
---   ch-prod-01 — which holds all six — re-applying this file after an edit
+--   ch-prod-01 — which holds all of them — re-applying this file after an edit
 --   changes NOTHING and reports success. Unlike the plain views in views.sql
 --   (task 0134) there is no `CREATE OR REPLACE` escape: a refreshable TO-table
 --   MV must be DROPped and re-CREATEd, which takes that tier offline while it
@@ -34,10 +36,11 @@
 --   It is read-only (SELECTs against system.tables only) and exits non-zero on
 --   drift. Run it after any edit here, and after any re-CREATE.
 --
--- These MVs serve the LIVE path only: each re-aggregates a bounded recent
+-- The six FAST MVs serve the LIVE path: each re-aggregates a bounded recent
 -- window from the previous granularity's FINAL (post-dedup, post-enrichment)
 -- and APPENDs the result. Historical/backfilled partitions fall outside the
--- window and are pre-rolled instead (see preroll.sql).
+-- window and are pre-rolled instead (see preroll.sql). The six RECONCILIATION
+-- MVs after them repair what the fast windows missed (below).
 --
 -- WHAT A COARSE CANDLE MEANS (task 0286 / ADR 0287 §2–§5).
 --   A candle's prices come only from the PRICE-FORMING trades of its own
@@ -101,6 +104,28 @@
 --   error, which is why the freshness probe watches that status. A live MV is
 --   moved onto this clause in place with `ALTER TABLE … MODIFY REFRESH`, which
 --   must repeat the whole clause (see the 0142 runbook).
+--
+-- AN HOURLY RECONCILIATION PASS REBUILDS ANY BUCKET THAT DISAGREES (task 0203).
+--   The fast windows are measured from now(), so they slide forward with the
+--   clock: a source row that arrives after its bucket left the window (a
+--   stalled ingest catching up, 2026-08-13) was never rolled up, and a bucket
+--   built from part of its children stayed partial for good. Every coarse
+--   tier therefore has a second writer, refreshed hourly. It rolls the tier's
+--   source over the last 7 days, aligned to the tier's bucket, with the SAME
+--   aggregation as the fast MV, and appends ONLY the buckets whose
+--   `trade_count` or `volume_base` differ from what the target holds FINAL
+--   (or that the target lacks). It never compares `version`: enrichment and
+--   the coarse sweep bump versions without changing completeness. The
+--   appended row wins because its `sum(version)` covers more children than
+--   the stale row did. The pass selects buckets by EVENT time, so arrival
+--   order does not matter, and it is idempotent: a bucket that agrees is not
+--   written. Each reconciliation MV waits for the one reading the tier below
+--   it, so a repair climbs every tier in one pass. The lowest waits for
+--   nothing, and no fast MV ever waits for a reconciliation MV, so the
+--   backstop cannot delay fresh data. Window and cadence live in the
+--   generator, once. An outage longer than 7 days still needs
+--   schema/preroll-live-gap.sql, and a re-ingest must STOP the reconciliation
+--   MVs first (runbook 0142 and the re-ingest runbooks).
 --
 -- DEPLOY ORDER, NOT NEGOTIABLE (task 0286 / BRIEF §4.9; the same statement is
 --   in schema/init.sql): schema → enrichment + coarse sweep + prices-api → the
@@ -321,5 +346,215 @@ SELECT
     sum(t.pf_price_volume) AS pf_price_volume
 FROM prices.price_ohlcv_1d AS t FINAL
 WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 400 DAY, INTERVAL 1 MONTH)
+GROUP BY timestamp, asset_id, quote_asset_id, source;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_reconcile_1m_to_15m
+REFRESH EVERY 1 HOUR APPEND
+TO prices.price_ohlcv_15m AS
+SELECT
+    timestamp, asset_id, quote_asset_id, source, open, high,
+    low, close, volume_base, volume_quote, volume_quote_usd, close_usd,
+    vwap, trade_count, version, pf_trade_count, pf_volume, pf_price_volume
+FROM (
+SELECT
+    toStartOfInterval(t.timestamp, INTERVAL 15 MINUTE) AS timestamp,
+    asset_id, quote_asset_id, source,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS high,
+    minIf(t.low, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS close,
+    sum(t.volume_base) AS volume_base,
+    sum(t.volume_quote) AS volume_quote,
+    sum(t.volume_quote_usd) AS volume_quote_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd >= toDecimal128('0.000000000001', 14) AND t.close >= toDecimal128('0.000000000001', 14))), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
+    sum(t.trade_count) AS trade_count,
+    sum(t.version) AS version,
+    sum(t.pf_trade_count) AS pf_trade_count,
+    sum(t.pf_volume) AS pf_volume,
+    sum(t.pf_price_volume) AS pf_price_volume
+FROM prices.price_ohlcv_1m AS t FINAL
+WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 15 MINUTE)
 GROUP BY timestamp, asset_id, quote_asset_id, source
+) AS s
+WHERE (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
+    SELECT d.timestamp, d.asset_id, d.quote_asset_id, d.source, d.trade_count, d.volume_base
+    FROM prices.price_ohlcv_15m AS d FINAL
+    WHERE d.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 15 MINUTE)
+);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_reconcile_15m_to_1h
+REFRESH EVERY 1 HOUR DEPENDS ON prices.mv_reconcile_1m_to_15m APPEND
+TO prices.price_ohlcv_1h AS
+SELECT
+    timestamp, asset_id, quote_asset_id, source, open, high,
+    low, close, volume_base, volume_quote, volume_quote_usd, close_usd,
+    vwap, trade_count, version, pf_trade_count, pf_volume, pf_price_volume
+FROM (
+SELECT
+    toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+    asset_id, quote_asset_id, source,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS high,
+    minIf(t.low, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS close,
+    sum(t.volume_base) AS volume_base,
+    sum(t.volume_quote) AS volume_quote,
+    sum(t.volume_quote_usd) AS volume_quote_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd >= toDecimal128('0.000000000001', 14) AND t.close >= toDecimal128('0.000000000001', 14))), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
+    sum(t.trade_count) AS trade_count,
+    sum(t.version) AS version,
+    sum(t.pf_trade_count) AS pf_trade_count,
+    sum(t.pf_volume) AS pf_volume,
+    sum(t.pf_price_volume) AS pf_price_volume
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 HOUR)
+GROUP BY timestamp, asset_id, quote_asset_id, source
+) AS s
+WHERE (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
+    SELECT d.timestamp, d.asset_id, d.quote_asset_id, d.source, d.trade_count, d.volume_base
+    FROM prices.price_ohlcv_1h AS d FINAL
+    WHERE d.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 HOUR)
+);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_reconcile_1h_to_4h
+REFRESH EVERY 1 HOUR DEPENDS ON prices.mv_reconcile_15m_to_1h APPEND
+TO prices.price_ohlcv_4h AS
+SELECT
+    timestamp, asset_id, quote_asset_id, source, open, high,
+    low, close, volume_base, volume_quote, volume_quote_usd, close_usd,
+    vwap, trade_count, version, pf_trade_count, pf_volume, pf_price_volume
+FROM (
+SELECT
+    toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+    asset_id, quote_asset_id, source,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS high,
+    minIf(t.low, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS close,
+    sum(t.volume_base) AS volume_base,
+    sum(t.volume_quote) AS volume_quote,
+    sum(t.volume_quote_usd) AS volume_quote_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd >= toDecimal128('0.000000000001', 14) AND t.close >= toDecimal128('0.000000000001', 14))), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
+    sum(t.trade_count) AS trade_count,
+    sum(t.version) AS version,
+    sum(t.pf_trade_count) AS pf_trade_count,
+    sum(t.pf_volume) AS pf_volume,
+    sum(t.pf_price_volume) AS pf_price_volume
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 4 HOUR)
+GROUP BY timestamp, asset_id, quote_asset_id, source
+) AS s
+WHERE (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
+    SELECT d.timestamp, d.asset_id, d.quote_asset_id, d.source, d.trade_count, d.volume_base
+    FROM prices.price_ohlcv_4h AS d FINAL
+    WHERE d.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 4 HOUR)
+);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_reconcile_4h_to_1d
+REFRESH EVERY 1 HOUR DEPENDS ON prices.mv_reconcile_1h_to_4h APPEND
+TO prices.price_ohlcv_1d AS
+SELECT
+    timestamp, asset_id, quote_asset_id, source, open, high,
+    low, close, volume_base, volume_quote, volume_quote_usd, close_usd,
+    vwap, trade_count, version, pf_trade_count, pf_volume, pf_price_volume
+FROM (
+SELECT
+    toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+    asset_id, quote_asset_id, source,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS high,
+    minIf(t.low, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS close,
+    sum(t.volume_base) AS volume_base,
+    sum(t.volume_quote) AS volume_quote,
+    sum(t.volume_quote_usd) AS volume_quote_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd >= toDecimal128('0.000000000001', 14) AND t.close >= toDecimal128('0.000000000001', 14))), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
+    sum(t.trade_count) AS trade_count,
+    sum(t.version) AS version,
+    sum(t.pf_trade_count) AS pf_trade_count,
+    sum(t.pf_volume) AS pf_volume,
+    sum(t.pf_price_volume) AS pf_price_volume
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 DAY)
+GROUP BY timestamp, asset_id, quote_asset_id, source
+) AS s
+WHERE (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
+    SELECT d.timestamp, d.asset_id, d.quote_asset_id, d.source, d.trade_count, d.volume_base
+    FROM prices.price_ohlcv_1d AS d FINAL
+    WHERE d.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 DAY)
+);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_reconcile_1d_to_1w
+REFRESH EVERY 1 HOUR DEPENDS ON prices.mv_reconcile_4h_to_1d APPEND
+TO prices.price_ohlcv_1w AS
+SELECT
+    timestamp, asset_id, quote_asset_id, source, open, high,
+    low, close, volume_base, volume_quote, volume_quote_usd, close_usd,
+    vwap, trade_count, version, pf_trade_count, pf_volume, pf_price_volume
+FROM (
+SELECT
+    toStartOfInterval(t.timestamp, INTERVAL 1 WEEK) AS timestamp,
+    asset_id, quote_asset_id, source,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS high,
+    minIf(t.low, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS close,
+    sum(t.volume_base) AS volume_base,
+    sum(t.volume_quote) AS volume_quote,
+    sum(t.volume_quote_usd) AS volume_quote_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd >= toDecimal128('0.000000000001', 14) AND t.close >= toDecimal128('0.000000000001', 14))), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
+    sum(t.trade_count) AS trade_count,
+    sum(t.version) AS version,
+    sum(t.pf_trade_count) AS pf_trade_count,
+    sum(t.pf_volume) AS pf_volume,
+    sum(t.pf_price_volume) AS pf_price_volume
+FROM prices.price_ohlcv_1d AS t FINAL
+WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 WEEK)
+GROUP BY timestamp, asset_id, quote_asset_id, source
+) AS s
+WHERE (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
+    SELECT d.timestamp, d.asset_id, d.quote_asset_id, d.source, d.trade_count, d.volume_base
+    FROM prices.price_ohlcv_1w AS d FINAL
+    WHERE d.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 WEEK)
+);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_reconcile_1d_to_1M
+REFRESH EVERY 1 HOUR DEPENDS ON prices.mv_reconcile_4h_to_1d APPEND
+TO prices.price_ohlcv_1M AS
+SELECT
+    timestamp, asset_id, quote_asset_id, source, open, high,
+    low, close, volume_base, volume_quote, volume_quote_usd, close_usd,
+    vwap, trade_count, version, pf_trade_count, pf_volume, pf_price_volume
+FROM (
+SELECT
+    toStartOfInterval(t.timestamp, INTERVAL 1 MONTH) AS timestamp,
+    asset_id, quote_asset_id, source,
+    argMinIf(t.open, t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS open,
+    maxIf(t.high, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS high,
+    minIf(t.low, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS low,
+    argMaxIf(t.close, t.timestamp, t.pf_trade_count > 0 AND t.close >= toDecimal128('0.000000000001', 14)) AS close,
+    sum(t.volume_base) AS volume_base,
+    sum(t.volume_quote) AS volume_quote,
+    sum(t.volume_quote_usd) AS volume_quote_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(close) * argMaxIf(toFloat64(t.close_usd) / toFloat64(t.close), t.timestamp, t.close_usd >= toDecimal128('0.000000000001', 14) AND t.close >= toDecimal128('0.000000000001', 14))), 14), 0) AS close_usd,
+    ifNull(toDecimal128OrZero(toString(toFloat64(volume_quote) / nullIf(toFloat64(volume_base), 0)), 14), toDecimal128(0, 14)) AS vwap,
+    sum(t.trade_count) AS trade_count,
+    sum(t.version) AS version,
+    sum(t.pf_trade_count) AS pf_trade_count,
+    sum(t.pf_volume) AS pf_volume,
+    sum(t.pf_price_volume) AS pf_price_volume
+FROM prices.price_ohlcv_1d AS t FINAL
+WHERE t.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 MONTH)
+GROUP BY timestamp, asset_id, quote_asset_id, source
+) AS s
+WHERE (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (
+    SELECT d.timestamp, d.asset_id, d.quote_asset_id, d.source, d.trade_count, d.volume_base
+    FROM prices.price_ohlcv_1M AS d FINAL
+    WHERE d.timestamp >= toStartOfInterval(now() - INTERVAL 7 DAY, INTERVAL 1 MONTH)
+)
 ;

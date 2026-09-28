@@ -108,7 +108,9 @@ async fn a_freshly_applied_chain_reports_no_drift() {
         .await
         .unwrap();
 
-    assert_eq!(reports.len(), 6, "all six MVs must be reported");
+    // Six fast MVs and six reconciliation MVs (task 0203). Two declared writers
+    // per coarse target are normal: neither is `Undeclared`.
+    assert_eq!(reports.len(), 12, "all twelve MVs must be reported");
     for report in &reports {
         assert_eq!(
             report.status,
@@ -165,8 +167,9 @@ async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops
     );
     assert_eq!(
         edited.matches(&narrowed).count(),
-        6,
-        "the edit must reach every MV in the chain"
+        12,
+        "the edit must reach every MV in the chain — the six fast MVs and the \
+         six reconciliation MVs share the one rollup body"
     );
 
     // Re-apply the EDITED file, exactly as an unwitting operator would.
@@ -194,7 +197,7 @@ async fn an_edited_body_is_reported_as_drift_because_the_reapply_silently_no_ops
     // The check compares the file to the target, so the edited file is the
     // source of truth here — the same input the operator just applied.
     let reports = check_mv_drift(&client, db, &edited).await.unwrap();
-    assert_eq!(reports.len(), 6);
+    assert_eq!(reports.len(), 12);
 
     for report in &reports {
         let MvStatus::Drifted(differences) = &report.status else {
@@ -287,8 +290,8 @@ async fn a_dropped_mv_is_reported_as_missing() {
             .iter()
             .filter(|r| r.status == MvStatus::InSync)
             .count(),
-        5,
-        "the other five must be unaffected"
+        11,
+        "the other eleven must be unaffected"
     );
 
     drop_scratch(&client, db).await;
@@ -397,7 +400,11 @@ async fn an_unreadable_definition_degrades_one_row_not_the_whole_report() {
         .await
         .expect("an unreadable live definition must not abort the check");
 
-    assert_eq!(reports.len(), 6, "every declared MV must still be reported");
+    assert_eq!(
+        reports.len(),
+        12,
+        "every declared MV must still be reported"
+    );
 
     let broken = reports
         .iter()
@@ -412,13 +419,13 @@ async fn an_unreadable_definition_degrades_one_row_not_the_whole_report() {
     );
     assert!(broken.needs_attention());
 
-    // The point of the finding: the other five are still compared.
+    // The point of the finding: the other eleven are still compared.
     assert_eq!(
         reports
             .iter()
             .filter(|r| r.status == MvStatus::InSync)
             .count(),
-        5,
+        11,
         "the remaining MVs must still be checked, got {:?}",
         reports
             .iter()
@@ -484,13 +491,13 @@ async fn an_undeclared_writer_into_a_rollup_target_is_reported() {
          price_ohlcv_1d — the trailing-character guard is what stops that"
     );
 
-    // The six declared MVs are untouched and still compare clean.
+    // The twelve declared MVs are untouched and still compare clean.
     assert_eq!(
         reports
             .iter()
             .filter(|r| r.status == MvStatus::InSync)
             .count(),
-        6
+        12
     );
 
     drop_scratch(&client, db).await;
@@ -641,7 +648,7 @@ async fn a_hand_edited_window_is_reported_as_drift() {
             .iter()
             .filter(|r| r.status == MvStatus::InSync)
             .count(),
-        5
+        11
     );
 
     drop_scratch(&client, db).await;
