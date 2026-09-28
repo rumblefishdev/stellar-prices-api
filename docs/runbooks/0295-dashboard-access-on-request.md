@@ -25,9 +25,11 @@ Access is granted only to a **named person**, never to a team address:
 | E-mail              | where the one-time password goes; must be the requester's own         |
 | Purpose and window  | "Tranche 3 review", with an end date — the user is deleted after it   |
 
-**MFA is mandatory.** The policy below denies every CloudWatch read unless the
-session is MFA-authenticated, so a password alone opens nothing but the MFA
-setup page. Record the request (who, when, until when) in task 0295's history
+**MFA is mandatory.** The policy below denies every action except the
+self-service ones (password change, MFA enrolment) unless the session is
+MFA-authenticated, so a password alone opens nothing but the MFA setup page.
+The denial is an explicit `Deny`: it holds even if another policy ever grants
+the user more. Record the request (who, when, until when) in task 0295's history
 before creating anything.
 
 ## 2. Create the user — operator, `AWS_PROFILE=soroban-admin`
@@ -94,6 +96,22 @@ statements the console needs to let the person enrol a device:
         "arn:aws:iam::750702271865:mfa/${aws:username}",
         "arn:aws:iam::750702271865:mfa/*"
       ]
+    },
+    {
+      "Sid": "DenyEverythingButSelfServiceWithoutMfa",
+      "Effect": "Deny",
+      "NotAction": [
+        "iam:GetUser",
+        "iam:ChangePassword",
+        "iam:GetLoginProfile",
+        "iam:ListMFADevices",
+        "iam:CreateVirtualMFADevice",
+        "iam:EnableMFADevice",
+        "iam:ResyncMFADevice",
+        "iam:ListVirtualMFADevices"
+      ],
+      "Resource": "*",
+      "Condition": { "BoolIfExists": { "aws:MultiFactorAuthPresent": "false" } }
     }
   ]
 }
@@ -104,6 +122,14 @@ The CloudWatch read actions do not support resource-level scoping, hence
 only, CloudWatch only) and by the MFA condition. This is the one place the
 project writes an IAM policy outside CDK; it is deliberately not in the
 template so that no deploy can recreate a standing identity.
+
+The third statement is the MFA gate. The condition on the first statement
+alone would only withhold that one grant: a policy attached to the same user
+later (a group, a managed policy) would open CloudWatch, or `logs:`, without
+MFA. An explicit `Deny` wins over any `Allow`. `BoolIfExists` makes it apply
+also when the key is absent, and its `NotAction` is exactly the self-service
+list of the second statement, so the first sign-in can still change the
+password and enrol a device.
 
 ## 3. Hand over
 
@@ -131,9 +157,10 @@ for mfa in true false; do
 done
 ```
 
-Expected: the two `cloudwatch:` actions `allowed` only with `true`; `logs:` and
-`secretsmanager:` `implicitDeny` both times. (Walked 2026-09-25 on a throwaway
-name — task 0295.)
+Expected: with `false`, all four `explicitDeny`; with `true`, the two
+`cloudwatch:` actions `allowed` and `logs:` and `secretsmanager:`
+`implicitDeny`. (The flow was walked 2026-09-25 on a throwaway name — task 0295. The `Deny` statement was added on 2026-09-28 and checked with
+`aws iam simulate-custom-policy` only, not yet in a console walk.)
 
 From a browser that is not signed in to anything else: sign in, enrol MFA, open
 the dashboard URL — every widget renders. Then confirm the boundary:
