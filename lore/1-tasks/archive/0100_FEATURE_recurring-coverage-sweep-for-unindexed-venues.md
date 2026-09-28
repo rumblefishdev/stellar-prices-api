@@ -2,7 +2,7 @@
 id: "0100"
 title: "A recurring coverage sweep over unregistered swap emitters — the only layer that catches a venue we have never seen"
 type: FEATURE
-status: active
+status: completed
 assignee: akot
 related_adr: []
 related_tasks: ["0097", "0079", "0078", "0285", "0290", "0291", "0300"]
@@ -81,6 +81,16 @@ history:
       the IT fixture mirroring the new DDL. The April-only residual (6
       emitters) classified and allow-listed in d1b1eda — no missing venue.
       Both windows read 0 unclassified on production. AC1 met.
+  - date: "2026-09-28"
+    status: completed
+    who: akot
+    note: >
+      Closed by Adam's decision with criteria unmet. PR #332 merged
+      2026-09-23 (probe crate + allow-list + runbook on develop). Met: the
+      classification, the back-test, the allow-list. Not done, and no
+      follow-up task: the schedule + metrics, the alarm and its test, the
+      aquarius/phoenix baselines, a named owner. Pool seeding lives in 0290
+      and 0300.
 ---
 
 # A recurring coverage sweep over unregistered swap emitters
@@ -286,9 +296,10 @@ With these entries the April window also reads **0 unclassified**.
       tables above; 0 unclassified in both on production.
 - [ ] Any genuine AMM pools found are seeded into `pool_registry` and their
       ranges repriced. (Comet BLND/USDC → [[0300]]; SushiSwap V3 → [[0290]].)
-- [ ] A committed allow-list of known-ignorable emitters exists, each entry
+- [x] A committed allow-list of known-ignorable emitters exists, each entry
       carrying its reason and originating task. (In PR #332, validated by
-      tests; ticks on merge.)
+      tests; ticks on merge.) → merged 2026-09-23,
+      `packages/coverage-sweep-probe/allowlist.toml`.
 - [ ] The sweep runs on a schedule and publishes unclassified contract count +
       event volume as metrics.
 - [ ] An alarm fires on a non-zero unclassified volume, and is proven by a
