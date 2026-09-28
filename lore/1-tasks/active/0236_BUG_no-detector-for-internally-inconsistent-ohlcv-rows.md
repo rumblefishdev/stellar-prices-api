@@ -2,7 +2,7 @@
 id: "0236"
 title: "Nothing detects an internally inconsistent `price_ohlcv_*` row — and 0229's clamp removed the one surface that used to surface them"
 type: BUG
-status: backlog
+status: active
 related_adr: ["0011"]
 related_tasks: ["0229", "0120", "0182", "0227"]
 tags: ["priority-medium", "effort-small", "data-correctness", "observability", "ohlcv", "milestone-M2"]
@@ -18,6 +18,13 @@ history:
       Spawned from [[0229]]'s code review, finding 3. Not a defect in that fix —
       a consequence of it that is worth owning explicitly rather than leaving
       implicit in a PR thread.
+  - date: "2026-09-28"
+    status: active
+    who: akot
+    note: >
+      Activated. Research first (statistical/econometric treatment of OHLC
+      consistency and how other data providers do it), then the prod baseline,
+      before any detector or alarm is designed.
 ---
 
 # No detector for an internally inconsistent stored candle
