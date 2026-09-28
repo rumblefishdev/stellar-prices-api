@@ -2,7 +2,7 @@
 id: "0245"
 title: "A single 1m candle carries 30% of the network's 24h notional — $13.4M of $44.2M in one row"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0178", "0242", "0123", "0114"]
 tags:
@@ -23,6 +23,14 @@ history:
       prod. Kept out of that task deliberately: 0178 only re-attributed rows
       that were already in the table, so this predates it and is unaffected by
       it either way.
+  - date: "2026-09-28"
+    status: active
+    who: akot
+    note: >
+      Activated. Time-sensitive: 0286 phase 3 will drop and re-ingest the
+      202608 1m partition, so the row must be identified (read-only prod
+      SELECTs) before that happens. Not absorbed by 0286 — it changes
+      prices, not volume.
 ---
 
 # One candle, 30% of the day
