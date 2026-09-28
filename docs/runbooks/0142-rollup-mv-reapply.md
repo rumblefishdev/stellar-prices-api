@@ -474,8 +474,8 @@ session. Do not leave §1–§2 applied overnight with the old probe.
 2. **The grant, again, before the stack:** `SHOW GRANTS FOR prices_writer`
    includes `SELECT ON system.view_refreshes`. Without it the new probe
    publishes `MvRefreshUnreadable = 1` and `prices-production-mv-refresh-unreadable`
-   fires as soon as the stack lands (by design: the waiting/disabled counts are
-   suppressed, not zero). If it is missing, deploy only when you accept that
+   fires as soon as the stack lands (by design: the waiting/disabled/failing
+   counts are suppressed, not zero). If it is missing, deploy only when you accept that
    alarm, and chase the grant with BE (task 0477).
 3. Deploy, reading the diff for removals first (`--require-approval
 broadening` prompts on IAM/security-group widening only, and the
@@ -492,7 +492,7 @@ broadening` prompts on IAM/security-group widening only, and the
 
 4. Expected afterwards: `prices-production-mv-drift` returns to OK within two
    probe runs (≤ 30 min: the alarm is 1 of 2 fifteen-minute periods). The six
-   `prices-production-rollup-mismatch-*` and three `mv-refresh-*` alarms leave
+   `prices-production-rollup-mismatch-*` and four `mv-refresh-*` alarms leave
    `INSUFFICIENT_DATA` once the new probe has published, and read OK on a
    healthy chain. Then continue with §4.
 
@@ -511,7 +511,11 @@ above, bottom-up, with these differences:
   for as long as it is gone.
 - A stopped (`SYSTEM STOP VIEW`), failing or misspelled dependency blocks its
   dependents the same way, silently. `prices-production-mv-refresh-waiting`
-  and `prices-production-mv-refresh-disabled` exist for that.
+  and `prices-production-mv-refresh-disabled` exist for that. A view that fails
+  itself goes back to `Scheduled` with the error in `exception`; nothing waits
+  on the four 1w/1M leaves, so for them only
+  `prices-production-mv-refresh-failing` fires (error left, or no success for
+  more than two of its own periods).
 - `SYSTEM REFRESH VIEW` ignores dependencies. Use it to force one view, never to
   "unstick" a chain whose dependency is still missing.
 - Reconcile MVs are dropped and re-created the same way, from the file, fine to
@@ -529,7 +533,11 @@ ORDER BY view;
 
 - Twelve rows. None `WaitingForDependencies` or `Disabled` for longer than one
   of its own periods (a dependent waits a few seconds at every shared slot;
-  that is the ordering working). Every `exception` empty.
+  that is the ordering working). Every `exception` empty, and every
+  `last_success_time` younger than two of the view's own periods —
+  `prices-production-mv-refresh-failing` watches both once the probe is
+  deployed, and its log line names the failing views
+  (`mv_refresh_failing_views`).
 - `prices-clickhouse-drift` (built from this change): exit 0, twelve lines `ok`.
 - Once the probe is deployed (§2b): `RollupMismatchBuckets` reads 0 for every coarse
   table within one to two hourly cycles. It counts only closed buckets that

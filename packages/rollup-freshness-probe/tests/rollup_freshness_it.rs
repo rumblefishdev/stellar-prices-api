@@ -1444,8 +1444,8 @@ async fn view_state(c: &Client, db: &str, view: &str) -> (String, i64, i64) {
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_stopped_dependency_is_reported_as_waiting_and_disabled() {
     use rollup_freshness_probe::refresh_waits::{
-        MV_REFRESH_DISABLED_METRIC, MV_REFRESH_UNREADABLE_METRIC, MV_REFRESH_WAITING_METRIC,
-        ViewRefreshRow, refresh_wait_metrics, refresh_waits_query,
+        MV_REFRESH_DISABLED_METRIC, MV_REFRESH_FAILING_METRIC, MV_REFRESH_UNREADABLE_METRIC,
+        MV_REFRESH_WAITING_METRIC, ViewRefreshRow, refresh_wait_metrics, refresh_waits_query,
     };
 
     const DEPENDENT: &str = "mv_ohlcv_4h_to_1d";
@@ -1548,6 +1548,15 @@ async fn a_stopped_dependency_is_reported_as_waiting_and_disabled() {
         ),
         1.0
     );
+    // Review WR-07: one stall is counted once — the waiting view's and the
+    // STOPped view's stale successes belong to their own counts, not failing.
+    assert_eq!(
+        value_of(
+            &refresh_wait_metrics(&pair, slot + PERIOD + 1),
+            MV_REFRESH_FAILING_METRIC
+        ),
+        0.0
+    );
     for not_yet in [slot + 1, slot + PERIOD] {
         assert_eq!(
             value_of(
@@ -1561,10 +1570,127 @@ async fn a_stopped_dependency_is_reported_as_waiting_and_disabled() {
     }
 }
 
+/// ⚠️ **Induce the condition** (review WR-07). The two monthly LEAVES —
+/// `mv_ohlcv_1d_to_1M` and `mv_reconcile_1d_to_1M` — fail on every pass: the
+/// column `vwap` of their shared target is renamed away, so the `INSERT` each
+/// pass makes into it fails at analysis, whatever the data and whatever the
+/// clock (a data-driven failure would need a CLOSED month inside the 7-day
+/// reconcile window, which exists only in a month's first week). Nothing
+/// `DEPENDS ON` a leaf, so neither makes anything wait: after its retries
+/// ClickHouse puts it back to `Scheduled` with the error in `exception`. The
+/// waiting and disabled counts therefore read 0 — the gap — and only the
+/// failing count, from the probe's exact read and classification, sees them.
+///
+/// Real clock throughout (no fake time), so the row's own `db_now_unix` is
+/// the probe's `now`, exactly as in production.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_failing_leaf_is_reported_as_failing_though_nothing_waits_on_it() {
+    use rollup_freshness_probe::refresh_waits::{
+        MV_REFRESH_DISABLED_METRIC, MV_REFRESH_FAILING_METRIC, MV_REFRESH_UNREADABLE_METRIC,
+        MV_REFRESH_WAITING_METRIC, ViewRefreshRow, describe_failing, metrics_for_read,
+        refresh_waits_query,
+    };
+
+    const LEAVES: [&str; 2] = ["mv_ohlcv_1d_to_1M", "mv_reconcile_1d_to_1M"];
+
+    let db = "it_refresh_failing_0203";
+    let c = scratch_db(db).await;
+    let rmv = Client::default()
+        .with_url(ch_url())
+        .with_option("allow_experimental_refreshable_materialized_view", "1");
+    prices_clickhouse::apply_sql(&rmv, &scratch_rewrite(prices_clickhouse::ROLLUPS_SQL, db))
+        .await
+        .expect("apply the generated rollup chain");
+    for (view, _) in prices_clickhouse::rollup_sql::rollup_views() {
+        exec(&rmv, &format!("SYSTEM WAIT VIEW {db}.{view}")).await;
+    }
+
+    exec(
+        &c,
+        &format!("ALTER TABLE {db}.price_ohlcv_1M RENAME COLUMN vwap TO vwap_renamed_by_it"),
+    )
+    .await;
+    for view in LEAVES {
+        // SYSTEM REFRESH VIEW ignores DEPENDS ON, so each leaf runs now.
+        exec(&rmv, &format!("SYSTEM REFRESH VIEW {db}.{view}")).await;
+    }
+
+    // Poll until both leaves are back to Scheduled with their error (retries
+    // spent), or give up after ~20 s and let the assertions say what is left.
+    let mut rows: Result<Vec<ViewRefreshRow>, clickhouse::error::Error> = Ok(vec![]);
+    for _ in 0..80 {
+        rows = c
+            .query(&refresh_waits_query(db))
+            .fetch_all::<ViewRefreshRow>()
+            .await;
+        let settled = rows.as_ref().is_ok_and(|rows| {
+            LEAVES.iter().all(|leaf| {
+                rows.iter()
+                    .any(|r| r.view == *leaf && r.status == "Scheduled" && !r.exception.is_empty())
+            })
+        });
+        if settled {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    // Everything collected; drop the scratch DB (its MVs keep firing) before
+    // any assertion can unwind past the cleanup.
+    drop_scratch_db(db).await;
+    let rows = rows.expect("the probe's refresh-waits query executes and deserializes");
+    assert_eq!(
+        rows.len(),
+        12,
+        "all twelve declared views are listed: {rows:?}"
+    );
+
+    for leaf in LEAVES {
+        let row = rows
+            .iter()
+            .find(|r| r.view == leaf)
+            .unwrap_or_else(|| panic!("{leaf} is among the probe's rows"));
+        assert_eq!(
+            row.status, "Scheduled",
+            "{leaf}: a failing leaf is Scheduled, not waiting — the state no \
+             other count can see; row: {row:?}"
+        );
+        assert!(
+            row.exception.contains("vwap"),
+            "{leaf}: the induced failure is the one recorded: {row:?}"
+        );
+    }
+
+    let value_of = |m: &[DriftMetric], name: &str| {
+        m.iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{name} published: {m:?}"))
+            .value
+    };
+    let detail = describe_failing(&rows, rows[0].db_now_unix);
+    let m =
+        metrics_for_read::<clickhouse::error::Error>(Ok(rows)).expect("a readable table publishes");
+    assert_eq!(
+        value_of(&m, MV_REFRESH_FAILING_METRIC),
+        2.0,
+        "exactly the two failing leaves: {detail}"
+    );
+    assert_eq!(value_of(&m, MV_REFRESH_WAITING_METRIC), 0.0, "{m:?}");
+    assert_eq!(value_of(&m, MV_REFRESH_DISABLED_METRIC), 0.0, "{m:?}");
+    assert_eq!(value_of(&m, MV_REFRESH_UNREADABLE_METRIC), 0.0, "{m:?}");
+    for leaf in LEAVES {
+        assert!(
+            detail.contains(&format!("{leaf}: Code: ")),
+            "the log detail names {leaf} and its error: {detail}"
+        );
+    }
+}
+
 /// `system.view_refreshes` is DENIED — not grant-filtered like `system.tables`
 /// — to a user holding only `SELECT ON prices.*`, the shape of the probe's
 /// `prices_writer` identity (measured on 26.3.10.60, RESEARCH §3). The probe's
-/// exact read must come back as the unreadable flag ALONE: a waiting/disabled
+/// exact read must come back as the unreadable flag ALONE: a waiting/disabled/failing
 /// 0 would read as a healthy chain the probe cannot see.
 ///
 /// Creates and drops its own least-privileged user; both results are

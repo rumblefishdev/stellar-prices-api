@@ -135,6 +135,13 @@ quiet hour.
    - `MvRefreshWaitingCount`: any of the 12 MVs in `WaitingForDependencies` for
      longer than one of its own periods.
    - `MvRefreshDisabledCount`: any of the 12 stopped.
+   - `MvRefreshFailingCount`: any of the 12 not stopped whose last refresh left
+     an error in `exception`, or that has not succeeded for more than 2 of its
+     own periods while not waiting. Nothing depends on the four 1w/1M leaves,
+     so a leaf that fails on every slot makes nothing wait. The reconcile MVs
+     repair a dead fast leaf's closed buckets, so the freshness alarm sees it
+     only once the open bucket it never writes ages past that tier's bound,
+     which takes days for 1w/1M.
    - `MvRefreshUnreadable`: `system.view_refreshes` is denied, or none of the 12
      views is visible. In that case it publishes no count, never a 0.
 

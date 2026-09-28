@@ -393,7 +393,13 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly mvRefreshWaitingAlarm: cloudwatch.Alarm;
   /** A rollup/reconcile MV is `SYSTEM STOP VIEW`ed (task 0203). */
   public readonly mvRefreshDisabledAlarm: cloudwatch.Alarm;
-  /** The probe cannot read `system.view_refreshes` — the two above are suppressed (0203). */
+  /**
+   * A rollup/reconcile MV that fails itself — last refresh errored, or no
+   * success for 2+ own periods (0203, review WR-07). The leaves block nothing,
+   * so {@link mvRefreshWaitingAlarm} cannot see them.
+   */
+  public readonly mvRefreshFailingAlarm: cloudwatch.Alarm;
+  /** The probe cannot read `system.view_refreshes` — the three above are suppressed (0203). */
   public readonly mvRefreshUnreadableAlarm: cloudwatch.Alarm;
   /** Live ledger-processor total-halt alarm — zero invocations (finding B / halt gap). */
   public readonly ledgerProcessorNoInvocationsAlarm: cloudwatch.Alarm;
@@ -1841,7 +1847,17 @@ export class ObservabilityStack extends cdk.Stack {
     // 26.3.10.60 — and a stuck reconcile MV never ages any tip. The probe
     // counts views waiting longer than their own period, and separately views
     // that were STOPped, so a deliberate re-ingest STOP cannot mask a real
-    // stall. system.view_refreshes is DENIED (not filtered) to a SELECT ON
+    // stall. A view that FAILS itself is a third count (review WR-07): nothing
+    // DEPENDS ON the four leaves (1d_to_1w, 1d_to_1M, fast and reconcile), so a
+    // leaf failing on every slot makes nothing wait, and since the reconcile
+    // MVs repair a dead fast leaf's closed buckets and the freshness alarm
+    // reads only the tip, nothing else sees it. Failing = the last refresh
+    // left an error in `exception` (ClickHouse puts a view that exhausted its
+    // retries back to Scheduled; the next success clears it), or no success
+    // for more than 2 own periods while neither waiting nor stopped (a hung
+    // or slot-skipping pass). 2 periods: a healthy view's last success is at
+    // most one period + its dependency wait + its run old, so one whole period
+    // of slack. system.view_refreshes is DENIED (not filtered) to a SELECT ON
     // prices.* identity; the probe then publishes only the unreadable flag.
     // 1 of 2 and MISSING, like the drift alarms above.
     const refreshAlarm = (
@@ -1883,11 +1899,17 @@ export class ObservabilityStack extends cdk.Stack {
       'MvRefreshDisabledCount',
       `A rollup or reconciliation MV is STOPped (SYSTEM STOP VIEW; status Disabled in system.view_refreshes) (task 0203). Expected ONLY while a re-ingest runbook runs (docs/runbooks/0286-reingest-history.md STOPs the six mv_reconcile_ views and STARTs them after). Otherwise it was forgotten: a stopped view refreshes nothing, and its dependents go WaitingForDependencies. Find it in system.view_refreshes as the ClickHouse admin and SYSTEM START VIEW it once no re-ingest is running. ⚠️ STOP is lost on a server restart, so a restart mid-re-ingest silently re-enables the reconcile MVs — check them after one. Latched by design: silence means still stopped, not resolved.`,
     );
+    this.mvRefreshFailingAlarm = refreshAlarm(
+      'MvRefreshFailingAlarm',
+      'mv-refresh-failing',
+      'MvRefreshFailingCount',
+      `A rollup or reconciliation MV is failing itself (task 0203): its last refresh left an error in system.view_refreshes.exception, or it has not succeeded for more than 2 of its own periods while neither waiting nor stopped. Nothing depends on the 1w/1M leaves, so no other alarm sees them fail: the reconcile MVs repair a dead fast leaf's closed buckets and the freshness alarm reads only the tip. The probe's log line names the views and errors (mv_refresh_failing_views). As the ClickHouse admin read status, exception, last_success_time of the prices mv_ohlcv_/mv_reconcile_ views; fix the cause (memory limit, schema change: prices-clickhouse-drift), then SYSTEM REFRESH VIEW it and check exception is empty. Re-create per docs/runbooks/0142-rollup-mv-reapply.md if needed. Latched by design: silence means still failing, not resolved.`,
+    );
     this.mvRefreshUnreadableAlarm = refreshAlarm(
       'MvRefreshUnreadableAlarm',
       'mv-refresh-unreadable',
       'MvRefreshUnreadable',
-      `The probe cannot read system.view_refreshes, or sees none of the 12 rollup/reconcile MVs in it (task 0203), so the mv-refresh-waiting and mv-refresh-disabled counts are SUPPRESSED, not zero — a stuck or stopped MV would go unreported. system.view_refreshes is DENIED (Code 497 ACCESS_DENIED), not grant-filtered, to an identity holding only SELECT ON prices.*. Check SHOW GRANTS FOR prices_writer (XML-managed on BE's side, BE task 0477) and add SELECT ON system.view_refreshes. If the grant is present, check that the rollup MVs exist in prices (prices-clickhouse-drift).`,
+      `The probe cannot read system.view_refreshes, or sees none of the 12 rollup/reconcile MVs in it (task 0203), so the mv-refresh-waiting, -disabled and -failing counts are SUPPRESSED, not zero — a stuck, stopped or failing MV would go unreported. system.view_refreshes is DENIED (Code 497 ACCESS_DENIED), not grant-filtered, to an identity holding only SELECT ON prices.*. Check SHOW GRANTS FOR prices_writer (XML-managed on BE's side, BE task 0477) and add SELECT ON system.view_refreshes. If the grant is present, check that the rollup MVs exist in prices (prices-clickhouse-drift).`,
     );
 
     // Total ingestion halt: the lag / errors / DLQ alarms above all key on the

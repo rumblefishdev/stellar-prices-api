@@ -30,8 +30,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         mismatch_read_bound, publish_mismatch,
     };
     use rollup_freshness_probe::refresh_waits::{
-        MV_REFRESH_DISABLED_METRIC, MV_REFRESH_UNREADABLE_METRIC, MV_REFRESH_WAITING_METRIC,
-        ViewRefreshRow, metrics_for_read, refresh_waits_query,
+        MV_REFRESH_DISABLED_METRIC, MV_REFRESH_FAILING_METRIC, MV_REFRESH_UNREADABLE_METRIC,
+        MV_REFRESH_WAITING_METRIC, ViewRefreshRow, describe_failing, metrics_for_read,
+        refresh_waits_query,
     };
     use rollup_freshness_probe::usd_sanity::{
         PegCounts, StrandedCounts, peg_metric, peg_query, publish_sanity, stranded_metric,
@@ -290,26 +291,37 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 Err(e) => failures.push(format!("mv-drift visibility read: {e}")),
             }
 
-            // ---- 4b. Rollup MVs stuck behind a dependency (task 0203) -----
+            // ---- 4b. Rollup MVs stuck behind a dependency, or failing ------
             //
             // Since task 0143 the rollup MVs run `DEPENDS ON` their source
             // tier's MV, and a stopped, failing or missing dependency leaves
             // every dependent `WaitingForDependencies` forever with no error.
+            // A view that fails itself — above all a leaf, which nothing waits
+            // on — is counted from the same read (`exception`,
+            // `last_success_time`; review WR-07), and named in the log line.
             // A cheap `system.*` read, so it sits with the drift read.
             //
             // ⚠️ `system.view_refreshes` is DENIED (Code 497), not filtered,
             // to a `SELECT ON prices.*` identity. That refusal publishes the
-            // unreadable flag alone — never a waiting/disabled 0, which would
+            // unreadable flag alone — never a waiting/disabled/failing 0, which would
             // read as a healthy chain — and is not a failure of the
             // invocation: the unreadable alarm is the signal. Any other error
             // is an ordinary failure.
             let mut refresh_waiting: Option<f64> = None;
             let mut refresh_disabled: Option<f64> = None;
+            let mut refresh_failing: Option<f64> = None;
             let mut refresh_unreadable = 0.0_f64;
             let read = ch
                 .query(&refresh_waits_query)
                 .fetch_all::<ViewRefreshRow>()
                 .await;
+            let refresh_failing_detail = match &read {
+                Ok(rows) => describe_failing(
+                    rows,
+                    rows.first().map(|r| r.db_now_unix).unwrap_or_default(),
+                ),
+                Err(_) => String::new(),
+            };
             let refresh_metrics = match metrics_for_read(read) {
                 Ok(metrics) => Some(metrics),
                 Err(e) => {
@@ -322,6 +334,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     match m.name {
                         MV_REFRESH_WAITING_METRIC => refresh_waiting = Some(m.value),
                         MV_REFRESH_DISABLED_METRIC => refresh_disabled = Some(m.value),
+                        MV_REFRESH_FAILING_METRIC => refresh_failing = Some(m.value),
                         MV_REFRESH_UNREADABLE_METRIC => refresh_unreadable = m.value,
                         _ => {}
                     }
@@ -456,6 +469,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 mv_detail = %drift_detail,
                 mv_refresh_waiting = refresh_waiting.unwrap_or_default(),
                 mv_refresh_disabled = refresh_disabled.unwrap_or_default(),
+                mv_refresh_failing = refresh_failing.unwrap_or_default(),
+                mv_refresh_failing_views = %refresh_failing_detail,
                 mv_refresh_unreadable = refresh_unreadable,
                 rollup_mismatch = %mismatch_detail,
                 "rollup-freshness-probe run complete"
@@ -499,6 +514,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 "mv_refresh": {
                     "waiting": refresh_waiting,
                     "disabled": refresh_disabled,
+                    "failing": refresh_failing,
+                    "failing_views": refresh_failing_detail,
                     "unreadable": refresh_unreadable,
                 },
                 "rollup_mismatch": mismatch_detail,
