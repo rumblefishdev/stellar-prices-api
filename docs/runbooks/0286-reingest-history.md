@@ -100,6 +100,13 @@ Four of those steps exist because of one fact and nothing else:
   done
   ```
 
+  ⚠️ The loop is unattended-safe only while no month left to do ends at or past
+  Soroban activation (stage A). From stage B on, with `--amm ssh`, every `run`
+  asks for the CH `default` password (`getpass`), so a restart after a crash
+  waits silently at that prompt in the tmux pane — the same dead loop the
+  wrapper exists to prevent. Watch `restarts.log` and answer the prompt, or run
+  those stages without the wrapper.
+
 - `events-backfill` reads `default.*` AND writes `prices.*`, so it runs **on the
   CH host as the `default` user** against `localhost:8123` — the prices mTLS user
   cannot read `default.*`
