@@ -1929,3 +1929,153 @@ async fn an_empty_registry_or_window_is_refused_as_unreadable() {
 
     drop_scratch_db(db).await;
 }
+
+// ---- task 0236: stored candles outside the OHLC band, on all seven tiers ----
+
+/// Clear all seven tiers, `_1m` FIRST and then the coarse tiers finest to
+/// coarsest. The rollup MVs run in this database: clearing a source before its
+/// target stops a refresh landing between the two from re-feeding the tier just
+/// cleared. Its own helper — [`reset_sanity_tables`] is shared and clears only
+/// two tiers.
+async fn reset_ohlc_band_tables(c: &Client) {
+    for table in [
+        "price_ohlcv_1m",
+        "price_ohlcv_15m",
+        "price_ohlcv_1h",
+        "price_ohlcv_4h",
+        "price_ohlcv_1d",
+        "price_ohlcv_1w",
+        "price_ohlcv_1M",
+    ] {
+        exec(c, &format!("TRUNCATE TABLE prices.{table}")).await;
+    }
+}
+
+/// One candle on any tier with its four prices spelled out, each as an exact
+/// `Decimal` literal — no Float64 path, so a fixture one ulp off the band is
+/// stored as written. Every other column as in [`insert_invariant_row`]:
+/// `pf_trade_count` explicit, never left to its DEFAULT.
+///
+/// `ts` is a unix timestamp fixed by the caller, so a repair at a higher
+/// `version` lands on the same key as the row it supersedes.
+async fn insert_ohlc_row(
+    c: &Client,
+    table: &str,
+    ts: u32,
+    asset_id: u32,
+    (open, high, low, close): (&str, &str, &str, &str),
+    pf: u32,
+    version: u32,
+) {
+    exec(
+        c,
+        &format!(
+            "INSERT INTO prices.{table} \
+               (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+                version, pf_trade_count, pf_volume, pf_price_volume) \
+             SELECT toDateTime({ts}), {asset_id}, 2, 'sdex', \
+                    toDecimal128('{open}', 14), toDecimal128('{high}', 14), \
+                    toDecimal128('{low}', 14), toDecimal128('{close}', 14), \
+                    1, 1, 0, 0, 1, 3, {version}, {pf}, {pf}, {pf}"
+        ),
+    )
+    .await;
+}
+
+/// Run every production query — `ohlc_band_queries()` itself, never a copy.
+async fn read_ohlc_band(
+    c: &Client,
+) -> Vec<(
+    &'static str,
+    rollup_freshness_probe::ohlc_band::OhlcBandCounts,
+)> {
+    let mut readings = Vec::new();
+    for (table, sql) in rollup_freshness_probe::ohlc_band::ohlc_band_queries() {
+        let counts = c
+            .query(&sql)
+            .fetch_one()
+            .await
+            .unwrap_or_else(|e| panic!("the ohlc-band query for {table} executes: {e}"));
+        readings.push((table, counts));
+    }
+    readings
+}
+
+/// A server-side unix timestamp for `now() - <interval>`, computed ONCE so every
+/// fixture of a test shares it.
+async fn ts_ago(c: &Client, interval: &str) -> u32 {
+    c.query(&format!("SELECT toUnixTimestamp(now() - {interval})"))
+        .fetch_one()
+        .await
+        .unwrap()
+}
+
+fn reading(
+    readings: &[(
+        &'static str,
+        rollup_freshness_probe::ohlc_band::OhlcBandCounts,
+    )],
+    table: &str,
+) -> rollup_freshness_probe::ohlc_band::OhlcBandCounts {
+    readings
+        .iter()
+        .find(|(t, _)| *t == table)
+        .unwrap_or_else(|| panic!("{table} was read"))
+        .1
+}
+
+/// The seven queries must **execute and deserialize** on the production build,
+/// and count exactly the rows outside the band — none of the healthy shapes a
+/// careless predicate flags: a single-trade candle (O=H=L=C), a dust-only
+/// candle (all four 0 with `pf_trade_count = 0`, correct per ADR 0287), and a
+/// priced candle still pending enrichment (`close_usd = 0`). The row breaking
+/// BOTH shapes (`open = 0` with a positive low) counts ONCE — RED if the band
+/// class loses its four-positive-prices gate.
+///
+/// `_1m` fixtures sit at `now() - 3 HOUR`: inside the probe's 2-day window,
+/// outside the 1m→15m MV's 2-hour window, so no refresh copies them upward
+/// mid-test and every coarse tier reads exactly zero.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn the_ohlc_band_scan_counts_only_rows_outside_the_band_on_every_tier() {
+    use rollup_freshness_probe::ohlc_band::{OHLC_BAND_TIERS, OhlcBandCounts, ohlc_band_metric};
+
+    let c = client().await;
+    reset_ohlc_band_tables(&c).await;
+    let ts = ts_ago(&c, "INTERVAL 3 HOUR").await;
+    let m = "price_ohlcv_1m";
+
+    insert_ohlc_row(&c, m, ts, 20, ("5", "5", "5", "5"), 1, 1).await; // single trade
+    insert_ohlc_row(&c, m, ts, 21, ("0", "0", "0", "0"), 0, 1).await; // dust only
+    insert_ohlc_row(&c, m, ts, 22, ("4", "6", "3", "5"), 3, 1).await; // pending enrichment
+    insert_ohlc_row(&c, m, ts, 23, ("5", "4.5", "3", "5"), 2, 1).await; // ⛔ high < close
+    insert_ohlc_row(&c, m, ts, 24, ("4", "6", "0", "5"), 2, 1).await; // ⛔ low = 0
+    insert_ohlc_row(&c, m, ts, 25, ("0", "6", "3", "5"), 2, 1).await; // ⛔ open = 0, low > open
+
+    let readings = read_ohlc_band(&c).await;
+    assert_eq!(readings.len(), OHLC_BAND_TIERS.len());
+    assert_eq!(
+        reading(&readings, m),
+        OhlcBandCounts {
+            band: 1,
+            nonpositive: 2,
+            scanned: 6
+        },
+        "_1m: one band violation, two non-positive rows (the double-shaped one counted once)"
+    );
+    for (table, counts) in &readings[1..] {
+        assert_eq!(
+            *counts,
+            OhlcBandCounts {
+                band: 0,
+                nonpositive: 0,
+                scanned: 0
+            },
+            "{table} holds nothing"
+        );
+    }
+    assert_eq!(ohlc_band_metric(&readings).unwrap().value, 3.0);
+
+    reset_ohlc_band_tables(&c).await;
+}
