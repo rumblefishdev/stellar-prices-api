@@ -1367,3 +1367,218 @@ async fn a_violation_older_than_the_window_is_out_of_the_zero_invariant_scan() {
 
     reset_sanity_tables(&c).await;
 }
+
+// ---- Rollup MVs stuck behind a dependency (task 0203 / 0143) ----------------
+//
+// Since task 0143 the rollup MVs are chained with `DEPENDS ON`. A stopped,
+// failing or missing dependency leaves its dependents `WaitingForDependencies`
+// forever, with no error (BRIEF §2). These pin the probe's read of that state
+// against a live 26.3.10.60 scheduler, and its refusal to publish a 0 when the
+// table is denied.
+
+/// One declared view's `(status, next_refresh_time, last_success_time)` as
+/// epoch seconds, straight from `system.view_refreshes`.
+async fn view_state(c: &Client, db: &str, view: &str) -> (String, i64, i64) {
+    c.query(&format!(
+        "SELECT toString(status), \
+                toInt64(toUnixTimestamp(ifNull(next_refresh_time, toDateTime(0)))), \
+                toInt64(toUnixTimestamp(ifNull(last_success_time, toDateTime(0)))) \
+         FROM system.view_refreshes WHERE database = '{db}' AND view = '{view}'"
+    ))
+    .fetch_one::<(String, i64, i64)>()
+    .await
+    .unwrap_or_else(|e| panic!("{view} is listed in system.view_refreshes: {e}"))
+}
+
+/// ⚠️ **Induce the condition.** STOP `mv_ohlcv_1h_to_4h`, then move
+/// `mv_ohlcv_4h_to_1d`'s scheduler just past its next 4-hour slot with
+/// `SYSTEM TEST VIEW … SET FAKE TIME`. The dependent fires for that slot, finds
+/// its dependency has not refreshed for it, and waits — forever, with no error.
+/// The probe's own query must see it `WaitingForDependencies` and its
+/// dependency `Disabled`.
+///
+/// ⚠️ The classifier is handed the FAKE clock (`slot + period + 1`), not the
+/// row's `db_now_unix`: fake time moves only the view's scheduler, not `now()`,
+/// so the wait has not yet aged in wall time. A real stall reaches the same
+/// state by waiting out one period of wall time — which is what the probe's
+/// server clock measures in production.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_stopped_dependency_is_reported_as_waiting_and_disabled() {
+    use rollup_freshness_probe::refresh_waits::{
+        MV_REFRESH_DISABLED_METRIC, MV_REFRESH_UNREADABLE_METRIC, MV_REFRESH_WAITING_METRIC,
+        ViewRefreshRow, refresh_wait_metrics, refresh_waits_query,
+    };
+
+    const DEPENDENT: &str = "mv_ohlcv_4h_to_1d";
+    const DEPENDENCY: &str = "mv_ohlcv_1h_to_4h";
+    const PERIOD: i64 = 14_400; // mv_ohlcv_4h_to_1d REFRESH EVERY 4 HOUR
+
+    let db = "it_refresh_waits_0203";
+    let c = scratch_db(db).await;
+    let rmv = Client::default()
+        .with_url(ch_url())
+        .with_option("allow_experimental_refreshable_materialized_view", "1");
+    prices_clickhouse::apply_sql(&rmv, &scratch_rewrite(prices_clickhouse::ROLLUPS_SQL, db))
+        .await
+        .expect("apply the generated rollup chain");
+
+    // Let the CREATE-time refreshes settle, then switch the dependency off.
+    for view in [DEPENDENCY, DEPENDENT] {
+        exec(&rmv, &format!("SYSTEM WAIT VIEW {db}.{view}")).await;
+    }
+    exec(&rmv, &format!("SYSTEM STOP VIEW {db}.{DEPENDENCY}")).await;
+
+    // The dependent's next slot on the real clock, and a fake clock 30 s past
+    // it (FAKE TIME takes a string literal; the server renders it in its TZ).
+    let (_, slot, _) = view_state(&c, db, DEPENDENT).await;
+    assert!(slot > 0, "{DEPENDENT} has a scheduled next refresh");
+    let fake: String = c
+        .query(&format!("SELECT toString(toDateTime({}))", slot + 30))
+        .fetch_one()
+        .await
+        .expect("render the fake time");
+    exec(
+        &rmv,
+        &format!("SYSTEM TEST VIEW {db}.{DEPENDENT} SET FAKE TIME '{fake}'"),
+    )
+    .await;
+
+    // Poll until the dependent either waits or (without DEPENDS ON) runs.
+    let mut state = view_state(&c, db, DEPENDENT).await;
+    for _ in 0..80 {
+        if state.0 == "WaitingForDependencies" || state.2 >= slot {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        state = view_state(&c, db, DEPENDENT).await;
+    }
+
+    // Collect everything before asserting, and drop the scratch DB (its MVs
+    // keep firing) before any assertion can unwind past the cleanup.
+    let rows = c
+        .query(&refresh_waits_query(db))
+        .fetch_all::<ViewRefreshRow>()
+        .await;
+    drop_scratch_db(db).await;
+    let rows = rows.expect("the probe's refresh-waits query executes and deserializes");
+
+    let find = |view: &str| {
+        rows.iter()
+            .find(|r| r.view == view)
+            .unwrap_or_else(|| panic!("{view} is among the probe's rows: {rows:?}"))
+    };
+    let dependent = find(DEPENDENT);
+    assert_eq!(
+        dependent.status, "WaitingForDependencies",
+        "with its dependency STOPped, {DEPENDENT} must wait for slot {slot} instead of \
+         running (last_success_time {}); rows: {rows:?}",
+        state.2
+    );
+    assert_eq!(
+        dependent.next_refresh_unix, slot,
+        "a waiting view keeps the slot it waits for as next_refresh_time"
+    );
+    assert_eq!(find(DEPENDENCY).status, "Disabled");
+    assert_eq!(rows.len(), 12, "all twelve declared views are listed");
+
+    let value_of = |m: &[rollup_freshness_probe::mv_drift::DriftMetric], name: &str| {
+        m.iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{name} published"))
+            .value
+    };
+
+    // A whole period later on the scheduler's clock: stuck, and the STOP shows.
+    let m = refresh_wait_metrics(&rows, slot + PERIOD + 1);
+    assert!(value_of(&m, MV_REFRESH_WAITING_METRIC) >= 1.0, "{m:?}");
+    assert!(value_of(&m, MV_REFRESH_DISABLED_METRIC) >= 1.0, "{m:?}");
+    assert_eq!(value_of(&m, MV_REFRESH_UNREADABLE_METRIC), 0.0);
+
+    // The threshold, on the two views this test controls. The other ten run
+    // on the REAL clock, so judging them against a fake "now" hours ahead could
+    // count an ordinary momentary wait of theirs.
+    let pair: Vec<ViewRefreshRow> = rows
+        .iter()
+        .filter(|r| r.view == DEPENDENT || r.view == DEPENDENCY)
+        .cloned()
+        .collect();
+    assert_eq!(
+        value_of(
+            &refresh_wait_metrics(&pair, slot + PERIOD + 1),
+            MV_REFRESH_WAITING_METRIC
+        ),
+        1.0
+    );
+    for not_yet in [slot + 1, slot + PERIOD] {
+        assert_eq!(
+            value_of(
+                &refresh_wait_metrics(&pair, not_yet),
+                MV_REFRESH_WAITING_METRIC
+            ),
+            0.0,
+            "a wait of at most one period (now = slot + {}) is an ordinary slot",
+            not_yet - slot
+        );
+    }
+}
+
+/// `system.view_refreshes` is DENIED — not grant-filtered like `system.tables`
+/// — to a user holding only `SELECT ON prices.*`, the shape of the probe's
+/// `prices_writer` identity (measured on 26.3.10.60, RESEARCH §3). The probe's
+/// exact read must come back as the unreadable flag ALONE: a waiting/disabled
+/// 0 would read as a healthy chain the probe cannot see.
+///
+/// Creates and drops its own least-privileged user; both results are
+/// collected and the user dropped before anything can panic.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn view_refreshes_is_denied_to_a_prices_only_user_and_reads_as_unreadable() {
+    use rollup_freshness_probe::refresh_waits::{
+        ViewRefreshRow, is_access_denied, metrics_for_read, refresh_waits_query, unreadable_metrics,
+    };
+
+    let admin = client();
+    exec(&admin, "DROP USER IF EXISTS rollup_probe_waits_it").await;
+    exec(
+        &admin,
+        "CREATE USER rollup_probe_waits_it IDENTIFIED WITH no_password",
+    )
+    .await;
+    exec(&admin, "GRANT SELECT ON prices.* TO rollup_probe_waits_it").await;
+
+    let restricted = Client::default()
+        .with_url(ch_url())
+        .with_database("prices")
+        .with_user("rollup_probe_waits_it");
+
+    let read = restricted
+        .query(&refresh_waits_query("prices"))
+        .fetch_all::<ViewRefreshRow>()
+        .await
+        .map_err(|e| e.to_string());
+    // The control: the same user CAN read the grant-filtered system.tables.
+    let tables: Result<u64, _> = restricted
+        .query("SELECT count() FROM system.tables WHERE database = 'prices'")
+        .fetch_one()
+        .await;
+
+    exec(&admin, "DROP USER IF EXISTS rollup_probe_waits_it").await;
+
+    assert!(
+        tables.expect("system.tables is filtered, not denied") > 0,
+        "the control: a prices-only user sees its own schema"
+    );
+    let err = read
+        .clone()
+        .expect_err("system.view_refreshes must be denied to a prices-only user");
+    assert!(
+        is_access_denied(&err),
+        "the refusal must be recognised as a grant gap, got: {err}"
+    );
+    assert_eq!(
+        metrics_for_read(read),
+        Ok(unreadable_metrics()),
+        "a denied read publishes the unreadable flag and no count"
+    );
+}

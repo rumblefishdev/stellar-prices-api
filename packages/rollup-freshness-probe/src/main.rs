@@ -25,6 +25,13 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         MV_DRIFT_CRITICAL_METRIC, MV_DRIFT_METRIC, describe, drift_metrics, publish_drift,
         visible_objects_query,
     };
+    use rollup_freshness_probe::reconcile_mismatch::{
+        MismatchCount, mismatch_metric, mismatch_queries, publish_mismatch,
+    };
+    use rollup_freshness_probe::refresh_waits::{
+        MV_REFRESH_DISABLED_METRIC, MV_REFRESH_UNREADABLE_METRIC, MV_REFRESH_WAITING_METRIC,
+        ViewRefreshRow, metrics_for_read, refresh_waits_query,
+    };
     use rollup_freshness_probe::usd_sanity::{
         PegCounts, StrandedCounts, peg_metric, peg_query, publish_sanity, stranded_metric,
         stranded_query,
@@ -57,6 +64,13 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     let stranded_query = Arc::new(stranded_query());
     let peg_query = Arc::new(peg_query());
     let zero_invariant_query = Arc::new(zero_invariant_query());
+    let refresh_waits_query = Arc::new(refresh_waits_query("prices"));
+    let mismatch_queries = Arc::new(mismatch_queries());
+    // The mismatch reads are the only ones here whose cost grows with a week
+    // of the child tier (the 15m read scans seven days of `_1m`). Each runs
+    // under a 10 s server-side bound, so one slow tier fails ITS read and
+    // leaves time for the rest inside the 60 s Lambda timeout.
+    let bounded_ch = Arc::new(prices_clickhouse::with_execution_bound((*ch).clone(), 10));
 
     let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .load()
@@ -72,6 +86,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         let stranded_query = stranded_query.clone();
         let peg_query = peg_query.clone();
         let zero_invariant_query = zero_invariant_query.clone();
+        let refresh_waits_query = refresh_waits_query.clone();
+        let mismatch_queries = mismatch_queries.clone();
+        let bounded_ch = bounded_ch.clone();
         let environment = environment.clone();
         async move {
             // ⚠️ EVERY CHECK RUNS, AND A FAILURE IN ONE MUST NOT SUPPRESS
@@ -225,8 +242,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
 
             // ---- 4. Materialized-view drift (task 0204, gap 3) ------------
             //
-            // This is the only read in the invocation that touches `system.*`.
-            // `system.tables` is grant-FILTERED rather than denied, so it needs
+            // One of the two reads here that touch `system.*` (the other is
+            // 4b, `system.view_refreshes`, which is DENIED rather than filtered
+            // and handled there). `system.tables` is grant-FILTERED, so it needs
             // no grant the probe does not already hold — but a narrowed grant or
             // a metadata hiccup here still must not cost the three checks above,
             // which is what the failure collection above guarantees.
@@ -266,18 +284,58 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 Err(e) => failures.push(format!("mv-drift visibility read: {e}")),
             }
 
-            // Log before deciding the invocation's fate: on a partial failure
-            // this line is the only record of what the healthy checks measured.
+            // ---- 4b. Rollup MVs stuck behind a dependency (task 0203) -----
+            //
+            // Since task 0143 the rollup MVs run `DEPENDS ON` their source
+            // tier's MV, and a stopped, failing or missing dependency leaves
+            // every dependent `WaitingForDependencies` forever with no error.
+            // A cheap `system.*` read, so it sits with the drift read.
+            //
+            // ⚠️ `system.view_refreshes` is DENIED (Code 497), not filtered,
+            // to a `SELECT ON prices.*` identity. That refusal publishes the
+            // unreadable flag alone — never a waiting/disabled 0, which would
+            // read as a healthy chain — and is not a failure of the
+            // invocation: the unreadable alarm is the signal. Any other error
+            // is an ordinary failure.
+            let mut refresh_waiting: Option<f64> = None;
+            let mut refresh_disabled: Option<f64> = None;
+            let mut refresh_unreadable = 0.0_f64;
+            let read = ch
+                .query(&refresh_waits_query)
+                .fetch_all::<ViewRefreshRow>()
+                .await;
+            let refresh_metrics = match metrics_for_read(read) {
+                Ok(metrics) => Some(metrics),
+                Err(e) => {
+                    failures.push(format!("mv-refresh-waits read: {e}"));
+                    None
+                }
+            };
+            if let Some(metrics) = refresh_metrics {
+                for m in &metrics {
+                    match m.name {
+                        MV_REFRESH_WAITING_METRIC => refresh_waiting = Some(m.value),
+                        MV_REFRESH_DISABLED_METRIC => refresh_disabled = Some(m.value),
+                        MV_REFRESH_UNREADABLE_METRIC => refresh_unreadable = m.value,
+                        _ => {}
+                    }
+                }
+                if let Err(e) = publish_drift(&cw, &environment, &metrics).await {
+                    failures.push(format!("mv-refresh-waits publish: {e}"));
+                }
+            }
+
             // ---- 5. The zero sentinel's stored-data invariants (ADR 0292) ---
             //
-            // LAST on purpose. It is the one unscoped read here: `timestamp` is the
+            // Late on purpose (only the mismatch reads, 6, come after it). It is the one unscoped read here: `timestamp` is the
             // fourth sort-key column, so the 48 h window prunes only to the monthly
             // partition, which is then merged `FINAL` across every pair. Measured on
             // production 2026-09-18 it is cheap (0.04 s, 650k rows read) — but it
             // is still the read whose cost grows with the table. A hard Lambda timeout loses whatever has not
             // been published yet, and the MV-drift datum above is `NOT_BREACHING` on
             // missing data — so a slow scan placed before it would turn a lost
-            // `APPEND` into a false OK. Placed here, a timeout costs only this check.
+            // `APPEND` into a false OK. Placed here, a timeout costs only this
+            // check and the mismatch reads after it.
             //
             // Not scoped to a quote leg, unlike the two USD-sanity checks (3): a
             // candle with no price-forming fill carries no price whatever it is
@@ -306,6 +364,36 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 Err(e) => failures.push(format!("zero-invariants read: {e}")),
             }
 
+            // ---- 6. Coarse buckets disagreeing with their source (0203) ---
+            //
+            // The new tail, for the reason the zero invariants were last: these
+            // are the reads whose cost grows with the data (a GROUP BY over a
+            // week of the child tier; the 15m read scans seven days of `_1m`).
+            // A hard Lambda timeout loses only what has not been published, so
+            // they run after every other check, cheapest tier first (1M → 15m),
+            // each under a 10 s execution bound. One tier's error is recorded
+            // and the next tier still runs. A 0 here is a real reading — the
+            // query is scoped to closed buckets past the grace, so a healthy
+            // chain legitimately reads 0.
+            let mut mismatch_detail: Vec<String> = Vec::new();
+            for (table, sql) in mismatch_queries.iter() {
+                match bounded_ch.query(sql).fetch_one::<MismatchCount>().await {
+                    Ok(count) => {
+                        mismatch_detail.push(format!("{table}={}", count.mismatched));
+                        let metric = mismatch_metric(table, &count);
+                        if let Err(e) =
+                            publish_mismatch(&cw, &environment, std::slice::from_ref(&metric)).await
+                        {
+                            failures.push(format!("rollup-mismatch {table} publish: {e}"));
+                        }
+                    }
+                    Err(e) => failures.push(format!("rollup-mismatch {table} read: {e}")),
+                }
+            }
+            let mismatch_detail = mismatch_detail.join(", ");
+
+            // Log before deciding the invocation's fate: on a partial failure
+            // this line is the only record of what the healthy checks measured.
             tracing::info!(
                 tiers,
                 current_prices_rows = current_age.map(|a| a.row_count).unwrap_or_default(),
@@ -323,6 +411,10 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 mv_drift = drift_count,
                 mv_visible_objects = visible_objects.unwrap_or_default(),
                 mv_detail = %drift_detail,
+                mv_refresh_waiting = refresh_waiting.unwrap_or_default(),
+                mv_refresh_disabled = refresh_disabled.unwrap_or_default(),
+                mv_refresh_unreadable = refresh_unreadable,
+                rollup_mismatch = %mismatch_detail,
                 "rollup-freshness-probe run complete"
             );
 
@@ -361,6 +453,12 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     "visible_objects": visible_objects,
                     "detail": drift_detail,
                 },
+                "mv_refresh": {
+                    "waiting": refresh_waiting,
+                    "disabled": refresh_disabled,
+                    "unreadable": refresh_unreadable,
+                },
+                "rollup_mismatch": mismatch_detail,
             }))
         }
     }))

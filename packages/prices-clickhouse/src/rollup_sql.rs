@@ -95,6 +95,10 @@ pub struct Tier {
     pub window: &'static str,
     /// The MV's `REFRESH` cadence, without the `APPEND` keyword.
     pub refresh: &'static str,
+    /// [`Tier::refresh`] in seconds — the MV's own period, which the probe
+    /// uses to tell a view that is merely between slots from one stuck
+    /// `WaitingForDependencies` (task 0203). A unit test ties it to the text.
+    pub refresh_seconds: u64,
     /// The hourly reconciliation MV that rebuilds any of `target`'s buckets
     /// that disagree with `child` over [`RECONCILE_WINDOW`] (task 0203).
     ///
@@ -114,6 +118,7 @@ pub const TIERS: [Tier; 6] = [
         mv: "mv_ohlcv_1m_to_15m",
         window: "INTERVAL 2 HOUR",
         refresh: "EVERY 1 MINUTE",
+        refresh_seconds: 60,
         reconcile_mv: "mv_reconcile_1m_to_15m",
     },
     Tier {
@@ -124,6 +129,7 @@ pub const TIERS: [Tier; 6] = [
         mv: "mv_ohlcv_15m_to_1h",
         window: "INTERVAL 8 HOUR",
         refresh: "EVERY 15 MINUTE",
+        refresh_seconds: 900,
         reconcile_mv: "mv_reconcile_15m_to_1h",
     },
     Tier {
@@ -134,6 +140,7 @@ pub const TIERS: [Tier; 6] = [
         mv: "mv_ohlcv_1h_to_4h",
         window: "INTERVAL 1 DAY",
         refresh: "EVERY 1 HOUR",
+        refresh_seconds: 3_600,
         reconcile_mv: "mv_reconcile_1h_to_4h",
     },
     Tier {
@@ -144,6 +151,7 @@ pub const TIERS: [Tier; 6] = [
         mv: "mv_ohlcv_4h_to_1d",
         window: "INTERVAL 7 DAY",
         refresh: "EVERY 4 HOUR",
+        refresh_seconds: 14_400,
         reconcile_mv: "mv_reconcile_4h_to_1d",
     },
     Tier {
@@ -154,6 +162,7 @@ pub const TIERS: [Tier; 6] = [
         mv: "mv_ohlcv_1d_to_1w",
         window: "INTERVAL 60 DAY",
         refresh: "EVERY 1 DAY",
+        refresh_seconds: 86_400,
         reconcile_mv: "mv_reconcile_1d_to_1w",
     },
     // Task 0286 / BRIEF F10: the month is rolled from the DAY, not the week,
@@ -174,6 +183,7 @@ pub const TIERS: [Tier; 6] = [
         mv: "mv_ohlcv_1d_to_1M",
         window: "INTERVAL 400 DAY",
         refresh: "EVERY 1 DAY",
+        refresh_seconds: 86_400,
         reconcile_mv: "mv_reconcile_1d_to_1M",
     },
 ];
@@ -195,6 +205,10 @@ pub const RECONCILE_WINDOW: &str = "INTERVAL 7 DAY";
 /// (keeping off the `:00` minute) is unmeasured, its drift round-trip is
 /// unverified, and equal slots keep the reconcile `DEPENDS ON` chain aligned.
 pub const RECONCILE_REFRESH: &str = "EVERY 1 HOUR";
+
+/// [`RECONCILE_REFRESH`] in seconds — every reconciliation MV's own period
+/// (see [`Tier::refresh_seconds`]). A unit test ties it to the text.
+pub const RECONCILE_REFRESH_SECONDS: u64 = 3_600;
 
 /// How old a bucket's END must be before a disagreement counts as a mismatch
 /// ([`reconcile_mismatch_select`]).
@@ -563,6 +577,26 @@ pub fn reconcile_mismatch_select(tier: &Tier, db: &str) -> Result<String, Rollup
          WHERE m.timestamp + {interval} <= now() - {MISMATCH_GRACE}",
         interval = tier.interval,
     ))
+}
+
+/// Every refreshable view `schema/rollups.sql` declares, with its own period
+/// in seconds: the six fast MVs fine to coarse, then the six reconciliation
+/// MVs in the same order (task 0203).
+///
+/// The probe's waiting-for-dependencies read takes its `IN (…)` list and each
+/// view's period from here, never from input — so a view added to [`TIERS`]
+/// is watched without a probe change, and no caller-supplied text reaches the
+/// query.
+pub fn rollup_views() -> Vec<(&'static str, u64)> {
+    TIERS
+        .iter()
+        .map(|t| (t.mv, t.refresh_seconds))
+        .chain(
+            TIERS
+                .iter()
+                .map(|t| (t.reconcile_mv, RECONCILE_REFRESH_SECONDS)),
+        )
+        .collect()
 }
 
 /// The same aggregation as a plain `INSERT … SELECT` over `bounds` — what the
@@ -1250,6 +1284,63 @@ mod tests {
                 ") AS m\nWHERE m.timestamp + {} <= now() - {MISMATCH_GRACE}",
                 tier.interval
             )));
+        }
+    }
+
+    /// `EVERY <n> <MINUTE|HOUR|DAY>` → seconds. Lives in the test on purpose:
+    /// the API carries the number, and this is what ties it to the text.
+    fn every_seconds(refresh: &str) -> u64 {
+        let mut words = refresh.split_whitespace();
+        assert_eq!(words.next(), Some("EVERY"), "{refresh}");
+        let n: u64 = words
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("{refresh}: a count"));
+        let unit = match words.next() {
+            Some("MINUTE") => 60,
+            Some("HOUR") => 3_600,
+            Some("DAY") => 86_400,
+            other => panic!("{refresh}: unsupported unit {other:?}"),
+        };
+        assert_eq!(words.next(), None, "{refresh}: nothing after the unit");
+        n * unit
+    }
+
+    /// The probe decides "stuck" by a view's own period, so the number must
+    /// be the text — a drifted pair would silently widen or narrow the alarm.
+    #[test]
+    fn each_refresh_period_in_seconds_is_its_refresh_text() {
+        for tier in TIERS {
+            assert_eq!(
+                tier.refresh_seconds,
+                every_seconds(tier.refresh),
+                "{}: refresh_seconds vs {:?}",
+                tier.name,
+                tier.refresh
+            );
+        }
+        assert_eq!(RECONCILE_REFRESH_SECONDS, every_seconds(RECONCILE_REFRESH));
+    }
+
+    /// Twelve distinct views, fast then reconcile, each with its own period —
+    /// the probe's `IN (…)` list and its thresholds.
+    #[test]
+    fn the_rollup_views_are_the_twelve_declared_views_with_their_own_periods() {
+        let views = rollup_views();
+        assert_eq!(views.len(), 12);
+        let unique: std::collections::BTreeSet<_> = views.iter().map(|(n, _)| *n).collect();
+        assert_eq!(unique.len(), 12, "no view listed twice");
+        for (i, tier) in TIERS.iter().enumerate() {
+            assert_eq!(views[i], (tier.mv, tier.refresh_seconds));
+            assert_eq!(views[6 + i], (tier.reconcile_mv, RECONCILE_REFRESH_SECONDS));
+        }
+        for (name, _) in &views {
+            assert!(
+                crate::ROLLUPS_SQL.contains(&format!(
+                    "CREATE MATERIALIZED VIEW IF NOT EXISTS prices.{name}\n"
+                )),
+                "{name} is declared in rollups.sql"
+            );
         }
     }
 

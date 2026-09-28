@@ -45,6 +45,16 @@ pub mod disk;
 /// for why one alarm transition is accepted here.
 pub mod mv_drift;
 
+/// Rollup MVs stuck `WaitingForDependencies` or STOPped (task 0203, the cost of
+/// task 0143's `DEPENDS ON` chain). See [`refresh_waits`] for why a denied
+/// `system.view_refreshes` publishes "unreadable" and never 0.
+pub mod refresh_waits;
+
+/// Coarse buckets that disagree with their source tier — the completeness
+/// signal a tip-based freshness check cannot give (task 0203). See
+/// [`reconcile_mismatch`] for the grace and for why these reads run last.
+pub mod reconcile_mismatch;
+
 /// USD-value correctness on the USDT quote leg (task 0204, gap 4). Rides in the
 /// same invocation as the rollup lag and the disk read, for the same namespace
 /// reason — see [`usd_sanity`].
