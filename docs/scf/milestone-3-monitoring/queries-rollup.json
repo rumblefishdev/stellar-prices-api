@@ -1,0 +1,34 @@
+[
+  {
+    "Id": "fresh_current",
+    "Label": "current_prices lag behind the 1-minute source (s)",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "Prices/Rollup",
+        "MetricName": "RollupLagSeconds",
+        "Dimensions": [
+          { "Name": "Table", "Value": "current_prices" },
+          { "Name": "Environment", "Value": "production" }
+        ]
+      },
+      "Period": 900,
+      "Stat": "Maximum"
+    }
+  },
+  {
+    "Id": "fresh_1m",
+    "Label": "price_ohlcv_1m lag (s)",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "Prices/Rollup",
+        "MetricName": "RollupLagSeconds",
+        "Dimensions": [
+          { "Name": "Table", "Value": "price_ohlcv_1m" },
+          { "Name": "Environment", "Value": "production" }
+        ]
+      },
+      "Period": 900,
+      "Stat": "Maximum"
+    }
+  }
+]
