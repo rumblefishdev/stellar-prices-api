@@ -26,9 +26,8 @@ in the "Community skills" section of https://skills.stellar.org.
 
 ## Status: Active
 
-**Current state:** skill in PR #368 (to `develop`). A second-pass audit
-changed the recipes, so the live run with a real key has to be repeated. Open:
-hosting decision, then the Stellar PR.
+**Current state:** skill in PR #368 (to `develop`), audited and verified live
+in bash and zsh. Open: hosting decision, then the Stellar PR.
 
 ## Verification log (2026-09-29)
 
@@ -85,6 +84,7 @@ responses, and the ohlcv spec for `XLM` and 503). All of them were fixed in
   - `/trade_aggregations` is per asset pair, from classic trades.
   - RPC's default retention is 120960 ledgers, about 7 days.
 - **Negative control.** The runbook script now runs every recipe in both bash and zsh. With a fake key, all recipes and both loops FAIL, each with a visible `curl: (22) … 403`.
+- **Live re-run with the user's key, 2026-09-29 ~12:37 UTC, on the audited recipes (`62430cc9`).** In bash all 8 recipes passed, and in zsh all 8 passed. The pagination loop returned 600 rows from 3 pages in each shell, so the zsh cursor fix holds against production.
 
 ## Context
 
