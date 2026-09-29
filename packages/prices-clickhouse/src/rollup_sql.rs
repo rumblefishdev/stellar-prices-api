@@ -1,8 +1,14 @@
 //! The single source of the coarse rollup SQL (task 0286, ADR 0287; BRIEF §4.5).
 //!
-//! Two statement kinds are rendered here, and nowhere else:
+//! These statement kinds are rendered here, and nowhere else:
 //!
-//! - [`mv_ddl`] — the six refreshable `APPEND` MVs of `schema/rollups.sql`;
+//! - [`mv_ddl`] — the six refreshable `APPEND` MVs of `schema/rollups.sql`,
+//!   each waiting (`DEPENDS ON`) for the MV that writes the table it reads
+//!   ([`dependency`], task 0143), and [`mv_modify_refresh`], the in-place
+//!   `ALTER` that lands that refresh clause on a live MV;
+//! - [`reconcile_mv_ddl`] — the six hourly reconciliation MVs that follow them
+//!   in `schema/rollups.sql` (task 0203), and [`reconcile_mismatch_select`],
+//!   the read-only count of what they would rewrite, for the freshness probe;
 //! - [`rollup_insert`] — the same SELECT as a bounded or full `INSERT`, which
 //!   is what `schema/preroll.sql` and `schema/preroll-live-gap.sql` are.
 //!
@@ -89,6 +95,18 @@ pub struct Tier {
     pub window: &'static str,
     /// The MV's `REFRESH` cadence, without the `APPEND` keyword.
     pub refresh: &'static str,
+    /// [`Tier::refresh`] in seconds — the MV's own period, which the probe
+    /// uses to tell a view that is merely between slots from one stuck
+    /// `WaitingForDependencies` (task 0203). A unit test ties it to the text.
+    pub refresh_seconds: u64,
+    /// The hourly reconciliation MV that rebuilds any of `target`'s CLOSED
+    /// buckets (past [`MISMATCH_GRACE`]) that disagree with `child` over
+    /// [`RECONCILE_WINDOW`] (task 0203).
+    ///
+    /// `mv_reconcile_<src>_to_<dst>`: greppable as `mv_reconcile_`, and it
+    /// contains no fast MV name as a substring, so a `contains(tier.mv)`
+    /// statement lookup can never match the reconcile statement instead.
+    pub reconcile_mv: &'static str,
 }
 
 /// The six coarse tiers, fine to coarse.
@@ -101,6 +119,8 @@ pub const TIERS: [Tier; 6] = [
         mv: "mv_ohlcv_1m_to_15m",
         window: "INTERVAL 2 HOUR",
         refresh: "EVERY 1 MINUTE",
+        refresh_seconds: 60,
+        reconcile_mv: "mv_reconcile_1m_to_15m",
     },
     Tier {
         name: "1h",
@@ -110,6 +130,8 @@ pub const TIERS: [Tier; 6] = [
         mv: "mv_ohlcv_15m_to_1h",
         window: "INTERVAL 8 HOUR",
         refresh: "EVERY 15 MINUTE",
+        refresh_seconds: 900,
+        reconcile_mv: "mv_reconcile_15m_to_1h",
     },
     Tier {
         name: "4h",
@@ -119,6 +141,8 @@ pub const TIERS: [Tier; 6] = [
         mv: "mv_ohlcv_1h_to_4h",
         window: "INTERVAL 1 DAY",
         refresh: "EVERY 1 HOUR",
+        refresh_seconds: 3_600,
+        reconcile_mv: "mv_reconcile_1h_to_4h",
     },
     Tier {
         name: "1d",
@@ -128,6 +152,8 @@ pub const TIERS: [Tier; 6] = [
         mv: "mv_ohlcv_4h_to_1d",
         window: "INTERVAL 7 DAY",
         refresh: "EVERY 4 HOUR",
+        refresh_seconds: 14_400,
+        reconcile_mv: "mv_reconcile_4h_to_1d",
     },
     Tier {
         name: "1w",
@@ -137,6 +163,8 @@ pub const TIERS: [Tier; 6] = [
         mv: "mv_ohlcv_1d_to_1w",
         window: "INTERVAL 60 DAY",
         refresh: "EVERY 1 DAY",
+        refresh_seconds: 86_400,
+        reconcile_mv: "mv_reconcile_1d_to_1w",
     },
     // Task 0286 / BRIEF F10: the month is rolled from the DAY, not the week,
     // and the MV is renamed `mv_ohlcv_1d_to_1M` to say so. A week straddling a
@@ -156,8 +184,50 @@ pub const TIERS: [Tier; 6] = [
         mv: "mv_ohlcv_1d_to_1M",
         window: "INTERVAL 400 DAY",
         refresh: "EVERY 1 DAY",
+        refresh_seconds: 86_400,
+        reconcile_mv: "mv_reconcile_1d_to_1M",
     },
 ];
+
+/// How far back every reconciliation MV compares a tier with its source
+/// (task 0203, BRIEF §3.2) — the ONE place the width is spelled.
+///
+/// Seven days is wider than any stall this system has had (0202's 11.5 h,
+/// 0111's four days) and is bounded by `_1m` retention (task 0200): no pass can
+/// heal from source rows that are gone. An outage longer than this needs
+/// `schema/preroll-live-gap.sql` (runbook 0142). The bound is ALIGNED to each
+/// tier's bucket (see `lower_bound`), so every compared bucket is whole.
+pub const RECONCILE_WINDOW: &str = "INTERVAL 7 DAY";
+
+/// The cadence of every reconciliation MV — the ONE place it is spelled.
+///
+/// Hourly is a backstop's cadence, not a live one: the fast MVs keep the tip
+/// fresh, and this pass only repairs what they missed. It never touches an
+/// OPEN bucket, or one closed less than [`MISMATCH_GRACE`] ago (review WR-06):
+/// those belong to the fast MVs, so on a live system a pass that finds nothing
+/// missed writes nothing. No `OFFSET`: its benefit (keeping off the `:00`
+/// minute) is unmeasured, its drift round-trip is unverified, and equal slots
+/// keep the reconcile `DEPENDS ON` chain aligned.
+pub const RECONCILE_REFRESH: &str = "EVERY 1 HOUR";
+
+/// [`RECONCILE_REFRESH`] in seconds — every reconciliation MV's own period
+/// (see [`Tier::refresh_seconds`]). A unit test ties it to the text.
+pub const RECONCILE_REFRESH_SECONDS: u64 = 3_600;
+
+/// How old a bucket's END must be before the reconciliation pass may rewrite
+/// it ([`reconcile_select`]) — and therefore before a disagreement counts as a
+/// mismatch ([`reconcile_mismatch_select`] counts that same SELECT). ONE bound
+/// for both, so the metric is exactly what the next pass would write.
+///
+/// The open bucket of every tier always disagrees with its source for a
+/// while: the fast MVs roll it on their own cadence (1h every 15 min, 1d every
+/// 4 h, 1w/1M daily), and a just-closed one may still lag by ingest delay.
+/// Without this bound the reconcile pass would rewrite every tier's open
+/// bucket every hour and become the live writer of 1d/1w/1M (review WR-06).
+/// Two hours is the fast 15m window, so every 15m bucket is covered by one
+/// writer or the other; every coarser fast window is wider still, and carries
+/// a repaired child into the open parent on its own next slot.
+pub const MISMATCH_GRACE: &str = "INTERVAL 2 HOUR";
 
 /// Why a rendering refused to produce SQL. Every variant is an interpolation
 /// point that failed its check, never a formatting failure.
@@ -239,6 +309,9 @@ pub enum Bounds<'a> {
     Range { from: Bound<'a>, to: Bound<'a> },
     /// Everything. Renders no `WHERE` at all.
     Full,
+    /// The reconciliation window, `now() - RECONCILE_WINDOW`, aligned to the
+    /// tier's bucket like every other lower bound. No upper bound.
+    Reconcile,
 }
 
 /// Look a tier up by its grain key. **Exact match, never case-folded**: `1M` is
@@ -267,6 +340,10 @@ fn lower_bound(tier: &Tier, bounds: &Bounds<'_>) -> Result<Option<String>, Rollu
             tier.interval
         )),
         Bounds::Full => None,
+        Bounds::Reconcile => Some(format!(
+            "toStartOfInterval(now() - {RECONCILE_WINDOW}, {})",
+            tier.interval
+        )),
     })
 }
 
@@ -367,17 +444,180 @@ GROUP BY timestamp, asset_id, quote_asset_id, source"
     ))
 }
 
+/// The tier whose MV WRITES this tier's child table — the fast MV this tier's
+/// fast MV must wait for (task 0143, BRIEF §3.1).
+///
+/// Derived from [`TIERS`], never hand-kept: `None` for 15m (its child,
+/// `price_ohlcv_1m`, is written by ingest, not by a rollup), and the day tier
+/// for BOTH the week and the month, which both read `price_ohlcv_1d`.
+pub fn dependency(tier: &Tier) -> Option<&'static Tier> {
+    TIERS.iter().find(|t| t.target == tier.child)
+}
+
+/// The text after `REFRESH` in a fast MV's head: its cadence, the fully
+/// qualified MV it waits for (if any), and `APPEND` — the ONE spelling both
+/// [`mv_ddl`] and [`mv_modify_refresh`] render.
+///
+/// Task 0143: every refreshable MV fired on its own clock, so at 00:00 the
+/// two dailies could read `_1d` before `mv_ohlcv_4h_to_1d` had written the day
+/// that just closed. `DEPENDS ON` makes a dependent's slot wait until its
+/// dependency has refreshed for the same slot. The name is FULLY qualified
+/// because ClickHouse stores an unqualified one qualified (BRIEF §2), and the
+/// drift check compares the stored text.
+fn refresh_clause(tier: &Tier, db: &str) -> Result<String, RollupSqlError> {
+    let db = qualifier(db)?;
+    Ok(match dependency(tier) {
+        Some(dep) => format!("{} DEPENDS ON {db}.{} APPEND", tier.refresh, dep.mv),
+        None => format!("{} APPEND", tier.refresh),
+    })
+}
+
 /// The tier's refreshable `APPEND` MV, exactly as `schema/rollups.sql` ships it.
 pub fn mv_ddl(tier: &Tier, db: &str) -> Result<String, RollupSqlError> {
     let body = rollup_select(tier, db, &Bounds::Window)?;
+    let refresh = refresh_clause(tier, db)?;
     let db = qualifier(db)?;
     Ok(format!(
-        "CREATE MATERIALIZED VIEW IF NOT EXISTS {db}.{mv}\nREFRESH {refresh} APPEND\nTO \
+        "CREATE MATERIALIZED VIEW IF NOT EXISTS {db}.{mv}\nREFRESH {refresh}\nTO \
          {db}.{target} AS\n{body}",
         mv = tier.mv,
-        refresh = tier.refresh,
         target = tier.target,
     ))
+}
+
+/// The in-place rollout of [`mv_ddl`]'s refresh clause onto a live fast MV
+/// (BRIEF §6): `ALTER TABLE … MODIFY REFRESH <the same clause>`.
+///
+/// `MODIFY REFRESH` REPLACES every refresh parameter, so the full clause is
+/// repeated — omitting `DEPENDS ON` would drop it, and ClickHouse refuses to
+/// add or remove `APPEND` this way (Code 48). `None` for the 15m tier, whose
+/// clause has no dependency and so never changes. Runbook
+/// `docs/runbooks/0142-rollup-mv-reapply.md` quotes these statements.
+pub fn mv_modify_refresh(tier: &Tier, db: &str) -> Result<Option<String>, RollupSqlError> {
+    let refresh = refresh_clause(tier, db)?;
+    let db = qualifier(db)?;
+    Ok(dependency(tier).map(|_| {
+        format!(
+            "ALTER TABLE {db}.{mv} MODIFY REFRESH {refresh}",
+            mv = tier.mv
+        )
+    }))
+}
+
+/// The reconciliation SELECT for one tier (task 0203): the tier's rollup over
+/// [`Bounds::Reconcile`], keeping ONLY the rows the target does not already
+/// hold with the same `trade_count` and `volume_base`.
+///
+/// - The aggregation is [`rollup_select`] verbatim, once — there is one
+///   definition of a coarse candle (ADR 0287 §4), and the reconcile row is
+///   exactly the row the fast MV would have written.
+/// - The comparison is on `trade_count` and `volume_base` and NEVER on
+///   `version`: enrichment re-inserts a `_1m` child at `version + 1` and the
+///   coarse sweep bumps coarse rows `+1`, so a version difference says nothing
+///   about completeness. A back-dated or late child changes the count/volume.
+/// - `NOT IN` over a tuple, not a `JOIN`: one predicate covers both a missing
+///   and a disagreeing bucket, and a `LEFT JOIN` would read a missing target
+///   row as `trade_count = 0` (ClickHouse's default-value join) rather than
+///   NULL. No top-level `WITH` (the shipped-file guards and
+///   `drift::parse_fingerprint` forbid it).
+/// - Source and target are bounded by the SAME aligned lower bound, computed
+///   once, so the two sides can never compare different buckets.
+/// - ONLY CLOSED buckets whose END is at least [`MISMATCH_GRACE`] old are
+///   emitted (review WR-06). The open bucket is the fast MVs' job; without
+///   this bound the pass rewrote every tier's open bucket hourly whenever its
+///   child had moved since the fast MV last ran — the hourly live writer of
+///   1d/1w/1M, with a non-zero `written_rows` on every pass.
+///
+/// The emitted row wins in the `ReplacingMergeTree(version)` target because
+/// its `sum(version)` covers a superset of the children the stale row summed
+/// (BRIEF §3.3); nothing new is versioned here.
+pub fn reconcile_select(tier: &Tier, db: &str) -> Result<String, RollupSqlError> {
+    let body = rollup_select(tier, db, &Bounds::Reconcile)?;
+    let db = qualifier(db)?;
+    let lb = lower_bound(tier, &Bounds::Reconcile)?
+        .expect("the reconcile bound always has a lower side");
+    let columns = CANDLE_COLUMNS
+        .chunks(6)
+        .map(|c| c.join(", "))
+        .collect::<Vec<_>>()
+        .join(",\n    ");
+    Ok(format!(
+        "SELECT\n    {columns}\nFROM (\n{body}\n) AS s\n\
+         WHERE timestamp + {interval} <= now() - {MISMATCH_GRACE}\n  \
+         AND (timestamp, asset_id, quote_asset_id, source, trade_count, volume_base) NOT IN (\n    \
+         SELECT d.timestamp, d.asset_id, d.quote_asset_id, d.source, d.trade_count, d.volume_base\n    \
+         FROM {db}.{target} AS d FINAL\n    \
+         WHERE d.timestamp >= {lb}\n)",
+        interval = tier.interval,
+        target = tier.target,
+    ))
+}
+
+/// The tier's hourly reconciliation MV (task 0203), exactly as
+/// `schema/rollups.sql` ships it: [`reconcile_select`] as a refreshable
+/// `APPEND` MV writing into the SAME target as the tier's fast MV.
+///
+/// It waits (`DEPENDS ON`) for the reconcile MV of the tier it reads, so one
+/// hourly pass carries a repair 15m → 1h → 4h → 1d → {1w, 1M}. The lowest one
+/// depends on NOTHING — in particular not on the fast `1m → 15m` MV: a stopped
+/// or failing dependency blocks its dependents silently and forever, and this
+/// backstop exists for exactly the case where the fast path failed. Both read
+/// `_1m FINAL` and append into the same RMT, and `sum(version)` resolves any
+/// overlap, so the ordering would buy nothing. No FAST MV ever depends on a
+/// reconcile MV: the backstop must never delay fresh data.
+pub fn reconcile_mv_ddl(tier: &Tier, db: &str) -> Result<String, RollupSqlError> {
+    let select = reconcile_select(tier, db)?;
+    let db = qualifier(db)?;
+    let depends = match dependency(tier) {
+        Some(dep) => format!(" DEPENDS ON {db}.{}", dep.reconcile_mv),
+        None => String::new(),
+    };
+    Ok(format!(
+        "CREATE MATERIALIZED VIEW IF NOT EXISTS {db}.{mv}\n\
+         REFRESH {RECONCILE_REFRESH}{depends} APPEND\n\
+         TO {db}.{target} AS\n{select}",
+        mv = tier.reconcile_mv,
+        target = tier.target,
+    ))
+}
+
+/// Read-only: how many CLOSED buckets of `tier` disagree with their source
+/// right now — one row, one `UInt64` column `mismatched` (task 0203 AC 4).
+///
+/// It is [`reconcile_select`] verbatim, counted, so the probe measures exactly
+/// what the reconcile MV would rewrite — including its [`MISMATCH_GRACE`]
+/// bound: the open bucket always disagrees for a while and is not counted.
+///
+/// ⚠️ **One-sided (review IN-04).** Both this count and the reconcile pass
+/// start from the SOURCE aggregate, so they see a target bucket that is
+/// missing or disagrees, never an EXTRA one: a target row with no source rows
+/// in the window (left by a removed or rogue writer, or whose source was
+/// deleted) is neither counted nor repaired.
+pub fn reconcile_mismatch_select(tier: &Tier, db: &str) -> Result<String, RollupSqlError> {
+    let select = reconcile_select(tier, db)?;
+    Ok(format!(
+        "SELECT count() AS mismatched FROM (\n{select}\n) AS m"
+    ))
+}
+
+/// Every refreshable view `schema/rollups.sql` declares, with its own period
+/// in seconds: the six fast MVs fine to coarse, then the six reconciliation
+/// MVs in the same order (task 0203).
+///
+/// The probe's waiting-for-dependencies read takes its `IN (…)` list and each
+/// view's period from here, never from input — so a view added to [`TIERS`]
+/// is watched without a probe change, and no caller-supplied text reaches the
+/// query.
+pub fn rollup_views() -> Vec<(&'static str, u64)> {
+    TIERS
+        .iter()
+        .map(|t| (t.mv, t.refresh_seconds))
+        .chain(
+            TIERS
+                .iter()
+                .map(|t| (t.reconcile_mv, RECONCILE_REFRESH_SECONDS)),
+        )
+        .collect()
 }
 
 /// The same aggregation as a plain `INSERT … SELECT` over `bounds` — what the
@@ -440,6 +680,14 @@ mod tests {
                     Some("max_threads = 4"),
                 )
                 .expect("a checked rendering"),
+            ));
+            out.push((
+                format!("reconcile {}", tier.name),
+                reconcile_mv_ddl(&tier, "prices").expect("a checked rendering"),
+            ));
+            out.push((
+                format!("mismatch {}", tier.name),
+                reconcile_mismatch_select(&tier, "prices").expect("a checked rendering"),
             ));
         }
         out
@@ -764,10 +1012,15 @@ mod tests {
                 "unexpected head: {}",
                 &ddl[..80.min(ddl.len())]
             );
+            let clause = match dependency(&tier) {
+                Some(dep) => format!("{} DEPENDS ON prices.{} APPEND", tier.refresh, dep.mv),
+                None => format!("{} APPEND", tier.refresh),
+            };
             assert!(
-                ddl.contains(&format!("\nREFRESH {} APPEND\n", tier.refresh)),
+                ddl.contains(&format!("\nREFRESH {clause}\n")),
                 "{}: a refreshable MV without APPEND replaces its whole target \
-                 on every refresh (task 0090/0095)",
+                 on every refresh (task 0090/0095), and a dependent must wait \
+                 for the MV writing its child (task 0143)",
                 tier.name
             );
             assert!(ddl.contains(&format!("\nTO prices.{}", tier.target)));
@@ -814,7 +1067,371 @@ mod tests {
         let tier = tier_by_name("1d").expect("the 1d tier");
         let ddl = mv_ddl(tier, "scratch_42").expect("a checked rendering");
         assert!(!ddl.contains("prices."), "left a prices. qualifier: {ddl}");
-        assert_eq!(ddl.matches("scratch_42.").count(), 3);
+        // The MV, its DEPENDS ON, its TO target and the FROM child.
+        assert_eq!(ddl.matches("scratch_42.").count(), 4);
+        let alter = mv_modify_refresh(tier, "scratch_42")
+            .expect("a checked rendering")
+            .expect("the day tier has a dependency");
+        assert!(
+            !alter.contains("prices."),
+            "left a prices. qualifier: {alter}"
+        );
+        assert_eq!(alter.matches("scratch_42.").count(), 2);
+        // The reconcile MV, its DEPENDS ON, its TO target, the FROM child and
+        // the target read by the NOT IN.
+        let reconcile = reconcile_mv_ddl(tier, "scratch_42").expect("a checked rendering");
+        assert!(
+            !reconcile.contains("prices."),
+            "left a prices. qualifier: {reconcile}"
+        );
+        assert_eq!(reconcile.matches("scratch_42.").count(), 5);
+    }
+
+    /// Task 0143 / BRIEF §3.1: each fast MV waits for the MV that writes the
+    /// table it reads. The expected pairs are spelled out here, NOT derived
+    /// from [`dependency`] — a test that re-derived them would pass on any
+    /// lookup bug.
+    #[test]
+    fn each_fast_mv_depends_on_the_mv_writing_its_child() {
+        let expected: [(&str, Option<&str>); 6] = [
+            ("mv_ohlcv_1m_to_15m", None),
+            ("mv_ohlcv_15m_to_1h", Some("mv_ohlcv_1m_to_15m")),
+            ("mv_ohlcv_1h_to_4h", Some("mv_ohlcv_15m_to_1h")),
+            ("mv_ohlcv_4h_to_1d", Some("mv_ohlcv_1h_to_4h")),
+            ("mv_ohlcv_1d_to_1w", Some("mv_ohlcv_4h_to_1d")),
+            ("mv_ohlcv_1d_to_1M", Some("mv_ohlcv_4h_to_1d")),
+        ];
+        let got: Vec<(&str, Option<&str>)> = TIERS
+            .iter()
+            .map(|t| (t.mv, dependency(t).map(|d| d.mv)))
+            .collect();
+        assert_eq!(got, expected.to_vec());
+
+        for (tier, (_, dep)) in TIERS.iter().zip(expected) {
+            let ddl = mv_ddl(tier, "prices").expect("a checked rendering");
+            let head = ddl.lines().nth(1).expect("the REFRESH line");
+            match dep {
+                Some(dep) => assert_eq!(
+                    head,
+                    format!("REFRESH {} DEPENDS ON prices.{dep} APPEND", tier.refresh),
+                    "{}: the dependency must be fully qualified, on the REFRESH line",
+                    tier.name
+                ),
+                None => {
+                    assert_eq!(head, format!("REFRESH {} APPEND", tier.refresh));
+                    assert!(
+                        !ddl.contains("DEPENDS ON"),
+                        "{}: _1m is ingest's",
+                        tier.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every `DEPENDS ON` in a fast DDL names a FAST MV — the fix must never
+    /// delay fresh data behind anything else (Adam, 2026-09-28).
+    #[test]
+    fn a_fast_mv_depends_only_on_a_fast_mv() {
+        let fast: Vec<&str> = TIERS.iter().map(|t| t.mv).collect();
+        for tier in TIERS {
+            let ddl = mv_ddl(&tier, "prices").expect("a checked rendering");
+            for dep in depends_on_names(&ddl) {
+                let name = dep.strip_prefix("prices.").expect("a qualified dependency");
+                assert!(
+                    fast.contains(&name),
+                    "{}: fast MV depends on `{dep}`, which is not a fast MV",
+                    tier.name
+                );
+            }
+        }
+    }
+
+    /// The names every `DEPENDS ON` in `sql` lists (qualified, as rendered).
+    fn depends_on_names(sql: &str) -> Vec<&str> {
+        sql.match_indices("DEPENDS ON ")
+            .map(|(at, needle)| {
+                let rest = &sql[at + needle.len()..];
+                rest.split([' ', '\n', ',']).next().expect("a name")
+            })
+            .collect()
+    }
+
+    /// Task 0203 / BRIEF §6: the reconcile names are fixed, greppable, and can
+    /// never be mistaken for a fast MV by a substring lookup.
+    #[test]
+    fn the_reconcile_mvs_are_named_apart_from_the_fast_mvs() {
+        assert_eq!(
+            TIERS.map(|t| t.reconcile_mv),
+            [
+                "mv_reconcile_1m_to_15m",
+                "mv_reconcile_15m_to_1h",
+                "mv_reconcile_1h_to_4h",
+                "mv_reconcile_4h_to_1d",
+                "mv_reconcile_1d_to_1w",
+                "mv_reconcile_1d_to_1M",
+            ]
+        );
+        for tier in TIERS {
+            assert!(tier.reconcile_mv.starts_with("mv_reconcile_"));
+            for other in TIERS {
+                assert!(
+                    !tier.reconcile_mv.contains(other.mv),
+                    "{} contains the fast name {}",
+                    tier.reconcile_mv,
+                    other.mv
+                );
+            }
+        }
+    }
+
+    /// BRIEF §3.2: the reconcile MVs chain among themselves bottom-up, the
+    /// lowest waits for nothing (not even the fast 1m → 15m MV), and no FAST MV
+    /// ever waits for a reconcile MV — the backstop must never delay fresh data.
+    #[test]
+    fn a_reconcile_mv_depends_only_on_a_reconcile_mv_and_no_fast_mv_on_one() {
+        let expected: [(&str, Option<&str>); 6] = [
+            ("mv_reconcile_1m_to_15m", None),
+            ("mv_reconcile_15m_to_1h", Some("mv_reconcile_1m_to_15m")),
+            ("mv_reconcile_1h_to_4h", Some("mv_reconcile_15m_to_1h")),
+            ("mv_reconcile_4h_to_1d", Some("mv_reconcile_1h_to_4h")),
+            ("mv_reconcile_1d_to_1w", Some("mv_reconcile_4h_to_1d")),
+            ("mv_reconcile_1d_to_1M", Some("mv_reconcile_4h_to_1d")),
+        ];
+        let reconcile: Vec<&str> = TIERS.iter().map(|t| t.reconcile_mv).collect();
+        for (tier, (name, dep)) in TIERS.iter().zip(expected) {
+            assert_eq!(tier.reconcile_mv, name);
+            let ddl = reconcile_mv_ddl(tier, "prices").expect("a checked rendering");
+            let deps = depends_on_names(&ddl);
+            match dep {
+                Some(dep) => assert_eq!(deps, vec![format!("prices.{dep}").as_str()]),
+                None => assert!(deps.is_empty(), "{name} must depend on nothing: {deps:?}"),
+            }
+            for d in deps {
+                let d = d.strip_prefix("prices.").expect("qualified");
+                assert!(
+                    reconcile.contains(&d),
+                    "{name} depends on non-reconcile {d}"
+                );
+            }
+
+            let fast = mv_ddl(tier, "prices").expect("a checked rendering");
+            assert!(
+                !fast.contains("mv_reconcile_"),
+                "{}: a fast MV must never mention, let alone wait for, a reconcile MV",
+                tier.mv
+            );
+        }
+    }
+
+    /// The reconcile DDL: its cadence and window come from the two constants,
+    /// the rollup body appears exactly once, both sides are bounded by the SAME
+    /// window, and the comparison never looks at `version`.
+    #[test]
+    fn the_reconcile_ddl_wraps_the_rollup_once_and_compares_counts_not_versions() {
+        for tier in TIERS {
+            let ddl = reconcile_mv_ddl(&tier, "prices").expect("a checked rendering");
+            let body = rollup_select(&tier, "prices", &Bounds::Reconcile).expect("rendered");
+
+            assert!(ddl.starts_with(&format!(
+                "CREATE MATERIALIZED VIEW IF NOT EXISTS prices.{}\nREFRESH {RECONCILE_REFRESH}",
+                tier.reconcile_mv
+            )));
+            assert!(
+                ddl.lines().nth(1).is_some_and(|l| l.ends_with(" APPEND")),
+                "{}: a reconcile MV without APPEND would replace its whole target",
+                tier.name
+            );
+            assert!(ddl.contains(&format!("\nTO prices.{} AS\nSELECT", tier.target)));
+            assert_eq!(
+                ddl.matches(&body).count(),
+                1,
+                "{}: the body once",
+                tier.name
+            );
+            assert_eq!(
+                ddl.matches(&format!("now() - {RECONCILE_WINDOW}")).count(),
+                2,
+                "{}: the source and the target side share the one window",
+                tier.name
+            );
+            assert_eq!(
+                ddl.matches(&format!(
+                    "toStartOfInterval(now() - {RECONCILE_WINDOW}, {})",
+                    tier.interval
+                ))
+                .count(),
+                2,
+                "{}: both bounds aligned to the tier's bucket",
+                tier.name
+            );
+
+            let (_, tail) = ddl.split_once(") AS s\n").expect("the outer filter");
+            // Review WR-06: only closed buckets past the grace, never the open
+            // one — the fast MVs stay its only writer.
+            assert!(
+                tail.starts_with(&format!(
+                    "WHERE timestamp + {} <= now() - {MISMATCH_GRACE}\n  AND (timestamp, asset_id, \
+                     quote_asset_id, source, trade_count, volume_base) NOT IN (",
+                    tier.interval
+                )),
+                "{}: the reconcile pass must be bounded to closed buckets past the grace: {tail}",
+                tier.name
+            );
+            assert_eq!(
+                ddl.matches(&format!("now() - {MISMATCH_GRACE}")).count(),
+                1,
+                "{}: one grace bound",
+                tier.name
+            );
+            assert!(tail.contains(&format!("FROM prices.{} AS d FINAL", tier.target)));
+            assert!(
+                !tail.contains("version"),
+                "{}: the comparison must never read version: {tail}",
+                tier.name
+            );
+            assert!(!ddl.contains("JOIN"), "a JOIN reads a missing row as 0");
+            assert!(!ddl.contains("WITH "), "no top-level WITH");
+
+            // The outer projection is every candle column, in DDL order, so
+            // the MV routes each by name into the target.
+            let head = ddl
+                .split_once(" AS\nSELECT\n")
+                .and_then(|(_, rest)| rest.split_once("\nFROM (\n"))
+                .map(|(cols, _)| cols)
+                .expect("the outer projection");
+            let got: Vec<&str> = head.split(',').map(str::trim).collect();
+            assert_eq!(got, CANDLE_COLUMNS.to_vec());
+        }
+    }
+
+    /// The mismatch count is the reconcile SELECT verbatim, counted — and
+    /// NOTHING else: the closed-bucket grace lives in the reconcile SELECT
+    /// itself (review WR-06), so the probe measures exactly what the MV would
+    /// rewrite, and a second grace here could only make the two disagree.
+    #[test]
+    fn the_mismatch_select_counts_the_reconcile_select_verbatim() {
+        for tier in TIERS {
+            let sql = reconcile_mismatch_select(&tier, "prices").expect("a checked rendering");
+            let select = reconcile_select(&tier, "prices").expect("a checked rendering");
+            assert_eq!(
+                sql,
+                format!("SELECT count() AS mismatched FROM (\n{select}\n) AS m")
+            );
+            assert_eq!(sql.matches(&format!("now() - {MISMATCH_GRACE}")).count(), 1);
+        }
+    }
+
+    /// Runbook 0142 §2 reads a reconcile pass's peak memory from
+    /// `system.query_log` by `query LIKE '%NOT IN (%'` (review WR-01): a fast
+    /// MV writes the same target with the same `INSERT INTO` prefix, so that
+    /// filter is the only thing telling the two apart. It holds only while no
+    /// fast MV body contains the text and every reconcile body does.
+    #[test]
+    fn only_the_reconcile_bodies_contain_not_in() {
+        for tier in TIERS {
+            let fast = mv_ddl(&tier, "prices").expect("a checked rendering");
+            assert!(!fast.contains("NOT IN ("), "{}: {fast}", tier.mv);
+            let reconcile = reconcile_mv_ddl(&tier, "prices").expect("a checked rendering");
+            assert_eq!(
+                reconcile.matches("NOT IN (").count(),
+                1,
+                "{}",
+                tier.reconcile_mv
+            );
+        }
+    }
+
+    /// `EVERY <n> <MINUTE|HOUR|DAY>` → seconds. Lives in the test on purpose:
+    /// the API carries the number, and this is what ties it to the text.
+    fn every_seconds(refresh: &str) -> u64 {
+        let mut words = refresh.split_whitespace();
+        assert_eq!(words.next(), Some("EVERY"), "{refresh}");
+        let n: u64 = words
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("{refresh}: a count"));
+        let unit = match words.next() {
+            Some("MINUTE") => 60,
+            Some("HOUR") => 3_600,
+            Some("DAY") => 86_400,
+            other => panic!("{refresh}: unsupported unit {other:?}"),
+        };
+        assert_eq!(words.next(), None, "{refresh}: nothing after the unit");
+        n * unit
+    }
+
+    /// The probe decides "stuck" by a view's own period, so the number must
+    /// be the text — a drifted pair would silently widen or narrow the alarm.
+    #[test]
+    fn each_refresh_period_in_seconds_is_its_refresh_text() {
+        for tier in TIERS {
+            assert_eq!(
+                tier.refresh_seconds,
+                every_seconds(tier.refresh),
+                "{}: refresh_seconds vs {:?}",
+                tier.name,
+                tier.refresh
+            );
+        }
+        assert_eq!(RECONCILE_REFRESH_SECONDS, every_seconds(RECONCILE_REFRESH));
+    }
+
+    /// Twelve distinct views, fast then reconcile, each with its own period —
+    /// the probe's `IN (…)` list and its thresholds.
+    #[test]
+    fn the_rollup_views_are_the_twelve_declared_views_with_their_own_periods() {
+        let views = rollup_views();
+        assert_eq!(views.len(), 12);
+        let unique: std::collections::BTreeSet<_> = views.iter().map(|(n, _)| *n).collect();
+        assert_eq!(unique.len(), 12, "no view listed twice");
+        for (i, tier) in TIERS.iter().enumerate() {
+            assert_eq!(views[i], (tier.mv, tier.refresh_seconds));
+            assert_eq!(views[6 + i], (tier.reconcile_mv, RECONCILE_REFRESH_SECONDS));
+        }
+        for (name, _) in &views {
+            assert!(
+                crate::ROLLUPS_SQL.contains(&format!(
+                    "CREATE MATERIALIZED VIEW IF NOT EXISTS prices.{name}\n"
+                )),
+                "{name} is declared in rollups.sql"
+            );
+        }
+    }
+
+    /// The window, cadence and grace are spelled once, as the constants.
+    #[test]
+    fn the_reconcile_parameters_are_the_decided_values() {
+        assert_eq!(RECONCILE_WINDOW, "INTERVAL 7 DAY");
+        assert_eq!(RECONCILE_REFRESH, "EVERY 1 HOUR");
+        assert_eq!(MISMATCH_GRACE, "INTERVAL 2 HOUR");
+    }
+
+    /// BRIEF §6: the in-place rollout repeats EXACTLY the clause the CREATE
+    /// renders (`MODIFY REFRESH` replaces every refresh parameter), and there is
+    /// nothing to modify on the 15m tier.
+    #[test]
+    fn the_modify_refresh_repeats_the_ddls_refresh_clause() {
+        for tier in TIERS {
+            let ddl = mv_ddl(&tier, "prices").expect("a checked rendering");
+            let alter = mv_modify_refresh(&tier, "prices").expect("a checked rendering");
+            match dependency(&tier) {
+                None => assert_eq!(alter, None, "{}: nothing to modify", tier.name),
+                Some(_) => {
+                    let alter = alter.expect("a dependent has a MODIFY REFRESH");
+                    let clause = ddl
+                        .lines()
+                        .nth(1)
+                        .and_then(|l| l.strip_prefix("REFRESH "))
+                        .expect("the REFRESH line");
+                    assert_eq!(
+                        alter,
+                        format!("ALTER TABLE prices.{} MODIFY REFRESH {clause}", tier.mv)
+                    );
+                    assert!(alter.ends_with(" APPEND"), "CH refuses to drop APPEND");
+                }
+            }
+        }
     }
 
     /// T-kpi-01 (ASVS V5). These renderers are `pub` in a workspace that has
@@ -836,6 +1453,27 @@ mod tests {
         );
         assert_eq!(
             rollup_insert(tier, bad, &Bounds::Full, None),
+            Err(RollupSqlError::Database(bad.to_string()))
+        );
+        assert_eq!(
+            mv_modify_refresh(tier, bad),
+            Err(RollupSqlError::Database(bad.to_string()))
+        );
+        assert_eq!(
+            reconcile_select(tier, bad),
+            Err(RollupSqlError::Database(bad.to_string()))
+        );
+        assert_eq!(
+            reconcile_mv_ddl(tier, bad),
+            Err(RollupSqlError::Database(bad.to_string()))
+        );
+        assert_eq!(
+            reconcile_mismatch_select(tier, bad),
+            Err(RollupSqlError::Database(bad.to_string()))
+        );
+        // The 15m tier renders no ALTER, and still refuses the qualifier.
+        assert_eq!(
+            mv_modify_refresh(tier_by_name("15m").expect("the 15m tier"), bad),
             Err(RollupSqlError::Database(bad.to_string()))
         );
 

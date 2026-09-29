@@ -5,8 +5,8 @@
 //!
 //! This is the test the 0059 full-chain test *structurally could not be*.
 //! `rollup_chain_it.rs` deliberately anchors every row INSIDE the refresh window
-//! (its own comment: rows "sit comfortably inside every rollup `WHERE timestamp
-//! >= now() - …`"), so "replace the table with the last 2 h" and "replace the
+//! (its own comment: rows "sit comfortably inside every rollup
+//! `WHERE timestamp >= now() - …`"), so "replace the table with the last 2 h" and "replace the
 //! table with everything" are the same operation — the replace-mode wipe that
 //! deleted pre-rolled history in production (task 0090) is invisible to it.
 //!
@@ -65,6 +65,18 @@ async fn setup(db: &str) -> Client {
     prices_clickhouse::apply_sql(&mv_client, &rewrite(prices_clickhouse::ROLLUPS_SQL, db))
         .await
         .expect("create rollup MV chain");
+
+    // Task 0203: `rollups.sql` also ships six hourly reconciliation MVs. This
+    // test never drives reconciliation, and a real `:00` crossing mid-test would
+    // otherwise append reconcile rows into the targets under assertion — so
+    // they are STOPped (which also cancels their CREATE-time refresh).
+    for tier in prices_clickhouse::rollup_sql::TIERS {
+        mv_client
+            .query(&format!("SYSTEM STOP VIEW {db}.{}", tier.reconcile_mv))
+            .execute()
+            .await
+            .unwrap_or_else(|e| panic!("stop {}: {e}", tier.reconcile_mv));
+    }
     admin
 }
 
