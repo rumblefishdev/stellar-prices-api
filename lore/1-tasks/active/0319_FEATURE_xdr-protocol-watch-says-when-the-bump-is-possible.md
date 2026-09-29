@@ -20,6 +20,16 @@ history:
       pin `stellar-xdr` 28. The reading is correct, but nothing can be done
       with it: the newest `stellar-xdr` on crates.io is 28.0.1 (published
       2026-09-29), so there is no crate to bump to.
+  - date: "2026-09-29"
+    status: active
+    who: okarcz
+    note: >
+      PR #369. Decided the same day: the watch alerts ONLY when something can
+      be done. WAITING (no crate published) is a green run with no issue and
+      no email; a WAITING run closes an open issue as "not actionable yet". A
+      check that cannot complete fails the run but leaves the issue alone.
+      Rollout is master first (workflow-only PR, as #308), then #369 to
+      develop, or master's old workflow closes #336 as "Resolved".
 ---
 
 # The XDR protocol watch fires before any stellar-xdr crate exists to bump to
@@ -51,25 +61,27 @@ Measured 2026-09-29:
 ## Implementation
 
 - `verify-xdr-protocol-gap.mjs`: when LAGGING, read `max_stable_version` from
-  crates.io. If no published major reaches the protocol core supports, report
-  **WAITING** (nothing to do yet, with the newest version named); otherwise
-  report **LAGGING** (bump now). An unreadable crates.io falls back to LAGGING,
-  never to silence.
-- The workflow tells three tiers apart (WAITING / LAGGING / BEHIND) and
-  comments on a change of tier, so WAITING → LAGGING ("the crate is
-  published") notifies once.
-- WAITING still fails the run under `--watch`, so `master`'s current workflow
-  (which closes the issue on success) keeps the issue open until the new
-  workflow reaches `master`.
+  crates.io. No published stable major reaching the supported protocol →
+  **WAITING**, a notice with exit 0 even under `--watch`. Published → LAGGING
+  (fatal under `--watch`). crates.io unreadable → fatal under `--watch` as a
+  check that could not complete.
+- Workflow: a green WAITING run closes an open issue as "not actionable yet";
+  a check that could not complete leaves the issue untouched; LAGGING/BEHIND
+  open or update it as before, commenting only on LAGGING → BEHIND.
+- Runbook `docs/runbooks/xdr-protocol-watch.md`, incl. the master-first
+  rollout.
 
 ## Acceptance Criteria
 
-- [ ] With crates.io at 28.x and core at 29, the report says WAITING, names the
-      newest crate version, and says there is nothing to bump to yet.
-- [ ] With a 29.x published, the report says LAGGING and asks for the bump
-      (and BE's `xdr-parser` first).
-- [ ] crates.io unreachable → LAGGING, with the reason in the report.
-- [ ] BEHIND is unchanged.
-- [ ] The workflow comments once on WAITING → LAGGING and on → BEHIND, and stays
-      silent while the tier is unchanged.
-- [ ] Issue #336's body reads WAITING after the next scheduled run.
+- [x] With crates.io at 28.x and core at 29, the watch run is green, the report
+      says WAITING and names the newest crate version (live, 2026-09-29).
+- [x] With a 29.x published, the run fails, the report says LAGGING and asks
+      for the bump (mock).
+- [x] crates.io or Horizon unreachable → red run, tracking issue untouched
+      (mock + fake `gh`).
+- [x] BEHIND is unchanged; LAGGING → BEHIND comments once (fake `gh`).
+- [x] A WAITING run closes an open issue as "not actionable yet" (fake `gh`).
+- [x] Runbook explains the check, the tiers and the rollout to `master`.
+- [ ] Workflow-only PR to `master` merged, then #369 merged to `develop`.
+- [ ] Manual run on `master` is green and #336 is closed as "not actionable
+      yet".
