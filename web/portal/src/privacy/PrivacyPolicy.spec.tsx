@@ -67,6 +67,6 @@ describe('the privacy policy page', () => {
     ).toBe('STRONG');
     expect(screen.getByText('identify').tagName).toBe('CODE');
     // The date the page carries for the text.
-    expect(screen.getByText(/version of 22 september 2026/i)).toBeTruthy();
+    expect(screen.getByText(/version of 29 september 2026/i)).toBeTruthy();
   });
 });

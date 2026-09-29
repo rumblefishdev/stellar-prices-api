@@ -112,7 +112,7 @@ These checks are performed at the time you request an API key.
 
 The result of such verification may determine whether an API key can be issued. Information used solely to perform these checks, such as current server membership or account age, is not retained as part of your user record after verification.
 
-## **5\. Cookies**
+## **5\. Cookies and Analytics**
 
 The **Prices API for the Stellar ecosystem** portal uses a session cookie that is necessary for authentication and operation of the Service.
 
@@ -125,11 +125,19 @@ The session cookie:
 
 The cookie may contain or be associated with information necessary to maintain your authenticated session, including your Discord account ID and username.
 
-The **Prices API for the Stellar ecosystem** portal does not use cookies or similar technologies for advertising, behavioral tracking or analytics purposes.
-
 Because the session cookie is necessary to provide the Service and is not used for advertising or analytics, it is not dependent on consent for non-essential cookies.
 
 Disabling or blocking the session cookie may prevent the authentication process or other parts of the Service from functioning correctly.
+
+We use cookies and similar tracking technologies to improve the functionality of our website, understand how visitors interact with our services, and enhance the overall user experience.
+
+We use Google Analytics, a web analytics service provided by Google LLC, to collect and analyze information about how visitors use our website. This may include information such as pages visited, time spent on the website, device and browser information, approximate geographic location, and interactions with our services.
+
+Google Analytics may use cookies and similar technologies to collect this information. The data collected helps us analyze website traffic, monitor performance, and improve our services.
+
+Where required by applicable law, we obtain your consent before placing non-essential cookies, including Google Analytics cookies, on your device. You can withdraw your consent at any time through our cookie settings.
+
+You can also manage or disable cookies through your browser settings.
 
 ## **6\. Payments**
 

@@ -22,7 +22,7 @@ export const POLICY = parsePolicy(policyMd);
  * its own, and a policy without one cannot say which version a visitor read
  * — bump it with every edit to the file.
  */
-export const POLICY_DATED = '22 September 2026';
+export const POLICY_DATED = '29 September 2026';
 
 /**
  * `**bold**`, `` `code` `` and the hard line breaks the draft writes with two
