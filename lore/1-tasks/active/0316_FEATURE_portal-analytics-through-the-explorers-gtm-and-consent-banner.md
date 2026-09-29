@@ -105,6 +105,12 @@ Verified on 2026-09-28:
   All" grants consent and sets `_ga`. GA still sends cookieless `gcs=G100`
   pings before consent, so the criterion "no `g/collect` request" needs the
   GTM-side setting (explorer 0589, option 2).
+- Before GTM loads, the same script pushes
+  `{'gtm.blocklist': ['customScripts']}` (explorer task 0593). GTM then runs
+  no Custom HTML tag and no Custom JavaScript variable, whatever the container
+  holds. A tag published there can therefore not read the key this page
+  renders. The container's only tag today is the Google tag for GA4, and on a
+  `vite preview` build it still sends hits after consent.
 - `vite dev` on localhost would also load the production container. The
   explorer accepts that. Filter `localhost` in the GA property if it turns out
   to be noise.
