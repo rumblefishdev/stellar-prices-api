@@ -26,7 +26,26 @@ in the "Community skills" section of https://skills.stellar.org.
 
 ## Status: Active
 
-**Current state:** skill being written in `skills/stellar-prices-api/SKILL.md`.
+**Current state:** skill written on `feat/0318_…`. Keyless checks and
+fresh-agent evals pass. The live run with a real key is still pending.
+
+## Verification log (2026-09-29)
+
+These checks are **proven**:
+
+- **Keyless calls against production.** `/health` and `/api-docs-json` answer 200. `/v1/assets/native/price` without a key answers 403 `Forbidden`. `Authorization: Bearer` also answers 403. The portal link `https://sorobanscan.rumblefish.dev/api/?ref=stellar-skill` answers 200.
+- **Skill matches the live spec.** All 9 paths in the live spec appear in the skill. Every enum (granularity, timeframe, sort, type, base_currency, order) and every query parameter name matches.
+- **Oracle list.** The only oracle in code is `reflector`. "Band" in the first draft of the card was a false grep hit (the word "band" in `change_7d_pct`), so it was removed. `sources` also lists `sushiswap`.
+- **Fresh-agent evals.** Runs used `claude -p --model sonnet` from a scratch directory outside the repo, so no repo context leaked in.
+  - "Sales" test, control: the unmodified `skills.stellar.org/llms.txt` with the question "USD price of a Soroban token + 7-day chart". 0/2 runs used a prices API. One went to Horizon/RPC with its own candle indexer; the other went to the Soroswap SDK plus self-sampling.
+  - "Sales" test, with our card line appended: 2/2 runs chose the Stellar Prices API skill first.
+  - No key: the first run was inconclusive, because the eval's sandbox blocked `$VAR` expansion before the agent's behaviour showed. After adding an explicit key-check command to the skill, the rerun with Bash allowed went 2/2. Each run's only command was the check; no API call was made. Each answer gave the portal link, the Discord requirements and the export step.
+  - Candles: `timeframe=30d&granularity=1d` for "daily USDC candles, 30 days".
+- **Negative control for the live runbook script.** With a fake key, all 8 recipes FAIL and the pagination loop returns 0 rows. The script checks curl `--fail-with-body` with `pipefail`, so `jq` reshaping an error body cannot hide a failure.
+
+This is **unproven**:
+
+- Every recipe returning 200 with a real key. This needs the user's key; the script prompts for it without echoing.
 
 ## Context
 
@@ -40,8 +59,8 @@ use us. Three consequences:
    AMM, oracle.
 2. The skill has to beat "I'll compute it from Horizon". SDF's own `data` skill
    points agents at raw RPC/Horizon trades. Ours says when to use us instead:
-   VWAP aggregated across SDEX, Soroswap, Aquarius and Phoenix, USD ready-made,
-   OHLCV history, Reflector/Band oracle comparison, 100-asset batch.
+   VWAP aggregated across SDEX, Soroswap, Aquarius, Phoenix and SushiSwap, USD ready-made,
+   OHLCV history, Reflector oracle readings, 100-asset batch.
 3. The funnel (agent → human → portal → Discord → key) must be smooth, and the
    result measurable: portal link carries `?ref=stellar-skill` (CloudFront
    logs), curl recipes send `User-Agent: stellar-prices-skill/1` (X-Ray trace
@@ -85,7 +104,7 @@ Draft entry:
 ```ts
 {
   title: "Stellar Prices API",
-  description: "Get USD and XLM prices for any classic or Soroban asset without computing them from Horizon trades: VWAP aggregated across SDEX, Soroswap, Aquarius and Phoenix, OHLCV candles, Reflector/Band oracle comparison and 100-asset batch lookups. Free API key via Discord.",
+  description: "Get USD and XLM prices for any classic or Soroban asset without computing them from Horizon trades: VWAP aggregated across SDEX, Soroswap, Aquarius, Phoenix and SushiSwap, OHLCV candles, Reflector oracle readings and 100-asset batch lookups. Free API key via Discord.",
   pathLabel: "rumblefishdev/stellar-prices-api",
   copyValue: "<depends on hosting>",
 }
