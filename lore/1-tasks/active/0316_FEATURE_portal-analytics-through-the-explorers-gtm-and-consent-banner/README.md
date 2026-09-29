@@ -91,7 +91,8 @@ Verified on 2026-09-28:
   own policy says analytics are "activated only after you provide consent",
   so it is already out of step with it. Copying the container 1:1 gives the
   portal the same defect. By decision the fix is made in the explorer first
-  (sbe 0589) and then repeated here.
+  (sbe 0589) and then repeated here. **Since fixed:** sbe 0589 went live on
+  2026-09-28 at 18:58 UTC, and this task repeats it (see Notes).
 
 ## Implementation Plan
 
