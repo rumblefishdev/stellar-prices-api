@@ -46,11 +46,14 @@ The official Stellar skills cover what this API does not:
 
 ## Step 1: get the API key (do this first)
 
-Every `/v1` endpoint needs an API key. Look for it in the `STELLAR_PRICES_API_KEY`
-environment variable before the first call. Check without printing it:
+Every `/v1` endpoint needs an API key. Before the first call, look for it in
+the `STELLAR_PRICES_API_KEY` environment variable, then in a
+`STELLAR_PRICES_API_KEY=` line of the project's `.env`. This check reads that
+one line without executing `.env` and without printing the key:
 
 ```bash
-[ -n "$STELLAR_PRICES_API_KEY" ] && echo "key set" || echo "key missing"
+KEY=${STELLAR_PRICES_API_KEY:-$(sed -n 's/^\(export \)*STELLAR_PRICES_API_KEY=//p' .env 2>/dev/null | head -1 | tr -d "\"'\r")}
+[ -n "$KEY" ] && echo "key set" || echo "key missing"
 ```
 
 **If the key is missing, stop and ask the user for it.** Do not call the API
@@ -150,13 +153,15 @@ Parameter values for `GET /v1/assets/{id}/ohlcv`:
 
 ## Runbook
 
-Every recipe assumes `STELLAR_PRICES_API_KEY` is set. The curl options send the
-`stellar-prices-skill/1` user agent, so we can tell agent traffic apart, and make
-an HTTP error visible (`curl: (22) … 403`) instead of letting `jq` print nulls.
+The first lines resolve the key the same way as the check above. Shell state
+does not carry over between tool calls, so repeat them in every call. The curl
+options send the `stellar-prices-skill/1` user agent and make an HTTP error
+visible (`curl: (22) … 403`) instead of letting `jq` print nulls.
 
 ```bash
 API=https://prices-api.sorobanscan.rumblefish.dev/v1
-H=(-sS --fail-with-body -H "x-api-key: $STELLAR_PRICES_API_KEY" -A "stellar-prices-skill/1")
+KEY=${STELLAR_PRICES_API_KEY:-$(sed -n 's/^\(export \)*STELLAR_PRICES_API_KEY=//p' .env 2>/dev/null | head -1 | tr -d "\"'\r")}
+H=(-sS --fail-with-body -H "x-api-key: $KEY" -A "stellar-prices-skill/1")
 USDC=USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
 
 # Current XLM price
@@ -220,8 +225,9 @@ done
     USDC.
   - `change_24h_pct: "0"` can mean there is no baseline.
 
-  Unpriced assets still appear in batch `prices`. `not_found` lists only
-  assets the API does not track.
+  In a batch, `not_found` lists every asset with no current price: an
+  unknown identifier, or a tracked asset not priced yet. Check the identifier
+  with `?search=` before assuming it is wrong.
 
 - **Judge freshness by `as_of`, not `updated_at`.** `updated_at` is refreshed
   every minute whether or not the price moved. `as_of` is the trading minute
@@ -230,6 +236,11 @@ done
   - `priced`: the newest price available.
   - `carried`: a real price, but a newer trade has not been priced yet.
   - `unpriced`: no price.
+  - `""`: transient, briefly during a deploy. `price_usd` is still a real
+    price, but `as_of` may be `""` beside it, so its age is unknown.
+
+  "No price" means `price_status: unpriced`. An empty `as_of` on its own does
+  not mean no price.
 
   USD values are recomputed hourly, so `carried` for up to about an hour is
   normal for an active asset. Do not treat it as an error or reject it with a
@@ -245,14 +256,15 @@ done
 
 ## Errors and limits
 
-| Status  | Body                                                                          | What to do                                                                                                                     |
-| ------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| 400     | `{"code": "invalid_id" \| "invalid_query" \| "invalid_body", "message": ...}` | `message` names the bad parameter. Fix it; do not retry as-is.                                                                 |
-| 403     | `{"message": "Forbidden"}`                                                    | Missing, wrong or disabled key. Check the key is set and sent as `x-api-key`. Do not suggest Regenerate. No 401 in production. |
-| 404     | `{"code": "not_found", "message": ...}`                                       | Unknown asset, one not priced yet, or a wrong path (`"no such route"`). Try `?search=`.                                        |
-| 429     | `{"message": "Too Many Requests"}`                                            | Over 1 request/second. There is no `Retry-After` header: wait at least 1 s and retry.                                          |
-| 429     | `{"message": "Limit Exceeded"}`                                               | Monthly quota spent. Retrying does not help; it resets on the 1st at 00:00 UTC.                                                |
-| 500/503 | `{"code": "db_error" \| "quote_unavailable", ...}`, or a gateway 502/504      | Retry with exponential backoff.                                                                                                |
+| Status      | Body                                                                          | What to do                                                                                                                     |
+| ----------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| 400         | `{"code": "invalid_id" \| "invalid_query" \| "invalid_body", "message": ...}` | `message` names the bad parameter. Fix it; do not retry as-is.                                                                 |
+| 403         | `{"message": "Forbidden"}`                                                    | Missing, wrong or disabled key. Check the key is set and sent as `x-api-key`. Do not suggest Regenerate. No 401 in production. |
+| 404         | `{"code": "not_found", "message": ...}`                                       | Unknown asset, one not priced yet, or a wrong path (`"no such route"`). Try `?search=`.                                        |
+| 429         | `{"message": "Too Many Requests"}`                                            | Over 1 request/second. There is no `Retry-After` header: wait at least 1 s and retry.                                          |
+| 429         | `{"message": "Limit Exceeded"}`                                               | Monthly quota spent. Retrying does not help; it resets on the 1st at 00:00 UTC.                                                |
+| 500/502/504 | `{"code": "db_error", ...}`, or a gateway `{"message": ...}`                  | Retry with exponential backoff.                                                                                                |
+| 503         | `{"code": "quote_unavailable", ...}` (ohlcv only)                             | The reference asset for that `base_currency` is not tracked. Do not retry: try the other `base_currency` or tell the user.     |
 
 Each key allows 100,000 requests per month and 1 request per second. The
 monthly quota resets on the 1st at 00:00 UTC. If a project needs more, the user
