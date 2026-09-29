@@ -37,6 +37,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import ssl
 import struct
 import subprocess
@@ -77,10 +78,31 @@ COMET_PROBE_LEDGER = 51_500_460
 # Set once the events-backfill binary has been proven to route Comet (per process).
 COMET_BINARY_PROVEN = False
 BAK = "reingest_0286_bak_"
+# Waits between attempts when the campaign machine cannot reach ClickHouse at all
+# (~8 min of sleeps, plus up to ~2 min of kernel connect timeout per attempt). On
+# 2026-09-25 22:41 UTC one such blip — the server was serving BE and the Lambdas
+# throughout — ended the run between two DROP PARTITIONs and cost 56 hours.
+CONNECT_RETRY_DELAYS = (5, 15, 30, 60, 120, 240)
 
 
 class Stop(Exception):
     """A gate said no. State is kept; fix the cause and `run` again."""
+
+
+class ClickHouseDown(Exception):
+    """ClickHouse is not answering behind the proxy. Exit 1: the wrapper resumes."""
+
+
+def _connect_error_is_permanent(reason):
+    """A connect failure no wait can fix: the server's certificate does not
+    verify, the server rejected ours (a TLS alert: bad, expired, unknown CA,
+    required), or the host name does not exist. A reset or EOF during the
+    handshake, or EAI_AGAIN from a resolver that is offline, is still a blip."""
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return True
+    if isinstance(reason, ssl.SSLError) and "ALERT" in str(reason).upper():
+        return True
+    return isinstance(reason, socket.gaierror) and reason.errno == socket.EAI_NONAME
 
 
 # ---------------------------------------------------------------- ClickHouse
@@ -113,12 +135,43 @@ class CH:
         if role != "reader":
             qs.update(settings or {})
         url = self.url + "/" + ("?" + urllib.parse.urlencode(qs) if qs else "")
-        req = urllib.request.Request(url, data=self._sql(sql).encode(), method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=timeout, context=self.ctx.get(role)) as r:
-                return r.read().decode()
-        except urllib.error.HTTPError as e:
-            raise Stop(f"ClickHouse refused ({role}): {e.read().decode()[:600]}\n--- {sql[:300]}")
+        for attempt, delay in enumerate(CONNECT_RETRY_DELAYS + (None,), 1):
+            req = urllib.request.Request(url, data=self._sql(sql).encode(), method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout, context=self.ctx.get(role)) as r:
+                    return r.read().decode()
+            except urllib.error.HTTPError as e:
+                body = e.read().decode()[:600]
+                if e.code not in (502, 503):
+                    raise Stop(f"ClickHouse refused ({role}): {body}\n--- {sql[:300]}")
+                # Caddy is up and ClickHouse behind it is not (a restart, an upstream
+                # blip). Caddy also answers 502 when ClickHouse dies while running the
+                # statement, so only a read is repeated here. A write ends the run with
+                # exit 1 — not a STOP — and the wrapper's `run` resumes at the step.
+                if role != "reader":
+                    raise ClickHouseDown(f"ClickHouse unavailable behind the proxy ({role}): "
+                                         f"HTTP {e.code} {body[:200]}\n--- {sql[:300]}")
+                if delay is None:
+                    raise ClickHouseDown(f"ClickHouse unavailable behind the proxy ({role}): "
+                                         f"HTTP {e.code} after {attempt} attempts")
+                log(f"ClickHouse unavailable ({role}): HTTP {e.code} — attempt {attempt} of "
+                    f"{len(CONNECT_RETRY_DELAYS) + 1}, next in {delay} s")
+                time.sleep(delay)
+            except urllib.error.URLError as e:
+                # urlopen raises URLError only while resolving, connecting or sending
+                # the request, so ClickHouse never received a whole statement and a
+                # write is as safe to repeat as a read. A failure after the request
+                # went out (a timeout waiting for the answer, a dropped response)
+                # surfaces as a bare OSError instead and is NOT retried: that
+                # statement may have run, and only a `run` resume may repeat it.
+                if _connect_error_is_permanent(e.reason):
+                    raise Stop(f"ClickHouse unreachable ({role}), and retrying cannot help: "
+                               f"{e.reason} — check the cert bundle, --ca and --ch-url")
+                if delay is None:
+                    raise
+                log(f"ClickHouse unreachable ({role}): {e.reason} — attempt {attempt} of "
+                    f"{len(CONNECT_RETRY_DELAYS) + 1}, next in {delay} s")
+                time.sleep(delay)
 
     def rows(self, role, sql, **kw):
         out = self.q(role, sql.rstrip().rstrip(";") + " FORMAT TabSeparated", **kw)
@@ -1021,6 +1074,10 @@ def main():
         log(f"STOP {e}")
         print(f"\nSTOP — {e}", file=sys.stderr)
         sys.exit(2)
+    except ClickHouseDown as e:
+        log(f"DOWN {e}")
+        print(f"\nDOWN — {e}\nstate kept; `run` resumes at the same step", file=sys.stderr)
+        sys.exit(1)
     except KeyboardInterrupt:
         print("\ninterrupted — state kept, `run` resumes at the same step", file=sys.stderr)
         sys.exit(130)
