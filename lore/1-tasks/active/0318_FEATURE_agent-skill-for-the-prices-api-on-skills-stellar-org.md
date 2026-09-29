@@ -91,6 +91,41 @@ responses, and the ohlcv spec for `XLM` and 503). All of them were fixed in
   - "The dashboard says my key was suspended, am I banned?" gets "no, expected after a Regenerate, new key on 1 October".
   - Source of that last case: after a self-regenerate the portal shows `RevokedDashboard` (`web/portal/src/app/app.tsx` ~1613). Its copy is written for an operator suspension ("Monthly quota exceeded repeatedly. Key was suspended…"). The code comment records this as Adam's decision (2026-08-26). The skill now tells agents it is expected; changing the card is Adam's call.
 
+### PR review: Oskar and Adam (2026-09-29)
+
+- **Oskar** checked the skill against the handlers, DTOs, the gateway and
+  the key-reissue logic. He raised three points that could make an agent act
+  wrongly. I re-checked each in code:
+  - Batch `not_found` also holds tracked assets that are not priced yet
+    (`batch/handlers.rs`).
+  - 503 `quote_unavailable` means the reference asset is untracked
+    (`errors.rs:63`), so retrying cannot help.
+  - `price_status` has a transient `""` beside a real price during a deploy
+    (`assets/dto.rs`). "No price" is `unpriced`, not an empty `as_of`.
+- **Adam** ran 6 scenarios with `claude -p` on Opus 5.5, each with only the
+  skill installed. All passed: key in env, key in `.env`, multi-asset with
+  search/batch/OHLCV, no key, invalid key, and a negative balance question.
+  His two nits:
+  - The key check ignored `.env`, although the skill tells users to put the
+    key there.
+  - The user-agent reason was written for us, not for the agent.
+- **Fixed in `7318d858`.** The key check and the recipe setup now read one
+  `STELLAR_PRICES_API_KEY=` line from `.env` when the variable is unset.
+  - This does not execute `.env`. Adam's suggestion `set -a; . ./.env` would.
+  - Shell state does not persist between an agent's tool calls, so the setup
+    line repeats in every call.
+- **Tests of the `.env` read** (bash and zsh):
+  - plain, double-quoted, single-quoted, `export` prefix, CRLF: all resolve;
+  - commented-out line, no key line, missing file: all give an empty key;
+  - the environment variable wins over `.env`;
+  - a `touch pwned` line in `.env` was not executed.
+- **Negative control with the fake key only in `.env`.** The recipes
+  resolved the 14-character key, and 8/8 bash plus 8/8 zsh returned
+  `curl: (22) … 403`.
+- **Fresh-agent run with the key only in `.env`.** The agent found the key
+  and got 403. It did not guess a price, warned against Regenerate, and never
+  printed the key (0 hits in the transcript).
+
 ### Structure vs the Stellar skills (2026-09-29)
 
 **Hard requirements.**
