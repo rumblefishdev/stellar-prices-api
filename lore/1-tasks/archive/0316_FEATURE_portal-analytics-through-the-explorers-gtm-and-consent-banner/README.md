@@ -249,4 +249,4 @@ Verified on 2026-09-28:
 - After deploy, update the "portal traffic only in CloudFront logs" knowledge:
   the logs stay, but they are no longer the only record. That knowledge lives
   in sbe `docs/architecture/infrastructure/infrastructure-overview.md` (the
-  task 0576 paragraph). It is corrected in sbe #537.
+  task 0576 paragraph). Corrected on sbe develop in bc0c1815.
