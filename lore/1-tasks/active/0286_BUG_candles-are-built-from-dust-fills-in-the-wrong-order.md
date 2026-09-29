@@ -744,6 +744,41 @@ and log-out are fine). `aws s3` concurrency there is 100
 into `~/stellar-prices-api/.temp/sdex-backfill/` — from ~2017 they are GBs
 each, so the campaign machine's own disk is watched too.
 
+#### 201902 accepted as DEFECT — a duplicate removed, not a loss (2026-09-29)
+
+The reconcile gate stopped the loop on 2026-09-28 11:51 UTC:
+`201902 sdex: LESS than the snapshot (583291 -> 583246 trades)`. The coarse
+partitions were untouched, as designed. Resumed 2026-09-29 ~08:15 UTC with
+`run … --accept 201902`.
+
+**Why it is accepted.** All 45 missing trades are fills of one asset,
+GOLDMAN (`GBEAOCF7…KOMB`). The old 201902 partition held each of them
+**twice** — once under `asset_id 123214` and once under `123738`, identical
+volumes (92 trades in 90 candles). The re-ingest writes each fill once, under
+`123738` (46 trades in 45 candles). That is the [[0139]] duplicate-`asset_id`
+defect — `prices.assets` has 3 315 ids shared by two identities; `123738` is
+registered as both `A3KM222019SE` and `USD`/`GATOANOU…`, and neither is
+GOLDMAN. The re-ingest did not cause it; it stopped carrying the double count.
+Checked on prod (`dev_read`, `FINAL` against `reingest_0286_bak_*`), to the
+last digit:
+
+| | trades | `volume_base` | `volume_quote` |
+| --- | --- | --- | --- |
+| GOLDMAN fills doubled in the snapshot | −46 | −741.2589376 | −1002.7477604 |
+| one real STM fill the old backfill missed (2019-02-13 14:45) | +1 | +614 | +2.7641666 |
+| **the gate's delta** | **−45** | **−127.2589376** | **−999.9835938** |
+
+After the resume, 201902 on every tier: trades 583 291 → 583 246 (the same
+−45 on 1m/15m/1h/4h/1d), candles 286 330 → 286 285 on 1m, 0 OHLC-order
+violations, raw = FINAL. Aligned 2/2.
+
+**Expected again at 201903**: its old partition carries both ids on 18
+candles. From 201905 on only `123214` appears in the old data. Each such stop
+is verified the same way before its `--accept`; an accept is never given
+ahead of the measurement. The GOLDMAN candles now sit under an id the
+registry names as two other assets — that mislabel is [[0139]]'s to fix, not
+this task's.
+
 #### Plan for the complete re-ingest
 
 | stage | months | gate | estimate |
