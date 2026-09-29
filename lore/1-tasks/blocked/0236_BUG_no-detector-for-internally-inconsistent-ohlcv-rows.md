@@ -2,7 +2,7 @@
 id: "0236"
 title: "Nothing detects an internally inconsistent `price_ohlcv_*` row — and 0229's clamp removed the one surface that used to surface them"
 type: BUG
-status: active
+status: blocked
 related_adr: ["0011"]
 related_tasks: ["0229", "0120", "0182", "0227"]
 tags: ["priority-medium", "effort-small", "data-correctness", "observability", "ohlcv", "milestone-M2"]
@@ -25,6 +25,17 @@ history:
       Activated. Research first (statistical/econometric treatment of OHLC
       consistency and how other data providers do it), then the prod baseline,
       before any detector or alarm is designed.
+  - date: "2026-09-29"
+    status: blocked
+    who: akot
+    note: >
+      Detector, alarm, ITs and the ADR-0011 s3 amendment are built on
+      fix/0236_ohlc-band-detector (not yet merged). Blocked on the deploy date:
+      not before 2026-10-04. The per-tier windows of `_1w` (bucket 2026-09-21)
+      and `_1M` (bucket 2026-09-01) still hold rollups of pre-0286 days that
+      inherit the legacy `low = 0` (measured 22 in `_1w`, 109 in `_1M`), so the
+      alarm would fire on deploy with nothing new broken. No floor in code
+      (Adam's decision); the window moves past those buckets by 2026-10-04.
 ---
 
 # No detector for an internally inconsistent stored candle
