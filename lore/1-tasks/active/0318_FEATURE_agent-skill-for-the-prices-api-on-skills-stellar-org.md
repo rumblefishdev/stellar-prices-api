@@ -91,6 +91,36 @@ responses, and the ohlcv spec for `XLM` and 503). All of them were fixed in
   - "The dashboard says my key was suspended, am I banned?" gets "no, expected after a Regenerate, new key on 1 October".
   - Source of that last case: after a self-regenerate the portal shows `RevokedDashboard` (`web/portal/src/app/app.tsx` ~1613). Its copy is written for an operator suspension ("Monthly quota exceeded repeatedly. Key was suspended…"). The code comment records this as Adam's decision (2026-08-26). The skill now tells agents it is expected; changing the card is Adam's call.
 
+### Structure vs the Stellar skills (2026-09-29)
+
+**Hard requirements.**
+- **Listing.** A community listing needs only the 4-field card and a
+  non-blob raw URL. SDF does not review community skill content.
+- **Agent Skills spec** ([agentskills.io](https://agentskills.io/specification)).
+  - `name`: up to 64 characters, lowercase and hyphens, equal to the directory
+    name.
+  - `description`: up to 1024 characters.
+  - Body: recommended under 500 lines / ~5000 tokens.
+- **Our skill** (~3.7k tokens) passes `uvx --from skills-ref agentskills
+  validate`. The negative control holds: a bad name fails with three errors.
+
+**Official house style**, followed in `40b888ed`:
+- `## When to use this skill` (7/8 official skills);
+- `## Related skills` (8/8). Ours links `data`, `assets` and `dapp` via
+  skills.stellar.org URLs.
+
+A fresh agent asked "balance in USD" split the work correctly: Horizon for the
+balance, this API for the price.
+
+**Deliberately not copied:** `user-invocable` and `argument-hint`. These are
+Claude Code-only fields, and the spec validator rejects them ("Unexpected
+fields"). SDF's own `data` skill fails validation for the same reason.
+
+**License: MIT, user's decision.** It is set in the frontmatter, and a
+bundled `skills/stellar-prices-api/LICENSE` names Rumble Fish Poland Sp. z o.o.
+(the entity named in the portal's privacy policy). This licenses the skill
+only, not the repo, which still has no root LICENSE (`package.json` says MIT).
+
 ## Context
 
 **Why: this is marketing aimed at AI agents, not at people.** An agent building
