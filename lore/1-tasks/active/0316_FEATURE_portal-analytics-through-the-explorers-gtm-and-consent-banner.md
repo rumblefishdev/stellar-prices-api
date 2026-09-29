@@ -97,6 +97,14 @@ Verified on 2026-09-28:
 
 ## Notes
 
+- Consent Mode wiring from explorer 0589 (`web/index.html`, deployed
+  2026-09-28) is repeated in `web/portal/index.html`. Everything is denied
+  before GTM loads, and a HubSpot `addPrivacyConsentListener` forwards the
+  banner's categories. `consent-mode.spec.ts` runs those inline scripts. On a
+  `vite preview` build, a fresh visitor gets no cookies at all, and "Accept
+  All" grants consent and sets `_ga`. GA still sends cookieless `gcs=G100`
+  pings before consent, so the criterion "no `g/collect` request" needs the
+  GTM-side setting (explorer 0589, option 2).
 - `vite dev` on localhost would also load the production container. The
   explorer accepts that. Filter `localhost` in the GA property if it turns out
   to be noise.
