@@ -4,12 +4,12 @@
 **"stellar-xdr lags the mainnet protocol"**, or who changes the watch itself.
 No prior context assumed.
 
-|          |                                                                                                  |
-| -------- | ------------------------------------------------------------------------------------------------ |
-| Workflow | `.github/workflows/xdr-protocol-watch.yml` — daily at 06:17 UTC, plus manual `workflow_dispatch` |
-| Script   | `tools/scripts/verify-xdr-protocol-gap.mjs` (`npm run xdr:watch-protocol-gap`)                   |
-| Output   | one tracking issue, titled exactly `stellar-xdr lags the mainnet protocol`                       |
-| Tasks    | 0098 (the watch), 0319 (the WAITING tier), 0277 (the protocol 28 bump, as a worked example)      |
+|          |                                                                                                            |
+| -------- | ---------------------------------------------------------------------------------------------------------- |
+| Workflow | `.github/workflows/xdr-protocol-watch.yml` — daily at 06:17 UTC, plus manual `workflow_dispatch`           |
+| Script   | `tools/scripts/verify-xdr-protocol-gap.mjs` (`npm run xdr:watch-protocol-gap`)                             |
+| Output   | one tracking issue, titled exactly `stellar-xdr lags the mainnet protocol`                                 |
+| Tasks    | 0098 (the watch), 0319 (green while nothing can be done), 0277 (the protocol 28 bump, as a worked example) |
 
 ## What it guards against
 
@@ -25,7 +25,7 @@ request cannot see it. The watch runs on a clock instead.
 
 ## What it checks
 
-Three readings, compared every run:
+Four readings, compared every run:
 
 | Reading             | Source                                                                                                                           |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
@@ -41,40 +41,50 @@ newest crate was 28.0.1 — there was nothing to bump to yet.
 
 ## The tiers
 
-| Tier        | Condition                                                                                    | Run   | Issue                                              | Notifies?                                               |
-| ----------- | -------------------------------------------------------------------------------------------- | ----- | -------------------------------------------------- | ------------------------------------------------------- |
-| **OK**      | pin ≥ core supports                                                                          | green | commented "Resolved" and **closed**                | yes (close comment)                                     |
-| **WAITING** | pin < core supports, **no** stable `stellar-xdr` for that protocol on crates.io              | red   | opened or kept open, body says _nothing to do yet_ | only when the issue is first opened                     |
-| **LAGGING** | pin < core supports, a stable crate for it **is** published (or crates.io could not be read) | red   | body says _bump now_                               | yes — once, on the move into LAGGING ("Now actionable") |
-| **BEHIND**  | pin < mainnet current — mainnet already voted                                                | red   | body says _bump and deploy now_                    | yes — once, on the move into BEHIND ("Escalated")       |
+**The rule: a red run, the failure email and an issue appear only when someone
+can do something.** A protocol that is announced but has no crate to bump to is
+reported, but stays green.
+
+| Tier         | Condition                                                                       | Run       | Issue                                                          | Notification                          |
+| ------------ | ------------------------------------------------------------------------------- | --------- | -------------------------------------------------------------- | ------------------------------------- |
+| **OK**       | pin ≥ core supports                                                             | green     | an open one is commented "Resolved" and **closed**             | the close comment                     |
+| **WAITING**  | pin < core supports, **no** stable `stellar-xdr` for that protocol on crates.io | **green** | **none opened**; an open one is closed as "not actionable yet" | none (only the close comment, if any) |
+| **LAGGING**  | pin < core supports, a stable crate for it **is** published                     | red       | **opened**, body says _bump now_                               | issue opened + GitHub's failure email |
+| **BEHIND**   | pin < mainnet current — mainnet already voted                                   | red       | opened, or the LAGGING one gets an "Escalated" comment         | yes, once                             |
+| **NO CHECK** | Horizon or crates.io could not be read                                          | red       | **untouched** — nothing is opened, edited or closed            | GitHub's failure email only           |
 
 Rules that are easy to get wrong:
 
-- **WAITING still fails the run.** The issue stays open exactly as long as the
-  run fails, and it should stay open through the wait. GitHub's own
-  "scheduled workflow failed" email therefore arrives daily while WAITING; that
-  email goes to whoever last edited the `cron:` line.
-- **An unreadable crates.io is never WAITING.** The script reports LAGGING with
-  `crates.io unknown (…)`, so an unknown answer never reads as "nothing to do".
-  The workflow then **keeps an issue that was WAITING at WAITING** — otherwise it
-  would post a false "Now actionable", and the day the crate really appears
-  would find the tier already at LAGGING and stay silent.
+- **WAITING is green on purpose** (task 0319). Before, the run failed every day
+  from the moment core supported a new protocol, and the issue asked for a bump
+  nobody could make, because no crate existed. Now the report still says WAITING
+  on the run summary, but nothing notifies until the crate is published. That
+  day the run turns red and the issue opens: that is the notification.
+- **A check that could not complete is red, but opens no issue.** Horizon or
+  crates.io being unreachable means nothing was measured. The failure email says
+  so; there is no bump to ask for, so the issue is left alone. A watch that
+  silently checks nothing is the failure it exists to prevent, which is why the
+  run still fails.
 - **A pre-release does not count.** `29.0.0-rc.1` is named in the report, but
   the tier stays WAITING until a stable `29.x` exists.
 - **Unchanged tier = silent.** The body is rewritten every run (with the fresh
   report and a link to the run), but there is no comment, so the thread is not
-  muted by daily noise.
-- **An unreachable Horizon fails the run.** A watch that silently checks nothing
-  is the failure it exists to prevent.
+  muted by daily noise. GitHub's failure email, however, arrives on every red
+  run; it goes to whoever last edited the `cron:` line.
 
 The tier is stored as an HTML comment on the first line of the issue body,
-`<!-- xdr-protocol-watch tier=WAITING -->`. The workflow compares it with the
+`<!-- xdr-protocol-watch tier=LAGGING -->`. The workflow compares it with the
 new tier to decide whether to comment. Don't edit it by hand.
 
 ## What to do, per tier
 
-**WAITING** — nothing. Read the report to see which protocol is coming and the
-newest crate version. Optionally ask BE when they expect to bump `xdr-parser`.
+**WAITING** — nothing; you get no notification. The run summary says which
+protocol is coming and the newest crate version. Optionally ask BE when they
+expect to bump `xdr-parser`.
+
+**NO CHECK** — re-run the workflow later (`gh workflow run … --ref master`). If
+it keeps failing, check whether `https://horizon.stellar.org/` or
+`https://crates.io/api/v1/crates/stellar-xdr` changed shape.
 
 **LAGGING** — the bump is possible now, and mainnet has not voted yet:
 
@@ -97,10 +107,11 @@ LAGGING, immediately, then verify the live candle frontier moves
 ## Running it by hand
 
 ```bash
-# the same check as the schedule (strict: WAITING / LAGGING exit 1)
+# the same check as the schedule (strict: LAGGING, BEHIND and NO CHECK exit 1;
+# WAITING exits 0)
 npm run xdr:watch-protocol-gap
 
-# the PR-mode check (LAGGING and WAITING are only notices, exit 0)
+# the PR-mode check (only BEHIND or a Cargo.toml / Cargo.lock mismatch exits 1)
 npm run xdr:verify-protocol-gap
 
 # against a different Horizon or crates.io endpoint
@@ -134,55 +145,66 @@ Consequences:
 - A change to **the workflow file** takes effect only once it reaches `master`.
   Merging it to `develop` changes nothing that runs.
 
-### After a workflow change is merged to `develop` — bring it to `master`
+### Rolling out a workflow change — `master` first
 
 This is how the watch first reached `master` (PR #308, 2026-09-11), and it is
-the step owed after PR #369 (task 0319):
+the step owed for PR #369 (task 0319).
 
-1. From an up-to-date `develop`, branch off `master` and copy only the workflow
-   file across:
+⚠️ **Order matters for #369.** Its script change makes WAITING a green run.
+`master`'s old workflow reads any green run as "resolved" and would close #336
+with the false comment _"Resolved — the pinned `stellar-xdr` is level with
+mainnet again."_ So the new workflow goes to `master` **before** #369 merges to
+`develop`. The new workflow with the old script is harmless: the old script
+still reports LAGGING, and the new workflow keeps #336 as it is.
+
+1. Branch off `master` and copy **only** the workflow file from the PR's branch:
 
    ```bash
    git fetch origin
    git checkout -b ci/0319_xdr-watch-tiers-on-master origin/master
-   git checkout origin/develop -- .github/workflows/xdr-protocol-watch.yml
+   git checkout origin/feat/0319_xdr-protocol-watch-says-when-the-bump-is-possible -- .github/workflows/xdr-protocol-watch.yml
    git diff --cached --stat   # must list exactly one file
    git commit -m "ci(lore-0319): bring the xdr watch tiers to master"
    git push -u origin ci/0319_xdr-watch-tiers-on-master
    gh pr create --base master --title "ci(0319): bring the xdr watch tiers to master"
    ```
 
-   Nothing else goes to `master` in this PR — the workflow reads everything else
-   from `develop`.
+   Nothing else goes to `master` in this PR: the workflow reads everything else
+   from `develop`. (For a later change that is already on `develop`, copy from
+   `origin/develop` instead.)
 
-2. After it merges, confirm `master` carries the new file:
+2. Merge that PR, then confirm `master` carries the new file:
 
    ```bash
    git fetch origin
-   git diff origin/master origin/develop -- .github/workflows/xdr-protocol-watch.yml
-   # no output = master runs the same workflow as develop
+   git diff origin/master origin/feat/0319_xdr-protocol-watch-says-when-the-bump-is-possible -- .github/workflows/xdr-protocol-watch.yml
+   # no output = master runs the new workflow
    ```
 
-3. Run it once by hand instead of waiting for 06:17 UTC:
+3. Only now merge #369 to `develop`.
+
+4. Run the watch once by hand instead of waiting for 06:17 UTC:
 
    ```bash
    gh workflow run xdr-protocol-watch.yml --ref master
+   gh run list --workflow xdr-protocol-watch.yml --limit 1
    ```
 
-4. Check the result on the tracking issue (#336 while protocol 29 is pending):
-   - the first line of the body reads `<!-- xdr-protocol-watch tier=WAITING -->`
-     while crates.io has no stable `stellar-xdr` 29;
-   - the body shows **"Nothing to do yet."** and the report's
-     `newest on crates.io …` value;
-   - there is **no new comment** (a move from LAGGING to WAITING is silent).
+5. Check the result while protocol 29 has no crate:
+   - the run is **green**, and its summary shows the `WAITING` report with
+     `newest on crates.io …`;
+   - **#336 is closed** with the comment _"Closed as not actionable yet …"_.
+     That single close comment is the last notification until the crate is
+     published.
 
-5. From then on, the next notification on that issue is either
-   **"📦 Now actionable"** (a stable crate was published — follow _LAGGING_
-   above) or **"⚠️ Escalated to BEHIND"** (mainnet voted first).
+6. From then on you hear from the watch only when there is something to do: a
+   **new issue** opens the day a stable `stellar-xdr` for the new protocol is
+   published (follow _LAGGING_ above), or it escalates to **BEHIND** if mainnet
+   votes first.
 
-Until step 1 is done, `master`'s older workflow still runs. It treats WAITING
-as LAGGING — the issue stays open and its report says WAITING, but its "What to
-do" paragraph still asks for the bump, and publishing the crate posts no comment.
+If #369 was merged to `develop` before step 2, expect #336 to be closed once
+with the misleading "Resolved" comment. Nothing is lost: the watch opens a new
+issue when the crate is published.
 
 ### If `develop` stops being what ships
 
