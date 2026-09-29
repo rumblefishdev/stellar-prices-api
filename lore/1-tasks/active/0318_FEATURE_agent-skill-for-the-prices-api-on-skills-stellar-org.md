@@ -176,7 +176,8 @@ Optional second placement: a mention in SDF's `data` or `standards` skill
 - Portal "Skills" section: split out to backlog task 0320 (2026-09-29).
 - Found in passing: `web/portal/src/landing/Faq.tsx:81` says prices "come
   straight from Soroswap liquidity pools and are updated on every block". The
-  product uses five venues and an hourly USD pass.
+  product uses five venues and an hourly USD pass. `Features.tsx:47` repeats
+  it. Filed as backlog task 0321.
 - Found in passing: prices-api README uses `/production/v1`. (The portal FAQ's
   "free is the only plan" was listed here as stale; it is consistent with plans
   not being public, so it is not.)
