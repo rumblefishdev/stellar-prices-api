@@ -441,8 +441,12 @@ non-zero value is not a row count on 26.3.10.60 (it was measured at 256 × the
 buckets appended), so read it as "something was written", never quote it as a
 number of rows. A pass rewrites only closed buckets that ended at least 2 h ago
 (`MISMATCH_GRACE`), never the open bucket, which stays the fast MV's. So on a
-live system `0` is the normal steady state after the first pass, and a non-zero
-value means the pass repaired something (a back-fill, a missed bucket).
+live system `0` is the usual steady state after the first pass, and a non-zero
+value means the pass repaired something (a back-fill, a missed bucket). Expect
+a routine non-zero around each day boundary: minutes that land late after
+midnight make the pass after the grace (≈ 02:00 UTC) rewrite yesterday's `1d`
+bucket, and at week and month ends the `1w` / `1M` bucket too. That is the
+self-heal working, not a fault.
 
 ### 2b. Deploy the probe and ObservabilityStack — after §1 and §2
 

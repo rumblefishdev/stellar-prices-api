@@ -312,6 +312,19 @@ pub fn metrics_for_read<E: std::fmt::Display>(
     }
 }
 
+/// The failing-views detail the probe logs, gated on what was published:
+/// when the read was unreadable (grant refused, or none of the declared views
+/// visible) there is no detail to show, so `None` — logged with the same
+/// `unreadable` label as the counts, never `failed` and never an empty
+/// string, which is the healthy shape (review IN-01, /code-review on #365).
+pub fn failing_detail_for_log(detail: Option<String>, unreadable: Option<f64>) -> Option<String> {
+    if unreadable == Some(1.0) {
+        None
+    } else {
+        detail
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,5 +696,23 @@ mod tests {
             assert_eq!(sql.matches(&format!("'{name}'")).count(), 1, "{name}");
         }
         assert_eq!(sql.matches("'mv_").count(), 12);
+    }
+
+    #[test]
+    fn an_unreadable_read_logs_no_failing_detail() {
+        // Grant refused: the read errored, so no detail was built.
+        assert_eq!(failing_detail_for_log(None, Some(1.0)), None);
+        // No declared view visible: the read succeeded with an empty detail,
+        // which must not be logged as the healthy empty string.
+        assert_eq!(failing_detail_for_log(Some(String::new()), Some(1.0)), None);
+        // Readable: the detail passes through, empty or not.
+        assert_eq!(
+            failing_detail_for_log(Some(String::new()), Some(0.0)),
+            Some(String::new())
+        );
+        assert_eq!(
+            failing_detail_for_log(Some("prices.mv_x: boom".into()), Some(0.0)),
+            Some("prices.mv_x: boom".into())
+        );
     }
 }

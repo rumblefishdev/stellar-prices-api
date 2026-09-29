@@ -31,8 +31,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     };
     use rollup_freshness_probe::refresh_waits::{
         MV_REFRESH_DISABLED_METRIC, MV_REFRESH_FAILING_METRIC, MV_REFRESH_UNREADABLE_METRIC,
-        MV_REFRESH_WAITING_METRIC, ViewRefreshRow, describe_failing, metrics_for_read,
-        refresh_waits_query,
+        MV_REFRESH_WAITING_METRIC, ViewRefreshRow, describe_failing, failing_detail_for_log,
+        metrics_for_read, refresh_waits_query,
     };
     use rollup_freshness_probe::usd_sanity::{
         PegCounts, StrandedCounts, peg_metric, peg_query, publish_sanity, stranded_metric,
@@ -348,6 +348,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     failures.push(format!("mv-refresh-waits publish: {e}"));
                 }
             }
+            let refresh_failing_detail =
+                failing_detail_for_log(refresh_failing_detail, refresh_unreadable);
 
             // ---- 5. The zero sentinel's stored-data invariants (ADR 0292) ---
             //
@@ -490,7 +492,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 mv_refresh_waiting = %reading(refresh_waiting, refresh_missing),
                 mv_refresh_disabled = %reading(refresh_disabled, refresh_missing),
                 mv_refresh_failing = %reading(refresh_failing, refresh_missing),
-                mv_refresh_failing_views = %reading(refresh_failing_detail.as_deref(), FAILED),
+                mv_refresh_failing_views = %reading(refresh_failing_detail.as_deref(), refresh_missing),
                 mv_refresh_unreadable = %reading(refresh_unreadable, FAILED),
                 rollup_mismatch = %mismatch_detail,
                 "rollup-freshness-probe run complete"
