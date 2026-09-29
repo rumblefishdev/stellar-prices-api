@@ -85,9 +85,14 @@ Four of those steps exist because of one fact and nothing else:
   the same range picks up where it stopped (`--start` the same, it skips what is
   done).
 - `reingest_0286.py` retries a ClickHouse call that cannot connect (six waits,
-  5 s → 240 s, each logged to `run.log` as `ClickHouse unreachable`). A call
+  5 s → 240 s, each logged to `run.log` as `ClickHouse unreachable`). A read
+  answered 502/503 by Caddy (ClickHouse down behind it) is retried the same way;
+  a write answered 502/503 ends the run with exit 1 and a `DOWN` line, because
+  Caddy also says 502 when ClickHouse died while running the statement. A call
   whose request already went out is not retried and still ends the run (exit 1),
-  and a gate still `STOP`s (exit 2). Wrap `run` so a crash resumes by itself
+  and a gate still `STOP`s (exit 2) — so does a connect error no wait can fix (a
+  certificate that does not verify or is rejected, an unknown host name), at the
+  first call instead of after an hour of restarts. Wrap `run` so a crash resumes by itself
   while a `STOP` stays down — on 2026-09-25 a single unreachable call left the
   loop dead for 56 hours:
 
