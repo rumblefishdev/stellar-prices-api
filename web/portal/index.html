@@ -5,7 +5,8 @@
     <!-- Google Consent Mode: everything denied until the HubSpot banner says
          otherwise. Must run before GTM; the listener after the HubSpot loader
          sends the update. Copied from soroban-block-explorer `web/index.html`
-         (explorer task 0589). -->
+         (explorer task 0589). The GTM blocklist below it has to be in place
+         before GTM loads as well. -->
     <script>
       window.dataLayer = window.dataLayer || [];
       function gtag() {
@@ -18,6 +19,10 @@
         ad_personalization: 'denied',
         wait_for_update: 500,
       });
+      // No Custom HTML tags or Custom JavaScript variables, whatever the
+      // container holds: a published tag must not be able to read the key
+      // this page renders (explorer task 0593).
+      dataLayer.push({ 'gtm.blocklist': ['customScripts'] });
     </script>
     <!-- Google Tag Manager — the explorer's container, copied verbatim from
          soroban-block-explorer `web/index.html` (task 0316). -->
