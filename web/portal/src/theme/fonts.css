@@ -2,13 +2,14 @@
  * Self-hosted webfonts — the design system's three families, exactly the
  * weights the Figma variables name and nothing else.
  *
- * SELF-HOSTED IS THE POINT, not a preference. Task 0193's acceptance criterion
- * is "no third-party scripts in the bundle" on a page that renders a
- * credential; a `<link>` to fonts.googleapis.com or cdn.fontshare.com is a
- * third-party request from that page, and it is what would force the CSP off
- * `default-src 'self'`. The bytes are committed under `src/assets/fonts/` and
- * Vite fingerprints them under `/api-tokens/assets/`, same origin as
- * everything else.
+ * Self-hosted since task 0193, whose rule was "no third-party request" from a
+ * page that renders a credential. Task 0316 relaxed that rule for the
+ * explorer's GTM and HubSpot only. A font CDN still adds a host that gets
+ * every visit and gains nothing over the committed bytes. The explorer
+ * distribution enforces no CSP (its `delivery-stack.ts`), so this rests on
+ * that choice, not on a header. The bytes are committed under
+ * `src/assets/fonts/` and Vite fingerprints them under `/api-tokens/assets/`,
+ * same origin as everything else.
  *
  * `font-display: swap` throughout: text renders immediately in the fallback and
  * reflows when the face lands. The alternative (`block`) hides the hero

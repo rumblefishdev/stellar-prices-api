@@ -7,6 +7,7 @@ related_adr: []
 related_tasks: ["0303", "0193", "0162", "0305", "0194"]
 tags: [layer-frontend, portal, legal, analytics, epic-self-service-onboarding, priority-medium, effort-small]
 links:
+  - "sources/privacy-policy-cookies-and-analytics-2026-09-29.md"
   - "../../../web/portal/index.html"
   - "../../../web/portal/src/privacy/privacy-policy.md"
   - "../../../web/portal/src/privacy/PrivacyPolicy.tsx"
@@ -90,7 +91,8 @@ Verified on 2026-09-28:
   own policy says analytics are "activated only after you provide consent",
   so it is already out of step with it. Copying the container 1:1 gives the
   portal the same defect. By decision the fix is made in the explorer first
-  (sbe 0589) and then repeated here.
+  (sbe 0589) and then repeated here. **Since fixed:** sbe 0589 went live on
+  2026-09-28 at 18:58 UTC, and this task repeats it (see Notes).
 
 ## Implementation Plan
 
@@ -127,6 +129,30 @@ Verified on 2026-09-28:
 
 ## Notes
 
+- Consent Mode wiring from explorer 0589 (`web/index.html`, deployed
+  2026-09-28) is repeated in `web/portal/index.html`. Everything is denied
+  before GTM loads, and a HubSpot `addPrivacyConsentListener` forwards the
+  banner's categories. `consent-mode.spec.ts` runs those inline scripts. On a
+  `vite preview` build, a fresh visitor gets no cookies at all, and "Accept
+  All" grants consent and sets `_ga`. GA still sends cookieless `gcs=G100`
+  pings before consent, so the criterion "no `g/collect` request" needs the
+  GTM-side setting (explorer 0589, option 2).
+- Before GTM loads, the same script pushes
+  `{'gtm.blocklist': ['customScripts']}` (explorer task 0593). GTM then runs
+  no Custom HTML tag and no Custom JavaScript variable, whatever the container
+  holds. A tag published there can therefore not read the key this page
+  renders. The container's only tag today is the Google tag for GA4, and on a
+  `vite preview` build it still sends hits after consent.
+- **Policy text (2026-09-29).** The owner sent one section, "Cookies and
+  Analytics", instead of a whole new document. It is kept verbatim in
+  `sources/privacy-policy-cookies-and-analytics-2026-09-29.md`. It went into
+  §5, which is renamed "Cookies and Analytics". The session-cookie
+  paragraphs stay as they were, and the new text follows them word for word.
+  One sentence was removed because it is no longer true: "…portal does not
+  use cookies or similar technologies for advertising, behavioral tracking or
+  analytics purposes." The rest of the policy is unchanged, as the owner
+  confirmed. `POLICY_DATED` is now 29 September 2026. The new text promises
+  consent before GA cookies, and that matches what the page does.
 - `vite dev` on localhost would also load the production container. The
   explorer accepts that. Filter `localhost` in the GA property if it turns out
   to be noise.
