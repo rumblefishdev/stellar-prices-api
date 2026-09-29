@@ -26,8 +26,8 @@ in the "Community skills" section of https://skills.stellar.org.
 
 ## Status: Active
 
-**Current state:** skill written on `feat/0318_…`. Keyless checks and
-fresh-agent evals pass. The live run with a real key is still pending.
+**Current state:** skill in PR #368 (to `develop`), fully verified including
+a live run with a real key. Open: hosting decision, then the Stellar PR.
 
 ## Verification log (2026-09-29)
 
@@ -43,9 +43,15 @@ These checks are **proven**:
   - Candles: `timeframe=30d&granularity=1d` for "daily USDC candles, 30 days".
 - **Negative control for the live runbook script.** With a fake key, all 8 recipes FAIL and the pagination loop returns 0 rows. The script checks curl `--fail-with-body` with `pipefail`, so `jq` reshaping an error body cannot hide a failure.
 
-This is **unproven**:
-
-- Every recipe returning 200 with a real key. This needs the user's key; the script prompts for it without echoing.
+- **Live run with the user's key, 2026-09-29 ~10:27 UTC.** All 8 recipes returned 200. They ran verbatim from SKILL.md, key read without echo. Results:
+  - XLM: `price_status: carried`, `as_of` 11 minutes behind `updated_at`. This is the ordinary state the skill describes.
+  - USDC: `method: oracle`, empty `sources`.
+  - `AQUA` search resolves the issuer.
+  - Soroban top-10 returns SolvBTC via aquarius.
+  - The 7-day hourly and date-range daily (XLM-based) OHLCV both return candles.
+  - Batch: `not_found: []`.
+  - Oracles: `reflector` only.
+  - The pagination loop, capped at 3 pages, returned 600 rows, so the `--data-urlencode` cursor round-trips.
 
 ## Context
 
