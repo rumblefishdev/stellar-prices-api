@@ -1,5 +1,5 @@
 ---
-id: "XXXX"
+id: "0317"
 title: "Rollup MVs run in dependency order and reconcile against their source tier"
 status: accepted
 deciders: [akot]
@@ -31,7 +31,7 @@ history:
       the rollout waits for task 0286 phase 3.
 ---
 
-# ADR XXXX: Rollup MVs run in dependency order and reconcile against their source tier
+# ADR 0317: Rollup MVs run in dependency order and reconcile against their source tier
 
 **Related:**
 

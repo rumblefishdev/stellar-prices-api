@@ -304,7 +304,7 @@ is a pre-roll — see `docs/runbooks/0136-coarse-rollup-merge-recovery.md` and t
 ## Tasks 0143 + 0203 — dependency order and reconciliation
 
 What changed in `schema/rollups.sql` (decision record:
-`lore/2-adrs/XXXX_rollup-mvs-dependency-order-and-reconciliation.md`):
+`lore/2-adrs/0317_rollup-mvs-dependency-order-and-reconciliation.md`):
 
 - **0143.** The five fast MVs above `mv_ohlcv_1m_to_15m` wait for the MV that
   writes their source (`REFRESH … DEPENDS ON prices.<mv> APPEND`). At 00:00 the
