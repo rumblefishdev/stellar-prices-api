@@ -11,6 +11,19 @@ links:
   - "../../../infra/src/lib/stacks/observability-stack.ts"
   - "../../../docs/prices-api-general-overview.md"
 history:
+  - date: "2026-09-29"
+    status: done
+    who: claude
+    note: >
+      Post-archive: the standing viewer came back. Observability was deployed
+      2026-09-25 14:48 from [[0311]]'s branch (#351), which did not contain
+      #355, and CloudFormation recreated prices-production-stellar-viewer
+      with its read policy (no login profile, no access keys, never used).
+      Removed again 2026-09-29 09:49 by an Observability deploy from
+      origin/develop @ 8302e00d; iam list-users is empty. "No IAM user in the
+      account" was false from 09-25 14:48 to 09-29 09:49. Runbook since:
+      explicit Deny without MFA (#359, merged 09-28) and an IAM Identity
+      Center alternative (#364, open).
   - date: 2026-09-25
     status: done
     who: claude

@@ -13,6 +13,23 @@ links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../../docs/prices-api-load-test-100rps.md"
 history:
+  - date: 2026-09-29
+    status: active
+    who: claude
+    note: >
+      AC 8 holds again: production has no IAM user (list-users empty after
+      the Observability deploy of 09:49 from origin/develop @ 8302e00d). It
+      did not hold 09-25 14:48 → 09-29 09:49: the 14:48 deploy from
+      [[0311]]'s branch (#351, without #349 and #355) recreated the 0125
+      viewer and deleted the two asset-discovery liveness alarms (details in
+      [[0295]] and [[0256]]). 65 alarms again; the one not OK is
+      coverage-sweep-unclassified (ALARM since 09-28 08:14, the first probe
+      run found the sda aggregator; allow-listed in #358, merged 09-28 11:02;
+      whether the deployed probe carries it was not checked). Access
+      runbooks: explicit Deny without MFA (#359, merged) and an IAM Identity
+      Center path (#364, open, not walked). Before submission, re-read any
+      sentence in the package that says "no IAM user" with a date between
+      09-25 and 09-29.
   - date: 2026-09-28
     status: active
     who: stkrolikiewicz

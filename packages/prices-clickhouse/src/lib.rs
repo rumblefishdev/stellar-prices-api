@@ -628,8 +628,9 @@ mod tests {
     }
 
     #[test]
-    fn rollups_and_preroll_each_have_six_statements() {
-        assert_eq!(split_statements(ROLLUPS_SQL).len(), 6);
+    fn rollups_has_twelve_statements_and_preroll_six() {
+        // Six fast MVs, then six reconciliation MVs (task 0203).
+        assert_eq!(split_statements(ROLLUPS_SQL).len(), 12);
         assert_eq!(split_statements(PREROLL_SQL).len(), 6);
     }
 
@@ -846,7 +847,7 @@ mod tests {
     #[test]
     fn rollups_sql_keeps_if_not_exists_and_references_the_reapply_runbook() {
         let stmts = split_statements(ROLLUPS_SQL);
-        assert_eq!(stmts.len(), 6, "guard is vacuous if the file is empty");
+        assert_eq!(stmts.len(), 12, "guard is vacuous if the file is empty");
 
         for stmt in &stmts {
             let head: String = stmt.chars().take(80).collect();
@@ -876,6 +877,156 @@ mod tests {
              here does not land on a provisioned target, and the file is the only \
              place that warning is guaranteed to be read"
         );
+    }
+
+    /// Tasks 0143 + 0203 (BRIEF §6): the five fast dependents gain `DEPENDS ON`
+    /// in place, by hand, with `ALTER TABLE … MODIFY REFRESH`. That statement
+    /// REPLACES every refresh parameter, so a runbook copy that drifts from the
+    /// generator (a missing `DEPENDS ON`, a wrong dependency, a changed cadence)
+    /// would silently land the wrong chain on prod. Read at test time, so an
+    /// edit to either side without the other fails here.
+    #[test]
+    fn the_reapply_runbook_quotes_every_generated_modify_refresh_statement() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/runbooks/0142-rollup-mv-reapply.md");
+        let runbook = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+
+        let statements: Vec<String> = rollup_sql::TIERS
+            .iter()
+            .filter_map(|t| {
+                rollup_sql::mv_modify_refresh(t, PROD_DATABASE).expect("a checked rendering")
+            })
+            .collect();
+        assert_eq!(
+            statements.len(),
+            5,
+            "guard is vacuous without the five dependents"
+        );
+
+        for stmt in &statements {
+            assert!(
+                runbook.contains(stmt.as_str()),
+                "docs/runbooks/0142-rollup-mv-reapply.md must quote the generated \
+                 rollout statement verbatim — copy it from here:\n{stmt};"
+            );
+        }
+    }
+
+    /// Read a runbook under `docs/runbooks/` at test time.
+    fn runbook(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/runbooks")
+            .join(name);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
+    /// Byte offsets of each needle in `haystack`, asserting each occurs
+    /// exactly once — so an order check below compares real positions.
+    fn positions(haystack: &str, file: &str, needles: &[String]) -> Vec<usize> {
+        needles
+            .iter()
+            .map(|n| {
+                assert_eq!(
+                    haystack.matches(n.as_str()).count(),
+                    1,
+                    "docs/runbooks/{file} must quote this generated statement exactly \
+                     once — copy it from here:\n{n}"
+                );
+                haystack.find(n.as_str()).expect("counted above")
+            })
+            .collect()
+    }
+
+    /// Review IN-02: the ROLLBACK side of runbook 0142 §6 — the five
+    /// `MODIFY REFRESH` clauses WITHOUT `DEPENDS ON` — is the generated
+    /// forward clause with its dependency removed, dailies first (the reverse
+    /// of the rollout). A cadence change in the generator would otherwise
+    /// leave a rollback that silently lands a stale cadence.
+    #[test]
+    fn the_reapply_runbook_rollback_is_the_generated_clause_without_depends_on() {
+        let text = runbook("0142-rollup-mv-reapply.md");
+        let rollback: Vec<String> = rollup_sql::TIERS
+            .iter()
+            .rev()
+            .filter_map(|t| {
+                rollup_sql::mv_modify_refresh(t, PROD_DATABASE).expect("a checked rendering")
+            })
+            .map(|forward| {
+                let (head, tail) = forward
+                    .split_once(" DEPENDS ON ")
+                    .expect("every dependent's clause declares its dependency");
+                let (_dependency, rest) = tail.split_once(' ').expect("a clause after the name");
+                format!("{head} {rest};")
+            })
+            .collect();
+        assert_eq!(
+            rollback.len(),
+            5,
+            "guard is vacuous without the five dependents"
+        );
+        for stmt in &rollback {
+            assert!(
+                !stmt.contains("DEPENDS ON") && stmt.ends_with(" APPEND;"),
+                "{stmt}"
+            );
+        }
+        let at = positions(&text, "0142-rollup-mv-reapply.md", &rollback);
+        assert!(
+            at.windows(2).all(|w| w[0] < w[1]),
+            "runbook 0142's rollback must take the dependencies off the dailies first, \
+             in this order:\n{}",
+            rollback.join("\n")
+        );
+    }
+
+    /// Review IN-02: every hand-typed list of the reconcile MVs names exactly
+    /// the six the generator declares — the runbook 0142 §6 DROPs (coarse to
+    /// fine) and the re-ingest STOP (§1a) / START (§7f) lists. A renamed
+    /// `reconcile_mv` would otherwise leave an operator a statement naming a
+    /// view that does not exist, or miss one that does.
+    #[test]
+    fn the_runbooks_name_exactly_the_generated_reconcile_mvs() {
+        let names: Vec<&str> = rollup_sql::TIERS.iter().map(|t| t.reconcile_mv).collect();
+        assert_eq!(
+            names.len(),
+            6,
+            "guard is vacuous without the six reconcile MVs"
+        );
+
+        let reapply = runbook("0142-rollup-mv-reapply.md");
+        let drops: Vec<String> = names
+            .iter()
+            .rev()
+            .map(|n| format!("DROP VIEW {PROD_DATABASE}.{n};"))
+            .collect();
+        let at = positions(&reapply, "0142-rollup-mv-reapply.md", &drops);
+        assert!(
+            at.windows(2).all(|w| w[0] < w[1]),
+            "runbook 0142 must drop the reconcile MVs coarse to fine:\n{}",
+            drops.join("\n")
+        );
+        assert_eq!(
+            reapply.matches("DROP VIEW prices.mv_reconcile_").count(),
+            6,
+            "no DROP of a reconcile MV the generator does not declare"
+        );
+
+        let reingest = runbook("0286-reingest-history.md");
+        for verb in ["STOP", "START"] {
+            let stmts: Vec<String> = names
+                .iter()
+                .map(|n| format!("SYSTEM {verb} VIEW {PROD_DATABASE}.{n};"))
+                .collect();
+            positions(&reingest, "0286-reingest-history.md", &stmts);
+            assert_eq!(
+                reingest
+                    .matches(&format!("SYSTEM {verb} VIEW prices.mv_reconcile_"))
+                    .count(),
+                6,
+                "no {verb} of a reconcile MV the generator does not declare"
+            );
+        }
     }
 
     /// `close_usd` is baked by a separate, lagging enrichment pass onto a
@@ -1125,15 +1276,70 @@ mod tests {
     }
 
     #[test]
-    fn rollups_sql_is_exactly_the_generators_six_mv_ddls() {
-        assert_generated(
-            "rollups.sql",
-            ROLLUPS_SQL,
-            rollup_sql::TIERS
-                .iter()
-                .map(|t| rollup_sql::mv_ddl(t, PROD_DATABASE).expect("a checked rendering"))
-                .collect(),
-        );
+    fn rollups_sql_is_exactly_the_generators_fast_then_reconcile_ddls() {
+        let fast = rollup_sql::TIERS
+            .iter()
+            .map(|t| rollup_sql::mv_ddl(t, PROD_DATABASE).expect("a checked rendering"));
+        let reconcile = rollup_sql::TIERS
+            .iter()
+            .map(|t| rollup_sql::reconcile_mv_ddl(t, PROD_DATABASE).expect("a checked rendering"));
+        assert_generated("rollups.sql", ROLLUPS_SQL, fast.chain(reconcile).collect());
+    }
+
+    /// Tasks 0143 + 0203: each shipped statement's REFRESH line waits for
+    /// exactly the MV `rollup_sql::dependency` implies — a fast MV for the MV
+    /// writing its child, a reconcile MV for the reconcile MV of its child —
+    /// and the cadence is the tier's own, or `RECONCILE_REFRESH`, verbatim.
+    /// Spelled from the raw file, so a hand edit of one line is caught even if
+    /// the generator comparison were ever loosened.
+    #[test]
+    fn every_shipped_rollup_statement_declares_the_dependency_its_tier_implies() {
+        let stmts = split_statements(ROLLUPS_SQL);
+        assert_eq!(stmts.len(), 12);
+        let (fast, reconcile) = stmts.split_at(6);
+        for (tier, (f, r)) in rollup_sql::TIERS.iter().zip(fast.iter().zip(reconcile)) {
+            let dep = rollup_sql::dependency(tier);
+            let refresh_line = |stmt: &str| {
+                stmt.lines()
+                    .find(|l| l.starts_with("REFRESH "))
+                    .expect("a REFRESH line")
+                    .to_string()
+            };
+
+            assert!(f.contains(&format!("EXISTS prices.{}\n", tier.mv)));
+            assert_eq!(
+                refresh_line(f),
+                match dep {
+                    Some(d) =>
+                        format!("REFRESH {} DEPENDS ON prices.{} APPEND", tier.refresh, d.mv),
+                    None => format!("REFRESH {} APPEND", tier.refresh),
+                },
+                "{}",
+                tier.mv
+            );
+
+            assert!(r.contains(&format!("EXISTS prices.{}\n", tier.reconcile_mv)));
+            assert_eq!(
+                refresh_line(r),
+                match dep {
+                    Some(d) => format!(
+                        "REFRESH {} DEPENDS ON prices.{} APPEND",
+                        rollup_sql::RECONCILE_REFRESH,
+                        d.reconcile_mv
+                    ),
+                    None => format!("REFRESH {} APPEND", rollup_sql::RECONCILE_REFRESH),
+                },
+                "{}",
+                tier.reconcile_mv
+            );
+            assert_eq!(
+                r.matches(&format!("now() - {}", rollup_sql::RECONCILE_WINDOW))
+                    .count(),
+                2,
+                "{}: the window comes from RECONCILE_WINDOW, on both sides",
+                tier.reconcile_mv
+            );
+        }
     }
 
     #[test]
@@ -1186,7 +1392,7 @@ mod tests {
     #[test]
     fn rollups_sql_respects_the_drift_detectors_file_constraints() {
         let stmts = split_statements(ROLLUPS_SQL);
-        assert_eq!(stmts.len(), 6);
+        assert_eq!(stmts.len(), 12);
         for stmt in &stmts {
             assert!(
                 stmt.starts_with("CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_"),
@@ -1209,12 +1415,13 @@ mod tests {
             .next()
             .expect("header");
         for tier in rollup_sql::TIERS {
-            assert!(
-                !header.contains(tier.mv),
-                "the header must not name {} — the per-statement lookups in \
-                 rollup_drift_it.rs would match the comment block",
-                tier.mv
-            );
+            for mv in [tier.mv, tier.reconcile_mv] {
+                assert!(
+                    !header.contains(mv),
+                    "the header must not name {mv} — the per-statement lookups in \
+                     rollup_drift_it.rs would match the comment block",
+                );
+            }
         }
         assert!(
             !header.contains(';'),

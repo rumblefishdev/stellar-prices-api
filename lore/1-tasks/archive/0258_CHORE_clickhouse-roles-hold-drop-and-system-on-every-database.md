@@ -2,12 +2,25 @@
 id: "0258"
 title: "api_reader and ingestion_writer hold DROP, TRUNCATE and SYSTEM on *.* — on the box shared with BE"
 type: CHORE
-status: backlog
+status: completed
 related_adr: ["0007"]
 related_tasks: ["0210"]
 tags: [layer-infra, priority-high, effort-small, milestone-M2, security, clickhouse]
 milestone: 2
+links:
+  - https://github.com/rumblefishdev/soroban-block-explorer/blob/develop/lore/1-tasks/archive/0591_OPS_api-reader-and-ingestion-writer-have-no-grants.md
+  - https://github.com/rumblefishdev/soroban-block-explorer/pull/531
 history:
+  - date: 2026-09-29
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Fixed in the explorer: task 0591, PR #531. Its services.xml was
+      deployed in place on 2026-09-29 06:33 UTC. SHOW GRANTS on ch-prod-01
+      now gives api_reader SELECT on default.* and prices.*, and
+      ingestion_writer SELECT, INSERT on default.*; nothing ON *.* for
+      either. Probes on prod: INSERT into prices.* and url()/remote() are
+      refused with 497.
   - date: 2026-09-25
     status: backlog
     who: claude
@@ -119,12 +132,46 @@ users in `services.xml`, mirroring what their matrix already says, deployed
 the way 0567–0569 were. Not this repo. 0258 closes when that task exists and
 points here.
 
+## Closed on the box — 2026-09-29
+
+Explorer task 0591 (PR #531) added `<grants>` to every service user in
+`services.xml`, and it was deployed in place on 2026-09-29 06:33 UTC.
+`SHOW GRANTS` on `ch-prod-01` after the deploy:
+
+| CH user | grants |
+|---|---|
+| `api_reader` | `SELECT ON default.*`, `SELECT ON prices.*` |
+| `ingestion_writer` | `SELECT, INSERT ON default.*` |
+| `galexie` | none (it writes to S3 only) |
+| `dev_read` | `SELECT` on `default.*`, `prices.*` and `system.*` |
+| `prices_reader` / `prices_writer` / `prices_admin` | unchanged, see the 2026-09-25 table |
+
+Probes on prod, as each user:
+
+- `ingestion_writer`: `INSERT INTO prices.asset_metadata … WHERE 0` is refused
+  with 497
+- `api_reader`: the same INSERT is refused with 497
+- `url()` and `remote()` are refused for both
+
+Still wide, by design or tracked elsewhere:
+
+- `default` and `dev_shared` are admin users on purpose. `default` is
+  password-protected and loopback-only. `dev_shared` is the target of the
+  developer mTLS certs, and the explorer's RBAC doc names it as the one
+  user without `<grants>`.
+- `dict_reader` still holds `ALL` on `default` plus the external-source
+  privileges. It is unused and loopback-only, and step 2 of explorer task
+  0396's rollout removes it.
+
 ## Acceptance Criteria
 
-- [ ] Every role's grants are scoped to the databases it actually uses
-- [ ] No service role holds `DROP`, `TRUNCATE` or `SYSTEM` on `*.*`
-- [ ] `displaySecretsInShowAndSelect` and the external-source privileges are
+- [x] Every role's grants are scoped to the databases it actually uses
+      → every service user; the exceptions are listed in "Closed on the box"
+- [x] No service role holds `DROP`, `TRUNCATE` or `SYSTEM` on `*.*`
+      → `dict_reader` is the one exception, and it goes with explorer 0396
+- [x] `displaySecretsInShowAndSelect` and the external-source privileges are
       removed unless a named requirement justifies each
+      → gone from `api_reader` and `ingestion_writer`; `dict_reader` as above
 - [x] The service→role mapping is written down, since it was not discoverable
       from the repo during this investigation
       → below, "Checked on the box — 2026-09-25"; the other three criteria are

@@ -2,7 +2,7 @@
 id: "0239"
 title: "A local deploy from macOS hits two undocumented prerequisites — the fd limit and bash 4"
 type: DOCS
-status: active
+status: completed
 assignee: stkrolikiewicz
 related_adr: []
 related_tasks: ["0118"]
@@ -28,6 +28,17 @@ history:
       prerequisites in. okarcz asked for macOS to be documented and
       supported; decided 2026-09-28: document the macOS prerequisites in
       infra/README.md rather than port the scripts to bash 3.2 / BSD.
+  - date: 2026-09-29
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      PR #360 merged 2026-09-28 (9aedb7c4), CI green: infra/README.md §1
+      "On macOS" and a macOS variant of step 4, the zig sentence fixed in
+      two runbooks, three scripts refusing with the cause named (one of
+      them a silently disabled target-dir guard). 5 files, no test
+      changed; tools/scripts tests 41/41. Proven on macOS 26.6: 12
+      bootstraps built and verified, credential-free synth. Follow-up
+      PR #366 (open): the root README points macOS contributors to §1.
 ---
 
 # Local deploy from macOS: two undocumented prerequisites
@@ -124,6 +135,16 @@ sentence), three guards in `tools/scripts/` (`lambda-assets.sh`,
 - **zsh keeps `hdiutil`'s trailing whitespace.** `hdiutil attach` prints the
   device padded with spaces and tabs, and zsh does not word-split an unquoted
   `$RD`, so `diskutil erasevolume … $RD` gets the padding; `awk '{print $1}'`.
+
+**Broken/modified tests:** none. The guards sit in front of the checks the
+existing tests exercise; `node --test "tools/scripts/**/*.test.mjs"` passes
+41/41 with the documented setup (15/41 with stock macOS tools, measured
+2026-09-29).
+
+**Follow-up:** PR #366 adds the macOS pointer to the root `README.md`
+"Local development": `npx nx run-many -t test` and the git hooks reach
+`infra:test`, which needs the same setup. No backlog task spawned: nothing
+is left open.
 
 ## Design Decisions
 

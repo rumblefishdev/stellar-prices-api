@@ -2,7 +2,7 @@
 id: "0143"
 title: "The rollup MV cascade has no DEPENDS ON — same-cadence tiers race daily and a tier can serve a stale tip"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0136", "0137", "0142", "0095"]
 tags: ["priority-medium", "effort-small", "clickhouse", "rollups", "correctness"]
@@ -19,6 +19,17 @@ history:
       2026-08-04 00:00:00. Cause is refresh ordering, not the 0136 freeze: both
       tail MVs are REFRESH EVERY 1 DAY with identical last_success_time and
       next_refresh_time, and `rollups.sql` declares no DEPENDS ON anywhere.
+  - date: "2026-09-28"
+    status: active
+    who: akot
+    note: >
+      Activated together with [[0203]], one branch and one PR (Adam,
+      2026-09-28). Decision: chain the six rollup MVs with fully qualified
+      DEPENDS ON (spike on 26.3.10.60: accepted with APPEND and mixed
+      intervals, ordering holds). Race is now 4h→1d vs the two dailies (after
+      0286), not 1w→1M — text to be corrected. Alarm on MVs stuck in
+      WaitingForDependencies is part of the scope. New ADR for rollup
+      ordering + reconciliation. Deploy after 0286 phase 3.
 ---
 
 # Rollup MV cascade has no `DEPENDS ON` — tiers race and serve stale tips

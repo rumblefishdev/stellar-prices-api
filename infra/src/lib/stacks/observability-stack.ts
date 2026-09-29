@@ -383,6 +383,24 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly mvDriftAlarm: cloudwatch.Alarm;
   /** The drift check could not see the schema at all (gap 3) — likely a grant. */
   public readonly mvDriftUnreadableAlarm: cloudwatch.Alarm;
+  /**
+   * Closed coarse buckets that still disagree with their source tier after an
+   * hourly reconciliation pass (task 0203), one alarm per coarse table — the
+   * hole behind a healthy tip that the freshness alarms cannot see.
+   */
+  public readonly rollupMismatchAlarms: Record<string, cloudwatch.Alarm>;
+  /** A rollup/reconcile MV stuck `WaitingForDependencies` past its own period (0143/0203). */
+  public readonly mvRefreshWaitingAlarm: cloudwatch.Alarm;
+  /** A rollup/reconcile MV is `SYSTEM STOP VIEW`ed (task 0203). */
+  public readonly mvRefreshDisabledAlarm: cloudwatch.Alarm;
+  /**
+   * A rollup/reconcile MV that fails itself — last refresh errored, or no
+   * success for 2+ own periods (0203, review WR-07). The leaves block nothing,
+   * so {@link mvRefreshWaitingAlarm} cannot see them.
+   */
+  public readonly mvRefreshFailingAlarm: cloudwatch.Alarm;
+  /** The probe cannot read `system.view_refreshes` — the three above are suppressed (0203). */
+  public readonly mvRefreshUnreadableAlarm: cloudwatch.Alarm;
   /** Live ledger-processor total-halt alarm — zero invocations (finding B / halt gap). */
   public readonly ledgerProcessorNoInvocationsAlarm: cloudwatch.Alarm;
   /**
@@ -1753,6 +1771,147 @@ export class ObservabilityStack extends cdk.Stack {
     this.mvDriftUnreadableAlarm.addAlarmAction(snsAction);
     this.mvDriftUnreadableAlarm.addOkAction(snsAction);
 
+    // Rollup completeness, one alarm per coarse table (task 0203).
+    //
+    // The freshness alarms above watch the TIP. On 2026-08-13 the tip was
+    // current while eight buckets behind it were missing — a hole behind a
+    // healthy tip is invisible to a staleness check. Six hourly reconciliation
+    // MVs now rebuild any bucket that disagrees with the tier below it, and the
+    // probe publishes, per tier, how many CLOSED buckets (ended at least 2 h
+    // ago) in the 7-day window still disagree. One alarm per table because the
+    // table is the diagnosis: a `_1m` hole shows on `price_ohlcv_15m` first —
+    // each tier is compared only with the tier directly below, so the coarser
+    // tiers agree with their equally-holed sources — and an upper tier
+    // mismatches on its own only when the chain broke part-way.
+    //
+    // 6 of 6 fifteen-minute periods (90 min), not 1 of 2: a back-dated arrival
+    // is EXPECTED to mismatch until the next hourly pass heals it. 90 min
+    // exceeds one 60-min reconcile cycle plus the propagation inside that pass
+    // plus one probe interval, so only a disagreement that survived a whole
+    // pass pages. A shorter hold (the BRIEF's "e.g. 3" = 45 min) would fire on
+    // every self-healing back-fill.
+    //
+    // treatMissingData: MISSING for the reason given at the drift alarms above:
+    // a correctness alarm must not announce a false recovery when the probe
+    // dies; the probe's own -errors alarm covers the dead probe.
+    const rollupMismatchTables = [
+      'price_ohlcv_15m',
+      'price_ohlcv_1h',
+      'price_ohlcv_4h',
+      'price_ohlcv_1d',
+      'price_ohlcv_1w',
+      'price_ohlcv_1M',
+    ] as const;
+    this.rollupMismatchAlarms = Object.fromEntries(
+      rollupMismatchTables.map((table) => {
+        // Same `price_ohlcv_15m` → `PriceOhlcv15m` mapping as rollup freshness.
+        const idSuffix = table
+          .split('_')
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join('');
+        const alarm = new cloudwatch.Alarm(
+          this,
+          `RollupMismatch${idSuffix}Alarm`,
+          {
+            alarmName: `prices-${config.envName}-rollup-mismatch-${table.replace('price_ohlcv_', '')}`,
+            alarmDescription: `${table} holds closed buckets (ended 2 h+ ago, within the last 7 days) that are missing or disagree with the tier below on trade_count/volume_base (extra target rows are not detected), and they survived more than one hourly reconciliation pass (task 0203). The freshness alarm cannot see this: the tip is healthy, the hole is behind it. A _1m hole shows on the 15m table first; a coarser table alone means the chain broke part-way. Check system.view_refreshes (as the ClickHouse admin) for the mv_reconcile_ views and the mv-refresh-waiting/-disabled alarms; check whether a re-ingest is running (its runbook STOPs the reconcile MVs); run prices-clickhouse-drift. A mismatch while a back-fill is still arriving is expected until it lands. For a hole older than 7 days use schema/preroll-live-gap.sql via docs/runbooks/0142-rollup-mv-reapply.md. Latched by design: silence means still wrong, not resolved.`,
+            metric: new cloudwatch.Metric({
+              namespace: 'Prices/Rollup',
+              metricName: 'RollupMismatchBuckets',
+              dimensionsMap: {
+                Environment: config.envName,
+                Table: table,
+              },
+              statistic: 'Maximum',
+              period: cdk.Duration.minutes(15),
+            }),
+            threshold: 1,
+            evaluationPeriods: 6,
+            datapointsToAlarm: 6,
+            comparisonOperator:
+              cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treatMissingData: cloudwatch.TreatMissingData.MISSING,
+          },
+        );
+        alarm.addAlarmAction(snsAction);
+        alarm.addOkAction(snsAction);
+        return [table, alarm];
+      }),
+    );
+
+    // Rollup MVs stuck behind a dependency, or switched off (task 0143/0203).
+    //
+    // Since task 0143 the rollup MVs run DEPENDS ON the MV writing their source
+    // tier. The price: a stopped, failing or missing dependency leaves every
+    // dependent WaitingForDependencies FOREVER with no error — verified on
+    // 26.3.10.60 — and a stuck reconcile MV never ages any tip. The probe
+    // counts views waiting longer than their own period, and separately views
+    // that were STOPped, so a deliberate re-ingest STOP cannot mask a real
+    // stall. A view that FAILS itself is a third count (review WR-07): nothing
+    // DEPENDS ON the four leaves (1d_to_1w, 1d_to_1M, fast and reconcile), so a
+    // leaf failing on every slot makes nothing wait, and since the reconcile
+    // MVs repair a dead fast leaf's closed buckets and the freshness alarm
+    // reads only the tip, nothing else sees it. Failing = the last refresh
+    // left an error in `exception` (ClickHouse puts a view that exhausted its
+    // retries back to Scheduled; the next success clears it), or no success
+    // for more than 2 own periods while neither waiting nor stopped (a hung
+    // or slot-skipping pass). 2 periods: a healthy view's last success is at
+    // most one period + its dependency wait + its run old, so one whole period
+    // of slack. system.view_refreshes is DENIED (not filtered) to a SELECT ON
+    // prices.* identity; the probe then publishes only the unreadable flag.
+    // 1 of 2 and MISSING, like the drift alarms above.
+    const refreshAlarm = (
+      id: string,
+      suffix: string,
+      metricName: string,
+      alarmDescription: string,
+    ): cloudwatch.Alarm => {
+      const alarm = new cloudwatch.Alarm(this, id, {
+        alarmName: `prices-${config.envName}-${suffix}`,
+        alarmDescription,
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Rollup',
+          metricName,
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(15),
+        }),
+        threshold: 1,
+        evaluationPeriods: 2,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.MISSING,
+      });
+      alarm.addAlarmAction(snsAction);
+      alarm.addOkAction(snsAction);
+      return alarm;
+    };
+    this.mvRefreshWaitingAlarm = refreshAlarm(
+      'MvRefreshWaitingAlarm',
+      'mv-refresh-waiting',
+      'MvRefreshWaitingCount',
+      `A rollup or reconciliation MV has been WaitingForDependencies for longer than its own refresh period (task 0143/0203): the MV it DEPENDS ON is stopped, failing after its retries, or missing, so it and everything above it in the chain wait forever with NO error — nothing else reports it, and a stuck reconcile MV never ages a freshness tip. Inspect system.view_refreshes as the ClickHouse admin (status, exception, next_refresh_time of the prices mv_ohlcv_/mv_reconcile_ views) to find the blocking dependency; SYSTEM START VIEW it if it was stopped, or re-create it per docs/runbooks/0142-rollup-mv-reapply.md (dependents re-link by name). SYSTEM REFRESH VIEW ignores dependencies, so it is a diagnostic, not a fix. Latched by design: silence means still stuck, not resolved.`,
+    );
+    this.mvRefreshDisabledAlarm = refreshAlarm(
+      'MvRefreshDisabledAlarm',
+      'mv-refresh-disabled',
+      'MvRefreshDisabledCount',
+      `A rollup or reconciliation MV is STOPped (SYSTEM STOP VIEW; status Disabled in system.view_refreshes) (task 0203). Expected ONLY while a re-ingest runbook runs (docs/runbooks/0286-reingest-history.md STOPs the six mv_reconcile_ views and STARTs them after). Otherwise it was forgotten: a stopped view refreshes nothing, and its dependents go WaitingForDependencies. Find it in system.view_refreshes as the ClickHouse admin and SYSTEM START VIEW it once no re-ingest is running. ⚠️ STOP is lost on a server restart, so a restart mid-re-ingest silently re-enables the reconcile MVs — check them after one. Latched by design: silence means still stopped, not resolved.`,
+    );
+    this.mvRefreshFailingAlarm = refreshAlarm(
+      'MvRefreshFailingAlarm',
+      'mv-refresh-failing',
+      'MvRefreshFailingCount',
+      `A rollup or reconciliation MV is failing itself (task 0203): its last refresh left an error in system.view_refreshes.exception, or it has not succeeded for more than 2 of its own periods while neither waiting nor stopped. Nothing depends on the 1w/1M leaves, so no other alarm sees them fail: the reconcile MVs repair a dead fast leaf's closed buckets and the freshness alarm reads only the tip. The probe's log line names the views and errors (mv_refresh_failing_views). As the ClickHouse admin read status, exception, last_success_time of the prices mv_ohlcv_/mv_reconcile_ views; fix the cause (memory limit, schema change: prices-clickhouse-drift), then SYSTEM REFRESH VIEW it and check exception is empty. Re-create per docs/runbooks/0142-rollup-mv-reapply.md if needed. Latched by design: silence means still failing, not resolved.`,
+    );
+    this.mvRefreshUnreadableAlarm = refreshAlarm(
+      'MvRefreshUnreadableAlarm',
+      'mv-refresh-unreadable',
+      'MvRefreshUnreadable',
+      `The probe cannot read system.view_refreshes, or sees none of the 12 rollup/reconcile MVs in it (task 0203), so the mv-refresh-waiting, -disabled and -failing counts are SUPPRESSED, not zero — a stuck, stopped or failing MV would go unreported. system.view_refreshes is DENIED (Code 497 ACCESS_DENIED), not grant-filtered, to an identity holding only SELECT ON prices.*. Check SHOW GRANTS FOR prices_writer (XML-managed on BE's side, BE task 0477) and add SELECT ON system.view_refreshes. If the grant is present, check that the rollup MVs exist in prices (prices-clickhouse-drift).`,
+    );
+
     // Total ingestion halt: the lag / errors / DLQ alarms above all key on the
     // *presence* of enqueued or failed messages, so a producer-side stop (BE's
     // S3→SNS→SQS delivery halts, the subscription is deleted, or upstream simply
@@ -1960,7 +2119,7 @@ export class ObservabilityStack extends cdk.Stack {
         timeout: cdk.Duration.minutes(1),
         cadence: cdk.Duration.minutes(15),
         impact:
-          'Every rollup-freshness alarm goes dark: they read Prices/Rollup RollupLagSeconds, which only this probe publishes, so a frozen rollup chain would stop being reported rather than reported as frozen — the exact nine-day blind spot of task 0136. Since task 0204 the ClickHouse free-space alarm rides on the same probe, so it goes dark too: a filling shared volume would also stop being reported. Since task 0243 the current-prices-freshness alarm rides on it as well, so a frozen current_prices would go unreported.',
+          'Every rollup-freshness alarm goes dark: they read Prices/Rollup RollupLagSeconds, which only this probe publishes, so a frozen rollup chain would stop being reported rather than reported as frozen — the exact nine-day blind spot of task 0136. Since task 0204 the ClickHouse free-space alarm rides on the same probe, so it goes dark too: a filling shared volume would also stop being reported. Since task 0243 the current-prices-freshness alarm rides on it as well, so a frozen current_prices would go unreported. Since task 0203 also rollup-mismatch and mv-refresh-* (MISSING: frozen).',
       },
       {
         name: 'mtls-notafter-probe',
