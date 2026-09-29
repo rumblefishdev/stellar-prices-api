@@ -2,7 +2,7 @@
 id: "0272"
 title: "Nothing compares backfill_progress's claims against the rows behind them — reconcile the stored watermarks on a schedule, not at the end of a run"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0264", "0263", "0176", "0243", "0127", "0200"]
 tags: [layer-backend, priority-medium, effort-small, milestone-M2, observability, backfill, data-correctness]
@@ -19,6 +19,13 @@ history:
       rather than met**. Scoped deliberately as a periodic sweep and NOT as the
       end-of-run check first proposed — see Design below for why that version is
       vacuous.
+  - date: "2026-09-29"
+    status: active
+    who: akot
+    note: >
+      Activated. Prod measured read-only first (both streams reconcile to 0;
+      a weekly `_1h` scan costs ~311 ms), then planned via GSD quick task
+      260929-k21 — plan in `.planning/quick/`, binding brief BRIEF-0272.
 ---
 
 # `backfill_progress` holds claims nobody compares to the data
