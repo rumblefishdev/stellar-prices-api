@@ -2,7 +2,7 @@
 id: "0236"
 title: "Nothing detects an internally inconsistent `price_ohlcv_*` row — and 0229's clamp removed the one surface that used to surface them"
 type: BUG
-status: backlog
+status: active
 related_adr: ["0011"]
 related_tasks: ["0229", "0120", "0182", "0227"]
 tags: ["priority-medium", "effort-small", "data-correctness", "observability", "ohlcv", "milestone-M2"]
@@ -18,6 +18,13 @@ history:
       Spawned from [[0229]]'s code review, finding 3. Not a defect in that fix —
       a consequence of it that is worth owning explicitly rather than leaving
       implicit in a PR thread.
+  - date: "2026-09-28"
+    status: active
+    who: akot
+    note: >
+      Activated. Research first (statistical/econometric treatment of OHLC
+      consistency and how other data providers do it), then the prod baseline,
+      before any detector or alarm is designed.
 ---
 
 # No detector for an internally inconsistent stored candle
@@ -70,6 +77,60 @@ row is now invisible end to end:
 - Consider whether the clamp firing is worth counting at the API. It is the only
   place that currently *knows*, but it has no metric path today and adding one
   per-request is not obviously worth it — decide with the baseline in hand.
+
+## Baseline — measured on prod 2026-09-28
+
+Read-only, `dev_read`. Pass 1 without `FINAL` over every row of every tier
+(~1.33 B rows; `_1m` full scan took 10 s), so every count below is an **upper
+bound** — superseded RMT versions are included.
+
+| tier | rows | band violations | priced row with a price ≤ 0, before 2026-09-22 12:00 | same, after |
+|---|---:|---:|---:|---:|
+| `_1m` | 800.9 M | **0** | 7,651 | 0 |
+| `_15m` | 167.8 M | **0** | 3,041 | 0 |
+| `_1h` | 215.6 M | **0** | 15,003 | 0 |
+| `_4h` | 95.3 M | **0** | 12,326 | 0 |
+| `_1d` | 32.2 M | **0** | 9,382 | 0 |
+| `_1w` | 7.4 M | **0** | 5,010 | — |
+| `_1M` | 2.7 M | **0** | 4,350 | — |
+
+- **Band violation** = `pf_trade_count > 0 AND (low > least(open, close) OR
+  high < greatest(open, close) OR low > high)`. 🔑 **Zero on every tier, every
+  source, since 2015** — before and after [[0286]]. Nothing to diagnose; AC 2
+  does not trigger for this predicate.
+- `pf_trade_count = 0` rows carrying any non-zero price: **0** on every tier.
+- **Priced row with a price ≤ 0** is the only non-zero class. Every one is an
+  exact **zero**, none negative; almost all `sdex`, 2021-11 onward, most often
+  `low = 0` with `close > 0` (on `_1h` `low ≤ 0` outnumbers `close ≤ 0`), i.e.
+  the dust-fill `low` that ADR 0287 removed. ⚠️ `zero_invariants` (invariant 3)
+  only sees the `close = 0` half of it; `low = 0` beside a positive `close` is
+  caught by nothing today.
+- ⚠️ **The 0286 cutoff is 2026-09-22 12:00 UTC, not 00:00.** The phase-1 rollout
+  ran 10:35–11:58 UTC. The one "post-0286" row the first cut found (pair
+  `80343/4`, `sdex`, bucket 06:59, all four prices `0`, `pf_trade_count = 1`,
+  propagated to `_15m`…`_1d`) was written by the old ingest before the rollout.
+  With the right cutoff the post-0286 count is **0** on every tier.
+- ⚠️ **`FINAL` matters for this class**: `_1m` 2026-09 reads 143 without `FINAL`
+  and **52** with it. The detector must use `FINAL`.
+- The legacy zero-price rows are pre-0286 residue that [[0286]] phase 3
+  re-ingests; they are recorded here, not filed as a separate task.
+
+## Decisions (Adam, 2026-09-28)
+
+1. **Predicate**: band violations **and** priced rows with any price ≤ 0 — the
+   second closes the `low = 0, close > 0` gap `zero_invariants` cannot see.
+2. **Scope**: all seven tiers, `FINAL`, a 2-day window on bucket time (as
+   `zero_invariants`), alarm on `> 0`. The legacy backlog falls outside the
+   window by construction and is documented above, not metered.
+3. **Clamp**: 0229's read-path clamp stays, with **no** API metric. The stored
+   side is now watched at the source with zero tolerance, and the USD crossing
+   is a structural ulp between exact `close_usd` and rate-derived extremes.
+   ADR-0011 §3 records the confirmation, the as-stored (`QuoteLeg`) arm that
+   does not clamp O/H/L, and this baseline.
+
+Research behind the decisions (econometrics, TradFi/crypto/DEX vendors, DQ
+frameworks): nobody repairs inconsistent bars; the invariant is kept by
+construction and checked with zero tolerance where it is checked at all.
 
 ## Acceptance Criteria
 

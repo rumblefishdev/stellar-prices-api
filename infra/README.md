@@ -64,8 +64,26 @@ account takes three parts, in this order:
 | Node.js              | `22.22.0` (`.nvmrc`) | `nvm use && npm ci` at the repo root (Nx + `aws-cdk` come from the lockfile)      |
 | Rust                 | `1.97.1`             | the pin CI uses; rustc ≥ 1.98 fails every aarch64 link under zig                  |
 | cargo-lambda         | `1.9.1`              | `pip3 install cargo-lambda==1.9.1`                                                |
-| zig                  | any                  | only on x86 machines: the Lambdas are cross-compiled to arm64                     |
+| zig                  | any                  | all but native ARM Linux, so every Mac: the Lambdas cross-compile to Linux arm64  |
 | jq, openssl, python3 | any                  | asset verification and the secret bundles below                                   |
+
+**On macOS**, the build and verify scripts behind step 7 need bash ≥ 4
+(`mapfile`, `declare -A`) and the GNU `realpath -m`, `stat --format`,
+`sha256sum` and `shred`. macOS ships bash 3.2 and BSD tools. zig also links
+more object files at once than the default limit of 256 open files allows,
+and the build then fails with `ProcessFdQuotaExceeded`. Install once:
+
+```bash
+brew install bash coreutils zig
+```
+
+Then run this in the shell you deploy from, before step 4:
+
+```bash
+export PATH="$(brew --prefix)/opt/coreutils/libexec/gnubin:$(brew --prefix)/bin:$PATH"
+ulimit -n 61440
+bash --version | head -1    # GNU bash, version 5.x
+```
 
 Check which account you are in before every command in this section. The
 account comes from your credentials (`CDK_DEFAULT_ACCOUNT`), so nothing pins
@@ -165,15 +183,26 @@ persistent disk:
 ```bash
 # [platform checkout] once per CN: prices-ingestion-production, prices-api-production
 CN=prices-ingestion-production
-mkdir -p -m 0700 /dev/shm/prices-cert && cp infra-hetzner/ca/out/$CN/{$CN.crt,$CN.key,ca.crt} /dev/shm/prices-cert/
-python3 - "$CN" > /dev/shm/prices-cert/bundle.json <<'PY'
+D=${D:-/dev/shm/prices-cert}    # tmpfs; on macOS set D first, see below
+mkdir -p -m 0700 "$D" && cp infra-hetzner/ca/out/$CN/{$CN.crt,$CN.key,ca.crt} "$D"/
+python3 - "$CN" "$D" > "$D"/bundle.json <<'PY'
 import json, pathlib, sys
-cn, d = sys.argv[1], pathlib.Path("/dev/shm/prices-cert")
+cn, d = sys.argv[1], pathlib.Path(sys.argv[2])
 print(json.dumps({"cert": (d/f"{cn}.crt").read_text(), "key": (d/f"{cn}.key").read_text(), "ca": (d/"ca.crt").read_text()}))
 PY
 aws secretsmanager create-secret --name "prices/production/clickhouse-mtls-$CN" \
-    --secret-string file:///dev/shm/prices-cert/bundle.json
-shred -u /dev/shm/prices-cert/* && rmdir /dev/shm/prices-cert
+    --secret-string "file://$D/bundle.json"
+shred -u "$D"/*
+```
+
+**macOS has no `/dev/shm`.** Stage the files on a RAM disk instead. Create the
+disk before the block and detach it afterwards; the files never reach the SSD.
+
+```bash
+RD=$(hdiutil attach -nomount ram://8192 | awk '{print $1}')   # 4 MB, in memory
+diskutil erasevolume HFS+ prices-cert "$RD" && D=/Volumes/prices-cert && chmod 700 "$D"
+# … the block above, once per CN …
+hdiutil detach "$RD"
 ```
 
 Resulting names, which must match what `src/lib/mtls.ts` computes:

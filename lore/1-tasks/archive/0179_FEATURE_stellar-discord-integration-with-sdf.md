@@ -2,7 +2,7 @@
 id: "0179"
 title: "Contact the Stellar Discord owner (SDF) to agree production guild integration and test it end to end"
 type: FEATURE
-status: backlog
+status: completed
 related_adr: ["0010"]
 related_tasks: ["0156", "0163", "0164", "0180", "0186", "0189", "0193"]
 tags: [layer-docs, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, discord, external-dependency, pre-launch]
@@ -53,6 +53,14 @@ history:
       worth restating: [[0189]] must have seeded that parameter as
       **operator-owned**, never `new ssm.StringParameter`, or step 4's flip is
       silently undone by the next `cdk deploy`.
+  - date: "2026-09-28"
+    status: completed
+    who: akot
+    note: >
+      Closed in the backlog cleanup. The owner of the Stellar Discord asked us
+      (official SDF statement) to hold the Discord developer account and run the
+      integration ourselves; that is done. The contact-and-agree half of this
+      task is therefore settled by SDF's own request.
 ---
 
 # Stellar Discord integration with SDF
@@ -222,3 +230,17 @@ honest framing is "we should tell them", not "we cannot proceed".
   Discord OAuth (`client_id=917408694822658160`), so the pattern is not foreign
   to them. It requests `identify email connections guilds`; we deliberately
   request less.
+
+## Closing — 2026-09-28
+
+Closed by Adam's decision in the backlog cleanup. The owner of the Stellar
+Discord asked us to hold the Discord developer account and run the integration
+ourselves — an official statement from SDF. We have that account set up and the
+integration running, and [[0164]]'s flow has been walked end to end against
+production by several team members.
+
+That answers the core question of this task — whether SDF is content for us to
+gate on their guild — with an explicit yes and an owner (us). The other
+acceptance criteria above (screening form contents, the screening heads-up,
+role requirement) are **not ticked**: they were not recorded separately, and
+closing this task does not claim they were.
