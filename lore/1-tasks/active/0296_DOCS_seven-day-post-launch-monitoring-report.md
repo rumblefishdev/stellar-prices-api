@@ -2,7 +2,7 @@
 id: "0296"
 title: "Tranche 3 AC 9 asks for a 7-day post-launch monitoring report — launch agreed as 2026-09-23 09:40 CEST, window to 2026-09-30 09:40"
 type: DOCS
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0294", "0293", "0249", "0260"]
 tags: [layer-docs, priority-high, effort-small, milestone-M3, observability, scf, evidence]
@@ -11,6 +11,13 @@ links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../../docs/prices-api-load-test-100rps.md"
 history:
+  - date: 2026-09-29
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated to prepare the export before the window closes (2026-09-30
+      09:40 CEST): the uptime definition and the CloudWatch queries, runnable
+      as soon as the window ends and while 1-minute data is retained.
   - date: 2026-09-25
     status: backlog
     who: stkrolikiewicz
