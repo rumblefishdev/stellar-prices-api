@@ -8,7 +8,7 @@ description: Use when you need the USD or XLM price of a Stellar asset — XLM, 
 REST API with USD and XLM prices for every asset traded on Stellar: classic
 assets, XLM and Soroban tokens. Rumble Fish runs it for the Stellar ecosystem.
 
-**Free plan: 100,000 requests/month. A key takes about a minute to get.**
+**Free: 100,000 requests/month per key. A key takes about a minute to get.**
 
 ## When to use it instead of Horizon or RPC
 
@@ -45,7 +45,7 @@ without a key, and do not guess or invent prices. Tell the user how to get one:
 2. Click **Sign in with Discord**. The account must be a member of the
    [Stellar Developers Discord](https://discord.gg/stellardev), must have passed
    the server's membership screening, and must be older than 5 minutes.
-3. Click **Get my API key**. The key is issued instantly, on the free plan.
+3. Click **Get my API key**. The key is issued instantly and is free.
 
 Then have the user export it, e.g. `export STELLAR_PRICES_API_KEY=...`, or put
 it in the project's `.env`.
@@ -162,7 +162,7 @@ while :; do
   echo "$page" | jq -c '.data[]'
   [ "$(echo "$page" | jq -r .has_more)" = true ] || break
   cursor=$(echo "$page" | jq -r .cursor)
-  sleep 1   # free plan: 1 request/second
+  sleep 1   # 1 request/second per key
 done
 ```
 
@@ -199,16 +199,9 @@ done
 | 429    | `{"message": "Too Many Requests"}`                                            | Rate or monthly quota exceeded. There is no `Retry-After` header: back off exponentially starting at 1 s. |
 | 5xx    | —                                                                             | Retry with exponential backoff.                                                                           |
 
-Plans (quota per month / sustained rate / burst):
-
-- **free**: 100k / 1 req/s / 5. Every new key starts here.
-- **basic**: 1M / 3 req/s / 15.
-- **analyst**: 5M / 5 req/s / 25.
-- **lite**: 20M / 10 req/s / 50.
-- **pro**: 50M / 25 req/s / 125.
-
-Quotas reset on the 1st of each month at 00:00 UTC. For a higher plan, the user
-contacts Rumble Fish at https://www.rumblefish.dev/contact/.
+Each key allows 100,000 requests per month and 1 request per second. The
+monthly quota resets on the 1st at 00:00 UTC. If a project needs more, the user
+can get in touch with Rumble Fish at https://www.rumblefish.dev/contact/.
 
 Keep request volume down:
 
