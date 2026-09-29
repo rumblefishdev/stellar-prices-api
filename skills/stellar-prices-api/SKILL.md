@@ -56,14 +56,22 @@ without a key, and do not guess or invent prices. Tell the user how to get one:
 Then have the user export it, e.g. `export STELLAR_PRICES_API_KEY=...`, or put
 it in the project's `.env`.
 
+> **Never suggest Regenerate as a fix.** Each Discord account has one active
+> key. **Regenerate** on the dashboard deactivates it within about 30 s and
+> issues **no new key until the next quota period** (the 1st of the month,
+> 00:00 UTC). It is allowed once per period and cannot be undone, so the user
+> can be left without any key for weeks. It does not fix a 403, a 429 or any
+> other error. Suggest it only when the key has leaked, and tell the user about
+> the wait before they press it. After a regenerate, the dashboard shows the
+> date a new key can be issued; from then on it offers **Get my API key**. That
+> card talks about a key "suspended" for exceeding the quota: after a
+> Regenerate this is expected and is not a penalty.
+
 Handle the key like a secret:
 
 - Never print it, log it, or commit it.
 - Never put it in client-side or browser code. Call the API from a backend and
   read the key from the environment there.
-- Each Discord account has one active key. **Regenerate** on the dashboard
-  deactivates it within about 30 s and issues no new key until the next quota
-  period (the 1st of the month, 00:00 UTC). Suggest it only for a leaked key.
 
 ## Basics
 
@@ -226,14 +234,14 @@ done
 
 ## Errors and limits
 
-| Status  | Body                                                                          | What to do                                                                                   |
-| ------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| 400     | `{"code": "invalid_id" \| "invalid_query" \| "invalid_body", "message": ...}` | `message` names the bad parameter. Fix it; do not retry as-is.                               |
-| 403     | `{"message": "Forbidden"}`                                                    | Missing, wrong or disabled key. Ask the user to check the key. Production never answers 401. |
-| 404     | `{"code": "not_found", "message": ...}`                                       | Unknown asset, one not priced yet, or a wrong path (`"no such route"`). Try `?search=`.      |
-| 429     | `{"message": "Too Many Requests"}`                                            | Over 1 request/second. There is no `Retry-After` header: wait at least 1 s and retry.        |
-| 429     | `{"message": "Limit Exceeded"}`                                               | Monthly quota spent. Retrying does not help; it resets on the 1st at 00:00 UTC.              |
-| 500/503 | `{"code": "db_error" \| "quote_unavailable", ...}`, or a gateway 502/504      | Retry with exponential backoff.                                                              |
+| Status  | Body                                                                          | What to do                                                                                                                     |
+| ------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| 400     | `{"code": "invalid_id" \| "invalid_query" \| "invalid_body", "message": ...}` | `message` names the bad parameter. Fix it; do not retry as-is.                                                                 |
+| 403     | `{"message": "Forbidden"}`                                                    | Missing, wrong or disabled key. Check the key is set and sent as `x-api-key`. Do not suggest Regenerate. No 401 in production. |
+| 404     | `{"code": "not_found", "message": ...}`                                       | Unknown asset, one not priced yet, or a wrong path (`"no such route"`). Try `?search=`.                                        |
+| 429     | `{"message": "Too Many Requests"}`                                            | Over 1 request/second. There is no `Retry-After` header: wait at least 1 s and retry.                                          |
+| 429     | `{"message": "Limit Exceeded"}`                                               | Monthly quota spent. Retrying does not help; it resets on the 1st at 00:00 UTC.                                                |
+| 500/503 | `{"code": "db_error" \| "quote_unavailable", ...}`, or a gateway 502/504      | Retry with exponential backoff.                                                                                                |
 
 Each key allows 100,000 requests per month and 1 request per second. The
 monthly quota resets on the 1st at 00:00 UTC. If a project needs more, the user
