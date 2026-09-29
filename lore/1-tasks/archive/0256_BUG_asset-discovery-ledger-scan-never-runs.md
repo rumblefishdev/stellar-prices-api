@@ -123,6 +123,18 @@ history:
       ops-alarms topic. Whole task: ledger scan removed (#331, 2026-09-24,
       bootstrap 13.98 → 7.07 MB, discovery_state dropped), 3 of 4 criteria
       met, the 4th not applicable (scan not kept). The seed stage stays.
+  - date: "2026-09-29"
+    status: done
+    who: claude
+    note: >
+      Post-archive: the two #349 alarms were missing from production from
+      2026-09-25 14:49:52 to 2026-09-29 09:49. CloudFormation deleted
+      -no-invocations and -duration-near-timeout when Observability was
+      deployed at 14:48 from [[0311]]'s branch (#351), which predated #349.
+      Found in the 09-28 diff; restored by an Observability deploy from
+      origin/develop @ 8302e00d (UPDATE_COMPLETE 09:49:47). Both OK on first
+      evaluation: 3 of 3 hourly invocations, duration 3.9 s against 240 s.
+      During the gap asset-discovery had only its -errors alarm.
 ---
 
 # The ledger scan is dead code in production
