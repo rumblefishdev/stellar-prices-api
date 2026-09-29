@@ -1186,6 +1186,40 @@ async fn as_of_of(admin: &Client, db: &str, asset: u32) -> String {
         .unwrap_or_else(|e| panic!("as_of for {asset}: {e}"))
 }
 
+async fn basis_of(admin: &Client, db: &str, asset: u32) -> String {
+    admin
+        .query(&format!(
+            "SELECT price_basis FROM {db}.current_prices FINAL WHERE asset_id = {asset}"
+        ))
+        .fetch_one::<String>()
+        .await
+        .unwrap_or_else(|e| panic!("price_basis for {asset}: {e}"))
+}
+
+/// A single-fill candle with its AMOUNTS named, for the task-0274 dust test:
+/// `vol_base` / `vol_quote` are decimal amounts (1 stroop = 0.0000001), and the
+/// pf columns are written explicitly as one price-forming fill of those amounts
+/// — the shape the ingest writes for an offer-priced fill.
+fn insert_fill(
+    db: &str,
+    base: u32,
+    source: &str,
+    close_usd: &str,
+    vol_base: &str,
+    vol_quote: &str,
+    mins: i64,
+) -> String {
+    format!(
+        "INSERT INTO {db}.price_ohlcv_1m \
+         (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+          volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version, \
+          pf_trade_count, pf_volume, pf_price_volume) \
+         VALUES (now() - INTERVAL {mins} MINUTE, {base}, 1, '{source}', {close_usd}, \
+          {close_usd}, {close_usd}, {close_usd}, {vol_base}, {vol_quote}, 0.01, {close_usd}, \
+          {close_usd}, 1, 1, 1, {vol_base}, {vol_quote})"
+    )
+}
+
 /// A candle `mins` minutes old with `pf_trade_count` named EXPLICITLY — the
 /// only fixture path in this file that can reach 0. Every other insert helper
 /// here stops the column list at `version`, so `pf_trade_count` takes its
@@ -1490,6 +1524,9 @@ async fn usdc_publishes_a_row_from_the_measured_rate_and_is_tagged_oracle() {
         "priced",
         "a measured rate is the newest thing there is to wait for here"
     );
+    // Task 0274 — the oracle arm has no candles, so its basis must be set
+    // explicitly; the aggregate's default 0 would call a measured rate dust.
+    assert_eq!(basis_of(&admin, db, 2).await, "trades");
 
     // Volume counts the quote leg: 10,000 + 2,000. Base-only summed an empty
     // set and published 0, which is the bug.
@@ -1732,6 +1769,117 @@ async fn an_unpriced_asset_carries_the_empty_sentinel_not_traded() {
         status_of(&admin, db, 5).await,
         "unpriced",
         "price_usd is the 0 sentinel, so the status word is `unpriced`"
+    );
+    assert_eq!(
+        basis_of(&admin, db, 5).await,
+        "",
+        "no price, no basis (task 0274) — mirrors method"
+    );
+
+    teardown(db).await;
+}
+
+/// Task 0274. Since 0286 an order-book fill forms price at the resting offer's
+/// price however small it is, so a 1-stroop fill against a lone offer prices an
+/// asset nobody really trades. The price is KEPT (it is often right — XAUa's
+/// pings sat within 2 % of its real fills) and `price_basis` says what it
+/// rests on. Each asset below isolates one clause of the rule:
+///
+/// * 20 PNG — only 1-stroop pings in the window → `offer_dust`, price kept.
+/// * 21 MIX — a real fill 30 min ago, then a newer 1-stroop ping that sets the
+///   price → `trades`. The rule is over the WINDOW; keyed on the as_of candle
+///   it would flag every real market a bot happens to ping last.
+/// * 22 EDG — one fill of exactly 1000 base stroops against a large quote →
+///   `offer_dust`: price.rs's bound fails at a <= 1000, and the SQL must agree
+///   with it at the boundary.
+/// * 23 ONE — 1001 base stroops against the same quote → `trades`
+///   ((1001 − 1000)(b − 1000) >= 10^6).
+/// * 24 AMM — the same 1-stroop amounts from a pool source → `trades`: a pool
+///   fill below the bound is never price-forming, so a price-forming pool fill
+///   already passed the bound in its own decimals and the stroop arithmetic
+///   must not be applied to it.
+/// * 25 BIG — a multi-fill minute whose base total is 900 stroops → every fill
+///   in it is below the bound → `offer_dust`.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_price_resting_only_on_offer_dust_is_kept_and_labelled() {
+    let db = "it_current_mv_0274_basis";
+    let admin = setup(db).await;
+
+    for q in [
+        insert_asset(db, 1, "XLM", ""),
+        insert_asset(db, 20, "PNG", "GPNG"),
+        insert_asset(db, 21, "MIX", "GMIX"),
+        insert_asset(db, 22, "EDG", "GEDG"),
+        insert_asset(db, 23, "ONE", "GONE"),
+        insert_asset(db, 24, "AMM", "GAMM"),
+        insert_asset(db, 25, "BIG", "GBIG"),
+        insert_fill(db, 20, "sdex", "4375", "0.0000001", "0.0021", 90),
+        insert_fill(db, 20, "sdex", "4400", "0.0000001", "0.0021", 5),
+        insert_fill(db, 21, "sdex", "4180", "0.003", "60", 30),
+        insert_fill(db, 21, "sdex", "4250", "0.0000001", "0.0021", 5),
+        insert_fill(db, 22, "sdex", "5", "0.0001", "100", 5),
+        insert_fill(db, 23, "sdex", "5", "0.0001001", "100", 5),
+        insert_fill(db, 24, "soroswap", "7", "0.0000001", "0.0021", 5),
+        format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) \
+             VALUES (now() - INTERVAL 5 MINUTE, 25, 1, 'sdex', 3, 3, 3, 3, \
+              0.00009, 50, 0.01, 3, 3, 3, 1, 3, 0.00009, 50)"
+        ),
+    ] {
+        admin.query(&q).execute().await.expect("fixture");
+    }
+    refresh(&admin, db, 6).await;
+
+    let price20 = scalar_f64(
+        &admin,
+        &format!("SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = 20"),
+    )
+    .await;
+    assert_eq!(
+        price20, 4400.0,
+        "the offer-dust price is KEPT, not withheld"
+    );
+    assert_eq!(basis_of(&admin, db, 20).await, "offer_dust");
+    assert_eq!(
+        status_of(&admin, db, 20).await,
+        "priced",
+        "basis is independent of age: the newest candle IS priced"
+    );
+
+    let price21 = scalar_f64(
+        &admin,
+        &format!("SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = 21"),
+    )
+    .await;
+    assert_eq!(
+        price21, 4250.0,
+        "the ping still sets the price; only the label is at stake"
+    );
+    assert_eq!(
+        basis_of(&admin, db, 21).await,
+        "trades",
+        "one real fill in the window makes it a market — the as_of candle alone must not decide"
+    );
+
+    assert_eq!(
+        basis_of(&admin, db, 22).await,
+        "offer_dust",
+        "a = 1000 stroops fails price.rs's bound; the SQL must agree at the boundary"
+    );
+    assert_eq!(basis_of(&admin, db, 23).await, "trades", "a = 1001 passes");
+    assert_eq!(
+        basis_of(&admin, db, 24).await,
+        "trades",
+        "a price-forming pool fill already passed the bound in its own decimals"
+    );
+    assert_eq!(
+        basis_of(&admin, db, 25).await,
+        "offer_dust",
+        "a minute whose base total is under 1000 stroops holds only dust fills"
     );
 
     teardown(db).await;
