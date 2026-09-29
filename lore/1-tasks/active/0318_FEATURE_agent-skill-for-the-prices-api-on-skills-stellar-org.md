@@ -86,10 +86,14 @@ One file (the "use without installing" mode fetches a single URL). The
 it works for every hosting option below. Content: key onboarding first, when to
 use us over Horizon, base URL + `x-api-key`, endpoint table with the live spec
 as source of truth, asset identifiers, curl runbook, reading the response
-(`as_of`, `price_status`), errors and plan limits.
+(`as_of`, `price_status`), errors and per-key limits.
 
-Do not copy stale text: `web/portal/src/landing/Faq.tsx:69-76` (says free is the
-only plan), `packages/prices-api/README.md` (`/production/v1`, 15 s cache).
+**Usage plans stay out of the skill** (user, 2026-09-29): they are not public.
+The skill states only what the portal FAQ publishes per key: 100k requests a
+month, 1 request/second, reset on the 1st, and "get in touch" for more.
+
+Do not copy stale text: `packages/prices-api/README.md` (`/production/v1`, 15 s
+cache).
 
 ### Step 2: Verify
 
@@ -136,5 +140,6 @@ Optional second placement: a mention in SDF's `data` or `standards` skill
 ## Notes
 
 - Portal "Skills" section: deferred by the user (2026-09-29).
-- Found in passing: portal FAQ still says free is the only plan; prices-api
-  README uses `/production/v1`.
+- Found in passing: prices-api README uses `/production/v1`. (The portal FAQ's
+  "free is the only plan" was listed here as stale; it is consistent with plans
+  not being public, so it is not.)
