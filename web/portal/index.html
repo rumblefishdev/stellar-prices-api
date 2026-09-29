@@ -2,6 +2,23 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <!-- Google Consent Mode: everything denied until the HubSpot banner says
+         otherwise. Must run before GTM; the listener after the HubSpot loader
+         sends the update. Copied from soroban-block-explorer `web/index.html`
+         (explorer task 0589). -->
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag() {
+        dataLayer.push(arguments);
+      }
+      gtag('consent', 'default', {
+        analytics_storage: 'denied',
+        ad_storage: 'denied',
+        ad_user_data: 'denied',
+        ad_personalization: 'denied',
+        wait_for_update: 500,
+      });
+    </script>
     <!-- Google Tag Manager — the explorer's container, copied verbatim from
          soroban-block-explorer `web/index.html` (task 0316). -->
     <script>
@@ -53,10 +70,9 @@
          from (`portalWebOrigin`), so loading the same container here gives
          nobody new access.
 
-         This page repeats the explorer's configuration 1:1, including what it
-         lacks: GTM is not gated on the banner's consent (explorer task 0451,
-         decision 7), so GA runs before a choice is made. The fix lands in the
-         explorer first (explorer task 0589) and is repeated here. -->
+         This page repeats the explorer's configuration 1:1, including the
+         Consent Mode wiring (explorer task 0589): GA starts denied and only
+         the banner's choice grants it. -->
     <!-- Google Tag Manager (noscript) -->
     <noscript
       ><iframe
@@ -78,5 +94,24 @@
       src="//js.hs-scripts.com/8102665.js"
     ></script>
     <!-- End of HubSpot Embed Code -->
+    <!-- Forward the banner choice to Google Consent Mode. HubSpot calls this on
+         load with a stored choice and on every change (footer Cookie Settings
+         included). Blocked HubSpot = never called = stays denied. -->
+    <script>
+      var _hsp = (window._hsp = window._hsp || []);
+      _hsp.push([
+        'addPrivacyConsentListener',
+        function (consent) {
+          var analytics = consent.categories.analytics ? 'granted' : 'denied';
+          var ads = consent.categories.advertisement ? 'granted' : 'denied';
+          gtag('consent', 'update', {
+            analytics_storage: analytics,
+            ad_storage: ads,
+            ad_user_data: ads,
+            ad_personalization: ads,
+          });
+        },
+      ]);
+    </script>
   </body>
 </html>
