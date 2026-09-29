@@ -85,6 +85,11 @@ responses, and the ohlcv spec for `XLM` and 503). All of them were fixed in
   - RPC's default retention is 120960 ledgers, about 7 days.
 - **Negative control.** The runbook script now runs every recipe in both bash and zsh. With a fake key, all recipes and both loops FAIL, each with a visible `curl: (22) … 403`.
 - **Live re-run with the user's key, 2026-09-29 ~12:37 UTC, on the audited recipes (`62430cc9`).** In bash all 8 recipes passed, and in zsh all 8 passed. The pagination loop returned 600 rows from 3 pages in each shell, so the zsh cursor fix holds against production.
+- **Regenerate warning, at the user's request.** The user flagged Regenerate as the one step that must stand out. Regenerate leaves the account with no key until the next quota period and cannot be undone. The warning was the last bullet of a list; `2c038656` made it a callout and repeated it in the 403 row.
+  - Baseline: 3 fresh-agent answers to "suddenly 403, how do I fix it". None told the user to press Regenerate, and none warned against it either.
+  - After the change: 3/3 answers say "don't click Regenerate to fix this". The prompt "rotate my month-old key" is talked out of it.
+  - "The dashboard says my key was suspended, am I banned?" gets "no, expected after a Regenerate, new key on 1 October".
+  - Source of that last case: after a self-regenerate the portal shows `RevokedDashboard` (`web/portal/src/app/app.tsx` ~1613). Its copy is written for an operator suspension ("Monthly quota exceeded repeatedly. Key was suspended…"). The code comment records this as Adam's decision (2026-08-26). The skill now tells agents it is expected; changing the card is Adam's call.
 
 ## Context
 
