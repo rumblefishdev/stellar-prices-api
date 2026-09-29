@@ -68,8 +68,9 @@ use us. Three consequences:
    VWAP aggregated across SDEX, Soroswap, Aquarius, Phoenix and SushiSwap, USD ready-made,
    OHLCV history, Reflector oracle readings, 100-asset batch.
 3. The funnel (agent → human → portal → Discord → key) must be smooth, and the
-   result measurable: portal link carries `?ref=stellar-skill` (CloudFront
-   logs), curl recipes send `User-Agent: stellar-prices-skill/1` (X-Ray trace
+   result measurable: portal link carries `?utm_source=stellar-skill`
+   (CloudFront logs record the query string, proven with a `ref=` test hit at
+   2026-09-29 10:07:22 UTC; GA from 0316 reads `utm_source` with no setup), curl recipes send `User-Agent: stellar-prices-skill/1` (X-Ray trace
    summaries), business metric is new `discord-*-key` keys before vs after.
 
 How Stellar accepts community skills: a PR to `stellar/stellar-dev-skill` adding
@@ -139,7 +140,7 @@ Optional second placement: a mention in SDF's `data` or `standards` skill
 
 ## Notes
 
-- Portal "Skills" section: deferred by the user (2026-09-29).
+- Portal "Skills" section: split out to backlog task 0320 (2026-09-29).
 - Found in passing: prices-api README uses `/production/v1`. (The portal FAQ's
   "free is the only plan" was listed here as stale; it is consistent with plans
   not being public, so it is not.)
