@@ -41,7 +41,7 @@ environment variable before the first call. Check without printing it:
 **If the key is missing, stop and ask the user for it.** Do not call the API
 without a key, and do not guess or invent prices. Tell the user how to get one:
 
-1. Open https://sorobanscan.rumblefish.dev/api/?ref=stellar-skill
+1. Open https://sorobanscan.rumblefish.dev/api/?utm_source=stellar-skill
 2. Click **Sign in with Discord**. The account must be a member of the
    [Stellar Developers Discord](https://discord.gg/stellardev), must have passed
    the server's membership screening, and must be older than 5 minutes.
