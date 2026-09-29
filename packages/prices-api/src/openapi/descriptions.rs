@@ -249,6 +249,13 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     ),
     (
         "AssetListItem",
+        "price_basis",
+        "What `price_usd` rests on: `trades` or `offer_dust` (`\"\"` when there is no \
+         price, or on a row the current snapshot definition has not rewritten yet). Same \
+         meaning as `PriceResponse.price_basis`.",
+    ),
+    (
+        "AssetListItem",
         "price_usd",
         "Latest USD price for the asset; `\"0\"` when none is available. Same meaning as \
          `PriceResponse.price_usd`, including the `method` it is attributed to, the age \
@@ -663,6 +670,22 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
     ),
     (
         "PriceResponse",
+        "price_basis",
+        "What `price_usd` rests on, over the same trailing 24-hour window it is read \
+         from:\n\n* `trades` — at least one priced minute in the window has a trade large \
+         enough that its price is not a rounding artefact. Prices taken from a rate read \
+         this too.\n* `offer_dust` — every priced minute in the window rests only on \
+         order-book trades of a few base units, each executed at the resting offer's own \
+         limit price. A trade that small costs the taker next to nothing, so it shows the \
+         offer existed, not that the price clears. The price is still published and is \
+         often right, but no real trade supports it; `price_xlm` inherits the same \
+         basis.\n* `\"\"` — no price (`price_usd` is `\"0\"`), or a row the current snapshot \
+         definition has not rewritten yet.\n\nIndependent of `price_status`: an \
+         `offer_dust` price can be `priced` or `carried`. To treat such prices as \
+         unavailable, filter on `offer_dust`; the API does not withhold them.",
+    ),
+    (
+        "PriceResponse",
         "price_usd",
         "Latest USD price for the asset: its own last priced close in the trailing \
          24-hour window, or — for an asset that never trades as the base of a market — a \
@@ -867,6 +890,7 @@ pub(super) const EXAMPLES: &[(&str, &str, &str)] = &[
     ("AssetListItem", "method", r#""traded""#),
     ("AssetListItem", "as_of", r#""2026-09-23T08:02:00Z""#),
     ("AssetListItem", "price_status", r#""carried""#),
+    ("AssetListItem", "price_basis", r#""trades""#),
     (
         "AssetListResponse",
         "cursor",
@@ -929,6 +953,7 @@ pub(super) const EXAMPLES: &[(&str, &str, &str)] = &[
     ("PriceResponse", "method", r#""traded""#),
     ("PriceResponse", "as_of", r#""2026-09-23T08:02:00Z""#),
     ("PriceResponse", "price_status", r#""carried""#),
+    ("PriceResponse", "price_basis", r#""trades""#),
     ("SdexStream", "status", r#""completed""#),
     ("SdexStream", "current_ledger", r#"1"#),
     ("SdexStream", "start_ledger", r#"1"#),

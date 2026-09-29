@@ -64,11 +64,13 @@ async fn setup(db: &str) -> Client {
         .query(&format!(
             "INSERT INTO {db}.current_prices \
              (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct, \
-              vwap_24h, volume_24h_usd, sources, updated_at, method, as_of, price_status) \
+              vwap_24h, volume_24h_usd, sources, updated_at, method, as_of, price_status, \
+              price_basis) \
              VALUES \
              (1, 0.5, 1.25, -2.5, 7.25, 0.51, 1234.5, \
               '{{\"sdex\":{{\"price\":\"0.5\",\"volume_24h\":\"1000\"}}}}', \
-              '2026-02-10 12:00:30', 'traded', '2026-02-10 11:30:00', 'carried')"
+              '2026-02-10 12:00:30', 'traded', '2026-02-10 11:30:00', 'carried', \
+              'offer_dust')"
         ))
         .execute()
         .await
@@ -189,6 +191,9 @@ async fn price_native_returns_seeded_row() {
          in the row — if they read alike here, a transposition would be invisible"
     );
     assert_eq!(json["price_status"], "carried");
+    // Task 0274 — a String adjacent to price_status, seeded with a different
+    // word so a transposition of the two would show.
+    assert_eq!(json["price_basis"], "offer_dust");
 
     teardown(db).await;
 }
@@ -222,6 +227,10 @@ async fn price_empty_sources_degrades_to_empty_object() {
         "the epoch sentinel must be mapped to the empty string, never formatted"
     );
     assert_eq!(json["price_status"], "");
+    assert_eq!(
+        json["price_basis"], "",
+        "table DEFAULT reaches the wire as-is"
+    );
 
     teardown(db).await;
 }

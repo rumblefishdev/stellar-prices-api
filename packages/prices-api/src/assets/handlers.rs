@@ -345,6 +345,7 @@ pub async fn get_assets(
                 method: r.method,
                 as_of: r.as_of,
                 price_status: r.price_status,
+                price_basis: r.price_basis,
             }
         })
         .collect();
