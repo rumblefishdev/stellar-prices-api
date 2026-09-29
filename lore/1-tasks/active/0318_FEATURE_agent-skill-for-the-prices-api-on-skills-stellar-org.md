@@ -125,6 +125,10 @@ responses, and the ohlcv spec for `XLM` and 503). All of them were fixed in
 - **Fresh-agent run with the key only in `.env`.** The agent found the key
   and got 403. It did not guess a price, warned against Regenerate, and never
   printed the key (0 hits in the transcript).
+- **Live re-run with the user's key, 2026-09-29 ~14:07 UTC, on `7318d858`.**
+  In bash all 8 recipes passed, and in zsh all 8 passed. The pagination loop
+  returned 600 rows in each shell, so the new key-resolving setup line works
+  against production.
 
 ### Structure vs the Stellar skills (2026-09-29)
 
