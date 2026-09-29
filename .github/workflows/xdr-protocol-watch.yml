@@ -21,6 +21,8 @@
 #     against — every signal green, nothing actually verified.
 #
 # Run it by hand any time with `npm run xdr:watch-protocol-gap`.
+# What each tier means, what to do, and how a change here reaches `master`:
+# docs/runbooks/xdr-protocol-watch.md
 name: XDR protocol watch
 
 on:

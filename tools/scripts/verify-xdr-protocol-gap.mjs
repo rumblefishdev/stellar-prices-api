@@ -65,6 +65,8 @@
 // read as "nothing to do". A pre-release (`29.0.0-rc.1`) does not count as
 // published; it is named in the report so the wait is visible.
 //
+// Operator guide: docs/runbooks/xdr-protocol-watch.md
+//
 // WHY --watch EXISTS
 // ------------------
 // On a pull request this script must never fail the build because the Stellar
