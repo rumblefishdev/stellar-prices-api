@@ -2,7 +2,7 @@
 id: "0316"
 title: "Add Google Analytics to the portal through the explorer's GTM container and HubSpot consent banner — the privacy policy changes in the same deploy"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0303", "0193", "0162", "0305", "0194"]
 tags: [layer-frontend, portal, legal, analytics, epic-self-service-onboarding, priority-medium, effort-small]
@@ -43,6 +43,18 @@ history:
       1:1, including today's ungated GTM (sbe 0451, decision 7), and repeats
       0589's change once it lands. Whoever writes the new portal policy text
       must be told that GA currently fires before consent.
+  - date: "2026-09-29"
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Merged in #362 (01f1ef24) and deployed with `make -C infra
+      sync-portal-explorer` at 10:49 UTC (invalidation
+      ISCA1BYSUT18XLC5J4SSBKPED). Production serves the build of 01f1ef24
+      (`index-BXqdF69r.js`). 7 of 8 criteria met, measured live. The OAuth
+      `code`/`state` check needs a Discord sign-in and was not run. Beyond the
+      plan: sbe 0589's Consent Mode wiring and sbe 0593's GTM blocklist were
+      repeated here, and the owner's "Cookies and Analytics" section went into
+      §5. Portal 269 tests (+3).
 ---
 
 # Add Google Analytics to the portal through the explorer's GTM container and HubSpot consent banner
@@ -112,20 +124,98 @@ Verified on 2026-09-28:
 
 ## Acceptance Criteria
 
-- [ ] `/api/` loads `GTM-TBF2GP5S` and HubSpot 8102665 with the same snippet
-      as the explorer root
-- [ ] Consent behaviour on `/api/` matches the explorer root, measured in a
+- [x] `/api/` loads `GTM-TBF2GP5S` and HubSpot 8102665 with the same snippet
+      as the explorer root. Live HTML checked after deploy.
+- [x] Consent behaviour on `/api/` matches the explorer root, measured in a
       fresh browser profile the same way on both. Once sbe 0589 lands, that
-      means no `_ga` before consent.
-- [ ] Consent given on the explorer root also applies on `/api/`, and the
-      reverse
-- [ ] "Cookie Settings" in the portal footer re-opens the banner, with a test
-- [ ] No GA hit carries `code=` or `state=` in `page_location`
-- [ ] The new policy text is live in the same deploy as the snippet, and
-      `POLICY_DATED` is bumped
-- [ ] Comments that claim no third-party scripts or an enforced CSP are
-      corrected
-- [ ] Portal tests, typecheck and lint pass
+      means no `_ga` before consent. Live on 2026-09-29 with the banner
+      untouched: no cookies at all, `consent default denied`, and one
+      `page_view` with `gcs=G100`, which is a cookieless ping.
+- [x] Consent given on the explorer root also applies on `/api/`, and the
+      reverse. Measured live in one direction: "Decline All" on `/api/`, then
+      the root showed no banner and sent `update denied` on load. The other
+      direction uses the same host cookie (`__hs_cookie_cat_pref`). "Accept"
+      was not clicked on production.
+- [x] "Cookie Settings" in the portal footer re-opens the banner, with a test
+      (`app.spec.tsx`). The link is live.
+- [ ] No GA hit carries `code=` or `state=` in `page_location`. Not measured:
+      it needs a Discord sign-in. By design the callback is answered by the
+      backend with a 303 to `/api/`, so no page carrying them loads GTM.
+- [x] The new policy text is live in the same deploy as the snippet, and
+      `POLICY_DATED` is bumped. Live bundle: "Cookies and Analytics",
+      "29 September 2026", and the removed sentence is gone.
+- [x] Comments that claim no third-party scripts or an enforced CSP are
+      corrected (`fonts.css`, `DiscordIcon.tsx`, `main.tsx`,
+      `vite.config.mts`)
+- [x] Portal tests, typecheck and lint pass (269 tests)
+
+## Implementation Notes
+
+- `web/portal/index.html`: GTM head snippet, the noscript iframe and the
+  HubSpot loader, verbatim from the explorer. Before GTM: Consent Mode
+  denied by default and `gtm.blocklist: ['customScripts']`. After HubSpot: an
+  `addPrivacyConsentListener` that forwards the banner's categories.
+- `landing/Chrome.tsx`: "Cookie settings" in the footer, pushing
+  `['showBanner']` onto `window._hsp`. Tested in `app.spec.tsx`.
+- `src/consent-mode.spec.ts` (new): runs the inline scripts. It checks that the
+  denied default and the blocklist come before GTM, and that categories map to
+  flags. Mutation-checked for both the default and the blocklist.
+- `privacy/privacy-policy.md` §5 and `POLICY_DATED`: see Notes.
+- Deploy on 2026-09-29, 10:49 UTC, from 01f1ef24 with `soroban-admin`. The
+  Discord guild check passed (897514728459468821). S3 sync and `/api/*`
+  invalidation followed. The live `index-BXqdF69r.js` matches the local build
+  hash.
+- The deploy also shipped three changes that had merged since the last portal
+  deploy. 0309: the quick start and `openapi.json` describe the
+  `404 not_found` for an unknown route, which production already returns.
+  0311: the usage request timeout goes from 15 s to 20 s.
+
+## Design Decisions
+
+### From Plan
+
+1. **The explorer's mechanism, no second stack.** One GTM container, one GA
+   property and one consent choice for the whole host.
+2. **Policy text in the same deploy as the snippet.** The page never claimed
+   "no analytics" while loading GA.
+
+### Emerged
+
+3. **Consent gating instead of a 1:1 copy of the ungated setup.** The plan
+   was to copy the explorer's configuration, defect included, and fix it
+   later. sbe 0589 landed first (2026-09-28), so its Consent Mode wiring went
+   in before the first deploy.
+4. **GTM blocklist (sbe 0593).** Loading GTM on the page that renders the key
+   is safe only if the container cannot run arbitrary code there. The
+   explorer's copy is in sbe #537.
+5. **The policy amendment went into §5, not over the whole document.** The
+   owner sent one section. It follows the still-true session-cookie
+   paragraphs, and only the sentence it contradicts was removed. The owner
+   confirmed that the rest of the policy is unchanged.
+6. **The task became a directory** to keep the owner's text verbatim under
+   `sources/`, as in [[0303]].
+
+## Issues Encountered
+
+- **The live portal was not built from develop.** The build of 395c03ba (the
+  0311 branch on 2026-09-24) reproduces the live asset hashes byte for byte,
+  so that is what production served before this deploy. The deploy's real
+  diff was therefore 395c03ba → 01f1ef24, which is why 0309 and 0311 changes
+  shipped with it.
+- **GitHub marked #362 as conflicting while a local merge was clean.** The
+  task file had been moved to a directory on the branch and edited on
+  develop. Fixed with a plain merge of develop into the branch.
+- **The pre-push hook needs GNU `realpath`.** The lambda-deploy-guard test
+  refuses BSD `realpath`. Pushed with Homebrew coreutils' `gnubin` first on
+  `PATH` (infra/README.md, Prerequisites), with the hooks still running.
+
+## Future Work
+
+- Cookieless `gcs=G100` pings before consent: only a GTM-side "require
+  `analytics_storage`" on the GA tag stops them. That is shared with the
+  explorer (sbe 0589, option 2) and is not a portal change.
+- The `code=`/`state=` criterion above is worth measuring on the next
+  Discord sign-in against production.
 
 ## Notes
 
@@ -157,4 +247,6 @@ Verified on 2026-09-28:
   explorer accepts that. Filter `localhost` in the GA property if it turns out
   to be noise.
 - After deploy, update the "portal traffic only in CloudFront logs" knowledge:
-  the logs stay, but they are no longer the only record.
+  the logs stay, but they are no longer the only record. That knowledge lives
+  in sbe `docs/architecture/infrastructure/infrastructure-overview.md` (the
+  task 0576 paragraph). It is corrected in sbe #537.
