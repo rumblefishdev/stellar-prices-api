@@ -30,6 +30,13 @@ history:
       check that cannot complete fails the run but leaves the issue alone.
       Rollout is master first (workflow-only PR, as #308), then #369 to
       develop, or master's old workflow closes #336 as "Resolved".
+  - date: "2026-09-29"
+    status: active
+    who: okarcz
+    note: >
+      Rolled out: #336 closed by hand, #370 merged to master, #369 merged to
+      develop, manual run 36561221555 green with WAITING and no issue opened.
+      Every acceptance criterion met; the task can be archived.
 ---
 
 # The XDR protocol watch fires before any stellar-xdr crate exists to bump to
@@ -82,6 +89,9 @@ Measured 2026-09-29:
 - [x] BEHIND is unchanged; LAGGING → BEHIND comments once (fake `gh`).
 - [x] A WAITING run closes an open issue as "not actionable yet" (fake `gh`).
 - [x] Runbook explains the check, the tiers and the rollout to `master`.
-- [ ] Workflow-only PR to `master` merged, then #369 merged to `develop`.
-- [ ] Manual run on `master` is green and #336 is closed as "not actionable
-      yet".
+- [x] Workflow-only PR to `master` merged (#370, `531c8a6d`), then #369 merged
+      to `develop` (`0f7d0571`); the two workflow files are identical.
+- [x] Manual run on `master` (run 36561221555, 2026-09-29) is green with
+      `WAITING … newest on crates.io 28.0.1`; the issue step logged "check
+      passed, no open issue — nothing to do". #336 had been closed by hand
+      the same day with an explanatory comment.
