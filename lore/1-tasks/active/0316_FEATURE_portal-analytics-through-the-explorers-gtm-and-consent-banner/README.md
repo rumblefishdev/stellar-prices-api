@@ -7,6 +7,7 @@ related_adr: []
 related_tasks: ["0303", "0193", "0162", "0305", "0194"]
 tags: [layer-frontend, portal, legal, analytics, epic-self-service-onboarding, priority-medium, effort-small]
 links:
+  - "sources/privacy-policy-cookies-and-analytics-2026-09-29.md"
   - "../../../web/portal/index.html"
   - "../../../web/portal/src/privacy/privacy-policy.md"
   - "../../../web/portal/src/privacy/PrivacyPolicy.tsx"
@@ -111,6 +112,16 @@ Verified on 2026-09-28:
   holds. A tag published there can therefore not read the key this page
   renders. The container's only tag today is the Google tag for GA4, and on a
   `vite preview` build it still sends hits after consent.
+- **Policy text (2026-09-29).** The owner sent one section, "Cookies and
+  Analytics", instead of a whole new document. It is kept verbatim in
+  `sources/privacy-policy-cookies-and-analytics-2026-09-29.md`. It went into
+  §5, which is renamed "Cookies and Analytics". The session-cookie
+  paragraphs stay as they were, and the new text follows them word for word.
+  One sentence was removed because it is no longer true: "…portal does not
+  use cookies or similar technologies for advertising, behavioral tracking or
+  analytics purposes." The rest of the policy is unchanged, as the owner
+  confirmed. `POLICY_DATED` is now 29 September 2026. The new text promises
+  consent before GA cookies, and that matches what the page does.
 - `vite dev` on localhost would also load the production container. The
   explorer accepts that. Filter `localhost` in the GA property if it turns out
   to be noise.
