@@ -772,10 +772,15 @@ After the resume, 201902 on every tier: trades 583 291 → 583 246 (the same
 −45 on 1m/15m/1h/4h/1d), candles 286 330 → 286 285 on 1m, 0 OHLC-order
 violations, raw = FINAL. Aligned 2/2.
 
-**Expected again at 201903**: its old partition carries both ids on 18
-candles. From 201905 on only `123214` appears in the old data. Each such stop
-is verified the same way before its `--accept`; an accept is never given
-ahead of the measurement. The GOLDMAN candles now sit under an id the
+**201903 stopped the same way** (2026-09-29 10:09 UTC, `724087 -> 724072`)
+and was accepted after the same check: GOLDMAN duplicates −18 trades /
+−199.4687236 base / −636.0973627 quote; two candles the old backfill had
+short — 2019-03-05 20:30 (`asset_id 14`/XLM, 6 → 8 trades, +99 999.9999994
+base) and 2019-03-21 16:33 (`10571`/`123196`, 2 → 3, +1 426.1168483) — +3
+trades / +101 426.1168477 base / +24 065.11 quote; net −15 trades, base and
+quote volume both HIGHER. All 493 725 markers written. From 201905 on only
+`123214` appears in the old data. Each such stop is verified the same way
+before its `--accept`; an accept is never given ahead of the measurement. The GOLDMAN candles now sit under an id the
 registry names as two other assets — that mislabel is [[0139]]'s to fix, not
 this task's.
 
