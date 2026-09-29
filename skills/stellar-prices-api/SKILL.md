@@ -1,6 +1,7 @@
 ---
 name: stellar-prices-api
 description: Use when you need the USD or XLM price of a Stellar asset — XLM, USDC, any classic CODE:ISSUER asset or Soroban token — current prices, 24h change and volume, OHLCV candles / price history, oracle readings, or many prices in one call. Covers the Rumble Fish Stellar Prices API (prices across SDEX, Soroswap, Aquarius, Phoenix and SushiSwap, with a cross-venue 24h VWAP), its free API key, endpoints, curl recipes and error handling.
+license: MIT
 ---
 
 # Stellar Prices API
@@ -11,7 +12,7 @@ the Stellar ecosystem.
 
 **Free: 100,000 requests/month per key. A key takes about a minute to get.**
 
-## When to use it next to Horizon or RPC
+## When to use this skill
 
 Horizon and RPC are the source of raw chain data; this API aggregates prices on
 top of it. Horizon's `/trade_aggregations` gives candles for one asset pair at a
@@ -30,8 +31,18 @@ retention. Use this API when the task needs:
 - **An oracle cross-check**: the latest Reflector reading, to compare with the
   traded price.
 
-Use Horizon or RPC for balances, transactions, order placement and contract
-calls. This API only reads prices.
+This API only reads prices.
+
+## Related skills
+
+The official Stellar skills cover what this API does not:
+
+- Balances, transactions, contract events, ledgers →
+  [Stellar data: RPC + Horizon](https://skills.stellar.org/skills/data/SKILL.md)
+- Issuing assets, trustlines, the SAC bridge →
+  [Stellar assets](https://skills.stellar.org/skills/assets/SKILL.md)
+- A dApp or frontend that shows these prices (keep the key on its backend) →
+  [Frontend & wallets](https://skills.stellar.org/skills/dapp/SKILL.md)
 
 ## Step 1: get the API key (do this first)
 
