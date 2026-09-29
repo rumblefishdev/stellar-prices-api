@@ -838,6 +838,53 @@ WHERE quote_asset_id = 111 AND close > 0 AND close_usd > 0;
 Expected: `peg_written = 0`, `pivot_written > 0` over the same span. Run it once
 more on `price_ohlcv_1h` to confirm the pre-roll carried no peg value up.
 
+**7e-2. The carried-product after-check (task 0207).** Before 0286 the coarse
+roll took `close` from the last child and `close_usd` from the last _priced_
+child — `argMaxIf(close_usd, t.timestamp, close_usd > 0)`. Where the last child
+was a dust print, or had not been enriched yet when the roll ran, the two came
+from different sub-buckets, and `close_usd / close` stopped being an XLM or USDT
+rate at all: up to 1.6e8× the bucket's own rate, in both directions. The rate
+form (ADR 0287 §5) cannot produce that, and the phase-3 rebuild replaces every
+such row — this measures that it did. Run after §7a and §7b-2, once per coarse
+tier (`1h`, `4h`, `1d`, `1w`, `1M`; the query is per table because each is a
+full scan):
+
+```sql
+-- A row is inconsistent when its rate is more than 10x off the median rate of
+-- its own quote leg in the same bucket. 4 = XLM, 111 = USDT (task 0209).
+-- close_usd is floored at the precision floor: below it the Decimal(38, 14)
+-- tick alone moves the ratio. close is NOT floored — a sub-floor close under a
+-- real close_usd is the worst case of this defect (5.0M x on 1h, 2022-02-11).
+WITH r AS (
+    SELECT timestamp, quote_asset_id, toFloat64(close_usd) / toFloat64(close) AS rate
+    FROM prices.price_ohlcv_1d FINAL          -- then _1h, _4h, _1w, _1M
+    WHERE quote_asset_id IN (4, 111)
+      AND close > 0
+      AND close_usd >= toDecimal128('0.000000000001', 14)),
+m AS (SELECT timestamp, quote_asset_id, quantileExact(0.5)(rate) AS med
+      FROM r GROUP BY timestamp, quote_asset_id)
+SELECT quote_asset_id,
+       countIf(rate > 10 * med) AS above_10x, countIf(rate < med / 10) AS below_10x,
+       min(r.timestamp) AS oldest, max(r.timestamp) AS newest
+FROM r JOIN m USING (timestamp, quote_asset_id)
+WHERE rate > 10 * med OR rate < med / 10
+GROUP BY quote_asset_id;
+```
+
+Expected: **no rows** on any tier. Before the run (prod, 2026-09-29), all on the
+XLM leg and all in 2022-01 … 2022-04, most on 2022-04-13:
+
+| tier | 1h  | 4h  | 1d  | 1w    | 1M  |
+| ---- | --- | --- | --- | ----- | --- |
+| rows | 25  | 99  | 394 | 1 236 | 3   |
+
+The USDT leg was already 0. The 10x band is deliberate: 2x flags real moves
+inside a week or month (XLM's own drift; USDT's June 2022 depeg month).
+
+⚠️ The `1w`/`1M` rows only go in §7a, so until `finish` they are still there —
+reading them mid-run is not a failure. A month rolled back with `rollback`
+restores its snapshot, and with it that month's inconsistent rows.
+
 **7f. Start the reconcile MVs again (tasks 0143 + 0203).**
 
 Only if §1a stopped them, and only after the last month, §7a and §7b-2 are done:
@@ -891,6 +938,10 @@ The phase-3 criteria of lore task 0286, in the order they can be checked:
    explained) — and `post_run_0228_it` green.
 6. **No USDT-quoted `1m` row carries the $1 peg** (step 7e): `peg_written = 0`
    and `pivot_written > 0` on `1m`, and on one coarse tier. This closes task 0212.
+7. **No coarse row whose `close_usd` contradicts its own `close`** (step 7e-2):
+   no row on `1h`, `4h`, `1d`, `1w` or `1M` more than 10x off its quote leg's
+   median rate in the bucket, on the XLM and the USDT leg. Before: 1 757 rows.
+   Task 0207 was closed on this check.
 
 ---
 

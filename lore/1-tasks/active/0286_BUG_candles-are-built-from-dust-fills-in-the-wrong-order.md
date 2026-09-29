@@ -4,7 +4,7 @@ title: "Candles take every fill at equal weight, including stroop-dust, in the w
 type: BUG
 status: active
 related_adr: ["0287"]
-related_tasks: ["0278", "0276", "0266", "0228", "0146", "0142", "0137", "0200", "0088", "0282", "0285", "0300", "0304", "0148"]
+related_tasks: ["0278", "0276", "0266", "0228", "0146", "0142", "0137", "0200", "0088", "0282", "0285", "0300", "0304", "0148", "0207"]
 tags: [layer-backend, priority-high, effort-large, ohlcv, ingest, enrichment, clickhouse, data-correctness, api-contract]
 links:
   - "../../2-adrs/0287_candle-prices-come-from-price-forming-fills-and-a-windowed-close.md"
@@ -985,6 +985,12 @@ Phase 3:
       measured on 1m and on one coarse tier) — the re-ingest replaces the
       1.56 M rows 0172/0182 never reached, so 0212 closes here (re-ingest
       runbook §7e). 0212 is archived pending this check ([[0314]]).
+- [ ] No coarse row whose `close_usd` contradicts its own `close` after §7a
+      and §7b-2 ([[0207]]'s query, re-ingest runbook §7e-2: no row on 1h, 4h,
+      1d, 1w, 1M more than 10x off its quote leg's median rate in the bucket,
+      XLM and USDT legs). Before: 1 757 rows, all XLM-quoted, 2022-01 …
+      2022-04 — the pre-0286 carried product, which the rate form cannot
+      write. 0207 is archived pending this check.
 
 ## Implementation Notes
 
