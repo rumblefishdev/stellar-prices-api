@@ -46,6 +46,25 @@
 //   LAGGING  ours < core_supported  an upgrade is announced and available.
 //                                   Fatal only under --watch (see below).
 //
+// LAGGING IS SPLIT BY WHETHER THERE IS ANYTHING TO BUMP TO (task 0319)
+// ---------------------------------------------------------------------
+// Core runs a new protocol before the Rust crate for it is published: SDF
+// builds core from the XDR definitions in git, and core's own Rust takes
+// rs-stellar-xdr by git too. On 2026-09-29 Horizon reported core 29 while
+// crates.io's newest `stellar-xdr` was 28.0.1 — the issue asked for a bump
+// nobody could make. So a LAGGING reading also asks crates.io:
+//
+//   WAITING  no published stable major reaches core_supported. The protocol is
+//            announced, there is nothing to bump to yet. Still fatal under
+//            --watch: the tracking issue lives exactly as long as the run
+//            fails, and it should stay open through the wait.
+//   LAGGING  a stable major that reaches core_supported is on crates.io. Bump
+//            now (after BE's xdr-parser).
+//
+// crates.io unreachable → LAGGING, never WAITING: an unknown answer must not
+// read as "nothing to do". A pre-release (`29.0.0-rc.1`) does not count as
+// published; it is named in the report so the wait is visible.
+//
 // WHY --watch EXISTS
 // ------------------
 // On a pull request this script must never fail the build because the Stellar
@@ -76,6 +95,8 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const watch = process.argv.includes('--watch');
 const horizonUrl = process.env.HORIZON_URL ?? 'https://horizon.stellar.org/';
+const cratesUrl =
+  process.env.CRATES_URL ?? 'https://crates.io/api/v1/crates/stellar-xdr';
 
 const die = (...lines) => {
   console.error(lines.join('\n'));
@@ -142,6 +163,36 @@ const networkProtocol = async () => {
   return { current, supported };
 };
 
+/**
+ * What crates.io has published: the newest stable version, and the newest
+ * version of any kind when that is a pre-release ahead of it. crates.io
+ * rejects requests without a User-Agent.
+ */
+const publishedCrate = async () => {
+  const response = await fetch(cratesUrl, {
+    signal: AbortSignal.timeout(15000),
+    headers: {
+      accept: 'application/json',
+      'user-agent':
+        'stellar-prices-api xdr-protocol-watch (github.com/rumblefishdev/stellar-prices-api)',
+    },
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+  const { crate } = await response.json();
+  const stable = crate?.max_stable_version;
+  const major = Number(String(stable).match(/^(\d+)\.\d+\.\d+$/)?.[1]);
+  if (!Number.isInteger(major))
+    throw new Error(`unexpected crate document: max_stable_version=${stable}`);
+
+  const newest = crate.max_version;
+  return {
+    stable,
+    major,
+    preRelease: newest && newest !== stable ? newest : null,
+  };
+};
+
 // -------------------------------------------------------------------- run --
 
 const pinned = pinnedMajor();
@@ -200,15 +251,41 @@ if (pinned < network.current)
   );
 
 if (pinned < network.supported) {
-  const lines = [
-    `stellar-xdr ${pinned} lags the protocol core already supports (${network.supported}).`,
-    '',
-    `  ${summary}`,
-    '',
-    'Mainnet has not voted yet, so nothing is broken right now — this is the',
-    'lead time. Open the bump before the vote, and remember BE must bump',
-    'xdr-parser first (task 0277).',
-  ];
+  let crate;
+  let crateError;
+  try {
+    crate = await publishedCrate();
+  } catch (error) {
+    crateError = `cannot read ${cratesUrl}: ${error.message}`;
+  }
+
+  const lines =
+    crate && crate.major < network.supported
+      ? [
+          `stellar-xdr ${pinned} lags the protocol core already supports (${network.supported}) — WAITING: no stellar-xdr ${network.supported} is published yet.`,
+          '',
+          `  ${summary} | newest on crates.io ${crate.stable}` +
+            (crate.preRelease ? ` (pre-release ${crate.preRelease})` : ''),
+          '',
+          'Nothing to do yet: there is no crate to bump to. Mainnet has not voted,',
+          'so nothing is broken. This turns into LAGGING, with a notification, on',
+          `the day a stable stellar-xdr ${network.supported}.x appears on crates.io.`,
+        ]
+      : [
+          `stellar-xdr ${pinned} lags the protocol core already supports (${network.supported}).`,
+          '',
+          `  ${summary}` +
+            (crate
+              ? ` | newest on crates.io ${crate.stable}`
+              : ` | crates.io unknown (${crateError})`),
+          '',
+          crate
+            ? `stellar-xdr ${crate.stable} is published — the bump is possible now.`
+            : 'Could not tell whether a crate to bump to exists, so this assumes one does.',
+          'Mainnet has not voted yet, so nothing is broken — this is the lead time.',
+          'Open the bump before the vote. BE must bump xdr-parser first, and check',
+          "the crate's XDR commit, not only its version number.",
+        ];
   if (watch) die(`error: ${lines[0]}`, ...lines.slice(1));
   console.log(`notice: ${lines.join('\n')}`);
   process.exit(0);

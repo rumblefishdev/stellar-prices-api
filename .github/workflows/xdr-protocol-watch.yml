@@ -13,7 +13,9 @@
 #     it is only a notice in CI. Horizon publishes `core_supported_protocol_
 #     version` weeks before the vote, and that gap is the entire lead time this
 #     task exists to buy. A warning nobody is obliged to read is what we
-#     already had.
+#     already had. While crates.io has no stellar-xdr for that protocol yet
+#     the reading is WAITING (task 0319): still a failure, so the issue stays
+#     open, but it says there is nothing to bump to.
 #   * An unreachable Horizon FAILS here too. A scheduled watch that quietly
 #     checks nothing is precisely the shape of the outage being guarded
 #     against — every signal green, nothing actually verified.
@@ -113,10 +115,16 @@ jobs:
       # otherwise.
       #
       #   opened      first detection                        -> notification
-      #   escalated   LAGGING -> BEHIND, mainnet has voted    -> notification
+      #   actionable  WAITING -> LAGGING, the crate is out    -> notification
+      #   escalated   -> BEHIND, mainnet has voted            -> notification
       #   unchanged   still the same tier                     -> body refresh
       #                                                          only, SILENT
       #   resolved    check passes                            -> comment+close
+      #
+      # WAITING (task 0319): core supports a newer protocol but crates.io has
+      # no stellar-xdr for it yet, so there is nothing to bump to. The issue
+      # stays open and says so; the day the crate is published is the day it
+      # becomes actionable, and that is the comment worth a notification.
       #
       # The body is rewritten every run either way, so the issue is never
       # stale even on the silent days. GitHub's own scheduled-workflow failure
@@ -154,11 +162,33 @@ jobs:
           fi
 
           # BEHIND means mainnet has already voted past us; LAGGING means it
-          # has not yet. The transition between them is the single most
-          # important moment in this issue's life, so it is the one thing
-          # besides creation that is allowed to notify.
+          # has not yet and a crate to bump to exists; WAITING means it has not
+          # and no crate exists. A move into LAGGING or BEHIND is what may
+          # notify, besides creation.
+          previous=""
+          if [ -n "$number" ]; then
+            previous=$(gh issue view "$number" --repo "$REPO" --json body --jq .body)
+          fi
+
           tier=LAGGING
-          case "$REPORT" in *"is BEHIND mainnet protocol"*) tier=BEHIND ;; esac
+          case "$REPORT" in
+            *"is BEHIND mainnet protocol"*) tier=BEHIND ;;
+            *"— WAITING: no stellar-xdr"*) tier=WAITING ;;
+            # crates.io could not be read. The script reports LAGGING so an
+            # unknown never reads as "nothing to do", but that must not post a
+            # false "now actionable" — nor move the marker off WAITING, or the
+            # day the crate really appears would find the tier unchanged and
+            # stay silent. Keep WAITING until crates.io answers.
+            *"crates.io unknown ("*)
+              case "$previous" in *"tier=WAITING"*) tier=WAITING ;; esac ;;
+          esac
+
+          case "$tier" in
+            WAITING)
+              todo="**Nothing to do yet.** The protocol is announced, but no \`stellar-xdr\` for it is on crates.io, so there is no crate to bump to. This issue gets a comment the day one is published." ;;
+            *)
+              todo="**What to do.** Bump \`stellar-xdr\`. BE must bump \`xdr-parser\` first, because \`prices-ingest-core/src/decode.rs\` takes \`LedgerCloseMeta\` across that crate boundary (the protocol 28 bump was task 0277). Check the crate's XDR commit, not only its version number." ;;
+          esac
 
           body=$(cat <<EOF
           <!-- xdr-protocol-watch tier=$tier -->
@@ -173,10 +203,7 @@ jobs:
           the doorbell-lag alarm watches queue age, which stays healthy. That
           is how protocol 27 froze the live candle frontier for six days.
 
-          **What to do.** The bump is tracked as lore task **0277**, which also
-          records the blocker: BE must bump \`xdr-parser\` first, because
-          \`prices-ingest-core/src/decode.rs\` takes \`LedgerCloseMeta\` across
-          that crate boundary.
+          $todo
 
           Opened and maintained automatically by \`.github/workflows/xdr-protocol-watch.yml\`
           (lore task 0098). It closes itself when the check passes. Last run:
@@ -191,14 +218,21 @@ jobs:
             exit 0
           fi
 
-          previous=$(gh issue view "$number" --repo "$REPO" --json body --jq .body)
           gh issue edit "$number" --repo "$REPO" --body "$body"
 
           case "$previous" in
             *"tier=$tier"*)
               echo "#$number still $tier — body refreshed, no comment" ;;
             *)
-              gh issue comment "$number" --repo "$REPO" --body \
-                "⚠️ **Escalated to $tier.** Mainnet has moved past our pin — the decode wall is live or one ledger away. See [this run]($RUN_URL)."
-              echo "#$number escalated to $tier" ;;
+              case "$tier" in
+                BEHIND)
+                  gh issue comment "$number" --repo "$REPO" --body \
+                    "⚠️ **Escalated to BEHIND.** Mainnet has moved past our pin — the decode wall is live or one ledger away. See [this run]($RUN_URL)." ;;
+                LAGGING)
+                  gh issue comment "$number" --repo "$REPO" --body \
+                    "📦 **Now actionable.** A \`stellar-xdr\` for the new protocol is on crates.io, so the bump can be made. See [this run]($RUN_URL)." ;;
+                WAITING)
+                  echo "#$number moved to WAITING — no comment" ;;
+              esac
+              echo "#$number is now $tier" ;;
           esac
