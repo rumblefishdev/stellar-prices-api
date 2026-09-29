@@ -26,8 +26,9 @@ in the "Community skills" section of https://skills.stellar.org.
 
 ## Status: Active
 
-**Current state:** skill in PR #368 (to `develop`), fully verified including
-a live run with a real key. Open: hosting decision, then the Stellar PR.
+**Current state:** skill in PR #368 (to `develop`). A second-pass audit
+changed the recipes, so the live run with a real key has to be repeated. Open:
+hosting decision, then the Stellar PR.
 
 ## Verification log (2026-09-29)
 
@@ -52,6 +53,38 @@ These checks are **proven**:
   - Batch: `not_found: []`.
   - Oracles: `reflector` only.
   - The pagination loop, capped at 3 pages, returned 600 rows, so the `--data-urlencode` cursor round-trips.
+
+### Second pass: claim-by-claim audit (2026-09-29)
+
+At the user's request, an independent agent checked every claim in SKILL.md
+against the live spec, the handlers, the gateway stack and the portal. I re-checked
+the key findings myself (FAQ line 102, `auth/mod.rs`, a zsh repro, the gateway
+responses, and the ohlcv spec for `XLM` and 503). All of them were fixed in
+`ec72a313`:
+
+- **Key flow was wrong.**
+  - The first sign-in issues the key automatically; the dashboard then offers **Copy key**. "Get my API key" appears only on a revoked dashboard.
+  - **Regenerate** deactivates the key within about 30 s and issues nothing until the next quota period. The skill had said "replacing it".
+- **429 has two bodies.**
+  - `Too Many Requests` is the 1 req/s throttle.
+  - `Limit Exceeded` is AWS's default body for a spent monthly quota; only THROTTLED is customised. Retrying the second one does not help.
+- **The pagination loop broke silently in zsh.** `${cursor:+...}` is not word-split there, so the loop stopped after page 1. The earlier 600-row result ran under bash only.
+  - The loop now builds an args array.
+  - Recipes use `-sS --fail-with-body`, so an HTTP error shows as `curl: (22) … 403` instead of `jq` printing nulls.
+- **Imprecise response details, corrected:**
+  - `"0"` sentinels differ per field. `vwap_24h` is `"0"` for USDC even when it is priced.
+  - Candle price fields can be `null`.
+  - `base_currency=XLM` returns only the asset's trades against XLM, not a conversion.
+  - The 5000-candle 400 applies only with an explicit `granularity`.
+  - `start`/`end` semantics.
+  - 500 `db_error` and 503 `quote_unavailable`.
+  - Per-route cache TTLs: batch is not cached.
+  - Field names on `/assets/{id}` and `/backfill/status`.
+  - `/oracles` carries no traded price.
+- **Horizon/RPC section.** It now states what each covers, and reads as complementary because SDF reviews it. Both facts were checked in the Stellar docs:
+  - `/trade_aggregations` is per asset pair, from classic trades.
+  - RPC's default retention is 120960 ledgers, about 7 days.
+- **Negative control.** The runbook script now runs every recipe in both bash and zsh. With a fake key, all recipes and both loops FAIL, each with a visible `curl: (22) … 403`.
 
 ## Context
 
@@ -141,6 +174,9 @@ Optional second placement: a mention in SDF's `data` or `standards` skill
 ## Notes
 
 - Portal "Skills" section: split out to backlog task 0320 (2026-09-29).
+- Found in passing: `web/portal/src/landing/Faq.tsx:81` says prices "come
+  straight from Soroswap liquidity pools and are updated on every block". The
+  product uses five venues and an hourly USD pass.
 - Found in passing: prices-api README uses `/production/v1`. (The portal FAQ's
   "free is the only plan" was listed here as stale; it is consistent with plans
   not being public, so it is not.)
