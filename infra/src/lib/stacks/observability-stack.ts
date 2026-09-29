@@ -321,10 +321,12 @@ export class ObservabilityStack extends cdk.Stack {
    */
   public readonly apiHandlerErrorAlarm: cloudwatch.Alarm;
   /**
-   * api-handler `portal closed at cold start` alarm (task 0249): the portal
-   * is closed in that execution environment.
+   * api-handler `portal sources failed to load` alarm (tasks 0249, 0311): a
+   * portal source failed to load for one request, which answered as
+   * unavailable. Nothing stays closed; the first portal request after a
+   * 2 s cooldown retries.
    */
-  public readonly apiHandlerPortalClosedAlarm: cloudwatch.Alarm;
+  public readonly apiHandlerPortalLoadFailedAlarm: cloudwatch.Alarm;
   /**
    * API Gateway 5xx alarm (task 0249): counts router-returned 5xx and Lambda
    * throttles, which AWS/Lambda `Errors` does not.
@@ -1227,21 +1229,27 @@ export class ObservabilityStack extends cdk.Stack {
       description: `api-handler invocation-error alarm for ${config.envName}`,
     });
 
-    // Task 0249 — the portal-closed signal. `main.rs` uses
-    // `tracing_subscriber::fmt().json()` without `flatten_event`, and the
-    // Lambda Text log format passes the line through raw, so the key is
-    // `$.fields.message` — confirmed against a real 2026-09-18 production
+    // Tasks 0249, 0311 — the portal-load-failed signal. The line is logged
+    // by `packages/prices-api/src/portal/sources.rs`, once per failed load of
+    // the portal's sources (the first portal request in an execution
+    // environment, or any request after a failure). `main.rs` owns the
+    // subscriber: `tracing_subscriber::fmt().json()` without `flatten_event`,
+    // and the Lambda Text log format passes the line through raw, so the key
+    // is `$.fields.message` — confirmed against a real 2026-09-18 production
     // line. The prefix wildcard keeps the match independent of the rest of
-    // the sentence (main.rs:58-63). Namespace follows this stack's
-    // `Prices/<Component>` convention. A metric filter publishes on behalf
-    // of CloudWatch Logs and needs no IAM grant.
+    // the sentence. Namespace follows this stack's `Prices/<Component>`
+    // convention. A metric filter publishes on behalf of CloudWatch Logs and
+    // needs no IAM grant.
     //
-    // The prefix below and the log line in main.rs are tied together by
-    // `tools/scripts/portal-closed-filter-guard.test.mjs` — reword one
+    // The prefix below and the log line in sources.rs are tied together by
+    // `tools/scripts/portal-load-failed-filter-guard.test.mjs` — reword one
     // without the other and that test fails, instead of the alarm going
-    // quiet. Expect this alarm during a load test: both times it would have
-    // fired so far (2026-09-18, 45 and 198 lines) were bursts of cold starts
-    // throttling the Parameter Store reads — real closures, not noise.
+    // quiet. `/v1` cold starts no longer read Parameter Store (task 0311), so
+    // a `/v1` load test should not fire this; portal traffic during SSM
+    // throttling can, and that is a real failure a visitor saw.
+    //
+    // Replaces task 0249's `portal-closed` filter and alarm 1-for-1 under
+    // new logical ids, so CloudFormation replaces both on deploy — expected.
     //
     // Log group imported BY NAME, not by ComputeStack construct reference —
     // ComputeStack creates it (compute-stack.ts:479); a construct reference
@@ -1253,53 +1261,53 @@ export class ObservabilityStack extends cdk.Stack {
       'ApiHandlerLogGroup',
       lambdaLogGroupName(config.envName, 'api-handler'),
     );
-    const portalClosedFilter = new logs.MetricFilter(
+    const portalLoadFailedFilter = new logs.MetricFilter(
       this,
-      'ApiHandlerPortalClosedFilter',
+      'ApiHandlerPortalLoadFailedFilter',
       {
         logGroup: apiHandlerLogGroup,
         filterPattern: logs.FilterPattern.stringValue(
           '$.fields.message',
           '=',
-          'portal closed at cold start*',
+          'portal sources failed to load*',
         ),
         metricNamespace: 'Prices/ApiHandler',
-        metricName: 'PortalClosedAtColdStart',
+        metricName: 'PortalSourcesLoadFailed',
         metricValue: '1',
         // No defaultValue: missing data must stay missing, so the alarm
         // below reads OK on a quiet log group rather than a false zero.
       },
     );
-    this.apiHandlerPortalClosedAlarm = new cloudwatch.Alarm(
+    this.apiHandlerPortalLoadFailedAlarm = new cloudwatch.Alarm(
       this,
-      'ApiHandlerPortalClosedAlarm',
+      'ApiHandlerPortalLoadFailedAlarm',
       {
-        alarmName: `prices-${config.envName}-api-handler-portal-closed`,
+        alarmName: `prices-${config.envName}-api-handler-portal-load-failed`,
         // MetricFilter.metric() defaults to statistic 'avg'; pass Sum
         // explicitly (RESEARCH §2).
-        metric: portalClosedFilter.metric({
+        metric: portalLoadFailedFilter.metric({
           statistic: 'Sum',
           period: cdk.Duration.minutes(5),
         }),
-        alarmDescription: `The api-handler logged "portal closed at cold start": a portal source (the Discord OAuth secret, the free-plan id, or an eligibility parameter) failed to load at cold start, so the portal is CLOSED in that execution environment until it is recycled, while /v1 is unaffected. Closure is per execution environment, so /config may answer enabled: false from one environment and true from another. Fix: read the line's error field, which names the failing variable, fix that secret or parameter, then recycle the environments (redeploy, or bump the function configuration). The alarm returns to OK one period later, silently: OK does NOT mean the portal reopened. Runbook docs/runbooks/portal-oauth-deploy-prep.md; task 0249.`,
+        alarmDescription: `The api-handler logged "portal sources failed to load": a portal request (the first in an execution environment, or /config) could not load a portal source (the Discord OAuth secret, the free-plan id, the API id, the guild id or the min account age) after its retries. That one request answered as unavailable (/config enabled: false; /key, /usage and /me 503; sign-in lands on a failure page) and the first portal request after a 2 s cooldown retries, so no recycle is needed. /v1 is unaffected. Fix: read the line's error field, which names the failing variable. A persistent misconfiguration logs on every load (at most one per environment per cooldown), so the alarm keeps firing while it lasts. Runbook docs/runbooks/portal-oauth-deploy-prep.md; tasks 0249, 0311.`,
         threshold: 1,
         evaluationPeriods: 1,
         datapointsToAlarm: 1,
         comparisonOperator:
           cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-        // Missing = no closure logged = OK.
+        // Missing = no failed load logged = OK.
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       },
     );
-    // Alarm action only, no OK action. The line is logged once, at the cold
-    // start that closed the portal; the next 5-min window is empty, so the
-    // alarm returns to OK while the environment is still closed. An OK
-    // notification would read as "recovered" when nothing was.
-    this.apiHandlerPortalClosedAlarm.addAlarmAction(snsAction);
+    // Alarm action only, no OK action. OK means no failed load in the last
+    // 5 minutes, and with no portal traffic in that window it proves
+    // nothing: an OK notification would read as "recovered" when nothing
+    // was tried.
+    this.apiHandlerPortalLoadFailedAlarm.addAlarmAction(snsAction);
 
-    new cdk.CfnOutput(this, 'ApiHandlerPortalClosedAlarmName', {
-      value: this.apiHandlerPortalClosedAlarm.alarmName,
-      description: `api-handler portal-closed-at-cold-start alarm for ${config.envName}`,
+    new cdk.CfnOutput(this, 'ApiHandlerPortalLoadFailedAlarmName', {
+      value: this.apiHandlerPortalLoadFailedAlarm.alarmName,
+      description: `api-handler portal-load-failed alarm for ${config.envName}`,
     });
 
     // Task 0282 — the forced-progress escape hatch fired. The reconcile loop
@@ -1873,6 +1881,22 @@ export class ObservabilityStack extends cdk.Stack {
         // to remove, self-inflicted.
         noDurationAlarm:
           'run length is a wall-clock budget (240 s of a 300 s timeout), not a symptom',
+      },
+      {
+        // Task 0256 settled the question 0223 parked there: the ledger scan
+        // is gone (removed 2026-09-24), and what remains — the Soroban symbol
+        // stage (0210) and the asset seed — is real hourly work, so it gets
+        // the standard pair. Measured 2026-09-24 before the first deploy:
+        // 1 invocation every hour for 48 h, Duration.Maximum 5.4 s against a
+        // 300 s timeout (threshold 240 s), 0 errors — neither alarm can latch
+        // on a healthy run.
+        name: 'asset-discovery',
+        idPrefix: 'AssetDiscovery',
+        functionName: workerFunctionName(config.envName, 'asset-discovery'),
+        timeout: cdk.Duration.minutes(5),
+        cadence: cdk.Duration.hours(1),
+        impact:
+          'a Soroban token that starts trading gets no symbol() lookup, so it lists with an empty code until the worker is back; the seed of the major assets stops being re-asserted.',
       },
       {
         name: 'enrichment',
@@ -2684,54 +2708,21 @@ export class ObservabilityStack extends cdk.Stack {
     );
 
     // -----------------------------------------------------------------
-    // Read-only viewer identity for the Stellar reviewer (Tranche 3 AC 8).
+    // No standing viewer identity for the Stellar reviewer (Tranche 3 AC 8).
     //
-    // An IAM *user*, not a cross-account role: there is no external principal
-    // to trust — none is known. A named substitution, like Decision A above.
-    //
-    // A hand-written read policy, not `CloudWatchReadOnlyAccess`: that managed
-    // policy also grants `logs:FilterLogEvents` / `logs:Get*` and `xray:Get*`
-    // on every log group and trace in the account — which is shared with the
-    // block explorer. The dashboard has no log widgets, so the viewer needs
-    // exactly the dashboard, metric and alarm read calls below and nothing
-    // that can read log contents (task 0125 deep review CR-01). These
-    // CloudWatch read actions do not support resource-level scoping.
-    //
-    // NO password is passed: `iam.User` creates a login profile only when one is
-    // supplied, and a password in the template is precisely what is being
-    // avoided. Creating the console login is an out-of-band operator step
-    // (`aws iam create-login-profile --password-reset-required`).
+    // Task 0125 created `prices-<env>-stellar-viewer` here — an IAM user with
+    // a scoped CloudWatch read policy and an out-of-band console login — as
+    // the substitute for the "read-only IAM role" the criterion names, since
+    // no external principal was known. Task 0295 removed it: access to this
+    // account is granted ON REQUEST, to a named person, with MFA enforced,
+    // and removed after the review — the same model the block explorer
+    // recorded for its D3 AC 3. A standing credential that nobody asked for,
+    // in an account that is otherwise SSO-only, is what AC 6 ("no wildcard
+    // IAM", least privilege) is graded against. The scoped read policy lives
+    // in `docs/runbooks/0295-dashboard-access-on-request.md`, ready to attach
+    // to the user created for that request. `verify-dashboard-synth.mjs`
+    // asserts this template creates no IAM user at all.
     // -----------------------------------------------------------------
-    const stellarViewer = new iam.User(this, 'StellarDashboardViewer', {
-      userName: `prices-${config.envName}-stellar-viewer`,
-    });
-    stellarViewer.attachInlinePolicy(
-      new iam.Policy(this, 'StellarDashboardViewerPolicy', {
-        policyName: `prices-${config.envName}-dashboard-read`,
-        statements: [
-          new iam.PolicyStatement({
-            sid: 'ReadDashboardsMetricsAndAlarms',
-            actions: [
-              'cloudwatch:GetDashboard',
-              'cloudwatch:ListDashboards',
-              'cloudwatch:GetMetricData',
-              'cloudwatch:GetMetricStatistics',
-              'cloudwatch:ListMetrics',
-              'cloudwatch:GetMetricWidgetImage',
-              'cloudwatch:DescribeAlarms',
-              'cloudwatch:DescribeAlarmHistory',
-              'cloudwatch:DescribeAlarmsForMetric',
-            ],
-            resources: ['*'],
-          }),
-        ],
-      }),
-    );
-
-    new cdk.CfnOutput(this, 'StellarViewerUserName', {
-      value: stellarViewer.userName,
-      description: `Read-only CloudWatch viewer IAM user for ${config.envName} (console login is created out of band)`,
-    });
 
     assertAlarmDescriptionsFitCloudWatch(this);
   }

@@ -112,7 +112,9 @@ Step 4 runs this again by itself; doing it here first is what makes the diff in
 step 3 a diff of the artifacts that will ship — step 3 uses a raw `npx cdk diff`,
 which builds nothing (`make diff-production` does, but see step 3 for why not).
 
-Needs `cargo-lambda` and, on an x86 machine, `zig`. 🔴 Use the toolchain CI
+Needs `cargo-lambda` and `zig` (everywhere except native ARM Linux). On macOS
+it also needs bash ≥ 4, GNU coreutils and a raised open-file limit, set up as
+in [`infra/README.md`](../../infra/README.md) §1 Prerequisites. 🔴 Use the toolchain CI
 pins (`.github/workflows/ci.yml`: rustc 1.97.1, cargo-lambda 1.9.1) — rustc ≥
 1.98 fails every aarch64 link under zig with `unsupported linker arg`. That
 failure is loud; it cannot ship anything.

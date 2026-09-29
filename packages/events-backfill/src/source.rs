@@ -224,11 +224,13 @@ pub(crate) fn chunk_sql(contract_ids: &[i64], start: u32, end: u32) -> String {
 /// even fetched by [`read_chunk`], so it produces no candle AND no
 /// `unresolved_pools` record).
 ///
-/// Heuristic: matches the common sym-`swap` / sym-`trade` signatures and the
-/// Soroswap-pair envelope (`String("SoroswapPair")`, whose `signature` is NULL).
-/// It may include non-AMM `swap`/`trade` emitters and misses the rare NULL-sig
-/// Phoenix micro-event shape, so it is a *verify-this* prompt, not a hard error.
-/// Returns `(distinct_contracts, events)`.
+/// Heuristic: matches the common sym-`swap` / sym-`trade` signatures, the
+/// Soroswap-pair envelope (`String("SoroswapPair")`, whose `signature` is NULL)
+/// and the Comet pool envelope `[Symbol("POOL"), Symbol("swap")]` (task 0300 —
+/// keyed on topics, because its `signature` would be `POOL` for the pool's
+/// liquidity events too). It may include non-AMM `swap`/`trade` emitters and
+/// misses the rare NULL-sig Phoenix micro-event shape, so it is a *verify-this*
+/// prompt, not a hard error. Returns `(distinct_contracts, events)`.
 pub async fn count_unregistered_amm_emitters(
     client: &Client,
     contract_ids: &[i64],
@@ -236,18 +238,6 @@ pub async fn count_unregistered_amm_emitters(
     end: u32,
     chunk_size: u32,
 ) -> Result<(u64, u64), EventsBackfillError> {
-    let not_in = if contract_ids.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "AND e.contract_id NOT IN ({}) ",
-            contract_ids
-                .iter()
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join(",")
-        )
-    };
     #[derive(Row, Deserialize)]
     struct EmitterRow {
         contract_id: i64,
@@ -274,14 +264,7 @@ pub async fn count_unregistered_amm_emitters(
     let step = chunk_size.max(1);
     loop {
         let chunk_end = chunk_start.saturating_add(step - 1).min(end);
-        let sql = format!(
-            "SELECT e.contract_id AS contract_id, count() AS events \
-             FROM default.soroban_events e \
-             WHERE e.ledger_sequence BETWEEN {chunk_start} AND {chunk_end} \
-               AND (e.signature IN ('swap', 'trade') OR e.topics_xdr LIKE '%SoroswapPair%') \
-               {not_in}\
-             GROUP BY e.contract_id"
-        );
+        let sql = unregistered_emitters_sql(chunk_start, chunk_end, contract_ids);
         for row in client.query(&sql).fetch_all::<EmitterRow>().await? {
             seen.insert(row.contract_id);
             events_total += row.events;
@@ -295,12 +278,71 @@ pub async fn count_unregistered_amm_emitters(
     Ok((seen.len() as u64, events_total))
 }
 
+/// One chunk of [`count_unregistered_amm_emitters`]: the swap/trade-shaped
+/// emitters in `[chunk_start, chunk_end]` outside `contract_ids`. A pure
+/// function so the shapes it matches are pinned by a test. Interpolates only
+/// integers; no `SETTINGS` (the read runs under `readonly=1`).
+///
+/// The Comet disjunct (task 0300) uses 1-based `topics_xdr` indexes, the same
+/// form as `discover.rs`'s factory read.
+pub(crate) fn unregistered_emitters_sql(
+    chunk_start: u32,
+    chunk_end: u32,
+    contract_ids: &[i64],
+) -> String {
+    let not_in = if contract_ids.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "AND e.contract_id NOT IN ({}) ",
+            contract_ids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    format!(
+        "SELECT e.contract_id AS contract_id, count() AS events \
+         FROM default.soroban_events e \
+         WHERE e.ledger_sequence BETWEEN {chunk_start} AND {chunk_end} \
+           AND (e.signature IN ('swap', 'trade') \
+                OR e.topics_xdr LIKE '%SoroswapPair%' \
+                OR (JSONExtractString(e.topics_xdr, 1, 'value') = 'POOL' \
+                    AND JSONExtractString(e.topics_xdr, 2, 'value') = 'swap')) \
+           {not_in}\
+         GROUP BY e.contract_id"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn sql() -> String {
         chunk_sql(&[11, 22], 1000, 2000)
+    }
+
+    /// Task 0300 D6: the unregistered-emitter probe matches every swap shape
+    /// the ingest prices, Comet's `[POOL, swap]` included (keyed on topics, not
+    /// on `signature`, which would also be `POOL` for its liquidity events).
+    #[test]
+    fn unregistered_emitters_sql_matches_every_indexed_swap_shape() {
+        let sql = unregistered_emitters_sql(1, 2, &[7, 9]);
+        let sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(sql.contains("BETWEEN 1 AND 2"));
+        assert!(sql.contains("e.signature IN ('swap', 'trade')"));
+        assert!(sql.contains("LIKE '%SoroswapPair%'"));
+        assert!(sql.contains(
+            "(JSONExtractString(e.topics_xdr, 1, 'value') = 'POOL' \
+             AND JSONExtractString(e.topics_xdr, 2, 'value') = 'swap')"
+        ));
+        assert!(sql.contains("NOT IN (7,9)"));
+        assert!(!sql.contains("SETTINGS"), "readonly=1 rejects SETTINGS");
+
+        let unfiltered = unregistered_emitters_sql(1, 2, &[]);
+        assert!(!unfiltered.contains("NOT IN"));
+        assert!(!unfiltered.contains("SETTINGS"));
     }
 
     /// Task 0286 D1, as task 0304 left it. The apply order used to come from a

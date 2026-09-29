@@ -4,7 +4,7 @@ title: "current_price_usd returns duplicate rows — assets is keyed on natural 
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0072", "0061", "0067", "0144", "0150"]
+related_tasks: ["0072", "0061", "0067", "0144", "0150", "0129"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "data-correctness", "milestone-M2"]
 milestone: 2
@@ -303,3 +303,13 @@ stopgap. Spawn accordingly.
       Raised by [[0144]] while answering BE's `volume_base` question.
 - [ ] A test fails if the fan-out reappears.
 - [ ] BE informed of the resolution.
+
+Carried from [[0129]] when it closed into this task (2026-09-24) — they check
+the allocator, not the view, so a view-only dedupe does not satisfy them:
+
+- [ ] `SELECT count(), countDistinct(asset_id) FROM prices.assets FINAL` returns
+      equal values in production.
+- [ ] 0129's two-query cross-check (its §Evidence) agrees to the row.
+- [ ] An invariant test or probe guards `asset_id` uniqueness going forward.
+- [ ] `GET /assets` verified to emit no duplicate asset across a full cursor
+      walk (extends 0074's pagination test).

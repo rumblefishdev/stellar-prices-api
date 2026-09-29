@@ -230,6 +230,38 @@ which is what this wider range is for: 99 SushiSwap pools have traded all-time
 and three of them come from an earlier factory generation that is still trading.
 Confirm with the same `FINAL` count below, then drop `--dry-run` to write.
 
+### Factory-less pools (task 0300)
+
+Some pools have no factory event, so neither `learn_factory` nor this tool can
+find them. They are registered by a committed list, `STATIC_POOLS` in
+`packages/prices-ingest-core/src/static_pools.rs`. Today it holds one pool:
+Comet BLND/USDC `CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM`
+(venue `comet`).
+
+- The live processor and the events-backfill reprice route it from the list,
+  with or without a table row.
+- `--discover-pools` writes its row once when the table lacks it, over **any**
+  range (the list is not read from events). A one-ledger dry run shows it:
+
+  ```bash
+  CLICKHOUSE_PASSWORD="$CH_PW" ~/events-backfill --discover-pools \
+    --start <TIP> --end <TIP> \
+    --clickhouse-url http://localhost:8123 --dry-run
+  ```
+
+  Expected until written: a `change="new"` line for `CAS3FL6T…` with
+  `venue="comet"`, then `to_write=1 per_venue={"comet": 1}` (plus any
+  factory pools created in that ledger).
+
+- sdex-backfill's end-of-run registry write also persists it — the identical
+  row, idempotent under the table's `ReplacingMergeTree`.
+- asset-discovery neither adds nor removes it.
+
+Adding a pool = a reviewed commit to the list, then a ledger-processor deploy
+(its cold start picks the pool up), then a `--discover-pools` WRITE, all
+before any 0286 phase-3 month that needs the pool — `reingest_0286.py` refuses
+Comet months until the row exists (gate `0300 registry write`).
+
 ### Verify
 
 ```sql

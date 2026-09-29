@@ -2,7 +2,7 @@
 name = "asset-discovery"
 version = "0.1.0"
 edition = "2024"
-description = "Asset Discovery worker — seeds + discovers prices.assets (task 0054)"
+description = "Asset Discovery worker — seeds prices.assets and resolves Soroban symbols (tasks 0054, 0210)"
 
 [lib]
 name = "asset_discovery"
@@ -22,17 +22,12 @@ required-features = ["lambda"]
 default = []
 # Remote ClickHouse over mTLS via the task-0052 prices-clickhouse::mtls client.
 aws-mtls = ["prices-clickhouse/aws-mtls"]
-# Full Lambda: scheduled runtime + the mTLS sink + the S3 ledger fetcher
-# (prices-ledger-processor's `lambda` feature gates S3Fetcher).
-lambda = ["aws-mtls", "dep:lambda_runtime", "prices-ledger-processor/lambda"]
+# Full Lambda: scheduled runtime + the mTLS sink.
+lambda = ["aws-mtls", "dep:lambda_runtime"]
 
 [dependencies]
 prices-ingest-core = { path = "../prices-ingest-core" }
 prices-clickhouse = { path = "../prices-clickhouse" }
-# Reused for the Galexie S3 key scheme + ObjectFetcher trait (LocalDiskFetcher
-# in tests, S3Fetcher behind `lambda`) — so discovery fetches ledgers by the
-# exact same scheme as the live processor (0038), no drift.
-prices-ledger-processor = { path = "../prices-ledger-processor" }
 
 stellar-xdr = { workspace = true }
 # Task 0210 symbol stage: Soroban RPC `simulateTransaction` against a token

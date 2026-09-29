@@ -4,7 +4,7 @@ title: "Candles take every fill at equal weight, including stroop-dust, in the w
 type: BUG
 status: active
 related_adr: ["0287"]
-related_tasks: ["0278", "0276", "0266", "0228", "0146", "0142", "0137", "0200", "0088", "0282", "0285", "0300", "0304"]
+related_tasks: ["0278", "0276", "0266", "0228", "0146", "0142", "0137", "0200", "0088", "0282", "0285", "0300", "0304", "0148"]
 tags: [layer-backend, priority-high, effort-large, ohlcv, ingest, enrichment, clickhouse, data-correctness, api-contract]
 links:
   - "../../2-adrs/0287_candle-prices-come-from-price-forming-fills-and-a-windowed-close.md"
@@ -180,6 +180,23 @@ history:
       snapshot, 2/2 minute-aligned, two order-book fills repriced from the
       resting offer as phase 2 intends). Its snapshot released. Stage A
       (201512 → 202401) started ~16:10 local; 201512 in flight.
+  - date: "2026-09-25"
+    status: active
+    who: okarcz
+    note: >
+      Runbook §7b did not re-price coarse history (enrichment is 1m-only,
+      the coarse sweep looks back 2 months), so every coarse row older than
+      that would keep close_usd = 0 after phase 3. Added step §7b-2
+      (full-range coarse-repair after the 1m drain, PR #353) and a per-tier
+      criterion. 0148 closed into it.
+  - date: "2026-09-25"
+    status: active
+    who: okarcz
+    note: >
+      PR #353 merged (e382bd46). Its last commit (aa254eed) made "1m drain
+      finished" need two readings, because the frontier gauge skips months
+      still marked exhausted from before the re-ingest. The criterion above
+      now matches.
 ---
 
 # Candles are built from dust fills in the wrong order
@@ -646,17 +663,70 @@ day candle inherits the new open. `close_usd = 0` before and after (no USD
 reference in 2015). The trial proves the script against the real
 `sdex-backfill` end to end; stage A may start.
 
-#### Stage A — running (status 2026-09-23 16:15 local)
+#### Stage A — running (status 2026-09-24 11:08 UTC)
 
 | | |
 | --- | --- |
-| started | ~16:10 local, `run --to-month 202401 --ack-phase1-measured --amm stop --skip-aws-check`, tmux session `reingest` on `fishuser-hero`, first pane |
-| months done | **1 of 99** in scope (201511, OK); 130 planned in total |
-| current month | **201512**, ledgers 1 096 833 – 1 618 657 (521 825): snapshot taken (1m 4 rows, 15m/1h/4h/1d 3 each), markers cleared, 1m dropped, `sdex-backfill` downloading its first archive partition |
-| snapshots held | 201512 only — 201511's released after its check (`release 201511`) |
-| CH disk | 447 GiB free (floor 300) |
+| started | ~16:10 local 2026-09-23, `run --to-month 202401 --ack-phase1-measured --amm stop --skip-aws-check`, tmux session `reingest` on `fishuser-hero`, first pane |
+| months done | **16 of 99** in scope: 201511 → 201702 (201702's 1m partition written 10:36 UTC); 130 planned in total |
+| current month | **201703**, re-ingest in progress: newest 1m candle 2017-03-16 12:56, 18 trades so far |
+| pace | ~80 min per month over the first 16 (1m partitions written 2026-09-23 13:52 → 2026-09-24 10:36 UTC); these months hold 1–32 candles each, so the pace is download-bound and will slow from ~2017 as archive partitions grow to GBs |
+| snapshots held | 201512 → 201703 in all five `reingest_0286_bak_*` tables — none released since 201511; each is a few rows, so no disk pressure |
+| CH disk | 603 GiB free (floor 300) |
 | pending mutations | 0 |
-| expected finish | ~2026-10-03..05 |
+| expected finish | ~2026-10-03..05 (unchanged) |
+
+**201512 → 201702 checked on prod** (2026-09-24 11:08 UTC, read-only, `FINAL`
+against `reingest_0286_bak_*`, 15 months together):
+
+| tier | candles new = old | trades new = old | volumes | OHLC-order violations | raw = FINAL |
+| --- | --- | --- | --- | --- | --- |
+| 1m | 175 = 175 | 211 = 211 | equal in every month | 0 | 175 = 175 |
+| 15m | 138 = 138 | 211 = 211 | — | 0 | 138 = 138 |
+| 1h | 126 = 126 | 211 = 211 | — | 0 | 126 = 126 |
+| 4h | 110 = 110 | 211 = 211 | — | 0 | 110 = 110 |
+| 1d | 103 = 103 | 211 = 211 | equal in every month | 0 | 103 = 103 |
+
+All 15 months are clean and can be `release`d.
+
+**Progress can be read without `fishuser-hero`.** Every step writes to
+ClickHouse, so the laptop's read-only `dev_read` cert shows it:
+`system.parts` for `price_ohlcv_1m` (a partition whose parts are all newer
+than 2026-09-23 12:00 UTC has been re-ingested; `max(modification_time)`
+dates it), the partitions still held by `reingest_0286_bak_*`, and the
+in-flight month's newest candle. What prod cannot show: a `STOP` line (the
+loop simply stops writing — a month far past its usual time is the signal to
+look at the tmux), the archive download inside a month, and the campaign
+machine's own disk. `dev_read`'s 4 TiB/hour quota was exhausted by other
+users on the morning of 09-24 until the 11:00 UTC reset; a check then waits
+for the next hour.
+
+**Campaign-machine read, 2026-09-24 13:22 local (11:22 UTC)** — the half prod
+cannot show:
+
+- **Loop healthy.** `status`: 16/99 months, every finished month `OK` with
+  SDEX trades equal before → after and `2/2` minute-aligned; 201703 at step
+  6/12 `sdex`, 5 of its 9 archive partitions indexed after 51 min.
+- **No `STOP` since the loop started.** The five in `run.log` are all
+  2026-09-23 12:16Z `no plan — run plan first` — the `watch … status` pane
+  started before `plan` had run. Harmless.
+- **The download is request-bound, not bandwidth-bound.** A 201703 partition
+  is 64 000 files / 26.9 MB: `aws s3 sync` 511 s (~7 500 files/min), indexing
+  1.6 s (5 trade ticks, 5 `order_book_fills`, 0 `offer_lookup_misses`).
+  Every partition holds 64 000 files, so the per-month time should stay near
+  the current **81 min average** until file sizes make bandwidth dominate.
+  The script's own figure, ~112 h remaining, would put stage A's end near
+  **2026-09-29**; the ~10-03..05 estimate above stands until the 2018–19
+  months show their real pace.
+- **Two `status` views are both right:** `16/130` counts the whole plan,
+  `16/99` the stage-A scope (`--to-month 202401`).
+- ⚠️ **`fishuser-hero`'s own disk: 52 GB free of 916 GB (95 % used).** The
+  campaign itself holds almost nothing (`.temp/sdex-backfill/` 2.4 MB; each
+  partition is deleted after indexing), but the next partition downloads
+  while the current one indexes, so up to two sit on disk at once — ~25 GB
+  at the ~12 GB partitions of ~2021. Enough, with a thin margin: free space
+  on the machine before the loop reaches ~2020.
+- **Releasable:** 201512 → 201702, all checked clean on prod at 11:08 UTC.
 
 **How it is watched.** The status pane (`watch -n5 … status`, second pane)
 shows the month, step and partitions indexed; each finished month lands in
@@ -674,6 +744,41 @@ and log-out are fine). `aws s3` concurrency there is 100
 into `~/stellar-prices-api/.temp/sdex-backfill/` — from ~2017 they are GBs
 each, so the campaign machine's own disk is watched too.
 
+#### 201902 accepted as DEFECT — a duplicate removed, not a loss (2026-09-29)
+
+The reconcile gate stopped the loop on 2026-09-28 11:51 UTC:
+`201902 sdex: LESS than the snapshot (583291 -> 583246 trades)`. The coarse
+partitions were untouched, as designed. Resumed 2026-09-29 ~08:15 UTC with
+`run … --accept 201902`.
+
+**Why it is accepted.** All 45 missing trades are fills of one asset,
+GOLDMAN (`GBEAOCF7…KOMB`). The old 201902 partition held each of them
+**twice** — once under `asset_id 123214` and once under `123738`, identical
+volumes (92 trades in 90 candles). The re-ingest writes each fill once, under
+`123738` (46 trades in 45 candles). That is the [[0139]] duplicate-`asset_id`
+defect — `prices.assets` has 3 315 ids shared by two identities; `123738` is
+registered as both `A3KM222019SE` and `USD`/`GATOANOU…`, and neither is
+GOLDMAN. The re-ingest did not cause it; it stopped carrying the double count.
+Checked on prod (`dev_read`, `FINAL` against `reingest_0286_bak_*`), to the
+last digit:
+
+| | trades | `volume_base` | `volume_quote` |
+| --- | --- | --- | --- |
+| GOLDMAN fills doubled in the snapshot | −46 | −741.2589376 | −1002.7477604 |
+| one real STM fill the old backfill missed (2019-02-13 14:45) | +1 | +614 | +2.7641666 |
+| **the gate's delta** | **−45** | **−127.2589376** | **−999.9835938** |
+
+After the resume, 201902 on every tier: trades 583 291 → 583 246 (the same
+−45 on 1m/15m/1h/4h/1d), candles 286 330 → 286 285 on 1m, 0 OHLC-order
+violations, raw = FINAL. Aligned 2/2.
+
+**Expected again at 201903**: its old partition carries both ids on 18
+candles. From 201905 on only `123214` appears in the old data. Each such stop
+is verified the same way before its `--accept`; an accept is never given
+ahead of the measurement. The GOLDMAN candles now sit under an id the
+registry names as two other assets — that mislabel is [[0139]]'s to fix, not
+this task's.
+
 #### Plan for the complete re-ingest
 
 | stage | months | gate | estimate |
@@ -687,16 +792,38 @@ Stage A command: `run --to-month 202401 --ack-phase1-measured --amm stop
 --skip-aws-check`. Each day: progress and disk read on prod, and `release`
 for every month that reconciled clean, to give the snapshot's disk back.
 
-**During stage A (about two weeks of buffer), before 202402:**
+**Before stage B (202402) — checklist, in order.** Stage A stops by itself at
+202401 (`--to-month 202401`), so a missed item costs waiting time, not data;
+the script also refuses each one it can detect before any DROP.
 
-- One script PR under 0286: the Soroban-era AMM step still parses
-  `events with no apply order:`, which [[0304]] removed, so the first AMM
-  month would die with a Python `AttributeError` AFTER `events-backfill`
-  wrote; the default `--amm mtls` cannot run because `events-backfill` on
-  `develop` has no `--transport` (use `--amm ssh`); add the Comet registry
-  gate for months ≥ 202405; correct the runbook's cleanup time.
-- `events-backfill --discover-pools` to the current tip.
-- The phase-1 measurement week recorded (AC 10).
+- [ ] **Script PR #350 merged** (`fix/0286_reingest-amm-step-after-0304`,
+      opened 2026-09-24). It reads the post-[[0304]] summary line
+      `negative apply order:` (the old `events with no apply order:` would
+      crash AFTER `events-backfill` wrote), after the `--dry-run` pass too;
+      checks the `--amm` mode in `preflight` and in each month's `gates` step,
+      before the snapshot and DROP; makes `--amm ssh` the default
+      (`events-backfill` on `develop` has no `--transport`); and corrects the
+      runbook's cleanup time to 03:00 UTC. The Comet registry gate for months
+      ≥ 202405 was already in, from [[0300]].
+- [ ] **`git pull` on `fishuser-hero`, only after stage A has finished** — the
+      running process keeps the script it started with, and the machine keeps
+      its own checkout.
+- [ ] **The `--ssh` target recorded here** — how `fishuser-hero` reaches the
+      ClickHouse host (the route the 0290 seed used on 2026-09-22). `--amm ssh`
+      without `--ssh` now stops in `preflight`.
+- [ ] **The host's `~/events-backfill` built from a `develop` that contains
+      [[0304]] and [[0300]].** The script proves both before any write (the
+      summary line; the Comet probe at ledger 51 500 460), but a stale binary
+      then costs a stopped month.
+- [ ] **`events-backfill --discover-pools` run to the current tip**, so
+      `pool_registry` holds every pool that exists — the re-ingest prices only
+      registered pools.
+- [ ] **The phase-1 measurement week recorded (AC 10)**, closes 2026-09-29.
+- [ ] **Stage B command:** `run --to-month 202404 --ack-phase1-measured
+      --skip-aws-check --ssh '<target from above>'` (`--amm ssh` is the
+      default; it asks for the CH `default` password once). Stage C (202405 →)
+      additionally needs [[0300]]'s Comet in `pool_registry` — the script's
+      gate refuses those months without it.
 
 **Stage C carries the [[0282]] check:** the days written live between
 2026-07-16 and 2026-09-17 12:04 UTC must come back HIGHER than the
@@ -822,15 +949,37 @@ Phase 3:
       this is where it is); the count of XLM-quoted candles priced from a
       quantised XLM/USDC close (0278's before-figure: 22 760 / 143 577 /
       85 699 / 30 064 / 10 938 on 15m / 1h / 4h / 1d / 1w) is zero after the
-      re-ingest and pre-roll.
+      re-ingest and pre-roll. [[0266]] closed into this criterion (2026-09-24,
+      [[0314]]) — it is that task's only remaining check.
 - [ ] The whole history re-enriched (`close_usd > 0` wherever a reference
       exists) and `post_run_0228_it` green on the repaired reference; 0228's
       reset-mode campaign recorded as superseded, not run.
+- [ ] Coarse history re-priced (runbook §7b-2, PR #353; [[0148]] closed into
+      this criterion 2026-09-25). Enrichment prices `1m` only and the coarse
+      sweep looks back two months, so without this step every coarse row older
+      than that keeps `close_usd = 0`. Checks:
+  - [ ] The 1m drain finished before the coarse re-price started, on both
+        readings of runbook §7b-2: `EnrichmentFrontierMonthsPending` = 0, AND
+        no `price_ohlcv_1m` row in `prices.enrichment_frontier` is
+        non-`exhausted` or swept before `T7` (the last §4e re-ingest's end).
+        The gauge alone reads 0 for a re-ingested month still marked
+        `exhausted`.
+  - [ ] Dry run recorded for all six coarse tables. Every table lists months
+        up to END (two months back), and none reports 0 months.
+  - [ ] `coarse-repair` run in plain mode (no `--reset-*`) on `price_ohlcv_15m`,
+        `_1h`, `_4h`, `_1d`, `_1w`, `_1M`, `--start-month 201501
+        --end-month <END>`. Each table's summary is recorded, with no
+        200000-capped month and no `enriched 0` month from 2021-03 on.
+  - [ ] Per tier, for rows older than two months, before and after recorded:
+        `reachable_left` ~0 (any remainder explained through the drill-down);
+        `before_reference`, `no_price` and `no_volume` unchanged; `other_quote`
+        not higher than the baseline.
+  - [ ] `post_run_0228_it` green after this step.
 - [ ] No USDT-quoted `price_ohlcv_1m` row carries the $1 peg after the
       re-enrichment ([[0212]]'s query: `peg_written = 0`, `pivot_written > 0`,
       measured on 1m and on one coarse tier) — the re-ingest replaces the
       1.56 M rows 0172/0182 never reached, so 0212 closes here (re-ingest
-      runbook §7e).
+      runbook §7e). 0212 is archived pending this check ([[0314]]).
 
 ## Implementation Notes
 
@@ -912,6 +1061,9 @@ price-forming 1m close on all 14 393 pairs; 10.5 % of SDEX minutes have
 13. **`views.sql` / `current.sql` keep no pf gate** (out of scope) —
     `/ohlcv` can now refuse a price that `price_usd_series` and
     `current_prices` still publish.
+    **Update 2026-09-24:** the series views (`price_usd_series{,_1h}`,
+    `usd_reference{,_1h}`) now carry the pf gate, since [[0147]] went live on
+    prod. `current.sql` still does not.
 14. **The coarse `close_usd` rate is held to the precision floor on BOTH legs**
     (`rollup_sql::RATE_BEARING_CHILD`, found by [[0151]]'s audit, 2026-09-17).
     The gate was `close_usd > 0 AND close > 0`; the prod row

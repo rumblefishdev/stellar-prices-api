@@ -113,6 +113,7 @@ export const FIXTURE: OpenApiDocument = {
       },
       Stream: {
         type: 'object',
+        required: ['ledger'],
         properties: {
           ledger: { type: 'integer', format: 'int64', minimum: 1 },
         },

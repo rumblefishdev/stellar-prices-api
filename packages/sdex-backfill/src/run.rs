@@ -151,6 +151,12 @@ pub async fn execute(
     // resolves earlier-created pools; empty on a fresh full run. Then grown
     // incrementally across partitions from in-window factory events.
     let mut reg = sink.load_pool_registry().await?;
+    // The committed factory-less pools (task 0300 D3). Without them a
+    // from-activation run would flag the Comet pool — no factory, so never
+    // learned — as a fatal genuine gap now that its `POOL/swap` is counted.
+    // The end-of-run `write_pool_registry` therefore also persists the Comet
+    // row: identical to discover-pools' row, idempotent under the table's RMT.
+    reg.merge_static_pools();
 
     let mut current_complete = matches!(
         sync_partition(todo[0], temp_dir).await?,
@@ -603,6 +609,19 @@ mod tests {
     #[test]
     fn empty_input_yields_no_records() {
         assert!(aggregate_unresolved(&[], &Registries::new()).is_empty());
+    }
+
+    /// Task 0300 D3: with the static pools merged, a Comet swap recorded
+    /// before anything else registered it is never a fatal genuine gap.
+    #[test]
+    fn a_static_pool_swap_is_never_a_genuine_gap() {
+        const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
+        let mut reg = Registries::new();
+        reg.merge_static_pools();
+
+        let out = aggregate_unresolved(&[swap(COMET, 51_500_460, 1)], &reg);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].still_unresolved, 0);
     }
 
     /// Review WR-02: the decision the whole carry-the-open-minute fix turns on.

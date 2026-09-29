@@ -33,19 +33,20 @@ pub struct AppConfig {
     /// half-built portal to the internet. Defaults are chosen per flag by what
     /// goes wrong when the variable is forgotten.
     pub portal_enabled: bool,
-    /// The free plan's per-key rate limit, requests per second, for the portal
-    /// dashboard to state (task 0188).
+    /// The free plan's per-key rate limit, requests per second, served by
+    /// `/config` (task 0188).
     ///
     /// Read from `PORTAL_RATE_LIMIT`, which `compute-stack.ts` sets from
     /// `pricingApiFreePlanRateLimit` — the same config value
-    /// `api-gateway-stack.ts` feeds to `addUsagePlan`. It travels this way
-    /// rather than being read back from `GetUsagePlan` because that would cost
-    /// the portal a control-plane grant task 0188 deliberately does not take,
-    /// and rather than being a literal in the frontend because that is the one
-    /// number on the panel that could then drift from what the gateway
-    /// enforces: raise the limit in `infra/envs/production.json`, deploy, and a
-    /// dashboard whose stated theme is rendering honestly would keep stating
-    /// the old figure.
+    /// `api-gateway-stack.ts` feeds to `addUsagePlan`. Since task 0311 the
+    /// signed-in dashboard does not state this figure: `/api/usage` reads the
+    /// key's OWN plan through `GetUsagePlans` and reports its figures. This
+    /// stays for what has no key to ask about — the no-key state and the
+    /// landing page; while the usage call is unanswered or failed the
+    /// dashboard states no figure at all rather than this one — and it
+    /// stays config-fed rather than a literal in the frontend, because a
+    /// literal would drift from what the gateway enforces the moment
+    /// `infra/envs/production.json` changed.
     ///
     /// `None` — unset, or set to something that is not a positive integer —
     /// means this deployment cannot say what the limit is, and the page omits
@@ -58,11 +59,12 @@ pub struct AppConfig {
     ///
     /// **Not read from the environment**, which is the point — ADR 0007 and
     /// Tranche 3 AC 6 forbid a secret value in an env var. [`Self::from_env`]
-    /// leaves this `None` and [`Self::load_portal_oauth`] fills it from Secrets
-    /// Manager, asynchronously, because the read is an HTTP call.
-    ///
-    /// `None` means sign-in is not configured on this deployment, which is the
-    /// normal state while `portal_enabled` is false.
+    /// leaves this `None`. In the Lambda it stays `None` and the portal loads
+    /// its sources lazily, on the first portal request that needs them
+    /// (`crate::portal::sources`). A value here is a pre-supplied source:
+    /// `serve.rs` fills it eagerly with [`Self::load_portal_oauth`], and tests
+    /// set it directly. Either way the portal then never loads from the
+    /// environment.
     pub portal_oauth: Option<crate::portal::auth::secret::OauthSecret>,
     /// Which Discord to talk to (task 0186). Production always takes the
     /// defaults; the overrides exist for the local round-trip and for the tests.
@@ -81,19 +83,15 @@ pub struct AppConfig {
     /// The API Gateway control-plane client the portal issues keys with
     /// (task 0187), already carrying the `pricing-api-free` usage-plan id.
     ///
-    /// `None` means key issuance is not configured on this deployment, which is
-    /// the normal state while `portal_enabled` is false — and, like
-    /// [`Self::portal_oauth`], it is filled by an async step rather than by
-    /// [`Self::from_env`], because building it resolves credentials and reading
-    /// the plan id is an HTTP call.
+    /// A pre-supplied source, like [`Self::portal_oauth`]: `None` in the
+    /// Lambda, where the portal loads it lazily; filled by `serve.rs` through
+    /// [`Self::load_portal_keys`], or directly by a test.
     pub portal_keys: Option<crate::portal::keys::gateway::Gateway>,
     /// Where the eligibility gate's two knobs come from (task 0189): the
-    /// Stellar guild id and the minimum account age. `None` means the gate is
-    /// not configured, which is the normal state while `portal_enabled` is
-    /// false; filled by [`Self::load_portal_eligibility`], which also probes
-    /// both values once so a mis-seeded parameter closes the portal at cold
-    /// start ([`Self::load_portal_or_close`]) rather than refusing at a
-    /// visitor's click.
+    /// Stellar guild id and the minimum account age. A pre-supplied source,
+    /// like [`Self::portal_oauth`]: `None` in the Lambda, where the portal
+    /// loads it lazily; filled by `serve.rs` through
+    /// [`Self::load_portal_eligibility`], or directly by a test.
     pub portal_eligibility: Option<crate::portal::eligibility::EligibilitySettings>,
     /// The origin the portal's bundle is served from, when that is not this
     /// backend's own host (task 0194): `https://sorobanscan.rumblefish.dev`.
@@ -178,220 +176,162 @@ impl AppConfig {
         }
     }
 
-    /// Fill [`Self::portal_oauth`] from Secrets Manager, or from the local file
-    /// named by `PORTAL_OAUTH_SECRET_FILE`.
+    /// Fill [`Self::portal_oauth`] for `serve.rs`, which loads eagerly and
+    /// `expect()`s: a developer who asked for the portal and did not get it
+    /// wants to know now, and no partner is behind that process.
     ///
-    /// Called by both entrypoints after [`Self::from_env`]. It is a separate,
-    /// async step because it performs I/O, and it is *conditional* on
-    /// [`Self::portal_enabled`], which is the load-bearing part:
-    ///
-    /// Production ran with `PORTAL_ENABLED=false` for the whole of the portal's
-    /// build, until task 0194 flipped it in `compute-stack.ts` — so this read
-    /// now happens on every production cold start. The conditionality still
-    /// matters for tests and for any environment where the flag is off: if a
-    /// cold start read this secret unconditionally it would fail on a deployment
-    /// where nobody has created it yet — and that failure is not confined to the portal.
-    /// `main.rs` builds one router for every route group (ADR 0008), so a panic
-    /// in init takes out `/v1` as well, to protect four routes that answer an
-    /// empty `404` either way.
-    ///
-    /// With the portal **open**, a missing or malformed secret is an error —
-    /// and what the Lambda does with it is the decision recorded on
-    /// [`Self::load_portal_or_close`]: close the portal in that process
-    /// rather than panic, because a panic here is an init failure on the
-    /// function that also serves `/v1`. The thing this guards against — a
-    /// sign-in button that answers `503` — does not happen either way: with
-    /// the portal closed the gate answers before any handler does.
+    /// A no-op while [`Self::portal_enabled`] is false, so the ordinary local
+    /// run of the data API needs none of it. The Lambda never calls this: it
+    /// loads through `load_portal_sources` on the first portal request.
     pub async fn load_portal_oauth(
         &mut self,
     ) -> Result<(), crate::portal::auth::secret::SecretError> {
         if !self.portal_enabled {
             return Ok(());
         }
-        match crate::portal::auth::secret::OauthSecret::load().await? {
-            Some(secret) => {
-                self.portal_oauth = Some(secret);
-                Ok(())
-            }
-            None => Err(crate::portal::auth::secret::SecretError::NoSource),
-        }
+        self.portal_oauth = Some(portal_oauth_from_env().await?);
+        Ok(())
     }
 
-    /// Fill [`Self::portal_keys`] with a control-plane client for task 0187.
+    /// Fill [`Self::portal_keys`] for `serve.rs` — see
+    /// [`Self::load_portal_oauth`] for why eagerly and why only there.
     ///
-    /// Conditional on [`Self::portal_enabled`] for exactly the reasons
-    /// [`Self::load_portal_oauth`] is, and one more of its own:
-    ///
-    /// - **A closed portal must not pay for this.** Building the client
-    ///   resolves credentials and reads an SSM parameter; doing that at every
-    ///   cold start would put two avoidable operations in front of the first
-    ///   `/v1` request, on one router that serves every route group (ADR 0008),
-    ///   for two routes that answer an empty `404` regardless.
-    /// - **A closed portal must not be able to reach the control plane at
-    ///   all.** With the portal off there is no client in the process, so no
-    ///   code path — not a bug, not a stray handler — can create or delete a
-    ///   production API key.
-    ///
-    /// With the portal **open** a missing plan id is an error, matching
-    /// sign-in — see [`Self::load_portal_or_close`] for what the Lambda does
-    /// with it. A portal that renders an "issue key" button which answers
-    /// `503` is the thing to avoid, and a closed portal avoids it as surely as
-    /// a failed init does, without taking `/v1` down.
-    ///
-    /// # Where the plan id comes from
-    ///
-    /// `PORTAL_FREE_PLAN_PARAM` carries the **name of an SSM parameter**, not
-    /// the id — the parameter `ApiGatewayStack` publishes at
-    /// `/prices/{env}/pricing-api-free-plan-id` (task 0157). It cannot be a
-    /// cross-stack reference: `ComputeStack` is a dependency of
-    /// `ApiGatewayStack`, so importing the plan would close a cycle, which is
-    /// the same shape of problem `apiBaseUrl` has. And it must not be
-    /// hard-coded, because a usage-plan id is generated by AWS and changes if
-    /// the plan is ever replaced.
+    /// The flag guard also keeps a closed portal away from the control plane:
+    /// with the portal off there is no client in the process, so no code path
+    /// can create or delete a production API key.
     pub async fn load_portal_keys(&mut self) -> Result<(), PortalKeysError> {
         if !self.portal_enabled {
             return Ok(());
         }
-        let plan_id = free_plan_id().await?;
-        self.portal_keys =
-            Some(crate::portal::keys::gateway::Gateway::from_ambient_config(plan_id).await);
+        self.portal_keys = Some(portal_keys_from_env().await?);
         Ok(())
     }
 
-    /// Fill [`Self::portal_eligibility`] with the sources of the eligibility
-    /// gate's two knobs (task 0189).
-    ///
-    /// Conditional on [`Self::portal_enabled`] for exactly the reasons the two
-    /// loaders above are. With the portal **open**, a missing source is an
-    /// error — a portal whose "get my key" round-trip can only ever answer
-    /// "could not verify" is worse than one that is closed — and so is an
-    /// unreadable or malformed *value*: both parameters are **probed once
-    /// here**, so `discord-guild-id` seeded with a name instead of a
-    /// snowflake, or `min-account-age-minutes` holding "five", is a cold-start
-    /// error with the parameter named, not a per-visitor refusal. What the
-    /// Lambda does with the error is [`Self::load_portal_or_close`]'s call.
-    ///
-    /// What is stored is the **source**, not the probed value: every issuance
-    /// resolves it again, which is what makes an operator's `put-parameter`
-    /// take effect without a redeploy (bounded only by the Parameters and
-    /// Secrets extension's ~5 min cache).
-    ///
-    /// # Where the values come from
-    ///
-    /// `PORTAL_GUILD_ID_PARAM` and `PORTAL_MIN_ACCOUNT_AGE_PARAM` carry the
-    /// **names of SSM parameters** (`/prices/{env}/discord-guild-id`,
-    /// `/prices/{env}/min-account-age-minutes`), seeded by the operator at
-    /// deploy prep — never created by CDK, because a CloudFormation-managed
-    /// parameter is restored to the committed value by the next `cdk deploy`,
-    /// which would silently un-flip production back to the test guild after
-    /// [0179]. The direct-value overrides are local-only seams, compiled out
-    /// of the Lambda like `PORTAL_FREE_PLAN_ID`.
+    /// Fill [`Self::portal_eligibility`] for `serve.rs` — see
+    /// [`Self::load_portal_oauth`].
     pub async fn load_portal_eligibility(&mut self) -> Result<(), PortalEligibilityError> {
         if !self.portal_enabled {
             return Ok(());
         }
-        let settings = eligibility_settings()?;
-        // Probe both values now. The per-action resolve keeps them tunable;
-        // this makes a bad seed loud at deploy time.
-        settings
-            .guild_id()
-            .await
-            .map_err(PortalEligibilityError::Probe)?;
-        settings
-            .min_account_age_minutes()
-            .await
-            .map_err(PortalEligibilityError::Probe)?;
-        self.portal_eligibility = Some(settings);
+        self.portal_eligibility = Some(portal_eligibility_from_env().await?);
         Ok(())
-    }
-
-    /// The three loaders above, in order, stopping at the first error.
-    async fn load_portal(&mut self) -> Result<(), PortalLoadError> {
-        self.load_portal_oauth().await?;
-        self.load_portal_keys().await?;
-        self.load_portal_eligibility().await?;
-        Ok(())
-    }
-
-    /// Load every portal source, or close the portal in this process.
-    ///
-    /// The three loaders each return their error; this is where the Lambda
-    /// decides what an error *means*, and the decision is **closed, not
-    /// crashed** (task 0194, PR review finding 1). `main.rs` used to
-    /// `expect()` each loader, on the argument that a portal source missing at
-    /// deploy should fail loudly in `Init Errors` rather than as a `503` under
-    /// a sign-in button. Three things were wrong with that:
-    ///
-    /// - **The loud failure lands on `/v1`.** One router serves every route
-    ///   group (ADR 0008), so an init panic is not "the portal fails to
-    ///   deploy" — `cdk deploy` succeeds regardless — it is the next `/v1`
-    ///   caller receiving a `502`, over a secret and three SSM parameters the
-    ///   data API never uses.
-    /// - **It was not only a deploy hazard.** The reads go through the
-    ///   Parameters and Secrets extension with a 2 s timeout and no retry
-    ///   (`prices_clickhouse::mtls`), and Parameter Store's default throughput
-    ///   is 40 TPS for the whole account. A burst of cold starts — the ramp of
-    ///   a load test — is three SSM reads per environment against that budget,
-    ///   and a throttled one was a `502` on the data API.
-    /// - **Nobody was paged by `Init Errors`.** When this was written the
-    ///   api-handler had no alarm on `Errors` at all, so the "loud" failure
-    ///   was loud only to whoever probed. The api-handler now has
-    ///   `prices-${env}-api-handler-errors`, and the closure this function
-    ///   produces instead pages as `prices-${env}-api-handler-portal-closed`
-    ///   (task 0249).
-    ///
-    /// So on any error the portal is closed *in this execution environment* —
-    /// the flag cleared and all three sources dropped, which restores every
-    /// property of a closed portal (the gate answers before any handler, and
-    /// there is no control-plane client in the process) — and the error is
-    /// returned for the caller to log. `/config` then reports
-    /// `enabled: false`, which is the probe the deploy runbook already makes
-    /// after every deploy, so a misconfigured deploy is caught by the same step
-    /// it always was; `/v1` never notices.
-    ///
-    /// The cost, stated: an environment that failed a *transient* read stays
-    /// closed for its lifetime, where a panic would have discarded it and
-    /// retried on the next cold start. That trades a `502` on the data API for
-    /// a portal that, in one environment, says it is not open. The alarm on
-    /// the log line `main.rs` writes is the follow-up recorded on task 0194.
-    ///
-    /// `serve.rs` keeps its three `expect()`s on purpose: a developer who asked
-    /// for the portal and did not get it wants to know now, and no partner is
-    /// behind that process.
-    pub async fn load_portal_or_close(&mut self) -> Result<(), PortalLoadError> {
-        let loaded = self.load_portal().await;
-        if loaded.is_err() {
-            self.close_portal();
-        }
-        loaded
-    }
-
-    /// Close the portal in this process: the flag AND the three sources, so a
-    /// half-loaded configuration (secret read, plan id not) leaves nothing
-    /// behind that a closed portal would not have — in particular, no
-    /// control-plane client.
-    fn close_portal(&mut self) {
-        self.portal_enabled = false;
-        self.portal_oauth = None;
-        self.portal_keys = None;
-        self.portal_eligibility = None;
     }
 }
 
-/// Which portal source failed to load at cold start — the value
-/// [`AppConfig::load_portal_or_close`] hands back, with the variable that
-/// names the source, so the log line points at the runbook step.
+/// Read the Discord OAuth secret (task 0186) from Secrets Manager, or from the
+/// local file named by `PORTAL_OAUTH_SECRET_FILE`. With the portal open, no
+/// source at all is an error.
+pub(crate) async fn portal_oauth_from_env()
+-> Result<crate::portal::auth::secret::OauthSecret, crate::portal::auth::secret::SecretError> {
+    crate::portal::auth::secret::OauthSecret::load()
+        .await?
+        .ok_or(crate::portal::auth::secret::SecretError::NoSource)
+}
+
+/// Build the control-plane client key issuance uses (task 0187).
+///
+/// # Where the plan id comes from
+///
+/// `PORTAL_FREE_PLAN_PARAM` carries the **name of an SSM parameter**, not
+/// the id — the parameter `ApiGatewayStack` publishes at
+/// `/prices/{env}/pricing-api-free-plan-id` (task 0157). It cannot be a
+/// cross-stack reference: `ComputeStack` is a dependency of
+/// `ApiGatewayStack`, so importing the plan would close a cycle, which is
+/// the same shape of problem `apiBaseUrl` has. And it must not be
+/// hard-coded, because a usage-plan id is generated by AWS and changes if
+/// the plan is ever replaced.
+///
+/// # The API id and stage (task 0311)
+///
+/// `Gateway::plan_of` keeps only the usage plans on OUR API stage, so the
+/// client also needs the REST API id and the stage name. The id arrives
+/// exactly as the plan id does — `PORTAL_API_ID_PARAM` names the SSM
+/// parameter `ApiGatewayStack` publishes at `/prices/{env}/api-gateway-id`,
+/// with a `PORTAL_API_ID` override for a local run compiled out of the
+/// Lambda — and the stage is the plain `PORTAL_API_STAGE`, because the
+/// stage name is `envName` and needs no lookup. The two reads run
+/// concurrently.
+pub(crate) async fn portal_keys_from_env()
+-> Result<crate::portal::keys::gateway::Gateway, PortalKeysError> {
+    let (plan_id, api_id) = tokio::try_join!(free_plan_id(), api_id())?;
+    let stage = api_stage()?;
+    Ok(crate::portal::keys::gateway::Gateway::from_ambient_config(plan_id, api_id, stage).await)
+}
+
+/// The sources of the eligibility gate's two knobs (task 0189), each value
+/// **probed once** so a mis-seeded parameter — `discord-guild-id` seeded
+/// with a name instead of a snowflake, `min-account-age-minutes` holding
+/// "five" — fails the load with the parameter named, rather than refusing
+/// every visitor as "could not verify".
+///
+/// What is kept is the **source**, not the probed value: every issuance
+/// resolves it again, which is what makes an operator's `put-parameter`
+/// take effect without a redeploy (bounded only by the Parameters and
+/// Secrets extension's ~5 min cache).
+///
+/// # Where the values come from
+///
+/// `PORTAL_GUILD_ID_PARAM` and `PORTAL_MIN_ACCOUNT_AGE_PARAM` carry the
+/// **names of SSM parameters** (`/prices/{env}/discord-guild-id`,
+/// `/prices/{env}/min-account-age-minutes`), seeded by the operator at
+/// deploy prep — never created by CDK, because a CloudFormation-managed
+/// parameter is restored to the committed value by the next `cdk deploy`,
+/// which would silently un-flip production back to the test guild after
+/// [0179]. The direct-value overrides are local-only seams, compiled out
+/// of the Lambda like `PORTAL_FREE_PLAN_ID`.
+pub(crate) async fn portal_eligibility_from_env()
+-> Result<crate::portal::eligibility::EligibilitySettings, PortalEligibilityError> {
+    let settings = eligibility_settings()?;
+    tokio::try_join!(settings.guild_id(), settings.min_account_age_minutes())
+        .map_err(PortalEligibilityError::Probe)?;
+    Ok(settings)
+}
+
+/// The Lambda's portal load (`crate::portal::sources`): all five reads — the
+/// OAuth secret, the free-plan id, the API id, the guild id and the minimum
+/// account age — in flight at once, failing on the first error.
+///
+/// Concurrent because the whole load sits inside
+/// `crate::portal::sources::LOAD_BUDGET`, in front of the request that asked:
+/// five reads one after another could each take the extension client's 2 s.
+pub(crate) async fn load_portal_sources() -> Result<crate::portal::sources::Loaded, PortalLoadError>
+{
+    let (oauth, gateway, settings) = tokio::try_join!(
+        async { portal_oauth_from_env().await.map_err(PortalLoadError::from) },
+        async { portal_keys_from_env().await.map_err(PortalLoadError::from) },
+        async {
+            portal_eligibility_from_env()
+                .await
+                .map_err(PortalLoadError::from)
+        },
+    )?;
+    Ok(crate::portal::sources::Loaded {
+        oauth: Some(std::sync::Arc::new(oauth)),
+        gateway: Some(std::sync::Arc::new(gateway)),
+        settings: Some(std::sync::Arc::new(settings)),
+    })
+}
+
+/// Why the lazy portal load failed (`crate::portal::sources`): which source,
+/// with the variable that names it, so the `portal sources failed to load`
+/// line points at the runbook step.
 #[derive(Debug, thiserror::Error)]
 pub enum PortalLoadError {
     #[error("portal sign-in (PORTAL_OAUTH_SECRET_NAME): {0}")]
     Oauth(#[from] crate::portal::auth::secret::SecretError),
-    #[error("portal key issuance (PORTAL_FREE_PLAN_PARAM): {0}")]
+    #[error("portal key issuance ({var}): {0}", var = .0.variable())]
     Keys(#[from] PortalKeysError),
     #[error("portal eligibility gate (PORTAL_GUILD_ID_PARAM, PORTAL_MIN_ACCOUNT_AGE_PARAM): {0}")]
     Eligibility(#[from] PortalEligibilityError),
+    #[error(
+        "the portal's five reads (PORTAL_OAUTH_SECRET_NAME, PORTAL_FREE_PLAN_PARAM, \
+         PORTAL_API_ID_PARAM, PORTAL_GUILD_ID_PARAM, PORTAL_MIN_ACCOUNT_AGE_PARAM) did not \
+         finish within {0:?}"
+    )]
+    TimedOut(std::time::Duration),
 }
 
-/// Why the eligibility gate could not be configured at cold start.
+/// Why the eligibility gate could not be configured.
 #[derive(Debug, thiserror::Error)]
 pub enum PortalEligibilityError {
     #[error(
@@ -447,7 +387,7 @@ fn eligibility_settings()
     })
 }
 
-/// Why key issuance could not be configured at cold start.
+/// Why key issuance could not be configured.
 #[derive(Debug, thiserror::Error)]
 pub enum PortalKeysError {
     #[error(
@@ -460,6 +400,40 @@ pub enum PortalKeysError {
     Fetch { name: String, message: String },
     #[error("SSM parameter `{name}` holds an empty usage-plan id")]
     Empty { name: String },
+    #[error(
+        "the portal is open but no REST API id is configured; set PORTAL_API_ID_PARAM to the SSM \
+         parameter holding it (ApiGatewayStack publishes it at /prices/<env>/api-gateway-id), \
+         or PORTAL_API_ID on a local run"
+    )]
+    ApiIdNoSource,
+    #[error(
+        "reading the REST API id from SSM parameter `{name}` (PORTAL_API_ID_PARAM) failed: {message}"
+    )]
+    ApiIdFetch { name: String, message: String },
+    #[error("SSM parameter `{name}` (PORTAL_API_ID_PARAM) holds an empty REST API id")]
+    ApiIdEmpty { name: String },
+    #[error(
+        "the portal is open but no API stage is configured; set PORTAL_API_STAGE to the stage \
+         name (the environment name, e.g. `production`)"
+    )]
+    NoStage,
+}
+
+impl PortalKeysError {
+    /// The variable naming the source that failed — the label on
+    /// [`PortalLoadError::Keys`]. Per variant, because the API id and the
+    /// stage are read from variables of their own (task 0311).
+    pub fn variable(&self) -> &'static str {
+        match self {
+            PortalKeysError::NoSource
+            | PortalKeysError::Fetch { .. }
+            | PortalKeysError::Empty { .. } => "PORTAL_FREE_PLAN_PARAM",
+            PortalKeysError::ApiIdNoSource
+            | PortalKeysError::ApiIdFetch { .. }
+            | PortalKeysError::ApiIdEmpty { .. } => "PORTAL_API_ID_PARAM",
+            PortalKeysError::NoStage => "PORTAL_API_STAGE",
+        }
+    }
 }
 
 /// Resolve the `pricing-api-free` usage-plan id.
@@ -493,35 +467,87 @@ async fn free_plan_id() -> Result<String, PortalKeysError> {
     // which is exactly what an operator gets from `echo <id> | aws ssm put-parameter`
     // — would produce a malformed request that reports as a control-plane
     // failure rather than as the typo it is.
-    let id = fetch_plan_id(&name).await?.trim().to_string();
+    let id = fetch_parameter(&name)
+        .await
+        .map_err(|message| PortalKeysError::Fetch {
+            name: name.clone(),
+            message,
+        })?
+        .trim()
+        .to_string();
     if id.is_empty() {
         return Err(PortalKeysError::Empty { name });
     }
     Ok(id)
 }
 
+/// Resolve our REST API id (task 0311) — the same shape as [`free_plan_id`].
+async fn api_id() -> Result<String, PortalKeysError> {
+    // A direct id, for a local run. **Compiled out of the Lambda** for the
+    // reason `PORTAL_FREE_PLAN_ID` is: this value decides which usage plans
+    // count as the key's plan, and a configuration change must not be able to
+    // point the portal at an API of somebody else's choosing.
+    #[cfg(not(feature = "lambda"))]
+    if let Ok(id) = std::env::var("PORTAL_API_ID")
+        && !id.trim().is_empty()
+    {
+        return Ok(id.trim().to_string());
+    }
+
+    let Ok(name) = std::env::var("PORTAL_API_ID_PARAM") else {
+        return Err(PortalKeysError::ApiIdNoSource);
+    };
+    if name.is_empty() {
+        return Err(PortalKeysError::ApiIdNoSource);
+    }
+    // Trimmed for the reason the plan id is: an `echo | put-parameter`
+    // newline would otherwise make every plan fail the stage comparison and
+    // report every key as on no plan.
+    let id = fetch_parameter(&name)
+        .await
+        .map_err(|message| PortalKeysError::ApiIdFetch {
+            name: name.clone(),
+            message,
+        })?
+        .trim()
+        .to_string();
+    if id.is_empty() {
+        return Err(PortalKeysError::ApiIdEmpty { name });
+    }
+    Ok(id)
+}
+
+/// Our stage name (task 0311), from `PORTAL_API_STAGE`.
+fn api_stage() -> Result<String, PortalKeysError> {
+    std::env::var("PORTAL_API_STAGE")
+        .ok()
+        .map(|stage| stage.trim().to_string())
+        .filter(|stage| !stage.is_empty())
+        .ok_or(PortalKeysError::NoStage)
+}
+
 /// Read the parameter through the Parameters and Secrets extension — the same
 /// localhost listener, token and in-process cache the mTLS bundle and the OAuth
 /// secret already use, so a warm container never calls Systems Manager on the
 /// path that issues a key.
+///
+/// Retried on a transient failure (`crate::portal::extension`). The error is
+/// the message alone; the caller wraps it in the variant naming which
+/// parameter it was reading.
 #[cfg(feature = "aws-mtls")]
-async fn fetch_plan_id(name: &str) -> Result<String, PortalKeysError> {
-    prices_clickhouse::mtls::fetch_parameter_string(name)
+async fn fetch_parameter(name: &str) -> Result<String, String> {
+    crate::portal::extension::parameter_string(name)
         .await
-        .map_err(|e| PortalKeysError::Fetch {
-            name: name.to_string(),
-            message: e.to_string(),
-        })
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(not(feature = "aws-mtls"))]
-async fn fetch_plan_id(name: &str) -> Result<String, PortalKeysError> {
-    Err(PortalKeysError::Fetch {
-        name: name.to_string(),
-        message: "this build has no Parameters and Secrets extension client (build with \
-                  `--features lambda`, or set PORTAL_FREE_PLAN_ID for a local run)"
+async fn fetch_parameter(_name: &str) -> Result<String, String> {
+    Err(
+        "this build has no Parameters and Secrets extension client (build with \
+         `--features lambda`, or set PORTAL_FREE_PLAN_ID and PORTAL_API_ID for a local run)"
             .into(),
-    })
+    )
 }
 
 #[cfg(test)]
@@ -566,52 +592,83 @@ mod web_origin_tests {
 
 #[cfg(test)]
 mod portal_load_tests {
-    use super::AppConfig;
+    use super::{AppConfig, PortalKeysError, PortalLoadError, load_portal_sources};
 
-    /// The unit under test is the decision, not the loaders: with the portal
-    /// open and no source configured, a loader fails and the config must come
-    /// back CLOSED — flag and all three sources — rather than half-open. No
-    /// environment variable is set here on purpose (`set_var` races the other
-    /// test threads, see `AppConfig::portal_endpoints`): the loaders read
-    /// `PORTAL_OAUTH_SECRET_FILE`/`_NAME`, `PORTAL_FREE_PLAN_ID`/`_PARAM` and
-    /// the eligibility seams, and a developer's shell exporting one of them
-    /// only moves which loader fails, not the outcome asserted.
+    /// With no source configured, the lazy load fails, and says which
+    /// source. No environment variable is set here on purpose (`set_var`
+    /// races the other test threads, see `AppConfig::portal_endpoints`): the
+    /// loaders read `PORTAL_OAUTH_SECRET_FILE`/`_NAME`,
+    /// `PORTAL_FREE_PLAN_ID`/`_PARAM`, `PORTAL_API_ID`/`_PARAM`,
+    /// `PORTAL_API_STAGE` and the eligibility seams, and a developer's shell
+    /// exporting one of them only moves which source fails, not the outcome
+    /// asserted.
     #[tokio::test]
-    async fn a_failed_load_closes_the_portal_and_keeps_none_of_its_sources() {
-        let mut config = AppConfig {
-            portal_enabled: true,
-            ..AppConfig::from_env()
+    async fn a_load_with_no_source_fails_and_names_the_source() {
+        let err = match load_portal_sources().await {
+            Ok(_) => panic!("no portal source is configured in a unit test"),
+            Err(err) => err,
         };
-
-        let err = config
-            .load_portal_or_close()
-            .await
-            .expect_err("no portal source is configured in a unit test");
-
-        assert!(
-            !config.portal_enabled,
-            "the portal must be closed after a failed load ({err})"
-        );
-        assert!(config.portal_oauth.is_none());
-        assert!(config.portal_keys.is_none());
-        assert!(config.portal_eligibility.is_none());
         // The message names the variable the runbook step sets.
         assert!(err.to_string().starts_with("portal "), "{err}");
     }
 
+    /// The label names the variable of the read that failed — not
+    /// `PORTAL_FREE_PLAN_PARAM` for all seven, which it used to.
+    #[test]
+    fn a_key_issuance_failure_names_its_own_variable() {
+        let name = || "/prices/production/x".to_string();
+        let cases = [
+            (PortalKeysError::NoSource, "PORTAL_FREE_PLAN_PARAM"),
+            (
+                PortalKeysError::Fetch {
+                    name: name(),
+                    message: "m".into(),
+                },
+                "PORTAL_FREE_PLAN_PARAM",
+            ),
+            (
+                PortalKeysError::Empty { name: name() },
+                "PORTAL_FREE_PLAN_PARAM",
+            ),
+            (PortalKeysError::ApiIdNoSource, "PORTAL_API_ID_PARAM"),
+            (
+                PortalKeysError::ApiIdFetch {
+                    name: name(),
+                    message: "m".into(),
+                },
+                "PORTAL_API_ID_PARAM",
+            ),
+            (
+                PortalKeysError::ApiIdEmpty { name: name() },
+                "PORTAL_API_ID_PARAM",
+            ),
+            (PortalKeysError::NoStage, "PORTAL_API_STAGE"),
+        ];
+        for (err, var) in cases {
+            let line = PortalLoadError::Keys(err).to_string();
+            assert!(
+                line.starts_with(&format!("portal key issuance ({var}): ")),
+                "{line}"
+            );
+        }
+    }
+
+    /// `serve.rs`'s eager loaders are no-ops on a closed portal: nothing is
+    /// read, nothing fails, nothing is filled.
     #[tokio::test]
-    async fn a_closed_portal_loads_nothing_and_stays_closed() {
+    async fn a_closed_portal_loads_nothing() {
         let mut config = AppConfig {
             portal_enabled: false,
             ..AppConfig::from_env()
         };
 
+        config.load_portal_oauth().await.expect("nothing to load");
+        config.load_portal_keys().await.expect("nothing to load");
         config
-            .load_portal_or_close()
+            .load_portal_eligibility()
             .await
-            .expect("a closed portal has nothing to load and nothing to fail");
+            .expect("nothing to load");
 
-        assert!(!config.portal_enabled);
         assert!(config.portal_oauth.is_none());
         assert!(config.portal_keys.is_none());
         assert!(config.portal_eligibility.is_none());

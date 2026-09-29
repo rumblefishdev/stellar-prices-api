@@ -33,11 +33,76 @@ history:
       second mechanism-level check on system.mutations for pending DELETEs, with
       the caveat that a starved mutation (six Phoenix deletes pending 07-17 to
       07-23+, empty latest_fail_reason) is armed, not safe.
+  - date: 2026-09-25
+    status: backlog
+    who: okarcz
+    note: >
+      NARROWED on the operator's 2026-09-25 decision, from the 2026-09-24 read-only
+      check. A cleanup-rule guard now exists, but only in the 0286 re-ingest
+      driver: tools/scripts/reingest_0286.py:407-411 runs `aws events
+      describe-rule` and gates on State == DISABLED, and --skip-aws-check
+      (declared at :1004) bypasses it. The live 0286 phase-3 run was started with
+      --skip-aws-check (0286 task file, run log), so no guard is protecting the
+      run in flight. Still open: sdex-backfill and events-backfill have no guard;
+      no system.mutations pending-DELETE gate; no tests; the runbooks do not
+      reference any guard. Original text kept below.
 ---
 
 # Preflight guard — refuse to backfill while the cleanup rule is ENABLED
 
-## Summary
+## Summary (narrowed 2026-09-25)
+
+A guard now exists, but only in one entrypoint, and in practice it is bypassed:
+
+- `tools/scripts/reingest_0286.py:407-411` runs
+  `aws events describe-rule --name <--cleanup-rule> --query State` and gates on
+  `State == "DISABLED"`. The rule name defaults to `prices-production-cleanup`
+  (`:1003`). An indeterminate result (no credentials, error) fails closed,
+  because the stdout is not `DISABLED`. It passes no `--region`, so it uses
+  whatever region the shell has.
+- `--skip-aws-check` (`:1004`) skips it entirely. **The live [[0286]] phase-3
+  run was started with `--skip-aws-check`** (the run log in the 0286 task file).
+  So nothing machine-checked is protecting the run in flight. Only the prose
+  precondition in `docs/runbooks/0286-reingest-history.md:34` does, and so does
+  the fact that the rule is currently disabled on purpose
+  ([[cleanup-rule-shreds-backfill-output]]).
+
+What is still open is the rest of the original scope:
+
+1. **`sdex-backfill` and `events-backfill` have no guard.** Neither binary
+   checks the rule, so running either one directly is unprotected.
+2. **No `system.mutations` gate.** Nothing checks for a pending destructive
+   `DELETE` before a run starts. (The script's `markers` step at `:684` polls
+   `system.mutations`, but only for its own `backfill_sdex_ledgers` delete.
+   That is not a preflight.)
+3. **No tests** for the enabled / disabled / indeterminate states.
+4. **No runbook references.** `running-ingestion-components.md` and
+   `preroll-incremental-presoroban.md` do not mention a guard.
+
+## Acceptance Criteria
+
+- [ ] `sdex-backfill` (and the `events-backfill` historical path) refuses to
+      start when `prices-production-cleanup` is ENABLED. The message names the
+      rule and the `aws events disable-rule` remediation.
+- [ ] An explicit, logged override flag is the only bypass. Decide whether
+      `reingest_0286.py`'s `--skip-aws-check` stays the usual way to start a
+      run, or becomes an exception that is recorded.
+- [ ] A preflight check on `system.mutations` for pending `DELETE`s
+      (`is_done = 0`) treats any such row as armed, not safe.
+- [ ] Indeterminate-check behaviour is decided and documented for every
+      guarded entrypoint. (`reingest_0286.py` already fails closed.)
+- [ ] Live ingestion is unaffected by the guard.
+- [ ] Test coverage for all three states: enabled → refuse, disabled → proceed,
+      indeterminate → chosen behaviour.
+- [ ] The runbooks (`running-ingestion-components.md`,
+      `preroll-incremental-presoroban.md`, `0286-reingest-history.md`) reference
+      the guard instead of relying on prose alone.
+
+## Original scope (before 2026-09-25 narrowing)
+
+> Kept verbatim for the record (headings demoted one level). Original title: *Preflight guard — refuse to backfill while the cleanup rule is ENABLED*. The Summary and Acceptance Criteria above supersede it.
+
+### Summary
 
 Make `sdex-backfill` check the `prices-production-cleanup` EventBridge rule at
 startup and **refuse to run** (or at minimum warn loudly and require an explicit
@@ -45,7 +110,7 @@ override flag) while it is `ENABLED`. Running a historical backfill against an
 enabled cleanup rule is not a degraded mode — it is silent, unrecoverable data
 destruction.
 
-## Context
+### Context
 
 Running both at once deletes the backfill's output **as fast as it is written**:
 cleanup removes historical rows immediately rather than honouring the 7-day
@@ -89,7 +154,7 @@ should become a machine-checked one.
 
 Memory: `[[cleanup-rule-shreds-backfill-output]]`.
 
-## Implementation
+### Implementation
 
 - At `sdex-backfill` startup (and the combined/events-backfill entrypoints that
   write historical partitions), describe the rule and fail fast when enabled:
@@ -129,7 +194,7 @@ Memory: `[[cleanup-rule-shreds-backfill-output]]`.
 - Cross-reference the guard from `running-ingestion-components.md` and
   `preroll-incremental-presoroban.md` so the prose and the code agree.
 
-## Acceptance Criteria
+### Acceptance Criteria
 
 - [ ] `sdex-backfill` refuses to start when `prices-production-cleanup` is
       ENABLED, with a message naming the rule and the remediation command.
@@ -142,7 +207,7 @@ Memory: `[[cleanup-rule-shreds-backfill-output]]`.
 - [ ] Test coverage for all three states: enabled → refuse, disabled → proceed,
       indeterminate → chosen behaviour.
 
-## Out of scope
+### Out of scope
 
 - Changing what the cleanup rule itself does, or its retention window.
 - The 0088 recovery run — this guard is for the *next* backfill, and must not

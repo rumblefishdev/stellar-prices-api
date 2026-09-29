@@ -62,6 +62,14 @@ history:
       `regenerate-key`, not `delete-key` — [[0191]] amendment (decision 41),
       recorded from [[0193]]'s review. **No decision in this ADR changes**;
       the confirm-then-re-auth order and the reasons for a typed phrase stand.
+  - date: 2026-09-25
+    status: accepted
+    who: okarcz
+    note: >
+      Correction 2 restated with the first measured MONTH rollover
+      (2026-09-01, [[0221]]): AWS resets on the 1st, after the 08-31 daily
+      bucket ends; the time within the day is still unobserved. The stale
+      DAY-period proxy line is replaced. No decision in this ADR changes.
 ---
 
 # ADR 0010: Discord identity is the account
@@ -622,16 +630,26 @@ first is now measured and corrected; the second is still open** ([[0180]]).
    paginates.** It comes back with a `position` token like any other list, so a
    reconciler that ranks by earliest `createdDate` off page one can pick a winner
    from a partial list. Page to exhaustion before ranking.
-2. ⏳ **The monthly quota reset instant is undocumented — still unmeasured.**
+2. ⏳ **The monthly quota reset instant is undocumented — the DAY is now
+   measured (2026-09-25, [[0221]]), the time within the day is not.**
    "1st of the month, 00:00 UTC" appears in [[0157]]/[[0158]]/[[0160]] as if it
    were AWS behaviour. AWS's only statement is an example caption — *"creates a
    usage plan that resets at the beginning of the month"* — with no timezone and
    no instant. `offset` is a **request count**, not a time shift. Keep the rule
    as **our** product decision; do not present it as inherited AWS semantics.
-   A real `MONTH` rollover cannot be observed before **1 September 2026**;
-   [[0180]] #7 measures a `DAY`-period plan as a proxy for the instant and the
-   timezone, which is evidence and not proof — and is enough, because the point
-   is to stop citing AWS for a rule AWS never stated.
+   [[0180]] #7's `DAY`-period proxy was abandoned on 2026-08-24. Instead, the
+   first real `MONTH` rollover (2026-09-01) was read off production with
+   `GetUsage` on the free plan. For every key with August usage, the balance
+   refills in the **09-01** daily bucket, and the 08-31 bucket still ends on
+   August's balance. So AWS resets on the **1st**, after the 08-31 bucket
+   ends. If GetUsage's buckets are UTC days (AWS states no timezone), a
+   reset at midnight in any timezone east of UTC is ruled out. **Still
+   unknown:** where inside 09-01 UTC it falls, because nothing we log ties a
+   request's time to a key. The rule stays **ours** (00:00 UTC on the 1st,
+   `portal/period.rs`). At worst it differs from AWS by part of one day,
+   which is a label nuance, not a change to the cap. [[0221]] holds the data
+   and a one-request probe at the 2026-10-01 boundary that would pin the
+   instant.
 
 ---
 

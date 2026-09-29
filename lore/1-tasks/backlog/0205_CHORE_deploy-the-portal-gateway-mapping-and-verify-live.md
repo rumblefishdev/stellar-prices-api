@@ -57,6 +57,18 @@ history:
       (deploy a tree that includes [[0185]]) plus one thing to check live —
       [[0185]]'s decision 13, on whether `/api-tokens/` can hold a cache entry at
       all. −1 code change.
+  - date: "2026-09-24"
+    status: backlog
+    who: okarcz
+    note: >
+      Considered for closure in the backlog cleanup ([[0314]]) and kept open.
+      Archived [[0309]] records that the cdk diffs of 2026-09-23 and 24 showed
+      no change to /api/{proxy+}, so the greedy proxy mapping is in the
+      deployed template, which answers the proxy-depth criterion. A clean diff
+      shows the template matches, not that the behaviour is live: the 302,
+      both Cache-Control headers, the per-verb throttles, cookie-free access
+      logs, /api-tokens/api/config and [[0185]]'s decision 13 still have no
+      evidence. What remains is the live re-measurement, no deploy expected.
 ---
 
 # Deploy the portal gateway mapping and verify it live

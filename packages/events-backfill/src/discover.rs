@@ -8,6 +8,10 @@
 //! processor uses, so a row written here is the row live would have learned.
 //! Only rows not already in the table are written; a re-run writes nothing.
 //!
+//! Besides factory events, it writes the committed factory-less pools
+//! (`STATIC_POOLS`, task 0300) the table does not hold, whatever the ledger
+//! range: they have no factory event to find.
+//!
 //! Needed once because the registry stopped growing when the history backfill
 //! ended (2026-07-06), and the live processor did not persist what it learned
 //! until task 0291. Also the check to run before a reprice that `DROP`s a
@@ -95,9 +99,20 @@ fn snapshot(reg: &Registries) -> HashMap<String, PoolRegistryRow> {
         .collect()
 }
 
+/// The registry to learn into, and the snapshot of what the table holds.
+///
+/// The snapshot is taken from the LOADED rows first, and the committed
+/// factory-less pools (`STATIC_POOLS`, task 0300 D3b) are merged after it — so
+/// a static pool the table lacks shows up in `pool_rows_unpersisted` and is
+/// written exactly once, and one the table holds is not written again.
+fn preload(mut loaded: Registries) -> (Registries, HashMap<String, PoolRegistryRow>) {
+    let persisted = snapshot(&loaded);
+    loaded.merge_static_pools();
+    (loaded, persisted)
+}
+
 pub async fn execute(cli: &Cli, writer: &OhlcvWriter) -> Result<(), EventsBackfillError> {
-    let mut reg = writer.load_pool_registry().await?;
-    let persisted = snapshot(&reg);
+    let (mut reg, persisted) = preload(writer.load_pool_registry().await?);
     info!(
         pools = persisted.len(),
         start = cli.start,
@@ -273,6 +288,61 @@ mod tests {
             "CAZ4Z273BBAAFL5NYNQJKEMZDQBRCPKAS4GOXDUFXPSE56M4ONBJUOVD"
         );
         assert_eq!(rows[0].venue, "soroswap");
+    }
+
+    const COMET: &str = "CAS3FL6TLZKDGGSISDBWGGPXT3NRR4DYTZD7YOD3HMYO6LTJUVGRVEAM";
+
+    fn comet_row() -> PoolRegistryRow {
+        PoolRegistryRow {
+            contract_id: COMET.to_string(),
+            venue: "comet".to_string(),
+            token0: String::new(),
+            token1: String::new(),
+            pool_type: 0,
+            wasm_hash: String::new(),
+        }
+    }
+
+    /// Task 0300 D3b: over an EMPTY table the factory-less Comet pool is the
+    /// one row to write — whatever the range, since it has no factory event.
+    #[test]
+    fn a_static_pool_missing_from_the_table_is_written_once() {
+        let (reg, persisted) = preload(Registries::new());
+        assert_eq!(reg.pool_rows_unpersisted(&persisted), vec![comet_row()]);
+    }
+
+    /// ...and once the table holds it, a re-run writes nothing.
+    #[test]
+    fn a_static_pool_already_in_the_table_is_not_rewritten() {
+        let mut loaded = Registries::new();
+        loaded.load_pool_rows(&[comet_row()]);
+        let (reg, persisted) = preload(loaded);
+        assert!(reg.pool_rows_unpersisted(&persisted).is_empty());
+    }
+
+    /// Factory-learned pools and the static pool are written side by side.
+    #[test]
+    fn a_new_factory_pool_and_a_missing_static_pool_are_both_written() {
+        let mut loaded = Registries::new();
+        learn_from_row(&row(ADD_POOL_TOPICS, ADD_POOL_DATA), &mut loaded);
+        let (mut reg, persisted) = preload(loaded);
+        learn_from_row(&row(NEW_PAIR_TOPICS, NEW_PAIR_DATA), &mut reg);
+
+        let rows = reg.pool_rows_unpersisted(&persisted);
+        let written: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|r| (r.contract_id.as_str(), r.venue.as_str()))
+            .collect();
+        assert_eq!(
+            written,
+            vec![
+                (COMET, "comet"),
+                (
+                    "CAZ4Z273BBAAFL5NYNQJKEMZDQBRCPKAS4GOXDUFXPSE56M4ONBJUOVD",
+                    "soroswap"
+                ),
+            ]
+        );
     }
 
     #[test]

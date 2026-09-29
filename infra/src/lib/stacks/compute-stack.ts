@@ -203,8 +203,16 @@ export class ComputeStack extends cdk.Stack {
    * here would close a Compute -> Gateway -> Compute cycle — the same shape of
    * problem `apiBaseUrl` has. And it must not be hard-coded, because AWS
    * generates the id and it changes if the plan is ever replaced. So the
-   * handler reads it at cold start through the Parameters and Secrets extension
-   * already attached below, exactly as it reads secret VALUES by NAME.
+   * handler reads it on the first portal request per execution environment
+   * (task 0311) through the Parameters and Secrets extension already attached
+   * below, exactly as it reads secret VALUES by NAME.
+   *
+   * Two siblings since task 0311, set beside it on the Function env and for
+   * the same reason: `PORTAL_API_ID_PARAM`, the NAME of the parameter holding
+   * the REST API id (`/prices/{env}/api-gateway-id`, also published by
+   * `ApiGatewayStack`), and `PORTAL_API_STAGE`, the stage name — a plain
+   * literal, because the stage name IS `envName`. With both the backend keeps
+   * only the usage plans on OUR API stage when it asks which plan a key is on.
    */
   public readonly portalFreePlanParameterName: string;
 
@@ -490,12 +498,13 @@ export class ComputeStack extends cdk.Stack {
     //
     // The grant is on the by-name wildcard ARN, so it does not require the
     // secret to exist at synth time. That WAS harmless because a closed portal
-    // never asked; with `PORTAL_ENABLED` true (task 0194) the read happens at
-    // every cold start, and a missing or misnamed secret closes the portal in
-    // that execution environment with a `portal closed at cold start` error
-    // log — not an init panic, because the Lambda also serves `/v1`. See the
-    // deploy-gate note on `PORTAL_ENABLED` below and
-    // `AppConfig::load_portal_or_close`.
+    // never asked; with `PORTAL_ENABLED` true (task 0194) the read happens on
+    // the first portal request per execution environment (task 0311), and a
+    // missing or misnamed secret answers that request as unavailable with a
+    // `portal sources failed to load` error log; the first request after a
+    // 2 s cooldown retries, and nothing stays closed. See the deploy-gate
+    // note on `PORTAL_ENABLED` below and
+    // `packages/prices-api/src/portal/sources.rs`.
     this.apiHandlerRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'ReadPortalOauthSecret',
@@ -514,13 +523,24 @@ export class ComputeStack extends cdk.Stack {
     // Self-service API keys (task 0187) — API Gateway CONTROL plane.
     // ---------------------------------------------------------------
     //
-    // Five of the seven calls the portal makes. The other two —
-    // `POST /usageplans/{id}/keys` (task 0187's attach) and
-    // `GET /usageplans/{id}/usage` (task 0188's `GetUsage`) — are granted in
-    // `ApiGatewayStack` instead, because the plan id lives there and importing
-    // it here would close the Compute -> Gateway -> Compute cycle described on
-    // `portalFreePlanParameterName` above. Each grant is declared where its
-    // resource is known; task 0194 audits the set as one policy.
+    // All eight calls the portal makes: five on `/apikeys`, and the three
+    // `/usageplans` grants at the end of this section — `GET /usageplans`
+    // (task 0311's `GetUsagePlans` by key), `GET /usageplans/*/usage`
+    // (`GetUsage` on the key's own plan) and `POST /usageplans/*/keys` (the
+    // attach). Task 0194 audits the set as one policy.
+    //
+    // The `/usageplans` three used to live in `ApiGatewayStack`, as the
+    // standalone policy `PortalAttachKeyToFreePlan`, because they named the
+    // free plan's id and importing it here would close the Compute -> Gateway
+    // -> Compute cycle described on `portalFreePlanParameterName` above. Since
+    // task 0311 they name no id, and they MUST be here: the new handler calls
+    // `GetUsagePlans` on every sign-in and every dashboard load, and this stack
+    // deploys FIRST (the Makefile's cross-stack rule, and `deploy --all`'s own
+    // order). A grant in `ApiGatewayStack` would reach IAM only after the code
+    // that needs it — every sign-in and dashboard broken for the whole
+    // ApiGateway deploy, and for good if that deploy rolled back (review
+    // CR-01). Here, the role's default policy and the Function are one
+    // CloudFormation update, and CDK makes the Function depend on the policy.
     //
     // Control-plane ARNs carry no account id — `arn:aws:apigateway:<region>::`
     // with a doubled colon — and the resource is the API's own path.
@@ -607,10 +627,9 @@ export class ComputeStack extends cdk.Stack {
     //    this is again exposure under code execution, not feature behaviour.
     //
     // What is deliberately NOT here: `apigateway:*`, `PUT /tags/*` on anything
-    // but API keys, and any grant on `/usageplans` beyond the key attachment
-    // and the usage read — both of those need the plan id, so both live in
-    // `ApiGatewayStack`'s standalone policy (`POST …/keys` for 0187's attach,
-    // `GET …/usage` for 0188's `GetUsage`).
+    // but API keys, and any grant on `/usageplans` beyond the three below
+    // (list by key, any plan's usage, attach to any plan) — each states there
+    // what it does not reach (`GET /usageplans/{id}`, `DELETE`, `PATCH`).
     //
     // `DELETE` **is** here, and it is this slice's: the reconciler removes
     // duplicate keys after a double-submit ("keep the earliest createdDate,
@@ -691,14 +710,71 @@ export class ComputeStack extends cdk.Stack {
       }),
     );
 
-    // The usage-plan id, read at cold start.
+    // The portal's `/usageplans` grants (tasks 0187, 0188, widened by 0311).
+    // Three statements, and they are the whole set. Task 0188's decision 1 was
+    // "one plan's ARN, nothing wider"; task 0311 widens it deliberately,
+    // because the dashboard must state the key's OWN plan and the usage counted
+    // on it, and a rework must keep a paid user on their paid plan:
+    //
+    // - `GET /usageplans` is `GetUsagePlans?keyId=` — which plans hold this
+    //   key. The keyId filter is a query parameter, not a resource, so this
+    //   cannot be scoped below the collection. Read-only; it reveals plan
+    //   names and limits, never another key.
+    // - `GET /usageplans/*/usage` is `GetUsage` on whichever plan the key is
+    //   on — paid, free or hand-made. The usage sub-resource does NOT permit
+    //   reading a plan itself, listing its keys or changing it.
+    // - `POST /usageplans/*/keys` attaches a key. The code only ever attaches
+    //   to the free plan or to a previous (revoked) key's plan — and only one
+    //   that `GetUsagePlans` reported on OUR API stage (`resolve_target_plan`
+    //   in `portal/keys/mod.rs`). Hand-made plans have no ARN known at synth,
+    //   hence the wildcard.
+    //
+    // Deliberately NOT granted:
+    // - `GET /usageplans/{id}` to validate the plan at cold start. 0187's
+    //   decision 22 rejected cold-start validation (a warm container still
+    //   misses a plan that changes under it, and the attach path
+    //   disambiguates a dead plan id into `PlanNotFound` loudly), and
+    //   `GetUsagePlans` already returns every figure the dashboard shows.
+    // - `DELETE`/`PATCH` on a plan or a plan key. The code never moves a key
+    //   between plans or changes limits; an operator does, by hand
+    //   (docs/runbooks/manual-api-key-tier.md).
+    // - `GET /usageplans/*/keys`. Nothing lists a plan's members.
+    //
+    // A `sid` on every statement is load-bearing: cdk.json enables
+    // `@aws-cdk/aws-iam:minimizePolicies`, which merges sid-less statements —
+    // the two GETs would collapse into one and the set would stop reading as
+    // three.
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalListUsagePlansByKey',
+        actions: ['apigateway:GET'],
+        resources: [`arn:aws:apigateway:${awsRegion}::/usageplans`],
+      }),
+    );
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalReadAnyPlanUsage',
+        actions: ['apigateway:GET'],
+        resources: [`arn:aws:apigateway:${awsRegion}::/usageplans/*/usage`],
+      }),
+    );
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalAttachKeyToAnyPlan',
+        actions: ['apigateway:POST'],
+        resources: [`arn:aws:apigateway:${awsRegion}::/usageplans/*/keys`],
+      }),
+    );
+
+    // The usage-plan id, read on the first portal request per execution
+    // environment (task 0311).
     //
     // **Currently redundant, and kept deliberately.** The baseline role already
     // carries `ReadSsmNamespaces`, which grants `ssm:GetParameter` across the
     // whole `/prices/${envName}/*` namespace — so this statement adds no access
     // today. It names the one parameter this feature depends on, so that
     // narrowing that baseline (which task 0194 may well want to) does not
-    // silently break key issuance at the next cold start. Stated rather than
+    // silently break key issuance at the next portal load. Stated rather than
     // left implicit, because an IAM statement that looks like the reason
     // something works, while something broader is the actual reason, is worse
     // than no statement at all.
@@ -712,8 +788,26 @@ export class ComputeStack extends cdk.Stack {
       }),
     );
 
+    // The REST API id, read with the plan id (task 0311) — `plan_of` keeps only
+    // the usage plans whose apiStages name this API + stage. Currently
+    // redundant and kept deliberately, for exactly the reason stated on
+    // `PortalReadFreePlanIdParameter` above: the baseline's
+    // `ReadSsmNamespaces` already covers `/prices/${envName}/*`, and this
+    // statement names the parameter the portal depends on, stated rather than
+    // implied, so a narrowed baseline cannot silently fail every portal load
+    // from the next one on.
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalReadApiGatewayIdParameter',
+        actions: ['ssm:GetParameter'],
+        resources: [
+          `arn:aws:ssm:${awsRegion}:${accountId}:parameter/prices/${envName}/api-gateway-id`,
+        ],
+      }),
+    );
+
     // The eligibility gate's two knobs (task 0189), read at runtime — per
-    // issuance, not at cold start alone. The same currently-redundant-and-kept
+    // issuance, not at the portal's load alone. The same currently-redundant-and-kept
     // reasoning as `PortalReadFreePlanIdParameter` above: the baseline's
     // `ReadSsmNamespaces` already covers `/prices/${envName}/*`, and this
     // statement names the two parameters the gate depends on so a narrowed
@@ -746,14 +840,15 @@ export class ComputeStack extends cdk.Stack {
     // DISARMED; the per-key rate and monthly quota are enforced at the API
     // Gateway usage plan (ADR 0008; limits set by task 0157 —
     // `pricingApiFreePlanRateLimit` / `pricingApiFreePlanMonthlyQuota`, not the design
-    // doc's 100 req/s). `reservedConcurrentExecutions` is the optional SLO escape
+    // doc's 100 req/s — and, for a key an operator moved, by the paid plan it
+    // is on, `pricingApiPaidPlans`, task 0311). `reservedConcurrentExecutions` is the optional SLO escape
     // hatch (only set when configured). API Gateway grants invoke via the
     // integration's resource policy (no role-cycle, unlike the SQS ESM above).
     //
     // No `loggingFormat`: the function logs in Lambda's Text format, so each
     // JSON line the tracing subscriber writes reaches CloudWatch untouched,
-    // and ObservabilityStack's portal-closed metric filter (task 0249)
-    // matches it on `$.fields.message`. AWS documents that JSON format does
+    // and ObservabilityStack's portal-load-failed metric filter (tasks 0249,
+    // 0311) matches it on `$.fields.message`. AWS documents that JSON format does
     // not re-encode lines that are already JSON, so switching would likely
     // still match — but that is a claim, not a measurement: after ANY change
     // to how this function's logs reach CloudWatch, re-prove the filter with
@@ -790,12 +885,15 @@ export class ComputeStack extends cdk.Stack {
         // opening creates has to be unwound to close it again.
         //
         // ⚠️ **This value is a deploy gate, not just a flag.** With it true the
-        // handler resolves the portal's configuration AT COLD START, from FOUR
-        // reads, and the portal opens only if every one of them succeeds:
+        // handler resolves the portal's configuration on the first portal
+        // request per execution environment (the `/config` probe triggers
+        // it; task 0311), from FIVE concurrent reads — `load_portal_sources`
+        // in `config.rs`, called by `portal/sources.rs` — and the portal
+        // answers as open only once every one of them has succeeded:
         //
-        // 1. `load_portal_oauth` (`config.rs`) on the Discord OAuth secret
+        // 1. `portal_oauth_from_env` (`config.rs`) on the Discord OAuth secret
         //    named by `PORTAL_OAUTH_SECRET_NAME` — operator-created, runbook §2
-        // 2. `load_portal_keys` (`config.rs`) on the SSM parameter named by
+        // 2. `portal_keys_from_env` (`config.rs`) on the SSM parameter named by
         //    `PORTAL_FREE_PLAN_PARAM`, i.e.
         //    `/prices/{env}/pricing-api-free-plan-id`. This one is NOT
         //    operator-seeded and is easy to miss: it is published by
@@ -804,24 +902,33 @@ export class ComputeStack extends cdk.Stack {
         //    plan is replaced or renamed, this stack can be live with the flag
         //    true while the parameter does not yet exist. Deploy order matters
         //    here
-        // 3. + 4. the eligibility probe (`portal/eligibility.rs`) on
+        // 3. + 4. `portal_eligibility_from_env`'s probe (`portal/eligibility.rs`) on
         //    `/prices/{env}/discord-guild-id` and
         //    `/prices/{env}/min-account-age-minutes` — operator-seeded,
         //    runbook §2a
+        // 5. `portal_keys_from_env` again (task 0311), on the SSM parameter named
+        //    by `PORTAL_API_ID_PARAM`, i.e. `/prices/{env}/api-gateway-id`.
+        //    The same deploy-order caveat as read 2: `ApiGatewayStack`
+        //    publishes it and deploys AFTER this stack. It has existed since
+        //    the gateway's first deploy, so this bites only a fresh
+        //    environment — where read 2 already fails the load until
+        //    `ApiGatewayStack` has deployed once, so this read adds no new
+        //    failure there.
         //
-        // A failed read CLOSES the portal in that execution environment and
-        // logs `portal closed at cold start` on the api-handler; it does NOT
-        // panic init, because this Lambda also serves `/v1` and an init panic
-        // is a `502` to the next data-API caller (task 0194's PR review,
-        // finding 1; the reasoning is on `AppConfig::load_portal_or_close`).
-        // So deploying this ahead of the operator steps ships a portal whose
-        // `/config` says `enabled: false`, not a data-API outage — and a
-        // closure pages as `prices-${env}-api-handler-portal-closed`
-        // (ObservabilityStack, task 0249), but only once a cold start
-        // happens, so the runbook's `/config` probe after the deploy is
-        // still the check that runs at deploy time. Runbook
-        // `portal-oauth-deploy-prep.md` §2, §2a and §5 are the steps; task
-        // 0194's audit is what verifies they were run.
+        // A failed read answers THAT request as unavailable (`/config`
+        // `enabled: false`, `503` on the portal's other routes) and logs
+        // `portal sources failed to load`, naming the variable, on the
+        // api-handler; the first portal request after a 2 s cooldown
+        // retries, so nothing stays closed and no recycle is needed. It never touches init: `/v1` cold
+        // starts read none of these (task 0311). So deploying this ahead of
+        // the operator steps ships a portal whose `/config` answers
+        // `enabled: false` on each call until the missing source exists, not
+        // a data-API outage — and each failed load pages as
+        // `prices-${env}-api-handler-portal-load-failed` (ObservabilityStack,
+        // tasks 0249, 0311). The runbook's `/config` probe after the deploy
+        // remains the deploy-time check, and it now itself triggers the
+        // load. Runbook `portal-oauth-deploy-prep.md` §2, §2a and §5 are the
+        // steps; task 0194's audit is what verifies they were run.
         PORTAL_ENABLED: 'true',
         // The NAME of the portal's Discord OAuth bundle, never its value
         // (task 0186; ADR 0007's precedent, audited by Tranche 3 AC 6). The
@@ -832,21 +939,32 @@ export class ComputeStack extends cdk.Stack {
         // Set unconditionally, which is what kept opening the portal to the
         // one-word diff above rather than a two-line change made under time
         // pressure. With the flag now true the read is no longer conditional:
-        // this name resolving to a missing secret is read 1 of the four fatal
-        // cold-start reads listed on `PORTAL_ENABLED`.
+        // this name resolving to a missing secret fails read 1 of the five
+        // portal-load reads listed on `PORTAL_ENABLED`.
         PORTAL_OAUTH_SECRET_NAME: this.portalOauthSecretName,
         // The NAME of the SSM parameter holding the `pricing-api-free` usage
         // plan id (task 0187) — see `portalFreePlanParameterName` for why it is
         // a name, why it is not a cross-stack reference, and why it is not
-        // hard-coded. Read through the same extension layer, at cold start —
-        // with `PORTAL_ENABLED` now true the control-plane client IS built in
-        // every process, and this read is read 2 of the four listed on
+        // hard-coded. Read through the same extension layer, on the first
+        // portal request per execution environment — with `PORTAL_ENABLED`
+        // now true the control-plane client is built in every process that
+        // serves the portal, and this read is read 2 of the five listed on
         // `PORTAL_ENABLED`, the one whose parameter `ApiGatewayStack` publishes
         // after this stack deploys.
         //
         // Set unconditionally alongside `PORTAL_OAUTH_SECRET_NAME`, and for the
         // same reason: opening the portal stayed a one-word diff.
         PORTAL_FREE_PLAN_PARAM: this.portalFreePlanParameterName,
+        // The NAME of the SSM parameter holding the REST API id, and the stage
+        // name (task 0311) — see `portalFreePlanParameterName` for why a name
+        // and not a cross-stack reference. `GetUsagePlans?keyId=` returns every
+        // plan holding the key, across every API in the account (the loadtest
+        // and partner plans share it); the backend keeps only the plans whose
+        // apiStages contain this (apiId, stage). The stage name IS `envName`
+        // (`ApiGatewayStack`'s `stageName`), so it is a literal. Read 5 of the
+        // five listed on `PORTAL_ENABLED`.
+        PORTAL_API_ID_PARAM: `/prices/${envName}/api-gateway-id`,
+        PORTAL_API_STAGE: envName,
         // The NAMES of the eligibility gate's two SSM parameters (task 0189):
         // which Discord guild membership is checked against, and the minimum
         // account age in minutes. Names, never values — the handler resolves
@@ -859,18 +977,20 @@ export class ComputeStack extends cdk.Stack {
         // same one-word-diff reasoning as the two names above.
         PORTAL_GUILD_ID_PARAM: `/prices/${envName}/discord-guild-id`,
         PORTAL_MIN_ACCOUNT_AGE_PARAM: `/prices/${envName}/min-account-age-minutes`,
-        // The free plan's per-key rate limit, for the portal dashboard to STATE
-        // (task 0188) — the same `pricingApiFreePlanRateLimit` ApiGatewayStack
-        // hands to `addUsagePlan`, so the figure on the page and the figure the
-        // gateway enforces cannot disagree.
+        // The free plan's per-key rate limit, served by `/config` (task 0188)
+        // — the same `pricingApiFreePlanRateLimit` ApiGatewayStack hands to
+        // `addUsagePlan`, so the figure stated and the figure the gateway
+        // enforces cannot disagree.
         //
-        // It travels as an env var rather than being read back from
-        // `GetUsagePlan` because that would cost the portal a control-plane
-        // grant task 0188 deliberately does not take, and rather than being a
-        // literal in the bundle because that is the one number on that panel
-        // that could then go stale: raise the limit here, deploy, and a
-        // dashboard whose stated theme is honesty would keep stating the old
-        // one. Not a secret, and not conditional on `PORTAL_ENABLED` — same
+        // Since task 0311 the signed-in dashboard no longer states this: it
+        // reads the key's OWN plan through `GetUsagePlans` (0311 took the
+        // grant 0188 had declined) and shows that plan's figures. This stays
+        // for what has no key to ask about — the no-key state and the landing
+        // page. While the usage call is unanswered (or failed) the dashboard
+        // states no figure at all rather than this one, which a paid key
+        // would read as its own (task 0311's review, WR-01). A literal in the
+        // bundle would go stale the moment the limit changed.
+        // Not a secret, and not conditional on `PORTAL_ENABLED` — same
         // one-word-diff reasoning as the two names above.
         PORTAL_RATE_LIMIT: String(config.pricingApiFreePlanRateLimit),
         PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED: 'true',
@@ -919,6 +1039,18 @@ export class ComputeStack extends cdk.Stack {
       value: this.ingestDlq.queueUrl,
       description: `Prices ingest DLQ URL (${envName})`,
     });
+    // ⚠️ Keeps the api-handler role's name exported although, since task
+    // 0311, nothing in this app imports it. `ApiGatewayStack`'s deployed
+    // template still does — its old `PortalAttachKeyToFreePlan` policy names
+    // the role through `Fn::ImportValue` — and this stack deploys FIRST.
+    // Without this line CDK would drop the auto-generated export, and
+    // CloudFormation refuses to delete an export another stack still imports:
+    // the Compute deploy would fail before ApiGateway ever removed the policy.
+    // The export name is the one CDK generated for the automatic reference,
+    // so the template does not change here. Remove it one release after
+    // `ApiGatewayStack` has deployed without the policy.
+    this.exportValue(this.apiHandlerRole.roleName);
+
     new cdk.CfnOutput(this, 'ApiHandlerRoleArn', {
       value: this.apiHandlerRole.roleArn,
       description: `API Handler Lambda execution role ARN (${envName})`,

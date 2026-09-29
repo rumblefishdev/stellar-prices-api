@@ -100,9 +100,9 @@ SETTINGS index_granularity = 8192;
 ----------------------------------------------------------------------
 -- 1-minute OHLCV candles, per-source rows (ADR 0004). Live writes from the
 -- Prices Ledger Processor; backfill streams write here with source in
--- ('sdex','phoenix','soroswap','aquarius'). version = ledger_seq × 1000 +
--- intra-ledger order; ReplacingMergeTree(version) collapses duplicate PKs.
--- §3.2.
+-- ('sdex','phoenix','soroswap','aquarius','sushiswap','comet'). version =
+-- ledger_seq × 1000 + intra-ledger order; ReplacingMergeTree(version) collapses
+-- duplicate PKs. §3.2.
 --
 -- Price semantics (task 0286, ADR 0287): open/high/low/close come ONLY from the
 -- bucket's PRICE-FORMING fills — open is the first such fill and close the last,
@@ -600,20 +600,12 @@ ALTER TABLE prices.backfill_progress ADD COLUMN IF NOT EXISTS earliest_data_avai
 ALTER TABLE prices.backfill_progress ADD COLUMN IF NOT EXISTS newest_data_available Nullable(DateTime) AFTER earliest_data_available;
 
 -- ---------------------------------------------------------------------
--- Asset Discovery high-water-mark (task 0054). One row per worker tracking
--- the highest ledger sequence the hourly discovery scan has processed, so
--- the next invocation resumes at last_ledger + 1 rather than re-scanning.
--- Single-writer = the asset-discovery worker. ReplacingMergeTree on the
--- worker key; read with FINAL.
+-- `prices.discovery_state` (task 0054) used to be created here: the cursor of
+-- asset-discovery's hourly ledger scan. The scan never ran in production and
+-- task 0256 removed it, so a fresh database no longer gets the table. This file
+-- is CREATE-IF-NOT-EXISTS only and never drops anything: on a database that
+-- already has the (empty) table, dropping it is an operator step — see 0256.
 -- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS prices.discovery_state (
-    worker        LowCardinality(String),   -- 'asset-discovery'
-    last_ledger   UInt64,                    -- highest ledger sequence scanned
-    updated_at    DateTime      DEFAULT now()
-)
-ENGINE = ReplacingMergeTree(updated_at)
-ORDER BY (worker)
-SETTINGS index_granularity = 8192;
 
 -- ---------------------------------------------------------------------
 -- Unresolved AMM pools (task 0053, decision #3). One row per
@@ -649,7 +641,7 @@ SETTINGS index_granularity = 8192;
 -- output of the in-window registry so a partial re-backfill (a mid-history
 -- window) or the live processor can LOAD it instead of re-deriving from Soroban
 -- activation (this inverts task 0069: registry-as-output, not required-input).
--- venue = 'soroswap' | 'phoenix' | 'aquarius' | 'sushiswap' (task 0290).
+-- venue = 'soroswap' | 'phoenix' | 'aquarius' | 'sushiswap' (task 0290) | 'comet' (task 0300).
 -- token0/token1 are the pair tokens of the two pair-backed venues — Soroswap
 -- (from `new_pair`) and SushiSwap V3 (from `pool_created`) — needed because
 -- their swap events omit them; pool_type / wasm_hash are Phoenix pool details;
@@ -708,8 +700,8 @@ SETTINGS index_granularity = 8192;
 -- (`ENRICH_LIVE_PARTITIONS`); the historical drain walks the rest one partition
 -- at a time, and this is how it remembers where it got to across invocations.
 --
--- Fourth instance of the pattern `ingest_cursor` / `backfill_progress` /
--- `discovery_state` already establish here: a tiny ReplacingMergeTree state
+-- Third instance of the pattern `ingest_cursor` / `backfill_progress`
+-- already establish here: a tiny ReplacingMergeTree state
 -- table in `prices`, written by our own workers. ~102 partitions × 6 tiers is
 -- under 700 rows and well under 100 KB permanently — on a disk we are 3.3% of.
 -- Not a materialized view, not in the rollup chain, and NOT in the cleanup

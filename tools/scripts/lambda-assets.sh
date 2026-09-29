@@ -28,6 +28,10 @@
 
 set -euo pipefail
 
+# `mapfile` below is bash 4+. macOS ships bash 3.2, which would die naming only
+# `mapfile` (task 0239) — name the cause instead.
+(( BASH_VERSINFO[0] >= 4 )) || { echo "lambda-assets: needs bash >= 4, this is ${BASH_VERSION}. On macOS see infra/README.md, Prerequisites." >&2; exit 1; }
+
 root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 src="${root}/infra/src"
 
