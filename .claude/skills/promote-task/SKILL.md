@@ -1,6 +1,8 @@
 ---
 name: promote-task
 description: Activate a lore task, update task status, and push the status-only change to develop.
+metadata:
+  internal: true
 ---
 
 # /promote-task — Activate a lore task and push to develop
