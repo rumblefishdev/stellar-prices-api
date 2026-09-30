@@ -1,6 +1,8 @@
 ---
 name: branch
 description: Create a git branch with a name derived from lore task metadata.
+metadata:
+  internal: true
 ---
 
 # /branch — Create a branch from a lore task
