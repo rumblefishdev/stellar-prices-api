@@ -296,6 +296,9 @@ export class ObservabilityStack extends cdk.Stack {
   /** SDEX push-freshness alarm (§5.6 / Tranche-1 AC #5). */
   public readonly sdexPushFreshnessAlarm: cloudwatch.Alarm;
   public readonly ammPushFreshnessAlarm: cloudwatch.Alarm;
+  /** Weekly earliest-claim overclaim alarms, one per stream (task 0272). */
+  public readonly sdexEarliestOverclaimAlarm: cloudwatch.Alarm;
+  public readonly ammEarliestOverclaimAlarm: cloudwatch.Alarm;
   /** mTLS client-cert expiry alarm (§7 / §11.4). */
   public readonly mtlsNotAfterAlarm: cloudwatch.Alarm;
   /**
@@ -934,6 +937,49 @@ export class ObservabilityStack extends cdk.Stack {
     );
     this.ammPushFreshnessAlarm.addAlarmAction(snsAction);
     this.ammPushFreshnessAlarm.addOkAction(snsAction);
+
+    // Earliest-claim overclaim, one alarm per stream (task 0272). IGNORE, not
+    // NOT_BREACHING: the probe publishes weekly, so the empty days between runs
+    // must not clear a latched ALARM. Recovery needs a <= 0 datum in a later hour.
+    const earliestOverclaimAlarm = (
+      id: string,
+      suffix: string,
+      stream: string,
+    ): cloudwatch.Alarm => {
+      const alarm = new cloudwatch.Alarm(this, id, {
+        alarmName: `prices-${config.envName}-backfill-earliest-overclaim-${suffix}`,
+        alarmDescription: `${stream}: backfill_progress.earliest_data_available is earlier than the first price_ohlcv_1h row, so /v1/backfill/status overstates coverage. Value = seconds of overclaim (lower bound). Fix with a deliberate write to backfill_progress (merge_min never moves it later; see task 0264). Clears on the next <= 0 datum: Monday 05:47 UTC run or a manual {"check":"reconcile"} invoke. Task 0272.`,
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Backfill',
+          metricName: 'EarliestOverclaimSeconds',
+          dimensionsMap: {
+            Environment: config.envName,
+            Stream: stream,
+          },
+          statistic: 'Maximum',
+          period: cdk.Duration.hours(1),
+        }),
+        threshold: 0,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.IGNORE,
+      });
+      alarm.addAlarmAction(snsAction);
+      alarm.addOkAction(snsAction);
+      return alarm;
+    };
+    this.sdexEarliestOverclaimAlarm = earliestOverclaimAlarm(
+      'SdexEarliestOverclaimAlarm',
+      'sdex',
+      'sdex_archive',
+    );
+    this.ammEarliestOverclaimAlarm = earliestOverclaimAlarm(
+      'AmmEarliestOverclaimAlarm',
+      'amm',
+      'soroban_amm',
+    );
 
     // Rollup freshness, one alarm per OHLCV granularity (task 0137).
     //

@@ -283,6 +283,8 @@ export interface EnvironmentConfig {
      * Weekly and off-peak; not coarse-sweep's minute 30.
      */
     readonly coverageSweepProbe: string;
+    /** Weekly backfill claim reconcile (task 0272); ~1.08 GB scan, so not every 15 min. */
+    readonly backfillReconcileProbe: string;
   };
 
   // Ops alarms + notification (consumed by ObservabilityStack — task 0056)
@@ -939,6 +941,7 @@ export function validateConfig(config: EnvironmentConfig): void {
       'rollupFreshnessProbe',
       'mtlsNotafterProbe',
       'coverageSweepProbe',
+      'backfillReconcileProbe',
     ] as const;
     for (const key of expectedKeys) {
       const value = schedules[key];
