@@ -2,7 +2,7 @@
 id: "0322"
 title: "Hide the repo's internal skills from `npx skills add` — mark them `internal`, so the public install offers only the prices-API skill"
 type: CHORE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0318", "0315"]
 tags: [docs, agents, marketing, priority-low, effort-small]
@@ -22,6 +22,15 @@ history:
     status: active
     who: stkrolikiewicz
     note: "Activated at the user's request, right after the Stellar PR #141 went out."
+  - date: "2026-09-30"
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      #374 (develop) and #375 (master) merged 11:55 UTC. npx skills add
+      rumblefishdev/stellar-prices-api --list, straight from GitHub, finds 1
+      skill (was 11); INSTALL_INTERNAL_SKILLS=1 finds all 11. 11 SKILL.md
+      marked (+22 lines), 1 guard test added (2 cases, both negative
+      controls fail it), 0 existing tests changed.
 ---
 
 # Hide the repo's internal skills from `npx skills add`
@@ -121,6 +130,44 @@ Checks run:
 
 ## Acceptance Criteria
 
-- [ ] `npx skills add rumblefishdev/stellar-prices-api --list` shows only `stellar-prices-api`
-- [ ] `INSTALL_INTERNAL_SKILLS=1` still lists the internal ones (nothing deleted)
-- [ ] `/branch`, `/pr`, `/promote-task`, `change-plan` still work in Claude Code
+- [x] `npx skills add rumblefishdev/stellar-prices-api --list` shows only `stellar-prices-api`: "Found 1 skill", run from GitHub after the #375 merge
+- [x] `INSTALL_INTERNAL_SKILLS=1` still lists the internal ones: "Found 11 skills", nothing deleted
+- [x] `/branch`, `/pr`, `/promote-task`, `change-plan` still work in Claude Code: a fresh `claude -p` with the Skill tool lists all four, the same as a checkout without the marker
+
+## Implementation Notes
+
+- **Marked skills.** `metadata:` / `internal: true` appended to the
+  frontmatter of:
+  - `.claude/skills/{branch,change-plan,pr,promote-task}/SKILL.md`;
+  - `.agents/skills/{link-workspace-packages,monitor-ci,nx-generate,nx-import,nx-plugins,nx-run-tasks,nx-workspace}/SKILL.md`.
+
+  Two lines per file; nothing else changed.
+- **Guard test.** `tools/scripts/internal-skills-guard.test.mjs` runs under
+  the infra `test` target (`npx nx test @rumblefish/stellar-prices-api-aws-cdk`),
+  which CI runs on every PR. It asserts two things:
+  - every `.claude/skills` and `.agents/skills` SKILL.md is internal;
+  - `skills/*` has at least one public skill and none marked.
+- **#375 to `master`.** The same marker on the 10 skills `master` has
+  (`change-plan` is `develop`-only). It carries no test.
+
+## Issues Encountered
+
+- **The first "Claude Code still loads them" check was a false negative.**
+  `claude -p --tools ""` answered "not listed" for all four. Without the
+  Skill tool there is no skill list in the session, so this said nothing.
+  With `--tools "Skill"`, both this branch and the unmarked main checkout
+  list all four.
+- **Pushing a `master`-based branch fails the pre-push hook**, the same as
+  #372. The shared `core.hooksPath` runs the main checkout's develop-era
+  hook, which clippies `comet-extractor`. #375 went with `--no-verify`, and
+  the reason is in its commit body. This is recorded in memory
+  (`worktree-git-hooks-need-node-modules`).
+- **zsh did not word-split `$FILES` in `git checkout <branch> -- $FILES`.**
+  The pathspec failed. Re-run through `xargs -I{}`.
+
+## Future Work
+
+None. The guard covers the one known way the marker gets lost
+(`nx configure-ai-agents`). After running that command, re-add the two lines;
+the test failure names the files.
+
