@@ -26,8 +26,13 @@ in the "Community skills" section of https://skills.stellar.org.
 
 ## Status: Active
 
-**Current state:** skill in PR #368 (to `develop`), audited and verified live
-in bash and zsh. Open: hosting decision, then the Stellar PR.
+**Current state:** the Stellar PR
+[stellar/stellar-dev-skill#141](https://github.com/stellar/stellar-dev-skill/pull/141)
+was opened 2026-09-30 from the fork `stkrolikiewicz/stellar-dev-skill`. It adds
+the card (`copyValue` on `master`) and the Data Indexing catalog entry, and it is
+waiting for SDF review. The fork CI (`Site CI for fork PRs`) shows
+`action_required`: a first-time contributor's workflows need a maintainer's
+approval. The Socket checks pass.
 
 ## Verification log (2026-09-29)
 
@@ -318,6 +323,29 @@ PR #368 was merged to `develop` on 2026-09-30.
     CI runs them.
 - **Stellar's queue.** New-card PRs from mid-September (#132, #136–#139) are
   still open. The last merge touching `skills.ts` was #133 on 2026-09-23.
+
+## Stellar PR #141 (2026-09-30)
+
+- **Hosting.** #372 merged `skills/` into `master`, and the `master` raw URL
+  answers 200. The `copyValue` was switched to `master` before publishing.
+- **`npx skills`.** `npx skills add rumblefishdev/stellar-prices-api --skill
+  stellar-prices-api` installs only this skill, with `LICENSE`, identical to
+  `master`. Without `--skill` the CLI lists 11 skills from the repo: this one,
+  7 Nx dev skills in `.agents/skills/` and the internal `branch`, `pr` and
+  `promote-task`. After the next develop→master merge `change-plan` joins
+  them. The CLI hides skills marked `metadata: internal: true`.
+- **PR description.** It follows the merged community PRs (#80, #89, #96,
+  #98): Summary, Why this skill is useful and a Test plan.
+  - The "why" is the catalog gap: `data` → raw RPC/Horizon, Soroswap →
+    quotes on one DEX. This is what the control run of the "sales" test
+    showed.
+  - The test plan ticks only what was run. The "card renders on the preview
+    deploy" item was dropped because `preview-pr.yml` skips fork PRs.
+- **Next:**
+  - Wait for SDF to approve the workflows and review.
+  - After the merge, check the card on skills.stellar.org and the line in
+    `llms.txt`.
+  - Then close this task through `/lore-framework-tasks`.
 
 ## Acceptance Criteria
 
