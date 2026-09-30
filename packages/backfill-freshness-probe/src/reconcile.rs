@@ -20,6 +20,8 @@ pub struct StreamOverclaim {
 /// - `LEFT JOIN` + `join_use_nulls = 1`: a claim with no rows reads
 ///   `now() − claim` instead of being dropped or joined to 1970.
 /// - `FINAL` + `optimize_move_to_prewhere_if_final = 0`: latest claim version.
+/// - `max_execution_time = 25`: below the proxy's 30 s cutoff, so ClickHouse's
+///   own timeout error surfaces first.
 pub const RECONCILE_QUERY: &str = "SELECT \
      p.task_name AS task_name, \
      toInt64(if(isNull(r.first_ts), \
@@ -40,7 +42,7 @@ pub const RECONCILE_QUERY: &str = "SELECT \
      GROUP BY task_name \
    ) AS r ON p.task_name = r.task_name \
    ORDER BY p.task_name \
-   SETTINGS join_use_nulls = 1, optimize_move_to_prewhere_if_final = 0, max_execution_time = 30";
+   SETTINGS join_use_nulls = 1, optimize_move_to_prewhere_if_final = 0, max_execution_time = 25";
 
 /// Signed, not clamped: values in (−3600, 0] are hour-bucket slack.
 pub fn overclaim_metrics(rows: &[StreamOverclaim]) -> Vec<Metric> {
