@@ -118,10 +118,13 @@ pub struct PriceResponse {
     ///   large enough that its price is not rounding (a measured rate reads
     ///   this too).
     /// * `"offer_dust"` — every priced candle in the window rests only on
-    ///   order-book trades of a few base units, each executed at the resting
-    ///   offer's own limit price. Such a trade shows the offer existed, not that
-    ///   the price clears: the price is published and is often right, but no
-    ///   real trade supports it. `price_xlm` inherits the same basis.
+    ///   order-book trades below the rounding bound (under 1 000 smallest
+    ///   units on a side), each executed at the resting offer's own limit
+    ///   price. Such a trade shows the offer existed, not that the price
+    ///   clears: the price is published and is often right, but no trade large
+    ///   enough to confirm it exists. For a dear asset these are not pennies —
+    ///   at $84k a unit the bound is about $8.50 (BTC `GBVFOW…`, measured
+    ///   2026-09-30). `price_xlm` inherits the same basis.
     /// * `""` — no price (`price_usd` is `"0"`), or a row the snapshot's current
     ///   definition has not rewritten yet. Not a vocabulary word.
     ///

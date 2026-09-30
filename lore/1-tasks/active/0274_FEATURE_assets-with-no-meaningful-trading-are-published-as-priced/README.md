@@ -154,8 +154,10 @@ batch endpoint):
   in stroops, so for BTC at $84k every fill under about $8.50 is below it.
   BTC `GBVFOW…` had 68 such minutes and $86 in 24 h on 2026-09-30 and reads
   `offer_dust`, with an on-market price. The label is true to the rule (no
-  fill pins the price within 0.1 %); whether such an asset should read
-  `trades` is an open question for the operator.
+  fill pins the price within 0.1 %). **Decided 2026-09-30 (operator): keep
+  the rule**, no USD-volume floor — that would be the size threshold this
+  task avoids. The field descriptions now say the bound is not pennies for a
+  dear asset.
 
 ## Original scope (before 2026-09-25 narrowing)
 

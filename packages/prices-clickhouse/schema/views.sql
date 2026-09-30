@@ -409,10 +409,10 @@
 --                    trade large enough that its price is not rounding (the
 --                    measured-rate row reads this too).
 --                    offer_dust = every priced candle in the window rests only
---                    on order-book trades of a few base units, each executed
+--                    on order-book trades below the rounding bound, each executed
 --                    at an offer's own limit price. Such a trade proves the
 --                    offer existed, not that the price clears; the price is
---                    kept, and is often right, but no real trade supports it.
+--                    kept, and is often right, but no larger trade confirms it.
 --                    price_xlm and market_cap_usd inherit the same basis.
 --                    It describes the window, not the as_of minute: an asset
 --                    with a real trade earlier in the window reads trades even
