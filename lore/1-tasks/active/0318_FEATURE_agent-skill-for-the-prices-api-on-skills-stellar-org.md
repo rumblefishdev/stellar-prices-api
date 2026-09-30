@@ -130,6 +130,30 @@ responses, and the ohlcv spec for `XLM` and 503). All of them were fixed in
   returned 600 rows in each shell, so the new key-resolving setup line works
   against production.
 
+### Public-facing wording (2026-09-30)
+
+The user asked whether the skill should show transient states, since it is
+public for the Stellar community.
+
+- **Decision:** keep documented sentinels, but word them precisely and
+  neutrally (`b4f237d5`).
+- **`price_status: ""` stays.** The public spec already documents it.
+  - It is not a backfill effect and does not happen on every deploy. It
+    appears only after a schema change that adds the snapshot's columns,
+    until the next refresh, about a minute (`current.sql`: "'' is
+    unreachable from here — it is the table DEFAULT").
+  - The skill now says so, and tells the agent to refetch if the price's
+    age matters.
+- **Backfill does not affect `price_status`.** `price_status` reads only the
+  last 24 h of candles, while the backfill walks backward toward genesis.
+  - The backfill shows only in history depth: `earliest_data_available` and
+    `backfill_note` on `timeframe=all`.
+  - `/v1/backfill/status` is now described by what it answers ("how far back
+    the price history reaches"), so the text stays true after the backfill
+    completes. No skill update is needed then.
+- **Question sent to Oskar:** confirm that `""` recurs only on such a schema
+  change.
+
 ### Structure vs the Stellar skills (2026-09-29)
 
 **Hard requirements.**
