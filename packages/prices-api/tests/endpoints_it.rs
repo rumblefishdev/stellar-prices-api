@@ -70,9 +70,11 @@ async fn setup(db: &str) -> Client {
             // Task 0216: asset 1 carries a REAL as_of/price_status pair dated
             // behind its updated_at.
             "INSERT INTO {db}.current_prices \
-             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at, as_of, price_status) \
+             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at, as_of, price_status, \
+              price_basis) \
              VALUES \
-             (1, 0.5, 0.51, 1234.5, '2026-02-10 12:00:30', '2026-02-10 11:30:00', 'carried')"
+             (1, 0.5, 0.51, 1234.5, '2026-02-10 12:00:30', '2026-02-10 11:30:00', 'carried', \
+              'offer_dust')"
         ))
         .execute()
         .await
@@ -335,9 +337,11 @@ async fn batch_returns_found_and_not_found() {
         "the batch surface must publish the price's own time, not the snapshot's"
     );
     assert_eq!(native["price_status"], "carried");
+    assert_eq!(native["price_basis"], "offer_dust", "task 0274, by value");
     let usdc = by_asset[format!("USDC:{}", issuer()).as_str()];
     assert_eq!(usdc["as_of"], "", "the epoch sentinel is never formatted");
     assert_eq!(usdc["price_status"], "");
+    assert_eq!(usdc["price_basis"], "");
 
     teardown(db).await;
 }

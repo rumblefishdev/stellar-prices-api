@@ -125,7 +125,10 @@ pub struct PriceResponse {
     /// * `""` — no price (`price_usd` is `"0"`), or a row the snapshot's current
     ///   definition has not rewritten yet. Not a vocabulary word.
     ///
-    /// Independent of `price_status`: an `"offer_dust"` price can be
+    /// It describes the WINDOW, not the minute `price_usd` was read from: an
+    /// asset with a real trade earlier in the window reads `"trades"` even when
+    /// its latest print was a 1-stroop fill (a price-choice question, not this
+    /// field's). Independent of `price_status`: an `"offer_dust"` price can be
     /// `"priced"` or `"carried"`.
     pub price_basis: String,
 }

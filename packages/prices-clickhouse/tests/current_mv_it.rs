@@ -1800,6 +1800,13 @@ async fn an_unpriced_asset_carries_the_empty_sentinel_not_traded() {
 ///   must not be applied to it.
 /// * 25 BIG — a multi-fill minute whose base total is 900 stroops → every fill
 ///   in it is below the bound → `offer_dust`.
+/// * 26 SID — ONE price-forming fill (1200 / 5000 stroops: (200)(4000) < 10^6,
+///   dust under price.rs) beside a non-forming claim, so trade_count = 2. Both
+///   totals exceed 1000, so a totals-only test would call it confirmed; the
+///   single price-forming fill must still be judged by the bound → `offer_dust`.
+/// * 27 RND — one fill of 2,000,000 base / 1001 quote stroops, which passes
+///   price.rs ((1999000)(1) >= 10^6), while pf_price_volume (offer price × base)
+///   rounds to 1000. The fill's own amounts must decide → `trades`.
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_price_resting_only_on_offer_dust_is_kept_and_labelled() {
@@ -1814,6 +1821,8 @@ async fn a_price_resting_only_on_offer_dust_is_kept_and_labelled() {
         insert_asset(db, 23, "ONE", "GONE"),
         insert_asset(db, 24, "AMM", "GAMM"),
         insert_asset(db, 25, "BIG", "GBIG"),
+        insert_asset(db, 26, "SID", "GSID"),
+        insert_asset(db, 27, "RND", "GRND"),
         insert_fill(db, 20, "sdex", "4375", "0.0000001", "0.0021", 90),
         insert_fill(db, 20, "sdex", "4400", "0.0000001", "0.0021", 5),
         insert_fill(db, 21, "sdex", "4180", "0.003", "60", 30),
@@ -1829,10 +1838,26 @@ async fn a_price_resting_only_on_offer_dust_is_kept_and_labelled() {
              VALUES (now() - INTERVAL 5 MINUTE, 25, 1, 'sdex', 3, 3, 3, 3, \
               0.00009, 50, 0.01, 3, 3, 3, 1, 3, 0.00009, 50)"
         ),
+        format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) \
+             VALUES (now() - INTERVAL 5 MINUTE, 26, 1, 'sdex', 4, 4, 4, 4, \
+              0.0001203, 0.0005001, 0.01, 4, 4, 2, 1, 1, 0.00012, 0.0005)"
+        ),
+        format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) \
+             VALUES (now() - INTERVAL 5 MINUTE, 27, 1, 'sdex', 0.0005, 0.0005, 0.0005, \
+              0.0005, 0.2, 0.0001001, 0.01, 0.0001, 0.0005, 1, 1, 1, 0.2, 0.00010004)"
+        ),
     ] {
         admin.query(&q).execute().await.expect("fixture");
     }
-    refresh(&admin, db, 6).await;
+    refresh(&admin, db, 8).await;
 
     let price20 = scalar_f64(
         &admin,
@@ -1880,6 +1905,16 @@ async fn a_price_resting_only_on_offer_dust_is_kept_and_labelled() {
         basis_of(&admin, db, 25).await,
         "offer_dust",
         "a minute whose base total is under 1000 stroops holds only dust fills"
+    );
+    assert_eq!(
+        basis_of(&admin, db, 26).await,
+        "offer_dust",
+        "a lone price-forming fill beside a non-forming claim is still judged by the bound"
+    );
+    assert_eq!(
+        basis_of(&admin, db, 27).await,
+        "trades",
+        "a single fill is judged on its own amounts, not on offer price × base"
     );
 
     teardown(db).await;

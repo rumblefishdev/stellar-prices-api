@@ -680,9 +680,13 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          offer existed, not that the price clears. The price is still published and is \
          often right, but no real trade supports it; `price_xlm` inherits the same \
          basis.\n* `\"\"` — no price (`price_usd` is `\"0\"`), or a row the current snapshot \
-         definition has not rewritten yet.\n\nIndependent of `price_status`: an \
-         `offer_dust` price can be `priced` or `carried`. To treat such prices as \
-         unavailable, filter on `offer_dust`; the API does not withhold them.",
+         definition has not rewritten yet.\n\nIt describes the window, not the single \
+         minute `price_usd` was read from: an asset that traded for real earlier in the \
+         window reads `trades` even if its latest print was a tiny fill. It answers \
+         \"does any real trade support this asset's price\", not \"is this number \
+         right\".\n\nIndependent of `price_status`: an `offer_dust` price can be `priced` \
+         or `carried`. The API does not withhold such prices; to treat them as \
+         unavailable, filter on `offer_dust`.",
     ),
     (
         "PriceResponse",
@@ -834,11 +838,11 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
 /// the referenced schema. `every_property_has_an_example_or_a_reason` in
 /// `tests/openapi.rs` holds that to the document.
 ///
-/// Every value is from production except `as_of` and `price_status`: task
-/// 0216 had not reached it when these were taken, so they follow 0216's own
-/// example — a `carried` price minutes behind `updated_at`, as the hourly USD
-/// pass leaves it. Replace them from the first live response after 0216's
-/// rollout.
+/// Every value is from production except `as_of`, `price_status` and
+/// `price_basis`: tasks 0216 and 0274 had not reached it when these were
+/// taken, so they follow those tasks' own examples — a `carried` price minutes
+/// behind `updated_at`, as the hourly USD pass leaves it, resting on `trades`.
+/// Replace them from the first live response after those rollouts.
 pub(super) const EXAMPLES: &[(&str, &str, &str)] = &[
     ("AmmStream", "status", r#""paused""#),
     ("AmmStream", "last_push_at", r#""2026-07-14T17:54:24Z""#),

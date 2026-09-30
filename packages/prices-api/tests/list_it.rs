@@ -60,9 +60,11 @@ async fn setup(db: &str) -> Client {
             // half an hour behind updated_at so a transposition of the two
             // DateTime columns cannot hide.
             "INSERT INTO {db}.current_prices \
-             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at, as_of, price_status) \
+             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at, as_of, price_status, \
+              price_basis) \
              VALUES \
-             (2, 1.0, 1.0, 3000, '2026-02-10 12:00:00', '2026-02-10 11:30:00', 'carried')"
+             (2, 1.0, 1.0, 3000, '2026-02-10 12:00:00', '2026-02-10 11:30:00', 'carried', \
+              'offer_dust')"
         ))
         .execute()
         .await
@@ -222,6 +224,9 @@ async fn default_sort_volume_desc_paginates() {
         "the listing must publish the price's own time, not the snapshot's"
     );
     assert_eq!(d1[0]["price_status"], "carried");
+    // Task 0274 — price_basis now sits directly before sort_key; a distinct
+    // word so a swap with either neighbour shows.
+    assert_eq!(d1[0]["price_basis"], "offer_dust");
 
     let cursor = page1["cursor"].as_str().unwrap().to_string();
 
@@ -241,6 +246,7 @@ async fn default_sort_volume_desc_paginates() {
     // at all is the second half of the positional proof above.
     assert_eq!(d2[0]["as_of"], "");
     assert_eq!(d2[0]["price_status"], "");
+    assert_eq!(d2[0]["price_basis"], "");
 
     teardown(db).await;
 }

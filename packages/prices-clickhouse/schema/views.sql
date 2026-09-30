@@ -414,6 +414,9 @@
 --                    offer existed, not that the price clears; the price is
 --                    kept, and is often right, but no real trade supports it.
 --                    price_xlm and market_cap_usd inherit the same basis.
+--                    It describes the window, not the as_of minute: an asset
+--                    with a real trade earlier in the window reads trades even
+--                    if its latest print was a 1-stroop fill.
 --                    '' = no price (price_usd is the 0 sentinel), or a row the
 --                    current MV has not rewritten yet. Not a vocabulary word.
 

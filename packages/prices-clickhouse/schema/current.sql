@@ -24,6 +24,13 @@
 -- init.sql does on a fresh apply; on prod that is rollout step B, before
 -- step E re-creates this view.
 --
+-- ⚠️ DEPENDS ON prices.current_prices.price_basis (task 0274), the last column
+-- of the TO(...) list. Same failure shape: without init.sql's price_basis
+-- ALTER the DROP succeeds and the CREATE fails, leaving current_prices with no
+-- writer. Order: (1) the ALTER, (2) views.sql, (3) this file, (4) the API —
+-- prices-api selects `c.price_basis`, so an API that ships before (1) fails
+-- every price, list and batch request with an unknown-identifier error.
+--
 -- ⚠️ REDEPLOY MECHANICS (task 0068 → 0072): a refreshable MV's definition is
 -- FIXED AT CREATE TIME. Changing this SELECT requires DROP VIEW + re-CREATE —
 -- an ALTER does not take. No backfill/migration is needed: the MV fully
@@ -516,6 +523,10 @@ WITH
     -- asset the price of whatever it was traded against — USDC would inherit
     -- XLM's price. Price and open stay strictly base-keyed. Do not re-merge.
     base_tip AS (
+        WITH
+            x -> round(toFloat64(x) * 1e7)                      AS stroops,
+            (a, b) -> a > 1000 AND b > 1000
+                      AND (a - 1000) * (b - 1000) >= 1e6        AS bound_holds
         SELECT
             asset_id                          AS asset_id,
             argMaxIf(close_usd, timestamp, close_usd > 0) AS price_usd,
@@ -560,30 +571,35 @@ WITH
             --
             -- A candle is offer-dust when it is SDEX (below ADR 0287's bound
             -- only an order-book fill can be price-forming — pool fills below
-            -- it never are, and every other source is a pool) and either its
-            -- single fill fails the bound, or its price-forming base or quote
-            -- total is <= 1000 stroops, so every fill in it fails the bound.
-            -- The bound is price.rs's shifted integer form
-            -- (a > 1000 AND b > 1000 AND (a-1000)(b-1000) >= 10^6), so this
-            -- and the ingest agree at exactly 1000 stroops. round() because
-            -- Decimal -> Float64 is not exact at 7 places; amounts below 2^53
-            -- are exact after it. `* 1e7` is stroops: SDEX amounts are always
-            -- classic 7-decimal.
+            -- it never are, and every other source is a pool) and its
+            -- price-forming fills fail price.rs's bound, read the most exact
+            -- way the candle allows:
+            --   * one fill in the minute: its own amounts, exactly as the
+            --     ingest judged it;
+            --   * one price-forming fill beside non-forming ones: its base is
+            --     pf_volume exactly; its quote is pf_price_volume = offer price
+            --     x base, the real amount up to the taker's rounding;
+            --   * several price-forming fills: only the totals are known, and
+            --     a total <= 1000 stroops means every fill in it fails.
+            -- `bound_holds` is price.rs's shifted integer form, so this and
+            -- the ingest agree at exactly 1000 stroops on the exact branch.
+            -- `stroops` rounds because Decimal -> Float64 is not exact at 7
+            -- places (amounts below 2^53 are exact after it); `* 1e7` is right
+            -- because SDEX amounts are always classic 7-decimal.
             --
-            -- SUFFICIENT, NOT EXACT: a minute of several dust fills whose
-            -- totals pass 1000 stroops reads as confirmed. That errs towards
-            -- 'trades', which is the safe side (0116: a small trade of a
-            -- dear asset is often a real price). pf_price_volume is
-            -- sum(offer price x base), i.e. the quote side up to rounding.
-            countIf(close_usd > 0 AND pf_trade_count > 0 AND NOT (
-                source = 'sdex' AND (
-                    (pf_trade_count = 1 AND trade_count = 1 AND NOT (
-                            round(toFloat64(volume_base)  * 1e7) > 1000
-                        AND round(toFloat64(volume_quote) * 1e7) > 1000
-                        AND (round(toFloat64(volume_base)  * 1e7) - 1000)
-                          * (round(toFloat64(volume_quote) * 1e7) - 1000) >= 1e6))
-                    OR round(toFloat64(pf_volume)       * 1e7) <= 1000
-                    OR round(toFloat64(pf_price_volume) * 1e7) <= 1000)))
+            -- SUFFICIENT, NOT EXACT on the last branch: a minute of several
+            -- dust fills whose totals pass 1000 stroops reads as confirmed.
+            -- That errs towards 'trades', the safe side (0116: a small trade
+            -- of a dear asset is often a real price). The exact answer needs a
+            -- per-candle count written at ingest — a follow-up once 0286's
+            -- re-ingest is done, since every 1m writer would have to carry it.
+            -- close_usd > 0 implies a price-forming fill (ADR 0287 §6).
+            countIf(close_usd > 0 AND NOT (source = 'sdex' AND multiIf(
+                pf_trade_count = 1 AND trade_count = 1,
+                    NOT bound_holds(stroops(volume_base), stroops(volume_quote)),
+                pf_trade_count = 1,
+                    NOT bound_holds(stroops(pf_volume), stroops(pf_price_volume)),
+                stroops(pf_volume) <= 1000 OR stroops(pf_price_volume) <= 1000)))
                                                  AS confirmed_candles
         FROM prices.price_ohlcv_1m FINAL
         WHERE timestamp >= now() - INTERVAL 24 HOUR
