@@ -334,6 +334,7 @@ PR #368 was merged to `develop` on 2026-09-30.
   7 Nx dev skills in `.agents/skills/` and the internal `branch`, `pr` and
   `promote-task`. After the next develop→master merge `change-plan` joins
   them. The CLI hides skills marked `metadata: internal: true`.
+  Filed as backlog task 0322.
 - **PR description.** It follows the merged community PRs (#80, #89, #96,
   #98): Summary, Why this skill is useful and a Test plan.
   - The "why" is the catalog gap: `data` → raw RPC/Horizon, Soroswap →
