@@ -38,17 +38,17 @@ State of the nine Tranche 3 acceptance criteria **as of 2026-09-25** (this table
 is rewritten on submission day; the rows say what is claimed, not what is
 hoped):
 
-| AC  | Criterion (short)                                           | State on 2026-09-25                                                                                                                                            |
-| --- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `/backfill/status`: running, fresh push, depth ≤ 2018-01-01 | **Depth met — 2015-11-18.** Liveness graded on amended wording (deviations §1): the archive completed 2026-07-27                                               |
-| 2   | OpenAPI lints clean; Swagger UI deployed                    | Lint is a CI job (`npm run openapi:lint`, Redocly CLI 2.44.0); reference rendered at `…/api/docs`. _To fill: lint output on the day_                           |
-| 3   | Portal accessible; self-service key flow works              | Portal public since 09-23. _Open:_ end-to-end proof on production (task 0164); sign-in still through the test Discord guild (0179)                             |
-| 4   | Integration suite passes on CI, link provided               | **Met.** CI starts ClickHouse and runs the integration suite on every Rust change since PR #327 (2026-09-22); run linked in §5                                 |
-| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met 2026-09-18 — p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`                                                          |
-| 6   | Security checklist signed off                               | mTLS-only ClickHouse, secrets in Secrets Manager, inputs validated, no wildcard **actions**; the 23 `Resource: "*"` statements are inventoried in §5           |
-| 7   | Repo public; `cdk deploy` from README in a fresh account    | **Met on the fresh-account runbook** (0297, PR #357): repo PUBLIC, `README.md` → `infra/README.md`; macOS via 0239 (PR #360). Not run in an empty account (§5) |
-| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, 65 alarms, all OK on 09-25. Access **on request to a named reviewer, MFA enforced** (deviations §3)                    |
-| 9   | 7-day post-launch report                                    | Window **2026-09-23 09:40 → 2026-09-30 09:40 CEST** agreed; report written after the window (task 0296); two metrics obsolete (§4)                             |
+| AC  | Criterion (short)                                           | State on 2026-09-25                                                                                                                                                         |
+| --- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `/backfill/status`: running, fresh push, depth ≤ 2018-01-01 | **Depth met — 2015-11-18.** Liveness graded on amended wording (deviations §1): the archive completed 2026-07-27                                                            |
+| 2   | OpenAPI lints clean; Swagger UI deployed                    | Lint is a CI job (`npm run openapi:lint`, Redocly CLI 2.44.0); reference rendered at `…/api/docs`. _To fill: lint output on the day_                                        |
+| 3   | Portal accessible; self-service key flow works              | Portal public since 09-23. _Open:_ end-to-end proof on production (task 0164); sign-in still through the test Discord guild (0179)                                          |
+| 4   | Integration suite passes on CI, link provided               | **Met.** CI starts ClickHouse and runs the integration suite on every Rust change since PR #327 (2026-09-22); run linked in §5                                              |
+| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met 2026-09-18 — p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`                                                                       |
+| 6   | Security checklist signed off                               | mTLS-only ClickHouse, secrets in Secrets Manager, inputs validated, no wildcard **actions**; the 23 `Resource: "*"` statements are inventoried in §5                        |
+| 7   | Repo public; `cdk deploy` from README in a fresh account    | **Met on the fresh-account runbook** (0297, PR #357): repo PUBLIC, `README.md` → `infra/README.md`; macOS via 0239 (PR #360). Not run in an empty account (§5)              |
+| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, 65 alarms, all OK on 09-25. Access **on request to a named reviewer, MFA enforced** (deviations §3)                                 |
+| 9   | 7-day post-launch report                                    | **Met 2026-09-30 — uptime 100.000 %, 0 × 5XX in 65,806 requests, gateway p95 145.2 ms**; push cadence and `earliest_data_available` replaced by live ingestion signals (§4) |
 
 The Tranche 3 work items with no numbered criterion are listed in §6, the known
 issues this submission declares in §7, and what it deliberately does not claim
@@ -362,27 +362,61 @@ _To fill on submission day:_ the alarm table.
 
 ### AC 9 — 7-day post-launch monitoring report
 
-**Verdict: window agreed; report pending.** Launch = **2026-09-23 09:40 CEST**
-(07:40:45 UTC), the moment the explorer's basic auth came off `/api/*` and the
-portal became public. Window: **2026-09-23 09:40 → 2026-09-30 09:40 CEST**. The
-report (task 0296) is written after the window closes, from gateway-side
-metrics at 1-minute resolution, with uptime defined in the report itself (no
-canary exists; `GET /health` is a keyless gateway mock).
+**Verdict: met, with two of the five named metrics replaced (deviations §2).
+Over the 7 days after launch the API returned no 5XX: uptime 100.000 %, error
+rate 0.000 % of 65,806 requests, gateway p95 145.2 ms.** Window **2026-09-23
+09:40 → 2026-09-30 09:40 CEST**; launch is the moment the explorer's basic auth
+came off `/api/*` (07:40:45 UTC) and the portal became public, agreed at the
+team's daily on 2026-09-24. Figures pulled 2026-09-30 09:46 CEST. The full
+report is [`milestone-3-monitoring-report.md`](milestone-3-monitoring-report.md)
+(task 0296).
 
-Two of the five named metrics — SDEX push cadence and the
-`earliest_data_available` trajectory — are flat by construction since the
-archive completed; the report carries, per minute, the age of the oldest ledger
-notification in the ingest queue and, per 15-minute probe, `current_prices`
-freshness, each against its alarm threshold, plus point samples of
-`earliest_data_available` and `realtime_tip_ledger` at export (deviations §2). The incident log for the window
-is kept in task 0296 as it happens; the two entries on 2026-09-24 (an oracle
-worker out-of-memory tick during the re-ingest; a teammate's request burst that
-closed the portal in part of the fleet for ~40 minutes while `/v1` served 0 ×
-5XX) are already there.
+| AC 9 asks for                             | Reported                                                                                                                                 | Source                                                                        |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| uptime %                                  | **100.000 %**: 100 % minus the mean 5XX rate of the window's 2,016 five-minute intervals (report §2)                                     | API Gateway `Count` and `5XXError`, stage `production`, 1-minute sums         |
+| error rate                                | **0.000 %** 5XX (0 of 65,806); 4XX 13.36 % (8,791), client errors, not downtime                                                          | same                                                                          |
+| p95 latency                               | **145.2 ms** at the gateway (p50 25.9, p99 795.7); **254.4 ms** on the Lambda path (p50 38.7, p99 896.7)                                 | `Latency`, `IntegrationLatency`; CloudWatch percentiles over the whole window |
+| SDEX push cadence (§2)                    | oldest ledger in the ingest queue ≤ 120 s in **all 10,080 minutes** (max 5 s); `current_prices` lag ≤ 900 s in all 672 probes (max 18 s) | `AWS/SQS ApproximateAgeOfOldestMessage`; `Prices/Rollup RollupLagSeconds`     |
+| `earliest_data_available` trajectory (§2) | `2015-11-18T03:47:00Z` at export, as on 2026-09-09; `realtime_tip_ledger` 5 ledgers behind the network at export                         | `GET /v1/backfill/status`; Horizon                                            |
 
-_To fill after 2026-09-30:_ the report itself — request count, 4XX/5XX rate,
-`Latency` and `IntegrationLatency` p50/p95/p99, cache hit ratio, the uptime
-figure and its definition, the ingestion signals, the incident list.
+**Scope of the claim.** Nothing probes the API from outside (`GET /health` is a
+keyless gateway mock), so uptime is derived from the requests the API served,
+and an interval without requests counts as up. Requests reached the API in
+**274 of the 10,080 minutes**, and **96.9 %** of all requests came from a
+teammate's test bursts inside the window: a `curl` loop on 2026-09-24 and k6
+runs for the paid plans (task 0311) on 2026-09-25 (report §6). The evidence
+that the service was live in every minute is the ingestion signal, which is
+measured regardless of traffic. The gateway p95 includes cache hits and 4XX
+rejections answered in about a millisecond; the Lambda-path p95 is the figure
+to set beside AC 5's miss-only row. The shared ClickHouse box ran the history
+re-ingest (task 0286) for the whole window.
+
+**Incidents.** None reached `/v1` as an error. Report §7 lists eight, each
+with its cause:
+
+- three oracle out-of-memory ticks during the re-ingest (§7 of this document);
+- two partial portal closures under the test bursts, cause fixed 2026-09-25
+  14:47 (§7);
+- asset-discovery's two liveness alarms missing 2026-09-25 14:49 → 09-29 09:49
+  after an Observability deploy from a feature branch, restored from `develop`;
+- `zero-invariant-1` in ALARM at the start of the window, OK from 09-24 09:21;
+- `coverage-sweep-unclassified` in ALARM since 2026-09-28 08:14 (see AC 8).
+
+#### Reproduce it
+
+Every figure above comes from the raw export committed next to the report, so
+it re-runs without AWS access:
+
+```sh
+python3 docs/scf/milestone-3-monitoring/report.py
+python3 docs/scf/milestone-3-monitoring/report.py --self-test
+```
+
+`docs/scf/milestone-3-monitoring/data/` holds the CloudWatch output, 1-minute
+series included, and the exact queries that produced it. `export.sh` in the same
+directory re-pulls it with read access to the production account; CloudWatch
+keeps 1-minute points for 15 days, so a re-pull after ~2026-10-08 returns
+coarser data than the committed export.
 
 ## 6. Work items without a numbered criterion
 
@@ -416,6 +450,7 @@ name on it.
 | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Completion of the history re-computation (0286 phase 3)     | _post-delivery_, operator-run; stage A of four started 2026-09-23; values change, coverage does not                                                      |
 | A run of the runbook in an empty AWS account (AC 7)         | _not claimed_: AC 7 rests on the runbook (§5); a run needs the explorer platform and a Hetzner server first. On a reviewer's request: task 0297 reopened |
+| Uptime measured by an external probe (AC 9)                 | _not claimed_: no canary exists; uptime is derived from served requests, which reached the API in 274 of the window's 10,080 minutes (§5, AC 9)          |
 | A standing read-only identity for the Stellar team (AC 8)   | _declared_: none exists by design; access is created per named reviewer on request, MFA enforced (deviations §3)                                         |
 | Self-service sign-in on the Stellar Discord guild (AC 3)    | _to decide_: agreed with SDF (task 0179), or declared (deviations §4)                                                                                    |
 | Paid usage plans and a dashboard that states the key's plan | In progress (task 0311); the free plan is what the criteria cover                                                                                        |
