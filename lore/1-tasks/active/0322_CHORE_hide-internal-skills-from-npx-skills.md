@@ -70,6 +70,55 @@ affected.
    CLI reads the default branch, so `develop` alone changes nothing publicly.
 4. Confirm Claude Code still loads the four `.claude/skills` after the change.
 
+## Progress (2026-09-30)
+
+Two PRs are open:
+
+- **#374 → `develop`:** the marker on all 11 skills plus
+  `tools/scripts/internal-skills-guard.test.mjs`.
+- **#375 → `master`:** the marker on the 10 skills that exist there; no
+  test, no `change-plan`.
+
+Checks run:
+
+- `npx skills add <branch> --list` shows 1 skill (`stellar-prices-api`) on
+  both branches.
+- A fresh `claude -p` with the Skill tool still lists `branch`, `pr`,
+  `promote-task` and `change-plan`, the same as the main checkout without
+  the marker.
+  - A first run with `--tools ""` reported all of them "not listed". That
+    was an artefact of the test: without the Skill tool there is no skill
+    list.
+- The guard passes 2/2 and runs under
+  `npx nx test @rumblefish/stellar-prices-api-aws-cdk`. Negative controls:
+  - removing the marker from `nx-workspace` fails it;
+  - marking `skills/stellar-prices-api` fails it.
+
+## Design Decisions
+
+### From Plan
+
+1. **Mark, don't delete.** `metadata: internal: true` on all 11. The CLI
+   hides them, and `INSTALL_INTERNAL_SKILLS=1` still shows them.
+
+### Emerged
+
+2. **A guard test instead of a note on how to re-apply the marker.**
+   `nx configure-ai-agents` copies Nx's templates over `.agents/` with
+   `generateFiles` (`nx/dist/src/ai/set-up-ai-agents/set-up-ai-agents.js`
+   ~190), and Nx suggests the command on every push. The marker would
+   vanish with every check green.
+   - The guard lives in `tools/scripts/`, where the infra `test` target
+     (`node --test "tools/scripts/**/*.test.mjs"`) already runs on every PR.
+   - It also stops a new internal skill landing unmarked, and the public
+     skill getting marked by mistake.
+3. **#375 to `master` without the test.** `master`'s infra project has no
+   `test` target, so the test would sit there unrun. It arrives with the
+   next develop→master release.
+4. **#375 pushed with `--no-verify`.** The shared-hooksPath problem is the
+   same as #372 (see memory `worktree-git-hooks-need-node-modules`). The
+   change is frontmatter only.
+
 ## Acceptance Criteria
 
 - [ ] `npx skills add rumblefishdev/stellar-prices-api --list` shows only `stellar-prices-api`
