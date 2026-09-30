@@ -16,6 +16,14 @@ history:
       `price_usd` from. One point in time; the traded population moves about
       25 % a day. Raw per-asset rows were kept outside the repository
       (`.planning/quick/260929-mi2-…/pop_2026-09-29.tsv`).
+  - date: "2026-09-30"
+    status: mature
+    who: akot
+    note: >
+      Second day, run read-only on prod at 11:14 UTC with the PUBLISHED
+      predicate (current.sql at 477bafbf): 169 of 3 564 in group A, 15 in
+      group B, 0 of 224 thin-but-real assets flagged. Added as its own
+      section; the 2026-09-29 text is unchanged.
 ---
 
 # Assets priced by offer-priced dust fills (2026-09-29)
@@ -107,13 +115,70 @@ person.
 
 ## Limits
 
-- One day. A second run on another day is owed before the rule is final.
+- ~~One day.~~ Second day run 2026-09-30, see below.
 - Sufficient dust test: misses undercount group A.
 - The deviation reference is in USD over 7 days; deviations under ~10 % are
   not evidence either way.
-- Not yet validated: that the published rule flags **no** thin-but-real
-  asset. By construction it cannot (one confirmed row in 24 h reads `trades`),
-  but it has not been run on prod.
+- ~~Not yet validated on prod.~~ Validated 2026-09-30: 0 of 224 thin-but-real
+  assets flagged; one dear asset with many sub-1 000-stroop trades is (BTC
+  `GBVFOW…`), see below.
+
+## Second day and rule validation (2026-09-30, 11:14 UTC)
+
+Same window and population, but with the **published** predicate — the
+`stroops` / `bound_holds` form in `current.sql` (commit `477bafbf`), not the
+float form above.
+
+| | 2026-09-29 | 2026-09-30 |
+| --- | --- | --- |
+| Priced from trades (24 h) | 3 733 | 3 564 |
+| **A** — would publish `offer_dust` | 132 | **169** |
+| **B** — real fills exist, a dust row printed last | 20 | 15 |
+| Current price set by a real fill | 3 581 | 3 380 |
+
+- **The two forms of the rule agree to one asset**: the float form counts 168
+  on the same data, the published integer form 169.
+- **`close_usd > 0` implies a price-forming fill**: 0 priced rows with
+  `pf_trade_count = 0` in the window, so dropping that conjunct from the
+  view's `countIf` is sound on prod data.
+- **No thin-but-real asset is flagged.** Taking thin-but-real as "at most 5
+  priced minutes in 24 h and at least $1 traded": 224 assets, 0 in group A.
+  1 066 assets priced from a single confirmed minute read `trades`.
+- **One flagged asset carries real money: BTC `GBVFOW…` (asset 411)**, 68
+  priced minutes and $86.52 in 24 h — $88.32 for all of group A. That is
+  about $1.27 a minute, roughly 150 stroops of base at $84,670. The bound is
+  in stroops, so for an asset this dear every trade under 1 000 stroops of
+  base (about $8.50) reads as dust, however many there are. It is the same
+  asset the 2026-09-29 run found on market (+1.8 %). The label is what the
+  rule says — no fill in the window pins the price within 0.1 % — but it is
+  0116's dear-asset case, and the field's description must not call these
+  "a few base units". Every other flagged asset traded under $0.45.
+- The rest of the top of group A is what the field is for: `CARD00049` at
+  $4.4M on $0.44, four tokens of one issuer (`GBQRSX…`, codes USDC, XLM, XRP,
+  WMinerals) at about $2,240 each, a `USDC` of `GAHJHC…` at $0.002 over 1 350
+  minutes.
+
+**Deviation in quote units** (latest dust close over the 7-day median close
+of the same pair's non-dust rows; this removes the XLM/USD drift that made
+the USD figures above unreadable under 10 %):
+
+- Group A, 43 pair rows with a reference: 35 within 4 % (most exactly 1.0 —
+  the same resting offer being hit), 8 far off — BEAR × 56 623, TESLA × 44,
+  BNBPLUS × 1.59, XDCB × 0.01, XLM `202844` × 0.0025, and YSE, xLMNR, FORGE
+  at under 0.00005.
+- Group B, 17 pair rows: 12 exactly 1.0; XAUa 0.974, mZAR 0.982, BTC
+  `108` 0.996 against quote 3 and 0.937 against quote 4; Estrela × 0.039 and
+  XLM `201411` × 1.88 are off.
+
+So where a reference exists the offer price is usually the pair's own real
+price and occasionally off by orders of magnitude, in both groups — the
+2026-09-29 reading holds on a second day and in quote units.
+
+Caveats: two days, 22 hours apart, so the windows overlap by two hours. The
+listing joined `prices.assets FINAL` on `asset_id` and returned two codes for
+several ids (123427, 4304, 4695, 4664, 4726, 4930), so the pair-row counts
+above include a few duplicates; the group counts do not use that join. Not
+investigated. Raw output kept outside the repository (`~/0274-out/`).
 
 ## Query (core)
 

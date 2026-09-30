@@ -84,13 +84,15 @@ about $0.20). That is a different defect and has its own task.
       1-stroop, offer-priced fills) is measured and dated, with XAUa as the
       reference case. **2026-09-29:** 132 of 3 733, plus 20 whose latest print
       is dust beside real fills
-      ([note](notes/R-offer-priced-dust-population-2026-09-29.md)). A second
-      day is still owed.
-- [ ] A rule separates them from thin-but-real assets, validated against a sample
+      ([note](notes/R-offer-priced-dust-population-2026-09-29.md)).
+      **2026-09-30:** 169 of 3 564, plus 15 (same note).
+- [x] A rule separates them from thin-but-real assets, validated against a sample
       of those so they are not swept up. This is the same false-positive
       discipline [[0116]] applied, and it is not a bare size threshold.
-      *Rule: see Design. By construction one confirmed candle in 24 h reads
-      `trades`; the prod validation run is owed.*
+      *Rule: see Design. Run on prod 2026-09-30 with the published predicate:
+      0 of 224 thin-but-real assets (at most 5 priced minutes, at least $1 in
+      24 h) flagged. Known edge: BTC `GBVFOW…`, $86 in 24 h in trades of about
+      150 stroops each, reads `offer_dust` — see Implementation Notes.*
 - [ ] A consumer can tell, without running their own aggregation, that such a
       price does not rest on a real market (e.g. it is `unpriced`, or carries a
       signal that says so). *Via `price_basis = "offer_dust"`.*
@@ -127,6 +129,33 @@ batch endpoint):
 - **Out of scope:** off-market dust beside a real market (group B's junk
   tokens) — [[0310]]; the exact per-candle counter written at ingest —
   follow-up after 0286 phase 3.
+
+## Implementation Notes
+
+- **Commits** on `feat/0274_…`: `f93675fb` ClickHouse (`current_prices.price_basis`,
+  `base_tip.confirmed_candles`), `1fe4f936` API, OpenAPI and portal samples,
+  `477bafbf` review fixes.
+- **Review (2026-09-29, 8 findings).** Fixed: a minute with one price-forming
+  fill beside non-forming ones skipped the exact bound; a single fill is now
+  judged on its own amounts, so the view matches `price.rs` at the boundary;
+  the descriptions say the field describes the 24 h window, not the minute
+  `price_usd` came from. Declined: the exact per-candle dust counter written
+  at ingest — every 1m writer would carry it, so it waits for 0286 phase 3.
+- **Rollout order — it matters.** (1) `ALTER TABLE prices.current_prices ADD
+  COLUMN price_basis` (init.sql), (2) `views.sql`, (3) `current.sql` (DROP +
+  re-CREATE of the refreshable MV), (4) prices-api. `current.sql` before (1)
+  drops the view and fails the CREATE, leaving `current_prices` with no
+  writer; the API before (1) fails every price, list and batch request on an
+  unknown identifier.
+- **Verified**: fmt, clippy, 782 Rust tests on local ClickHouse 26.3.10.60,
+  270 portal tests, typecheck, lint. `execution_bound_error_it` needs the
+  Caddy proxy and was left to CI.
+- **Known edge — a dear asset traded in sub-1 000-stroop fills.** The bound is
+  in stroops, so for BTC at $84k every fill under about $8.50 is below it.
+  BTC `GBVFOW…` had 68 such minutes and $86 in 24 h on 2026-09-30 and reads
+  `offer_dust`, with an on-market price. The label is true to the rule (no
+  fill pins the price within 0.1 %); whether such an asset should read
+  `trades` is an open question for the operator.
 
 ## Original scope (before 2026-09-25 narrowing)
 
