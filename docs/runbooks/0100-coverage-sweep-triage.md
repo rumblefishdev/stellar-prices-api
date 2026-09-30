@@ -53,18 +53,21 @@ event wraps the pool-level trade we already index.
   `Environment`. It is the sum of swap/trade-shaped events over the trailing
   14 days, from contracts on no list. `UnclassifiedSwapContracts` (the count of
   those contracts) is published beside it, and nothing alarms on it.
-- **Published only when non-zero.** The alarm condition is `Sum >= 1` over
-  1-day periods, 1 of 7, with `treatMissingData: NOT_BREACHING`.
-- **One datapoint a week holds the alarm in ALARM for about 7 days.**
-  7 × 86,400 s = 604,800 s is CloudWatch's maximum evaluation span.
-- **Weekly boundary:** the old datapoint can leave the window just as the next
-  run publishes. While a residual persists, that can produce an OK→ALARM
-  pair of notifications around Monday 05:17 UTC. This is expected, not a flap
-  to fix — and **an OK on this alarm is never, by itself, "resolved"**.
-- **OK means one of three things:** the last run found nothing, the weekly
-  boundary above, **or nothing ran** (the alarm goes back to OK 7 days after
-  its last datapoint, whatever the cause). Rule out the last with the
-  `-errors` alarm and the `coverage sweep complete` log line below.
+- **Published on every run, `0` when clean** (task 0323). The alarm
+  condition is `Maximum >= 1` over 1-hour periods, 1 of 1, with
+  `treatMissingData: IGNORE`, the shape of task 0272's earliest-overclaim
+  alarms.
+- **The alarm shows the latest run.** A run's datapoint sets the state, and
+  the state holds until the next datapoint. A residual therefore stays in
+  ALARM until a run finds none: next Monday's, or a manual invoke after
+  triage (§3, "Clearing the alarm").
+- **OK means the last completed run found nothing.** A run that fails
+  publishes nothing and leaves the state as it was, so rule out a stale OK
+  with the `-errors` alarm and the `coverage sweep complete` log line below.
+- Until 2026-09-30 the alarm was `Sum >= 1`, 1-day periods, 1 of 7,
+  `NOT_BREACHING`, and the metric was published only when non-zero. One
+  finding then held ALARM for 7 days whatever was done (the 2026-09-28 `sda`
+  case, task 0323).
 
 ### `prices-<env>-coverage-sweep-probe-errors`
 
@@ -149,9 +152,26 @@ Also look at:
 - The list is compiled into the binary, so an edit **ships only with an
   EventBridge deploy** (§4.4).
 
+**Clearing the alarm** once every contract has its outcome:
+
+1. Merge the allow-list or registry change and deploy EventBridge (§4.4). A
+   registration alone needs no deploy.
+2. Invoke the probe once, in a later clock hour than the run that alarmed
+   (after 06:00 UTC for a Monday 05:17 run):
+
+   ```bash
+   aws lambda invoke --function-name prices-production-coverage-sweep-probe /dev/stdout
+   ```
+
+3. Expect `coverage sweep complete` with `unclassified = 0` in the log and the
+   alarm back to OK within about an hour, when that hour's period is
+   evaluated. A contract still unclassified means
+   the deploy did not carry the change: `grep -a -c '<strkey>'` on the
+   deployed `bootstrap` tells you.
+
 > **The first run will not alarm.** Phase 1 of task 0100 classified the whole
 > residual (`e4bae2a`, `d1b1eda`), so the current window reads 0 unclassified,
-> the run publishes no datapoint and the alarm stays OK. That OK is **not** the
+> the run publishes `0` and the alarm stays OK. That OK is **not** the
 > end-to-end proof: the proof is the deliberate synthetic datapoint in §4.5.
 
 ## 4. Rollout (deploy-gated)
@@ -279,8 +299,9 @@ task's alarm.
 The CleanupRule hazard (task 0200) is guarded at synth by
 `assertCleanupRuleStaysDisabled`, but still read the diff for it.
 
-Order: **EventBridge before Observability, or in the same session.** An alarm
-on a metric nobody publishes reads OK under NOT_BREACHING.
+Order: **EventBridge before Observability, then one invoke (§4.5).** Updating
+the alarm keeps its current state, and under IGNORE it changes only when a run
+publishes. A new alarm stays `INSUFFICIENT_DATA` until then.
 
 ```bash
 export CARGO_BUILD_JOBS=4               # build-lambdas is a full cargo build; this desktop has OOM'd on it
@@ -303,8 +324,8 @@ Expect, since the phase-1 classification (2026-09-22) allow-listed the whole
 - the INFO `coverage sweep complete` summary with `unclassified = 0`,
   `rows` ≈ 54, `allowlisted` = `rows`; a local dry run of the probe's code on
   2026-09-22 (window 64,334,366–64,555,544) read exactly that;
-- **no** WARN line and **no** datapoint — the metric is published only when
-  non-zero, so `prices-production-coverage-sweep-unclassified` stays OK;
+- **no** WARN line and a `0` datapoint for both unclassified metrics, so
+  `prices-production-coverage-sweep-unclassified` is OK;
 - `unmatched_allowlist` listing the entries nothing hit this fortnight
   (routers that did not trade, the Soroswap factory without a new pair) —
   informational, not a fault.
@@ -318,8 +339,8 @@ aws cloudwatch put-metric-data --namespace Prices/Coverage \
 ```
 
 Within ~one period `prices-production-coverage-sweep-unclassified` goes to
-**ALARM** and the ops topic delivers it (Slack). It returns to OK by itself 7
-days after that datapoint (§2). That proves metric → alarm → notification;
+**ALARM** and the ops topic delivers it (Slack). It stays there until a run
+publishes `0`: invoke the probe once, in a later clock hour (§3). That proves metric → alarm → notification;
 the probe's own half — computing a non-zero residual — is proven by the
 local dry runs (13 contracts / 911 events before the classification) and by
 `coverage_sweep_it`. Record both in task 0100.

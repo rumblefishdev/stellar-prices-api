@@ -1461,40 +1461,42 @@ export class ObservabilityStack extends cdk.Stack {
     // Task 0100 — layer 3 of the coverage model. Layer 2 (the alarm above)
     // sees only pools shaped like a venue we already index; the weekly coverage
     // sweep looks at EVERY contract emitting swap/trade-shaped events over a
-    // trailing 14-day window and publishes `UnclassifiedSwapEvents` only when
-    // something is in neither `prices.pool_registry` nor the allow-list — the
-    // SushiSwap V3 case (task 0290), which traded unseen for months.
+    // trailing 14-day window and publishes `UnclassifiedSwapEvents` on every
+    // run: the event count of contracts in neither `prices.pool_registry` nor
+    // the allow-list — the SushiSwap V3 case (task 0290), which traded unseen
+    // for months — and `0` when there are none.
     //
-    // One datapoint a week. A 1-day period with 1 of 7 holds it in ALARM for
-    // the week: 7 × 86,400 s = 604,800 s is CloudWatch's Period ×
-    // EvaluationPeriods maximum, and a single 7-day period is not an option
-    // (86,400 s is the period ceiling recorded at the top of this file). Edge:
-    // the old datapoint can leave the window just as the next run publishes, so
-    // a brief OK→ALARM pair is possible while a residual persists — expected,
-    // not a flap to engineer away (review WR-06; the runbook tells operators
-    // not to read that OK as resolved). Conversely a probe that stops running
-    // also reads OK after 7 days — the -errors alarm is the backstop (WR-01). While latched, the daily stuck-alarm digest
-    // (task 0214) re-lists it.
+    // The alarm follows the latest run (task 0323). Each run's datapoint sets
+    // the state, and IGNORE holds it between runs, so a residual stays in ALARM
+    // until a run finds none. After triage, one manual invoke clears it; the
+    // earlier 1-day × 1-of-7 hold kept it in ALARM for a week whatever was
+    // done. The invoke has to land in a later clock hour than the breaching
+    // run, since Maximum over one period holding both stays >= 1. Same shape
+    // as the earliest-overclaim alarms above (task 0272).
+    // A run that fails publishes nothing and changes nothing — the -errors
+    // alarm is the backstop (review WR-01). While latched, the daily
+    // stuck-alarm digest (task 0214) re-lists it.
     this.coverageSweepUnclassifiedAlarm = new cloudwatch.Alarm(
       this,
       'CoverageSweepUnclassifiedAlarm',
       {
         alarmName: `prices-${config.envName}-coverage-sweep-unclassified`,
-        alarmDescription: `Contracts emit swap/trade-shaped Soroban events but are in neither prices.pool_registry nor the committed allow-list (task 0100) — possibly a venue we do not index (the SushiSwap V3 case, task 0290). Each one is a WARN "unclassified swap emitter" line in /aws/lambda/prices-${config.envName}-coverage-sweep-probe. Triage each: register it, open a venue task, or allow-list it with a reason and a task. The probe never registers anything. It returns to OK 7 days after the last datapoint whatever the cause, so an OK here is NOT proof the residual is gone: check the last run's log and the -errors alarm. Runbook: docs/runbooks/0100-coverage-sweep-triage.md.`,
+        alarmDescription: `Contracts emit swap/trade-shaped Soroban events but are in neither prices.pool_registry nor the committed allow-list (task 0100) — possibly a venue we do not index (the SushiSwap V3 case, task 0290). Each one is a WARN "unclassified swap emitter" line in /aws/lambda/prices-${config.envName}-coverage-sweep-probe. Triage each: register it, open a venue task, or allow-list it with a reason and a task. The probe never registers anything. The alarm holds the latest run: it returns to OK only when a run reads 0, so after triage deploy EventBridge and invoke the probe once, in a later clock hour than the run that alarmed. A failed run leaves the state as it was: check the -errors alarm. Runbook: docs/runbooks/0100-coverage-sweep-triage.md.`,
         metric: new cloudwatch.Metric({
           namespace: 'Prices/Coverage',
           metricName: 'UnclassifiedSwapEvents',
           dimensionsMap: { Environment: config.envName },
-          statistic: 'Sum',
-          period: cdk.Duration.days(1),
+          statistic: 'Maximum',
+          period: cdk.Duration.hours(1),
         }),
         threshold: 1,
-        evaluationPeriods: 7,
+        evaluationPeriods: 1,
         datapointsToAlarm: 1,
         comparisonOperator:
           cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-        // Emitted only when something is unclassified: "missing" is healthy.
-        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        // One datapoint a week, published on every run: "missing" means
+        // "between runs", so the last run's state holds.
+        treatMissingData: cloudwatch.TreatMissingData.IGNORE,
       },
     );
     this.coverageSweepUnclassifiedAlarm.addAlarmAction(snsAction);
