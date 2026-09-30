@@ -265,18 +265,46 @@ Draft entry:
 Optional second placement: a mention in SDF's `data` or `standards` skill
 (separate PR; SDF may decline).
 
-## Open questions
+## Decisions for the Stellar PR (2026-09-30, user)
 
-- **Where `copyValue` points.** Raw GitHub on `master` (needs a develop→master
-  merge first; `npx skills add` works), raw GitHub on `develop` (live on merge),
-  or a static file on the portal (`web/portal/public`, manual portal deploy).
-  Only the portal option gives a fetch count, from CloudFront logs.
+PR #368 was merged to `develop` on 2026-09-30.
+
+- **`copyValue`:** raw GitHub on `develop`,
+  `https://raw.githubusercontent.com/rumblefishdev/stellar-prices-api/develop/skills/stellar-prices-api/SKILL.md`.
+  It answers 200 `text/plain`.
+  - `develop` plays the role other listings give `main`.
+  - Skill fixes reach agents on merge, with no Stellar PR.
+  - `npx skills add` reads the default branch (`master`), so it works only
+    after a develop→master merge.
+- **The path must never move.** Stellar #133 exists because the Trustless
+  Work card went 404 when its `SKILL.md` moved.
+- **Catalog entry in the same PR.** It goes under "Data Indexing" in
+  `skills/standards/ecosystem.md`, in the neighbours' format, like #133,
+  #132 and #139. This puts the API inside SDF's own `standards` skill, not
+  only in the community list.
+- **Card text** (it no longer says "any asset" or presents the VWAP as the
+  price):
+  > Get USD and XLM prices for classic and Soroban assets without computing
+  > them from Horizon trades: prices across SDEX, Soroswap, Aquarius, Phoenix
+  > and SushiSwap with a 24h cross-venue VWAP, OHLCV candles, Reflector oracle
+  > readings and 100-asset batch lookups. Free API key via Discord.
+- **"Sales" re-test with this text.** 3/3 fresh agents load the skill first.
+- **Checks in the prepared branch:**
+  - `check:ecosystem-links` passes: 31 entries, no blob URLs.
+  - `test:ecosystem-links` passes 12/12.
+  - The generated `llms.txt` carries the line.
+  - Our card is prettier-clean. The four prettier warnings in that file
+    were already there, in other cards.
+  - `next lint`, `tsc` and `build` were not run locally (2.4 GiB free); their
+    CI runs them.
+- **Stellar's queue.** New-card PRs from mid-September (#132, #136–#139) are
+  still open. The last merge touching `skills.ts` was #133 on 2026-09-23.
 
 ## Acceptance Criteria
 
-- [ ] `skills/stellar-prices-api/SKILL.md` merged to `develop`
-- [ ] Every curl in it verified against production
-- [ ] Hosting decided and `copyValue` resolves to raw markdown
+- [x] `skills/stellar-prices-api/SKILL.md` merged to `develop` (#368, 2026-09-30)
+- [x] Every curl in it verified against production
+- [x] Hosting decided and `copyValue` resolves to raw markdown
 - [ ] Entry merged into `stellar/stellar-dev-skill` and visible on skills.stellar.org
 
 ## Notes
