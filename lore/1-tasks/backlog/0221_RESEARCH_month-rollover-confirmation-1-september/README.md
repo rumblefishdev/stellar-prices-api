@@ -86,9 +86,20 @@ plan.
       evidence ([[0294]]) is submitted.
 - [ ] **The 2026-10-01 probe is run and recorded** (decided 2026-09-25, before
       the M3 evidence goes out):
-  - [ ] **[local machine] 2026-09-30:** choose a key the operator owns on a
+  - [x] **[local machine] 2026-09-30:** choose a key the operator owns on a
         `MONTH` plan, with September usage (balance below its limit). Record its
         id, plan and `get-usage` balance for 09-30.
+        **Recorded 2026-09-30 21:30 UTC:** key id `6ncoc0c655`, plan `71t9im`
+        (`pricing-api-free-production`, `MONTH`, limit 100 000). Balance on
+        09-30: **99 993** — 7 used in September, all on 09-02, none since.
+        `get-usage … --start-date 2026-09-30 --end-date 2026-10-01` returns
+        `"items": {}` (a key with no requests in the window is omitted, not
+        reported as zero); the balance comes from the 09-01 → 09-30 read, whose
+        last bucket is `[0, 99993]`. Expected on 10-01 after the probe:
+        `[1, 99999]` if AWS reset before 00:05 UTC, `[1, 99992]` if later. The
+        request is sent by a one-shot user timer on the local machine
+        (`probe-0221.timer`, 00:05:00 UTC, the key read from the gitignored env
+        file, a marker set before sending so it cannot fire twice).
   - [ ] **[local machine] 2026-10-01 00:05 UTC (02:05 CEST):** send exactly
         **one** keyed request, and nothing else with that key that day:
         `curl -si -H "x-api-key: $KEY" https://prices-api.sorobanscan.rumblefish.dev/v1/assets/native/price`.
