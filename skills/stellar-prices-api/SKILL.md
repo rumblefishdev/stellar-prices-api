@@ -219,8 +219,8 @@ done
   venues. `price_xlm` is `price_usd` divided by the XLM close.
 - **`"0"` is a sentinel, not a zero price. It means different things in
   different fields:**
-  - `price_usd: "0"` means there is no price. `price_status` is then
-    `unpriced`, and `method` and `as_of` are `""`.
+  - `price_usd: "0"` means there is no price; `price_status` is then
+    `unpriced`.
   - `vwap_24h: "0"` means no venue qualified. This is always the case for
     USDC.
   - `change_24h_pct: "0"` can mean there is no baseline.
@@ -236,10 +236,10 @@ done
   - `priced`: the newest price available.
   - `carried`: a real price, but a newer trade has not been priced yet.
   - `unpriced`: no price.
-  - `""`: only right after a schema change to the price snapshot, until its
-    next refresh (about a minute). `price_usd` is still a real price, but
-    `as_of` may be `""`, so its age is unknown; if the age matters, fetch
-    again after a minute.
+  - `""`: transient, only while a schema change to the price snapshot is
+    being rolled out. `price_usd` is still a real price, but `as_of` is `""`
+    too, so the price's age is unknown. Use the price and say its age is
+    unknown; do not refetch to get the age.
 
   "No price" means `price_status: unpriced`. An empty `as_of` on its own does
   not mean no price.
