@@ -60,14 +60,17 @@ running.
    `UnclassifiedSwapContracts` and `UnclassifiedSwapEvents` on every
    successful run, `0` when clean. `UnresolvedSwapEmitters` is unchanged
    (no alarm on it).
-2. **Alarm on the latest run.** `Maximum >= 1`, 300 s period, 1 of 1,
+2. **Alarm on the latest run.** `Maximum >= 1`, 1-hour period, 1 of 1,
    `treatMissingData: IGNORE`. A run's datapoint sets the state, and between
-   runs the state holds.
+   runs the state holds. Same shape as [[0272]]'s earliest-overclaim alarms
+   (`observability-stack.ts`, "IGNORE, not NOT_BREACHING"). Those are not in
+   production yet (describe-alarms, 2026-09-30), so the pattern has no
+   production run behind it; the first deploy of this one is its proof.
 
 Consequences, all written into the runbook:
 
 - Clearing after triage: deploy the allow-list, then invoke the probe once.
-  The invoke must land in a later 5-minute bucket than the breaching run,
+  The invoke must land in a later clock hour than the breaching run,
   because `Maximum` over one bucket holding both stays `>= 1`.
 - A failed run publishes nothing, so the state holds (ALARM stays ALARM).
   The `-errors` alarm is still the backstop for "did not run".
@@ -79,10 +82,27 @@ Consequences, all written into the runbook:
 
 Out of scope: the `-errors` alarm has the same 1-of-7 shape.
 
+## Rollout rides with undeployed 0203 and 0272
+
+`cdk diff --exclusively` against production on 2026-09-30 (stub Lambda
+assets, so S3Key changes are not meaningful) shows that both stacks carry more
+than this task:
+
+- **EventBridge:** [[0272]]'s `BackfillReconcileProbeRule` plus its
+  `lambda:InvokeFunction` permission. That is an IAM addition, so the deploy
+  prompts and must run in a human terminal.
+- **Observability:** 12 new alarms: 2 earliest-overclaim ([[0272]]), 6
+  rollup-mismatch and 4 mv-refresh ([[0203]], #365). Also the dashboard and
+  two description changes.
+
+All of it is Adam's work from 2026-09-29, so the deploy is one joint rollout
+with him. The new alarms need their publishers live first, or they sit in
+`INSUFFICIENT_DATA`, which is no better for AC 8.
+
 ## Acceptance Criteria
 
 - [ ] A clean run yields `0` for both unclassified metrics (unit test)
-- [ ] Synth: the alarm is `Maximum`, 300 s, 1 of 1, `ignore`
+- [ ] Synth: the alarm is `Maximum`, 3600 s, 1 of 1, `ignore`
 - [ ] Code comments, alarm description and runbook §2, §3 and §4.5 describe
       the latch-until-clean-run behaviour; no text still promises the 7-day
       return to OK
