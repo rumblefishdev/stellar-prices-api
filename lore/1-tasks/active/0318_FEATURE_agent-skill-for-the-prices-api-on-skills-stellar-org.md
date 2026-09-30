@@ -139,11 +139,21 @@ public for the Stellar community.
   neutrally (`b4f237d5`).
 - **`price_status: ""` stays.** The public spec already documents it.
   - It is not a backfill effect and does not happen on every deploy. It
-    appears only after a schema change that adds the snapshot's columns,
-    until the next refresh, about a minute (`current.sql`: "'' is
-    unreachable from here — it is the table DEFAULT").
-  - The skill now says so, and tells the agent to refetch if the price's
-    age matters.
+    appears only while a schema change that adds the snapshot's columns is
+    being rolled out.
+  - ~~until the next refresh, about a minute~~ was wrong (Oskar,
+    2026-09-30). The old view rewrites the blanks on every refresh, so the
+    state lasts until the view is re-created by hand. In the 0216 rollout
+    one view was missed and fixed hours later.
+  - In that window `as_of` is `""` too, not "may be".
+  - The skill now says to use the price, report its age as unknown and not
+    refetch (`a4a5db8e`). It also drops the half-line that read as "empty
+    `as_of` means no price".
+  - Fresh-agent runs on a blank-window response: 3/3 use the price, call the
+    age unknown and do not refetch. Before the last tweak, 2/2 suggested
+    "check again in a minute".
+  - Refresh cadence is verified in code: `REFRESH EVERY 1 MINUTE`
+    (`current.sql:172`).
 - **Backfill does not affect `price_status`.** `price_status` reads only the
   last 24 h of candles, while the backfill walks backward toward genesis.
   - The backfill shows only in history depth: `earliest_data_available` and
@@ -151,8 +161,8 @@ public for the Stellar community.
   - `/v1/backfill/status` is now described by what it answers ("how far back
     the price history reaches"), so the text stays true after the backfill
     completes. No skill update is needed then.
-- **Question sent to Oskar:** confirm that `""` recurs only on such a schema
-  change.
+- **Oskar's answer (2026-09-30)** corrected the duration and the retry
+  advice. Both are fixed above.
 
 ### Structure vs the Stellar skills (2026-09-29)
 
