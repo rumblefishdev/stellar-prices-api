@@ -3,10 +3,10 @@
 Tranche 3 AC 9: _"7-day post-launch monitoring report: uptime %, error rate, p95
 latency, SDEX push cadence and `earliest_data_available` trajectory."_ Task 0296.
 
-> **Status: definitions and queries ready; figures pending.** The window
-> closes 2026-09-30 09:40 CEST. §6 is filled from `export.sh` and `report.py`
-> right after that, while CloudWatch still keeps the 1-minute datapoints of the
-> first day (until ~2026-10-08).
+> **Status: figures pulled 2026-09-30 09:46 CEST**, six minutes after the
+> window closed, with `export.sh`; tables in §6 printed by `report.py`. The
+> raw export, 1-minute series included, is in
+> `docs/scf/milestone-3-monitoring/data/`.
 
 ## 1. Window
 
@@ -40,9 +40,7 @@ unknown routes) are client errors and are reported separately, not as
 downtime.
 
 **Read it together with the traffic.** An interval without requests counts as
-up because nothing failed in it, not because anything was checked. Traffic
-after launch is thin: in the first six days of the window, 233 of ~8,700
-minutes had any request at all (partial export, 2026-09-29). §6 therefore also
+up because nothing failed in it, not because anything was checked. Traffic after launch is thin: 274 of the window's 10,080 minutes had any request, and 96.9 % of all requests came from a teammate's tests (§5). §6 therefore also
 reports the minutes with at least one request and the minutes with at least
 one 5XX, so the uptime figure is never read alone.
 
@@ -82,16 +80,82 @@ Reported instead:
 ## 5. What the window contains
 
 - **The load tests are outside it.** 0293's runs were on 2026-09-17/18.
-- **Two teammate tests are inside it and are counted**: a `curl` loop on
-  2026-09-24 15:23 (~4,100 requests in 2 minutes) and a k6 run for 0311 on
-  2026-09-25 11:56–12:25. Both produced 4XX and portal effects, no 5XX. §6
-  lists the per-day request counts, so their share is visible.
-- **Incidents:** the running log in task 0296, copied to §7 when the window
-  closes.
+- **Teammate tests are inside it and are counted.** A `curl` loop on
+  `GET /v1/assets` on 2026-09-24 (15:12–15:13 and 15:24–15:25, 5,922
+  requests) and k6 runs for task 0311 on 2026-09-25 (seven bursts between
+  11:39 and 15:21, 57,817 requests). Together they are 96.9 % of the window's
+  65,806 requests, and produced 4XX and portal effects but no 5XX. Outside the
+  bursts the API served 2,067 requests in seven days, 947 of them 4XX.
+- **Incidents:** §7, each with its cause.
 
 ## 6. Figures
 
-_To be filled after 2026-09-30 09:40 CEST._
+**In one paragraph.** Over the 7 days after launch the API returned no 5XX:
+uptime 100.000 % by §2, error rate 0.000 % of 65,806 requests. Gateway latency
+p95 was 145.2 ms, and 254.4 ms for the requests that reached the Lambda. Live
+ingestion kept up in every one of the 10,080 minutes (oldest ledger waited at
+most 5 s against a 120 s threshold), and `current_prices` never lagged more
+than 18 s (threshold 900 s). Read these with the traffic: requests reached the
+API in 274 minutes, and 96.9 % of the requests were a teammate's tests (§5).
+
+### Window
+
+| figure                                    | value                                         |
+| ----------------------------------------- | --------------------------------------------- |
+| uptime (§2, 5-minute intervals)           | 100.000 %                                     |
+| minutes with at least one 5XX             | 0                                             |
+| minutes with any request                  | 274 of 10,080                                 |
+| requests                                  | 65,806                                        |
+| 5XX rate                                  | 0.000 % (0)                                   |
+| 4XX rate (client errors, not downtime)    | 13.36 % (8,791)                               |
+| latency p50, gateway (ms)                 | 25.9                                          |
+| latency p95, gateway (ms)                 | 145.2                                         |
+| latency p99, gateway (ms)                 | 795.7                                         |
+| integration latency p50, Lambda path (ms) | 38.7                                          |
+| integration latency p95, Lambda path (ms) | 254.4                                         |
+| integration latency p99, Lambda path (ms) | 896.7                                         |
+| cache hit ratio                           | 42.8 %                                        |
+| api-handler errors                        | 0                                             |
+| api-handler throttles                     | 0                                             |
+| ledger-processor errors                   | 0                                             |
+| portal closed at cold start               | 11                                            |
+| portal source loads failed                | no data                                       |
+| ingest lag ≤ 120 s                        | 100.00 % of 10,080 minutes with data; max 5 s |
+| current_prices lag ≤ 900 s                | 100.00 % of 672 probes; max 18 s              |
+
+### Per day (09:40 → 09:40 CEST)
+
+| day from    | requests | 5XX | 4XX   | p95 (ms) | p99 (ms) |
+| ----------- | -------- | --- | ----- | -------- | -------- |
+| 09-23 09:40 | 680      | 0   | 181   | 221.6    | 899.6    |
+| 09-24 09:40 | 6,229    | 0   | 1,812 | 11.5     | 1,565.3  |
+| 09-25 09:40 | 58,165   | 0   | 6,243 | 149.1    | 793.5    |
+| 09-26 09:40 | 100      | 0   | 95    | 1.1      | 612.9    |
+| 09-27 09:40 | 171      | 0   | 171   | 0.0      | 0.0      |
+| 09-28 09:40 | 95       | 0   | 87    | 19.7     | 720.4    |
+| 09-29 09:40 | 366      | 0   | 202   | 610.6    | 729.7    |
+
+### Point samples at export (2026-09-30T07:46:24Z)
+
+- `sdex.earliest_data_available`: 2015-11-18T03:47:00Z
+- `realtime_tip_ledger`: 64693715 against the network's 64693720 (5 ledgers behind)
+
+### Test traffic inside the window
+
+| when (CEST)               | requests | 4XX   | source                                         |
+| ------------------------- | -------- | ----- | ---------------------------------------------- |
+| 09-24 15:12–15:13         | 1,780    | 288   | `curl` loop on `GET /v1/assets`                |
+| 09-24 15:24–15:25         | 4,142    | 1,326 | same loop; closed the portal in 7 environments |
+| 09-25 11:39–11:41         | 8,049    | 2,422 | k6 for 0311                                    |
+| 09-25 11:47–11:50         | 12,121   | 3,728 | k6 for 0311                                    |
+| 09-25 11:54–12:18         | 34,257   | 3     | k6 for 0311 (concurrency 200)                  |
+| 09-25 12:22–12:25         | 1,192    | 0     | k6 for 0311                                    |
+| 09-25 14:53, 14:59, 15:21 | 2,198    | 77    | k6 for 0311                                    |
+
+Bursts are minutes with ≥ 100 requests, merged across gaps of up to 3 minutes,
+from the 1-minute `Count` series in `data/minute.json`.
+
+### Reproduce
 
 ```bash
 export AWS_PROFILE=soroban-admin
@@ -108,5 +172,42 @@ The 1-minute series stay reproducible after CloudWatch rolls them up.
 
 ## 7. Incidents in the window
 
-_Copied from task 0296's running log when the window closes, next to the alarm
-transitions `report.py` prints._
+No incident reached `/v1` as an error. Each has its cause; the alarm
+transitions they produced follow the table.
+
+| when (CEST)                | what                                                                                                                                                          | `/v1`                                                       | cause / task                                                                                                                 |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| window start → 09-24 09:21 | `zero-invariant-1` in ALARM, carried over from before the window                                                                                              | none                                                        | returned to OK 09-24 09:21                                                                                                   |
+| 09-24 15:17                | oracle `Runtime.OutOfMemory` (256/256 MB), one 5-minute tick skipped                                                                                          | none                                                        | the re-ingest rewrites the whole asset registry after every month and the oracle reads it without `FINAL` — tasks 0226, 0140 |
+| 09-24 15:24 → ~16:00       | portal closed in 7 of 69 execution environments after the second `curl` burst (69 simultaneous cold starts throttled Parameter Store)                         | none, 0 × 5XX                                               | cold-start reads of three parameters; fixed 09-25 14:47 by task 0311                                                         |
+| 09-24 20:09                | oracle out-of-memory, as 15:17                                                                                                                                | none                                                        | as 15:17                                                                                                                     |
+| 09-25 12:15 → 12:37        | portal closed in ≥ 4 environments during the k6 run (576 cold starts in 10 minutes)                                                                           | none                                                        | same mechanism; fixed at 14:47 the same day                                                                                  |
+| 09-25 14:49 → 09-29 09:49  | asset-discovery's `-no-invocations` and `-duration-near-timeout` alarms absent, deleted by an Observability deploy from task 0311's branch that predated them | none; a monitoring gap, the worker's `-errors` alarm stayed | restored by a deploy from `develop` (task 0256)                                                                              |
+| 09-25 19:14                | oracle out-of-memory, as 09-24 15:17                                                                                                                          | none                                                        | as 09-24 15:17                                                                                                               |
+| 09-28 08:14 →              | `coverage-sweep-unclassified` ALARM: the weekly probe found one unclassified swap emitter (the `sda` aggregator, one event)                                   | none                                                        | task 0100; allow-listed in PR #358. The alarm counts 1 of 7 daily datapoints, so it stays in ALARM until about 2026-10-04    |
+
+### Alarm transitions in the window (prices-production-\*)
+
+| when             | alarm                                 | transition              |
+| ---------------- | ------------------------------------- | ----------------------- |
+| 09-24 09:21 CEST | zero-invariant-1                      | ALARM to OK             |
+| 09-24 13:48 CEST | coverage-sweep-probe-errors           | INSUFFICIENT_DATA to OK |
+| 09-24 15:18 CEST | oracle-errors                         | OK to ALARM             |
+| 09-24 15:23 CEST | oracle-errors                         | ALARM to OK             |
+| 09-24 15:24 CEST | api-handler-portal-closed             | OK to ALARM             |
+| 09-24 15:39 CEST | api-handler-portal-closed             | ALARM to OK             |
+| 09-24 20:09 CEST | oracle-errors                         | OK to ALARM             |
+| 09-24 20:13 CEST | oracle-errors                         | ALARM to OK             |
+| 09-25 09:20 CEST | asset-discovery-duration-near-timeout | INSUFFICIENT_DATA to OK |
+| 09-25 09:20 CEST | asset-discovery-no-invocations        | INSUFFICIENT_DATA to OK |
+| 09-25 10:14 CEST | coverage-sweep-unclassified           | INSUFFICIENT_DATA to OK |
+| 09-25 12:16 CEST | api-handler-portal-closed             | OK to ALARM             |
+| 09-25 12:18 CEST | asset-discovery-no-invocations        | OK to ALARM             |
+| 09-25 12:21 CEST | asset-discovery-no-invocations        | ALARM to OK             |
+| 09-25 12:37 CEST | api-handler-portal-closed             | ALARM to OK             |
+| 09-25 14:49 CEST | api-handler-portal-load-failed        | INSUFFICIENT_DATA to OK |
+| 09-25 19:14 CEST | oracle-errors                         | OK to ALARM             |
+| 09-25 19:18 CEST | oracle-errors                         | ALARM to OK             |
+| 09-28 08:14 CEST | coverage-sweep-unclassified           | OK to ALARM             |
+| 09-29 09:49 CEST | asset-discovery-duration-near-timeout | INSUFFICIENT_DATA to OK |
+| 09-29 09:49 CEST | asset-discovery-no-invocations        | INSUFFICIENT_DATA to OK |
