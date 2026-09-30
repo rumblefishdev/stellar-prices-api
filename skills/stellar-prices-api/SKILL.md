@@ -121,7 +121,7 @@ If you only know a code, find the issuer with `GET /v1/assets?search=CODE`.
 | `GET /v1/assets/{id}`            | Metadata: `asset_kind` (`native`/`credit`/`contract`), `code`, `issuer`, `contract`, `is_active` | —                                                           |
 | `GET /v1/assets/{id}/ohlcv`      | Candles in ascending time order                                                                  | `timeframe`, `granularity`, `start`, `end`, `base_currency` |
 | `GET /v1/oracles/{id}`           | Latest reading per oracle (Reflector); empty `oracles` if none covers the asset                  | —                                                           |
-| `GET /v1/backfill/status`        | Progress of the history backfill; `earliest_data_available` is network-wide, not per asset       | —                                                           |
+| `GET /v1/backfill/status`        | How far back the price history reaches: `earliest_data_available` (network-wide, not per asset)  | —                                                           |
 | `GET /health` (no `/v1`, no key) | Liveness                                                                                         | —                                                           |
 
 The list endpoint names the metadata fields differently: `asset_type`,
@@ -236,8 +236,10 @@ done
   - `priced`: the newest price available.
   - `carried`: a real price, but a newer trade has not been priced yet.
   - `unpriced`: no price.
-  - `""`: transient, briefly during a deploy. `price_usd` is still a real
-    price, but `as_of` may be `""` beside it, so its age is unknown.
+  - `""`: only right after a schema change to the price snapshot, until its
+    next refresh (about a minute). `price_usd` is still a real price, but
+    `as_of` may be `""`, so its age is unknown; if the age matters, fetch
+    again after a minute.
 
   "No price" means `price_status: unpriced`. An empty `as_of` on its own does
   not mean no price.
