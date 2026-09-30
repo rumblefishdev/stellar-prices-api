@@ -43,16 +43,32 @@ cadence and `earliest_data_available` has been 2015-11-18 on every day.
 
 ### What the report carries instead
 
-The live-ingestion signals that answer the same question — _is the data
-current?_ — for a service whose history is complete: ledger-processor lag
-against the chain tip (`realtime_tip_ledger`), rollup freshness per tier, and
-the alarms on both. Uptime, error rate and p95 are reported as written, from
-gateway-side metrics, with the queries beside them (task 0296).
+Signals that answer the same question, _is the data current?_, for a service
+whose history is complete. Each is measured against the threshold of the alarm
+that watches it:
+
+| AC 9 wording                         | Reported instead                                                                                                                                                                                                                          | Measured                                     |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| SDEX push cadence                    | live ingestion keeps up: age of the oldest ledger notification waiting in the ingest queue (`AWS/SQS ApproximateAgeOfOldestMessage`, `prices-ingest-production`) against 120 s, the threshold of `prices-production-ledger-processor-lag` | every minute of the window                   |
+|                                      | prices are recomputed: `current_prices` lag behind the 1-minute source (`Prices/Rollup RollupLagSeconds`) against 900 s, the threshold of `prices-production-current-prices-freshness`                                                    | every 15-minute probe of the window          |
+| `earliest_data_available` trajectory | the value at export time, next to `2015-11-18T03:47:00Z` as re-verified on 2026-09-09 for Milestone 2                                                                                                                                     | once, at export                              |
+|                                      | `realtime_tip_ledger` against the network's latest ledger (Horizon)                                                                                                                                                                       | once, at export: a point check, not a series |
+
+The other rollup tiers (15m to 1M) are not charted. Their freshness alarms
+exist, and any transition they made in the window appears in the report's
+alarm history.
+
+Uptime, error rate and p95 are reported as written, from gateway-side metrics,
+with the queries beside them. Nothing probes the API from outside, so uptime is
+derived from the requests the API served; the report states how few minutes
+carried traffic
+([`milestone-3-monitoring-report.md`](milestone-3-monitoring-report.md) §2).
 
 ### Status
 
-Disclosed here; the report (task 0296) is written after the window closes on
-2026-09-30 09:40 CEST.
+Disclosed here. The report (task 0296, `milestone-3-monitoring-report.md`) is
+filled from `docs/scf/milestone-3-monitoring/export.sh` after the window closes
+on 2026-09-30 09:40 CEST.
 
 ## 3. AC 8: no standing "read-only IAM role" — access on request, per person, with MFA
 

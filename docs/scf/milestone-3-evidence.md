@@ -103,12 +103,12 @@ Each is set out in full, with its measurements and reasoning, in
 [`milestone-3-rfp-deviations.md`](milestone-3-rfp-deviations.md). The rows below
 are pointers, not summaries.
 
-| #   | Wording says                                                              | We deliver                                                                                                                        | Kind                       |
-| --- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
-| 1   | AC 1: `sdex.status: "running"`, `last_push_at` fresh                      | the archive completed on 2026-07-27; liveness graded on the ingestion alarms and `realtime_tip_ledger` (carried from M2)          | disclosed, delivered early |
-| 2   | AC 9: report "SDEX push cadence and `earliest_data_available` trajectory" | both are flat by construction since 2026-07-27; the report carries ledger-processor lag and rollup freshness instead              | disclosed                  |
-| 3   | AC 8: "read-only IAM role" for the Stellar team                           | no standing identity: a read-only IAM user is created for a named reviewer on request, MFA enforced, and removed after the review | disclosed                  |
-| 4   | AC 3: self-service key flow                                               | _candidate_: sign-in runs on the project's test Discord guild until the Stellar guild integration (task 0179) is agreed           | to be decided              |
+| #   | Wording says                                                              | We deliver                                                                                                                                                | Kind                       |
+| --- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| 1   | AC 1: `sdex.status: "running"`, `last_push_at` fresh                      | the archive completed on 2026-07-27; liveness graded on the ingestion alarms and `realtime_tip_ledger` (carried from M2)                                  | disclosed, delivered early |
+| 2   | AC 9: report "SDEX push cadence and `earliest_data_available` trajectory" | both are flat by construction since 2026-07-27; the report carries ingest-queue age and `current_prices` freshness against their alarm thresholds instead | disclosed                  |
+| 3   | AC 8: "read-only IAM role" for the Stellar team                           | no standing identity: a read-only IAM user is created for a named reviewer on request, MFA enforced, and removed after the review                         | disclosed                  |
+| 4   | AC 3: self-service key flow                                               | _candidate_: sign-in runs on the project's test Discord guild until the Stellar guild integration (task 0179) is agreed                                   | to be decided              |
 
 ## 5. Acceptance-criteria evidence
 
@@ -371,8 +371,10 @@ canary exists; `GET /health` is a keyless gateway mock).
 
 Two of the five named metrics — SDEX push cadence and the
 `earliest_data_available` trajectory — are flat by construction since the
-archive completed; the report carries ledger-processor lag, rollup freshness and
-`realtime_tip_ledger` instead (deviations §2). The incident log for the window
+archive completed; the report carries, per minute, the age of the oldest ledger
+notification in the ingest queue and, per 15-minute probe, `current_prices`
+freshness, each against its alarm threshold, plus point samples of
+`earliest_data_available` and `realtime_tip_ledger` at export (deviations §2). The incident log for the window
 is kept in task 0296 as it happens; the two entries on 2026-09-24 (an oracle
 worker out-of-memory tick during the re-ingest; a teammate's request burst that
 closed the portal in part of the fleet for ~40 minutes while `/v1` served 0 ×
