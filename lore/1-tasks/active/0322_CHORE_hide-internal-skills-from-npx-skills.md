@@ -2,7 +2,7 @@
 id: "0322"
 title: "Hide the repo's internal skills from `npx skills add` — mark them `internal`, so the public install offers only the prices-API skill"
 type: CHORE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0318", "0315"]
 tags: [docs, agents, marketing, priority-low, effort-small]
@@ -18,6 +18,10 @@ history:
       Spawned from 0318. Once the public skill landed on master (#372), the
       skills CLI started offering our internal tooling to anyone who installs
       from the repo.
+  - date: "2026-09-30"
+    status: active
+    who: stkrolikiewicz
+    note: "Activated at the user's request, right after the Stellar PR #141 went out."
 ---
 
 # Hide the repo's internal skills from `npx skills add`
