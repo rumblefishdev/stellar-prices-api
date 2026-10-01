@@ -1729,7 +1729,9 @@ export class ObservabilityStack extends cdk.Stack {
     // See packages/rollup-freshness-probe/src/asset_id_uniqueness.rs.
     const zeroLadder = [
       1,
-      ...config.opsAlarms.usdSanityEscalationCounts.filter((count) => count > 1),
+      ...config.opsAlarms.usdSanityEscalationCounts.filter(
+        (count) => count > 1,
+      ),
     ];
     this.assetIdCollisionAlarms = usdSanityRungs(
       'AssetIdCollisions',
