@@ -3772,8 +3772,9 @@ async fn the_pivot_reset_is_value_idempotent_across_runs() {
 // non-empty backlog" warning latches forever (task 0214's shape).
 // ---------------------------------------------------------------------------
 
-/// A dust-only minute alongside an ordinary one, both FOO/USDC with an oracle
-/// price in window. `trade_count` and `pf_trade_count` differ on BOTH rows, so a
+/// A dust-only minute on base id 11 (no `assets` row) alongside an ordinary
+/// FOO/USDC one, both quoted in USDC with an oracle price in window.
+/// `trade_count` and `pf_trade_count` differ on BOTH rows, so a
 /// re-insert that drops the pf columns is visible: `pf_trade_count DEFAULT
 /// trade_count` would silently restore them to `trade_count`.
 async fn seed_dust_and_priced(client: &Client, db: &str, ts: u32) {
