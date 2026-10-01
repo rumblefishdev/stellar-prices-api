@@ -12,6 +12,10 @@ use clickhouse::{Client, Compression};
 /// Lambdas. Companion to `mtls::require_env` (the must-be-set case).
 pub mod env;
 
+/// The one asset-id expression (task 0139): ClickHouse derives `asset_id`
+/// from the asset identity. Schema, migration and fixtures render it from here.
+pub mod asset_id;
+
 /// Shared observability setup for the worker Lambdas (`init_tracing`).
 pub mod observability;
 
