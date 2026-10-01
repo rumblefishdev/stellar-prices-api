@@ -784,6 +784,69 @@ before its `--accept`; an accept is never given ahead of the measurement. The GO
 registry names as two other assets — that mislabel is [[0139]]'s to fix, not
 this task's.
 
+#### 201904 → 202101 reconciled — boundary minutes and two re-keyed assets (2026-10-01)
+
+Checked on prod 2026-10-01 07:15 UTC (`dev_read`, `FINAL` against
+`reingest_0286_bak_*`), without the campaign machine. Stage A stood at
+**63 / 99** months (201511 → 202101 done, 202102 in flight, newest candle
+2021-02-25 02:05); pace ~2 h per month since 201903; CH disk 872 GiB free, 0
+pending mutations; snapshots 201512 → 202102 held on all five tiers (~780 MiB).
+
+None of these 22 months stopped the loop. 20 came back with slightly MORE SDEX
+trades than the snapshot, under `--sdex-max-gain-pct` (0.5 %), so the script
+rated them `FINDING`, not `DEFECT`. Accounted for here:
+
+| month | trades old → new | Δ trades | Δ `volume_base` | Δ `volume_quote` |
+| --- | --- | --- | --- | --- |
+| 201904 | 496 806 → 496 814 | +8 | +2106.1410529 | +40001.938069 |
+| 201905 | 647 293 → 647 309 | +16 | +7075.3813109 | +501.0164445 |
+| 201906 | 928 065 → 928 132 | +67 | +648104.1340822 | +2668.1290686 |
+| 201907 | 602 244 → 602 244 | 0 | 0 | 0 |
+| 201908 | 669 437 → 669 447 | +10 | +0.4191247 | +0.0123484 |
+| 201909 | 596 118 → 596 129 | +11 | +3.3063182 | +1572.1656222 |
+| 201910 | 881 555 → 881 556 | +1 | +0.0000999 | +0.0193808 |
+| 201911 | 436 848 → 436 851 | +3 | +10000560.8586878 | +700.008422 |
+| 201912 | 367 429 → 367 433 | +4 | +0.0221458 | +0.0011872 |
+| 202001 | 343 498 → 343 499 | +1 | +0.0041873 | +0.095286 |
+| 202002 | 264 388 → 264 388 | 0 | 0 | 0 |
+| 202003 | 352 213 → 352 215 | +2 | +98.6804724 | +63.999319 |
+| 202004 | 507 949 → 507 950 | +1 | +0.0004571 | +0.00008 |
+| 202005 | 884 607 → 884 645 | +38 | +111726.320761 | +17127.4276324 |
+| 202006 | 903 227 → 903 243 | +16 | +73.9567285 | +1000.0122403 |
+| 202007 | 716 557 → 716 590 | +33 | +47175.2795394 | +7244.508706 |
+| 202008 | 427 578 → 427 581 | +3 | +999.9543208 | +10000 |
+| 202009 | 368 068 → 368 079 | +11 | +33479.066313 | +345.1011609 |
+| 202010 | 464 440 → 464 465 | +25 | +169162.200887 | +24797.1112972 |
+| 202011 | 711 512 → 711 515 | +3 | +0.0715845 | +14626.2434128 |
+| 202012 | 882 121 → 882 145 | +24 | +514642.5504593 | +22093.46502 |
+| 202101 | 1 116 692 → 1 116 694 | +2 | +2123297.7650535 | +3.54778 |
+
+- **Every gain is a 64k-partition boundary minute.** The +279 trades sit in
+  92 one-minute candles, all SDEX, and every one of them closes 0–9 ledgers
+  after a multiple of 64 000 (`intDiv(version, 1000) % 64000`, max 9) — the
+  minute that straddles two archive partitions, which the old backfill wrote
+  from one side only. Those 92 candles carry the whole delta, to the digit:
+  +13 658 506.1135862 base and +142 744.8024773 quote, equal to the monthly
+  sums. No candle came back with fewer trades, and no candle with equal
+  trades changed volume. This is the "boundary minutes documented" case of
+  the phase-3 criterion.
+- **Same candle count in every month, but 52 candles changed `asset_id`.**
+  5 244 996 of 5 245 048 candles join on `(timestamp, asset_id,
+  quote_asset_id, source)`; the other 52 on each side are the same candles
+  under another id: GOLDMAN (`GBEAOCF7…KOMB`) `123214 → 123738` (as in
+  201902), and LOTELTRR (`GB3TUD7W…B4BY`) `123878 → 123737` (201912 and
+  202011). With the ids mapped back, all 52 pairs are identical in trades and
+  both volumes. `123738` is registered as `A3KM222019SE` and `USD`, `123737`
+  as `CISPIELBERPE` and `USC` — the [[0139]] duplicate-id collision again,
+  not a loss; the mislabel is 0139's to fix.
+- **Coarse tiers carry the same +279** on 15m / 1h / 4h / 1d (13 568 645 →
+  13 568 924 trades over the range), with candle counts equal to the
+  snapshot on every tier.
+- **0 OHLC-order violations** on 1m, 15m, 1h, 4h and 1d over 201904 → 202101;
+  1m raw = FINAL (5 245 048), so no duplicate rows.
+
+All 22 months are clean and can be `release`d.
+
 #### Plan for the complete re-ingest
 
 | stage | months | gate | estimate |
