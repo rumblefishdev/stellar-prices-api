@@ -41,18 +41,13 @@ pub mod mtls;
 /// Table schema embedded at compile time (DATABASE + all `prices.*` tables).
 pub const INIT_SQL: &str = include_str!("../schema/init.sql");
 
-/// The canonical candle column list, in DDL order, for every `price_ohlcv_*`
-/// table (task 0286 / ADR 0287). The first fifteen are the pre-0286 shape; the
-/// last three are the price-forming aggregates ADR 0287 §1 introduces.
+/// The stored candle columns, in DDL order, for every `price_ohlcv_*` table
+/// (task 0286 / ADR 0287). The first fifteen are the pre-0286 shape; the last
+/// three are the price-forming aggregates ADR 0287 §1 introduces.
 ///
-/// This exists because the ingest writer is **name-routed**, not positional:
-/// `clickhouse` 0.13 emits `INSERT INTO t(<struct field names>) FORMAT
-/// RowBinary`, so a candle column the row struct omits silently takes its
-/// column DEFAULT instead of erroring. On the pf columns that failure mode is
-/// invisible and wrong — `pf_trade_count DEFAULT trade_count` would report a
-/// dust-only minute as fully price-forming. So the DDL here and the field names
-/// of `OhlcvRow` in `packages/prices-ingest-core/src/writer.rs` are both pinned
-/// to this list by unit tests; change one and the other fails.
+/// The `_1m` CREATE and every `INSERT … SELECT` between tiers (the rollup
+/// generator, enrichment) name exactly this list; unit tests pin both. What the
+/// ingest writer sends is [`CANDLE_WRITER_COLUMNS`].
 pub const CANDLE_COLUMNS: [&str; 18] = [
     "timestamp",
     "asset_id",
@@ -73,6 +68,17 @@ pub const CANDLE_COLUMNS: [&str; 18] = [
     "pf_volume",
     "pf_price_volume",
 ];
+
+/// The columns the ingest writer names, i.e. the field names of `OhlcvRow` in
+/// `packages/prices-ingest-core/src/writer.rs`, pinned there by a unit test.
+///
+/// The writer is **name-routed**, not positional: `clickhouse` 0.13 emits
+/// `INSERT INTO t(<struct field names>) FORMAT RowBinary`, so a candle column
+/// the row struct omits silently takes its column DEFAULT instead of erroring.
+/// On the pf columns that failure mode is invisible and wrong —
+/// `pf_trade_count DEFAULT trade_count` would report a dust-only minute as
+/// fully price-forming.
+pub const CANDLE_WRITER_COLUMNS: [&str; 18] = CANDLE_COLUMNS;
 
 /// The smallest price this system treats as a price, as a decimal literal
 /// (task 0286, review WR-03).

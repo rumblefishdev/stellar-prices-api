@@ -780,7 +780,7 @@ mod tests {
     fn the_row_struct_names_every_candle_column() {
         assert_eq!(
             OhlcvRow::COLUMN_NAMES.to_vec(),
-            prices_clickhouse::CANDLE_COLUMNS.to_vec()
+            prices_clickhouse::CANDLE_WRITER_COLUMNS.to_vec()
         );
     }
 
