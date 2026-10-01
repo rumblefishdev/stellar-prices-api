@@ -2,7 +2,7 @@
 id: "0139"
 title: "current_price_usd returns duplicate rows — assets is keyed on natural identity, not asset_id"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0072", "0061", "0067", "0144", "0150", "0129"]
 tags:
@@ -10,6 +10,12 @@ tags:
 milestone: 2
 links: []
 history:
+  - date: "2026-10-01"
+    status: active
+    who: akot
+    note: >
+      Activated for implementation via GSD (plan 261001-fwh), one PR on
+      fix/0139, worked in .claude/worktrees/0139.
   - date: "2026-10-01"
     status: backlog
     who: akot
