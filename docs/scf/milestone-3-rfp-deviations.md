@@ -15,17 +15,17 @@ Carried unchanged from [`milestone-2-rfp-deviations.md`](milestone-2-rfp-deviati
 
 The criterion reads _"`GET /backfill/status` shows `sdex.status: "running"`,
 `sdex.last_push_at` within the Tranche 3 push-cadence window, and
-`sdex.earliest_data_available` ≤ 2018-01-01"_. The archive walked from the
-chain tip to genesis during Tranche 2 and reports `completed` since 2026-07-27,
-at **2015-11-18**, two years beyond the depth clause. The liveness half is
+`sdex.earliest_data_available` ≤ 2018-01-01"_. The archive completed during
+Tranche 2, on 2026-07-27, and reaches back to **2015-11-18**, two years beyond
+the depth clause. The liveness half is
 graded on the signals that are live after a backfill: the rollup-freshness
 alarms, the ledger-processor lag alarm, and `realtime_tip_ledger` tracking the
 chain tip. The design document carries the amendment since 2026-09-08.
 
 ### Status
 
-Delivered early. _To fill on submission day:_ the three signals' states and the
-`GET /v1/backfill/status` body.
+Delivered early. The signals and the `GET /v1/backfill/status` body, read on
+2026-10-01, are in evidence AC 1.
 
 ## 2. AC 9 names two metrics that are flat by construction
 
@@ -65,14 +65,10 @@ alarms OK."_
 ### The deviation
 
 No standing role or user exists for the Stellar team in `infra/`, by decision
-of the operator on 2026-09-25. A read-only IAM **user** is created for a named
-reviewer when they ask — first name, surname, e-mail, purpose and end date — with
-a one-time password and a policy that denies every read unless the session is
-MFA-authenticated; the user is removed after the review
-([`docs/runbooks/0295-dashboard-access-on-request.md`](../runbooks/0295-dashboard-access-on-request.md)).
-The same nine read actions can instead be granted through IAM Identity Center:
-an Identity Center user and a `PricesDashboardRead` permission set assigned for
-the review window
+of the operator on 2026-09-25. Access is granted on request: a named reviewer —
+first name, surname, e-mail, purpose and end date — gets an IAM Identity Center
+user with the `PricesDashboardRead` permission set, assigned for the review
+window, with MFA at sign-in
 ([`docs/runbooks/0295-dashboard-access-via-identity-center.md`](../runbooks/0295-dashboard-access-via-identity-center.md)).
 
 ### Why
@@ -87,7 +83,7 @@ the review window
 ### What a reviewer gets
 
 The dashboard, its metrics and the alarm states — the nine CloudWatch read
-actions the runbooks grant — and nothing that can read a log group, a trace, a
+actions of the permission set — and nothing that can read a log group, a trace, a
 secret or a Lambda's configuration. The read actions cannot be scoped per
 dashboard, so the explorer's dashboard in the same account is visible too.
 
@@ -192,9 +188,9 @@ measured 2026-09-18, task 0293). The points below set the scope of that number.
   every row carries the gateway-side p95.
 - **500 and 1000 req/s are informational, not bars** (the team's decision of
   2026-09-18). 500 req/s held with 0 errors. At 1000 req/s 15.9 % of requests
-  failed, all of them Lambda throttles. The ceiling is the ClickHouse box shared
+  failed, all of them Lambda throttles. The limit is the ClickHouse server shared
   with the Soroban Block Explorer, between 500 and ~900 req/s.
-- **The box has changed since.** The history re-ingest (task 0286 phase 3) has
+- **The server's load has changed since.** The history recomputation (task 0286) has
   run on it since 2026-09-23, after these figures; its effect on latency is not
   measured.
 
