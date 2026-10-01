@@ -59,12 +59,12 @@ const FEATURES: readonly Feature[] = [
   {
     icon: fastResponseIcon,
     title: 'Fast Response Times',
-    body: 'API Gateway caching keeps latency low for repeated lookups. Optimized for high-frequency applications like trading bots.',
+    body: 'API Gateway caching keeps latency low for repeated lookups.',
   },
   {
     icon: secureAccessIcon,
     title: 'Secure Access',
-    body: 'Every request requires an API key. Rate limiting and monthly quotas protect the service for all users.',
+    body: 'Every price request requires an API key. Rate limiting and monthly quotas protect the service for all users.',
   },
   {
     icon: developerFriendlyIcon,
