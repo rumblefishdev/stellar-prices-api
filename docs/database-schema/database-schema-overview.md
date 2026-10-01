@@ -11,6 +11,7 @@
 
 | Date       | Sections                                         | Driver                                                                                                                                                                                                                                                                                                                                                                                                              | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | ---------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-10-01 | §3.1, §3.2, §3.3, §3.4, §3.9, §3.10, App. A      | [Task 0139](../../lore/1-tasks/active/0139_BUG_current-price-usd-fans-out-on-duplicate-asset-id.md) | **`asset_id` is derived by ClickHouse from the identity** — `xxh3(concat(asset_code, ':', issuer_address, ':', contract_address))`, `UInt64`, rendered once by `prices_clickhouse::asset_id`. `assets.asset_id` is `MATERIALIZED` (a writer naming it is refused); candle tiers and `oracle_prices` take the identity in `EPHEMERAL` columns and derive the ids as `DEFAULT` (the rollup MVs and enrichment still copy ids with `INSERT … SELECT`); `current_prices`, `asset_supply` and `asset_metadata` hold plain `UInt64`. A `CHECK` refuses 0 and the id of a blank identity; on `oracle_prices` a blank identity is the REDSTONE sentinel 0. Two identities can no longer share an id, which closes the fan-out of every `asset_id` join. |
 | 2026-09-21 | §3.0 note, §3.6, §3.8 (removed), §13, App. A     | [Task 0256](../../lore/1-tasks/active/0256_BUG_asset-discovery-ledger-scan-never-runs.md)                                                                                                                                                                                                                                                                                                                           | **`prices.discovery_state` removed** together with asset-discovery's ledger scan, which never ran on production. §3.8 is kept as a numbered tombstone so §3.9 onwards do not shift; the table leaves the storage-engine list (§3.0), the §13 at-a-glance table, and App. A's index and ER diagram. `init.sql` no longer creates it — a database created earlier keeps the (always empty) table until an operator drops it. The Asset Discovery Lambda is no longer listed as a `pool_registry` writer (§3.6, §13): the live Ledger Processor maintains that table (task 0291).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | 2026-09-17 | §3.6 (`pool_registry`), App. A                   | [Task 0291](../../lore/1-tasks/active/0291_BUG_pool-registry-is-stale-since-the-backfill-ended.md)                                                                                                                                                                                                                                                                                                                  | **`pool_registry` has two new writers.** The live Ledger Processor persists pools it learns from factory events (new rows only), and `events-backfill --discover-pools` fills a range's missing pools. Corrected the Asset Discovery claim: its scan has never run on production (task 0256).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | 2026-09-16 | §3.0, §3.2 (DDL + rollup chain), §13, App. A & B | [Task 0286](../../lore/1-tasks/active/0286_BUG_candles-are-built-from-dust-fills-in-the-wrong-order.md) · [ADR 0287](../../lore/2-adrs/0287_candle-prices-come-from-price-forming-fills-and-a-windowed-close.md)                                                                                                                                                                                                    | **A candle's prices come only from the price-forming trades of its own bucket.** A fill's price is the ratio of the two integer amounts exchanged, so a fill of a few stroops prints an exact small fraction (1/17, 5/34) that is arithmetically right and can sit hundreds of percent off the market; landing last in the bucket it became the `close`, and through the pivot tier the USD reference for every XLM-quoted asset. Added `pf_trade_count` / `pf_volume` / `pf_price_volume` to all seven `price_ohlcv_*` tables (idempotent per-table `ALTER`, DEFAULTs carrying the pre-0286 meaning so history keeps reading as before), and rewrote the rollup sketch to the shipped generator's form: every price aggregate conditional on `t.pf_trade_count > 0`, `close_usd` as the bucket's own close re-priced by the latest priced child's **rate**, both derived Decimals through the never-throwing Float64 conversion, and the **month rolled from the day** (`mv_ohlcv_1d_to_1M`) because a week straddling a month sent the month's close and extremes to whichever month owned that week. Recorded the non-negotiable deploy order (schema → enrichment + sweep + API → MV re-CREATE → ingest **last**) and pointed at the rollout runbook.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
@@ -214,7 +215,7 @@ erDiagram
     price_ohlcv_1w  ||--o{ price_ohlcv_1M : "MV: 1w → 1M"
 
     assets {
-        UInt32         asset_id PK "app-assigned surrogate"
+        UInt64         asset_id PK "MATERIALIZED xxh3 of the identity"
         FixedString12  asset_code
         Enum8          asset_type "classic | soroban"
         FixedString56  issuer_address "G-address, empty for XLM"
@@ -229,8 +230,8 @@ erDiagram
 
     price_ohlcv_1m {
         DateTime           timestamp "DoubleDelta codec"
-        UInt32             asset_id
-        UInt32             quote_asset_id "ADR 0003 — PK includes quote leg"
+        UInt64             asset_id "DEFAULT xxh3 of the EPHEMERAL base identity"
+        UInt64             quote_asset_id "ADR 0003 — PK includes quote leg"
         LowCardinality_S   source "sdex|soroswap|aquarius|phoenix|..."
         Decimal_38_14      open
         Decimal_38_14      high
@@ -250,7 +251,7 @@ erDiagram
     }
 
     current_prices {
-        UInt32             asset_id "natural FK to assets (logical)"
+        UInt64             asset_id "natural FK to assets (logical)"
         Decimal_38_14      price_usd
         Decimal_38_14      price_xlm
         Decimal_10_4       change_24h_pct
@@ -266,7 +267,7 @@ erDiagram
 
     oracle_prices {
         DateTime           timestamp "DoubleDelta codec"
-        UInt32             asset_id
+        UInt64             asset_id "DEFAULT xxh3 of the identity; 0 = no asset"
         LowCardinality_S   oracle_name "reflector|chainlink|redstone|band"
         Decimal_38_14      price_usd
         String             raw_data "JSON blob, unparsed"
@@ -342,7 +343,7 @@ SEP-41 contract deployments and UPSERTs into this table.
 
 ```sql
 CREATE TABLE prices.assets (
-    asset_id         UInt32,            -- application-assigned surrogate id
+    asset_id         UInt64 MATERIALIZED xxh3(concat(asset_code, ':', issuer_address, ':', contract_address)),  -- task 0139
     asset_code       FixedString(12),
     asset_type       Enum8('classic' = 1, 'soroban' = 2),
     issuer_address   FixedString(56),   -- G-address; empty string for XLM
@@ -360,10 +361,13 @@ SETTINGS index_granularity = 8192;
 
 **Notes:**
 
-- `asset_id` is an **application-assigned surrogate** (a small `UInt32` counter
-  materialised in the prices-api write path), not the asset's on-chain identity.
-  ClickHouse does not have `SERIAL` / sequences — the writer assigns the next
-  unused id on UPSERT against the natural key tuple.
+- `asset_id` is **derived by ClickHouse from the natural key** (task 0139):
+  `xxh3` of `code:issuer:contract`, case preserved, absent fields empty (native
+  XLM is `XLM::`). It is `MATERIALIZED`, so no writer sends it and a writer that
+  names it is refused, and `CHECK asset_id_derived` refuses 0 and the id of a
+  blank identity. Two identities cannot share an id, so `assets FINAL` holds one
+  row per id. The id it replaced was a `UInt32` counter in each writer process,
+  which collided when two writers ran at once (3,315 ids on 2026-09-30).
 - `issuer_address` is empty (zero-padded `FixedString(56)`) for XLM (the
   native asset). `FixedString(56)` is preferred over `String` for fixed-width
   strkeys because it stores in column-store as fixed-width slots, with better
@@ -420,8 +424,11 @@ design.
 ```sql
 CREATE TABLE prices.price_ohlcv_1m (
     timestamp        DateTime CODEC(DoubleDelta),
-    asset_id         UInt32,
-    quote_asset_id   UInt32,                  -- ADR 0003: PK includes the quote leg
+    -- Task 0139: derived from the EPHEMERAL identities below; DEFAULT, not
+    -- MATERIALIZED, because the MVs and enrichment copy ids between tiers.
+    asset_id         UInt64 DEFAULT xxh3(concat(base_code, ':', base_issuer, ':', base_contract)),
+    quote_asset_id   UInt64 DEFAULT xxh3(concat(quote_code, ':', quote_issuer, ':', quote_contract)),
+                                              -- ADR 0003: PK includes the quote leg
     source           LowCardinality(String),  -- 'sdex', 'soroswap', 'aquarius', 'phoenix', ...
     open             Decimal(38, 14),
     high             Decimal(38, 14),
@@ -464,10 +471,19 @@ CREATE TABLE prices.price_ohlcv_1m (
                                                -- its price fields are 0
     pf_volume        Decimal(38, 14) DEFAULT volume_base,   -- Σ volume_base of
                                                -- the price-forming fills
-    pf_price_volume  Decimal(38, 14) DEFAULT volume_quote   -- Σ price × volume_base
+    pf_price_volume  Decimal(38, 14) DEFAULT volume_quote,  -- Σ price × volume_base
                                                -- of those fills; the ratio of
                                                -- the two is the price-forming
                                                -- VWAP /ohlcv publishes
+    -- Task 0139: what the ingest writer sends instead of ids. Not stored.
+    base_code        String EPHEMERAL,
+    base_issuer      String EPHEMERAL,
+    base_contract    String EPHEMERAL,
+    quote_code       String EPHEMERAL,
+    quote_issuer     String EPHEMERAL,
+    quote_contract   String EPHEMERAL,
+    CONSTRAINT asset_ids_derived CHECK asset_id != 0 AND asset_id != xxh3(concat('', ':', '', ':', ''))
+        AND quote_asset_id != 0 AND quote_asset_id != xxh3(concat('', ':', '', ':', ''))
 )
 ENGINE = ReplacingMergeTree(version)
 PARTITION BY toYYYYMM(timestamp)
@@ -834,7 +850,7 @@ read path).
 
 ```sql
 CREATE TABLE prices.current_prices (
-    asset_id         UInt32,
+    asset_id         UInt64,
     price_usd        Decimal(38, 14),
     price_xlm        Decimal(38, 14),
     change_24h_pct   Decimal(10, 4),
@@ -946,10 +962,15 @@ asset X"; use `FINAL` (or rely on background merges) for the collapsed view.
 ```sql
 CREATE TABLE prices.oracle_prices (
     timestamp     DateTime CODEC(DoubleDelta),
-    asset_id      UInt32,
+    -- Task 0139: derived from the EPHEMERAL identity; a blank one (REDSTONE,
+    -- a feed with no asset) is the sentinel 0.
+    asset_id      UInt64 DEFAULT if(concat(asset_code, ':', issuer_address, ':', contract_address) = '::', 0, xxh3(concat(asset_code, ':', issuer_address, ':', contract_address))),
     oracle_name   LowCardinality(String),  -- 'reflector', 'chainlink', 'redstone', 'band'
     price_usd     Decimal(38, 14),
-    raw_data      String                   -- JSON blob, unparsed for forensic value
+    raw_data      String,                  -- JSON blob, unparsed for forensic value
+    asset_code       String EPHEMERAL,
+    issuer_address   String EPHEMERAL,
+    contract_address String EPHEMERAL
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMM(timestamp)
@@ -1010,7 +1031,8 @@ genuine `asset_id` collisions between unrelated assets — measured 2026-08-10 a
 why the population step guards the `asset_id` → identity translation in **both**
 directions and refuses to write when ambiguous: `oracle_prices` is
 `asset_id`-keyed and this table is not, so the copy is the one place the two key
-spaces meet.
+spaces meet. Since 0139 derives the id from the identity, the ambiguity cannot
+be stored; the guard stays as a cheap assertion.
 
 ⚠️ **`method` is part of the sorting key, deliberately.** `ReplacingMergeTree`
 dedups on the sorting key, so without it a `'pivot'` estimate written at the same
@@ -1345,7 +1367,7 @@ Processor and the discovery worker).
 
 ```sql
 CREATE TABLE prices.asset_metadata (
-    asset_id     UInt32,
+    asset_id     UInt64,
     home_domain  String DEFAULT '',
     updated_at   DateTime DEFAULT now()    -- RMT version
 )
@@ -1382,7 +1404,7 @@ as §3.9: supply is slow (hourly) and price is fast (per-minute), so sharing a
 
 ```sql
 CREATE TABLE prices.asset_supply (
-    asset_id      UInt32,
+    asset_id      UInt64,
     token_supply  Decimal(38, 14),
     fetched_at    DateTime DEFAULT now()   -- RMT version
 )

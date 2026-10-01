@@ -133,7 +133,8 @@
 -- symbol→issuer mapping is task 0173.
 --
 -- ## Public key = natural Stellar identity, never asset_id (§12.2)
--- asset_id is an internal UInt32 surrogate. These views resolve it to the
+-- asset_id is an internal UInt64 id ClickHouse derives from the identity (task
+-- 0139). These views resolve it to the
 -- portable identity via prices.assets and expose:
 --   asset_kind ∈ ('native','credit','contract'),
 --   asset_code, issuer_address, contract_address.
