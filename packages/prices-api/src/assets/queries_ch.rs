@@ -64,13 +64,15 @@ pub struct AssetRow {
 
 #[derive(Debug, clickhouse::Row, serde::Deserialize)]
 struct IdRow {
-    asset_id: u32,
+    asset_id: u64,
 }
 
 /// One row of the `GET /assets` listing (with the sort key for cursoring).
 #[derive(Debug, clickhouse::Row, serde::Deserialize)]
 pub struct AssetListRow {
-    pub asset_id: u32,
+    /// Read through `toUInt64` so the same struct reads the UInt32 schema and
+    /// the UInt64 one (task 0139).
+    pub asset_id: u64,
     pub asset_code: String,
     pub issuer_address: String,
     pub contract_address: String,
@@ -189,7 +191,7 @@ fn list_assets_sql(
 ) -> String {
     format!(
         "SELECT \
-           a.asset_id AS asset_id, \
+           toUInt64(a.asset_id) AS asset_id, \
            if(a.asset_code != '', a.asset_code, sym.symbol) AS asset_code, \
            a.issuer_address AS issuer_address, \
            a.contract_address AS contract_address, \
@@ -471,14 +473,23 @@ pub async fn asset_detail(
 pub async fn resolve_asset_id(
     ch: &Client,
     id: &AssetIdentifier,
-) -> Result<Option<u32>, clickhouse::error::Error> {
+) -> Result<Option<u64>, clickhouse::error::Error> {
     let (where_sql, binds) = identity_where(id);
-    let sql = format!("SELECT a.asset_id FROM assets AS a FINAL WHERE {where_sql} LIMIT 1");
+    let sql = resolve_asset_id_sql(where_sql);
     let mut q = ch.query(&sql);
     for b in binds {
         q = q.bind(b);
     }
     Ok(q.fetch_optional::<IdRow>().await?.map(|r| r.asset_id))
+}
+
+/// `toUInt64` makes the read width-independent: the same u64 field reads the
+/// UInt32 schema and the UInt64 one (task 0139, spike 008 H). Without the cast
+/// a u64 RowBinary field would misread a UInt32 column.
+fn resolve_asset_id_sql(where_sql: &str) -> String {
+    format!(
+        "SELECT toUInt64(a.asset_id) AS asset_id FROM assets AS a FINAL WHERE {where_sql} LIMIT 1"
+    )
 }
 
 // ----------------------------------------------------------------------------
@@ -680,13 +691,13 @@ pub struct UsdRefs {
     /// without it a genuine peg row (`close_usd = close` on a USDC leg) is
     /// indistinguishable from the anomalous same-signature rows on other legs
     /// and would be dropped. Its absence is a real server-side data gap.
-    pub usdc: u32,
+    pub usdc: u64,
     /// XLM and canonical USDT, the two pivot references. **Optional**: they only
     /// select the `traded` label. An untracked reference cannot be any candle's
     /// quote leg, so the branch simply never matches — refusing to serve the
     /// endpoint over a missing label would turn a cosmetic dependency into an
     /// outage.
-    pub pivots: Vec<u32>,
+    pub pivots: Vec<u64>,
 }
 
 /// What `base_currency` asks for. Per [ADR 0011] it **denominates**; it does not
@@ -704,7 +715,7 @@ pub enum Denomination {
     /// `base_currency=XLM`. Converting that mode needs XLM's own USD rate per
     /// bucket, which is not on the candle row — ADR 0011 §6's degenerate cases.
     /// Tracked in [`0170`]; not a decision, just not done yet.
-    QuoteLeg(u32),
+    QuoteLeg(u64),
 }
 
 /// Validated OHLCV query inputs. `start`/`end` are **validated epochs**
@@ -712,7 +723,7 @@ pub enum Denomination {
 /// leaves exactly one interpretation of the window — no divergence between our
 /// point-count check and what ClickHouse would have made of the raw value.
 pub struct OhlcvArgs {
-    pub asset_id: u32,
+    pub asset_id: u64,
     /// How the candles are denominated (ADR 0011 §1).
     pub denomination: Denomination,
     pub granularity: Granularity,
@@ -1332,8 +1343,8 @@ const CLOSE_DIVERGENT_PLACEHOLDER: &str = "CAST(NULL AS Nullable(UInt8)) AS cdiv
 pub async fn ohlcv_peg_series(
     ch: &Client,
     args: &OhlcvArgs,
-    usdc_id: u32,
-    xlm_id: u32,
+    usdc_id: u64,
+    xlm_id: u64,
     usdc_issuer: &str,
     // Denominate in XLM instead of USD — ADR 0011 §6's second degenerate case.
     in_xlm: bool,
@@ -1540,7 +1551,7 @@ pub async fn ohlcv_peg_series(
 #[cfg(test)]
 pub(crate) const CANDLE_METHOD_LABELS: [&str; 4] = ["external", "assumed-par", "oracle", "traded"];
 
-pub(crate) fn usd_method_expr(usdc: u32, pivots: &[u32], granularity: Granularity) -> String {
+pub(crate) fn usd_method_expr(usdc: u64, pivots: &[u64], granularity: Granularity) -> String {
     let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
     let traded_arm = if pivots.is_empty() {
         String::new()
@@ -2054,6 +2065,40 @@ mod tests {
         assert!(
             ext < traded,
             "the USDC arms are tested before traded: {sql}"
+        );
+    }
+
+    /// Task 0139: every SELECT whose id lands in a Rust u64 field casts with
+    /// `toUInt64`, so the readers work on the UInt32 schema and the UInt64 one.
+    /// A bare `a.asset_id` read into a u64 misparses a UInt32 column.
+    #[test]
+    fn id_reads_cast_to_uint64_so_either_schema_width_reads() {
+        let list = list_assets_sql("a.asset_code", "a.asset_code", "ASC", "", 51);
+        assert!(
+            list.starts_with("SELECT toUInt64(a.asset_id) AS asset_id, "),
+            "{list}"
+        );
+        let resolve = resolve_asset_id_sql("a.contract_address = ?");
+        assert_eq!(
+            resolve,
+            "SELECT toUInt64(a.asset_id) AS asset_id FROM assets AS a FINAL \
+             WHERE a.contract_address = ? LIMIT 1"
+        );
+    }
+
+    /// A u64 id above `u32::MAX` renders as a plain integer literal in the
+    /// method classifier (the UInt64 schema's ids are full-width hashes).
+    #[test]
+    fn usd_method_expr_renders_full_width_ids() {
+        let big = 0x9e37_79b9_7f4a_7c15_u64;
+        let sql = usd_method_expr(big, &[u64::MAX], Granularity::D1);
+        assert!(
+            sql.contains(&format!("quote_asset_id = {big} AND")),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!("quote_asset_id IN ({}), 'traded'", u64::MAX)),
+            "{sql}"
         );
     }
 
