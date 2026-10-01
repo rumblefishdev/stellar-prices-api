@@ -2,7 +2,7 @@
 id: "0221"
 title: "Confirm the MONTH quota rollover instant on production, on or after 1 September 2026"
 type: RESEARCH
-status: backlog
+status: completed
 related_adr: ["0010"]
 related_tasks: ["0191", "0180", "0157"]
 tags: [layer-backend, priority-low, effort-small, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, measurement]
@@ -46,6 +46,15 @@ history:
       AWS reset between 00:00 and 00:05:00 UTC on the 1st. Our rule (00:00
       UTC, portal/period.rs) matches AWS to within 5 minutes. ADR 0010
       correction #2 closed as measured.
+  - date: "2026-10-01"
+    status: completed
+    who: okarcz
+    note: >
+      Closed. Every acceptance criterion met: AWS resets the MONTH quota
+      between 00:00 and 00:05 UTC on the 1st, measured with a one-request
+      probe and GetUsage (raw output below). Our rule (00:00 UTC on the
+      1st, portal/period.rs) stands, with no label change. ADR 0010
+      correction #2 closed (750b25d2). No follow-up work.
 
 ---
 
@@ -218,3 +227,11 @@ A one-request probe pins the instant without new infrastructure:
    `remaining = limit − 1`, the reset happened before 00:05 UTC and our rule
    matches AWS to within 5 minutes. If it shows the September balance − 1,
    the reset is later, and a second request at a later hour brackets it.
+
+### Result of the probe (2026-10-01)
+
+The probe ran as planned: one request at 00:05:00.496 UTC, HTTP 200. The
+10-01 bucket read `[1, 99999]` (`remaining = limit − 1`), so the request
+counted against October's fresh quota. With the 09-01 reading as the lower
+bound, AWS resets in **[00:00, 00:05:00] UTC on the 1st**. That is our
+rule to within 5 minutes; the cap and the dashboard label stay as they are.
