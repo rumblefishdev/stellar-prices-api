@@ -36,6 +36,16 @@ history:
       Decided: pin the instant with the 2026-10-01 one-request probe before
       the M3 evidence is submitted, instead of closing on the day-level
       result. Added as an acceptance criterion.
+  - date: "2026-10-01"
+    status: backlog
+    who: okarcz
+    note: >
+      Probe run: one request at 2026-10-01 00:05:00.496 UTC, HTTP 200.
+      GetUsage for key 6ncoc0c655 reads 09-30 [0, 99993] and 10-01
+      [1, 99999] — the request counted against October's fresh quota, so
+      AWS reset between 00:00 and 00:05:00 UTC on the 1st. Our rule (00:00
+      UTC, portal/period.rs) matches AWS to within 5 minutes. ADR 0010
+      correction #2 closed as measured.
 
 ---
 
@@ -75,7 +85,7 @@ plan.
 
 ## Acceptance Criteria
 
-- [ ] The `MONTH` reset instant and its timezone are recorded with the date and
+- [x] The `MONTH` reset instant and its timezone are recorded with the date and
       the source (log line or measurement), or recorded as still unobserved
       with the reason. **Partly met, 2026-09-25:** the day is measured (the
       1st), and resets at midnight in any timezone east of UTC are ruled out.
@@ -83,8 +93,9 @@ plan.
       handler doesn't log the calling key). See the measurement below.
       Closes with the 2026-10-01 probe (next criterion). Decided 2026-09-25:
       the day-level result isn't enough; the instant is pinned before the M3
-      evidence ([[0294]]) is submitted.
-- [ ] **The 2026-10-01 probe is run and recorded** (decided 2026-09-25, before
+      evidence ([[0294]]) is submitted. **Met, 2026-10-01:** the reset falls
+      between 00:00 and 00:05:00 UTC on the 1st (the probe below); UTC.
+- [x] **The 2026-10-01 probe is run and recorded** (decided 2026-09-25, before
       the M3 evidence goes out):
   - [x] **[local machine] 2026-09-30:** choose a key the operator owns on a
         `MONTH` plan, with September usage (balance below its limit). Record its
@@ -100,17 +111,39 @@ plan.
         request is sent by a one-shot user timer on the local machine
         (`probe-0221.timer`, 00:05:00 UTC, the key read from the gitignored env
         file, a marker set before sending so it cannot fire twice).
-  - [ ] **[local machine] 2026-10-01 00:05 UTC (02:05 CEST):** send exactly
+  - [x] **[local machine] 2026-10-01 00:05 UTC (02:05 CEST):** send exactly
         **one** keyed request, and nothing else with that key that day:
         `curl -si -H "x-api-key: $KEY" https://prices-api.sorobanscan.rumblefish.dev/v1/assets/native/price`.
         Record the UTC time and the status (must be 200).
-  - [ ] **[local machine] 2026-10-02:**
+        **Sent 2026-10-01T00:05:00.496Z, HTTP 200** (response `date: Thu, 01
+        Oct 2026 00:05:01 GMT`, `x-amzn-requestid:
+        529697e9-05ab-4bea-8f8a-e24063571786`). The only request with that
+        key on 10-01.
+  - [x] **[local machine] 2026-10-02:** (read 2026-10-01 07:10 UTC; the
+        10-01 bucket was already populated)
         `aws apigateway get-usage --profile soroban-readonly --region eu-central-1 --usage-plan-id <plan> --key-id <key> --start-date 2026-09-30 --end-date 2026-10-01`.
         `remaining = limit − 1` on 10-01 ==> AWS reset before 00:05 UTC, and
         our rule matches within 5 minutes. `remaining = 09-30 balance − 1` ==>
         the reset is later; bracket it with one more request at a later hour
         on the next boundary.
-  - [ ] Result written here and in ADR 0010 correction #2, with the date and
+        **Result: `remaining = limit − 1`** — AWS reset before 00:05 UTC.
+        Combined with the 2026-09-01 reading (the 08-31 bucket still ends on
+        August's balance), the reset falls in **[00:00, 00:05:00] UTC on the
+        1st**. Raw output:
+        ```json
+        {
+            "items": {
+                "6ncoc0c655": [
+                    [0, 99993],
+                    [1, 99999]
+                ]
+            },
+            "usagePlanId": "71t9im",
+            "startDate": "2026-09-30",
+            "endDate": "2026-10-01"
+        }
+        ```
+  - [x] Result written here and in ADR 0010 correction #2, with the date and
         the raw `get-usage` output.
 - [x] ADR 0010 correction #2 updated: either closed with the measured value, or
       restated with what is now known. Restated 2026-09-25, and the stale
