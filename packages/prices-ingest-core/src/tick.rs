@@ -15,10 +15,8 @@ pub struct TradeTick {
     pub transaction_index: u16,
     pub operation_index: u16,
     pub claim_index: u16,
-    pub base_id: u32,
-    pub quote_id: u32,
     /// The pair as `canonicalise` resolved it (SAC-collapsed): what candles
-    /// are keyed and written by (task 0139).
+    /// are keyed and written by. ClickHouse derives the ids (task 0139).
     pub base: AssetIdentity,
     pub quote: AssetIdentity,
     pub price: Decimal,
@@ -114,8 +112,6 @@ pub fn raw_trade_to_tick_with_source(
         transaction_index: trade.transaction_index,
         operation_index: trade.operation_index,
         claim_index: trade.claim_index,
-        base_id: pair.base_id,
-        quote_id: pair.quote_id,
         base: pair.base,
         quote: pair.quote,
         price,

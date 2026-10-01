@@ -91,8 +91,8 @@ fn main() {
     );
     for c in candles.iter().take(3) {
         println!(
-            "   candle minute={} base={} quote={} close={} vol_base={} version={}",
-            c.minute_start, c.asset_id, c.quote_asset_id, c.close, c.volume_base, c.version
+            "   candle minute={} base={:?} quote={:?} close={} vol_base={} version={}",
+            c.minute_start, c.base, c.quote, c.close, c.volume_base, c.version
         );
     }
 }

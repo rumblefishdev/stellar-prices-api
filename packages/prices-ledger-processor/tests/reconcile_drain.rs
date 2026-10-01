@@ -27,8 +27,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use prices_ingest_core::{
-    AssetRegistry, OfferLookupCounts, OhlcvCandle, OracleSample, PoolRegistryRow, Registries,
-    decode_object, extract_trades_with_counts,
+    AssetIdentity, AssetRegistry, OfferLookupCounts, OhlcvCandle, OracleSample, PoolRegistryRow,
+    Registries, decode_object, extract_trades_with_counts,
 };
 use prices_ledger_processor::{
     cursor::{Cursor, StubFileCursor},
@@ -139,7 +139,7 @@ impl ObjectFetcher for MemoryFetcher {
 struct Write {
     source: String,
     minute: u32,
-    pair: (u32, u32),
+    pair: (AssetIdentity, AssetIdentity),
     trade_count: u32,
 }
 
@@ -162,7 +162,7 @@ impl CandleSink for RecordingSink {
             .extend(candles.iter().map(|c| Write {
                 source: source.to_string(),
                 minute: c.minute_start,
-                pair: (c.asset_id, c.quote_asset_id),
+                pair: (c.base.clone(), c.quote.clone()),
                 trade_count: c.trade_count,
             }));
         Ok(())
@@ -257,11 +257,11 @@ fn assert_each_minute_written_once_and_whole(
     let open_minute = *ledgers_in_minute.keys().last().unwrap();
 
     let writes = sink.writes();
-    let mut per_key: HashMap<(String, u32, (u32, u32)), u32> = HashMap::new();
+    let mut per_key: HashMap<(String, u32, (AssetIdentity, AssetIdentity)), u32> = HashMap::new();
     let mut per_minute: BTreeMap<(String, u32), u64> = BTreeMap::new();
     for w in &writes {
         *per_key
-            .entry((w.source.clone(), w.minute, w.pair))
+            .entry((w.source.clone(), w.minute, w.pair.clone()))
             .or_insert(0) += 1;
         *per_minute.entry((w.source.clone(), w.minute)).or_insert(0) += w.trade_count as u64;
     }

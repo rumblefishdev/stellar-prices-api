@@ -15,8 +15,8 @@ use crate::price::CANDLE_COLUMN_MAX_INTEGER as COLUMN_DOMAIN_MAX_INTEGER;
 #[derive(Debug, Clone)]
 pub struct OhlcvCandle {
     pub minute_start: u32,
-    pub asset_id: u32,
-    pub quote_asset_id: u32,
+    /// The pair; the writer sends these and ClickHouse derives the ids
+    /// (task 0139).
     pub base: AssetIdentity,
     pub quote: AssetIdentity,
     pub open: Decimal,
@@ -121,8 +121,6 @@ impl CandleAccumulator {
             .or_insert_with_key(|key| OpenBucket {
                 candle: OhlcvCandle {
                     minute_start,
-                    asset_id: tick.base_id,
-                    quote_asset_id: tick.quote_id,
                     base: key.1.clone(),
                     quote: key.2.clone(),
                     // A minute with no price-forming fill keeps these zeros and is
@@ -289,8 +287,8 @@ fn finalise(bucket: &mut OpenBucket) -> OhlcvCandle {
         // the right trade and saying so is the whole of this WARN.
         warn!(
             minute_start = bucket.candle.minute_start,
-            asset_id = bucket.candle.asset_id,
-            quote_asset_id = bucket.candle.quote_asset_id,
+            base = ?bucket.candle.base,
+            quote = ?bucket.candle.quote,
             trade_count = bucket.candle.trade_count,
             "candle value saturated at the Decimal(38, 14) column domain — a \
              VOLUME of this minute (volume_base / volume_quote / vwap / \
@@ -431,8 +429,6 @@ mod tests {
             transaction_index: tx,
             operation_index: op,
             claim_index: claim,
-            base_id: base,
-            quote_id: quote,
             base: ident(base),
             quote: ident(quote),
             price: Decimal::from(price),
@@ -587,16 +583,17 @@ mod tests {
         assert_eq!(keys, [1, 3, 5, 9].map(ident));
     }
 
-    /// Two identities that share a surrogate id (task 0139) are two candles.
+    /// Two identities in one minute are two candles: buckets key on the
+    /// identity, which is all a tick carries since task 0139.
     #[test]
-    fn buckets_key_on_identities_not_ids() {
+    fn buckets_key_on_identities() {
         let mut acc = CandleAccumulator::new();
         let mut other = tick(100, 1, 0, 1, 2, 4, 1, 4, T_M0_B);
         other.base = ident(7);
         acc.merge(tick(100, 0, 0, 1, 2, 10, 1, 10, T_M0_A));
         acc.merge(other);
         let out = acc.flush_all();
-        assert_eq!(out.len(), 2, "one id, two identities, two candles");
+        assert_eq!(out.len(), 2, "two identities, two candles");
         assert_eq!((&out[0].base, out[0].close), (&ident(1), 10.into()));
         assert_eq!((&out[1].base, out[1].close), (&ident(7), 4.into()));
     }
@@ -880,8 +877,6 @@ mod tests {
             transaction_index: 0,
             operation_index: 0,
             claim_index: 0,
-            base_id: 1,
-            quote_id: 2,
             base: ident(1),
             quote: ident(2),
             price,
@@ -954,8 +949,6 @@ mod tests {
             transaction_index: 0,
             operation_index: 0,
             claim_index: 0,
-            base_id: 1,
-            quote_id: 2,
             base: ident(1),
             quote: ident(2),
             price,
@@ -999,8 +992,6 @@ mod tests {
             transaction_index: 0,
             operation_index: 0,
             claim_index: 0,
-            base_id: 1,
-            quote_id: 2,
             base: ident(1),
             quote: ident(2),
             price: Decimal::new(486, 17), // ~4.86e-15, the 2026-04-02 06:39 row

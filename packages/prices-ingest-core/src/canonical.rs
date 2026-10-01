@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sha2::{Digest, Sha256};
 use stellar_xdr::{
@@ -62,7 +62,7 @@ impl AssetIdentity {
 /// shared with `enrichment-worker`) so the backfill interns the same identity the
 /// enrichment reader matches on; they can never drift. Used here and in the
 /// Soroban oracle reconciliation (`soroban.rs`) so a Reflector `USDC`/`USDT`
-/// symbol resolves to the same `asset_id` used as a trade quote.
+/// symbol resolves to the same identity used as a trade quote.
 pub(crate) use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 
 /// Mainnet (Public) network passphrase. A SAC contract id is **network-scoped**:
@@ -149,21 +149,20 @@ fn is_preferred_quote(asset: &AssetIdentity) -> Option<u8> {
 pub struct CanonicalPair {
     pub base: AssetIdentity,
     pub quote: AssetIdentity,
-    pub base_id: u32,
-    pub quote_id: u32,
     pub inverted: bool,
 }
 
+/// The identities this process knows: what `prices.assets` held when it was
+/// loaded, plus what the run has interned. It holds no ids. ClickHouse derives
+/// every asset id from the identity (task 0139), so no process can hand two
+/// assets one id.
 pub struct AssetRegistry {
-    /// Identity → a process-local number. No writer sends it since task 0139:
-    /// ClickHouse derives the stored id from the identity.
-    by_identity: HashMap<AssetIdentity, u32>,
-    next_id: u32,
+    known: HashSet<AssetIdentity>,
     network_id: [u8; 32],
     /// SAC contract address → the classic identity it wraps (task 0061 §12.4).
-    /// Lets the AMM path collapse a SAC-quoted/based token onto the same
-    /// `asset_id` as its classic SDEX form, so liquidity is not split across two
-    /// ids and the cross-source merge (ADR 0004) holds.
+    /// Lets the AMM path collapse a SAC-quoted/based token onto its classic SDEX
+    /// identity, so liquidity is not split across two assets and the
+    /// cross-source merge (ADR 0004) holds.
     sac_index: HashMap<String, AssetIdentity>,
     /// Identities first interned by this process and not yet persisted, in
     /// intern order. Replaces the id watermark (task 0139): a set of
@@ -173,17 +172,8 @@ pub struct AssetRegistry {
 
 impl AssetRegistry {
     pub fn from_existing(existing: Vec<AssetIdentity>) -> Self {
-        let mut next_id = 1u32;
-        let mut by_identity = HashMap::with_capacity(existing.len());
-        for identity in existing {
-            by_identity.entry(identity).or_insert_with(|| {
-                next_id += 1;
-                next_id - 1
-            });
-        }
         let mut reg = Self {
-            by_identity,
-            next_id,
+            known: existing.into_iter().collect(),
             // Mainnet SAC scope is baked in here. To support a non-mainnet
             // backfill, take the passphrase as a parameter instead — see the
             // silent-failure note on `MAINNET_PASSPHRASE` (review #9).
@@ -203,7 +193,7 @@ impl AssetRegistry {
             code: "USDT".to_string(),
             issuer: USDT_ISSUER.to_string(),
         });
-        let known: Vec<AssetIdentity> = reg.by_identity.keys().cloned().collect();
+        let known: Vec<AssetIdentity> = reg.known.iter().cloned().collect();
         for identity in known {
             reg.register_sac(&identity);
         }
@@ -222,21 +212,21 @@ impl AssetRegistry {
         }
     }
 
-    pub fn get_or_assign(&mut self, identity: &AssetIdentity) -> u32 {
-        if let Some(&id) = self.by_identity.get(identity) {
-            return id;
+    /// Record `identity`; true when it was not known yet, which also makes it
+    /// pending (to be written to `prices.assets`).
+    pub fn intern(&mut self, identity: &AssetIdentity) -> bool {
+        if self.known.contains(identity) {
+            return false;
         }
-        let id = self.next_id;
-        self.next_id += 1;
-        self.by_identity.insert(identity.clone(), id);
+        self.known.insert(identity.clone());
         self.pending.push(identity.clone());
         self.register_sac(identity);
-        id
+        true
     }
 
     /// If `contract_addr` is the SAC of a known classic asset, return that
     /// underlying classic identity (§12.4). The AMM path uses this to collapse a
-    /// SAC token onto its classic `asset_id`; a pure Soroban token returns `None`
+    /// SAC token onto its classic identity; a pure Soroban token returns `None`
     /// and keeps its `Contract(address)` identity.
     pub fn resolve_sac(&self, contract_addr: &str) -> Option<AssetIdentity> {
         self.sac_index.get(contract_addr).cloned()
@@ -253,7 +243,7 @@ impl AssetRegistry {
     }
 
     pub fn assets(&self) -> impl Iterator<Item = &AssetIdentity> {
-        self.by_identity.keys()
+        self.known.iter()
     }
 
     /// Identities interned since the last [`clear_pending`], in intern order —
@@ -294,14 +284,12 @@ pub fn canonicalise(
         }
     };
 
-    let base_id = registry.get_or_assign(&base);
-    let quote_id = registry.get_or_assign(&quote);
+    registry.intern(&base);
+    registry.intern(&quote);
 
     CanonicalPair {
         base,
         quote,
-        base_id,
-        quote_id,
         inverted,
     }
 }
@@ -397,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn sac_and_classic_collapse_to_one_asset_id() {
+    fn sac_and_classic_collapse_to_one_identity() {
         let usdc = AssetIdentity::Credit {
             code: "USDC".to_string(),
             issuer: USDC_ISSUER.to_string(),
@@ -407,15 +395,15 @@ mod tests {
 
         let mut reg = AssetRegistry::from_existing(vec![]);
         // SDEX path interns the classic USDC.
-        let via_sdex = reg.get_or_assign(&usdc);
+        assert!(reg.intern(&usdc));
         // AMM path sees the USDC SAC contract address → resolves to the classic
-        // identity → same asset_id (no split).
+        // identity → one asset, so one derived id (no split).
         let resolved = reg
             .resolve_sac(&usdc_sac)
             .expect("usdc sac maps to classic");
-        let via_amm = reg.get_or_assign(&resolved);
         assert_eq!(resolved, usdc);
-        assert_eq!(via_sdex, via_amm);
+        assert!(!reg.intern(&resolved), "already known");
+        assert_eq!(reg.assets().count(), 1);
     }
 
     #[test]
@@ -451,10 +439,10 @@ mod tests {
         let mut reg = AssetRegistry::from_existing(vec![AssetIdentity::Native]);
         let b = AssetIdentity::Contract("CB".to_string());
         let a = AssetIdentity::Contract("CA".to_string());
-        reg.get_or_assign(&b);
-        reg.get_or_assign(&AssetIdentity::Native);
-        reg.get_or_assign(&a);
-        reg.get_or_assign(&b);
+        assert!(reg.intern(&b));
+        assert!(!reg.intern(&AssetIdentity::Native), "loaded");
+        assert!(reg.intern(&a));
+        assert!(!reg.intern(&b), "interned once");
         assert_eq!(pending(&reg), vec![b, a], "intern order, no repeats");
     }
 
@@ -462,12 +450,12 @@ mod tests {
     fn pending_survives_until_cleared() {
         let mut reg = AssetRegistry::from_existing(vec![]);
         let new = AssetIdentity::Contract("CNEW".to_string());
-        reg.get_or_assign(&new);
+        reg.intern(&new);
         // A failed write does not clear: the next run offers it again.
         assert_eq!(pending(&reg), vec![new.clone()]);
         reg.clear_pending();
         assert!(pending(&reg).is_empty());
-        reg.get_or_assign(&new);
+        reg.intern(&new);
         assert!(pending(&reg).is_empty(), "re-interning adds nothing");
     }
 }

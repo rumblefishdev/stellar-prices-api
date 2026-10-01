@@ -34,8 +34,8 @@ async fn write_new_assets_writes_only_the_newly_discovered_asset() {
     let sink = CountingSink::default();
 
     // The run interns one brand-new asset (plus re-sees known ones — no-ops).
-    reg.get_or_assign(&AssetIdentity::Native);
-    reg.get_or_assign(&AssetIdentity::Contract("CNEW".to_string()));
+    reg.intern(&AssetIdentity::Native);
+    reg.intern(&AssetIdentity::Contract("CNEW".to_string()));
 
     sink.write_new_assets(&reg).await.unwrap();
 

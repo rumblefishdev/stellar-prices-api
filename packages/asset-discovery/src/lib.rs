@@ -16,8 +16,8 @@
 //! hourly reader of the same ledgers could only find what live already had.
 //!
 //! The seed reuses `prices_ingest_core`'s [`AssetRegistry`] + [`OhlcvWriter`] so
-//! the rows are byte-identical to the live ledger processor's (same surrogate
-//! ids, same column mapping). The supply fetch (`prices.asset_supply`) is a
+//! the rows are byte-identical to the live ledger processor's (same column
+//! mapping; ClickHouse derives the ids). The supply fetch (`prices.asset_supply`) is a
 //! *different* worker (task 0039); this crate only writes the identity columns
 //! of `prices.assets` — never `home_domain`, whose enrichment carries the
 //! task-0067 whole-row-clobber hazard.
@@ -94,7 +94,7 @@ pub async fn ensure_seed(
     // from `prices.assets` become pending.
     let mut registry = AssetRegistry::from_existing(existing);
     for identity in identities {
-        registry.get_or_assign(identity);
+        registry.intern(identity);
     }
     // Steady state: the seed is already present, nothing is pending, and this
     // writes NOTHING — no INSERT, no new part.

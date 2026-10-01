@@ -5,8 +5,8 @@
 //! (`sdex-backfill`) and is now reused verbatim by the live **Prices Ledger
 //! Processor Lambda** (`prices-ledger-processor`, task 0038). Both writers go
 //! through the same modules so live and backfill produce **identical**
-//! `prices.price_ohlcv_1m` rows (same surrogate `asset_id`s via the
-//! [`AssetRegistry`], same SAC→classic collapse, same preferred-quote
+//! `prices.price_ohlcv_1m` rows (same identities, from which ClickHouse
+//! derives the `asset_id`s, same SAC→classic collapse, same preferred-quote
 //! orientation, same `Decimal(38,14)` scaling, same `version`). Splitting this
 //! into its own crate is what prevents the two paths from drifting.
 //!
@@ -15,8 +15,8 @@
 //! - [`soroban`] — Soroban AMM trades + oracle samples from contract events.
 //! - [`static_pools`] — the committed list of factory-less pools
 //!   ([`STATIC_POOLS`], task 0300) merged into the AMM registries.
-//! - [`canonical`] — asset identity, the [`AssetRegistry`] surrogate-id store,
-//!   and `(base, quote)` canonicalisation.
+//! - [`canonical`] — asset identity, the [`AssetRegistry`] of known and newly
+//!   seen identities, and `(base, quote)` canonicalisation.
 //! - [`price`] / [`tick`] — per-trade price + the [`TradeTick`] the bucketer eats.
 //! - [`bucket`] — 1-minute OHLCV accumulation ([`CandleAccumulator`]).
 //! - [`writer`] — the transport-agnostic ClickHouse [`OhlcvWriter`] (works with a

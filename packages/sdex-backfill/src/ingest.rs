@@ -532,8 +532,6 @@ mod tests {
             transaction_index: 0,
             operation_index: 0,
             claim_index: 0,
-            base_id: 1,
-            quote_id: 2,
             base: AssetIdentity::Native,
             quote: AssetIdentity::Contract("CQUOTE".to_string()),
             price,
@@ -735,8 +733,8 @@ mod tests {
     fn registry_with_new_pair() -> AssetRegistry {
         let mut registry = AssetRegistry::from_existing(vec![]);
         let quote = AssetIdentity::Contract("CQUOTE".to_string());
-        registry.get_or_assign(&AssetIdentity::Native);
-        registry.get_or_assign(&quote);
+        registry.intern(&AssetIdentity::Native);
+        registry.intern(&quote);
         registry
     }
 

@@ -14,9 +14,7 @@
 pub mod metrics;
 
 use base64::Engine;
-use prices_ingest_core::{
-    AssetIdentity, AssetRegistry, OhlcvWriter, OracleSample, reflector_key_to_identity,
-};
+use prices_ingest_core::{AssetIdentity, OhlcvWriter, OracleSample, reflector_key_to_identity};
 use stellar_xdr::{
     ContractId, Hash, HostFunction, Int128Parts, InvokeContractArgs, InvokeHostFunctionOp, Limits,
     Memo, MuxedAccount, Operation, OperationBody, Preconditions, ReadXdr, ScAddress, ScMap,
@@ -487,10 +485,7 @@ async fn run_oracle_inner(
     contract: &str,
     timestamp_rejected: &mut usize,
 ) -> Result<OracleStats, OracleError> {
-    let existing = writer.load_assets().await?;
-    let mut registry = AssetRegistry::from_existing(existing);
-    let known_before = registry.assets().count();
-    let mut samples = Vec::new();
+    let mut samples: Vec<OracleSample> = Vec::new();
     let mut skipped = 0usize;
     // Read once per pass, not per symbol: the plausibility window must not move
     // underneath a batch, or the same reading could be accepted for one symbol
@@ -541,10 +536,8 @@ async fn run_oracle_inner(
                         continue;
                     }
                 };
-                let asset_id = registry.get_or_assign(&identity);
                 samples.push(OracleSample {
                     timestamp,
-                    asset_id,
                     identity: Some(identity),
                     oracle_name: ORACLE_NAME.to_string(),
                     price_usd: pd.price,
@@ -562,13 +555,12 @@ async fn run_oracle_inner(
         }
     }
 
-    // Persist any newly-minted surrogate ids BEFORE the oracle rows that
-    // reference them, so oracle_prices.asset_id always resolves in prices.assets
-    // and never collides with an id the discovery/ingest path mints next (it
-    // derives next_id from the persisted max).
-    if registry.assets().count() > known_before {
-        writer.write_assets(&registry).await?;
-    }
+    // Write the sampled assets' rows BEFORE the oracle rows, so every
+    // oracle_prices.asset_id resolves in prices.assets. Only absent ones: the
+    // ids are derived from the identity (task 0139), so nothing needs the
+    // 210k-row registry, and a present row is never re-emitted.
+    let sampled: Vec<AssetIdentity> = samples.iter().filter_map(|s| s.identity.clone()).collect();
+    writer.write_absent_assets(&sampled).await?;
 
     let written = samples.len();
     writer.write_oracle(&samples).await?;

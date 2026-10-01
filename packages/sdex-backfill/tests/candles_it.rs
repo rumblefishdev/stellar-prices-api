@@ -35,8 +35,6 @@ fn candle(asset: u32, quote: u32, closed_at: i64, ledger: u32) -> Vec<OhlcvCandl
         transaction_index: 0,
         operation_index: 0,
         claim_index: 0,
-        base_id: asset,
-        quote_id: quote,
         base: AssetIdentity::Contract(format!("C{asset}")),
         quote: AssetIdentity::Contract(format!("C{quote}")),
         price: Decimal::from(10),

@@ -96,9 +96,9 @@ impl ClickHouseSink {
         self.writer.client()
     }
 
-    /// Load the existing asset registry from `prices.assets` so surrogate ids
-    /// are reused (not reassigned) across cold starts — the load-bearing
-    /// guarantee that live ids match the backfill's.
+    /// Load the identities already in `prices.assets`, so a cold start writes
+    /// only the assets it discovers. Ids are ClickHouse's, derived from the
+    /// identity (task 0139), so live and backfill ids agree by construction.
     pub async fn load_registry(&self) -> Result<AssetRegistry, SinkError> {
         let existing = self.writer.load_assets().await.map_err(redact)?;
         Ok(AssetRegistry::from_existing(existing))

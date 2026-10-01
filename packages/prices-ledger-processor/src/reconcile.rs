@@ -123,8 +123,8 @@ pub struct RunStats {
     pub ch_write: Option<WriteLatency>,
 }
 
-/// Warm per-container processing state: the surrogate-id registry (loaded from
-/// `prices.assets` at cold start) and the incrementally-grown AMM venue/pool
+/// Warm per-container processing state: the asset registry (identities loaded
+/// from `prices.assets` at cold start) and the incrementally-grown AMM venue/pool
 /// registries. Persisting these across invocations lets a warm Lambda resolve
 /// pools discovered earlier in its lifetime.
 pub struct ProcessingState {
@@ -404,8 +404,8 @@ where
             _ => {}
         }
 
-        // Write newly-interned assets FIRST — the candles below reference their
-        // surrogate ids, so persisting the dimension row before the fact rows
+        // Write newly-interned assets FIRST — the candles below carry their
+        // derived ids, so persisting the dimension row before the fact rows
         // keeps `prices.assets` referentially ahead of `price_ohlcv_*`. Only the
         // registry's pending identities, not the whole registry (task 0132); a
         // run that discovered nothing new writes nothing. The registry is warm

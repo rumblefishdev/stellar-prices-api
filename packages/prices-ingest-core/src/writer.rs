@@ -232,6 +232,36 @@ impl OhlcvWriter {
             .await
     }
 
+    /// Write the `prices.assets` rows of those `identities` the table does not
+    /// hold yet, and return how many that was. For a writer that needs a few
+    /// assets to exist without loading the ~210k-row registry (the oracle
+    /// worker). A row already present is not re-emitted.
+    pub async fn write_absent_assets(
+        &self,
+        identities: &[AssetIdentity],
+    ) -> Result<usize, IngestError> {
+        let mut absent = AssetRegistry::from_existing(Vec::new());
+        for identity in identities {
+            let (code, issuer, contract) = identity_strings(identity);
+            let present: u64 = self
+                .client
+                .query(
+                    "SELECT count() FROM prices.assets \
+                     WHERE asset_code = ? AND issuer_address = ? AND contract_address = ?",
+                )
+                .bind(code)
+                .bind(issuer)
+                .bind(contract)
+                .fetch_one()
+                .await?;
+            if present == 0 {
+                absent.intern(identity);
+            }
+        }
+        self.write_new_assets(&absent).await?;
+        Ok(absent.pending_new().count())
+    }
+
     /// Shared row-builder for [`write_assets`] / [`write_new_assets`]. Skips the
     /// INSERT entirely when `rows` is empty (matching every other writer here),
     /// so an idle reconcile makes no network round-trip. `registry` is borrowed
@@ -404,6 +434,9 @@ impl OhlcvWriter {
     /// already written — a partial write, which is the exact failure mode the
     /// guard exists to prevent. All identities are checked first; if any fails,
     /// nothing is written and the error names every offender.
+    ///
+    /// Since 0139 ClickHouse derives the id from the identity, so a shared id
+    /// can no longer be stored. The guard stays as a cheap assertion.
     pub async fn populate_usd_rate_from_oracle(
         &self,
         pegs: &[AssetIdentity],
@@ -756,7 +789,6 @@ struct UnresolvedPoolRow {
 #[derive(Debug, Clone)]
 pub struct OracleSample {
     pub timestamp: u32,
-    pub asset_id: u32,
     /// The sampled asset; `None` for a feed with no asset (REDSTONE). The
     /// writer sends it and ClickHouse derives the row's id (task 0139).
     pub identity: Option<AssetIdentity>,
@@ -856,8 +888,6 @@ mod tests {
     fn the_row_builder_maps_each_pf_column_from_its_own_field() {
         let candle = OhlcvCandle {
             minute_start: 1_700_000_000,
-            asset_id: 1,
-            quote_asset_id: 2,
             base: AssetIdentity::Native,
             quote: AssetIdentity::Contract("CQUOTE".to_string()),
             open: Decimal::from(3),
@@ -904,7 +934,6 @@ mod tests {
     fn the_oracle_row_names_the_identity_or_a_blank_one() {
         let sample = |identity| OracleSample {
             timestamp: 1,
-            asset_id: 0,
             identity,
             oracle_name: "reflector".to_string(),
             price_usd: 1,

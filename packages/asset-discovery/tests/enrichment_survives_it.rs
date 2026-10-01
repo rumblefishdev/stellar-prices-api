@@ -34,7 +34,7 @@ async fn home_domain_survives_a_second_write_assets() {
 
     // Register an asset and write its identity row (as the ledger processor does).
     let mut registry = AssetRegistry::from_existing(Vec::new());
-    registry.get_or_assign(&AssetIdentity::Credit {
+    registry.intern(&AssetIdentity::Credit {
         code: "USDC".to_string(),
         issuer: prices_clickhouse::USDC_ISSUER.to_string(),
     });

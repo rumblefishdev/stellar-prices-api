@@ -76,7 +76,7 @@ async fn main() -> Result<(), Error> {
     // - cursor.read(): last processed ledger from `prices.ingest_cursor`. Durable,
     //   so the loop resumes across execution-environment recycles instead of
     //   rewinding to INITIAL_CURSOR every cold start (the freeze this task fixes).
-    // - load_registry: existing asset surrogate ids from `prices.assets`.
+    // - load_registry: the identities already in `prices.assets`.
     // - load_pool_registry: discovered AMM pool classification from
     //   `prices.pool_registry` (task 0078). The processor writes back only the
     //   pools it learns from factory events (task 0291; `prices_writer` holds
