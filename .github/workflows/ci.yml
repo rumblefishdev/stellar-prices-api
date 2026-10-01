@@ -221,10 +221,11 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace
       - run: cargo clippy -p extractors-core -p phoenix-extractor -p soroswap-extractor -p aquarius-extractor -p comet-extractor -p ledger-processor -p prices-api -- -D warnings
-      # `--no-deps` because prices-ingest-core (a path dependency) carries
-      # pre-existing clippy findings; this lints only the crate that owns the
-      # ClickHouseWriteLatencyMs publish path (task 0125).
-      - run: cargo clippy -p prices-ledger-processor --features lambda --no-deps -- -D warnings
+      # The ingest writers and the core they share, tests included, with the
+      # features their Lambda / operator builds use. prices-ingest-core was
+      # linted nowhere before (this step ran `--no-deps` on the ledger
+      # processor alone), which is how ten findings piled up (task 0139).
+      - run: cargo clippy -p prices-ingest-core -p prices-ledger-processor -p asset-discovery -p sdex-backfill -p events-backfill -p oracle-worker --all-targets --features prices-ledger-processor/lambda,asset-discovery/lambda,sdex-backfill/aws-mtls,oracle-worker/lambda -- -D warnings
       # The operator binaries `coarse-repair` and `load-external-rate` declare
       # `required-features = ["aws-mtls"]`, so `cargo check --workspace` and
       # `cargo test --workspace` skip them entirely, and the Lambda build names
