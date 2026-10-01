@@ -20,7 +20,8 @@ margin:
 > `x-api-key` header; the reviewer key published with the Milestone 2 package
 > (`prices-production-scf-reviewer-key-20260909T120021Z`, public free tier —
 > 1 request per second, burst 5, 100,000 requests a month, read-only) is
-> unchanged and every command below runs as printed with `API_KEY` set to it.
+> unchanged (still enabled and on the free plan, checked 2026-10-01) and every
+> command below runs as printed with `API_KEY` set to it.
 >
 > **Criteria graded against amended wording** are set out in full in
 > [`milestone-3-rfp-deviations.md`](milestone-3-rfp-deviations.md), part of
@@ -34,21 +35,21 @@ service went public on **2026-09-23 at 09:40 CEST**, when the onboarding portal
 at `https://sorobanscan.rumblefish.dev/api/` lost its staging basic auth; the
 API itself had been serving on the custom domain since Tranche 2.
 
-State of the nine Tranche 3 acceptance criteria **as of 2026-09-25** (this table
+State of the nine Tranche 3 acceptance criteria **as of 2026-10-01** (this table
 is rewritten on submission day; the rows say what is claimed, not what is
 hoped):
 
-| AC  | Criterion (short)                                           | State on 2026-09-25                                                                                                                                                         |
-| --- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `/backfill/status`: running, fresh push, depth ≤ 2018-01-01 | **Depth met — 2015-11-18.** Liveness graded on amended wording (deviations §1): the archive completed 2026-07-27                                                            |
-| 2   | OpenAPI lints clean; Swagger UI deployed                    | Lint is a CI job (`npm run openapi:lint`, Redocly CLI 2.44.0); reference rendered at `…/api/docs` (deviations §4). _To fill: lint output on the day_                        |
-| 3   | Portal accessible; self-service key flow works              | Portal public since 09-23; sign-in gated on the Stellar Developers guild since 09-02 (0254). _To fill:_ the recorded walk (0164)                                            |
-| 4   | Integration suite passes on CI, link provided               | **Met.** CI starts ClickHouse and runs the integration suite on every Rust change since PR #327 (2026-09-22); run linked in §5                                              |
-| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met 2026-09-18 — p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`; scope in deviations §5                                               |
-| 6   | Security checklist signed off                               | mTLS-only ClickHouse, secrets in Secrets Manager, inputs validated, no wildcard **actions**; the 22 `Resource: "*"` statements are inventoried in §5                        |
-| 7   | Repo public; `cdk deploy` from README in a fresh account    | **Met on the fresh-account runbook** (0297, PR #357): repo PUBLIC, `README.md` → `infra/README.md`; macOS via 0239 (PR #360). Not run in an empty account (§5)              |
-| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, 65 alarms, all OK on 10-01. Access **on request to a named reviewer, MFA enforced** (deviations §3)                                 |
-| 9   | 7-day post-launch report                                    | **Met 2026-09-30 — uptime 100.000 %, 0 × 5XX in 65,806 requests, gateway p95 145.2 ms**; push cadence and `earliest_data_available` replaced by live ingestion signals (§4) |
+| AC  | Criterion (short)                                           | State on 2026-10-01                                                                                                                                                                                                         |
+| --- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `/backfill/status`: running, fresh push, depth ≤ 2018-01-01 | **Depth met — 2015-11-18.** Liveness graded on amended wording (deviations §1): the archive completed 2026-07-27                                                                                                            |
+| 2   | OpenAPI lints clean; Swagger UI deployed                    | Lint green in CI on 09-30 (`npm run openapi:lint`, Redocly CLI 2.44.0); reference rendered at `…/api/docs` (deviations §4). _To fill: lint output on the day_                                                               |
+| 3   | Portal accessible; self-service key flow works              | Portal public since 09-23; sign-in gated on the Stellar Developers guild since 09-02 (0254). _To fill:_ the recorded walk (0164)                                                                                            |
+| 4   | Integration suite passes on CI, link provided               | **Met** on pull-request CI: ClickHouse starts and the integration suite runs on every PR that changes Rust code since PR #327 (09-22); run linked in §5. `master` (last release 09-11) gets the suite with the next release |
+| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met 2026-09-18 — p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`; scope in deviations §5                                                                                               |
+| 6   | Security checklist signed off                               | **Met.** mTLS-only ClickHouse, secrets in Secrets Manager, inputs validated, no wildcard **actions**; the 22 `Resource: "*"` statements are inventoried in §5                                                               |
+| 7   | Repo public; `cdk deploy` from README in a fresh account    | **Met on the fresh-account runbook** (0297, PR #357): repo PUBLIC, `README.md` → `infra/README.md` on `develop`, on `master` with the next release; macOS via 0239 (PR #360). Not run in an empty account (§5)              |
+| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, 65 alarms, all OK on 10-01. Access **on request to a named reviewer, MFA enforced** (deviations §3)                                                                                 |
+| 9   | 7-day post-launch report                                    | **Met 2026-09-30 — uptime 100.000 %, 0 × 5XX in 65,806 requests, gateway p95 145.2 ms**; push cadence and `earliest_data_available` replaced by live ingestion signals (§4)                                                 |
 
 The Tranche 3 work items with no numbered criterion are listed in §6, the known
 issues this submission declares in §7, and what it deliberately does not claim
@@ -192,8 +193,9 @@ A run to cite: [`36001067242`](https://github.com/rumblefishdev/stellar-prices-a
 ClickHouse → Apply the ClickHouse schema → Start the ClickHouse reverse proxy →
 ClickHouse integration tests_, all `success`).
 
-_To fill on submission day:_ the newest green run on `develop`, and the test
-count from its log (229 integration tests at #327).
+_To fill on submission day:_ the first green run on `master` after the release
+(CI runs on pull requests and on pushes to `master`, not on `develop`), and the
+test count from its log (229 integration tests at #327).
 
 #### Reproduce it locally
 
