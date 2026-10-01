@@ -10,11 +10,6 @@ deliverable. Access is created for a named person when they ask, with MFA, and
 removed when the review is over — the same model the block explorer recorded
 for its D3 AC 3 (explorer task 0129: "available on request").
 
-History: task 0125 shipped `prices-production-stellar-viewer` (IAM user, scoped
-inline read policy) on 2026-09-03 and its console login on 2026-09-04. The
-login was deleted on 2026-09-25 and the user removed from the Observability
-stack the same day (this task). The policy it carried is the template below.
-
 Alternative without an IAM user in this account:
 [0295-dashboard-access-via-identity-center.md](0295-dashboard-access-via-identity-center.md)
 — the reviewer becomes an IAM Identity Center user with a permission set,
@@ -58,10 +53,10 @@ runs against the shell's default credentials: on 2026-09-25 that created the
 user in the operator's personal account, and the sign-in at this account's URL
 failed with "Authentication failed".
 
-`dashboard-read.json` — the scoped policy task 0125 wrote (deep-review CR-01:
-**not** `CloudWatchReadOnlyAccess`, which also grants `logs:*` and `xray:Get*`
-across the shared account), plus the MFA condition and the self-service
-statements the console needs to let the person enrol a device:
+`dashboard-read.json` — the scoped policy (**not** `CloudWatchReadOnlyAccess`,
+which also grants `logs:*` and `xray:Get*` across the shared account), plus the
+MFA condition and the self-service statements the console needs to let the
+person enrol a device:
 
 ```json
 {
