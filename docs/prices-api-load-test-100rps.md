@@ -444,11 +444,14 @@ from the AWS side and is not a property of the API.
   decomposed: query ≈ 8 ms, AWS↔Hetzner a few ms, connection setup ≈ 560 ms
   but only on a cold container. The 170–240 ms measured on 2026-09-03 was
   client network plus cold containers, not the data path.
-- **No client-measured number from this run can be quoted for AC 5.** The
-  k6 figure measures the operator's network. Any number meant for the
-  report — and every run at 500 / 1000 req/s — must be driven from a client
-  inside `eu-central-1`: task
-  [0293](../lore/1-tasks/active/0293_TEST_load-test-ramp-to-1000-rps-from-inside-eu-central-1.md).
+- **No client-measured number from this run is quoted for AC 5.** The k6
+  figure measures the operator's network. The plan was to drive the report's
+  runs, and every run at 500 / 1000 req/s, from a client inside
+  `eu-central-1` (task
+  [0293](../lore/1-tasks/archive/0293_TEST_load-test-ramp-to-1000-rps-from-inside-eu-central-1.md));
+  on 2026-09-18 that was dropped by decision. The evidence run below stays on
+  the laptop, brackets every run with one-minute controls that measure the
+  network, and reports the gateway-side p95 beside each figure.
 - Noted, unexplained: the gateway's per-minute p95 alternated
   45 / 81 / 44 / 89 / 49 / 85 ms — something periodic adds ~40 ms every other
   minute.
@@ -477,7 +480,7 @@ idle containers. Details in task 0293.
 
 ## Evidence run and the ceiling — 2026-09-18
 
-Task [0293](../lore/1-tasks/active/0293_TEST_load-test-ramp-to-1000-rps-from-inside-eu-central-1.md).
+Task [0293](../lore/1-tasks/archive/0293_TEST_load-test-ramp-to-1000-rps-from-inside-eu-central-1.md).
 Tranche 3 AC 5 reads _"p95 <100ms at 100 req/s confirmed"_, the usage plan
 named; the Work list asks for results at 100, 500 and 1000 req/s. All runs on
 2026-09-18, k6 v2.2.0 from the operator's laptop in Poland, each bracketed by
@@ -557,7 +560,9 @@ Ordered by urgency, not by AC order.
 - [x] Verdict written — **PASS** on the AC, with the outage stated alongside it
 - [x] Cache-**miss** percentiles — obtained 2026-09-17 on the gateway side
       (p95 74 ms); the client-side figure from that run is tainted by the
-      client's network and is replaced by 0293's in-region run.
+      client's network and is replaced by 0293's evidence run of 2026-09-18,
+      from the same laptop with network controls (the in-region client was
+      dropped by decision).
 - [x] CloudWatch access to the production account obtained (used for the
       2026-09-17 decomposition)
 - [ ] Report cited by
