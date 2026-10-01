@@ -13,7 +13,7 @@ async fn write_new_assets_writes_nothing_when_no_new_assets() {
     // Cold start loaded one existing asset; a reconcile that discovers no new
     // asset must write ZERO rows — this is the steady-state case that used to
     // re-emit all ~200k rows every run (the 9,413× amplification).
-    let reg = AssetRegistry::from_existing(vec![(1, AssetIdentity::Native)]);
+    let reg = AssetRegistry::from_existing(vec![AssetIdentity::Native]);
     let sink = CountingSink::default();
 
     sink.write_new_assets(&reg).await.unwrap();
@@ -28,8 +28,8 @@ async fn write_new_assets_writes_nothing_when_no_new_assets() {
 #[tokio::test]
 async fn write_new_assets_writes_only_the_newly_discovered_asset() {
     let mut reg = AssetRegistry::from_existing(vec![
-        (1, AssetIdentity::Native),
-        (2, AssetIdentity::Contract("CEXISTING".to_string())),
+        AssetIdentity::Native,
+        AssetIdentity::Contract("CEXISTING".to_string()),
     ]);
     let sink = CountingSink::default();
 

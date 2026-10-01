@@ -34,7 +34,7 @@ async fn home_domain_survives_a_second_write_assets() {
 
     // Register an asset and write its identity row (as the ledger processor does).
     let mut registry = AssetRegistry::from_existing(Vec::new());
-    let asset_id = registry.get_or_assign(&AssetIdentity::Credit {
+    registry.get_or_assign(&AssetIdentity::Credit {
         code: "USDC".to_string(),
         issuer: prices_clickhouse::USDC_ISSUER.to_string(),
     });
@@ -42,6 +42,17 @@ async fn home_domain_survives_a_second_write_assets() {
         .write_assets(&registry)
         .await
         .expect("write identity");
+    // The id is the database's, read back by identity (task 0139).
+    let asset_id: u64 = writer
+        .client()
+        .query(
+            "SELECT asset_id FROM prices.assets FINAL \
+             WHERE asset_code = 'USDC' AND issuer_address = ?",
+        )
+        .bind(prices_clickhouse::USDC_ISSUER)
+        .fetch_one()
+        .await
+        .expect("read back the derived id");
 
     // Enrich home_domain via the single-writer enrichment table.
     writer

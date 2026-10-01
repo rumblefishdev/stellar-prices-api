@@ -68,7 +68,7 @@ impl Sink {
         Ok(())
     }
 
-    pub async fn load_assets(&self) -> Result<Vec<(u32, AssetIdentity)>, BackfillError> {
+    pub async fn load_assets(&self) -> Result<Vec<AssetIdentity>, BackfillError> {
         Ok(self.writer.load_assets().await?)
     }
 

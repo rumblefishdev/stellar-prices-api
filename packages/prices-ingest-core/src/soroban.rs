@@ -937,6 +937,7 @@ fn decode_reflector(
                 out.oracle.push(OracleSample {
                     timestamp,
                     asset_id,
+                    identity: Some(identity),
                     oracle_name: "reflector".to_string(),
                     price_usd: price, // already 1e14-scaled
                     raw_data: format!("{{\"asset\":\"{key}\"}}"),
@@ -977,6 +978,7 @@ fn decode_redstone(ev: &xdr_parser::types::ExtractedEvent, out: &mut LedgerSorob
     out.oracle.push(OracleSample {
         timestamp: ev.created_at.max(0) as u32,
         asset_id: ORACLE_FEED_NO_ASSET_ID,
+        identity: None,
         oracle_name: "redstone".to_string(),
         price_usd: 0,
         raw_data: raw,

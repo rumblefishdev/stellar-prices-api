@@ -155,6 +155,8 @@ pub struct CanonicalPair {
 }
 
 pub struct AssetRegistry {
+    /// Identity → a process-local number. No writer sends it since task 0139:
+    /// ClickHouse derives the stored id from the identity.
     by_identity: HashMap<AssetIdentity, u32>,
     next_id: u32,
     network_id: [u8; 32],
@@ -170,12 +172,14 @@ pub struct AssetRegistry {
 }
 
 impl AssetRegistry {
-    pub fn from_existing(existing: Vec<(u32, AssetIdentity)>) -> Self {
+    pub fn from_existing(existing: Vec<AssetIdentity>) -> Self {
         let mut next_id = 1u32;
         let mut by_identity = HashMap::with_capacity(existing.len());
-        for (id, identity) in existing {
-            next_id = next_id.max(id + 1);
-            by_identity.insert(identity, id);
+        for identity in existing {
+            by_identity.entry(identity).or_insert_with(|| {
+                next_id += 1;
+                next_id - 1
+            });
         }
         let mut reg = Self {
             by_identity,
@@ -248,8 +252,8 @@ impl AssetRegistry {
         identity_to_asset(identity).and_then(|asset| sac_address(&asset, &self.network_id))
     }
 
-    pub fn assets(&self) -> impl Iterator<Item = (&AssetIdentity, &u32)> {
-        self.by_identity.iter()
+    pub fn assets(&self) -> impl Iterator<Item = &AssetIdentity> {
+        self.by_identity.keys()
     }
 
     /// Identities interned since the last [`clear_pending`], in intern order —
@@ -257,10 +261,8 @@ impl AssetRegistry {
     /// never pending.
     ///
     /// [`clear_pending`]: AssetRegistry::clear_pending
-    pub fn pending_new(&self) -> impl Iterator<Item = (&AssetIdentity, &u32)> {
-        self.pending
-            .iter()
-            .filter_map(|identity| self.by_identity.get_key_value(identity))
+    pub fn pending_new(&self) -> impl Iterator<Item = &AssetIdentity> {
+        self.pending.iter()
     }
 
     /// Forget the pending set. Call only after its write returned `Ok`, so a
@@ -428,7 +430,7 @@ mod tests {
     }
 
     fn pending(reg: &AssetRegistry) -> Vec<AssetIdentity> {
-        reg.pending_new().map(|(i, _)| i.clone()).collect()
+        reg.pending_new().cloned().collect()
     }
 
     // The incremental write (task 0132), keyed on identities since 0139: the
@@ -437,8 +439,8 @@ mod tests {
     #[test]
     fn loaded_identities_are_never_pending() {
         let reg = AssetRegistry::from_existing(vec![
-            (1, AssetIdentity::Native),
-            (2, AssetIdentity::Contract("CEXISTING".to_string())),
+            AssetIdentity::Native,
+            AssetIdentity::Contract("CEXISTING".to_string()),
         ]);
         assert_eq!(reg.assets().count(), 2);
         assert!(pending(&reg).is_empty(), "cold start loads, writes nothing");
@@ -446,7 +448,7 @@ mod tests {
 
     #[test]
     fn a_new_identity_is_pending_once_in_intern_order() {
-        let mut reg = AssetRegistry::from_existing(vec![(1, AssetIdentity::Native)]);
+        let mut reg = AssetRegistry::from_existing(vec![AssetIdentity::Native]);
         let b = AssetIdentity::Contract("CB".to_string());
         let a = AssetIdentity::Contract("CA".to_string());
         reg.get_or_assign(&b);

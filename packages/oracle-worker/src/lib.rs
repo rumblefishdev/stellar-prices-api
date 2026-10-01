@@ -545,6 +545,7 @@ async fn run_oracle_inner(
                 samples.push(OracleSample {
                     timestamp,
                     asset_id,
+                    identity: Some(identity),
                     oracle_name: ORACLE_NAME.to_string(),
                     price_usd: pd.price,
                     raw_data: format!("{{\"symbol\":\"{symbol}\"}}"),
@@ -587,7 +588,7 @@ async fn run_oracle_inner(
     // ⚠️ TWO CALLS, not one list (task 0228). `populate_usd_rate_from_oracle`
     // runs its task-0139 identity guard as a PRE-PASS over the whole slice and
     // returns before writing anything for ANY identity if one of them fails
-    // (`writer.rs`, pinned by `a_collision_on_one_peg_writes_nothing_for_any_peg`).
+    // (`writer.rs`).
     // Appending XLM to the peg call would therefore let a collision on XLM's
     // asset_id silently stop USDC's snapshot as well — the two sets have nothing
     // to do with each other, and one's data condition must not cost the other its
