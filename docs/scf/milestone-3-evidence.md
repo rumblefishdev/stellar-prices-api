@@ -41,10 +41,10 @@ hoped):
 | AC  | Criterion (short)                                           | State on 2026-09-25                                                                                                                                                         |
 | --- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | `/backfill/status`: running, fresh push, depth ≤ 2018-01-01 | **Depth met — 2015-11-18.** Liveness graded on amended wording (deviations §1): the archive completed 2026-07-27                                                            |
-| 2   | OpenAPI lints clean; Swagger UI deployed                    | Lint is a CI job (`npm run openapi:lint`, Redocly CLI 2.44.0); reference rendered at `…/api/docs`. _To fill: lint output on the day_                                        |
+| 2   | OpenAPI lints clean; Swagger UI deployed                    | Lint is a CI job (`npm run openapi:lint`, Redocly CLI 2.44.0); reference rendered at `…/api/docs` (deviations §5). _To fill: lint output on the day_                        |
 | 3   | Portal accessible; self-service key flow works              | Portal public since 09-23. _Open:_ end-to-end proof on production (task 0164); sign-in still through the test Discord guild (0179)                                          |
 | 4   | Integration suite passes on CI, link provided               | **Met.** CI starts ClickHouse and runs the integration suite on every Rust change since PR #327 (2026-09-22); run linked in §5                                              |
-| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met 2026-09-18 — p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`                                                                       |
+| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met 2026-09-18 — p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`; scope in deviations §6                                               |
 | 6   | Security checklist signed off                               | mTLS-only ClickHouse, secrets in Secrets Manager, inputs validated, no wildcard **actions**; the 23 `Resource: "*"` statements are inventoried in §5                        |
 | 7   | Repo public; `cdk deploy` from README in a fresh account    | **Met on the fresh-account runbook** (0297, PR #357): repo PUBLIC, `README.md` → `infra/README.md`; macOS via 0239 (PR #360). Not run in an empty account (§5)              |
 | 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, 65 alarms, all OK on 09-25. Access **on request to a named reviewer, MFA enforced** (deviations §3)                                 |
@@ -61,7 +61,7 @@ Validation**, weeks 10 to 13. The work it names, and where each stands:
 
 | Work item                                                                 | State                                                                                                                                                        |
 | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| OpenAPI 3.0 specification covering all endpoints                          | Served from the code at `/api-docs-json`; 74 production-shaped examples and a lint gate since 2026-09-24 (task 0306)                                         |
+| OpenAPI 3.0 specification covering all endpoints                          | Served from the code at `/api-docs-json` as OpenAPI 3.1.0 (deviations §5); 74 production-shaped examples and a lint gate since 2026-09-24 (task 0306)        |
 | Self-service onboarding portal: key request, quickstart, example queries  | Public since 2026-09-23 at `…/api/`; quick start reconciled with the spec (0163, 0233); privacy policy (0303); Discord sign-in on the test guild (0179 open) |
 | Integration test suite, automated, runs in CI, all 7 endpoint groups      | 229 ClickHouse-backed tests run in CI since 2026-09-22 (task 0275); each of the seven `/v1` route groups has its own (§5, AC 4)                              |
 | Load test report: k6, documented plan, results at 100 / 500 / 1000 req/s  | [`prices-api-load-test-100rps.md`](../prices-api-load-test-100rps.md) — all three rates on 2026-09-18 (task 0293)                                            |
@@ -109,6 +109,8 @@ are pointers, not summaries.
 | 2   | AC 9: report "SDEX push cadence and `earliest_data_available` trajectory" | both are flat by construction since 2026-07-27; the report carries ingest-queue age and `current_prices` freshness against their alarm thresholds instead | disclosed                  |
 | 3   | AC 8: "read-only IAM role" for the Stellar team                           | no standing identity: a read-only IAM user is created for a named reviewer on request, MFA enforced, and removed after the review                         | disclosed                  |
 | 4   | AC 3: self-service key flow                                               | _candidate_: sign-in runs on the project's test Discord guild until the Stellar guild integration (task 0179) is agreed                                   | to be decided              |
+| 5   | AC 2: `openapi-validator` lint, Swagger UI; Work list: OpenAPI 3.0        | an OpenAPI 3.1.0 document, linted by Redocly `recommended-strict`; the reference at `…/api/docs` is the portal's own renderer, in Swagger UI's layout     | disclosed                  |
+| 6   | AC 5: p95 < 100 ms at 100 req/s, plan named                               | met as written on a scenario with 98.3 % cache hits; the miss-only row, the 500 / 1000 req/s rows and the client's location travel with it                | disclosed (met as written) |
 
 ## 5. Acceptance-criteria evidence
 
@@ -138,6 +140,8 @@ at `/api-docs-json`; since task 0306 it carries a production-shaped example for
 every field and a lint that fails on an example that stops validating against
 its schema (`no-invalid-schema-examples`, `redocly.yaml`). The rendered
 reference is the portal's own page, `https://sorobanscan.rumblefish.dev/api/docs`.
+Neither the lint tool nor the reference is the one the wording names; both
+substitutions, and the OpenAPI version, are set out in deviations §5.
 
 #### Reproduce it
 
@@ -211,7 +215,7 @@ sustain the run — the default plan is 1 req/s and a 100,000 monthly quota.
 | 500 req/s  | wide pool × 4 key variants       | 149,880  | 0                                     | 68.8 / **133.0** / 261  | 87–95 ms    | ~2.6 %     |
 | 1000 req/s | wide pool × 8 key variants       | 93,351   | 14,865 (15.9 %), all Lambda throttles | 637 / 1,730 / 2,700     | 1.4–1.5 s   | 0 %        |
 
-**Scope of the claim.** The AC scenario is 98.3 % cache hits and the report
+**Scope of the claim** (deviations §6). The AC scenario is 98.3 % cache hits and the report
 says so; the miss-only row is the honest companion (p95 129.9 ms from Poland,
 ~45 ms of it network, 45–90 ms as the gateway measures it). 500 req/s held with
 p95 moved by 3 ms; the ramp to 1000 req/s found the ceiling in the shared
