@@ -235,20 +235,6 @@ and 45–90 ms at the gateway. At 500 req/s p95 moved by 3 ms. The ramp to
 ~900 req/s, not of Lambda or the gateway; the overload slowed the explorer's
 indexer for two minutes, its alarm fired and cleared, and nothing was lost.
 
-**Side effect.** On the 500 and 1000 req/s ramps, bursts of 157, 278 and 255
-Lambda cold starts within 1–2 s throttled Parameter Store and closed the
-onboarding portal in 243 execution environments; `/v1` kept answering. The
-AC-scenario run (09:33–09:44 UTC) had 41 cold starts and no closure, so its
-49.0 ms is unaffected. Fixed on 2026-09-25 (task 0311). Counted on 2026-09-28 with
-CloudWatch Logs Insights on `/aws/lambda/prices-production-api-handler`:
-
-```
-stats sum(strcontains(@message, "INIT_START")) as cold_starts,
-      sum(strcontains(@message, "portal closed at cold start")) as portal_closed,
-      sum(strcontains(@message, "ThrottlingException")) as ssm_throttled
-  by bin(1s)
-```
-
 #### Reproduce it
 
 ```sh
