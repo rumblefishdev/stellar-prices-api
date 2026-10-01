@@ -44,7 +44,7 @@ const FEATURES: readonly Feature[] = [
   {
     icon: livePricesIcon,
     title: 'Live Prices',
-    body: 'Real-time token prices for all Stellar assets. Sourced directly from Soroswap liquidity pools, updated on every block.',
+    body: 'USD and XLM prices for Stellar assets from SDEX, Soroswap, Aquarius, Phoenix and SushiSwap, with a 24h VWAP across venues and a per-venue breakdown.',
   },
   {
     icon: liquidityDataIcon,

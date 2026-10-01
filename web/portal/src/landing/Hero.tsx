@@ -136,9 +136,8 @@ export function Hero({ canOfferKey }: { canOfferKey: boolean }) {
               variant="body1"
               sx={{ color: color.text.tertiary, maxWidth: 560 }}
             >
-              Token prices, liquidity data and market insights for wallets, DEX
-              aggregators and DeFi applications. Powered by Soroswap
-              infrastructure.
+              Token prices and price history for wallets, DEX aggregators and
+              DeFi applications, across SDEX and four Soroban AMMs.
             </Typography>
 
             <Stack

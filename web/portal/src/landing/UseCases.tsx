@@ -24,7 +24,7 @@ const USE_CASES: readonly { title: string; body: string }[] = [
   },
   {
     title: 'DEX Aggregators',
-    body: 'Power swap routing and token comparisons. Use liquidity depth data to find optimal trade paths across Soroswap pools.',
+    body: 'Compare token prices across venues. Each price comes with a per-venue breakdown for SDEX, Soroswap, Aquarius, Phoenix and SushiSwap.',
   },
   {
     title: 'Portfolio Trackers',
