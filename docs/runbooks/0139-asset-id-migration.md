@@ -6,8 +6,8 @@ production the old UInt32 counter ids are still in every id-keyed table, and
 3,315 of them serve two or three unrelated assets. This runbook moves prod onto
 the derived ids in one window:
 
-- `assets` is altered in place (`MODIFY COLUMN … MATERIALIZED`, `MATERIALIZE
-  COLUMN`).
+- `assets` is altered in place (`MODIFY COLUMN … MATERIALIZED`,
+  `MATERIALIZE COLUMN`).
 - The other 11 id-keyed tables are copied into `X__new` tables through the map
   `prices.asset_id_map_0139`, then swapped in with `EXCHANGE TABLES`. The old
   tables stay as `X__pre0139`.
@@ -131,8 +131,8 @@ AWS shell. This is what a rollback after W11 redeploys from.
    `DISABLED`.
 
 2. The rollback commit is `develop` just before the 0139 merge. On window day,
-   record it as the merge commit's first parent: `ROLLBACK_SHA=$(git rev-parse
-   <merge>^1)`. Before the merge, it is `origin/develop`. Check it matches
+   record it as the merge commit's first parent:
+   `ROLLBACK_SHA=$(git rev-parse <merge>^1)`. Before the merge, it is `origin/develop`. Check it matches
    production: `make -C infra diff-production` run from it shows no change
    besides Lambda asset hashes.
 
@@ -195,7 +195,6 @@ wall-second, task 11), the catch-up takes C = W / (r − 1), and the gap exposed
 to the 15m MV is W + C. Above about 1.5 h, the 15m MV alone loses part of it.
 **W14 runs whatever the measured gap**: it costs minutes and is the only thing
 that makes every tier whole.
-
 
 ## The window
 
@@ -551,7 +550,6 @@ aws cloudwatch enable-alarm-actions --alarm-names "${MUTED[@]}"
 
 The 0286 orchestrator stays stopped until W14 is green.
 
-
 ### W15 — afterwards
 
 - Adam sends the BE note (draft below) and records the acceptance numbers in
@@ -560,7 +558,8 @@ The 0286 orchestrator stays stopped until W14 is green.
 - Then task 13 (the colliding history): 0286 phase 3 resumes from the month
   after `PAUSE_MONTH` on the new ids, and the second pass covers every month
   in `prices.rekey_0139_reingest_months` up to and including `PAUSE_MONTH`
-  (`0286-reingest-history.md`).
+  ([`0286-reingest-history.md`](0286-reingest-history.md) §10: binaries,
+  old snapshots, resume, second pass).
 
 ### W16 — the next day
 
@@ -572,7 +571,6 @@ rk gap-verify
 
 Then the next-day post-check block below: every line `1`. Then remove the
 rollback worktree (`git worktree remove .claude/worktrees/0139-rollback`).
-
 
 ## Rollback
 
@@ -608,8 +606,9 @@ the seven MVs of W5 and re-enable the writers in W13's order.
 
 3. Re-check that the ESM is still `Disabled` and the five rules still
    `DISABLED` (the W11 re-check lines). Disable again if needed.
-4. Put the `*.pre0139` host binaries back (`cp -p ~/events-backfill.pre0139
-   ~/events-backfill`, likewise `sdex-backfill`) and the local ones.
+4. Put the `*.pre0139` host binaries back
+   (`cp -p ~/events-backfill.pre0139 ~/events-backfill`, likewise
+   `sdex-backfill`) and the local ones.
 5. Force an api-handler cold start (W11's last line).
 6. `SYSTEM START VIEW` for the seven MVs, then re-enable the writers in W13's
    order and watch the catch-up the same way.
@@ -632,7 +631,6 @@ rk gap-verify --schema pre0139 --from "$START_TS" --to "$CATCHUP_END"
 (Copy `preroll-live-gap.sql` from the merge commit's checkout to the host
 first.) `--schema pre0139` makes `gap-verify` run its tier comparisons on the
 restored UInt32 tables, read-only.
-
 
 ## Post-checks
 
@@ -739,9 +737,9 @@ any old-id-space table remains (`reingest_0286_bak_*_pre0139`).
 
 ## BE note (draft; Adam sends)
 
-> - `asset_id` is now `xxh3(concat(asset_code, ':', issuer_address, ':',
->   contract_address))`, a UInt64 computed by ClickHouse. You can compute it in
->   your own SQL; native XLM is `XLM::`, and case is preserved.
+> - `asset_id` is now
+>   `xxh3(concat(asset_code, ':', issuer_address, ':', contract_address))`, a
+>   UInt64 computed by ClickHouse. You can compute it in your own SQL; native XLM is `XLM::`, and case is preserved.
 > - `current_price_usd` no longer fans out: one row per `current_prices` row,
 >   and its columns are unchanged.
 > - ClickHouse JSON output quotes UInt64 by default
