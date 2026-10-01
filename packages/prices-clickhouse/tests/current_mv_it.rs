@@ -15,6 +15,7 @@
 //! cargo's default parallel test threads.
 
 use clickhouse::Client;
+use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert, fetch_ids};
 
 fn ch_url() -> String {
     std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string())
@@ -67,7 +68,26 @@ async fn scalar_f64(client: &Client, sql: &str) -> f64 {
         .unwrap_or_else(|e| panic!("{sql}: {e}"))
 }
 
-fn insert_row(db: &str, asset: u32, close_usd: &str, vol_usd: &str) -> String {
+/// A classic asset row; ids come from the identity (`asset_id::fixture`).
+fn classic<'a>(code: &'a str, issuer: &'a str) -> AssetFixture<'a> {
+    AssetFixture::new(code, "classic", issuer, "")
+}
+
+/// Seed `rows` into `assets` and return each row's id, in order.
+async fn seed_assets<const N: usize>(
+    admin: &Client,
+    db: &str,
+    rows: [AssetFixture<'_>; N],
+) -> [u64; N] {
+    admin
+        .query(&assets_insert(db, &rows))
+        .execute()
+        .await
+        .expect("assets");
+    fetch_ids(admin, &rows).await
+}
+
+fn insert_row(db: &str, asset: u64, close_usd: &str, vol_usd: &str) -> String {
     format!(
         "INSERT INTO {db}.price_ohlcv_1m \
          (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
@@ -208,26 +228,42 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
 
     // XLM must be resolvable by natural key (no issuer, no contract) — this is
     // how the MV finds the price_xlm divisor, mirroring ch_enrich.rs:447.
-    admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, is_active) \
-             VALUES (1,'XLM','classic','','',1), (3,'FOO','classic','GFOO','',1), \
-                    (4,'BAR','classic','GBAR','',1), (5,'DUO','classic','GDUO','',1), \
-                    (6,'EXO','classic','GEXO','',1), (7,'ZER','classic','GZER','',1), \
-                    (8,'DIP','classic','GDIP','',1), (10,'STA','classic','GSTA','',1), \
-                    (11,'LAG','classic','GLAG','',1), (12,'TRI','classic','GTRI','',1), \
-                    (13,'NRB','classic','GNRB','',1), (14,'MIX','classic','GMIX','',1)"
-        ))
-        .execute()
-        .await
-        .expect("assets");
+    // The fixture names assets by slot (`3 FOO`); `id(slot)` is the id the
+    // database derived from that slot's identity. Quote slot 2 has no row.
+    let cast = [
+        (1, classic("XLM", "")),
+        (3, classic("FOO", "GFOO")),
+        (4, classic("BAR", "GBAR")),
+        (5, classic("DUO", "GDUO")),
+        (6, classic("EXO", "GEXO")),
+        (7, classic("ZER", "GZER")),
+        (8, classic("DIP", "GDIP")),
+        (10, classic("STA", "GSTA")),
+        (11, classic("LAG", "GLAG")),
+        (12, classic("TRI", "GTRI")),
+        (13, classic("NRB", "GNRB")),
+        (14, classic("MIX", "GMIX")),
+        (15, classic("EVN", "GEVN")),
+        (16, classic("LIV", "GLIV")),
+        (17, classic("DST", "GDST")),
+        (18, classic("ATK", "GATK")),
+        (19, classic("THL", "GTHL")),
+        (20, classic("SUB", "GSUB")),
+    ];
+    let ids = seed_assets(&admin, db, cast.map(|(_, a)| a)).await;
+    let id = |slot: u32| -> u64 {
+        cast.iter()
+            .zip(ids)
+            .find_map(|((s, _), id)| (*s == slot).then_some(id))
+            .unwrap_or_else(|| panic!("no fixture asset in slot {slot}"))
+    };
 
     // Supply for asset 7 so market_cap_usd = price_usd x supply is assertable
     // (without a row the LEFT JOIN misses and market_cap is 0 for any price).
     admin
         .query(&format!(
-            "INSERT INTO {db}.asset_supply (asset_id, token_supply) VALUES (7, 1000)"
+            "INSERT INTO {db}.asset_supply (asset_id, token_supply) VALUES ({}, 1000)",
+            id(7)
         ))
         .execute()
         .await
@@ -386,6 +422,7 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
                   volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
                  VALUES (now() - INTERVAL {mins} MINUTE, {asset}, 2, '{src}', \
                   {cu},{cu},{cu},{cu}, 10, {vol}, {vol}, {cu}, {cu}, 1, {v})",
+                asset = id(*asset),
                 v = i + 1
             ))
             .execute()
@@ -403,8 +440,9 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
                 "INSERT INTO {db}.price_ohlcv_1h \
                  (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
                   volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
-                 VALUES (now() - INTERVAL {mins} MINUTE, 3, 2, 'sdex', \
-                  {cu},{cu},{cu},{cu}, 10, 5, 5, {cu}, {cu}, 1, 1)"
+                 VALUES (now() - INTERVAL {mins} MINUTE, {foo}, 2, 'sdex', \
+                  {cu},{cu},{cu},{cu}, 10, 5, 5, {cu}, {cu}, 1, 1)",
+                foo = id(3)
             ))
             .execute()
             .await
@@ -425,6 +463,7 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
                   volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
                  VALUES (now() - INTERVAL {mins} MINUTE, {asset}, 2, 'sdex', \
                   1.00,1.00,1.00,1.00, 10, 5, 5, 1.00, 1.00, 1, 1)",
+                asset = id(asset),
                 mins = 6 * 24 * 60_i64
             ))
             .execute()
@@ -442,8 +481,9 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
-             VALUES (now() - INTERVAL {mins} MINUTE, 13, 2, 'sdex', \
+             VALUES (now() - INTERVAL {mins} MINUTE, {nrb}, 2, 'sdex', \
               1.00,1.00,1.00,1.00, 10, 5, 5, 1.00, 1.00, 1, 1)",
+            nrb = id(13),
             mins = 4 * 24 * 60_i64
         ))
         .execute()
@@ -470,11 +510,17 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
     }
     assert!(ready, "MV did not populate current_prices in time");
 
-    let f = |col: &str, id: u32| {
-        format!("SELECT toFloat64({col}) FROM {db}.current_prices FINAL WHERE asset_id = {id}")
+    let f = |col: &str, slot: u32| {
+        format!(
+            "SELECT toFloat64({col}) FROM {db}.current_prices FINAL WHERE asset_id = {}",
+            id(slot)
+        )
     };
-    let s = |col: &str, id: u32| {
-        format!("SELECT {col} FROM {db}.current_prices FINAL WHERE asset_id = {id}")
+    let s = |col: &str, slot: u32| {
+        format!(
+            "SELECT {col} FROM {db}.current_prices FINAL WHERE asset_id = {}",
+            id(slot)
+        )
     };
 
     // ── the outlier filter actually fires ──────────────────────────────────
@@ -603,7 +649,8 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
                     / nullIf(toFloat64(argMinIf(close_usd, timestamp, close_usd > 0)), 0) * 100, \
                     0) \
              FROM {db}.price_ohlcv_1m FINAL \
-             WHERE asset_id = 7 AND timestamp >= now() - INTERVAL 24 HOUR"
+             WHERE asset_id = {zer} AND timestamp >= now() - INTERVAL 24 HOUR",
+            zer = id(7)
         ),
     )
     .await;
@@ -925,37 +972,38 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
     // `carried` names. `as_of` must date the priced close, NOT the newest
     // candle: reporting the latter would say the price is a minute old when it
     // is half an hour old, which is the whole defect this column removes.
-    let candle_ts = |expr: &str, id: u32| {
+    let candle_ts = |expr: &str, slot: u32| {
         format!(
             "SELECT toString({expr}) FROM {db}.price_ohlcv_1m FINAL \
-             WHERE asset_id = {id} AND timestamp >= now() - INTERVAL 24 HOUR"
+             WHERE asset_id = {} AND timestamp >= now() - INTERVAL 24 HOUR",
+            id(slot)
         )
     };
-    for id in [7_u32, 11] {
+    for slot in [7_u32, 11] {
         let priced_ts: String = admin
-            .query(&candle_ts("maxIf(timestamp, close_usd > 0)", id))
+            .query(&candle_ts("maxIf(timestamp, close_usd > 0)", slot))
             .fetch_one()
             .await
-            .unwrap_or_else(|e| panic!("priced ts for {id}: {e}"));
+            .unwrap_or_else(|e| panic!("priced ts for {slot}: {e}"));
         let newest_ts: String = admin
-            .query(&candle_ts("max(timestamp)", id))
+            .query(&candle_ts("max(timestamp)", slot))
             .fetch_one()
             .await
-            .unwrap_or_else(|e| panic!("newest ts for {id}: {e}"));
-        let as_of = as_of_of(&admin, db, id).await;
+            .unwrap_or_else(|e| panic!("newest ts for {slot}: {e}"));
+        let as_of = as_of_of(&admin, db, id(slot)).await;
         assert_eq!(
             as_of, priced_ts,
-            "asset {id}: as_of must be the timestamp of the candle price_usd was read from"
+            "asset {slot}: as_of must be the timestamp of the candle price_usd was read from"
         );
         assert_ne!(
             as_of, newest_ts,
-            "asset {id}: as_of must NOT be the newest candle — that candle has no price yet, \
+            "asset {slot}: as_of must NOT be the newest candle — that candle has no price yet, \
              and equality here would mean the column is max(timestamp) in disguise"
         );
         assert_eq!(
-            status_of(&admin, db, id).await,
+            status_of(&admin, db, id(slot)).await,
             "carried",
-            "asset {id}: a priced close older than a price-forming candle is `carried`"
+            "asset {slot}: a priced close older than a price-forming candle is `carried`"
         );
     }
 
@@ -1034,20 +1082,12 @@ async fn price_xlm_lands_on_the_sentinel_when_the_xlm_divisor_is_missing() {
     let admin = setup(db).await;
 
     // Deliberately NO XLM row — the xlm_usd subquery finds nothing.
+    let [solo] = seed_assets(&admin, db, [classic("SOLO", "GSOLO")]).await;
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, is_active) \
-             VALUES (9,'SOLO','classic','GSOLO','',1)"
-        ))
+        .query(&insert_row(db, solo, "2.00", "100"))
         .execute()
         .await
-        .expect("assets");
-    admin
-        .query(&insert_row(db, 9, "2.00", "100"))
-        .execute()
-        .await
-        .expect("ohlcv 9");
+        .expect("ohlcv SOLO");
 
     admin
         .query(&format!("SYSTEM REFRESH VIEW {db}.mv_current_prices"))
@@ -1070,7 +1110,7 @@ async fn price_xlm_lands_on_the_sentinel_when_the_xlm_divisor_is_missing() {
     assert!(ready, "MV did not populate current_prices in time");
 
     let q = |col: &str| {
-        format!("SELECT toFloat64({col}) FROM {db}.current_prices FINAL WHERE asset_id = 9")
+        format!("SELECT toFloat64({col}) FROM {db}.current_prices FINAL WHERE asset_id = {solo}")
     };
 
     // Non-vacuity: the numerator is genuinely non-zero, so a passing price_xlm
@@ -1101,17 +1141,8 @@ async fn price_xlm_lands_on_the_sentinel_when_the_xlm_divisor_is_missing() {
 // USDC address as a SQL literal that cannot reference a Rust const.
 use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 
-fn insert_asset(db: &str, id: u32, code: &str, issuer: &str) -> String {
-    format!(
-        "INSERT INTO {db}.assets \
-         (asset_id, asset_code, asset_type, issuer_address, contract_address, \
-          sac_address, home_domain, is_active, created_at, updated_at) \
-         VALUES ({id}, '{code}', 'classic', '{issuer}', '', '', '', 1, now(), now())"
-    )
-}
-
 /// A candle for `base` quoted in `quote`, carrying `vol_usd` of USD value.
-fn insert_pair(db: &str, base: u32, quote: u32, close_usd: &str, vol_usd: &str) -> String {
+fn insert_pair(db: &str, base: u64, quote: u64, close_usd: &str, vol_usd: &str) -> String {
     format!(
         "INSERT INTO {db}.price_ohlcv_1m \
          (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
@@ -1154,7 +1185,7 @@ async fn refresh(admin: &Client, db: &str, expect_rows: u64) {
     panic!("MV did not write {expect_rows} row(s) to {db}.current_prices in time");
 }
 
-async fn method_of(admin: &Client, db: &str, asset: u32) -> String {
+async fn method_of(admin: &Client, db: &str, asset: u64) -> String {
     admin
         .query(&format!(
             "SELECT method FROM {db}.current_prices FINAL WHERE asset_id = {asset}"
@@ -1164,7 +1195,7 @@ async fn method_of(admin: &Client, db: &str, asset: u32) -> String {
         .unwrap_or_else(|e| panic!("method for {asset}: {e}"))
 }
 
-async fn status_of(admin: &Client, db: &str, asset: u32) -> String {
+async fn status_of(admin: &Client, db: &str, asset: u64) -> String {
     admin
         .query(&format!(
             "SELECT price_status FROM {db}.current_prices FINAL WHERE asset_id = {asset}"
@@ -1176,7 +1207,7 @@ async fn status_of(admin: &Client, db: &str, asset: u32) -> String {
 
 /// `as_of` as a string, so the epoch sentinel is readable in a failure message
 /// rather than arriving as an integer nobody recognises.
-async fn as_of_of(admin: &Client, db: &str, asset: u32) -> String {
+async fn as_of_of(admin: &Client, db: &str, asset: u64) -> String {
     admin
         .query(&format!(
             "SELECT toString(as_of) FROM {db}.current_prices FINAL WHERE asset_id = {asset}"
@@ -1192,8 +1223,8 @@ async fn as_of_of(admin: &Client, db: &str, asset: u32) -> String {
 /// DEFAULT (= `trade_count` = 1) and every fixture candle is price-forming.
 fn insert_pair_pf(
     db: &str,
-    base: u32,
-    quote: u32,
+    base: u64,
+    quote: u64,
     close_usd: &str,
     vol_usd: &str,
     mins: i64,
@@ -1220,8 +1251,8 @@ fn insert_pair_pf(
 /// the §5.5 threshold, so neither venue is erased before the liveness rule runs.
 fn insert_pair_at(
     db: &str,
-    base: u32,
-    quote: u32,
+    base: u64,
+    quote: u64,
     close_usd: &str,
     ts_literal: &str,
     source: &str,
@@ -1283,24 +1314,23 @@ async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
         .await
         .expect("stale timestamp");
 
+    let [xlm, fut] = seed_assets(&admin, db, [classic("XLM", ""), classic("FUT", "GFUT")]).await;
     for q in [
-        insert_asset(db, 1, "XLM", ""),
-        insert_asset(db, 12, "FUT", "GFUT"),
-        insert_pair_at(db, 12, 1, "2.00", &past, "sdex"),
+        insert_pair_at(db, fut, xlm, "2.00", &past, "sdex"),
         // A DIFFERENT price on the future candle: if the bound ever moves back
         // inside the `as_of` aggregate alone, price_usd reads 3.0 here and the
         // assertion below says so.
-        insert_pair_at(db, 12, 1, "3.00", &future, "sdex"),
+        insert_pair_at(db, fut, xlm, "3.00", &future, "sdex"),
         // XLM priced as a BASE leg, so the `xlm_usd` scalar has something to
         // read and `price_xlm` is a real quotient instead of the 0 sentinel.
         // Two closes again, so an unbounded scalar is visible as a number.
-        insert_pair_at(db, 1, 12, "0.40", &past, "sdex"),
-        insert_pair_at(db, 1, 12, "0.60", &future, "sdex"),
+        insert_pair_at(db, xlm, fut, "0.40", &past, "sdex"),
+        insert_pair_at(db, xlm, fut, "0.60", &future, "sdex"),
         // A venue that stopped quoting three hours ago and then emitted one
         // future-stamped candle. `per_source`'s liveness test is a `max` over
         // the same window, so an unbounded one reads it as live forever.
-        insert_pair_at(db, 12, 1, "9.00", &stale, "soroswap"),
-        insert_pair_at(db, 12, 1, "9.00", &future, "soroswap"),
+        insert_pair_at(db, fut, xlm, "9.00", &stale, "soroswap"),
+        insert_pair_at(db, fut, xlm, "9.00", &future, "soroswap"),
     ] {
         admin.query(&q).execute().await.expect("fixture");
     }
@@ -1310,7 +1340,7 @@ async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
     // happens to pick, including one that silently dropped the newest real
     // candle. This says which candle as_of must name.
     assert_eq!(
-        as_of_of(&admin, db, 12).await,
+        as_of_of(&admin, db, fut).await,
         past,
         "as_of must name the newest candle at or before now(), not the future-dated one"
     );
@@ -1319,7 +1349,9 @@ async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
     // published price did not come from.
     let price = scalar_f64(
         &admin,
-        &format!("SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = 12"),
+        &format!(
+            "SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = {fut}"
+        ),
     )
     .await;
     assert!(
@@ -1327,7 +1359,7 @@ async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
         "price_usd must come from the same candle as_of names (the past one, 2.00) — got {price}"
     );
     assert_eq!(
-        status_of(&admin, db, 12).await,
+        status_of(&admin, db, fut).await,
         "priced",
         "tip_at is bounded the same way, so a future candle cannot make a live price `carried`"
     );
@@ -1342,7 +1374,7 @@ async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
         &admin,
         &format!(
             "SELECT toFloat64OrZero(JSONExtractString(sources, 'sdex', 'price')) \
-             FROM {db}.current_prices FINAL WHERE asset_id = 12"
+             FROM {db}.current_prices FINAL WHERE asset_id = {fut}"
         ),
     )
     .await;
@@ -1355,7 +1387,9 @@ async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
     // One kept venue at 2.00 → exactly 2.00.
     let vwap = scalar_f64(
         &admin,
-        &format!("SELECT toFloat64(vwap_24h) FROM {db}.current_prices FINAL WHERE asset_id = 12"),
+        &format!(
+            "SELECT toFloat64(vwap_24h) FROM {db}.current_prices FINAL WHERE asset_id = {fut}"
+        ),
     )
     .await;
     assert!(
@@ -1367,7 +1401,7 @@ async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
     // dead venue's future stamp keeps it live and it survives into `sources`.
     let srcs: String = admin
         .query(&format!(
-            "SELECT sources FROM {db}.current_prices FINAL WHERE asset_id = 12"
+            "SELECT sources FROM {db}.current_prices FINAL WHERE asset_id = {fut}"
         ))
         .fetch_one()
         .await
@@ -1388,7 +1422,7 @@ async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
     let vol = scalar_f64(
         &admin,
         &format!(
-            "SELECT toFloat64(volume_24h_usd) FROM {db}.current_prices FINAL WHERE asset_id = 12"
+            "SELECT toFloat64(volume_24h_usd) FROM {db}.current_prices FINAL WHERE asset_id = {fut}"
         ),
     )
     .await;
@@ -1401,7 +1435,9 @@ async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
     // own price_usd reads 0.40, and XLM stops being worth 1 XLM.
     let xlm_price = scalar_f64(
         &admin,
-        &format!("SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = 1"),
+        &format!(
+            "SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = {xlm}"
+        ),
     )
     .await;
     assert!(
@@ -1409,13 +1445,15 @@ async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
         "XLM's own price_usd must be the past close 0.40 — got {xlm_price}"
     );
     assert_eq!(
-        as_of_of(&admin, db, 1).await,
+        as_of_of(&admin, db, xlm).await,
         past,
         "XLM is dated from its own past candle too"
     );
     let xlm_in_xlm = scalar_f64(
         &admin,
-        &format!("SELECT toFloat64(price_xlm) FROM {db}.current_prices FINAL WHERE asset_id = 1"),
+        &format!(
+            "SELECT toFloat64(price_xlm) FROM {db}.current_prices FINAL WHERE asset_id = {xlm}"
+        ),
     )
     .await;
     assert!(
@@ -1426,7 +1464,9 @@ async fn a_future_dated_candle_does_not_date_as_of_ahead_of_now() {
     // The same scalar, seen from a second asset: 2.00 / 0.40 = 5.
     let fut_in_xlm = scalar_f64(
         &admin,
-        &format!("SELECT toFloat64(price_xlm) FROM {db}.current_prices FINAL WHERE asset_id = 12"),
+        &format!(
+            "SELECT toFloat64(price_xlm) FROM {db}.current_prices FINAL WHERE asset_id = {fut}"
+        ),
     )
     .await;
     assert!(
@@ -1447,26 +1487,33 @@ async fn usdc_publishes_a_row_from_the_measured_rate_and_is_tagged_oracle() {
     let db = "it_current_mv_0178_usdc";
     let admin = setup(db).await;
 
+    let [xlm, usdc, tkn] = seed_assets(
+        &admin,
+        db,
+        [
+            classic("XLM", ""),
+            classic("USDC", USDC_ISSUER),
+            classic("TKN", "GTKN"),
+        ],
+    )
+    .await;
     for q in [
-        insert_asset(db, 1, "XLM", ""),
-        insert_asset(db, 2, "USDC", USDC_ISSUER),
-        insert_asset(db, 4, "TKN", "GTKN"),
         // USDC appears ONLY as a quote leg, exactly as on prod.
-        insert_pair(db, 1, 2, "0.5", "10000"),
-        insert_pair(db, 4, 2, "2.0", "2000"),
+        insert_pair(db, xlm, usdc, "0.5", "10000"),
+        insert_pair(db, tkn, usdc, "2.0", "2000"),
         insert_rate(db, "USDC", USDC_ISSUER, "0.9993"),
     ] {
         admin.query(&q).execute().await.expect("fixture");
     }
     refresh(&admin, db, 3).await;
 
-    let w = format!("FROM {db}.current_prices FINAL WHERE asset_id = 2");
+    let w = format!("FROM {db}.current_prices FINAL WHERE asset_id = {usdc}");
     let price = scalar_f64(&admin, &format!("SELECT toFloat64(price_usd) {w}")).await;
     assert!(
         (price - 0.9993).abs() < 1e-9,
         "USDC must carry the MEASURED rate, not a $1 placeholder — got {price}"
     );
-    assert_eq!(method_of(&admin, db, 2).await, "oracle");
+    assert_eq!(method_of(&admin, db, usdc).await, "oracle");
 
     // Task 0216 — the oracle arm dates itself from the reading it published,
     // not from the refresh. `as_of` = `tip_at` there by construction, which is
@@ -1481,12 +1528,12 @@ async fn usdc_publishes_a_row_from_the_measured_rate_and_is_tagged_oracle() {
         .await
         .expect("rate timestamp");
     assert_eq!(
-        as_of_of(&admin, db, 2).await,
+        as_of_of(&admin, db, usdc).await,
         rate_ts,
         "as_of must be the measured rate's OWN timestamp"
     );
     assert_eq!(
-        status_of(&admin, db, 2).await,
+        status_of(&admin, db, usdc).await,
         "priced",
         "a measured rate is the newest thing there is to wait for here"
     );
@@ -1537,15 +1584,22 @@ async fn the_oracle_allowlist_is_usdc_only_and_never_repegs_stellar_usdt() {
     let db = "it_current_mv_0178_usdt";
     let admin = setup(db).await;
 
+    let [xlm, usdt, usdc] = seed_assets(
+        &admin,
+        db,
+        [
+            classic("XLM", ""),
+            classic("USDT", USDT_ISSUER),
+            classic("USDC", USDC_ISSUER),
+        ],
+    )
+    .await;
     for q in [
-        insert_asset(db, 1, "XLM", ""),
-        insert_asset(db, 3, "USDT", USDT_ISSUER),
         // The canonical USDC identity IS resolvable here — it simply has no
         // oracle reading. That is the "no rate" half of the tuple scalar
         // (task 0216), asserted below.
-        insert_asset(db, 2, "USDC", USDC_ISSUER),
         // USDT trades as a base at its real, depegged value.
-        insert_pair(db, 3, 1, "0.13", "65"),
+        insert_pair(db, usdt, xlm, "0.13", "65"),
         // The trap: a par rate filed under the depegged issuer's identity.
         insert_rate(db, "USDT", USDT_ISSUER, "1.0"),
     ] {
@@ -1553,7 +1607,7 @@ async fn the_oracle_allowlist_is_usdc_only_and_never_repegs_stellar_usdt() {
     }
     refresh(&admin, db, 1).await;
 
-    let w = format!("FROM {db}.current_prices FINAL WHERE asset_id = 3");
+    let w = format!("FROM {db}.current_prices FINAL WHERE asset_id = {usdt}");
     let price = scalar_f64(&admin, &format!("SELECT toFloat64(price_usd) {w}")).await;
     assert!(
         (price - 0.13).abs() < 1e-9,
@@ -1561,7 +1615,7 @@ async fn the_oracle_allowlist_is_usdc_only_and_never_repegs_stellar_usdt() {
          the ticker must not reach it — got {price}"
     );
     assert_eq!(
-        method_of(&admin, db, 3).await,
+        method_of(&admin, db, usdt).await,
         "traded",
         "a market-priced asset is 'traded'; tagging it 'oracle' would assert \
          authority this price does not have"
@@ -1574,7 +1628,7 @@ async fn the_oracle_allowlist_is_usdc_only_and_never_repegs_stellar_usdt() {
     // 'oracle' label — the exact "confident zero" the arm exists to refuse.
     let usdc_rows: u64 = admin
         .query(&format!(
-            "SELECT count() FROM {db}.current_prices FINAL WHERE asset_id = 2"
+            "SELECT count() FROM {db}.current_prices FINAL WHERE asset_id = {usdc}"
         ))
         .fetch_one()
         .await
@@ -1598,13 +1652,17 @@ async fn usdc_with_a_base_candle_is_traded_not_oracle_and_never_doubles() {
     let db = "it_current_mv_0178_arm";
     let admin = setup(db).await;
 
+    let [xlm, usdc] = seed_assets(
+        &admin,
+        db,
+        [classic("XLM", ""), classic("USDC", USDC_ISSUER)],
+    )
+    .await;
     for q in [
-        insert_asset(db, 1, "XLM", ""),
-        insert_asset(db, 2, "USDC", USDC_ISSUER),
-        insert_pair(db, 1, 2, "0.5", "10000"),
+        insert_pair(db, xlm, usdc, "0.5", "10000"),
         insert_rate(db, "USDC", USDC_ISSUER, "0.9993"),
         // USDC now ALSO trades as a base — the synthesised arm must stand down.
-        insert_pair(db, 2, 1, "1.01", "50"),
+        insert_pair(db, usdc, xlm, "1.01", "50"),
     ] {
         admin.query(&q).execute().await.expect("fixture");
     }
@@ -1612,7 +1670,7 @@ async fn usdc_with_a_base_candle_is_traded_not_oracle_and_never_doubles() {
 
     let rows: u64 = admin
         .query(&format!(
-            "SELECT count() FROM {db}.current_prices FINAL WHERE asset_id = 2"
+            "SELECT count() FROM {db}.current_prices FINAL WHERE asset_id = {usdc}"
         ))
         .fetch_one()
         .await
@@ -1625,7 +1683,9 @@ async fn usdc_with_a_base_candle_is_traded_not_oracle_and_never_doubles() {
 
     let price = scalar_f64(
         &admin,
-        &format!("SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = 2"),
+        &format!(
+            "SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = {usdc}"
+        ),
     )
     .await;
     assert!(
@@ -1633,7 +1693,7 @@ async fn usdc_with_a_base_candle_is_traded_not_oracle_and_never_doubles() {
         "a real traded close outranks the synthesised rate — got {price}"
     );
     assert_eq!(
-        method_of(&admin, db, 2).await,
+        method_of(&admin, db, usdc).await,
         "traded",
         "the label follows the producing arm; a traded price tagged 'oracle' \
          is worse than either alone"
@@ -1651,20 +1711,27 @@ async fn volume_counts_both_legs_while_per_source_weighting_stays_base_only() {
     let db = "it_current_mv_0178_vol";
     let admin = setup(db).await;
 
+    let [xlm, usdc, usdt] = seed_assets(
+        &admin,
+        db,
+        [
+            classic("XLM", ""),
+            classic("USDC", USDC_ISSUER),
+            classic("USDT", USDT_ISSUER),
+        ],
+    )
+    .await;
     for q in [
-        insert_asset(db, 1, "XLM", ""),
-        insert_asset(db, 2, "USDC", USDC_ISSUER),
-        insert_asset(db, 3, "USDT", USDT_ISSUER),
         // XLM as a BASE: $10,000.
-        insert_pair(db, 1, 2, "0.5", "10000"),
+        insert_pair(db, xlm, usdc, "0.5", "10000"),
         // XLM as a QUOTE: $65 more.
-        insert_pair(db, 3, 1, "0.13", "65"),
+        insert_pair(db, usdt, xlm, "0.13", "65"),
     ] {
         admin.query(&q).execute().await.expect("fixture");
     }
     refresh(&admin, db, 2).await;
 
-    let w = format!("FROM {db}.current_prices FINAL WHERE asset_id = 1");
+    let w = format!("FROM {db}.current_prices FINAL WHERE asset_id = {xlm}");
     let vol = scalar_f64(&admin, &format!("SELECT toFloat64(volume_24h_usd) {w}")).await;
     assert!(
         (vol - 10_065.0).abs() < 1e-6,
@@ -1695,11 +1762,10 @@ async fn an_unpriced_asset_carries_the_empty_sentinel_not_traded() {
     let db = "it_current_mv_0178_sentinel";
     let admin = setup(db).await;
 
+    let [xlm, raw] = seed_assets(&admin, db, [classic("XLM", ""), classic("RAW", "GRAW")]).await;
     for q in [
-        insert_asset(db, 1, "XLM", ""),
-        insert_asset(db, 5, "RAW", "GRAW"),
         // close_usd = 0: ingested but never enriched.
-        insert_pair(db, 5, 1, "0", "0"),
+        insert_pair(db, raw, xlm, "0", "0"),
     ] {
         admin.query(&q).execute().await.expect("fixture");
     }
@@ -1707,12 +1773,14 @@ async fn an_unpriced_asset_carries_the_empty_sentinel_not_traded() {
 
     let price = scalar_f64(
         &admin,
-        &format!("SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = 5"),
+        &format!(
+            "SELECT toFloat64(price_usd) FROM {db}.current_prices FINAL WHERE asset_id = {raw}"
+        ),
     )
     .await;
     assert_eq!(price, 0.0, "no priced candle → the 0 sentinel");
     assert_eq!(
-        method_of(&admin, db, 5).await,
+        method_of(&admin, db, raw).await,
         "",
         "no method applies to a missing price"
     );
@@ -1724,12 +1792,12 @@ async fn an_unpriced_asset_carries_the_empty_sentinel_not_traded() {
     // sentinel. The guard makes the epoch a decision; the API maps exactly this
     // value to "".
     assert_eq!(
-        as_of_of(&admin, db, 5).await,
+        as_of_of(&admin, db, raw).await,
         "1970-01-01 00:00:00",
         "no priced candle → as_of is the epoch sentinel, never an age"
     );
     assert_eq!(
-        status_of(&admin, db, 5).await,
+        status_of(&admin, db, raw).await,
         "unpriced",
         "price_usd is the 0 sentinel, so the status word is `unpriced`"
     );
@@ -1749,32 +1817,39 @@ async fn a_dust_only_newest_minute_does_not_make_a_price_read_carried() {
     let db = "it_current_mv_0216_dust";
     let admin = setup(db).await;
 
+    let [xlm, dst, wai] = seed_assets(
+        &admin,
+        db,
+        [
+            classic("XLM", ""),
+            classic("DST", "GDST"),
+            classic("WAI", "GWAI"),
+        ],
+    )
+    .await;
     for q in [
-        insert_asset(db, 1, "XLM", ""),
-        insert_asset(db, 9, "DST", "GDST"),
-        insert_asset(db, 10, "WAI", "GWAI"),
         // 9 DST — a real priced close, then a newest minute that traded only
         // dust: trade_count = 1 (a fill DID happen) but pf_trade_count = 0, so
         // none of it was price-forming and the bucket carries no close.
-        insert_pair_pf(db, 9, 1, "2.00", "500", 30, 1),
-        insert_pair_pf(db, 9, 1, "0", "0", 1, 0),
+        insert_pair_pf(db, dst, xlm, "2.00", "500", 30, 1),
+        insert_pair_pf(db, dst, xlm, "0", "0", 1, 0),
         // 10 WAI — the control, and the reason this test cannot pass vacuously:
         // the SAME shape with a PRICE-FORMING newest minute that has not been
         // enriched yet. That one IS a price the reader is waiting for.
-        insert_pair_pf(db, 10, 1, "2.00", "500", 30, 1),
-        insert_pair_pf(db, 10, 1, "0", "0", 1, 1),
+        insert_pair_pf(db, wai, xlm, "2.00", "500", 30, 1),
+        insert_pair_pf(db, wai, xlm, "0", "0", 1, 1),
     ] {
         admin.query(&q).execute().await.expect("fixture");
     }
     refresh(&admin, db, 2).await;
 
     assert_eq!(
-        status_of(&admin, db, 9).await,
+        status_of(&admin, db, dst).await,
         "priced",
         "a dust-only newest minute has no price to wait for — the asset is priced, not carried"
     );
     assert_eq!(
-        status_of(&admin, db, 10).await,
+        status_of(&admin, db, wai).await,
         "carried",
         "control: a price-forming newest minute with no close yet IS `carried` — if this \
          also read `priced`, the assertion above would prove nothing"

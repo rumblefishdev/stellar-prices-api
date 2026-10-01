@@ -75,6 +75,9 @@ pub mod fixture {
     use super::{id_of, sql_str};
 
     /// One `prices.assets` row for `assets_insert`.
+    ///
+    /// Displays as its fixture id, so a format string names the asset's id as
+    /// `{FOO}` and the row and its candles cannot disagree.
     #[derive(Debug, Clone, Copy)]
     pub struct AssetFixture<'a> {
         pub code: &'a str,
@@ -82,6 +85,40 @@ pub mod fixture {
         pub issuer: &'a str,
         pub contract: &'a str,
         pub sac: &'a str,
+    }
+
+    impl<'a> AssetFixture<'a> {
+        /// A row with no SAC.
+        pub const fn new(
+            code: &'a str,
+            asset_type: &'a str,
+            issuer: &'a str,
+            contract: &'a str,
+        ) -> Self {
+            Self {
+                code,
+                asset_type,
+                issuer,
+                contract,
+                sac: "",
+            }
+        }
+
+        /// The same row, wrapped by the SAC `sac`.
+        pub const fn with_sac(self, sac: &'a str) -> Self {
+            Self { sac, ..self }
+        }
+
+        /// This row's fixture id, as a SQL expression.
+        pub fn id(&self) -> String {
+            id(self.code, self.issuer, self.contract)
+        }
+    }
+
+    impl std::fmt::Display for AssetFixture<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.id())
+        }
     }
 
     /// The fixture id of an identity, as a SQL expression.
@@ -131,6 +168,29 @@ pub mod fixture {
             .fetch_one::<u64>()
             .await
             .unwrap_or_else(|e| panic!("fetch_id({code:?}, {issuer:?}, {contract:?}): {e}"))
+    }
+
+    /// The fixture ids of `rows`, in order, computed by the server.
+    ///
+    /// # Panics
+    ///
+    /// If the query fails. This is a test helper.
+    pub async fn fetch_ids<const N: usize>(
+        client: &clickhouse::Client,
+        rows: &[AssetFixture<'_>; N],
+    ) -> [u64; N] {
+        let ids: Vec<String> = rows
+            .iter()
+            .map(|r| format!("toUInt64({})", r.id()))
+            .collect();
+        let sql = format!("SELECT [{}]", ids.join(", "));
+        let got: Vec<u64> = client
+            .query(&sql)
+            .fetch_one()
+            .await
+            .unwrap_or_else(|e| panic!("fetch_ids: {e}"));
+        got.try_into()
+            .unwrap_or_else(|v: Vec<u64>| panic!("fetch_ids: {} ids for {N} rows", v.len()))
     }
 }
 
@@ -189,6 +249,19 @@ mod tests {
             id("XLM", "", ""),
             "toUInt32(xxh3(concat('XLM', ':', '', ':', '')))"
         );
+    }
+
+    #[test]
+    fn fixture_constructors_fill_the_row() {
+        let xlm = AssetFixture::new("XLM", "native", "", "").with_sac("CXLMSAC");
+        assert_eq!(
+            (xlm.code, xlm.asset_type, xlm.issuer, xlm.contract, xlm.sac),
+            ("XLM", "native", "", "", "CXLMSAC")
+        );
+        assert_eq!(AssetFixture::new("USDC", "classic", "GA5Z", "").sac, "");
+        let token = AssetFixture::new("", "contract", "", "CTOK");
+        assert_eq!(token.id(), id("", "", "CTOK"));
+        assert_eq!(format!("({token}, 1)"), format!("({}, 1)", token.id()));
     }
 
     #[test]

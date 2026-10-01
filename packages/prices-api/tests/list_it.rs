@@ -8,6 +8,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use clickhouse::Client;
 use prices_api::{AppConfig, AppState, app};
+use prices_clickhouse::asset_id::fixture::{self, AssetFixture};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -22,6 +23,16 @@ fn rewrite(sql: &str, db: &str) -> String {
 
 fn iss() -> &'static str {
     prices_clickhouse::USDC_ISSUER
+}
+
+/// `setup`'s assets: XLM, USDC, a Soroban token, FOO.
+fn setup_assets() -> [AssetFixture<'static>; 4] {
+    [
+        AssetFixture::new("XLM", "native", "", ""),
+        AssetFixture::new("USDC", "credit", iss(), ""),
+        AssetFixture::new("", "contract", "", "CCONTRACTTOKEN"),
+        AssetFixture::new("FOO", "credit", iss(), ""),
+    ]
 }
 
 /// Seed 4 assets with distinct 24h volumes:
@@ -42,27 +53,20 @@ async fn setup(db: &str) -> Client {
         .await
         .unwrap();
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (1, 'XLM', 'native', '', ''), \
-             (2, 'USDC', 'credit', '{i}', ''), \
-             (3, '', 'contract', '', 'CCONTRACTTOKEN'), \
-             (4, 'FOO', 'credit', '{i}', '')",
-            i = iss()
-        ))
+        .query(&fixture::assets_insert(db, &setup_assets()))
         .execute()
         .await
         .unwrap();
+    let [xlm, usdc, token, foo_id] = setup_assets().map(|a| a.id());
     admin
         .query(&format!(
-            // Task 0216: asset 2 carries a REAL as_of/price_status pair, dated
+            // Task 0216: USDC carries a REAL as_of/price_status pair, dated
             // half an hour behind updated_at so a transposition of the two
             // DateTime columns cannot hide.
             "INSERT INTO {db}.current_prices \
              (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at, as_of, price_status) \
              VALUES \
-             (2, 1.0, 1.0, 3000, '2026-02-10 12:00:00', '2026-02-10 11:30:00', 'carried')"
+             ({usdc}, 1.0, 1.0, 3000, '2026-02-10 12:00:00', '2026-02-10 11:30:00', 'carried')"
         ))
         .execute()
         .await
@@ -75,9 +79,9 @@ async fn setup(db: &str) -> Client {
             "INSERT INTO {db}.current_prices \
              (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at) \
              VALUES \
-             (1, 0.5, 0.5, 1000, '2026-02-10 12:00:00'), \
-             (3, 2.0, 2.0, 2000, '2026-02-10 12:00:00'), \
-             (4, 9.0, 9.0, 500,  '2026-02-10 12:00:00')"
+             ({xlm}, 0.5, 0.5, 1000, '2026-02-10 12:00:00'), \
+             ({token}, 2.0, 2.0, 2000, '2026-02-10 12:00:00'), \
+             ({foo_id}, 9.0, 9.0, 500,  '2026-02-10 12:00:00')"
         ))
         .execute()
         .await
@@ -88,9 +92,9 @@ async fn setup(db: &str) -> Client {
 /// Seed `n` assets + `current_prices` rows for the pagination walk. Each asset
 /// gets a unique `asset_code` (`A0001`…) — the response item exposes `asset_code`
 /// (not the internal `asset_id`), so it is the identity we assert set-completeness
-/// on. Volumes are bucketed into 13 tie-groups (`(asset_id % 13) * 100`): the
-/// groups are large (~19 rows) and non-monotonic in `asset_id`, so equal-volume
-/// rows both *reorder* relative to id and *straddle* the 50-row page boundary —
+/// on. Volumes are bucketed into 13 tie-groups by row index (`(i % 13) * 100`):
+/// the groups are large (~19 rows) and ids are hashes of the identity, so
+/// equal-volume rows both *reorder* relative to id and *straddle* the 50-row page boundary —
 /// which is exactly what exercises the cursor's `(sort_col, asset_id)` tie-break.
 async fn setup_n(db: &str, n: u32) -> Client {
     let admin = Client::default().with_url(ch_url());
@@ -108,22 +112,21 @@ async fn setup_n(db: &str, n: u32) -> Client {
         .await
         .unwrap();
 
-    let mut assets = Vec::with_capacity(n as usize);
+    let codes: Vec<String> = (1..=n).map(|i| format!("A{i:04}")).collect();
+    let assets: Vec<AssetFixture<'_>> = codes
+        .iter()
+        .map(|code| AssetFixture::new(code, "credit", iss(), ""))
+        .collect();
     let mut prices = Vec::with_capacity(n as usize);
-    for i in 1..=n {
-        assets.push(format!(
-            "({i}, 'A{i:04}', 'credit', '{iss}', '')",
-            iss = iss()
-        ));
+    for (i, a) in (1..=n).zip(&assets) {
         let vol = (i % 13) * 100;
-        prices.push(format!("({i}, 1.0, 1.0, {vol}, '2026-02-10 12:00:00')"));
+        prices.push(format!(
+            "({}, 1.0, 1.0, {vol}, '2026-02-10 12:00:00')",
+            a.id()
+        ));
     }
     admin
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES {}",
-            assets.join(", ")
-        ))
+        .query(&fixture::assets_insert(db, &assets))
         .execute()
         .await
         .unwrap();
@@ -368,7 +371,6 @@ async fn setup_identities(
     shared: usize,
     contracts: usize,
 ) -> Vec<Identity> {
-    use prices_clickhouse::asset_id::fixture;
     let admin = Client::default().with_url(ch_url());
     admin
         .query(&format!("DROP DATABASE IF EXISTS {db}"))
@@ -553,8 +555,8 @@ async fn full_cursor_walk_returns_every_identity_exactly_once() {
 // Task 0210 — Soroban token symbols composed into `asset_code` at read time.
 // ---------------------------------------------------------------------------
 
-/// Insert a `prices.asset_symbol` row for the fixture's Soroban asset (id 3,
-/// `CCONTRACTTOKEN`), which `setup` seeds with an empty `asset_code`.
+/// Insert a `prices.asset_symbol` row for the fixture's Soroban asset
+/// (`CCONTRACTTOKEN`), which `setup` seeds with an empty `asset_code`.
 async fn seed_symbol(db: &str, contract: &str, symbol: &str) {
     Client::default()
         .with_url(ch_url())

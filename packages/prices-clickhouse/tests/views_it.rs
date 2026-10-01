@@ -8,7 +8,19 @@
 //! onto the scratch name) and drops it at the end.
 
 use clickhouse::Client;
+use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert};
 use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
+
+// The fixture assets. Each displays as its id, derived from its identity
+// (`asset_id::fixture`), so a candle written `({FOO}, {USDC}, …)` always agrees
+// with the `assets` row a test seeds for it.
+const XLM: AssetFixture = AssetFixture::new("XLM", "classic", "", "");
+const USDC: AssetFixture = AssetFixture::new("USDC", "classic", USDC_ISSUER, "");
+const USDT: AssetFixture = AssetFixture::new("USDT", "classic", USDT_ISSUER, "");
+const FOO: AssetFixture = AssetFixture::new("FOO", "classic", "GFOO", "");
+const BAR: AssetFixture = AssetFixture::new("BAR", "classic", "GBAR", "");
+const EXO: AssetFixture = AssetFixture::new("EXO", "classic", "GEXO", "");
+const CTK: AssetFixture = AssetFixture::new("CTK", "soroban", "", "CTOKEN7XYZ");
 
 fn ch_url() -> String {
     std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string())
@@ -71,18 +83,15 @@ async fn views_expose_usd_series_and_reference() {
     let db = "it_views_series";
     let client = setup_scratch(db).await;
 
-    // 1=XLM native (with a SAC), 2=USDC, 10=FOO credit, 20=EXO quote,
-    // 30=soroban contract token. Token 30 deliberately carries a non-empty
+    // XLM native (with a SAC), USDC, FOO credit, EXO quote, CTK soroban
+    // contract token. CTK deliberately carries a non-empty
     // asset_code ('CTK') — discovery/metadata could populate a symbol — to prove
     // the views normalize a 'contract' kind to asset_code='' (review #6), not just
     // rely on the writer leaving it blank.
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (1,'XLM','classic','','','CXLMSAC'), (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','',''), (20,'EXO','classic','GEXO','',''), \
-             (30,'CTK','soroban','','CTOKEN7XYZ','')"
+        .query(&assets_insert(
+            db,
+            &[XLM.with_sac("CXLMSAC"), USDC, FOO, EXO, CTK],
         ))
         .execute()
         .await
@@ -94,11 +103,11 @@ async fn views_expose_usd_series_and_reference() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1620000000, 1, 2,'sdex',    0.30,0.30,0.30,0.30, 1000,300,300,0.30,0.30,1,1), \
-             (1620000000,10, 2,'sdex',    5,5,5,5,             10, 50, 500, 5,   5,   1,1), \
-             (1620000000,10, 1,'phoenix', 16.6667,16.6667,16.6667,16.6667, 5,83,250,5,16.6667,1,1), \
-             (1620000000,30, 2,'soroswap',2,2,2,2,             3,  6,  600,  2,   2,   1,1), \
-             (1620000000,10,20,'sdex',    9,9,9,9,             1,  9,  0,  0,   9,   1,1)"
+             (1620000000, {XLM}, {USDC}, 'sdex',    0.30,0.30,0.30,0.30, 1000,300,300,0.30,0.30,1,1), \
+             (1620000000, {FOO}, {USDC}, 'sdex',    5,5,5,5,             10, 50, 500, 5,   5,   1,1), \
+             (1620000000, {FOO}, {XLM}, 'phoenix', 16.6667,16.6667,16.6667,16.6667, 5,83,250,5,16.6667,1,1), \
+             (1620000000, {CTK}, {USDC}, 'soroswap',2,2,2,2,             3,  6,  600,  2,   2,   1,1), \
+             (1620000000, {FOO}, {EXO}, 'sdex',    9,9,9,9,             1,  9,  0,  0,   9,   1,1)"
         ))
         .execute()
         .await
@@ -163,7 +172,7 @@ async fn views_expose_usd_series_and_reference() {
         .unwrap();
     assert_eq!(non_peg_quote, 0, "a non-peg quote leg gets no row");
 
-    // ⚠️ Was `== 3` before task 0165. USDC (asset 2) is the quote on three of
+    // ⚠️ Was `== 3` before task 0165. USDC is the quote on three of
     // these candles and the base of none, so it previously had NO row at all —
     // that is the whole defect. It now gets a 'peg' row, hence 4. The change is
     // intentional; a regression to 3 means the peg-fill arm stopped firing.
@@ -219,8 +228,8 @@ async fn views_expose_usd_series_and_reference() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1620003600, 1, 2,'sdex', 0.31,0.31,0.31,0.31, 100,31,310,0.31,0.31,1,1), \
-             (1620007200, 1, 2,'sdex', 0.32,0.32,0.32,0.32, 100,32,320,0.32,0.32,1,1)"
+             (1620003600, {XLM}, {USDC}, 'sdex', 0.31,0.31,0.31,0.31, 100,31,310,0.31,0.31,1,1), \
+             (1620007200, {XLM}, {USDC}, 'sdex', 0.32,0.32,0.32,0.32, 100,32,320,0.32,0.32,1,1)"
         ))
         .execute()
         .await
@@ -269,19 +278,19 @@ async fn views_expose_usd_series_and_reference() {
     assert_eq!(pure, "contract", "pure soroban token maps to itself");
 
     // current_price_usd (live spot): one row per asset, natural-identity keyed.
-    // Include the contract token (30) to confirm the same #6 normalization here.
-    // Asset 1 carries every task-0072 column with a DISTINCT value, so a view
-    // that mixed up two forwarded columns cannot pass; asset 30 stays on the
+    // Include the contract token (CTK) to confirm the same #6 normalization here.
+    // XLM carries every task-0072 column with a DISTINCT value, so a view
+    // that mixed up two forwarded columns cannot pass; CTK stays on the
     // table DEFAULTs, standing in for an asset the MV has no breakdown for.
     client
         .query(&format!(
             "INSERT INTO {db}.current_prices \
              (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct, \
               volume_24h_usd, market_cap_usd, vwap_24h, sources, updated_at) VALUES \
-             (1, 0.1600, 1.0000, -3.2500, 7.7500, 125000.0000, 4500000.0000, 0.1580, \
+             ({XLM}, 0.1600, 1.0000, -3.2500, 7.7500, 125000.0000, 4500000.0000, 0.1580, \
               '{{\"sdex\":{{\"price\":\"0.16\",\"volume_24h\":\"125000\"}}}}', \
               toDateTime(1620100000)), \
-             (30, 2.5000, 0, 0, 0, 0, 0, 0, '', toDateTime(1620100000))"
+             ({CTK}, 2.5000, 0, 0, 0, 0, 0, 0, '', toDateTime(1620100000))"
         ))
         .execute()
         .await
@@ -684,19 +693,12 @@ async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
     /// this fixture deliberately seeds none.
     const PEG_FALLBACK: f64 = 1.0;
 
-    // 2 = USDC (top-preference quote → never a base, the defect).
-    // 3 = USDT at its canonical issuer (a peg asset that DOES trade as a base —
+    // USDC (top-preference quote → never a base, the defect).
+    // USDT at its canonical issuer (a peg asset that DOES trade as a base —
     //     the control that catches the flattening regression).
-    // 10 = FOO, an ordinary credit asset; 1 = native XLM.
+    // FOO, an ordinary credit asset; native XLM.
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (1,'XLM','classic','','',''), \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (3,'USDT','classic','{USDT_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','','')"
-        ))
+        .query(&assets_insert(db, &[XLM, USDC, USDT, FOO]))
         .execute()
         .await
         .unwrap();
@@ -711,10 +713,10 @@ async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1620000000,10, 2,'sdex', 5,5,5,5,             10, 50, 500, 5,    5,    1,1), \
-             (1620000000, 1, 2,'sdex', 0.30,0.30,0.30,0.30, 1000,300,300,0.30,0.30, 1,1), \
-             (1620000000, 3, 2,'sdex', 0.97,0.97,0.97,0.97, 100, 97, 970, 0.97, 0.97, 1,1), \
-             (1620000000,10, 3,'sdex', 5.15,5.15,5.15,5.15, 4,  20.6,206,5,  5.15, 1,1)"
+             (1620000000, {FOO}, {USDC}, 'sdex', 5,5,5,5,             10, 50, 500, 5,    5,    1,1), \
+             (1620000000, {XLM}, {USDC}, 'sdex', 0.30,0.30,0.30,0.30, 1000,300,300,0.30,0.30, 1,1), \
+             (1620000000, {USDT}, {USDC}, 'sdex', 0.97,0.97,0.97,0.97, 100, 97, 970, 0.97, 0.97, 1,1), \
+             (1620000000, {FOO}, {USDT}, 'sdex', 5.15,5.15,5.15,5.15, 4,  20.6,206,5,  5.15, 1,1)"
         ))
         .execute()
         .await
@@ -844,13 +846,7 @@ async fn peg_member_that_also_trades_as_a_base_keeps_its_market_value() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (1,'XLM','classic','','',''), \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','','')"
-        ))
+        .query(&assets_insert(db, &[XLM, USDC, FOO]))
         .execute()
         .await
         .unwrap();
@@ -864,8 +860,8 @@ async fn peg_member_that_also_trades_as_a_base_keeps_its_market_value() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1620000000,10, 2,'sdex', 5,5,5,5,             10, 50,  500,  5,    5,    1,1), \
-             (1620000000, 2, 1,'sdex', 3.2,3.2,3.2,3.2,     50, 160, 520,  1.04, 3.2,  1,1)"
+             (1620000000, {FOO}, {USDC}, 'sdex', 5,5,5,5,             10, 50,  500,  5,    5,    1,1), \
+             (1620000000, {USDC}, {XLM}, 'sdex', 3.2,3.2,3.2,3.2,     50, 160, 520,  1.04, 3.2,  1,1)"
         ))
         .execute()
         .await
@@ -955,12 +951,7 @@ async fn peg_asset_with_only_zero_volume_candles_falls_back_instead_of_publishin
     let client = setup_scratch(db).await;
 
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','','')"
-        ))
+        .query(&assets_insert(db, &[USDC, FOO]))
         .execute()
         .await
         .unwrap();
@@ -975,8 +966,8 @@ async fn peg_asset_with_only_zero_volume_candles_falls_back_instead_of_publishin
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1620000000, 2,10,'sdex', 0.97,0.97,0.97,0.97, 0,0,0,0.97,0.97,1,1), \
-             (1620000000,10, 2,'sdex', 5,5,5,5,                7,35,350,5,5,1,1)"
+             (1620000000, {USDC}, {FOO}, 'sdex', 0.97,0.97,0.97,0.97, 0,0,0,0.97,0.97,1,1), \
+             (1620000000, {FOO}, {USDC}, 'sdex', 5,5,5,5,                7,35,350,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1045,13 +1036,7 @@ async fn usdt_quote_only_gets_no_peg_fallback_but_usdc_still_does() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (3,'USDT','classic','{USDT_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','','')"
-        ))
+        .query(&assets_insert(db, &[USDC, USDT, FOO]))
         .execute()
         .await
         .unwrap();
@@ -1064,8 +1049,8 @@ async fn usdt_quote_only_gets_no_peg_fallback_but_usdc_still_does() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1620000000,10, 2,'sdex', 5,5,5,5,             10,50,  500,  5,5,   1,1), \
-             (1620000000,10, 3,'sdex', 5.15,5.15,5.15,5.15,  4,20.6,206,5,5.15,1,1)"
+             (1620000000, {FOO}, {USDC}, 'sdex', 5,5,5,5,             10,50,  500,  5,5,   1,1), \
+             (1620000000, {FOO}, {USDT}, 'sdex', 5.15,5.15,5.15,5.15,  4,20.6,206,5,5.15,1,1)"
         ))
         .execute()
         .await
@@ -1201,12 +1186,7 @@ async fn peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one() 
     const EARLIER: &str = "1.00050000000000";
 
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','','')"
-        ))
+        .query(&assets_insert(db, &[USDC, FOO]))
         .execute()
         .await
         .unwrap();
@@ -1222,9 +1202,9 @@ async fn peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one() 
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-03-01 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
-             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
-             (toDateTime('2026-08-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
+             (toDateTime('2026-03-01 00:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2026-08-10 00:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2026-08-11 00:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1246,8 +1226,8 @@ async fn peg_fill_publishes_the_measured_rate_and_falls_back_only_without_one() 
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-10 09:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
-             (toDateTime('2026-08-10 23:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
+             (toDateTime('2026-08-10 09:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2026-08-10 23:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1428,12 +1408,7 @@ async fn an_oracle_row_outranks_an_imported_row_in_the_same_bucket() {
     const IMPORT: &str = "0.50000000000000";
 
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','','')"
-        ))
+        .query(&assets_insert(db, &[USDC, FOO]))
         .execute()
         .await
         .unwrap();
@@ -1445,7 +1420,7 @@ async fn an_oracle_row_outranks_an_imported_row_in_the_same_bucket() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
+             (toDateTime('2026-08-10 00:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1455,7 +1430,7 @@ async fn an_oracle_row_outranks_an_imported_row_in_the_same_bucket() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-10 23:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
+             (toDateTime('2026-08-10 23:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1525,7 +1500,7 @@ async fn an_oracle_row_outranks_an_imported_row_in_the_same_bucket() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
+             (toDateTime('2023-03-11 00:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1611,12 +1586,7 @@ async fn price_usd_series_1h_publishes_the_imported_rate_of_each_hour() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','','')"
-        ))
+        .query(&assets_insert(db, &[USDC, FOO]))
         .execute()
         .await
         .unwrap();
@@ -1629,10 +1599,10 @@ async fn price_usd_series_1h_publishes_the_imported_rate_of_each_hour() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
-             (toDateTime('2023-03-11 07:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
-             (toDateTime('2023-03-11 23:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
-             (toDateTime('2023-03-12 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
+             (toDateTime('2023-03-11 00:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2023-03-11 07:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2023-03-11 23:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2023-03-12 00:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1697,7 +1667,7 @@ async fn price_usd_series_1h_publishes_the_imported_rate_of_each_hour() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2023-03-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
+             (toDateTime('2023-03-11 00:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1762,12 +1732,7 @@ async fn a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains()
     const MEASURED: &str = "0.99930223861292";
 
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','','')"
-        ))
+        .query(&assets_insert(db, &[USDC, FOO]))
         .execute()
         .await
         .unwrap();
@@ -1778,7 +1743,7 @@ async fn a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains()
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-12 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
+             (toDateTime('2026-08-12 00:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1791,8 +1756,8 @@ async fn a_day_whose_last_candle_hour_holds_no_reading_diverges_between_grains()
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-12 09:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
-             (toDateTime('2026-08-12 23:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
+             (toDateTime('2026-08-12 09:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2026-08-12 23:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -1897,12 +1862,7 @@ async fn a_measured_rate_at_exactly_par_is_labelled_oracle_not_peg() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','','')"
-        ))
+        .query(&assets_insert(db, &[USDC, FOO]))
         .execute()
         .await
         .unwrap();
@@ -1913,8 +1873,8 @@ async fn a_measured_rate_at_exactly_par_is_labelled_oracle_not_peg() {
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (toDateTime('2026-08-10 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1), \
-             (toDateTime('2026-08-11 00:00:00'),10,2,'sdex',5,5,5,5,10,50,500,5,5,1,1)"
+             (toDateTime('2026-08-10 00:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1), \
+             (toDateTime('2026-08-11 00:00:00'), {FOO}, {USDC}, 'sdex',5,5,5,5,10,50,500,5,5,1,1)"
         ))
         .execute()
         .await
@@ -2015,13 +1975,7 @@ const JIT_MODES: [&str; 2] = [
 /// quote leg, so neither the 0165 guard nor anything else can rescue it.
 async fn seed_zero_volume_only_base(client: &Client, db: &str) {
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','',''), \
-             (11,'BAR','classic','GBAR','','')"
-        ))
+        .query(&assets_insert(db, &[USDC, FOO, BAR]))
         .execute()
         .await
         .unwrap();
@@ -2031,8 +1985,8 @@ async fn seed_zero_volume_only_base(client: &Client, db: &str) {
                 "INSERT INTO {db}.{tbl} \
                  (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
                   volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-                 (1620000000,10, 2,'sdex', 5,5,5,5,           7,35,350,5,5,1,1), \
-                 (1620000000,11,10,'sdex', 0.5,0.5,0.5,0.5,   0,0,0,0.5,0.5,1,1)"
+                 (1620000000, {FOO}, {USDC}, 'sdex', 5,5,5,5,           7,35,350,5,5,1,1), \
+                 (1620000000, {BAR}, {FOO}, 'sdex', 0.5,0.5,0.5,0.5,   0,0,0,0.5,0.5,1,1)"
             ))
             .execute()
             .await
@@ -2124,12 +2078,7 @@ async fn a_zero_volume_candle_beside_a_real_one_changes_nothing() {
     let db = "it_views_zero_weight_mixed";
     let client = setup_scratch(db).await;
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','','')"
-        ))
+        .query(&assets_insert(db, &[USDC, FOO]))
         .execute()
         .await
         .unwrap();
@@ -2142,8 +2091,8 @@ async fn a_zero_volume_candle_beside_a_real_one_changes_nothing() {
                 "INSERT INTO {db}.{tbl} \
                  (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
                   volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-                 (1620000000,10,2,'sdex',    5,5,5,5, 7,35,350,5,5,1,1), \
-                 (1620000000,10,2,'soroswap',4,4,4,4, 0,0,0,4,4,1,1)"
+                 (1620000000, {FOO}, {USDC}, 'sdex',    5,5,5,5, 7,35,350,5,5,1,1), \
+                 (1620000000, {FOO}, {USDC}, 'soroswap',4,4,4,4, 0,0,0,4,4,1,1)"
             ))
             .execute()
             .await
@@ -2185,11 +2134,15 @@ async fn usd_reference_omits_a_bucket_whose_reference_candles_have_no_volume() {
     let db = "it_views_zero_weight_reference";
     let client = setup_scratch(db).await;
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (1,'XLM','native','','',''), \
-             (2,'USDC','classic','{USDC_ISSUER}','','')"
+        .query(&assets_insert(
+            db,
+            &[
+                AssetFixture {
+                    asset_type: "native",
+                    ..XLM
+                },
+                USDC,
+            ],
         ))
         .execute()
         .await
@@ -2202,8 +2155,8 @@ async fn usd_reference_omits_a_bucket_whose_reference_candles_have_no_volume() {
                 "INSERT INTO {db}.{tbl} \
                  (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
                   volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-                 (1620000000,1,2,'sdex', 0.1,0.1,0.1,0.1, 100,10,10,0.1,0.1,1,1), \
-                 (1620086400,1,2,'sdex', 0.2,0.2,0.2,0.2,   0, 0, 0,0.2,0.2,1,1)"
+                 (1620000000, {XLM}, {USDC}, 'sdex', 0.1,0.1,0.1,0.1, 100,10,10,0.1,0.1,1,1), \
+                 (1620086400, {XLM}, {USDC}, 'sdex', 0.2,0.2,0.2,0.2,   0, 0, 0,0.2,0.2,1,1)"
             ))
             .execute()
             .await
@@ -2276,12 +2229,7 @@ async fn a_dust_print_cannot_price_a_bucket_whose_volume_is_unpriced() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','','')"
-        ))
+        .query(&assets_insert(db, &[USDC, FOO]))
         .execute()
         .await
         .unwrap();
@@ -2301,8 +2249,8 @@ async fn a_dust_print_cannot_price_a_bucket_whose_volume_is_unpriced() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
-             (1620000000,10,2,'sdex',     1.3085,1.3085,1.3085,1.3085, 0.764,1.0,1.0,1.3085,1.3085,1, 1,0.764,1.0, 1), \
-             (1620000000,10,2,'soroswap', 0.0065,0.0065,0.0065,0.0065, 1000,6.5,0,0,0.0065,1,        1,1000,6.5, 1)"
+             (1620000000, {FOO}, {USDC}, 'sdex',     1.3085,1.3085,1.3085,1.3085, 0.764,1.0,1.0,1.3085,1.3085,1, 1,0.764,1.0, 1), \
+             (1620000000, {FOO}, {USDC}, 'soroswap', 0.0065,0.0065,0.0065,0.0065, 1000,6.5,0,0,0.0065,1,        1,1000,6.5, 1)"
         ))
         .execute()
         .await
@@ -2371,7 +2319,7 @@ async fn a_dust_print_cannot_price_a_bucket_whose_volume_is_unpriced() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
-             (1620000000,10,2,'soroswap', 0.0065,0.0065,0.0065,0.0065, 1000,6.5,650,0.0065,0.0065,1, 1,1000,6.5, 2)"
+             (1620000000, {FOO}, {USDC}, 'soroswap', 0.0065,0.0065,0.0065,0.0065, 1000,6.5,650,0.0065,0.0065,1, 1,1000,6.5, 2)"
         ))
         .execute()
         .await
@@ -2439,12 +2387,7 @@ async fn a_fully_priced_small_bucket_publishes_at_full_share() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','','')"
-        ))
+        .query(&assets_insert(db, &[USDC, FOO]))
         .execute()
         .await
         .unwrap();
@@ -2454,7 +2397,7 @@ async fn a_fully_priced_small_bucket_publishes_at_full_share() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
-             (1620000000,10,2,'sdex', 1.3085,1.3085,1.3085,1.3085, 0.764,1.0,1.0,1.3085,1.3085,1, 1,0.764,1.0, 1)"
+             (1620000000, {FOO}, {USDC}, 'sdex', 1.3085,1.3085,1.3085,1.3085, 0.764,1.0,1.0,1.3085,1.3085,1, 1,0.764,1.0, 1)"
         ))
         .execute()
         .await
@@ -2532,17 +2475,11 @@ async fn a_bucket_quoted_only_in_an_ineligible_asset_reads_unpriceable_with_a_ze
     let db = "it_views_0147_unpriceable";
     let client = setup_scratch(db).await;
 
-    // 20 = EXO: an ordinary credit asset, not in the eligible set by literal and
-    // with no usd_rate row. 2 = USDC is seeded only so the peg arm has its
+    // EXO: an ordinary credit asset, not in the eligible set by literal and
+    // with no usd_rate row. USDC is seeded only so the peg arm has its
     // canonical identity to key on.
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','',''), \
-             (20,'EXO','classic','GEXO','','')"
-        ))
+        .query(&assets_insert(db, &[USDC, FOO, EXO]))
         .execute()
         .await
         .unwrap();
@@ -2552,7 +2489,7 @@ async fn a_bucket_quoted_only_in_an_ineligible_asset_reads_unpriceable_with_a_ze
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
-             (1620000000,10,20,'sdex', 9,9,9,9, 500,4500,0,0,9,1, 1,500,4500, 1)"
+             (1620000000, {FOO}, {EXO}, 'sdex', 9,9,9,9, 500,4500,0,0,9,1, 1,500,4500, 1)"
         ))
         .execute()
         .await
@@ -2632,13 +2569,7 @@ async fn dust_rows_move_neither_the_published_close_nor_the_share() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','',''), \
-             (11,'BAR','classic','GBAR','','')"
-        ))
+        .query(&assets_insert(db, &[USDC, FOO, BAR]))
         .execute()
         .await
         .unwrap();
@@ -2654,9 +2585,9 @@ async fn dust_rows_move_neither_the_published_close_nor_the_share() {
                  (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
                   volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
                   pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
-                 (1620000000,10,2,'sdex',     5,5,5,5, 7,35,350,5,5,1,       1,7,35, 1), \
-                 (1620000000,10,2,'soroswap', 4,4,4,4, 1000,4000,4000,4,4,3, 0,0,0,  1), \
-                 (1620000000,11,2,'sdex',     5,5,5,5, 7,35,350,5,5,1,       1,7,35, 1)"
+                 (1620000000, {FOO}, {USDC}, 'sdex',     5,5,5,5, 7,35,350,5,5,1,       1,7,35, 1), \
+                 (1620000000, {FOO}, {USDC}, 'soroswap', 4,4,4,4, 1000,4000,4000,4,4,3, 0,0,0,  1), \
+                 (1620000000, {BAR}, {USDC}, 'sdex',     5,5,5,5, 7,35,350,5,5,1,       1,7,35, 1)"
             ))
             .execute()
             .await
@@ -2707,12 +2638,7 @@ async fn the_gate_and_the_coverage_view_behave_the_same_at_the_hourly_grain() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','','')"
-        ))
+        .query(&assets_insert(db, &[USDC, FOO]))
         .execute()
         .await
         .unwrap();
@@ -2722,8 +2648,8 @@ async fn the_gate_and_the_coverage_view_behave_the_same_at_the_hourly_grain() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
-             (1620000000,10,2,'sdex',     1.3085,1.3085,1.3085,1.3085, 0.764,1.0,1.0,1.3085,1.3085,1, 1,0.764,1.0, 1), \
-             (1620000000,10,2,'soroswap', 0.0065,0.0065,0.0065,0.0065, 1000,6.5,0,0,0.0065,1,        1,1000,6.5, 1)"
+             (1620000000, {FOO}, {USDC}, 'sdex',     1.3085,1.3085,1.3085,1.3085, 0.764,1.0,1.0,1.3085,1.3085,1, 1,0.764,1.0, 1), \
+             (1620000000, {FOO}, {USDC}, 'soroswap', 0.0065,0.0065,0.0065,0.0065, 1000,6.5,0,0,0.0065,1,        1,1000,6.5, 1)"
         ))
         .execute()
         .await
@@ -2764,7 +2690,7 @@ async fn the_gate_and_the_coverage_view_behave_the_same_at_the_hourly_grain() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
-             (1620000000,10,2,'soroswap', 0.0065,0.0065,0.0065,0.0065, 1000,6.5,650,0.0065,0.0065,1, 1,1000,6.5, 2)"
+             (1620000000, {FOO}, {USDC}, 'soroswap', 0.0065,0.0065,0.0065,0.0065, 1000,6.5,650,0.0065,0.0065,1, 1,1000,6.5, 2)"
         ))
         .execute()
         .await
@@ -2820,11 +2746,15 @@ async fn usd_reference_ignores_sub_floor_and_dust_only_rows_at_both_grains() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (1,'XLM','native','','',''), \
-             (2,'USDC','classic','{USDC_ISSUER}','','')"
+        .query(&assets_insert(
+            db,
+            &[
+                AssetFixture {
+                    asset_type: "native",
+                    ..XLM
+                },
+                USDC,
+            ],
         ))
         .execute()
         .await
@@ -2836,11 +2766,11 @@ async fn usd_reference_ignores_sub_floor_and_dust_only_rows_at_both_grains() {
                  (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
                   volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
                   pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
-                 (1620000000,1,2,'sdex',     0.1,0.1,0.1,0.1, 100,10,10,0.1,0.1,1, 1,100,10, 1), \
-                 (1620000000,1,2,'soroswap', 0.0000000000001,0.0000000000001,0.0000000000001,0.0000000000001, 900,0,0,0,0,1, 1,900,0, 1), \
-                 (1620000000,1,2,'phoenix',  0.5,0.5,0.5,0.5, 900,450,450,0.5,0.5,5, 0,0,0, 1), \
-                 (1620086400,1,2,'soroswap', 0.0000000000001,0.0000000000001,0.0000000000001,0.0000000000001, 900,0,0,0,0,1, 1,900,0, 1), \
-                 (1620172800,1,2,'phoenix',  0.5,0.5,0.5,0.5, 900,450,450,0.5,0.5,5, 0,0,0, 1)"
+                 (1620000000, {XLM}, {USDC}, 'sdex',     0.1,0.1,0.1,0.1, 100,10,10,0.1,0.1,1, 1,100,10, 1), \
+                 (1620000000, {XLM}, {USDC}, 'soroswap', 0.0000000000001,0.0000000000001,0.0000000000001,0.0000000000001, 900,0,0,0,0,1, 1,900,0, 1), \
+                 (1620000000, {XLM}, {USDC}, 'phoenix',  0.5,0.5,0.5,0.5, 900,450,450,0.5,0.5,5, 0,0,0, 1), \
+                 (1620086400, {XLM}, {USDC}, 'soroswap', 0.0000000000001,0.0000000000001,0.0000000000001,0.0000000000001, 900,0,0,0,0,1, 1,900,0, 1), \
+                 (1620172800, {XLM}, {USDC}, 'phoenix',  0.5,0.5,0.5,0.5, 900,450,450,0.5,0.5,5, 0,0,0, 1)"
             ))
             .execute()
             .await
@@ -2904,17 +2834,10 @@ async fn a_priced_row_outside_the_eligible_quote_set_stays_inside_the_share() {
     let db = "it_views_0147_priced_not_eligible";
     let client = setup_scratch(db).await;
 
-    // 20 = EXO: an ordinary credit asset, in neither the three eligible
-    // literals nor `prices.usd_rate`. 2 = USDC is the canonical eligible quote.
+    // EXO: an ordinary credit asset, in neither the three eligible
+    // literals nor `prices.usd_rate`. USDC is the canonical eligible quote.
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
-             (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (10,'FOO','classic','GFOO','',''), \
-             (11,'BAR','classic','GBAR','',''), \
-             (20,'EXO','classic','GEXO','','')"
-        ))
+        .query(&assets_insert(db, &[USDC, FOO, BAR, EXO]))
         .execute()
         .await
         .unwrap();
@@ -2925,9 +2848,9 @@ async fn a_priced_row_outside_the_eligible_quote_set_stays_inside_the_share() {
                  (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
                   volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
                   pf_trade_count, pf_volume, pf_price_volume, version) VALUES \
-                 (1620000000,10,20,'sdex', 9,9,9,9, 500,4500,5000,2.5,9,7, 7,500,4500, 1), \
-                 (1620000000,10,2,'soroswap', 9,9,9,9, 0.0001,0.0009,0,0,9,1, 1,0.0001,0.0009, 1), \
-                 (1620000000,11,20,'sdex', 9,9,9,9, 500,4500,5000,2.5,9,7, 7,500,4500, 1)"
+                 (1620000000, {FOO}, {EXO}, 'sdex', 9,9,9,9, 500,4500,5000,2.5,9,7, 7,500,4500, 1), \
+                 (1620000000, {FOO}, {USDC}, 'soroswap', 9,9,9,9, 0.0001,0.0009,0,0,9,1, 1,0.0001,0.0009, 1), \
+                 (1620000000, {BAR}, {EXO}, 'sdex', 9,9,9,9, 500,4500,5000,2.5,9,7, 7,500,4500, 1)"
             ))
             .execute()
             .await
