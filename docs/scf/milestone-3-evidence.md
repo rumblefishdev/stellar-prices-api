@@ -63,9 +63,9 @@ Validation**, weeks 10 to 13. The work it names, and where each stands:
 | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | OpenAPI 3.0 specification covering all endpoints                          | Served from the code at `/api-docs-json`; 74 production-shaped examples and a lint gate since 2026-09-24 (task 0306)                                         |
 | Self-service onboarding portal: key request, quickstart, example queries  | Public since 2026-09-23 at `…/api/`; quick start reconciled with the spec (0163, 0233); privacy policy (0303); Discord sign-in on the test guild (0179 open) |
-| Integration test suite, automated, runs in CI, all 7 endpoint groups      | 229 ClickHouse-backed tests run in CI since 2026-09-22 (task 0275)                                                                                           |
+| Integration test suite, automated, runs in CI, all 7 endpoint groups      | 229 ClickHouse-backed tests run in CI since 2026-09-22 (task 0275); each of the seven `/v1` route groups has its own (§5, AC 4)                              |
 | Load test report: k6, documented plan, results at 100 / 500 / 1000 req/s  | [`prices-api-load-test-100rps.md`](../prices-api-load-test-100rps.md) — all three rates on 2026-09-18 (task 0293)                                            |
-| Security review checklist: IAM least privilege, no secrets in env, inputs | Audit in task 0194; the wildcard-IAM inventory is the open half (§5, AC 6)                                                                                   |
+| Security review checklist: IAM least privilege, no secrets in env, inputs | Audit in task 0194; no wildcard actions, every `Resource: "*"` statement inventoried (§5, AC 6)                                                              |
 | X-Ray tracing end-to-end                                                  | `TracingConfig.Mode: Active` on api-handler, oracle, enrichment and ledger-processor (§6)                                                                    |
 | CloudWatch dashboards: latency, errors, ingestion lag, CH write latency…  | `prices-production-overview`; 65 `prices-production-*` alarms, 64 on its alarm strip (§6)                                                                    |
 | GitHub repository public with README, architecture docs, deploy steps     | PUBLIC since 2026-09-16; root `README.md` and the fresh-account runbook in `infra/README.md` since 2026-09-25 (PR #357, task 0297; AC 7)                     |
@@ -167,6 +167,15 @@ starts a ClickHouse instance, applies the schema, starts the mTLS reverse proxy,
 and runs the integration suite — the tests that were `#[ignore]`d for lack of a
 database — on every change to Rust code, after the unit tests.
 
+The seven endpoint groups the Work list names are the seven `/v1` routes of §9,
+counted as the Milestone 2 package counted them
+([`milestone-2-evidence.md`](milestone-2-evidence.md) AC 1); the design
+document's §4 files the same routes under five headings. Each route has its own
+tests in `packages/prices-api/tests/`: `GET /v1/assets` in `list_it.rs`;
+`/v1/assets/{id}`, `POST /v1/prices/batch`, `/v1/oracles/{id}` and
+`/v1/backfill/status` in `endpoints_it.rs`; `…/price` in `price_it.rs`; and
+`…/ohlcv` in `ohlcv_it.rs`.
+
 A run to cite: [`36001067242`](https://github.com/rumblefishdev/stellar-prices-api/actions/runs/36001067242)
 (2026-09-24, job _Rust (fmt, clippy, test, lambda build)_, steps _Start
 ClickHouse → Apply the ClickHouse schema → Start the ClickHouse reverse proxy →
@@ -247,8 +256,9 @@ loaded box. State the date beside any re-run.
 
 ### AC 6 — Security checklist signed off
 
-**Verdict: _open_ — three of four items have evidence, the wildcard-IAM
-inventory does not.** The checklist as the design document states it:
+**Verdict: met — all four items have evidence; the wildcard-IAM item rests on
+the inventory below, taken from the templates of 2026-09-25.** The checklist
+as the design document states it:
 
 | Item                                                 | Evidence                                                                                                                                                                                                                                                                                                                       | State            |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------- |
