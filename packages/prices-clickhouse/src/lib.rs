@@ -32,6 +32,10 @@ pub mod drift;
 /// shipped file equals its rendering, whitespace-normalised.
 pub mod rollup_sql;
 
+/// The task-0139 migration tool: re-keys the asset-id tables onto derived
+/// ids by copy (`prices-clickhouse-rekey`).
+pub mod rekey;
+
 /// mTLS transport for the remote Hetzner CH endpoint (Caddy:443). Gated behind
 /// the `aws-mtls` feature so the plaintext local-dev / init-CLI path does not
 /// pull the rustls / hyper-util / reqwest stack. Ported from BE (task 0052).
