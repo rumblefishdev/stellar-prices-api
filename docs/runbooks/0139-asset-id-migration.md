@@ -478,7 +478,7 @@ curl -sS -H "x-api-key: $PRICES_API_KEY" \
   "$API/assets/native/ohlcv?granularity=1h&start=$(date -u -d '-2 day' +%FT%H:00:00Z)&end=$(date -u -d '-1 day' +%FT%H:00:00Z)&base_currency=USD" \
   | jq '.data | length'                                                             # > 0
 aws lambda invoke --function-name prices-production-rollup-freshness-probe ~/rekey-0139/probe.json
-jq '.asset_id_uniqueness' ~/rekey-0139/probe.json
+jq -r '.errorMessage // .' ~/rekey-0139/probe.json                                # the orphan refusal, see below
 aws cloudwatch get-metric-statistics --namespace Prices/Rollup --metric-name AssetIdCollisions \
   --dimensions Name=Environment,Value=production --start-time "$(date -u -d '-10 min' +%FT%TZ)" \
   --end-time "$(date -u +%FT%TZ)" --period 60 --statistics Maximum --query 'Datapoints[].Maximum'
@@ -486,8 +486,11 @@ aws cloudwatch get-metric-statistics --namespace Prices/Rollup --metric-name Ass
 
 The prices are those of W3 (nothing newer is ingested yet). `AssetIdCollisions`
 must read `0` (measured as `count() − uniqExact(asset_id)` before the window:
-3,321 on 2026-10-01). The probe invocation itself reports an error while the
-orphan read refuses on an empty 2-hour window; that is expected until W13.
+3,321 on 2026-10-01). The probe invocation itself returns an error while the
+orphan read refuses on an empty 2-hour window, and it fails before it writes its
+JSON, so the file holds only that error; that is expected until W13. The
+CloudWatch line is the uniqueness check: the probe publishes `AssetIdCollisions`
+before the orphan read refuses.
 
 **Any failure here: roll back (below), before W13.**
 

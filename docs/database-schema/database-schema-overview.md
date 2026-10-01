@@ -2408,7 +2408,7 @@ erDiagram
     pool_registry |o--o{ unresolved_pools : "contract_id — NO registry row at drop time (negative space)"
 
     assets {
-        UInt32         asset_id PK "application-assigned surrogate"
+        UInt64         asset_id PK "MATERIALIZED xxh3 of code:issuer:contract (task 0139)"
         String         asset_code "plain String, not FixedString — writer contract"
         String         asset_type "plain String, not Enum8 — classic | soroban"
         String         issuer_address "DEFAULT '' — G-address, empty for XLM"
@@ -2424,8 +2424,8 @@ erDiagram
 
     price_ohlcv_1m {
         DateTime           timestamp "DoubleDelta codec"
-        UInt32             asset_id "logical FK to assets"
-        UInt32             quote_asset_id "ADR 0003 — PK includes quote leg"
+        UInt64             asset_id "logical FK to assets; DEFAULT xxh3 of EPHEMERAL identity"
+        UInt64             quote_asset_id "ADR 0003 — PK includes quote leg; DEFAULT xxh3"
         LowCardinality_S   source "sdex | soroswap | aquarius | phoenix | ..."
         Decimal_38_14      open
         Decimal_38_14      high
@@ -2480,7 +2480,7 @@ erDiagram
     }
 
     current_prices {
-        UInt32             asset_id "logical FK to assets"
+        UInt64             asset_id "logical FK to assets"
         Decimal_38_14      price_usd
         Decimal_38_14      price_xlm
         Decimal_10_4       change_24h_pct
@@ -2496,7 +2496,7 @@ erDiagram
 
     oracle_prices {
         DateTime           timestamp "DoubleDelta codec"
-        UInt32             asset_id "logical FK to assets"
+        UInt64             asset_id "logical FK to assets; DEFAULT xxh3, 0 = no asset"
         LowCardinality_S   oracle_name "reflector | chainlink | redstone | band"
         Decimal_38_14      price_usd
         String             raw_data "JSON blob, unparsed"
@@ -2548,7 +2548,7 @@ erDiagram
     }
 
     asset_metadata {
-        UInt32             asset_id PK "logical FK to assets"
+        UInt64             asset_id PK "logical FK to assets"
         String             home_domain "DEFAULT ''; single-writer, supersedes assets.home_domain"
         DateTime           updated_at "DEFAULT now() — RMT version column"
         ENGINE             engine "ReplacingMergeTree(updated_at)"
@@ -2556,7 +2556,7 @@ erDiagram
     }
 
     asset_supply {
-        UInt32             asset_id PK "logical FK to assets"
+        UInt64             asset_id PK "logical FK to assets"
         Decimal_38_14      token_supply "circulating supply"
         DateTime           fetched_at "DEFAULT now() — RMT version column"
         ENGINE             engine "ReplacingMergeTree(fetched_at)"
@@ -2721,9 +2721,9 @@ flowchart TB
             subgraph pricesDB["prices.* — prices-api-owned (ADR 0007)"]
                 direction TB
 
-                Assets["<b>prices.assets</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id UInt32 (surrogate)<br/>asset_code FixedString(12)<br/>asset_type Enum8 classic|soroban<br/>issuer_address FixedString(56)<br/>contract_address FixedString(56)<br/>home_domain String<br/>is_active UInt8 (soft-delete)<br/>created_at / updated_at DateTime<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(updated_at)<br/>ORDER BY (code, issuer, contract)"]
+                Assets["<b>prices.assets</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id UInt64 (xxh3 of identity)<br/>asset_code FixedString(12)<br/>asset_type Enum8 classic|soroban<br/>issuer_address FixedString(56)<br/>contract_address FixedString(56)<br/>home_domain String<br/>is_active UInt8 (soft-delete)<br/>created_at / updated_at DateTime<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(updated_at)<br/>ORDER BY (code, issuer, contract)"]
 
-                OHLCV1m["<b>prices.price_ohlcv_1m</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>timestamp DateTime CODEC(DoubleDelta)<br/>asset_id UInt32<br/>quote_asset_id UInt32 (ADR 0003)<br/>source LowCardinality(String)<br/>open/high/low/close Decimal(38,14)<br/>volume_base / volume_quote_usd Decimal(38,14)<br/>vwap Decimal(38,14) (per-source bucket)<br/>trade_count UInt32<br/>version UInt64 (RMT version)<br/>pf_trade_count UInt32 (0 = no price)<br/>pf_volume / pf_price_volume Decimal(38,14)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(version)<br/>PARTITION BY toYYYYMM(timestamp)<br/>ORDER BY (asset_id, quote_asset_id, source, timestamp)"]
+                OHLCV1m["<b>prices.price_ohlcv_1m</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>timestamp DateTime CODEC(DoubleDelta)<br/>asset_id UInt64<br/>quote_asset_id UInt64 (ADR 0003)<br/>source LowCardinality(String)<br/>open/high/low/close Decimal(38,14)<br/>volume_base / volume_quote_usd Decimal(38,14)<br/>vwap Decimal(38,14) (per-source bucket)<br/>trade_count UInt32<br/>version UInt64 (RMT version)<br/>pf_trade_count UInt32 (0 = no price)<br/>pf_volume / pf_price_volume Decimal(38,14)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(version)<br/>PARTITION BY toYYYYMM(timestamp)<br/>ORDER BY (asset_id, quote_asset_id, source, timestamp)"]
 
                 OHLCV15m["<b>price_ohlcv_15m</b><br/>(same shape; MV-populated)"]
                 OHLCV1h["<b>price_ohlcv_1h</b>"]
@@ -2732,9 +2732,9 @@ flowchart TB
                 OHLCV1w["<b>price_ohlcv_1w</b>"]
                 OHLCV1M["<b>price_ohlcv_1M</b>"]
 
-                Current["<b>prices.current_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id UInt32 (logical FK)<br/>price_usd / price_xlm Decimal(38,14)<br/>change_24h_pct / change_7d_pct Decimal(10,4)<br/>volume_24h_usd / market_cap_usd Decimal(38,14)<br/>vwap_24h Decimal(38,14)<br/>sources String (JSON)<br/>updated_at DateTime (RMT version)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(updated_at)<br/>ORDER BY (asset_id)"]
+                Current["<b>prices.current_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id UInt64 (logical FK)<br/>price_usd / price_xlm Decimal(38,14)<br/>change_24h_pct / change_7d_pct Decimal(10,4)<br/>volume_24h_usd / market_cap_usd Decimal(38,14)<br/>vwap_24h Decimal(38,14)<br/>sources String (JSON)<br/>updated_at DateTime (RMT version)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(updated_at)<br/>ORDER BY (asset_id)"]
 
-                OracleP["<b>prices.oracle_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>timestamp DateTime<br/>asset_id UInt32<br/>oracle_name LowCardinality(String)<br/>price_usd Decimal(38,14)<br/>raw_data String (JSON)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree<br/>PARTITION BY toYYYYMM(timestamp)<br/>ORDER BY (asset_id, oracle_name, timestamp)"]
+                OracleP["<b>prices.oracle_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>timestamp DateTime<br/>asset_id UInt64<br/>oracle_name LowCardinality(String)<br/>price_usd Decimal(38,14)<br/>raw_data String (JSON)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree<br/>PARTITION BY toYYYYMM(timestamp)<br/>ORDER BY (asset_id, oracle_name, timestamp)"]
 
                 BP["<b>prices.backfill_progress</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>task_name LowCardinality(String)<br/>  sdex_archive | soroban_amm<br/>start/target/current_ledger UInt64<br/>status Enum8<br/>last_push_at Nullable(DateTime)<br/>started_at / updated_at DateTime<br/>completed_at Nullable(DateTime)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(updated_at)<br/>ORDER BY (task_name)"]
 
