@@ -85,6 +85,10 @@ reviewer when they ask — first name, surname, e-mail, purpose and end date —
 a one-time password and a policy that denies every read unless the session is
 MFA-authenticated; the user is removed after the review
 ([`docs/runbooks/0295-dashboard-access-on-request.md`](../runbooks/0295-dashboard-access-on-request.md)).
+The same nine read actions can instead be granted through IAM Identity Center:
+an Identity Center user and a `PricesDashboardRead` permission set assigned for
+the review window
+([`docs/runbooks/0295-dashboard-access-via-identity-center.md`](../runbooks/0295-dashboard-access-via-identity-center.md)).
 
 ### Why
 
@@ -96,10 +100,6 @@ MFA-authenticated; the user is removed after the review
   same package's AC 6 (least privilege) argues against; the block explorer's
   Milestone 3 took the same position ("available on request") for its
   equivalent criterion.
-- **What was there before was worse than nothing:** task 0125 had shipped a
-  standing viewer user with a console login and no MFA (2026-09-03/04). It was
-  removed on 2026-09-25 (task 0295), and the synth verifier now refuses any IAM
-  identity in the template.
 
 ### What a reviewer gets
 
@@ -111,26 +111,9 @@ visible too; stated rather than hidden.
 
 ### Status
 
-Disclosed. The runbook's create → verify → remove walk is recorded in task 0295
-once it has been done on a throwaway name.
+Disclosed.
 
-## 4. AC 3: which Discord guild gates self-service — _candidate_
-
-### The wording
-
-_"Onboarding portal accessible; self-service API key request flow functional."_
-The portal is public and the flow works end to end on the project's **test
-Discord guild**. The design intends the Stellar developer guild as the
-eligibility gate (task 0179: agreement with the guild's owner, then the switch
-and a test).
-
-### Status
-
-If the Stellar guild integration is agreed and switched before submission, this
-section is deleted. If not, the criterion is met on the test guild and the
-guild switch is declared as a post-delivery step with a name on it.
-
-## 5. AC 2: Redocly lints the document, and the reference is the portal's own renderer
+## 4. AC 2: Redocly lints the document, and the reference is the portal's own renderer
 
 ### The wording
 
@@ -198,7 +181,7 @@ endpoints"_.
 Disclosed. _To fill on submission day:_ the Redocly summary line, and the IBM
 validator's error count on that day's document (five in task 0124).
 
-## 6. AC 5: met on the scenario it names, and what travels with that number
+## 5. AC 5: met on the scenario it names, and what travels with that number
 
 ### The wording
 
@@ -251,7 +234,7 @@ export or query behind it.
 ## How to read this document
 
 Each numbered section is one criterion whose literal wording the delivered
-system does not match; section 6 is the exception, a criterion met as written
+system does not match; section 5 is the exception, a criterion met as written
 whose scope is declared. "Disclosed" means the departure is a fact and the
 package grades the criterion on the stated replacement; "to decide" means the
 outcome is open on the date at the top and will be one of the listed options.

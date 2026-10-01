@@ -41,13 +41,13 @@ hoped):
 | AC  | Criterion (short)                                           | State on 2026-09-25                                                                                                                                                         |
 | --- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | `/backfill/status`: running, fresh push, depth ≤ 2018-01-01 | **Depth met — 2015-11-18.** Liveness graded on amended wording (deviations §1): the archive completed 2026-07-27                                                            |
-| 2   | OpenAPI lints clean; Swagger UI deployed                    | Lint is a CI job (`npm run openapi:lint`, Redocly CLI 2.44.0); reference rendered at `…/api/docs` (deviations §5). _To fill: lint output on the day_                        |
-| 3   | Portal accessible; self-service key flow works              | Portal public since 09-23. _Open:_ end-to-end proof on production (task 0164); sign-in still through the test Discord guild (0179)                                          |
+| 2   | OpenAPI lints clean; Swagger UI deployed                    | Lint is a CI job (`npm run openapi:lint`, Redocly CLI 2.44.0); reference rendered at `…/api/docs` (deviations §4). _To fill: lint output on the day_                        |
+| 3   | Portal accessible; self-service key flow works              | Portal public since 09-23; sign-in gated on the Stellar Developers guild since 09-02 (0254). _To fill:_ the recorded walk (0164)                                            |
 | 4   | Integration suite passes on CI, link provided               | **Met.** CI starts ClickHouse and runs the integration suite on every Rust change since PR #327 (2026-09-22); run linked in §5                                              |
-| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met 2026-09-18 — p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`; scope in deviations §6                                               |
+| 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met 2026-09-18 — p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`; scope in deviations §5                                               |
 | 6   | Security checklist signed off                               | mTLS-only ClickHouse, secrets in Secrets Manager, inputs validated, no wildcard **actions**; the 23 `Resource: "*"` statements are inventoried in §5                        |
 | 7   | Repo public; `cdk deploy` from README in a fresh account    | **Met on the fresh-account runbook** (0297, PR #357): repo PUBLIC, `README.md` → `infra/README.md`; macOS via 0239 (PR #360). Not run in an empty account (§5)              |
-| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, 65 alarms, all OK on 09-25. Access **on request to a named reviewer, MFA enforced** (deviations §3)                                 |
+| 8   | Dashboard accessible to Stellar (read-only IAM); alarms OK  | Dashboard `prices-production-overview`, 65 alarms, all OK on 10-01. Access **on request to a named reviewer, MFA enforced** (deviations §3)                                 |
 | 9   | 7-day post-launch report                                    | **Met 2026-09-30 — uptime 100.000 %, 0 × 5XX in 65,806 requests, gateway p95 145.2 ms**; push cadence and `earliest_data_available` replaced by live ingestion signals (§4) |
 
 The Tranche 3 work items with no numbered criterion are listed in §6, the known
@@ -59,16 +59,16 @@ in §8.
 §9 of the technical design defines Tranche 3 as **Production Launch &
 Validation**, weeks 10 to 13. The work it names, and where each stands:
 
-| Work item                                                                 | State                                                                                                                                                        |
-| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| OpenAPI 3.0 specification covering all endpoints                          | Served from the code at `/api-docs-json` as OpenAPI 3.1.0 (deviations §5); 74 production-shaped examples and a lint gate since 2026-09-24 (task 0306)        |
-| Self-service onboarding portal: key request, quickstart, example queries  | Public since 2026-09-23 at `…/api/`; quick start reconciled with the spec (0163, 0233); privacy policy (0303); Discord sign-in on the test guild (0179 open) |
-| Integration test suite, automated, runs in CI, all 7 endpoint groups      | 229 ClickHouse-backed tests run in CI since 2026-09-22 (task 0275); each of the seven `/v1` route groups has its own (§5, AC 4)                              |
-| Load test report: k6, documented plan, results at 100 / 500 / 1000 req/s  | [`prices-api-load-test-100rps.md`](../prices-api-load-test-100rps.md) — all three rates on 2026-09-18 (task 0293)                                            |
-| Security review checklist: IAM least privilege, no secrets in env, inputs | Audit in task 0194; no wildcard actions, every `Resource: "*"` statement inventoried (§5, AC 6)                                                              |
-| X-Ray tracing end-to-end                                                  | `TracingConfig.Mode: Active` on api-handler, oracle, enrichment and ledger-processor (§6)                                                                    |
-| CloudWatch dashboards: latency, errors, ingestion lag, CH write latency…  | `prices-production-overview`; 65 `prices-production-*` alarms, 64 on its alarm strip (§6)                                                                    |
-| GitHub repository public with README, architecture docs, deploy steps     | PUBLIC since 2026-09-16; root `README.md` and the fresh-account runbook in `infra/README.md` since 2026-09-25 (PR #357, task 0297; AC 7)                     |
+| Work item                                                                 | State                                                                                                                                                                                  |
+| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OpenAPI 3.0 specification covering all endpoints                          | Served from the code at `/api-docs-json` as OpenAPI 3.1.0 (deviations §4); 74 production-shaped examples and a lint gate since 2026-09-24 (task 0306)                                  |
+| Self-service onboarding portal: key request, quickstart, example queries  | Public since 2026-09-23 at `…/api/`; quick start reconciled with the spec (0163, 0233); privacy policy (0303); Discord sign-in on the Stellar Developers guild since 2026-09-02 (0254) |
+| Integration test suite, automated, runs in CI, all 7 endpoint groups      | 229 ClickHouse-backed tests run in CI since 2026-09-22 (task 0275); each of the seven `/v1` route groups has its own (§5, AC 4)                                                        |
+| Load test report: k6, documented plan, results at 100 / 500 / 1000 req/s  | [`prices-api-load-test-100rps.md`](../prices-api-load-test-100rps.md) — all three rates on 2026-09-18 (task 0293)                                                                      |
+| Security review checklist: IAM least privilege, no secrets in env, inputs | Audit in task 0194; no wildcard actions, every `Resource: "*"` statement inventoried (§5, AC 6)                                                                                        |
+| X-Ray tracing end-to-end                                                  | `TracingConfig.Mode: Active` on api-handler, oracle, enrichment and ledger-processor (§6)                                                                                              |
+| CloudWatch dashboards: latency, errors, ingestion lag, CH write latency…  | `prices-production-overview`; 65 `prices-production-*` alarms, all of them on its alarm strip (§6)                                                                                     |
+| GitHub repository public with README, architecture docs, deploy steps     | PUBLIC since 2026-09-16; root `README.md` and the fresh-account runbook in `infra/README.md` since 2026-09-25 (PR #357, task 0297; AC 7)                                               |
 
 **The backfill milestone for the tranche** — SDEX history to ~January 2018 —
 was overtaken during Tranche 2: the archive walked to genesis and reports
@@ -89,7 +89,7 @@ and §3. What Tranche 3 added on top of the Milestone 2 platform:
 | Layer         | Addition                                                                                                                                                                                            |
 | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Portal (SPA)  | Served under `/api/*` of the explorer's CloudFront distribution from its own S3 bucket; Discord OAuth sign-in, key issuance on the free plan, dashboard, quick start                                |
-| API Gateway   | 404 `not_found` in the error envelope for unknown routes (0309); usage plans for paid tiers in progress (0311)                                                                                      |
+| API Gateway   | 404 `not_found` in the error envelope for unknown routes (0309); five usage plans, free and four paid tiers, live since 2026-09-24 (0311)                                                           |
 | Lambda (axum) | Portal routes whose sources load on the first portal request, never at cold start; a failed load costs that request only (0194, 0311); `as_of` and `price_status` beside every current price (0216) |
 | ClickHouse    | Price-forming-fill candle definitions across all tiers (0286 phase 1–2, ADR 0287); scoped `prices_admin` identity for the history re-ingest (explorer 0567)                                         |
 | Observability | api-handler error and 5xx alarms (0249) and portal-load-failed alarm (0311); liveness and duration alarms on every scheduled worker (0223, 0256); weekly coverage sweep of swap venues (0100)       |
@@ -108,9 +108,8 @@ are pointers, not summaries.
 | 1   | AC 1: `sdex.status: "running"`, `last_push_at` fresh                      | the archive completed on 2026-07-27; liveness graded on the ingestion alarms and `realtime_tip_ledger` (carried from M2)                                  | disclosed, delivered early |
 | 2   | AC 9: report "SDEX push cadence and `earliest_data_available` trajectory" | both are flat by construction since 2026-07-27; the report carries ingest-queue age and `current_prices` freshness against their alarm thresholds instead | disclosed                  |
 | 3   | AC 8: "read-only IAM role" for the Stellar team                           | no standing identity: a read-only IAM user is created for a named reviewer on request, MFA enforced, and removed after the review                         | disclosed                  |
-| 4   | AC 3: self-service key flow                                               | _candidate_: sign-in runs on the project's test Discord guild until the Stellar guild integration (task 0179) is agreed                                   | to be decided              |
-| 5   | AC 2: `openapi-validator` lint, Swagger UI; Work list: OpenAPI 3.0        | an OpenAPI 3.1.0 document, linted by Redocly `recommended-strict`; the reference at `…/api/docs` is the portal's own renderer, in Swagger UI's layout     | disclosed                  |
-| 6   | AC 5: p95 < 100 ms at 100 req/s, plan named                               | met as written on a scenario with 98.3 % cache hits; the miss-only row, the 500 / 1000 req/s rows and the client's location travel with it                | disclosed (met as written) |
+| 4   | AC 2: `openapi-validator` lint, Swagger UI; Work list: OpenAPI 3.0        | an OpenAPI 3.1.0 document, linted by Redocly `recommended-strict`; the reference at `…/api/docs` is the portal's own renderer, in Swagger UI's layout     | disclosed                  |
+| 5   | AC 5: p95 < 100 ms at 100 req/s, plan named                               | met as written on a scenario with 98.3 % cache hits; the miss-only row, the 500 / 1000 req/s rows and the client's location travel with it                | disclosed (met as written) |
 
 ## 5. Acceptance-criteria evidence
 
@@ -141,7 +140,7 @@ every field and a lint that fails on an example that stops validating against
 its schema (`no-invalid-schema-examples`, `redocly.yaml`). The rendered
 reference is the portal's own page, `https://sorobanscan.rumblefish.dev/api/docs`.
 Neither the lint tool nor the reference is the one the wording names; both
-substitutions, and the OpenAPI version, are set out in deviations §5.
+substitutions, and the OpenAPI version, are set out in deviations §4.
 
 #### Reproduce it
 
@@ -154,15 +153,23 @@ _To fill:_ the lint summary line, the CI job that runs it, and a screenshot of
 
 ### AC 3 — Onboarding portal accessible; self-service API key request flow functional
 
-**Verdict: _open_.** The portal is public at `https://sorobanscan.rumblefish.dev/api/`
+**Verdict: _to fill_ — the flow works on production; the recorded walk is not
+in this document yet.** The portal is public at `https://sorobanscan.rumblefish.dev/api/`
 since 2026-09-23 09:40 CEST. The flow is Discord OAuth → eligibility check
 (guild membership, account age) → a key on the free plan → the dashboard with
 the key's plan and usage.
 
-_To fill:_ the end-to-end proof on production (task 0164) — a sign-in, a key
-issued, a `/v1` call with it, the key revoked — with timestamps; and the state
-of task 0179 (which Discord guild gates eligibility). If the Stellar guild is
-not agreed by submission, deviations §4 applies.
+Eligibility is checked against the official **Stellar Developers** guild
+(`897514728459468821`) since 2026-09-02 (task 0254; production parameter
+`/prices/production/discord-guild-id`, version 2). A member the guild has not
+screened yet is refused with its own answer (`pending_rules`). SDF, which owns
+the guild, asked in an official statement that the project hold the Discord
+developer account and run the integration itself (task 0179, closed
+2026-09-28). The team has walked the flow end to end on production several
+times (task 0164, closed 2026-09-28).
+
+_To fill:_ the recorded walk on production — a sign-in, a key issued, a `/v1`
+call with it, the key revoked — with timestamps (video scene 2 can record it).
 
 ### AC 4 — Integration test suite: all tests pass on CI, link provided
 
@@ -215,7 +222,7 @@ sustain the run — the default plan is 1 req/s and a 100,000 monthly quota.
 | 500 req/s  | wide pool × 4 key variants       | 149,880  | 0                                     | 68.8 / **133.0** / 261  | 87–95 ms    | ~2.6 %     |
 | 1000 req/s | wide pool × 8 key variants       | 93,351   | 14,865 (15.9 %), all Lambda throttles | 637 / 1,730 / 2,700     | 1.4–1.5 s   | 0 %        |
 
-**Scope of the claim** (deviations §6). The AC scenario is 98.3 % cache hits and the report
+**Scope of the claim** (deviations §5). The AC scenario is 98.3 % cache hits and the report
 says so; the miss-only row is the honest companion (p95 129.9 ms from Poland,
 ~45 ms of it network, 45–90 ms as the gateway measures it). 500 req/s held with
 p95 moved by 3 ms; the ramp to 1000 req/s found the ceiling in the shared
@@ -333,15 +340,14 @@ named as a caveat.
 ### AC 8 — CloudWatch dashboard accessible to the Stellar team (read-only IAM role); all alarms OK
 
 **Verdict: met on the amended wording (deviations §3); alarms OK on
-2026-09-25.** The dashboard is `prices-production-overview` in `eu-central-1`;
+2026-10-01.** The dashboard is `prices-production-overview` in `eu-central-1`;
 **65** `prices-production-*` alarms stand behind it (up from 53 at Milestone 2),
 including — since 2026-09-22 — error and portal-closed alarms on the
 api-handler (the portal-closed one replaced on the afternoon of 2026-09-25
 by `portal-load-failed`, task 0311) and liveness/duration alarms on every
 scheduled worker. On
-2026-09-25 09:20 CEST every alarm read OK except
-`prices-production-coverage-sweep-unclassified`, in `INSUFFICIENT_DATA` until
-its weekly probe's first run.
+2026-10-01 08:23 CEST all 65 read OK
+(`aws cloudwatch describe-alarms --alarm-name-prefix prices-production-`).
 
 **Access is granted on request, to a named person, with MFA — not through a
 standing role or user.** The account is shared with the Soroban Block Explorer
@@ -354,23 +360,12 @@ the scoped policy in
 password, and deletes the user after the review. This is the model the block
 explorer's Milestone 3 package used for its equivalent criterion.
 
-What changed for this submission: task 0125 had created a standing viewer user
-(`prices-production-stellar-viewer`, 2026-09-03) with a console login and no
-MFA; the login was deleted and the user removed from the stack on 2026-09-25
-(task 0295, PR #355), and the synth verifier now fails on any IAM identity in
-the template.
-
-The runbook was walked end to end on 2026-09-25 by the operator, on a
-throwaway name (`prices-production-viewer-krolikiewicz`): user created 13:13:42
-→ forced password change on first sign-in 13:14:19 → passkey enrolled as the
-MFA device 13:20:22 → re-login → the dashboard renders (`GetDashboard`,
-`ListDashboards`, `DescribeAlarms` in CloudTrail with `mfaAuthenticated=true`,
-13:21:37) → the log-groups page answers access denied
-(`logs:DescribeMetricFilters` AccessDenied) → user removed 13:24:14,
-`aws iam list-users` empty. The same policy, checked headlessly with
-`simulate-principal-policy`: the nine CloudWatch reads `allowed` only with
-`aws:MultiFactorAuthPresent=true`; `logs:*`, `xray:*`, `secretsmanager:*`,
-`lambda:*`, `iam:ListUsers` `implicitDeny` either way.
+A second path goes through IAM Identity Center: the reviewer gets an Identity
+Center user and a `PricesDashboardRead` permission set with the same nine
+CloudWatch read actions, assigned for the review window, with no IAM user and
+no password set by the operator
+([`docs/runbooks/0295-dashboard-access-via-identity-center.md`](../runbooks/0295-dashboard-access-via-identity-center.md),
+PR #364).
 
 _To fill on submission day:_ the alarm table.
 
@@ -434,25 +429,26 @@ coarser data than the committed export.
 
 ## 6. Work items without a numbered criterion
 
-| Item                                    | State                                                                                                                                                                                          |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| X-Ray tracing enabled end-to-end        | `TracingConfig.Mode: Active` on `api-handler`, `oracle`, `enrichment`, `ledger-processor`; the gateway stage traces too (client IPs are in X-Ray for 30 days, as the privacy policy states)    |
-| CloudWatch dashboards                   | `prices-production-overview`: API latency and error rate, ingestion lag, ClickHouse write latency, mTLS NotAfter, backfill progress, worker duration/errors, alarm strip (64 of the 65 alarms) |
-| Security review checklist               | see AC 6                                                                                                                                                                                       |
-| README, architecture docs, deploy steps | `README.md`, `docs/prices-api-general-overview.md`, `docs/runbooks/`, `infra/README.md` (the fresh-account runbook, AC 7)                                                                      |
+| Item                                    | State                                                                                                                                                                                       |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| X-Ray tracing enabled end-to-end        | `TracingConfig.Mode: Active` on `api-handler`, `oracle`, `enrichment`, `ledger-processor`; the gateway stage traces too (client IPs are in X-Ray for 30 days, as the privacy policy states) |
+| CloudWatch dashboards                   | `prices-production-overview`: API latency and error rate, ingestion lag, ClickHouse write latency, mTLS NotAfter, backfill progress, worker duration/errors, alarm strip (all 65 alarms)    |
+| Security review checklist               | see AC 6                                                                                                                                                                                    |
+| README, architecture docs, deploy steps | `README.md`, `docs/prices-api-general-overview.md`, `docs/runbooks/`, `infra/README.md` (the fresh-account runbook, AC 7)                                                                   |
 
 ## 7. Known issues declared with this submission
 
 Each row is either fixed and verified by submission, or declared here with the
 task that owns it. Written from the task ledger, not from memory.
 
-| Issue                                                                                                                                   | State on 2026-09-25                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Task             |
-| --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------- |
-| Candles were built from every fill, dust included, in the wrong intra-ledger order; live Aquarius ingestion dropped ~50 % of its trades | Fix live since 2026-09-22; 09-19/20 measured at exactly zero loss. History re-computation running since 2026-09-23 (stage A, pre-Soroban months)                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | 0282, 0286       |
-| `pool_registry` had not learned a pool since 2026-07-06; 42 pools missing                                                               | Seeded 2026-09-18; live persistence deployed 2026-09-22; alarm live; the "first new pool" production check open                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | 0291             |
-| The portal closed itself in an execution environment when Parameter Store throttled its cold start (account default 40 TPS)             | **Fixed 2026-09-25 14:47 CEST.** The cold start now reads only the mTLS bundle; the portal's sources load on the first portal request, and a failed load answers that request only — the next retries after a 2 s cooldown. The alarm now watches failed loads (`portal-load-failed`). Before the fix it occurred on 2026-09-18 on the load test's 500/1000 req/s ramps (243 environments, found in the logs on 2026-09-21, before any alarm existed) and on 2026-09-24 and 2026-09-25 (both caught by the alarm); `/v1` was unaffected throughout. Since the fix: 0 closures and 0 failed loads (read 2026-09-28) | 0249, 0194, 0311 |
-| The oracle worker runs out of memory while the re-ingest re-emits the asset registry (it reads without `FINAL`)                         | One 5-minute tick lost per ~1.5 h cycle until the backfill writes deltas                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | 0226, 0140       |
-| Load-test latency describes a box that is now also running the re-ingest                                                                | Declared beside the AC 5 figures                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | 0293, 0047       |
+| Issue                                                                                                                                         | State on 2026-09-25                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Task             |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------- |
+| Candles were built from every fill, dust included, in the wrong intra-ledger order; live Aquarius ingestion dropped ~50 % of its trades       | Fix live since 2026-09-22; 09-19/20 measured at exactly zero loss. History re-computation running since 2026-09-23 (stage A, pre-Soroban months)                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | 0282, 0286       |
+| `pool_registry` had not learned a pool since 2026-07-06; 42 pools missing                                                                     | Seeded 2026-09-18; live persistence deployed 2026-09-22; alarm live; the first new pool was persisted on 2026-09-30 16:52 CEST (Aquarius `CD2CU3DR…`)                                                                                                                                                                                                                                                                                                                                                                                                                                                              | 0291             |
+| A new pool's trades are rejected by an execution environment that started before the pool was persisted (the registry is read once, at start) | Seen 2026-09-30: 3 trades of `CD2CU3DR…` rejected between 17:00 and 18:40 CEST, until that environment was replaced at 19:14. Re-ingest of the range and a fix: _task to open_                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| The portal closed itself in an execution environment when Parameter Store throttled its cold start (account default 40 TPS)                   | **Fixed 2026-09-25 14:47 CEST.** The cold start now reads only the mTLS bundle; the portal's sources load on the first portal request, and a failed load answers that request only — the next retries after a 2 s cooldown. The alarm now watches failed loads (`portal-load-failed`). Before the fix it occurred on 2026-09-18 on the load test's 500/1000 req/s ramps (243 environments, found in the logs on 2026-09-21, before any alarm existed) and on 2026-09-24 and 2026-09-25 (both caught by the alarm); `/v1` was unaffected throughout. Since the fix: 0 closures and 0 failed loads (read 2026-09-28) | 0249, 0194, 0311 |
+| The oracle worker runs out of memory while the re-ingest re-emits the asset registry (it reads without `FINAL`)                               | One 5-minute tick lost per ~1.5 h cycle until the backfill writes deltas                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | 0226, 0140       |
+| Load-test latency describes a box that is now also running the re-ingest                                                                      | Declared beside the AC 5 figures                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | 0293, 0047       |
 
 ## 8. What is deliberately not claimed
 
@@ -460,15 +456,14 @@ Milestone 3 is the last tranche, so this section has nowhere to push things:
 each row is closed, declared as a deviation, or handed to post-delivery with a
 name on it.
 
-| Item                                                        | Disposition                                                                                                                                              |
-| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Completion of the history re-computation (0286 phase 3)     | _post-delivery_, operator-run; stage A of four started 2026-09-23; values change, coverage does not                                                      |
-| A run of the runbook in an empty AWS account (AC 7)         | _not claimed_: AC 7 rests on the runbook (§5); a run needs the explorer platform and a Hetzner server first. On a reviewer's request: task 0297 reopened |
-| Uptime measured by an external probe (AC 9)                 | _not claimed_: no canary exists; uptime is derived from served requests, which reached the API in 274 of the window's 10,080 minutes (§5, AC 9)          |
-| A standing read-only identity for the Stellar team (AC 8)   | _declared_: none exists by design; access is created per named reviewer on request, MFA enforced (deviations §3)                                         |
-| Self-service sign-in on the Stellar Discord guild (AC 3)    | _to decide_: agreed with SDF (task 0179), or declared (deviations §4)                                                                                    |
-| Paid usage plans and a dashboard that states the key's plan | In progress (task 0311); the free plan is what the criteria cover                                                                                        |
-| Content-Security-Policy on the portal                       | Not shipped; tracked as a backlog task (id pending)                                                                                                      |
+| Item                                                        | Disposition                                                                                                                                                                                                             |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Completion of the history re-computation (0286 phase 3)     | _post-delivery_, operator-run; stage A of four started 2026-09-23; values change, coverage does not                                                                                                                     |
+| A run of the runbook in an empty AWS account (AC 7)         | _not claimed_: AC 7 rests on the runbook (§5); a run needs the explorer platform and a Hetzner server first. On a reviewer's request: task 0297 reopened                                                                |
+| Uptime measured by an external probe (AC 9)                 | _not claimed_: no canary exists; uptime is derived from served requests, which reached the API in 274 of the window's 10,080 minutes (§5, AC 9)                                                                         |
+| A standing read-only identity for the Stellar team (AC 8)   | _declared_: none exists by design; access is created per named reviewer on request, MFA enforced (deviations §3)                                                                                                        |
+| Paid usage plans and a dashboard that states the key's plan | _not claimed_: live since 2026-09-24 (task 0311), outside the criteria; the evidence covers the free plan                                                                                                               |
+| Content-Security-Policy on the portal                       | _not claimed_: none is set. The portal is served by the explorer's distribution, which deliberately sets none, and loads the explorer's Google Tag Manager container since task 0316; a portal CSP was dropped after it |
 
 ## 9. Live endpoints and access
 
