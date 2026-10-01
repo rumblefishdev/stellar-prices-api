@@ -17,7 +17,7 @@
 > the shared ClickHouse box is the ceiling, between 500 and ~900 req/s. See
 > _Evidence run and the ceiling — 2026-09-18_.
 
-Task [0121](../lore/1-tasks/active/0121_TEST_api-load-test-100rps-report.md) ·
+Task [0121](../lore/1-tasks/archive/0121_TEST_api-load-test-100rps-report.md) ·
 Tranche 2 AC 2 · script: [`packages/prices-api/loadtest/`](../packages/prices-api/loadtest/README.md)
 
 ## The acceptance criterion
@@ -98,7 +98,7 @@ forces three separate runs rather than one number:
 | #   | regime | pool                                                                                                     | max misses of 30 000 | what its p95 measures                  |
 | --- | ------ | -------------------------------------------------------------------------------------------------------- | -------------------- | -------------------------------------- |
 | 1   | cache  | 1 (`native`)                                                                                             | ~30 (0.1 %)          | the API Gateway cache                  |
-| 2   | **AC** | 20 (conformance list, [0120](../lore/1-tasks/blocked/0120_TEST_endpoint-conformance-20-major-assets.md)) | ~600 (2 %)           | the AC scenario, still cache-dominated |
+| 2   | **AC** | 20 (conformance list, [0120](../lore/1-tasks/archive/0120_TEST_endpoint-conformance-20-major-assets.md)) | ~600 (2 %)           | the AC scenario, still cache-dominated |
 | 3   | wide   | 3504                                                                                                     | 30 000 (100 %)       | the real data path, worst case         |
 
 Regime 3 needs `pool ≫ RATE × TTL`. Selection is deterministic round-robin, so a
@@ -324,7 +324,7 @@ Two honest qualifications, because this number is easy to over-claim:
 **The plan for closing a T3 gap needs revisiting before it is used.** This report
 previously assumed the gap would be a latency gap, to be closed by raising the
 per-endpoint TTL (§6 /
-[0122](../lore/1-tasks/backlog/0122_TEST_apigateway-cache-ttl-verification.md)),
+[0122](../lore/1-tasks/archive/0122_TEST_apigateway-cache-ttl-verification.md)),
 Lambda provisioned concurrency (~+$45/mo per §10), or moving a hot column
 producer-side. Regime 3 suggests the binding constraint may not be latency at
 all. Two of those three levers work by _avoiding_ the database rather than making
@@ -566,4 +566,4 @@ Ordered by urgency, not by AC order.
 - [x] CloudWatch access to the production account obtained (used for the
       2026-09-17 decomposition)
 - [ ] Report cited by
-      [0128](../lore/1-tasks/backlog/0128_DOCS_scf-milestone-2-verification-package.md)
+      [0128](../lore/1-tasks/archive/0128_DOCS_scf-milestone-2-verification-package.md)
