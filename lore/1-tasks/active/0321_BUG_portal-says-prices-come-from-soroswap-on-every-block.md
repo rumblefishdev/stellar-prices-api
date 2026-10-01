@@ -2,7 +2,7 @@
 id: "0321"
 title: "Portal says prices come straight from Soroswap and update on every block — the product reads five venues and prices USD hourly"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0318", "0316", "0193"]
 tags: [layer-frontend, portal, copy, epic-self-service-onboarding, priority-medium, effort-small]
@@ -16,6 +16,12 @@ history:
     note: >
       Found by the 0318 claim-by-claim audit of the agent skill; the same
       sentence also sits in the Features section.
+  - date: "2026-10-01"
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated for the Milestone 3 video, which shows the portal; both
+      sentences are still in the live bundle (checked 2026-10-01).
 ---
 
 # Portal says prices come straight from Soroswap and update on every block
