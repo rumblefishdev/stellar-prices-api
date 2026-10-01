@@ -578,7 +578,11 @@ WITH
             --     ingest judged it;
             --   * one price-forming fill beside non-forming ones: its base is
             --     pf_volume exactly; its quote is pf_price_volume = offer price
-            --     x base, the real amount up to the taker's rounding;
+            --     x base, within one stroop of the real amount (the taker's
+            --     rounding). It is judged on that value + 1 stroop, the most the
+            --     real amount can be, so a fill that passes price.rs on its own
+            --     amounts never reads as dust; the error is at most one stroop,
+            --     towards 'trades';
             --   * several price-forming fills: only the totals are known, and
             --     a total <= 1000 stroops means every fill in it fails.
             -- `bound_holds` is price.rs's shifted integer form, so this and
@@ -587,18 +591,27 @@ WITH
             -- places (amounts below 2^53 are exact after it); `* 1e7` is right
             -- because SDEX amounts are always classic 7-decimal.
             --
-            -- SUFFICIENT, NOT EXACT on the last branch: a minute of several
+            -- SUFFICIENT, NOT EXACT on the last two branches: a minute of several
             -- dust fills whose totals pass 1000 stroops reads as confirmed.
             -- That errs towards 'trades', the safe side (0116: a small trade
             -- of a dear asset is often a real price). The exact answer needs a
             -- per-candle count written at ingest — a follow-up once 0286's
             -- re-ingest is done, since every 1m writer would have to carry it.
             -- close_usd > 0 implies a price-forming fill (ADR 0287 §6).
+            --
+            -- A candle not yet enriched (close_usd = 0) does not count, even
+            -- for a large real fill: it is not in price_usd's candle set
+            -- either, so the published price does not rest on it yet. Such an
+            -- asset reads 'offer_dust' until enrichment converts that candle,
+            -- then 'trades' — intended: the field describes the price as
+            -- published, and a fill whose quote never gains a USD path never
+            -- supports the USD price at all.
             countIf(close_usd > 0 AND NOT (source = 'sdex' AND multiIf(
                 pf_trade_count = 1 AND trade_count = 1,
                     NOT bound_holds(stroops(volume_base), stroops(volume_quote)),
                 pf_trade_count = 1,
-                    NOT bound_holds(stroops(pf_volume), stroops(pf_price_volume)),
+                    NOT bound_holds(stroops(pf_volume),
+                                    toFloat64(pf_price_volume) * 1e7 + 1),
                 stroops(pf_volume) <= 1000 OR stroops(pf_price_volume) <= 1000)))
                                                  AS confirmed_candles
         FROM prices.price_ohlcv_1m FINAL

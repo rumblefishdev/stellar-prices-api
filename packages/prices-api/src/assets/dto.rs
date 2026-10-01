@@ -118,9 +118,12 @@ pub struct PriceResponse {
     ///   large enough that its price is not rounding (a measured rate reads
     ///   this too).
     /// * `"offer_dust"` — every priced candle in the window rests only on
-    ///   order-book trades below the rounding bound (under 1 000 smallest
-    ///   units on a side), each executed at the resting offer's own limit
-    ///   price. Such a trade shows the offer existed, not that the price
+    ///   order-book trades below the ingest's rounding bound, each executed at
+    ///   the resting offer's own limit price. With `a` and `b` the two amounts
+    ///   in smallest units, a fill clears the bound only when `a > 1000`,
+    ///   `b > 1000` and `(a - 1000)(b - 1000) >= 1_000_000`: always flagged
+    ///   under 0.0001 on either side, and up to 0.0002 a side when both are
+    ///   small (1 999 / 2 000 is flagged). Such a trade shows the offer existed, not that the price
     ///   clears: the price is published and is often right, but no trade large
     ///   enough to confirm it exists. For a dear asset these are not pennies —
     ///   at $84k a unit the bound is about $8.50 (BTC `GBVFOW…`, measured

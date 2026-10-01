@@ -1807,6 +1807,9 @@ async fn an_unpriced_asset_carries_the_empty_sentinel_not_traded() {
 /// * 27 RND — one fill of 2,000,000 base / 1001 quote stroops, which passes
 ///   price.rs ((1999000)(1) >= 10^6), while pf_price_volume (offer price × base)
 ///   rounds to 1000. The fill's own amounts must decide → `trades`.
+/// * 28 RNB — fixture 27's fill beside one non-forming fill, so trade_count = 2
+///   and only pf_price_volume (1000.4 stroops) is known for its quote. The
+///   real quote can be up to one stroop more, and 1001 passes → `trades`.
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
 async fn a_price_resting_only_on_offer_dust_is_kept_and_labelled() {
@@ -1823,6 +1826,7 @@ async fn a_price_resting_only_on_offer_dust_is_kept_and_labelled() {
         insert_asset(db, 25, "BIG", "GBIG"),
         insert_asset(db, 26, "SID", "GSID"),
         insert_asset(db, 27, "RND", "GRND"),
+        insert_asset(db, 28, "RNB", "GRNB"),
         insert_fill(db, 20, "sdex", "4375", "0.0000001", "0.0021", 90),
         insert_fill(db, 20, "sdex", "4400", "0.0000001", "0.0021", 5),
         insert_fill(db, 21, "sdex", "4180", "0.003", "60", 30),
@@ -1854,10 +1858,18 @@ async fn a_price_resting_only_on_offer_dust_is_kept_and_labelled() {
              VALUES (now() - INTERVAL 5 MINUTE, 27, 1, 'sdex', 0.0005, 0.0005, 0.0005, \
               0.0005, 0.2, 0.0001001, 0.01, 0.0001, 0.0005, 1, 1, 1, 0.2, 0.00010004)"
         ),
+        format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
+              version, pf_trade_count, pf_volume, pf_price_volume) \
+             VALUES (now() - INTERVAL 5 MINUTE, 28, 1, 'sdex', 0.0005, 0.0005, 0.0005, \
+              0.0005, 0.2000003, 0.0001004, 0.01, 0.0001, 0.0005, 2, 1, 1, 0.2, 0.00010004)"
+        ),
     ] {
         admin.query(&q).execute().await.expect("fixture");
     }
-    refresh(&admin, db, 8).await;
+    refresh(&admin, db, 9).await;
 
     let price20 = scalar_f64(
         &admin,
@@ -1915,6 +1927,11 @@ async fn a_price_resting_only_on_offer_dust_is_kept_and_labelled() {
         basis_of(&admin, db, 27).await,
         "trades",
         "a single fill is judged on its own amounts, not on offer price × base"
+    );
+    assert_eq!(
+        basis_of(&admin, db, 28).await,
+        "trades",
+        "beside a non-forming fill, offer price × base is read up to one stroop high"
     );
 
     teardown(db).await;

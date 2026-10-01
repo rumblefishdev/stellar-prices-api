@@ -675,8 +675,12 @@ pub(super) const FIELDS: &[(&str, &str, &str)] = &[
          from:\n\n* `trades` — at least one priced minute in the window has a trade large \
          enough that its price is not a rounding artefact. Prices taken from a rate read \
          this too.\n* `offer_dust` — every priced minute in the window rests only on \
-         order-book trades too small to pin a price — under 0.0001 of the asset or of \
-         what it was traded for — each executed at the resting offer's own limit price. \
+         order-book trades too small to pin a price, each executed at the resting \
+         offer's own limit price. With `a` and `b` the two amounts of a fill in smallest \
+         units (0.0000001), the fill is too small unless `a > 1000`, `b > 1000` and \
+         `(a - 1000) * (b - 1000) >= 1000000`. Roughly: always under 0.0001 of the asset \
+         or of what it was traded for, and up to 0.0002 a side when both sides are \
+         small. \
          A trade that small usually costs the taker next to nothing, so it shows the \
          offer existed, not that the price clears; for an asset worth tens of thousands \
          of dollars a unit it can still be a few dollars. The price is still published \
