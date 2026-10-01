@@ -105,8 +105,9 @@ impl Sink {
             .await
     }
 
-    pub async fn write_assets(&self, registry: &AssetRegistry) -> Result<(), BackfillError> {
-        self.retry_write(|| async { self.writer.write_assets(registry).await })
+    /// The registry's pending identities; the caller clears them after `Ok`.
+    pub async fn write_new_assets(&self, registry: &AssetRegistry) -> Result<(), BackfillError> {
+        self.retry_write(|| async { self.writer.write_new_assets(registry).await })
             .await
     }
 
