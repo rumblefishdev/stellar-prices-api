@@ -48,8 +48,8 @@ const FEATURES: readonly Feature[] = [
   },
   {
     icon: liquidityDataIcon,
-    title: 'Liquidity Data',
-    body: 'Pool reserves, trading depth and liquidity metrics. Essential for swap routing and price impact calculations.',
+    title: 'Volume Data',
+    body: '24-hour volume in total and per venue, a 24-hour VWAP across venues, and volume and trade counts in every candle.',
   },
   {
     icon: historicalDataIcon,
