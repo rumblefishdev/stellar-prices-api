@@ -25,6 +25,15 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         MV_DRIFT_CRITICAL_METRIC, MV_DRIFT_METRIC, describe, drift_metrics, publish_drift,
         visible_objects_query,
     };
+    use rollup_freshness_probe::reconcile_mismatch::{
+        MISMATCH_MIN_READ_SECS, MISMATCH_RESERVE, MismatchCount, mismatch_metric, mismatch_queries,
+        mismatch_read_bound, publish_mismatch,
+    };
+    use rollup_freshness_probe::refresh_waits::{
+        MV_REFRESH_DISABLED_METRIC, MV_REFRESH_FAILING_METRIC, MV_REFRESH_UNREADABLE_METRIC,
+        MV_REFRESH_WAITING_METRIC, ViewRefreshRow, describe_failing, failing_detail_for_log,
+        metrics_for_read, refresh_waits_query,
+    };
     use rollup_freshness_probe::usd_sanity::{
         PegCounts, StrandedCounts, peg_metric, peg_query, publish_sanity, stranded_metric,
         stranded_query,
@@ -32,7 +41,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     use rollup_freshness_probe::zero_invariants::{
         ZeroInvariantCounts, zero_invariant_metric, zero_invariant_query,
     };
-    use rollup_freshness_probe::{TableLag, freshness_query, lag_metrics, publish};
+    use rollup_freshness_probe::{
+        FAILED, SKIPPED_UNREADABLE, TableLag, freshness_query, lag_metrics, publish, reading,
+    };
     use std::sync::Arc;
 
     prices_clickhouse::observability::init_tracing();
@@ -57,6 +68,18 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     let stranded_query = Arc::new(stranded_query());
     let peg_query = Arc::new(peg_query());
     let zero_invariant_query = Arc::new(zero_invariant_query());
+    let refresh_waits_query = Arc::new(refresh_waits_query("prices"));
+    // The mismatch reads are the only ones here whose cost grows with a week
+    // of the child tier (the 15m read scans seven days of `_1m`: 0.7–4.0 s on
+    // 26.3.10.60 over ~3 M rows with 8 threads, unmeasured on prod, where the
+    // CPU is shared with the BE tenant). Six reads at a 10 s bound would be the
+    // whole 60 s Lambda timeout (eventbridge-stack.ts) on their own, after the
+    // freshness, disk, USD, drift (~2 round trips per declared MV, 12 now) and
+    // zero-invariant reads. So the per-read bound is NOT fixed: each read gets
+    // `min(10 s, time left − 5 s reserve)` from the invocation's deadline, and a
+    // read that would get under 2 s is skipped and recorded as a failure — see
+    // `reconcile_mismatch` (review WR-04).
+    let mismatch_queries = Arc::new(mismatch_queries());
 
     let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .load()
@@ -65,14 +88,17 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     let environment = Arc::new(prices_clickhouse::env::env_or("ENV_NAME", "unknown"));
     tracing::info!(environment = %environment, "rollup-freshness-probe cold start ready");
 
-    run(service_fn(move |_event: LambdaEvent<serde_json::Value>| {
+    run(service_fn(move |event: LambdaEvent<serde_json::Value>| {
         let ch = ch.clone();
         let cw = cw.clone();
         let query = query.clone();
         let stranded_query = stranded_query.clone();
         let peg_query = peg_query.clone();
         let zero_invariant_query = zero_invariant_query.clone();
+        let refresh_waits_query = refresh_waits_query.clone();
+        let mismatch_queries = mismatch_queries.clone();
         let environment = environment.clone();
+        let deadline = event.context.deadline();
         async move {
             // ⚠️ EVERY CHECK RUNS, AND A FAILURE IN ONE MUST NOT SUPPRESS
             // ANOTHER. This is the invariant the whole invocation is built
@@ -225,13 +251,18 @@ async fn main() -> Result<(), lambda_runtime::Error> {
 
             // ---- 4. Materialized-view drift (task 0204, gap 3) ------------
             //
-            // This is the only read in the invocation that touches `system.*`.
-            // `system.tables` is grant-FILTERED rather than denied, so it needs
+            // One of the two reads here that touch `system.*` (the other is
+            // 4b, `system.view_refreshes`, which is DENIED rather than filtered
+            // and handled there). `system.tables` is grant-FILTERED, so it needs
             // no grant the probe does not already hold — but a narrowed grant or
             // a metadata hiccup here still must not cost the three checks above,
             // which is what the failure collection above guarantees.
-            let mut drift_critical = 0.0_f64;
-            let mut drift_count = 0.0_f64;
+            // `None` until a read succeeds, and left `None` when the schema is
+            // unreadable (the published 0 is then a suppression, not a count):
+            // the log line and the JSON result must never show a healthy 0
+            // for a reading the probe does not have (review IN-01).
+            let mut drift_critical: Option<f64> = None;
+            let mut drift_count: Option<f64> = None;
             let mut visible_objects: Option<u64> = None;
             let mut drift_detail = String::new();
             match ch
@@ -244,15 +275,12 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     match prices_clickhouse::drift::check_rollup_drift(&ch, "prices").await {
                         Ok(reports) => {
                             let drift = drift_metrics(&reports, visible);
-                            let value_of = |name: &str| {
-                                drift
-                                    .iter()
-                                    .find(|m| m.name == name)
-                                    .map(|m| m.value)
-                                    .unwrap_or_default()
-                            };
-                            drift_critical = value_of(MV_DRIFT_CRITICAL_METRIC);
-                            drift_count = value_of(MV_DRIFT_METRIC);
+                            let value_of =
+                                |name: &str| drift.iter().find(|m| m.name == name).map(|m| m.value);
+                            if visible > 0 {
+                                drift_critical = value_of(MV_DRIFT_CRITICAL_METRIC);
+                                drift_count = value_of(MV_DRIFT_METRIC);
+                            }
                             // Named per-MV, so an alarm can be diagnosed from the
                             // log line without re-running the drift CLI by hand.
                             drift_detail = describe(&reports);
@@ -266,18 +294,74 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 Err(e) => failures.push(format!("mv-drift visibility read: {e}")),
             }
 
-            // Log before deciding the invocation's fate: on a partial failure
-            // this line is the only record of what the healthy checks measured.
+            // ---- 4b. Rollup MVs stuck behind a dependency, or failing ------
+            //
+            // Since task 0143 the rollup MVs run `DEPENDS ON` their source
+            // tier's MV, and a stopped, failing or missing dependency leaves
+            // every dependent `WaitingForDependencies` forever with no error.
+            // A view that fails itself — above all a leaf, which nothing waits
+            // on — is counted from the same read (`exception`,
+            // `last_success_time`; review WR-07), and named in the log line.
+            // A cheap `system.*` read, so it sits with the drift read.
+            //
+            // ⚠️ `system.view_refreshes` is DENIED (Code 497), not filtered,
+            // to a `SELECT ON prices.*` identity. That refusal publishes the
+            // unreadable flag alone — never a waiting/disabled/failing 0, which would
+            // read as a healthy chain — and is not a failure of the
+            // invocation: the unreadable alarm is the signal. Any other error
+            // is an ordinary failure.
+            let mut refresh_waiting: Option<f64> = None;
+            let mut refresh_disabled: Option<f64> = None;
+            let mut refresh_failing: Option<f64> = None;
+            // `None` = the read failed; the three counts stay `None` too when
+            // the table is unreadable (then nothing but the flag is published).
+            let mut refresh_unreadable: Option<f64> = None;
+            let read = ch
+                .query(&refresh_waits_query)
+                .fetch_all::<ViewRefreshRow>()
+                .await;
+            let refresh_failing_detail = match &read {
+                Ok(rows) => Some(describe_failing(
+                    rows,
+                    rows.first().map(|r| r.db_now_unix).unwrap_or_default(),
+                )),
+                Err(_) => None,
+            };
+            let refresh_metrics = match metrics_for_read(read) {
+                Ok(metrics) => Some(metrics),
+                Err(e) => {
+                    failures.push(format!("mv-refresh-waits read: {e}"));
+                    None
+                }
+            };
+            if let Some(metrics) = refresh_metrics {
+                for m in &metrics {
+                    match m.name {
+                        MV_REFRESH_WAITING_METRIC => refresh_waiting = Some(m.value),
+                        MV_REFRESH_DISABLED_METRIC => refresh_disabled = Some(m.value),
+                        MV_REFRESH_FAILING_METRIC => refresh_failing = Some(m.value),
+                        MV_REFRESH_UNREADABLE_METRIC => refresh_unreadable = Some(m.value),
+                        _ => {}
+                    }
+                }
+                if let Err(e) = publish_drift(&cw, &environment, &metrics).await {
+                    failures.push(format!("mv-refresh-waits publish: {e}"));
+                }
+            }
+            let refresh_failing_detail =
+                failing_detail_for_log(refresh_failing_detail, refresh_unreadable);
+
             // ---- 5. The zero sentinel's stored-data invariants (ADR 0292) ---
             //
-            // LAST on purpose. It is the one unscoped read here: `timestamp` is the
+            // Late on purpose (only the mismatch reads, 6, come after it). It is the one unscoped read here: `timestamp` is the
             // fourth sort-key column, so the 48 h window prunes only to the monthly
             // partition, which is then merged `FINAL` across every pair. Measured on
             // production 2026-09-18 it is cheap (0.04 s, 650k rows read) — but it
             // is still the read whose cost grows with the table. A hard Lambda timeout loses whatever has not
             // been published yet, and the MV-drift datum above is `NOT_BREACHING` on
             // missing data — so a slow scan placed before it would turn a lost
-            // `APPEND` into a false OK. Placed here, a timeout costs only this check.
+            // `APPEND` into a false OK. Placed here, a timeout costs only this
+            // check and the mismatch reads after it.
             //
             // Not scoped to a quote leg, unlike the two USD-sanity checks (3): a
             // candle with no price-forming fill carries no price whatever it is
@@ -306,23 +390,111 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 Err(e) => failures.push(format!("zero-invariants read: {e}")),
             }
 
+            // ---- 6. Coarse buckets disagreeing with their source (0203) ---
+            //
+            // The new tail, for the reason the zero invariants were last: these
+            // are the reads whose cost grows with the data (a GROUP BY over a
+            // week of the child tier; the 15m read scans seven days of `_1m`).
+            // They run after every other check, 15m FIRST (the heaviest, and
+            // where a `_1m` hole shows first), each bounded by what is left of
+            // the invocation (review WR-04): a tier that cannot get
+            // MISMATCH_MIN_READ_SECS is skipped and recorded as a failure, so
+            // the probe's -errors alarm speaks instead of a hard timeout that
+            // publishes nothing. One tier's error is recorded and the next
+            // tier still runs. A 0 here is a real reading — the query is
+            // scoped to closed buckets past the grace, so a healthy chain
+            // legitimately reads 0.
+            let mut mismatch_detail: Vec<String> = Vec::new();
+            for (table, sql) in mismatch_queries.iter() {
+                let remaining = deadline
+                    .duration_since(std::time::SystemTime::now())
+                    .unwrap_or_default();
+                let Some(bound) = mismatch_read_bound(remaining) else {
+                    mismatch_detail.push(format!("{table}=skipped"));
+                    failures.push(format!(
+                        "rollup-mismatch {table} skipped: {:.1} s left of the invocation, \
+                         under the {} s reserve + {MISMATCH_MIN_READ_SECS} s a read needs",
+                        remaining.as_secs_f64(),
+                        MISMATCH_RESERVE.as_secs(),
+                    ));
+                    continue;
+                };
+                let bounded = prices_clickhouse::with_execution_bound((*ch).clone(), bound);
+                // The server bound is checked between blocks; this client-side
+                // guard (bound + 2 s, inside the reserve) is what makes the
+                // budget hold if the server does not answer at all.
+                let read = tokio::time::timeout(
+                    std::time::Duration::from_secs(bound + 2),
+                    bounded.query(sql).fetch_one::<MismatchCount>(),
+                )
+                .await;
+                match read {
+                    Ok(Ok(count)) => {
+                        mismatch_detail.push(format!("{table}={}", count.mismatched));
+                        let metric = mismatch_metric(table, &count);
+                        if let Err(e) =
+                            publish_mismatch(&cw, &environment, std::slice::from_ref(&metric)).await
+                        {
+                            failures.push(format!("rollup-mismatch {table} publish: {e}"));
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        mismatch_detail.push(format!("{table}=failed"));
+                        failures.push(format!(
+                            "rollup-mismatch {table} read (bound {bound} s): {e}"
+                        ));
+                    }
+                    Err(_) => {
+                        mismatch_detail.push(format!("{table}=failed"));
+                        failures.push(format!(
+                            "rollup-mismatch {table} read: no answer within {} s",
+                            bound + 2
+                        ));
+                    }
+                }
+            }
+            let mismatch_detail = mismatch_detail.join(", ");
+
+            // Log before deciding the invocation's fate: on a partial failure
+            // this line is the only record of what the healthy checks measured.
+            //
+            // ⚠️ A reading the probe does not have is logged as `failed` (the
+            // read errored) or `unreadable` (suppressed: the grant or the
+            // schema is missing), NEVER as 0 — a 0 is the healthy shape, and
+            // this line is what the triage paragraphs point to (review IN-01).
+            let drift_missing = if visible_objects == Some(0) {
+                SKIPPED_UNREADABLE
+            } else {
+                FAILED
+            };
+            let refresh_missing = if refresh_unreadable == Some(1.0) {
+                SKIPPED_UNREADABLE
+            } else {
+                FAILED
+            };
             tracing::info!(
                 tiers,
-                current_prices_rows = current_age.map(|a| a.row_count).unwrap_or_default(),
-                current_prices_age_seconds = current_age.map(|a| a.age_seconds).unwrap_or_default(),
+                current_prices_rows = %reading(current_age.map(|a| a.row_count), FAILED),
+                current_prices_age_seconds = %reading(current_age.map(|a| a.age_seconds), FAILED),
                 checks_failed = failures.len(),
-                disk_free_percent = free_percent.unwrap_or_default(),
-                disk_available_bytes = disk_reading.map(|u| u.available_bytes).unwrap_or_default(),
-                usd_peg_applied = peg_counts.map(|c| c.peg_applied).unwrap_or_default(),
-                usd_peg_scanned = peg_counts.map(|c| c.scanned).unwrap_or_default(),
-                usd_stranded = stranded_counts.map(|c| c.stranded).unwrap_or_default(),
-                usd_stranded_scanned = stranded_counts.map(|c| c.scanned).unwrap_or_default(),
-                zero_invariant_violations = zero_counts.map(|c| c.violations).unwrap_or_default(),
-                zero_invariant_scanned = zero_counts.map(|c| c.scanned).unwrap_or_default(),
-                mv_drift_critical = drift_critical,
-                mv_drift = drift_count,
-                mv_visible_objects = visible_objects.unwrap_or_default(),
+                disk_free_percent = %reading(free_percent, FAILED),
+                disk_available_bytes = %reading(disk_reading.map(|u| u.available_bytes), FAILED),
+                usd_peg_applied = %reading(peg_counts.map(|c| c.peg_applied), FAILED),
+                usd_peg_scanned = %reading(peg_counts.map(|c| c.scanned), FAILED),
+                usd_stranded = %reading(stranded_counts.map(|c| c.stranded), FAILED),
+                usd_stranded_scanned = %reading(stranded_counts.map(|c| c.scanned), FAILED),
+                zero_invariant_violations = %reading(zero_counts.map(|c| c.violations), FAILED),
+                zero_invariant_scanned = %reading(zero_counts.map(|c| c.scanned), FAILED),
+                mv_drift_critical = %reading(drift_critical, drift_missing),
+                mv_drift = %reading(drift_count, drift_missing),
+                mv_visible_objects = %reading(visible_objects, FAILED),
                 mv_detail = %drift_detail,
+                mv_refresh_waiting = %reading(refresh_waiting, refresh_missing),
+                mv_refresh_disabled = %reading(refresh_disabled, refresh_missing),
+                mv_refresh_failing = %reading(refresh_failing, refresh_missing),
+                mv_refresh_failing_views = %reading(refresh_failing_detail.as_deref(), refresh_missing),
+                mv_refresh_unreadable = %reading(refresh_unreadable, FAILED),
+                rollup_mismatch = %mismatch_detail,
                 "rollup-freshness-probe run complete"
             );
 
@@ -361,6 +533,14 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     "visible_objects": visible_objects,
                     "detail": drift_detail,
                 },
+                "mv_refresh": {
+                    "waiting": refresh_waiting,
+                    "disabled": refresh_disabled,
+                    "failing": refresh_failing,
+                    "failing_views": refresh_failing_detail,
+                    "unreadable": refresh_unreadable,
+                },
+                "rollup_mismatch": mismatch_detail,
             }))
         }
     }))

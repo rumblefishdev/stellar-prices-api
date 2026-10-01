@@ -1,0 +1,342 @@
+[
+  {
+    "Id": "gw_count",
+    "Label": "requests",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/ApiGateway",
+        "MetricName": "Count",
+        "Dimensions": [
+          {
+            "Name": "ApiName",
+            "Value": "prices-production-api"
+          },
+          {
+            "Name": "Stage",
+            "Value": "production"
+          }
+        ]
+      },
+      "Period": 604800,
+      "Stat": "Sum"
+    }
+  },
+  {
+    "Id": "gw_4xx",
+    "Label": "4XX",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/ApiGateway",
+        "MetricName": "4XXError",
+        "Dimensions": [
+          {
+            "Name": "ApiName",
+            "Value": "prices-production-api"
+          },
+          {
+            "Name": "Stage",
+            "Value": "production"
+          }
+        ]
+      },
+      "Period": 604800,
+      "Stat": "Sum"
+    }
+  },
+  {
+    "Id": "gw_5xx",
+    "Label": "5XX",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/ApiGateway",
+        "MetricName": "5XXError",
+        "Dimensions": [
+          {
+            "Name": "ApiName",
+            "Value": "prices-production-api"
+          },
+          {
+            "Name": "Stage",
+            "Value": "production"
+          }
+        ]
+      },
+      "Period": 604800,
+      "Stat": "Sum"
+    }
+  },
+  {
+    "Id": "lat_p50",
+    "Label": "Latency p50 (ms)",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/ApiGateway",
+        "MetricName": "Latency",
+        "Dimensions": [
+          {
+            "Name": "ApiName",
+            "Value": "prices-production-api"
+          },
+          {
+            "Name": "Stage",
+            "Value": "production"
+          }
+        ]
+      },
+      "Period": 604800,
+      "Stat": "p50"
+    }
+  },
+  {
+    "Id": "lat_p95",
+    "Label": "Latency p95 (ms)",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/ApiGateway",
+        "MetricName": "Latency",
+        "Dimensions": [
+          {
+            "Name": "ApiName",
+            "Value": "prices-production-api"
+          },
+          {
+            "Name": "Stage",
+            "Value": "production"
+          }
+        ]
+      },
+      "Period": 604800,
+      "Stat": "p95"
+    }
+  },
+  {
+    "Id": "lat_p99",
+    "Label": "Latency p99 (ms)",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/ApiGateway",
+        "MetricName": "Latency",
+        "Dimensions": [
+          {
+            "Name": "ApiName",
+            "Value": "prices-production-api"
+          },
+          {
+            "Name": "Stage",
+            "Value": "production"
+          }
+        ]
+      },
+      "Period": 604800,
+      "Stat": "p99"
+    }
+  },
+  {
+    "Id": "ilat_p50",
+    "Label": "IntegrationLatency p50 (ms)",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/ApiGateway",
+        "MetricName": "IntegrationLatency",
+        "Dimensions": [
+          {
+            "Name": "ApiName",
+            "Value": "prices-production-api"
+          },
+          {
+            "Name": "Stage",
+            "Value": "production"
+          }
+        ]
+      },
+      "Period": 604800,
+      "Stat": "p50"
+    }
+  },
+  {
+    "Id": "ilat_p95",
+    "Label": "IntegrationLatency p95 (ms)",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/ApiGateway",
+        "MetricName": "IntegrationLatency",
+        "Dimensions": [
+          {
+            "Name": "ApiName",
+            "Value": "prices-production-api"
+          },
+          {
+            "Name": "Stage",
+            "Value": "production"
+          }
+        ]
+      },
+      "Period": 604800,
+      "Stat": "p95"
+    }
+  },
+  {
+    "Id": "ilat_p99",
+    "Label": "IntegrationLatency p99 (ms)",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/ApiGateway",
+        "MetricName": "IntegrationLatency",
+        "Dimensions": [
+          {
+            "Name": "ApiName",
+            "Value": "prices-production-api"
+          },
+          {
+            "Name": "Stage",
+            "Value": "production"
+          }
+        ]
+      },
+      "Period": 604800,
+      "Stat": "p99"
+    }
+  },
+  {
+    "Id": "cache_hit",
+    "Label": "cache hits",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/ApiGateway",
+        "MetricName": "CacheHitCount",
+        "Dimensions": [
+          {
+            "Name": "ApiName",
+            "Value": "prices-production-api"
+          },
+          {
+            "Name": "Stage",
+            "Value": "production"
+          }
+        ]
+      },
+      "Period": 604800,
+      "Stat": "Sum"
+    }
+  },
+  {
+    "Id": "cache_miss",
+    "Label": "cache misses",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/ApiGateway",
+        "MetricName": "CacheMissCount",
+        "Dimensions": [
+          {
+            "Name": "ApiName",
+            "Value": "prices-production-api"
+          },
+          {
+            "Name": "Stage",
+            "Value": "production"
+          }
+        ]
+      },
+      "Period": 604800,
+      "Stat": "Sum"
+    }
+  },
+  {
+    "Id": "api_inv",
+    "Label": "api-handler invocations",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/Lambda",
+        "MetricName": "Invocations",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": "prices-production-api-handler"
+          }
+        ]
+      },
+      "Period": 604800,
+      "Stat": "Sum"
+    }
+  },
+  {
+    "Id": "api_err",
+    "Label": "api-handler errors",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/Lambda",
+        "MetricName": "Errors",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": "prices-production-api-handler"
+          }
+        ]
+      },
+      "Period": 604800,
+      "Stat": "Sum"
+    }
+  },
+  {
+    "Id": "api_thr",
+    "Label": "api-handler throttles",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/Lambda",
+        "MetricName": "Throttles",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": "prices-production-api-handler"
+          }
+        ]
+      },
+      "Period": 604800,
+      "Stat": "Sum"
+    }
+  },
+  {
+    "Id": "lp_err",
+    "Label": "ledger-processor errors",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/Lambda",
+        "MetricName": "Errors",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": "prices-production-ledger-processor"
+          }
+        ]
+      },
+      "Period": 604800,
+      "Stat": "Sum"
+    }
+  },
+  {
+    "Id": "portal_closed",
+    "Label": "portal closed at cold start (until 09-25 14:47)",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "Prices/ApiHandler",
+        "MetricName": "PortalClosedAtColdStart",
+        "Dimensions": []
+      },
+      "Period": 604800,
+      "Stat": "Sum"
+    }
+  },
+  {
+    "Id": "portal_failed",
+    "Label": "portal sources failed to load (from 09-25 14:47)",
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "Prices/ApiHandler",
+        "MetricName": "PortalSourcesLoadFailed",
+        "Dimensions": []
+      },
+      "Period": 604800,
+      "Stat": "Sum"
+    }
+  }
+]

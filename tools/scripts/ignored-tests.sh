@@ -64,6 +64,14 @@
 # and `usd_rate_population_it` (which TRUNCATEs usd_rate / oracle_prices /
 # assets) share it too. Measured cost: ~109 s of test time vs ~50 s.
 #
+# The shared `prices` database also carries the six hourly reconciliation MVs
+# (`--rollups` applies them since tasks 0143 + 0203), which rewrite coarse rows
+# up to 7 days back on the real clock. `rollup_freshness_it` seeds `_1m` and
+# `_1h` independently at those ages, so its `client()` SYSTEM STOPs every
+# `prices.mv_reconcile_*` first and leaves them stopped (STOP is lost on a
+# server restart). A new shared-database test that seeds candle tiers older
+# than the fast windows must do the same (review WR-05).
+#
 # NEVER RUN TWO OF THESE AGAINST ONE SERVER AT ONCE. Across targets the run is
 # safe only because cargo runs test binaries one after another inside ONE
 # invocation. Two invocations — two CI jobs, or a developer while CI runs —

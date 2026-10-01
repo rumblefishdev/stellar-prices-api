@@ -1,6 +1,8 @@
 ---
 name: pr
 description: Create a GitHub pull request from the active lore task and git diff.
+metadata:
+  internal: true
 ---
 
 # /pr — Create a pull request from the active lore task

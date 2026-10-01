@@ -538,7 +538,7 @@ async fn the_sushiswap_family_is_reported_without_its_wasm_entry() {
 
 /// (7) Production before BE ships D5 option A: prices_writer without the two
 /// SELECTs gets Code 497, and the sweep returns Err — never Ok, which would
-/// publish nothing and leave the NOT_BREACHING alarm green forever.
+/// publish a `0` and clear the alarm without having looked.
 #[tokio::test]
 #[ignore = "requires ClickHouse (local 26.3.10.60; cargo test -- --ignored)"]
 async fn missing_be_grants_fail_the_sweep() {

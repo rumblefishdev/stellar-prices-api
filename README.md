@@ -49,6 +49,11 @@ npx nx run-many -t test                  # the whole workspace through Nx
 The ClickHouse-backed integration tests and the schema applier are described in
 [`packages/prices-clickhouse/README.md`](packages/prices-clickhouse/README.md).
 
+**On macOS**, `infra:test` needs bash ≥ 4 and GNU coreutils. It runs in the
+last command above and in the git hooks, whenever a change reaches `infra`.
+Set them up as in [`infra/README.md` §1](infra/README.md#1-prerequisites),
+"On macOS".
+
 ## Deploy
 
 **[`infra/README.md`](infra/README.md) is the deployment runbook**, including

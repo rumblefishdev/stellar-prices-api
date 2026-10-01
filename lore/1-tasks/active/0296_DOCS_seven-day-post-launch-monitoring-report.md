@@ -11,6 +11,18 @@ links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../../docs/prices-api-load-test-100rps.md"
 history:
+  - date: 2026-09-30
+    status: active
+    who: claude
+    note: >
+      Report filled from the export run at 09:46, six minutes after the window
+      closed (PR #367, 55b36124): 0 × 5XX in 65,806 requests, uptime
+      100.000 %, gateway p95 145.2 ms / Lambda path 254.4 ms, ingest lag ≤ 5 s
+      in all 10,080 minutes, current_prices ≤ 18 s in all 672 probes. Only
+      274 minutes carried requests, and 96.9 % of the requests were a
+      teammate's test bursts; the report states both next to the uptime.
+      The 1-minute series corrected two rows below (burst times). All
+      criteria met; archive once #367 is merged.
   - date: 2026-09-29
     status: active
     who: claude
@@ -119,14 +131,20 @@ for the M3 package ([[0294]]).
 - [x] The launch event and the 7-day window are agreed and recorded
       → 2026-09-23 09:40 CEST (basic auth off on `/api/*`), window to
       2026-09-30 09:40 CEST; daily 2026-09-24, recorded 2026-09-25
-- [ ] Uptime is defined in the report and computed from a stated source
-- [ ] Error rate and p95 latency are reported from gateway-side metrics, with
+- [x] Uptime is defined in the report and computed from a stated source
+      → report §2 (5-minute intervals of the stage's Count/5XXError), 100.000 %
+- [x] Error rate and p95 latency are reported from gateway-side metrics, with
       the queries that produced them
-- [ ] The two obsolete metrics are replaced by live ingestion signals and the
+      → report §6; queries in docs/scf/milestone-3-monitoring/, PR #367
+- [x] The two obsolete metrics are replaced by live ingestion signals and the
       replacement is declared as a deviation in [[0294]]
-- [ ] Load-test days and the backfill are either outside the window or
+      → report §4; deviations §2 aligned 2026-09-30 (PR #354, e85dd7c5)
+- [x] Load-test days and the backfill are either outside the window or
       annotated inside it
-- [ ] Figures pulled while 1-minute resolution is still retained
+      → load tests 09-17/18 outside; re-ingest annotated (§3); a teammate's
+      test bursts inside it listed (§6), 96.9 % of all requests
+- [x] Figures pulled while 1-minute resolution is still retained
+      → 2026-09-30 09:46 CEST; raw 1-minute export committed in data/
 
 ## Incidents in the window — running log
 
@@ -135,9 +153,9 @@ Every entry names the cause; an unexplained gap is a finding, not a footnote.
 | when (CEST) | what | API impact | cause / task |
 |---|---|---|---|
 | 2026-09-24 15:17 | `prices-production-oracle` `Runtime.OutOfMemory` (256/256 MB), one 5-minute oracle tick skipped; `oracle-errors` ALARM 15:18 → OK 15:23 | none on `/v1` | the re-ingest writes the whole asset registry after every month (`sdex-backfill/src/run.rs:321`); the oracle reads `prices.assets` without `FINAL` and sees up to 4 un-merged copies — [[0226]], [[0140]]; fix agreed: the backfill writes deltas |
-| 2026-09-24 15:23 → ~16:00 | portal closed in part of the fleet: a teammate's `curl` loop on `GET /v1/assets` (~4,100 requests in 2 min, 2,747 cache hits, 1,326 × 4XX, 69 cold starts) throttled Parameter Store (account default 40 TPS, 19 × `ThrottlingException`); 7 api-handler environments booted with the portal closed and served `/api/config` `enabled:false` until they were recycled by idleness; `api-handler-portal-closed` ALARM 15:24 | `/v1`: 0 × 5XX, 0 Lambda errors; portal sign-in/dashboard intermittently "closed" | design trade-off from 0194 ([[0249]] caught it as intended); rule agreed: throughput tests only with the load-test key, never as a cold-start burst; fixed 2026-09-25 14:47 by [[0311]] (sources load on the first portal request, not at cold start; PR #351) |
+| 2026-09-24 15:23 → ~16:00 | portal closed in part of the fleet: a teammate's `curl` loop on `GET /v1/assets` (~4,100 requests in 2 min, 2,747 cache hits, 1,326 × 4XX, 69 cold starts; the 1-minute export shows an earlier burst at 15:12–15:13, 1,780 requests, that closed nothing) throttled Parameter Store (account default 40 TPS, 19 × `ThrottlingException`); 7 api-handler environments booted with the portal closed and served `/api/config` `enabled:false` until they were recycled by idleness; `api-handler-portal-closed` ALARM 15:24 | `/v1`: 0 × 5XX, 0 Lambda errors; portal sign-in/dashboard intermittently "closed" | design trade-off from 0194 ([[0249]] caught it as intended); rule agreed: throughput tests only with the load-test key, never as a cold-start burst; fixed 2026-09-25 14:47 by [[0311]] (sources load on the first portal request, not at cold start; PR #351) |
 | 2026-09-24 20:09 | oracle `Runtime.OutOfMemory` again (256/256 MB); `oracle-errors` ALARM 20:09 → OK 20:13 | none on `/v1` | same cause as 15:17 — [[0226]], [[0140]] |
-| 2026-09-25 11:56 → 12:25 | portal closed in part of the fleet again, same mechanism: a teammate's k6 run for [[0311]] (`User-Agent: k6-0311-five-plan`, one home IP) against production `/health` and `/v1/assets/native/price` — ramps to 4,496 invocations/min, concurrency 200 at 12:21–12:24, 576 cold starts in ten minutes, 0 throttles, 0 errors, all 200/202; ≥ 4 environments logged "portal closed at cold start" (12:15, 12:21 × 3); `portal-closed` ALARM 12:16:51 → OK 12:37:51 (21 min, on missing data once the run stopped) | none on `/v1`; the portal answered as closed from those environments until recycled | 0249 said it: expect this alarm during a load test. Cold-start bursts are the trigger, fixed 2 h later, 14:47, by [[0311]] |
+| 2026-09-25 11:56 → 12:25 | portal closed in part of the fleet again, same mechanism: a teammate's k6 run for [[0311]] (`User-Agent: k6-0311-five-plan`, one home IP; the 1-minute export shows the day's k6 runs as seven bursts from 11:39 to 15:21, 57,817 requests, and this one, 11:54–12:18, as the one that closed the portal) against production `/health` and `/v1/assets/native/price` — ramps to 4,496 invocations/min, concurrency 200 at 12:21–12:24, 576 cold starts in ten minutes, 0 throttles, 0 errors, all 200/202; ≥ 4 environments logged "portal closed at cold start" (12:15, 12:21 × 3); `portal-closed` ALARM 12:16:51 → OK 12:37:51 (21 min, on missing data once the run stopped) | none on `/v1`; the portal answered as closed from those environments until recycled | 0249 said it: expect this alarm during a load test. Cold-start bursts are the trigger, fixed 2 h later, 14:47, by [[0311]] |
 | 2026-09-25 14:49 → 2026-09-29 09:49 | asset-discovery's `-no-invocations` and `-duration-near-timeout` alarms missing: CloudFormation deleted them when Observability was deployed from [[0311]]'s branch (#351), which predated #349 | none; a monitoring gap — only `-errors` watched the worker | [[0256]] post-archive entry; restored 2026-09-29 09:49 from `develop` |
 | 2026-09-25 19:14 | oracle `Runtime.OutOfMemory` (256/256 MB); `oracle-errors` ALARM 19:14 → OK 19:18 | none on `/v1` | same cause as 09-24 15:17 |
 | 2026-09-28 08:14 → | `coverage-sweep-unclassified` ALARM: the first weekly probe run (07:17) found one unclassified swap emitter, `CDYPJTUT…` (the `sda` aggregator, one event) | none on `/v1` | [[0100]]; allow-listed in #358 (merged 09-28 11:02) |

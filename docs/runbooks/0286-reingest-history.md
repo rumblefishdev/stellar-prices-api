@@ -41,6 +41,50 @@ phase-1 rollout. This runbook assumes everything in it is done and green.
 
 ---
 
+### 1a. Stop the reconcile MVs (tasks 0143 + 0203)
+
+**Before the first month**, if the target holds the six hourly reconciliation
+MVs (`SELECT count() FROM system.tables WHERE database = 'prices' AND name LIKE
+'mv_reconcile_%'` reads 6; it reads 0 on a target where tasks 0143 + 0203 have
+not been rolled out, and then this step does not apply):
+
+```sql
+SYSTEM STOP VIEW prices.mv_reconcile_1m_to_15m;
+SYSTEM STOP VIEW prices.mv_reconcile_15m_to_1h;
+SYSTEM STOP VIEW prices.mv_reconcile_1h_to_4h;
+SYSTEM STOP VIEW prices.mv_reconcile_4h_to_1d;
+SYSTEM STOP VIEW prices.mv_reconcile_1d_to_1w;
+SYSTEM STOP VIEW prices.mv_reconcile_1d_to_1M;
+
+SELECT view, status FROM system.view_refreshes
+WHERE database = 'prices' AND view LIKE 'mv_reconcile_%' ORDER BY view;
+```
+
+Six rows, every one `Disabled`. Stop all six, not only the lowest: a stopped
+dependency leaves the rest `WaitingForDependencies`, which reads as a stall
+rather than as a deliberate stop.
+
+**Why.** Each reconcile MV re-rolls every bucket of the last 7 days whose
+`trade_count` or `volume_base` disagrees with the tier below. Mid-re-ingest that
+source is partial (the month's `1m` partition was just dropped and is being
+refilled), and it carries a lower `sum(version)` than the old, enriched coarse
+rows. The reconcile rows then lose in the `ReplacingMergeTree`, are re-emitted
+every hour, the mismatch never converges, and the `prices-production-rollup-mismatch-*`
+alarms fire. A pass that did win would write coarse buckets from a
+half-refilled month. Only months overlapping the last 7 days are exposed, but
+stop them for the whole run: it costs nothing, and a forgotten START is alarmed.
+
+- ⚠️ **`prices-production-mv-refresh-disabled` fires while they are stopped.**
+  That is expected for the whole run and clears after the START in §7f. Do not
+  silence it: it is what catches a STOP that is never undone.
+- ⚠️ **`SYSTEM STOP VIEW` is lost on a server restart.** After any ClickHouse
+  restart during the run, re-run the `system.view_refreshes` check above and
+  re-issue the six STOPs if any view reads `Scheduled`.
+- The fast MVs keep running. They only re-roll their own recent windows, which
+  §4g and §7a already account for.
+
+---
+
 ## 2. Why the loop has the shape it has
 
 ```
@@ -84,6 +128,34 @@ Four of those steps exist because of one fact and nothing else:
   cleared in step 4c are re-written per ledger as it completes, so a re-run of
   the same range picks up where it stopped (`--start` the same, it skips what is
   done).
+- `reingest_0286.py` retries a ClickHouse call that cannot connect (six waits,
+  5 s → 240 s, each logged to `run.log` as `ClickHouse unreachable`). A read
+  answered 502/503 by Caddy (ClickHouse down behind it) is retried the same way;
+  a write answered 502/503 ends the run with exit 1 and a `DOWN` line, because
+  Caddy also says 502 when ClickHouse died while running the statement. A call
+  whose request already went out is not retried and still ends the run (exit 1),
+  and a gate still `STOP`s (exit 2) — so does a connect error no wait can fix (a
+  certificate that does not verify or is rejected, an unknown host name), at the
+  first call instead of after an hour of restarts. Wrap `run` so a crash resumes by itself
+  while a `STOP` stays down — on 2026-09-25 a single unreachable call left the
+  loop dead for 56 hours:
+
+  ```bash
+  for try in 1 2 3 4 5 6; do
+    python3 tools/scripts/reingest_0286.py run --to-month <M> <flags> --yes
+    code=$?; echo "$(date -u +%FT%TZ) exit=$code try=$try" | tee -a ~/reingest-0286/restarts.log
+    [ $code -eq 1 ] || break
+    sleep 300
+  done
+  ```
+
+  ⚠️ The loop is unattended-safe only while no month left to do ends at or past
+  Soroban activation (stage A). From stage B on, with `--amm ssh`, every `run`
+  asks for the CH `default` password (`getpass`), so a restart after a crash
+  waits silently at that prompt in the tmux pane — the same dead loop the
+  wrapper exists to prevent. Watch `restarts.log` and answer the prompt, or run
+  those stages without the wrapper.
+
 - `events-backfill` reads `default.*` AND writes `prices.*`, so it runs **on the
   CH host as the `default` user** against `localhost:8123` — the prices mTLS user
   cannot read `default.*`
@@ -794,6 +866,75 @@ WHERE quote_asset_id = 111 AND close > 0 AND close_usd > 0;
 Expected: `peg_written = 0`, `pivot_written > 0` over the same span. Run it once
 more on `price_ohlcv_1h` to confirm the pre-roll carried no peg value up.
 
+**7e-2. The carried-product after-check (task 0207).** Before 0286 the coarse
+roll took `close` from the last child and `close_usd` from the last _priced_
+child — `argMaxIf(close_usd, t.timestamp, close_usd > 0)`. Where the last child
+was a dust print, or had not been enriched yet when the roll ran, the two came
+from different sub-buckets, and `close_usd / close` stopped being an XLM or USDT
+rate at all: up to 1.6e8× the bucket's own rate, in both directions. The rate
+form (ADR 0287 §5) cannot produce that, and the phase-3 rebuild replaces every
+such row — this measures that it did. Run after §7a and §7b-2, once per coarse
+tier (`1h`, `4h`, `1d`, `1w`, `1M`; the query is per table because each is a
+full scan):
+
+```sql
+-- A row is inconsistent when its rate is more than 10x off the median rate of
+-- its own quote leg in the same bucket. 4 = XLM, 111 = USDT (task 0209).
+-- close_usd is floored at the precision floor: below it the Decimal(38, 14)
+-- tick alone moves the ratio. close is NOT floored — a sub-floor close under a
+-- real close_usd is the worst case of this defect (5.0M x on 1h, 2022-02-11).
+WITH r AS (
+    SELECT timestamp, quote_asset_id, toFloat64(close_usd) / toFloat64(close) AS rate
+    FROM prices.price_ohlcv_1d FINAL          -- then _1h, _4h, _1w, _1M
+    WHERE quote_asset_id IN (4, 111)
+      AND close > 0
+      AND close_usd >= toDecimal128('0.000000000001', 14)),
+m AS (SELECT timestamp, quote_asset_id, quantileExact(0.5)(rate) AS med
+      FROM r GROUP BY timestamp, quote_asset_id)
+SELECT quote_asset_id,
+       countIf(rate > 10 * med) AS above_10x, countIf(rate < med / 10) AS below_10x,
+       min(r.timestamp) AS oldest, max(r.timestamp) AS newest
+FROM r JOIN m USING (timestamp, quote_asset_id)
+WHERE rate > 10 * med OR rate < med / 10
+GROUP BY quote_asset_id;
+```
+
+Expected: **no rows** on any tier. Before the run (prod, 2026-09-29), all on the
+XLM leg and all in 2022-01 … 2022-04, most on 2022-04-13:
+
+| tier | 1h  | 4h  | 1d  | 1w    | 1M  |
+| ---- | --- | --- | --- | ----- | --- |
+| rows | 25  | 99  | 394 | 1 236 | 3   |
+
+The USDT leg was already 0. The 10x band is deliberate: 2x flags real moves
+inside a week or month (XLM's own drift; USDT's June 2022 depeg month).
+
+⚠️ The `1w`/`1M` rows only go in §7a, so until `finish` they are still there —
+reading them mid-run is not a failure. A month rolled back with `rollback`
+restores its snapshot, and with it that month's inconsistent rows.
+
+**7f. Start the reconcile MVs again (tasks 0143 + 0203).**
+
+Only if §1a stopped them, and only after the last month, §7a and §7b-2 are done:
+
+```sql
+SYSTEM START VIEW prices.mv_reconcile_1m_to_15m;
+SYSTEM START VIEW prices.mv_reconcile_15m_to_1h;
+SYSTEM START VIEW prices.mv_reconcile_1h_to_4h;
+SYSTEM START VIEW prices.mv_reconcile_4h_to_1d;
+SYSTEM START VIEW prices.mv_reconcile_1d_to_1w;
+SYSTEM START VIEW prices.mv_reconcile_1d_to_1M;
+
+SELECT view, status, next_refresh_time, exception FROM system.view_refreshes
+WHERE database = 'prices' AND view LIKE 'mv_reconcile_%' ORDER BY view;
+```
+
+Six rows, none `Disabled`. `prices-production-mv-refresh-disabled` returns to OK
+on the next probe run, and `RollupMismatchBuckets` should read 0 on every coarse
+table within one to two hourly passes. A mismatch that persists after that
+means a coarse tier disagrees with the re-ingested `1m` inside the last 7 days:
+compare that tier with the one below before assuming the alarm is wrong.
+
 ---
 
 ## 8. Acceptance
@@ -825,6 +966,10 @@ The phase-3 criteria of lore task 0286, in the order they can be checked:
    explained) — and `post_run_0228_it` green.
 6. **No USDT-quoted `1m` row carries the $1 peg** (step 7e): `peg_written = 0`
    and `pivot_written > 0` on `1m`, and on one coarse tier. This closes task 0212.
+7. **No coarse row whose `close_usd` contradicts its own `close`** (step 7e-2):
+   no row on `1h`, `4h`, `1d`, `1w` or `1M` more than 10x off its quote leg's
+   median rate in the bucket, on the XLM and the USDT leg. Before: 1 757 rows.
+   Task 0207 was closed on this check.
 
 ---
 
@@ -841,6 +986,12 @@ ALTER TABLE prices.price_ohlcv_1m ATTACH PARTITION <month>
 Same for each coarse table dropped in 4g. The completion markers cleared in 4d do
 NOT need restoring — they are backfill bookkeeping, and the restored rows are
 already the indexed result.
+
+Keep the reconcile MVs STOPped (§1a) until every restored partition is back:
+while a month is half-restored, its `1m` and coarse partitions disagree, and a
+pass would re-roll the coarse side from whichever `1m` is there at the moment.
+Then START them as in §7f. A server restart during the rollback un-stops them;
+re-check.
 
 Release a month's snapshots only once you are certain, and only after its
 reconciliation is recorded:

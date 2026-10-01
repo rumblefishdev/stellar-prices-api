@@ -411,6 +411,14 @@ with no finer copy of itself outside the FREEZE.
 
 **5c. Truncate and re-roll.**
 
+> ⚠️ **If the target holds the `prices.mv_reconcile_*` MVs (tasks 0143 + 0203),
+> STOP all six before the `TRUNCATE` and START them after**, exactly as
+> [0286-reingest-history §1a](0286-reingest-history.md#1a-stop-the-reconcile-mvs-tasks-0143--0203) and §7f do. While the coarse tables are
+> half-rebuilt, an hourly reconcile pass would re-roll the last 7 days from
+> whatever the tier below holds at that moment. `SYSTEM STOP VIEW` is lost on a
+> server restart, and `prices-production-mv-refresh-disabled` fires while they
+> are stopped (expected; it clears after START).
+
 ```sql
 TRUNCATE TABLE prices.price_ohlcv_1M;
 ```
@@ -446,6 +454,14 @@ creation (measured on the 26.3.10.60 pin, 0142 §3), so no manual
 `SYSTEM REFRESH VIEW` is needed.
 
 ## 6. Rollback
+
+> ⚠️ **If the target holds the `prices.mv_reconcile_*` MVs (tasks 0143 + 0203),
+> STOP all six before the first `DROP PARTITION` / `TRUNCATE` below and START them after**, exactly as
+> [0286-reingest-history §1a](0286-reingest-history.md#1a-stop-the-reconcile-mvs-tasks-0143--0203) and §7f do. While the coarse tables are
+> half-rebuilt, an hourly reconcile pass would re-roll the last 7 days from
+> whatever the tier below holds at that moment. `SYSTEM STOP VIEW` is lost on a
+> server restart, and `prices-production-mv-refresh-disabled` fires while they
+> are stopped (expected; it clears after START).
 
 Real, and it is why section 3 exists. Per affected coarse table and partition:
 

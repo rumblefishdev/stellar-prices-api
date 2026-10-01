@@ -2,13 +2,14 @@
 name = "backfill-freshness-probe"
 version = "0.1.0"
 edition = "2024"
-description = "Publishes prices.backfill_progress push-age to CloudWatch for the SDEX push-freshness alarm (task 0056)"
+description = "Publishes prices.backfill_progress push-age (every 15 minutes, task 0056) and the weekly earliest-claim overclaim reconcile (task 0272) to CloudWatch"
 
 [lib]
 name = "backfill_freshness_probe"
 path = "src/lib.rs"
 
-# EventBridge rate(15 minutes) Lambda entrypoint (task 0056). Behind `lambda`
+# Lambda entrypoint for two EventBridge rules: rate(15 minutes) push-age (task
+# 0056) and a weekly {"check":"reconcile"} run (task 0272). Behind `lambda`
 # so the default build/test exercises the pure metric-shaping logic without the
 # AWS runtime / mTLS stack. Deployable:
 #   cargo lambda build -p backfill-freshness-probe --release --arm64 --features lambda

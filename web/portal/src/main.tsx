@@ -15,7 +15,7 @@ import { bridgeOAuthPopup } from './landing/oauthPopup';
 // The three self-hosted families (task 0193). Imported here rather than linked
 // from `index.html` so Vite fingerprints the `.woff2` files and rewrites their
 // URLs under `base` — a `<link>` in the document would ship the paths verbatim
-// and 403 on every deploy. Nothing is fetched from a third-party host; see the
+// and 403 on every deploy. No font is fetched from a third-party host; see the
 // comment at the top of `theme/fonts.css`.
 import './theme/fonts.css';
 import { theme } from './theme/theme';

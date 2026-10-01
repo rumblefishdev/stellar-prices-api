@@ -507,6 +507,23 @@ describe('routes', () => {
     ).toBe('/privacy-policy');
   });
 
+  it('re-opens the HubSpot consent banner from the footer, the only way to withdraw consent (task 0316)', async () => {
+    openAndSignedOut();
+    renderAt('/privacy-policy');
+    await screen.findByRole('heading', { level: 1, name: /privacy policy/i });
+
+    // `Window._hsp` is declared in `landing/Chrome.tsx`, which the spec's
+    // project reaches only through `app.d.ts`, where the declaration is gone.
+    const w = window as { _hsp?: unknown[] };
+    delete w._hsp;
+    const footer = within(screen.getByRole('navigation', { name: 'Footer' }));
+    fireEvent.click(footer.getByRole('link', { name: 'Cookie settings' }));
+
+    // The loader never runs in a test, so this is also the no-script case:
+    // `_hsp` is created on demand and the click queues the command, not throws.
+    expect(w._hsp).toEqual([['showBanner']]);
+  });
+
   it('marks the section the quick start opens on in its rail', async () => {
     openAndSignedOut();
     renderAt('/quick-start');

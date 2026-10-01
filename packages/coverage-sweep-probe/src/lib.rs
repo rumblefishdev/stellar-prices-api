@@ -14,8 +14,10 @@
 //! it (with a reason and a task). Auto-registering routers would double-count
 //! the pool-level trades they wrap.
 //!
-//! The residual is published to `Prices/Coverage` only when non-zero, so the
-//! alarm is a plain `UnclassifiedSwapEvents >= 1` over `NOT_BREACHING`.
+//! The residual is published to `Prices/Coverage` on every run, `0` when
+//! clean, and the alarm holds the latest run's value between runs
+//! (`treatMissingData: IGNORE`): ALARM from a run that finds a residual until
+//! a run that finds none, so a re-run after triage clears it (task 0323).
 //! Triage: `docs/runbooks/0100-coverage-sweep-triage.md`.
 
 pub mod allowlist;
@@ -61,13 +63,10 @@ pub struct Metric {
     pub value: f64,
 }
 
-/// The residual's datapoints: nothing when nothing is unclassified, else the
-/// contract count and the event sum. Absent-while-healthy, like the ledger
-/// processor's `unregistered_pool_event_metrics`.
+/// The residual's datapoints, on every run: the contract count and the event
+/// sum, both `0` when nothing is unclassified. The `0` is what clears the
+/// alarm (task 0323); absent-while-healthy left it waiting 7 days.
 pub fn unclassified_metrics(unclassified: &[SweepRow]) -> Vec<Metric> {
-    if unclassified.is_empty() {
-        return Vec::new();
-    }
     let events: u64 = unclassified.iter().map(|r| r.events).sum();
     vec![
         Metric {
@@ -81,8 +80,8 @@ pub fn unclassified_metrics(unclassified: &[SweepRow]) -> Vec<Metric> {
     ]
 }
 
-/// The unresolved emitters' datapoint: nothing when there are none, like
-/// [`unclassified_metrics`].
+/// The unresolved emitters' datapoint: nothing when there are none. No alarm
+/// reads it, so absent-while-healthy is enough here.
 pub fn unresolved_metrics(unresolved: &[SweepRow]) -> Vec<Metric> {
     if unresolved.is_empty() {
         return Vec::new();
@@ -153,8 +152,20 @@ mod tests {
     }
 
     #[test]
-    fn nothing_unclassified_publishes_nothing() {
-        assert!(unclassified_metrics(&[]).is_empty());
+    fn nothing_unclassified_publishes_zeros() {
+        assert_eq!(
+            unclassified_metrics(&[]),
+            vec![
+                Metric {
+                    name: UNCLASSIFIED_SWAP_CONTRACTS,
+                    value: 0.0
+                },
+                Metric {
+                    name: UNCLASSIFIED_SWAP_EVENTS,
+                    value: 0.0
+                },
+            ]
+        );
     }
 
     #[test]

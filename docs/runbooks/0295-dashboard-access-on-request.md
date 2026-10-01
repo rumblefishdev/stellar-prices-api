@@ -15,6 +15,12 @@ inline read policy) on 2026-09-03 and its console login on 2026-09-04. The
 login was deleted on 2026-09-25 and the user removed from the Observability
 stack the same day (this task). The policy it carried is the template below.
 
+Alternative without an IAM user in this account:
+[0295-dashboard-access-via-identity-center.md](0295-dashboard-access-via-identity-center.md)
+— the reviewer becomes an IAM Identity Center user with a permission set,
+which needs the management account's admin role and the organization
+administrator's agreement.
+
 ## 1. What a request must contain
 
 Access is granted only to a **named person**, never to a team address:

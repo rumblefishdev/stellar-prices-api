@@ -121,6 +121,12 @@ reason = "swap router, newer build of CDE5MFAG… (same deployer; sda/fee_policy
 task = "0100"
 
 [[contract]]
+id = "CAJ5BOSJFEIO6UO644ZTSGNEZULRJS4ZTMNIMLUU2IPVEMAKBF5MH4XA"
+wasm = "6b68231953c2bf31ad8ea880abf1cbcbcf6ca0224a6b30cab85306b6cf44a26a"
+reason = "swap aggregator (route_swap) deployed 2026-09-29 by GCHGSJGJ…, its only caller; routes through per-venue adapters (CCKXYWSV… Soroswap, CCB4CMWG… Aquarius) and both venues' routers; 6/6 txs also hold a registered pool's swap"
+task = "0323"
+
+[[contract]]
 id = "CDCNXZHYWRDHNAQEY5EX3WCF7BCWVJBS64ZBVUGRTQBFTHUKG6NAXFTR"
 wasm = "cbbb1bde44acab147b7e2eece89350ed37fe79f33c4b8938fba89c2583a6b52f"
 reason = "LI.FI swap/bridge aggregator (lifi_swap); routes through pools, prices nothing itself"
