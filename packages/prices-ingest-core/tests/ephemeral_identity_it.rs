@@ -622,17 +622,10 @@ async fn the_fixture_helpers_work_against_todays_init_sql() {
             .unwrap();
         let fetched = fixture::fetch_id(&admin, ident.0, ident.1, ident.2).await;
         assert_eq!(stored, fetched, "fixture id for {ident:?}");
-        let truncated: u64 = admin
-            .query("SELECT toUInt64(toUInt32(xxh3(concat(?, ':', ?, ':', ?))))")
-            .bind(ident.0)
-            .bind(ident.1)
-            .bind(ident.2)
-            .fetch_one()
-            .await
-            .unwrap();
         assert_eq!(
-            fetched, truncated,
-            "fixture id is the UInt32 form for {ident:?}"
+            fetched,
+            server_id(&admin, *ident).await,
+            "fixture id is the full UInt64 id for {ident:?}"
         );
     }
     let distinct: u64 = admin

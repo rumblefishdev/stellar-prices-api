@@ -12,6 +12,7 @@
 //! against a shared/prod cluster.
 
 use clickhouse::Client;
+use prices_clickhouse::asset_id::id_of;
 use prices_ingest_core::{AssetIdentity, CandleAccumulator, OhlcvCandle, TradeTick};
 use rust_decimal::Decimal;
 use sdex_backfill::sink::Sink;
@@ -68,7 +69,13 @@ async fn per_source_candles_coexist_and_rewrites_are_idempotent() {
         .expect("truncate price_ohlcv_1m");
 
     let sink = Sink::new(&ch_url());
-    let pair = "asset_id = 1 AND quote_asset_id = 2";
+    // Task 0139: the ids of the identities `candle` writes, as ClickHouse derives them.
+    let pair = format!(
+        "asset_id = {} AND quote_asset_id = {}",
+        id_of("", "", "C1"),
+        id_of("", "", "C2")
+    );
+    let pair = pair.as_str();
 
     // Same (asset, quote, minute) under two different sources → two rows: source
     // is part of the RMT key, so they must not collapse into one.
