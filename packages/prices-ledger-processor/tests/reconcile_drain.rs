@@ -172,11 +172,7 @@ impl CandleSink for RecordingSink {
         Ok(())
     }
 
-    async fn write_new_assets(
-        &self,
-        _registry: &AssetRegistry,
-        _since: u32,
-    ) -> Result<(), SinkError> {
+    async fn write_new_assets(&self, _registry: &AssetRegistry) -> Result<(), SinkError> {
         Ok(())
     }
 

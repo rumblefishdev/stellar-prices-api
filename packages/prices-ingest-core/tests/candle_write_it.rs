@@ -72,7 +72,7 @@ fn candles() -> Vec<OhlcvCandle> {
         (3, 17, 1),
     ] {
         let trade = fill(tx, sold, bought);
-        acc.merge(&raw_trade_to_tick(&trade, &mut registry));
+        acc.merge(raw_trade_to_tick(&trade, &mut registry));
     }
     acc.flush_all()
 }

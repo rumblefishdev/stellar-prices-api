@@ -72,7 +72,7 @@ fn accumulate_ledger(
 ) {
     let mut out = LedgerSoroban::default();
     process_soroban_event_rows(ledger, closed_at, events, reg, assets, &mut out);
-    for (source, tick) in &out.amm_ticks {
+    for (source, tick) in out.amm_ticks {
         accumulators.entry(source).or_default().merge(tick);
         *ticks_by_source.entry(source).or_default() += 1;
     }

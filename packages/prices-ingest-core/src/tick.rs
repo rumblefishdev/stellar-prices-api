@@ -1,6 +1,6 @@
 use rust_decimal::Decimal;
 
-use crate::canonical::{AssetRegistry, CanonicalPair, canonicalise};
+use crate::canonical::{AssetIdentity, AssetRegistry, CanonicalPair, canonicalise};
 use crate::filter::{PriceSource, RawTrade};
 use crate::price::{compute_price, offer_price, price_forming_i64, price_survives_column_scale};
 
@@ -17,6 +17,10 @@ pub struct TradeTick {
     pub claim_index: u16,
     pub base_id: u32,
     pub quote_id: u32,
+    /// The pair as `canonicalise` resolved it (SAC-collapsed): what candles
+    /// are keyed and written by (task 0139).
+    pub base: AssetIdentity,
+    pub quote: AssetIdentity,
     pub price: Decimal,
     pub volume_base: Decimal,
     pub volume_quote: Decimal,
@@ -112,6 +116,8 @@ pub fn raw_trade_to_tick_with_source(
         claim_index: trade.claim_index,
         base_id: pair.base_id,
         quote_id: pair.quote_id,
+        base: pair.base,
+        quote: pair.quote,
         price,
         volume_base,
         volume_quote,
@@ -185,6 +191,10 @@ mod tests {
 
         let ordinary = raw_trade_to_tick(&trade(50_000_000, 10_000_000), &mut registry);
         assert!(ordinary.price_forming, "5 XLM against 1 USDC forms price");
+        assert_eq!(
+            (ordinary.base, ordinary.quote),
+            (AssetIdentity::Native, usdc())
+        );
     }
 
     /// Task 0286, VERIFY-0286-local discrepancy 4. The rounding bound passes a

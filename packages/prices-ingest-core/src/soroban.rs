@@ -883,6 +883,8 @@ fn amm_trade_to_tick(
         claim_index: 0,
         base_id: pair.base_id,
         quote_id: pair.quote_id,
+        base: pair.base,
+        quote: pair.quote,
         price,
         volume_base,
         volume_quote,
@@ -2049,6 +2051,14 @@ mod tests {
             &mut assets,
         )
         .expect("the swap still produces a tick");
+        // T0 is XLM's SAC: the tick carries the collapsed identity (D6).
+        assert_eq!(
+            (&tick.base, &tick.quote),
+            (
+                &AssetIdentity::Contract(T1.to_string()),
+                &AssetIdentity::Native
+            )
+        );
 
         assert!(
             !crate::price::price_survives_column_scale(tick.price),

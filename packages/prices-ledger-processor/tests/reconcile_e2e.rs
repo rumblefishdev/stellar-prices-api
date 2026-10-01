@@ -81,15 +81,11 @@ impl CandleSink for FailFirstAssetSink {
         Ok(())
     }
 
-    async fn write_new_assets(
-        &self,
-        registry: &AssetRegistry,
-        since: u32,
-    ) -> Result<(), SinkError> {
+    async fn write_new_assets(&self, registry: &AssetRegistry) -> Result<(), SinkError> {
         if self.fail_next_asset_write.swap(false, Ordering::Relaxed) {
             return Err(SinkError::Write("injected asset-write failure".to_string()));
         }
-        let n = registry.assets_since(since).count() as u64;
+        let n = registry.pending_new().count() as u64;
         self.assets_written.fetch_add(n, Ordering::Relaxed);
         Ok(())
     }
@@ -101,9 +97,9 @@ impl CandleSink for FailFirstAssetSink {
 
 /// Regression for task 0132 / code-review finding 1: the registry is warm across
 /// invocations, so a run that interns new assets and then fails a later write
-/// must NOT strand those assets below the next run's watermark. The durable
-/// persisted watermark only advances after a successful asset write, so the
-/// retry re-writes them instead of orphaning the candles that reference them.
+/// must NOT lose them. The pending set is drained only after a successful asset
+/// write, so the retry re-writes them instead of orphaning the candles that
+/// reference them.
 #[tokio::test]
 async fn assets_from_a_failed_run_are_written_on_the_next_run() {
     skip_if_no_fixtures!();
@@ -136,9 +132,9 @@ async fn assets_from_a_failed_run_are_written_on_the_next_run() {
         "nothing persisted when the asset write fails"
     );
 
-    // Run 2 on the SAME warm reconciler: the registry still holds the interned
-    // assets (next_id advanced), but the durable watermark did NOT advance — so
-    // those assets are re-offered and written, not skipped.
+    // Run 2 on the SAME warm reconciler: re-seeing the identities interns
+    // nothing new, but they are still pending from run 1 — so they are
+    // re-offered and written, not skipped.
     let second = reconciler.run(16).await.expect("retry run should succeed");
     // MODIFIED for task 0282, intentional, not a regression: the three fixtures
     // all share one minute, so run 2 decodes them, writes their assets, then

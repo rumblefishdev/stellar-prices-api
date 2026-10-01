@@ -132,11 +132,11 @@ impl RunAccumulators {
         Self::default()
     }
 
-    fn merge_sdex(&mut self, tick: &TradeTick) {
+    fn merge_sdex(&mut self, tick: TradeTick) {
         self.sdex.merge(tick);
     }
 
-    fn merge_amm(&mut self, source: &'static str, tick: &TradeTick) {
+    fn merge_amm(&mut self, source: &'static str, tick: TradeTick) {
         self.amm.entry(source).or_default().merge(tick);
     }
 
@@ -333,7 +333,7 @@ pub async fn index_partition(
             let trades = extract_trades(lcm);
             for trade in &trades {
                 let tick = raw_trade_to_tick(trade, registry);
-                accs.merge_sdex(&tick);
+                accs.merge_sdex(tick);
                 stats.trade_ticks += 1;
             }
 
@@ -342,7 +342,7 @@ pub async fn index_partition(
             // events, so SdexOnly skips the decode entirely.
             if mode == ExtractMode::Combined {
                 let sob = process_ledger(lcm, reg, registry);
-                for (source, tick) in &sob.amm_ticks {
+                for (source, tick) in sob.amm_ticks {
                     accs.merge_amm(source, tick);
                     stats.amm_ticks += 1;
                 }
@@ -456,6 +456,7 @@ pub async fn peek_ledger_minute(partition: &Partition, seq: u32, temp_dir: &Path
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prices_ingest_core::AssetIdentity;
     use rust_decimal::Decimal;
 
     const MINUTE_M: i64 = 1_700_000_040; // minute start 1_700_000_040
@@ -475,6 +476,8 @@ mod tests {
             claim_index: 0,
             base_id: 1,
             quote_id: 2,
+            base: AssetIdentity::Native,
+            quote: AssetIdentity::Contract("CQUOTE".to_string()),
             price,
             volume_base: Decimal::from(1),
             volume_quote: price,
@@ -495,7 +498,7 @@ mod tests {
         let mut accs = RunAccumulators::new();
 
         // Last ledgers of partition A: an ordinary, price-forming fill.
-        accs.merge_sdex(&fill(100, MINUTE_M, Decimal::from(2), true));
+        accs.merge_sdex(fill(100, MINUTE_M, Decimal::from(2), true));
         assert!(
             accs.drain_closed(minute_of(MINUTE_M)).is_empty(),
             "the minute the last ledger closed in is still open"
@@ -510,7 +513,7 @@ mod tests {
         );
 
         // First ledgers of partition B: only dust in the same minute.
-        accs.merge_sdex(&fill(
+        accs.merge_sdex(fill(
             101,
             MINUTE_M_LATE,
             Decimal::new(588_235_294, 10), // 1/17
@@ -536,7 +539,7 @@ mod tests {
     #[test]
     fn the_last_partition_of_a_run_writes_the_minute_it_still_holds_open() {
         let mut accs = RunAccumulators::new();
-        accs.merge_sdex(&fill(100, MINUTE_M, Decimal::from(2), true));
+        accs.merge_sdex(fill(100, MINUTE_M, Decimal::from(2), true));
 
         let drained = candles_at_partition_end(&mut accs, PartitionEnd::Drain);
         assert_eq!(drained.len(), 1, "the open minute is written, not dropped");
@@ -552,14 +555,11 @@ mod tests {
     #[test]
     fn an_amm_venues_open_minute_is_carried_across_the_boundary_too() {
         let mut accs = RunAccumulators::new();
-        accs.merge_amm("soroswap", &fill(100, MINUTE_M, Decimal::from(3), true));
+        accs.merge_amm("soroswap", fill(100, MINUTE_M, Decimal::from(3), true));
 
         assert!(candles_at_partition_end(&mut accs, PartitionEnd::Carry).is_empty());
 
-        accs.merge_amm(
-            "soroswap",
-            &fill(101, MINUTE_M_LATE, Decimal::from(4), true),
-        );
+        accs.merge_amm("soroswap", fill(101, MINUTE_M_LATE, Decimal::from(4), true));
         let drained = accs.drain_closed(minute_of(MINUTE_M_PLUS_1));
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].0, "soroswap");

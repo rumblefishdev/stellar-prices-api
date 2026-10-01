@@ -6,7 +6,7 @@ use stellar_xdr::{
     HashIdPreimage, HashIdPreimageContractId, Limits, PublicKey, Uint256, WriteXdr,
 };
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AssetIdentity {
     Native,
     Credit {
@@ -163,6 +163,10 @@ pub struct AssetRegistry {
     /// `asset_id` as its classic SDEX form, so liquidity is not split across two
     /// ids and the cross-source merge (ADR 0004) holds.
     sac_index: HashMap<String, AssetIdentity>,
+    /// Identities first interned by this process and not yet persisted, in
+    /// intern order. Replaces the id watermark (task 0139): a set of
+    /// identities says "new" without assuming ids are handed out in order.
+    pending: Vec<AssetIdentity>,
 }
 
 impl AssetRegistry {
@@ -181,6 +185,7 @@ impl AssetRegistry {
             // silent-failure note on `MAINNET_PASSPHRASE` (review #9).
             network_id: mainnet_network_id(),
             sac_index: HashMap::new(),
+            pending: Vec::new(),
         };
         // Pre-seed the canonical quote SACs so an AMM-via-SAC USDC/USDT/XLM
         // collapses even before that asset's first classic (SDEX) sighting in the
@@ -220,6 +225,7 @@ impl AssetRegistry {
         let id = self.next_id;
         self.next_id += 1;
         self.by_identity.insert(identity.clone(), id);
+        self.pending.push(identity.clone());
         self.register_sac(identity);
         id
     }
@@ -246,31 +252,21 @@ impl AssetRegistry {
         self.by_identity.iter()
     }
 
-    /// The next surrogate id that will be assigned. Ids are handed out
-    /// monotonically by [`get_or_assign`], so every asset interned *after* this
-    /// value is captured receives an id `>= watermark`. Capturing it before a
-    /// run and passing it to [`assets_since`] yields exactly the assets that run
-    /// newly discovered — the basis for writing only new assets instead of
-    /// re-emitting the whole registry every reconcile (task 0132).
+    /// Identities interned since the last [`clear_pending`], in intern order —
+    /// what a run must still write to `prices.assets`. Loaded identities are
+    /// never pending.
     ///
-    /// [`get_or_assign`]: AssetRegistry::get_or_assign
-    /// [`assets_since`]: AssetRegistry::assets_since
-    pub fn watermark(&self) -> u32 {
-        self.next_id
+    /// [`clear_pending`]: AssetRegistry::clear_pending
+    pub fn pending_new(&self) -> impl Iterator<Item = (&AssetIdentity, &u32)> {
+        self.pending
+            .iter()
+            .filter_map(|identity| self.by_identity.get_key_value(identity))
     }
 
-    /// Iterate the assets interned on/after the `since` watermark — those newly
-    /// assigned since [`watermark`] was captured. `since == 0` (or any value
-    /// `<=` the lowest live id) yields the whole registry, so this generalises
-    /// [`assets`]. An asset's `sac_address` is a deterministic function of its
-    /// identity ([`sac_address_of`]), fully known the moment the asset is
-    /// interned, so a newly-written row needs no later correction.
-    ///
-    /// [`watermark`]: AssetRegistry::watermark
-    /// [`assets`]: AssetRegistry::assets
-    /// [`sac_address_of`]: AssetRegistry::sac_address_of
-    pub fn assets_since(&self, since: u32) -> impl Iterator<Item = (&AssetIdentity, &u32)> {
-        self.by_identity.iter().filter(move |&(_, &id)| id >= since)
+    /// Forget the pending set. Call only after its write returned `Ok`, so a
+    /// failed write is retried by the next run.
+    pub fn clear_pending(&mut self) {
+        self.pending.clear();
     }
 }
 
@@ -431,48 +427,45 @@ mod tests {
         );
     }
 
-    // The incremental-write watermark (task 0132): `assets_since(watermark)`
-    // yields exactly the assets interned after `watermark` was captured, so the
-    // live processor writes only new assets instead of re-emitting all ~200k.
+    fn pending(reg: &AssetRegistry) -> Vec<AssetIdentity> {
+        reg.pending_new().map(|(i, _)| i.clone()).collect()
+    }
+
+    // The incremental write (task 0132), keyed on identities since 0139: the
+    // pending set is exactly what this process interned and has not yet
+    // persisted, so the live processor writes only new assets.
     #[test]
-    fn assets_since_watermark_isolates_newly_interned_assets() {
-        // Two assets loaded from `prices.assets` at cold start (ids 1, 2).
-        let mut reg = AssetRegistry::from_existing(vec![
+    fn loaded_identities_are_never_pending() {
+        let reg = AssetRegistry::from_existing(vec![
             (1, AssetIdentity::Native),
             (2, AssetIdentity::Contract("CEXISTING".to_string())),
         ]);
-        let watermark = reg.watermark();
-        assert_eq!(watermark, 3, "next id after loading ids 1,2");
         assert_eq!(reg.assets().count(), 2);
-        // No new assets yet → nothing at/after the watermark → an empty write set.
-        assert_eq!(reg.assets_since(watermark).count(), 0);
-
-        // This run interns one brand-new asset.
-        let new_id = reg.get_or_assign(&AssetIdentity::Contract("CNEW".to_string()));
-        assert_eq!(new_id, 3);
-
-        // Only that new asset is at/after the watermark — the sole row written.
-        let since: Vec<_> = reg.assets_since(watermark).collect();
-        assert_eq!(since.len(), 1);
-        assert_eq!(*since[0].1, 3);
-        assert_eq!(since[0].0, &AssetIdentity::Contract("CNEW".to_string()));
-
-        // `since == 0` generalises to the whole registry (the backfill's path).
-        assert_eq!(reg.assets_since(0).count(), 3);
+        assert!(pending(&reg).is_empty(), "cold start loads, writes nothing");
     }
 
     #[test]
-    fn reinterning_a_known_asset_adds_nothing_since_watermark() {
+    fn a_new_identity_is_pending_once_in_intern_order() {
         let mut reg = AssetRegistry::from_existing(vec![(1, AssetIdentity::Native)]);
-        let watermark = reg.watermark();
-        // Re-seeing an already-known asset returns its existing id and interns
-        // nothing new → the write set stays empty (the common steady-state case).
-        let id = reg.get_or_assign(&AssetIdentity::Native);
-        assert_eq!(id, 1);
-        assert_eq!(
-            reg.assets_since(watermark).count(),
-            0,
-            "no new asset → no rows to write"
-        );
+        let b = AssetIdentity::Contract("CB".to_string());
+        let a = AssetIdentity::Contract("CA".to_string());
+        reg.get_or_assign(&b);
+        reg.get_or_assign(&AssetIdentity::Native);
+        reg.get_or_assign(&a);
+        reg.get_or_assign(&b);
+        assert_eq!(pending(&reg), vec![b, a], "intern order, no repeats");
+    }
+
+    #[test]
+    fn pending_survives_until_cleared() {
+        let mut reg = AssetRegistry::from_existing(vec![]);
+        let new = AssetIdentity::Contract("CNEW".to_string());
+        reg.get_or_assign(&new);
+        // A failed write does not clear: the next run offers it again.
+        assert_eq!(pending(&reg), vec![new.clone()]);
+        reg.clear_pending();
+        assert!(pending(&reg).is_empty());
+        reg.get_or_assign(&new);
+        assert!(pending(&reg).is_empty(), "re-interning adds nothing");
     }
 }

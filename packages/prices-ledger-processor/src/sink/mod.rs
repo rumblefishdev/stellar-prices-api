@@ -36,14 +36,13 @@ pub trait CandleSink {
         samples: &[OracleSample],
     ) -> impl Future<Output = Result<(), SinkError>> + Send;
 
-    /// Persist assets interned on/after the `since` watermark — only the ones
-    /// this run newly discovered, not the whole registry (task 0132). `since` is
-    /// [`AssetRegistry::watermark`] captured before the run. A no-op write when
-    /// no new assets were seen.
+    /// Persist the registry's pending identities ([`AssetRegistry::pending_new`])
+    /// — only the ones not yet written, not the whole registry (task 0132). A
+    /// no-op write when nothing is pending. Does not clear the set: the caller
+    /// does, after `Ok`.
     fn write_new_assets(
         &self,
         registry: &AssetRegistry,
-        since: u32,
     ) -> impl Future<Output = Result<(), SinkError>> + Send;
 
     /// Persist AMM pools this run learned from factory events — only the rows
@@ -143,20 +142,11 @@ impl CandleSink for ClickHouseSink {
         .map(|_| ())
     }
 
-    async fn write_new_assets(
-        &self,
-        registry: &AssetRegistry,
-        since: u32,
-    ) -> Result<(), SinkError> {
+    async fn write_new_assets(&self, registry: &AssetRegistry) -> Result<(), SinkError> {
         retry_with_backoff(
             &DEFAULT_BACKOFF_MS,
             |_| true,
-            || async {
-                self.writer
-                    .write_new_assets(registry, since)
-                    .await
-                    .map_err(redact)
-            },
+            || async { self.writer.write_new_assets(registry).await.map_err(redact) },
         )
         .await
         .map(|_| ())
@@ -204,12 +194,8 @@ impl CandleSink for CountingSink {
         Ok(())
     }
 
-    async fn write_new_assets(
-        &self,
-        registry: &AssetRegistry,
-        since: u32,
-    ) -> Result<(), SinkError> {
-        let n = registry.assets_since(since).count() as u64;
+    async fn write_new_assets(&self, registry: &AssetRegistry) -> Result<(), SinkError> {
+        let n = registry.pending_new().count() as u64;
         self.assets
             .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
         Ok(())

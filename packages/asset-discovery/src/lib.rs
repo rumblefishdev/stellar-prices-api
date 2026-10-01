@@ -90,15 +90,15 @@ pub async fn ensure_seed(
     identities: &[AssetIdentity],
 ) -> Result<usize, DiscoveryError> {
     let existing = writer.load_assets().await?;
+    // Everything loaded is already durable, so only seed identities absent
+    // from `prices.assets` become pending.
     let mut registry = AssetRegistry::from_existing(existing);
-    // Everything already durable in `prices.assets` sits below this id.
-    let durable = registry.watermark();
     for identity in identities {
         registry.get_or_assign(identity);
     }
-    // Steady state: the seed is already present, nothing lands at or above the
-    // watermark, and this writes NOTHING — no INSERT, no new part.
-    writer.write_new_assets(&registry, durable).await?;
+    // Steady state: the seed is already present, nothing is pending, and this
+    // writes NOTHING — no INSERT, no new part.
+    writer.write_new_assets(&registry).await?;
     Ok(registry.assets().count())
 }
 

@@ -60,7 +60,7 @@ fn main() {
             if tick.price_forming {
                 price_forming += 1;
             }
-            acc.merge(&tick);
+            acc.merge(tick);
         }
         println!(
             "  seq={seq} meta={variant} tx_processing={txn} trades_extracted={}",

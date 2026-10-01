@@ -222,26 +222,15 @@ impl OhlcvWriter {
         self.write_asset_rows(registry, registry.assets()).await
     }
 
-    /// Write only the assets interned on/after the `since` watermark — the
-    /// caller's high-water mark of assets already durably in `prices.assets` (see
-    /// [`AssetRegistry::watermark`]). A run that discovered no new assets writes
-    /// **nothing**. This is the live processor's asset write path: it replaces the
-    /// full-registry re-emit that caused ~$337/mo of redundant egress (task 0132).
-    /// Correctness is unchanged — a new asset's row (including its deterministic
-    /// `sac_address`) is complete when interned.
-    pub async fn write_new_assets(
-        &self,
-        registry: &AssetRegistry,
-        since: u32,
-    ) -> Result<(), IngestError> {
-        // O(1) steady-state fast path (the common case — no new assets). Ids are
-        // handed out monotonically, so once `since` has caught up to the next id
-        // no asset can have `id >= since`; skip without scanning the whole
-        // ~200k-entry registry to conclude the set is empty.
-        if since >= registry.watermark() {
-            return Ok(());
-        }
-        self.write_asset_rows(registry, registry.assets_since(since))
+    /// Write only the registry's pending identities ([`AssetRegistry::pending_new`])
+    /// — those this process interned and has not yet persisted. A run that
+    /// discovered no new assets writes **nothing**. This is the live processor's
+    /// asset write path: it replaces the full-registry re-emit that caused
+    /// ~$337/mo of redundant egress (task 0132). A new asset's row (including its
+    /// deterministic `sac_address`) is complete when interned. The caller clears
+    /// the pending set only after this returns `Ok`.
+    pub async fn write_new_assets(&self, registry: &AssetRegistry) -> Result<(), IngestError> {
+        self.write_asset_rows(registry, registry.pending_new())
             .await
     }
 
@@ -432,21 +421,22 @@ impl OhlcvWriter {
         oracle_name: &str,
     ) -> Result<UsdRateStats, IngestError> {
         // ---- pre-pass: resolve + guard EVERY identity before writing ----
-        let mut resolved: Vec<(&AssetIdentity, u32)> = Vec::with_capacity(pegs.len());
+        let mut resolved: Vec<(&AssetIdentity, u64)> = Vec::with_capacity(pegs.len());
         let mut problems: Vec<String> = Vec::new();
 
         for identity in pegs {
             let (_, code, issuer, contract) = identity_columns(identity);
-            let ids: Vec<u32> = self
+            // `toUInt64`: reads the id on either schema width (task 0139).
+            let ids: Vec<u64> = self
                 .client
                 .query(
-                    "SELECT asset_id FROM prices.assets FINAL \
+                    "SELECT toUInt64(asset_id) FROM prices.assets FINAL \
                      WHERE asset_code = ? AND issuer_address = ? AND contract_address = ?",
                 )
                 .bind(code)
                 .bind(issuer)
                 .bind(contract)
-                .fetch_all::<u32>()
+                .fetch_all::<u64>()
                 .await?;
             let [asset_id] = ids[..] else {
                 problems.push(format!(
@@ -839,6 +829,8 @@ mod tests {
             minute_start: 1_700_000_000,
             asset_id: 1,
             quote_asset_id: 2,
+            base: AssetIdentity::Native,
+            quote: AssetIdentity::Contract("CQUOTE".to_string()),
             open: Decimal::from(3),
             high: Decimal::from(4),
             low: Decimal::from(2),
