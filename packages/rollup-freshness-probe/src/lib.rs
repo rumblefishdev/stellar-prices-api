@@ -71,6 +71,11 @@ pub mod usd_sanity;
 /// scheduled assertion rather than a ClickHouse `CHECK` constraint.
 pub mod zero_invariants;
 
+/// Asset-id uniqueness (task 0139): identities sharing an id in `assets`, and
+/// recent candles naming an id `assets` does not hold. See
+/// [`asset_id_uniqueness`] for why each refuses an empty read.
+pub mod asset_id_uniqueness;
+
 /// `current_prices` writer liveness (task 0243). Rides in the same invocation
 /// and publishes under the same [`METRIC_NAME`] with `Table = current_prices` —
 /// but it is **not** a rollup tier and must never be added to [`ROLLUP_TIERS`];

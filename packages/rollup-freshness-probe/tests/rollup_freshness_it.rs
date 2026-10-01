@@ -39,6 +39,7 @@ use rollup_freshness_probe::usd_sanity::{
     stranded_metric, stranded_query,
 };
 use rollup_freshness_probe::{ROLLUP_TIERS, TableLag, freshness_query, lag_metrics};
+use std::fmt::Display;
 
 fn ch_url() -> String {
     std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string())
@@ -432,7 +433,7 @@ async fn seed_usdt_identity(c: &Client) {
 async fn insert_candle_into(
     c: &Client,
     table: &str,
-    usdt_id: impl std::fmt::Display,
+    usdt_id: impl Display,
     asset_id: u32,
     ts_sql: &str,
     close: &str,
@@ -454,7 +455,7 @@ async fn insert_candle_into(
 /// Insert into the **stranded** tier (`price_ohlcv_1h`).
 async fn insert_usdt_candle(
     c: &Client,
-    usdt_id: impl std::fmt::Display,
+    usdt_id: impl Display,
     asset_id: u32,
     ts_sql: &str,
     close: &str,
@@ -481,7 +482,7 @@ async fn insert_usdt_candle(
 /// tests that should have failed keep passing.
 async fn insert_usdt_minute_candle(
     c: &Client,
-    usdt_id: impl std::fmt::Display,
+    usdt_id: impl Display,
     asset_id: u32,
     ts_sql: &str,
     close: &str,
@@ -1759,4 +1760,172 @@ async fn view_refreshes_is_denied_to_a_prices_only_user_and_reads_as_unreadable(
         Ok(unreadable_metrics()),
         "a denied read publishes the unreadable flag and no count"
     );
+}
+
+// ---- Task 0139: asset-id uniqueness and orphan candles -----------------------
+//
+// Scratch databases built from the real schema, so the probe's unqualified
+// queries resolve exactly as on prod and nothing in `prices.*` is touched.
+
+const FOO: AssetFixture = AssetFixture::new("FOO", "classic", "GFOO", "");
+const USDC: AssetFixture = AssetFixture::new("USDC", "classic", prices_clickhouse::USDC_ISSUER, "");
+
+async fn read_asset_ids(c: &Client) -> rollup_freshness_probe::asset_id_uniqueness::AssetIdCounts {
+    c.query(&rollup_freshness_probe::asset_id_uniqueness::collisions_query())
+        .fetch_one()
+        .await
+        .expect("the collision query executes and deserializes")
+}
+
+async fn read_orphans(
+    c: &Client,
+) -> rollup_freshness_probe::asset_id_uniqueness::OrphanCandleCounts {
+    c.query(&rollup_freshness_probe::asset_id_uniqueness::orphan_candles_query())
+        .fetch_one()
+        .await
+        .expect("the orphan query executes and deserializes")
+}
+
+/// One `_1m` candle `mins_ago` minutes old. `base` / `quote` are SQL id
+/// expressions: a fixture asset (`{FOO}`) or a bare number no row carries.
+async fn insert_id_candle(c: &Client, base: impl Display, quote: impl Display, mins_ago: u32) {
+    exec(
+        c,
+        &format!(
+            "INSERT INTO price_ohlcv_1m \
+               (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             SELECT now() - INTERVAL {mins_ago} MINUTE, {base}, {quote}, 'sdex', \
+                    1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1"
+        ),
+    )
+    .await;
+}
+
+/// A registry whose ids are derived from the identity reads 0 collisions, and
+/// candles on those ids read 0 orphans.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_derived_registry_reads_no_collision_and_no_orphan() {
+    use rollup_freshness_probe::asset_id_uniqueness::{
+        AssetIdCounts, OrphanCandleCounts, collisions_metric, orphan_candles_metric,
+    };
+
+    let db = "it_probe_0139_clean";
+    let c = scratch_db(db).await;
+    exec(&c, &assets_insert(db, &[FOO, USDC])).await;
+    insert_id_candle(&c, FOO, USDC, 2).await;
+
+    let ids = read_asset_ids(&c).await;
+    assert_eq!(
+        ids,
+        AssetIdCounts {
+            identities: 2,
+            ids: 2
+        }
+    );
+    assert_eq!(collisions_metric(&ids).unwrap().value, 0.0);
+    let orphans = read_orphans(&c).await;
+    assert_eq!(
+        orphans,
+        OrphanCandleCounts {
+            orphans: 0,
+            scanned: 1
+        }
+    );
+    assert_eq!(orphan_candles_metric(&orphans).unwrap().value, 0.0);
+
+    drop_scratch_db(db).await;
+}
+
+/// Two identities on one id read as one collision. The registry here has the
+/// pre-0139 shape (a plain id column, as prod's `assets` holds until the
+/// window), because the derived schema cannot store a shared id at all.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn one_id_shared_by_two_identities_is_one_collision() {
+    use rollup_freshness_probe::asset_id_uniqueness::collisions_metric;
+
+    let db = "it_probe_0139_collision";
+    let c = scratch_db(db).await;
+    exec(&c, "DROP TABLE assets").await;
+    exec(
+        &c,
+        "CREATE TABLE assets ( \
+             asset_id UInt32, asset_code String, issuer_address String, \
+             contract_address String, updated_at DateTime DEFAULT now()) \
+         ENGINE = ReplacingMergeTree(updated_at) \
+         ORDER BY (asset_code, issuer_address, contract_address)",
+    )
+    .await;
+    // 4194's shape on prod: STW and ARBRIDGE on one id, beside a clean one.
+    exec(
+        &c,
+        "INSERT INTO assets (asset_id, asset_code, issuer_address, contract_address) VALUES \
+         (4194, 'STW', 'GA2L', ''), (4194, 'ARBRIDGE', 'GBAC', ''), (3, 'USDC', 'GA5Z', '')",
+    )
+    .await;
+
+    let ids = read_asset_ids(&c).await;
+    assert_eq!((ids.identities, ids.ids), (3, 2));
+    assert_eq!(collisions_metric(&ids).unwrap().value, 1.0);
+
+    drop_scratch_db(db).await;
+}
+
+/// A candle naming an id with no `assets` row is an orphan, on either leg; one
+/// older than the window is not counted.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn a_candle_on_an_unregistered_id_is_an_orphan_on_either_leg() {
+    use rollup_freshness_probe::asset_id_uniqueness::orphan_candles_metric;
+
+    let db = "it_probe_0139_orphan";
+    let c = scratch_db(db).await;
+    exec(&c, &assets_insert(db, &[FOO, USDC])).await;
+    insert_id_candle(&c, FOO, USDC, 2).await;
+    insert_id_candle(&c, 999, USDC, 3 * 60).await; // outside the 2 h window
+
+    insert_id_candle(&c, 999, USDC, 2).await;
+    let orphans = read_orphans(&c).await;
+    assert_eq!((orphans.orphans, orphans.scanned), (1, 2), "base leg");
+    assert_eq!(orphan_candles_metric(&orphans).unwrap().value, 1.0);
+
+    insert_id_candle(&c, FOO, 998, 2).await;
+    let orphans = read_orphans(&c).await;
+    assert_eq!((orphans.orphans, orphans.scanned), (2, 3), "quote leg");
+
+    drop_scratch_db(db).await;
+}
+
+/// An empty registry and an empty window are unreadable: both reads succeed,
+/// and both readings are refused rather than published as a healthy 0.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn an_empty_registry_or_window_is_refused_as_unreadable() {
+    use rollup_freshness_probe::asset_id_uniqueness::{
+        UniquenessRefusal, collisions_metric, orphan_candles_metric,
+    };
+
+    let db = "it_probe_0139_empty";
+    let c = scratch_db(db).await;
+
+    assert_eq!(
+        collisions_metric(&read_asset_ids(&c).await),
+        Err(UniquenessRefusal::EmptyRegistry)
+    );
+    assert_eq!(
+        orphan_candles_metric(&read_orphans(&c).await),
+        Err(UniquenessRefusal::EmptyWindow)
+    );
+
+    // Candles only outside the window: still nothing measured.
+    exec(&c, &assets_insert(db, &[FOO, USDC])).await;
+    insert_id_candle(&c, FOO, USDC, 3 * 60).await;
+    assert_eq!(
+        orphan_candles_metric(&read_orphans(&c).await),
+        Err(UniquenessRefusal::EmptyWindow)
+    );
+
+    drop_scratch_db(db).await;
 }
