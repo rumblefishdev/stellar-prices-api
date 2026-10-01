@@ -301,6 +301,18 @@ mod tests {
         );
     }
 
+    /// The window runbook runs every command through its `rk` helper.
+    #[test]
+    fn the_runbook_runs_every_command() {
+        let runbook = include_str!("../../../../docs/runbooks/0139-asset-id-migration.md");
+        for c in COMMANDS {
+            assert!(
+                runbook.contains(&format!("rk {c}")),
+                "`rk {c}` is not in the runbook"
+            );
+        }
+    }
+
     #[test]
     fn window_commands_take_their_flags() {
         let a = p("recreate-mvs --source prod-text --execute").unwrap();
