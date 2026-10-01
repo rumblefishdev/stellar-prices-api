@@ -16,6 +16,7 @@ use clickhouse::Client;
 
 use crate::asset_id::{id_expr, id_of};
 
+pub mod gap;
 pub mod swap;
 
 /// Old id → new id, one row per (old id, identity).

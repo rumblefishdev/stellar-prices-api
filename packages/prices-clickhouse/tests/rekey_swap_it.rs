@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use clickhouse::Client;
 use prices_clickhouse::asset_id::fixture::fetch_id;
+use prices_clickhouse::rekey::gap::{Postcheck, postcheck_sql};
 use prices_clickhouse::rekey::swap::{FORCE_LOSE, MvSource};
 use prices_clickhouse::rekey::{
     COPIED_TABLES, DDL_TABLE, Fill, LOG_TABLE, MAP_FINAL, Rekey, RekeyError,
@@ -330,6 +331,13 @@ async fn id_columns(c: &Client, db: &str) -> Vec<(String, String, String)> {
     .unwrap()
 }
 
+/// Refresh every MV of `db` once, dependencies first.
+async fn refresh_all(c: &Client, db: &str) {
+    for mv in TIERS.iter().map(|t| t.mv).chain(["mv_current_prices"]) {
+        refresh(c, db, mv).await;
+    }
+}
+
 async fn refresh(c: &Client, db: &str, mv: &str) {
     exec(c, &format!("SYSTEM REFRESH VIEW {db}.{mv}")).await;
     exec(c, &format!("SYSTEM WAIT VIEW {db}.{mv}")).await;
@@ -419,6 +427,14 @@ async fn end_to_end(source: MvSource, name: &str) {
         2
     );
 
+    refresh_all(&c, &db).await;
+    let lines = r.verify().await.unwrap();
+    assert!(
+        lines.iter().any(|l| l == "cross_check_0129: 1"),
+        "{lines:?}"
+    );
+    refused(r.gap_backfill(None).await, "older than 15 minutes");
+
     refused(r.map().await, MAP_FINAL);
     refused(
         r.fill(&Fill::table("price_ohlcv_1m")).await,
@@ -438,6 +454,26 @@ async fn end_to_end(source: MvSource, name: &str) {
     exec(&c, &format!("DROP VIEW {db}.mv_ohlcv_1h_to_4h SYNC")).await;
     exec(&c, &text).await;
     gate_failed(r.type_gate().await, "mv_ohlcv_1h_to_4h.asset_id is UInt32");
+
+    // An id assets lacks fails verify, and the post-check that sees it.
+    exec(&c, &format!("SYSTEM STOP VIEW {db}.mv_current_prices")).await;
+    exec(
+        &c,
+        &format!(
+            "INSERT INTO {db}.current_prices (asset_id, price_usd, price_xlm, change_24h_pct, \
+             change_7d_pct, volume_24h_usd, market_cap_usd, vwap_24h, sources) VALUES \
+             (77, 1, 1, 0, 0, 0, 0, 0, '')"
+        ),
+    )
+    .await;
+    let err = format!("{:?}", r.verify().await);
+    for want in [
+        "current_prices.asset_id: 1 rows on an id assets lacks",
+        "current_price_usd_one_row",
+        "mv_ohlcv_1h_to_4h.asset_id is UInt32",
+    ] {
+        assert!(err.contains(want), "{want} not in {err}");
+    }
     drop_db(&c, &db).await;
 }
 
@@ -636,4 +672,156 @@ async fn a_rehearsal_captures_rewritten_definitions_and_never_touches_the_source
     );
     drop_db(&c, &db).await;
     drop_db(&c, &src).await;
+}
+
+/// Every post-check of `set` on `db`, by name.
+async fn postchecks(c: &Client, db: &str, set: Postcheck, m: Option<u32>) -> Vec<(String, u8)> {
+    let mut out = Vec::new();
+    for (name, sql) in postcheck_sql(set, db) {
+        let mut q = c.query(&sql);
+        if let Some(m) = m {
+            q = q.param("m", m);
+        }
+        out.push((
+            name,
+            q.fetch_one().await.unwrap_or_else(|e| panic!("{e}\n{sql}")),
+        ));
+    }
+    out
+}
+
+/// W13 simulated: a catch-up row 3 h old, written through the writer shape,
+/// its assets row first.
+async fn catch_up(c: &Client, db: &str, base: (&str, &str), quote: (&str, &str), trades: u32) {
+    exec(
+        c,
+        &format!(
+            "INSERT INTO {db}.assets (asset_code, asset_type, issuer_address, contract_address) \
+             VALUES ('{}', 'classic', '{}', '')",
+            base.0, base.1
+        ),
+    )
+    .await;
+    exec(
+        c,
+        &format!(
+            "INSERT INTO {db}.price_ohlcv_1m (timestamp, base_code, base_issuer, base_contract, \
+             quote_code, quote_issuer, quote_contract, source, open, high, low, close, \
+             volume_base, volume_quote, vwap, trade_count, version) \
+             SELECT toStartOfMinute(now() - INTERVAL 3 HOUR), '{}', '{}', '', '{}', '{}', '', \
+             'sdex', 0.2, 0.2, 0.2, 0.2, 5, 1, 0.2, {trades}, 1",
+            base.0, base.1, quote.0, quote.1
+        ),
+    )
+    .await;
+}
+
+/// The writer-stop gap: a catch-up older than the 15m MV's 2 h window never
+/// reaches 15m until gap-backfill rolls every tier, and the copy's exclusions
+/// hold inside the gap.
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn gap_backfill_rolls_a_catch_up_older_than_the_15m_window_into_every_tier() {
+    let (c, db, _) = world("gap").await;
+    refused(
+        Rekey::new(c.clone(), &db, true).gap_backfill(None).await,
+        "swap has not run",
+    );
+    let r = migrate(&c, &db, MvSource::ProdText).await;
+    refresh_all(&c, &db).await;
+
+    catch_up(&c, &db, ("STW", "GSTW"), ("XLM", ""), 3).await;
+    catch_up(&c, &db, ("XLM", ""), ("USDC", USDC_ISSUER), 2).await;
+    refresh(&c, &db, "mv_ohlcv_1m_to_15m").await;
+    refused(r.gap_verify(false, None).await, "no gap-backfill logged");
+    let before = postchecks(&c, &db, Postcheck::Window, None).await;
+    assert_eq!(
+        before[4],
+        ("gap_15m".to_string(), 0),
+        "no gap-backfill, no pass"
+    );
+    let (now, newest, early): (String, String, String) = c
+        .query(&format!(
+            "SELECT formatDateTime(now(), '%Y-%m-%d %H:%i:%S', 'UTC'), \
+             formatDateTime(max(timestamp), '%Y-%m-%d %H:%i:%S', 'UTC'), \
+             formatDateTime(max(timestamp) - INTERVAL 1 MINUTE, '%Y-%m-%d %H:%i:%S', 'UTC') \
+             FROM {db}.price_ohlcv_1m"
+        ))
+        .fetch_one()
+        .await
+        .unwrap();
+    gate_failed(
+        r.gap_verify(false, Some(("2000-01-01 00:00:00", now.as_str())))
+            .await,
+        "price_ohlcv_15m: ",
+    );
+    refused(
+        r.gap_backfill(None).await,
+        &format!("({newest}) is older than 15 minutes"),
+    );
+    refused(
+        r.gap_backfill(Some(&early)).await,
+        "is earlier than the newest",
+    );
+
+    r.gap_backfill(Some(&now)).await.unwrap();
+    let lines = r.gap_verify(false, None).await.unwrap();
+    assert!(lines.iter().any(|l| l == "gap_15m: 1"), "{lines:?}");
+    r.gap_backfill(Some(&now)).await.unwrap();
+    r.gap_verify(false, None).await.unwrap();
+
+    let stw = fetch_id(&c, "STW", "GSTW", "").await;
+    let arb = fetch_id(&c, "ARBRIDGE", "GARB", "").await;
+    for t in std::iter::once("price_ohlcv_1m").chain(TIERS.iter().map(|t| t.target)) {
+        let (stw_trades, arb_rows, orphans): (u64, u64, u64) = c
+            .query(&format!(
+                "SELECT sumIf(trade_count, asset_id = {stw}), \
+                 countIf(asset_id = {arb} OR quote_asset_id = {arb}), \
+                 countIf(asset_id NOT IN (SELECT asset_id FROM {db}.assets) \
+                 OR quote_asset_id NOT IN (SELECT asset_id FROM {db}.assets)) \
+                 FROM {db}.{t} FINAL"
+            ))
+            .fetch_one()
+            .await
+            .unwrap();
+        assert_eq!(stw_trades, 3, "{t}: STW holds the post-resume trades only");
+        assert_eq!(arb_rows, 0, "{t}: no blend in any tier");
+        assert_eq!(orphans, 0, "{t}: the orphan stays out");
+    }
+    for set in [Postcheck::Window, Postcheck::NextDay] {
+        for (name, ok) in postchecks(&c, &db, set, None).await {
+            assert_eq!(ok, 1, "{set:?} {name}");
+        }
+    }
+
+    // 202401 held STW/ARBRIDGE blends: not restored until it is re-ingested.
+    let month = postchecks(&c, &db, Postcheck::Month, Some(202401)).await;
+    let s = |n: &str, v: u8| (n.to_string(), v);
+    assert_eq!(
+        month,
+        vec![
+            s("assets_unique", 1),
+            s("colliding_restored", 0),
+            s("month_1d_equals_1m", 1)
+        ]
+    );
+    exec(
+        &c,
+        &format!(
+            "INSERT INTO {db}.price_ohlcv_1m (timestamp, base_code, base_issuer, base_contract, \
+             quote_code, quote_issuer, quote_contract, source, open, high, low, close, vwap, \
+             trade_count, version) SELECT toDateTime('2024-01-01 00:00:00'), 'STW', 'GSTW', '', \
+             'XLM', '', '', 'sdex', 1, 1, 1, 1, 1, 1, 1"
+        ),
+    )
+    .await;
+    let restored = postchecks(&c, &db, Postcheck::Month, Some(202401)).await;
+    assert_eq!(restored[1], s("colliding_restored", 1));
+    let unlisted = postchecks(&c, &db, Postcheck::Month, Some(202403)).await;
+    assert_eq!(
+        unlisted[1],
+        s("colliding_restored", 1),
+        "a month not listed passes"
+    );
+    drop_db(&c, &db).await;
 }

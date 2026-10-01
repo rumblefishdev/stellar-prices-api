@@ -9,7 +9,9 @@
 //!   `fill|check [--table T] [--partition P] [--source S --target T]`;
 //! - `alter-assets [--mutation-timeout SECS]`; `swap [--check-only]`;
 //!   `recreate-mvs --source prod-text|generator`;
-//!   `rollback [--force-lose-post-swap-rows]`.
+//!   `rollback [--force-lose-post-swap-rows]`;
+//! - `verify`; `gap-backfill [--to 'YYYY-MM-DD HH:MM:SS']`;
+//!   `gap-verify [--schema pre0139 --from T --to T]`.
 //!
 //! `--rewrite-db` (rehearsal in a scratch `--database`) captures the MVs and
 //! views of `prices` rewritten into the scratch database.
@@ -32,7 +34,7 @@ use std::time::Duration;
 use prices_clickhouse::rekey::swap::{FORCE_LOSE, MvSource};
 use prices_clickhouse::rekey::{COPIED_TABLES, Fill, Rekey, RekeyError};
 
-const COMMANDS: [&str; 10] = [
+const COMMANDS: [&str; 13] = [
     "preflight",
     "capture",
     "map",
@@ -43,6 +45,9 @@ const COMMANDS: [&str; 10] = [
     "swap",
     "recreate-mvs",
     "rollback",
+    "verify",
+    "gap-backfill",
+    "gap-verify",
 ];
 use prices_clickhouse::{Config, client, with_readable_errors};
 
@@ -61,6 +66,9 @@ struct Args {
     mv_source: Option<MvSource>,
     force_lose: bool,
     mutation_timeout: u64,
+    gap_from: Option<String>,
+    gap_to: Option<String>,
+    pre0139: bool,
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
@@ -95,6 +103,12 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--mtls-cert" => mtls[1] = Some(value()?),
             "--mtls-key" => mtls[2] = Some(value()?),
             "--mtls-ca" => mtls[3] = Some(value()?),
+            "--from" => a.gap_from = Some(value()?),
+            "--to" => a.gap_to = Some(value()?),
+            "--schema" => match value()?.as_str() {
+                "pre0139" => a.pre0139 = true,
+                v => return Err(format!("--schema {v}: only pre0139")),
+            },
             "--rewrite-db" => a.rewrite_db = true,
             "--check-only" => a.check_only = true,
             FORCE_LOSE => a.force_lose = true,
@@ -120,6 +134,9 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--database {} is not a bare identifier",
             a.database
         ));
+    }
+    if a.gap_from.is_some() && a.gap_to.is_none() {
+        return Err("--from needs --to".into());
     }
     if a.command == "recreate-mvs" && a.mv_source.is_none() {
         return Err("recreate-mvs needs --source prod-text or --source generator".into());
@@ -213,6 +230,12 @@ async fn run(a: &Args) -> Result<Vec<String>, RekeyError> {
                 .await
         }
         "rollback" => r.rollback(a.force_lose).await,
+        "verify" => r.verify().await,
+        "gap-backfill" => r.gap_backfill(a.gap_to.as_deref()).await,
+        "gap-verify" => {
+            let bounds = a.gap_from.as_deref().zip(a.gap_to.as_deref());
+            r.gap_verify(a.pre0139, bounds).await
+        }
         _ => unreachable!("parse admits only COMMANDS"),
     }
 }
@@ -232,7 +255,8 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    if !a.execute && a.command != "preflight" && !a.check_only {
+    let reads_only = ["preflight", "verify", "gap-verify"].contains(&a.command.as_str());
+    if !a.execute && !reads_only && !a.check_only {
         eprintln!("dry run: nothing is written (add --execute)");
     }
     match run(&a).await {
@@ -285,6 +309,8 @@ mod tests {
             "recreate-mvs --source text",
             "map --database x;y",
             "alter-assets --mutation-timeout soon",
+            "gap-verify --schema current",
+            "gap-verify --from 2026-10-01",
             "fill --source a",
             "fill --table assets",
             "fill --table price_ohlcv_1m --source a --target b",

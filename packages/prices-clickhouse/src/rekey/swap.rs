@@ -37,13 +37,20 @@ pub const FORCE_LOSE: &str = "--force-lose-post-swap-rows";
 pub const OLD_ID_SPACE: &str = "(endsWith(table, 'pre0139') \
      OR startsWith(table, 'rollout_0286_bak_') OR match(table, '^price_ohlcv_.+_bak$'))";
 
-/// Id columns of `db` outside [`OLD_ID_SPACE`] that are not UInt64.
+/// `system.columns` rows of `db`: id columns outside [`OLD_ID_SPACE`] that
+/// are not UInt64.
+pub fn uint32_ids_where(db: &str) -> String {
+    format!(
+        "database = '{db}' AND name IN ('asset_id', 'quote_asset_id') \
+         AND type NOT IN ('UInt64', 'Nullable(UInt64)') AND NOT {OLD_ID_SPACE}"
+    )
+}
+
+/// `(table, name, type)` of every id column [`uint32_ids_where`] finds.
 pub fn uint32_ids_sql(db: &str) -> String {
     format!(
-        "SELECT table, name, type FROM system.columns WHERE database = '{db}' \
-         AND name IN ('asset_id', 'quote_asset_id') \
-         AND type NOT IN ('UInt64', 'Nullable(UInt64)') \
-         AND NOT {OLD_ID_SPACE} ORDER BY table, name"
+        "SELECT table, name, type FROM system.columns WHERE {} ORDER BY table, name",
+        uint32_ids_where(db)
     )
 }
 
@@ -203,7 +210,7 @@ impl Rekey {
             .await?)
     }
 
-    async fn id_type(&self, table: &str) -> Result<Option<String>> {
+    pub(crate) async fn id_type(&self, table: &str) -> Result<Option<String>> {
         Ok(self
             .id_types(table)
             .await?
