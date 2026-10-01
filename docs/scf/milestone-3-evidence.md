@@ -239,7 +239,7 @@ indexer for two minutes, its alarm fired and cleared, and nothing was lost.
 Lambda cold starts within 1–2 s throttled Parameter Store and closed the
 onboarding portal in 243 execution environments; `/v1` kept answering. The
 AC-scenario run (09:33–09:44 UTC) had 41 cold starts and no closure, so its
-49.0 ms is unaffected. Fixed on 2026-09-25 (§7). Counted on 2026-09-28 with
+49.0 ms is unaffected. Fixed on 2026-09-25 (task 0311). Counted on 2026-09-28 with
 CloudWatch Logs Insights on `/aws/lambda/prices-production-api-handler`:
 
 ```
@@ -384,7 +384,7 @@ recomputation (task 0286) for the whole window.
 
 - three oracle updates lost to out-of-memory during the recomputation (§7);
 - two partial portal closures under the test bursts, cause fixed on 2026-09-25
-  at 14:47 (§7);
+  at 14:47 (task 0311);
 - asset-discovery's two liveness alarms absent from 2026-09-25 14:49 to
   09-29 09:49 after a deploy, then restored;
 - `zero-invariant-1` in ALARM at the start of the window, OK from 09-24 09:21;
@@ -418,15 +418,13 @@ export.
 
 ## 7. Known issues
 
-Each is either fixed and verified, or open with the task that owns it.
+Open issues, each with the task that owns it.
 
-| Issue                                                                                                                                                     | State                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Task             |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------- |
-| Candles were built from every fill, dust included, in the wrong intra-ledger order; live Aquarius ingestion dropped ~50 % of its trades                   | Live ingestion fixed: no lost trades on 2026-09-19/20, price-forming fills since 2026-09-22. History recomputation running since 2026-09-23                                                                                                                                                                                                                                                                                                                                    | 0282, 0286       |
-| `pool_registry` had not learned a pool since 2026-07-06; 42 pools missing                                                                                 | Seeded 2026-09-18; live persistence deployed 2026-09-22; alarm live; the first new pool was persisted on 2026-09-30 16:52 CEST (Aquarius `CD2CU3DR…`)                                                                                                                                                                                                                                                                                                                          | 0291             |
-| The portal closed itself in an execution environment when Parameter Store throttled its cold start (account default 40 TPS)                               | **Fixed on 2026-09-25 at 14:47 CEST.** The cold start reads only the mTLS bundle; the portal's sources load on the first portal request, and a failed load affects only that request (2 s retry cooldown), watched by the `portal-load-failed` alarm. Before the fix it happened on 2026-09-18 (the load test's 500 and 1000 req/s ramps, 243 environments), 2026-09-24 and 2026-09-25; `/v1` was unaffected. Since the fix: no closures and no failed loads (read 2026-09-28) | 0249, 0194, 0311 |
-| The oracle worker runs out of memory while the recomputation re-emits the asset registry (it reads without `FINAL`)                                       | One 5-minute oracle update lost about every 1.5 hours until the backfill writes only changes                                                                                                                                                                                                                                                                                                                                                                                   | 0226, 0140       |
-| Some asset ids each carry two or three asset identities in `prices.assets`, so a join on `asset_id` can attribute one long-tail asset's prices to another | Open: 3,312 such ids on 2026-09-17, growing with the registry. The measured effect is in ClickHouse views the block explorer reads: 5.5 % of the pools it shows a TVL for, all long-tail (2026-08-06)                                                                                                                                                                                                                                                                          | 0139             |
+| Issue                                                                                                                                                                          | State                                                                                                                                                                                                 | Task       |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| Candles before 2026-09-22 were built from every fill, dust included, in the wrong intra-ledger order, and live Aquarius ingestion dropped ~50 % of its trades until 2026-09-17 | Live ingestion is fixed; the history is being recomputed since 2026-09-23 and finishes after delivery (§8)                                                                                            | 0282, 0286 |
+| The oracle worker runs out of memory while the recomputation re-emits the asset registry (it reads without `FINAL`)                                                            | One 5-minute oracle update lost about every 1.5 hours until the backfill writes only changes                                                                                                          | 0226, 0140 |
+| Some asset ids each carry two or three asset identities in `prices.assets`, so a join on `asset_id` can attribute one long-tail asset's prices to another                      | Open: 3,312 such ids on 2026-09-17, growing with the registry. The measured effect is in ClickHouse views the block explorer reads: 5.5 % of the pools it shows a TVL for, all long-tail (2026-08-06) | 0139       |
 
 ## 8. Limitations
 
