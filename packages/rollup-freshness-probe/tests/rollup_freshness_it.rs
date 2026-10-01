@@ -29,6 +29,7 @@
 //! cluster.**
 
 use clickhouse::Client;
+use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert};
 use rollup_freshness_probe::mv_drift::{
     DriftMetric, MV_DRIFT_CRITICAL_METRIC, MV_DRIFT_METRIC, MV_DRIFT_UNREADABLE_METRIC, describe,
     drift_metrics, visible_objects_query,
@@ -402,20 +403,20 @@ async fn restricted_user_can_read_disk_headroom_but_not_system_disks() {
 // Task 0204, gap 4 — USD-value correctness on the USDT quote leg.
 // ---------------------------------------------------------------------------
 
-/// Seed the canonical USDT identity into `prices.assets` and return its
-/// `asset_id`. The probe resolves the leg by code + issuer rather than a
-/// hard-coded id (task 0139), so the IT has to make that resolution succeed.
-async fn seed_usdt_identity(c: &Client, asset_id: u32) {
-    exec(
-        c,
-        &format!(
-            "INSERT INTO prices.assets \
-               (asset_id, asset_code, asset_type, issuer_address, contract_address) \
-             SELECT {asset_id}, 'USDT', 'credit_alphanum4', '{issuer}', ''",
-            issuer = prices_clickhouse::USDT_ISSUER,
-        ),
-    )
-    .await;
+/// The canonical USDT identity. Displays as its derived id, so a candle quoted
+/// `{USDT}` sits on the leg the probe resolves.
+const USDT: AssetFixture = AssetFixture::new(
+    "USDT",
+    "credit_alphanum4",
+    prices_clickhouse::USDT_ISSUER,
+    "",
+);
+
+/// Seed [`USDT`] into `prices.assets`. The probe resolves the leg by code +
+/// issuer rather than a hard-coded id (task 0139), so the IT has to make that
+/// resolution succeed.
+async fn seed_usdt_identity(c: &Client) {
+    exec(c, &assets_insert("prices", &[USDT])).await;
 }
 
 /// Insert one USDT-quoted candle with an explicit `close` / `close_usd` into a
@@ -431,7 +432,7 @@ async fn seed_usdt_identity(c: &Client, asset_id: u32) {
 async fn insert_candle_into(
     c: &Client,
     table: &str,
-    usdt_id: u32,
+    usdt_id: impl std::fmt::Display,
     asset_id: u32,
     ts_sql: &str,
     close: &str,
@@ -453,7 +454,7 @@ async fn insert_candle_into(
 /// Insert into the **stranded** tier (`price_ohlcv_1h`).
 async fn insert_usdt_candle(
     c: &Client,
-    usdt_id: u32,
+    usdt_id: impl std::fmt::Display,
     asset_id: u32,
     ts_sql: &str,
     close: &str,
@@ -480,7 +481,7 @@ async fn insert_usdt_candle(
 /// tests that should have failed keep passing.
 async fn insert_usdt_minute_candle(
     c: &Client,
-    usdt_id: u32,
+    usdt_id: impl std::fmt::Display,
     asset_id: u32,
     ts_sql: &str,
     close: &str,
@@ -531,12 +532,12 @@ async fn read_peg(c: &Client) -> PegCounts {
 async fn usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero() {
     let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // A correctly-priced USDT-quoted candle on each tier: USDT at its measured
     // ~0.15, so close_usd is nowhere near close.
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "15").await;
-    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "15").await;
+    insert_usdt_candle(&c, USDT, 5, "now() - INTERVAL 3 DAY", "100", "15").await;
+    insert_usdt_minute_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "15").await;
 
     let stranded = read_stranded(&c).await;
     assert_eq!(stranded.resolved_legs, 1, "the USDT identity must resolve");
@@ -557,15 +558,15 @@ async fn usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero() {
 async fn usd_sanity_counts_both_induced_defects() {
     let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // Defect 1 — the peg re-applied, on the tier enrichment WRITES: close_usd
     // == close (task 0172 / 0212).
-    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    insert_usdt_minute_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
     // Defect 2 — stranded past the grace period, on the tier the consumer
     // reads: zero on a representable close (what task 0182's own reset produced
     // on 2026-08-19).
-    insert_usdt_candle(&c, 111, 6, "now() - INTERVAL 3 DAY", "100", "0").await;
+    insert_usdt_candle(&c, USDT, 6, "now() - INTERVAL 3 DAY", "100", "0").await;
 
     assert_eq!(
         read_peg(&c).await.peg_applied,
@@ -588,15 +589,15 @@ async fn usd_sanity_counts_both_induced_defects() {
 async fn a_freshly_written_zero_is_not_yet_stranded() {
     let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // Inside the 48 h grace — awaiting enrichment, not damaged.
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 1 HOUR", "100", "0").await;
+    insert_usdt_candle(&c, USDT, 5, "now() - INTERVAL 1 HOUR", "100", "0").await;
     assert_eq!(read_stranded(&c).await.stranded, 0, "still within grace");
 
     // The same row, aged past the grace, is the defect.
     exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1h").await;
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
+    insert_usdt_candle(&c, USDT, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
     assert_eq!(read_stranded(&c).await.stranded, 1, "past grace = stranded");
 }
 
@@ -610,11 +611,11 @@ async fn a_freshly_written_zero_is_not_yet_stranded() {
 async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
     let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     insert_usdt_candle(
         &c,
-        111,
+        USDT,
         5,
         "now() - INTERVAL 3 DAY",
         "0.00000000000001",
@@ -634,7 +635,7 @@ async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
 async fn an_exotic_quoted_zero_is_ignored_because_it_is_by_design() {
     let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // quote_asset_id 999 is not the USDT leg — an unpriceable exotic pair.
     insert_usdt_candle(&c, 999, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
@@ -653,21 +654,23 @@ async fn an_exotic_quoted_zero_is_ignored_because_it_is_by_design() {
 async fn a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it() {
     let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
-    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    insert_usdt_minute_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
     assert_eq!(read_peg(&c).await.peg_applied, 1, "the defect is present");
 
     // The repair: same primary key, corrected value, version + 1.
     exec(
         &c,
-        "INSERT INTO prices.price_ohlcv_1m \
-           (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
-            volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
-         SELECT timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
-                volume_base, volume_quote, volume_quote, 15, vwap, trade_count, version + 1 \
-         FROM prices.price_ohlcv_1m FINAL \
-         WHERE quote_asset_id = 111 AND close_usd = close",
+        &format!(
+            "INSERT INTO prices.price_ohlcv_1m \
+               (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             SELECT timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                    volume_base, volume_quote, volume_quote, 15, vwap, trade_count, version + 1 \
+             FROM prices.price_ohlcv_1m FINAL \
+             WHERE quote_asset_id = {USDT} AND close_usd = close"
+        ),
     )
     .await;
 
@@ -688,7 +691,7 @@ async fn an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused() {
     let c = client().await;
     reset_sanity_tables(&c).await;
     // Deliberately no USDT identity seeded.
-    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    insert_usdt_minute_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
 
     let counts = read_peg(&c).await;
     assert_eq!(counts.resolved_legs, 0);
@@ -722,13 +725,13 @@ async fn an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused() {
 async fn a_peg_row_only_in_1m_is_counted_although_every_coarse_tier_reads_clean() {
     let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // The tier enrichment writes: the peg re-applied.
-    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    insert_usdt_minute_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
     // The repaired coarse tier: the SAME candle, correctly valued at ~0.15 —
     // which is precisely what 0182's repair left behind.
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "15").await;
+    insert_usdt_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "15").await;
 
     assert_eq!(
         read_peg(&c).await.peg_applied,
@@ -759,10 +762,10 @@ async fn a_peg_row_only_in_1m_is_counted_although_every_coarse_tier_reads_clean(
 async fn each_direction_only_scans_its_own_tier() {
     let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // Rows in `_1m` only.
-    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    insert_usdt_minute_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
     assert_eq!(read_peg(&c).await.scanned, 1);
     assert_eq!(
         read_stranded(&c).await.scanned,
@@ -778,8 +781,8 @@ async fn each_direction_only_scans_its_own_tier() {
     // to `price_ohlcv_1h` — testing the window instead of the tier. Inside the
     // peg window, only the tier can explain a zero.
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "0").await;
+    seed_usdt_identity(&c).await;
+    insert_usdt_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "0").await;
     assert_eq!(read_stranded(&c).await.scanned, 1);
     assert_eq!(
         read_peg(&c).await.scanned,
@@ -799,14 +802,14 @@ async fn each_direction_only_scans_its_own_tier() {
 async fn the_peg_window_excludes_rows_a_cleanup_run_could_delete() {
     let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // Inside the 48 h peg window — counted.
-    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    insert_usdt_minute_candle(&c, USDT, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
     // Older than the peg window but still well inside `_1m`'s 7-day retention,
     // i.e. exactly the band a widened window would have picked up and a cleanup
     // run could then remove underneath it.
-    insert_usdt_minute_candle(&c, 111, 6, "now() - INTERVAL 5 DAY", "100", "100").await;
+    insert_usdt_minute_candle(&c, USDT, 6, "now() - INTERVAL 5 DAY", "100", "100").await;
 
     let peg = read_peg(&c).await;
     assert_eq!(peg.scanned, 1, "only the in-window row is examined");
@@ -825,10 +828,10 @@ async fn the_peg_window_excludes_rows_a_cleanup_run_could_delete() {
 async fn an_empty_peg_scan_does_not_suppress_the_stranded_metric() {
     let c = client().await;
     reset_sanity_tables(&c).await;
-    seed_usdt_identity(&c, 111).await;
+    seed_usdt_identity(&c).await;
 
     // `_1m` is empty; `_1h` carries a real stranded candle.
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
+    insert_usdt_candle(&c, USDT, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
 
     let peg = read_peg(&c).await;
     assert_eq!(

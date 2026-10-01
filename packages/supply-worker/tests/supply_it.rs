@@ -8,6 +8,7 @@
 //! `supply_net_it.rs`, so that `--ignored` here never reaches Horizon.
 
 use clickhouse::Client;
+use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert, fetch_ids};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
@@ -32,26 +33,40 @@ async fn load_and_write_supply_roundtrip() {
 
     // Two credit assets (load), native XLM (no issuer → excluded), a Soroban
     // contract (excluded). EURC already has a supply row; USDC never did.
+    let usdc = AssetFixture::new("USDC", "classic", prices_clickhouse::USDC_ISSUER, "");
+    let eurc = AssetFixture::new(
+        "EURC",
+        "classic",
+        "GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP2",
+        "",
+    );
     client
-        .query(
-            "INSERT INTO prices.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (1, 'USDC', 'classic', 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN', ''), \
-             (2, 'XLM', 'classic', '', ''), \
-             (3, '', 'soroban', '', 'CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34M7JQNS7VJK4D5DA73G5'), \
-             (4, 'EURC', 'classic', 'GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP2', '')",
-        )
+        .query(&assets_insert(
+            "prices",
+            &[
+                usdc,
+                AssetFixture::new("XLM", "classic", "", ""),
+                AssetFixture::new(
+                    "",
+                    "soroban",
+                    "",
+                    "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34M7JQNS7VJK4D5DA73G5",
+                ),
+                eurc,
+            ],
+        ))
         .execute()
         .await
         .expect("seed assets");
+    let [usdc_id, eurc_id] = fetch_ids(&client, &[usdc, eurc]).await;
 
     // EURC has a (stale) supply row; USDC has none. Never-fetched must sort
     // first under the stalest-first checkpoint ordering (task 0084).
     client
-        .query(
+        .query(&format!(
             "INSERT INTO prices.asset_supply (asset_id, token_supply, fetched_at) VALUES \
-             (4, 100.0, toDateTime('2020-01-01 00:00:00'))",
-        )
+             ({eurc_id}, 100.0, toDateTime('2020-01-01 00:00:00'))"
+        ))
         .execute()
         .await
         .expect("seed stale EURC supply");
@@ -70,8 +85,9 @@ async fn load_and_write_supply_roundtrip() {
     );
     assert_eq!(assets[1].asset_code, "EURC", "already-fetched asset trails");
     // Task 0139: the id is read back as u64 (`toUInt64` in the SELECT) and is
-    // exactly the stored one, so writing it back keys the same asset.
-    assert_eq!((assets[0].asset_id, assets[1].asset_id), (1, 4));
+    // exactly the one the database derived, so writing it back keys the same
+    // asset.
+    assert_eq!((assets[0].asset_id, assets[1].asset_id), (usdc_id, eurc_id));
 
     // The `limit` caps the slice — only the single stalest is returned.
     let capped = supply_worker::load_stalest_credit_assets(&client, 1)
@@ -80,13 +96,17 @@ async fn load_and_write_supply_roundtrip() {
     assert_eq!(capped.len(), 1, "limit bounds the per-run slice");
     assert_eq!(capped[0].asset_code, "USDC");
 
-    let usdc_id = assets[0].asset_id;
-    supply_worker::write_supplies(&client, &[(usdc_id, Decimal::from_str("999.5").unwrap())])
-        .await
-        .expect("write supply");
+    supply_worker::write_supplies(
+        &client,
+        &[(assets[0].asset_id, Decimal::from_str("999.5").unwrap())],
+    )
+    .await
+    .expect("write supply");
 
     let supply: f64 = client
-        .query("SELECT toFloat64(token_supply) FROM prices.asset_supply FINAL WHERE asset_id = 1")
+        .query(&format!(
+            "SELECT toFloat64(token_supply) FROM prices.asset_supply FINAL WHERE asset_id = {usdc_id}"
+        ))
         .fetch_one()
         .await
         .expect("read supply");

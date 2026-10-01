@@ -8,7 +8,15 @@
 //! client rather than by rewriting the writer's SQL.
 
 use clickhouse::Client;
+use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert};
+use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 use prices_ingest_core::{AssetIdentity, OhlcvWriter};
+
+// The peg assets. Each displays as its id, derived from its identity
+// (`asset_id::fixture`), so an oracle row written `({USDC}, …)` agrees with
+// the `assets` row.
+const USDC: AssetFixture = AssetFixture::new("USDC", "classic", USDC_ISSUER, "");
+const USDT: AssetFixture = AssetFixture::new("USDT", "classic", USDT_ISSUER, "");
 
 fn ch_url() -> String {
     std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string())
@@ -17,7 +25,7 @@ fn ch_url() -> String {
 fn usdc() -> AssetIdentity {
     AssetIdentity::Credit {
         code: "USDC".to_string(),
-        issuer: prices_clickhouse::USDC_ISSUER.to_string(),
+        issuer: USDC_ISSUER.to_string(),
     }
 }
 
@@ -45,13 +53,22 @@ async fn fresh_prices_schema() -> Client {
     admin
 }
 
-async fn seed_usdc(client: &Client, asset_id: u32) {
+async fn seed_usdc(client: &Client) {
+    client
+        .query(&assets_insert("prices", &[USDC]))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// ARBRIDGE on USDC's id: the shared-id shape the 0139 guard refuses. Task 7
+/// rewrites the two tests that use it, as the schema makes it impossible.
+async fn squat_on_usdc_id(client: &Client) {
     client
         .query(&format!(
             "INSERT INTO prices.assets \
              (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) \
-             VALUES ({asset_id},'USDC','classic','{}','','')",
-            prices_clickhouse::USDC_ISSUER
+             VALUES ({USDC},'ARBRIDGE','classic','GARB','','')"
         ))
         .execute()
         .await
@@ -74,16 +91,16 @@ async fn rate_rows(client: &Client) -> Vec<(u32, f64, String, u8)> {
 async fn copies_oracle_readings_and_re_runs_without_duplicating() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;
-    seed_usdc(&client, 3).await;
+    seed_usdc(&client).await;
     let writer = OhlcvWriter::new(client.clone());
 
     // Two readings, deliberately NOT $1 — the whole point is a depeg-aware rate.
     client
-        .query(
+        .query(&format!(
             "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1750000000, 3, 'reflector', 0.9993, ''), \
-                    (1750003600, 3, 'reflector', 1.0004, '')",
-        )
+             VALUES (1750000000, {USDC}, 'reflector', 0.9993, ''), \
+                    (1750003600, {USDC}, 'reflector', 1.0004, '')"
+        ))
         .execute()
         .await
         .unwrap();
@@ -116,10 +133,10 @@ async fn copies_oracle_readings_and_re_runs_without_duplicating() {
 
     // A new reading arrives; only it is copied.
     client
-        .query(
+        .query(&format!(
             "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1750007200, 3, 'reflector', 0.9987, '')",
-        )
+             VALUES (1750007200, {USDC}, 'reflector', 0.9987, '')"
+        ))
         .execute()
         .await
         .unwrap();
@@ -142,22 +159,14 @@ async fn copies_oracle_readings_and_re_runs_without_duplicating() {
 async fn refuses_to_write_when_the_peg_asset_id_is_shared() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;
-    seed_usdc(&client, 3).await;
+    seed_usdc(&client).await;
     // A second, unrelated identity squatting on the same surrogate id.
+    squat_on_usdc_id(&client).await;
     client
-        .query(
-            "INSERT INTO prices.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) \
-             VALUES (3,'ARBRIDGE','classic','GARB','','')",
-        )
-        .execute()
-        .await
-        .unwrap();
-    client
-        .query(
+        .query(&format!(
             "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1750000000, 3, 'reflector', 0.9993, '')",
-        )
+             VALUES (1750000000, {USDC}, 'reflector', 0.9993, '')"
+        ))
         .execute()
         .await
         .unwrap();
@@ -181,7 +190,7 @@ async fn refuses_to_write_when_the_peg_asset_id_is_shared() {
 fn usdt() -> AssetIdentity {
     AssetIdentity::Credit {
         code: "USDT".to_string(),
-        issuer: prices_clickhouse::USDT_ISSUER.to_string(),
+        issuer: USDT_ISSUER.to_string(),
     }
 }
 
@@ -196,14 +205,14 @@ fn usdt() -> AssetIdentity {
 async fn snapshots_a_backdated_reading_that_lands_below_the_frontier() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;
-    seed_usdc(&client, 3).await;
+    seed_usdc(&client).await;
     let writer = OhlcvWriter::new(client.clone());
 
     client
-        .query(
+        .query(&format!(
             "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1750003600, 3, 'reflector', 1.0004, '')",
-        )
+             VALUES (1750003600, {USDC}, 'reflector', 1.0004, '')"
+        ))
         .execute()
         .await
         .unwrap();
@@ -214,10 +223,10 @@ async fn snapshots_a_backdated_reading_that_lands_below_the_frontier() {
 
     // A backfill now writes an OLDER reading — below the frontier just set.
     client
-        .query(
+        .query(&format!(
             "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1740000000, 3, 'reflector', 0.9981, '')",
-        )
+             VALUES (1740000000, {USDC}, 'reflector', 0.9981, '')"
+        ))
         .execute()
         .await
         .unwrap();
@@ -245,34 +254,21 @@ async fn snapshots_a_backdated_reading_that_lands_below_the_frontier() {
 async fn a_collision_on_one_peg_writes_nothing_for_any_peg() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;
-    seed_usdc(&client, 3).await;
+    seed_usdc(&client).await;
     // USDT is clean...
     client
-        .query(&format!(
-            "INSERT INTO prices.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) \
-             VALUES (111,'USDT','classic','{}','','')",
-            prices_clickhouse::USDT_ISSUER
-        ))
+        .query(&assets_insert("prices", &[USDT]))
         .execute()
         .await
         .unwrap();
     // ...but USDC's surrogate id is shared, and USDC is processed FIRST.
+    squat_on_usdc_id(&client).await;
     client
-        .query(
-            "INSERT INTO prices.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) \
-             VALUES (3,'ARBRIDGE','classic','GARB','','')",
-        )
-        .execute()
-        .await
-        .unwrap();
-    client
-        .query(
+        .query(&format!(
             "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1750000000, 3, 'reflector', 0.9993, ''), \
-                    (1750000000, 111, 'reflector', 0.9997, '')",
-        )
+             VALUES (1750000000, {USDC}, 'reflector', 0.9993, ''), \
+                    (1750000000, {USDT}, 'reflector', 0.9997, '')"
+        ))
         .execute()
         .await
         .unwrap();
@@ -316,16 +312,16 @@ async fn a_collision_on_one_peg_writes_nothing_for_any_peg() {
 async fn does_not_snapshot_the_0086_junk_1970_timestamps() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;
-    seed_usdc(&client, 3).await;
+    seed_usdc(&client).await;
     let writer = OhlcvWriter::new(client.clone());
 
     // One good reading and one 0086-shaped row: correct price, epoch/1000.
     client
-        .query(
+        .query(&format!(
             "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1750000000, 3, 'reflector', 0.9993, ''), \
-                    (   1750000, 3, 'reflector', 0.9991, '')",
-        )
+             VALUES (1750000000, {USDC}, 'reflector', 0.9993, ''), \
+                    (   1750000, {USDC}, 'reflector', 0.9991, '')"
+        ))
         .execute()
         .await
         .unwrap();

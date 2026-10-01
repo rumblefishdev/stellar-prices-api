@@ -13,7 +13,39 @@ use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPa
 use enrichment_worker::repair::{
     CoarseRepairConfig, CoarseRepairDriver, CoarseSweepConfig, run_coarse_sweep,
 };
+use prices_clickhouse::asset_id::fixture::{AssetFixture, assets_insert, fetch_ids};
 use prices_clickhouse::{USDC_ISSUER, USDC_ORACLE_EPOCH_S, USDT_ISSUER};
+use std::fmt::Display;
+
+// The fixture assets. Each displays as its id, derived from its identity
+// (`asset_id::fixture`), so a candle written `({FOO}, {USDC}, …)` always agrees
+// with the `assets` row a test seeds for it.
+const XLM: AssetFixture = AssetFixture::new("XLM", "classic", "", "");
+const USDC: AssetFixture = AssetFixture::new("USDC", "classic", USDC_ISSUER, "");
+const USDT: AssetFixture = AssetFixture::new("USDT", "classic", USDT_ISSUER, "");
+const FOO: AssetFixture = AssetFixture::new("FOO", "classic", "GFOO", "");
+const EXO: AssetFixture = AssetFixture::new("EXO", "classic", "GEXO", "");
+
+/// The fixture ids as numbers, for the Rust values that carry one
+/// (`UsdResetSpec`, error variants). Read back from the server.
+struct Ids {
+    xlm: u64,
+    usdc: u64,
+    usdt: u64,
+    foo: u64,
+}
+
+impl Ids {
+    async fn fetch(client: &Client) -> Self {
+        let [xlm, usdc, usdt, foo_id] = fetch_ids(client, &[XLM, USDC, USDT, FOO]).await;
+        Self {
+            xlm,
+            usdc,
+            usdt,
+            foo: foo_id,
+        }
+    }
+}
 
 fn ch_url() -> String {
     std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string())
@@ -43,14 +75,18 @@ async fn setup_scratch(db: &str) -> Client {
     client
 }
 
-async fn close_usd(client: &Client, db: &str, asset: u32, quote: u32, ts: u32) -> f64 {
+async fn close_usd(
+    client: &Client,
+    db: &str,
+    asset: impl Display,
+    quote: impl Display,
+    ts: u32,
+) -> f64 {
     client
         .query(&format!(
             "SELECT toFloat64(close_usd) FROM {db}.price_ohlcv_1m FINAL \
-             WHERE asset_id = ? AND quote_asset_id = ? AND timestamp = ?"
+             WHERE asset_id = {asset} AND quote_asset_id = {quote} AND timestamp = ?"
         ))
-        .bind(asset)
-        .bind(quote)
         .bind(ts)
         .fetch_one::<f64>()
         .await
@@ -64,7 +100,7 @@ async fn coarse_1h_f64(client: &Client, db: &str, col_expr: &str, ts: u32) -> f6
     client
         .query(&format!(
             "SELECT toFloat64({col_expr}) FROM {db}.price_ohlcv_1h FINAL \
-             WHERE asset_id = 10 AND quote_asset_id = 2 AND timestamp = ?"
+             WHERE asset_id = {FOO} AND quote_asset_id = {USDC} AND timestamp = ?"
         ))
         .bind(ts)
         .fetch_one::<f64>()
@@ -78,7 +114,7 @@ async fn coarse_1h_u64(client: &Client, db: &str, col_expr: &str, ts: u32) -> u6
     client
         .query(&format!(
             "SELECT toUInt64({col_expr}) FROM {db}.price_ohlcv_1h FINAL \
-             WHERE asset_id = 10 AND quote_asset_id = 2 AND timestamp = ?"
+             WHERE asset_id = {FOO} AND quote_asset_id = {USDC} AND timestamp = ?"
         ))
         .bind(ts)
         .fetch_one::<u64>()
@@ -88,14 +124,18 @@ async fn coarse_1h_u64(client: &Client, db: &str, col_expr: &str, ts: u32) -> u6
 
 /// `close_usd` of an arbitrary `price_ohlcv_1h` bucket (asset/quote/ts), for the
 /// coarse-repair driver test which spans multiple pairs and months.
-async fn coarse_1h_close_usd_of(client: &Client, db: &str, asset: u32, quote: u32, ts: u32) -> f64 {
+async fn coarse_1h_close_usd_of(
+    client: &Client,
+    db: &str,
+    asset: impl Display,
+    quote: impl Display,
+    ts: u32,
+) -> f64 {
     client
         .query(&format!(
             "SELECT toFloat64(close_usd) FROM {db}.price_ohlcv_1h FINAL \
-             WHERE asset_id = ? AND quote_asset_id = ? AND timestamp = ?"
+             WHERE asset_id = {asset} AND quote_asset_id = {quote} AND timestamp = ?"
         ))
-        .bind(asset)
-        .bind(quote)
         .bind(ts)
         .fetch_one::<f64>()
         .await
@@ -122,21 +162,22 @@ fn cfg(db: &str) -> ChEnrichConfig {
     }
 }
 
-const ASSETS: &str = "INSERT INTO {db}.assets \
-     (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-     (1,'XLM','classic','',''), (2,'USDC','classic','{usdc}',''), \
-     (10,'FOO','classic','GFOO',''), (20,'EXO','classic','GEXO','')";
+const ASSETS: [AssetFixture; 4] = [XLM, USDC, FOO, EXO];
 
 // (asset, quote): recent FOO/USDC (oracle-covered), deep FOO/USDC (peg),
 // deep XLM/USDC pivot source, deep FOO/XLM (pivot), deep FOO/EXO (no reference).
-const CANDLES: &str = "INSERT INTO {db}.price_ohlcv_1m \
+fn candles(db: &str) -> String {
+    format!(
+        "INSERT INTO {db}.price_ohlcv_1m \
      (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
       volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-     (1700000000,10, 2,'sdex',    5,5,5,5,             1,  5, 0,0, 5,       1,1), \
-     (1600000000,10, 2,'sdex',    4,4,4,4,             1,  4, 0,0, 4,       1,1), \
-     (1600000000, 1, 2,'sdex',    0.30,0.30,0.30,0.30, 1000,300,0,0,0.30,  1,1), \
-     (1600000000,10, 1,'phoenix', 13.3333,13.3333,13.3333,13.3333, 3,40,0,0,13.3333,1,1), \
-     (1600000000,10,20,'sdex',    9,9,9,9,             1,  9, 0,0, 9,       1,1)";
+     (1700000000,{FOO}, {USDC}, 'sdex',    5,5,5,5,             1,  5, 0,0, 5,       1,1), \
+     (1600000000,{FOO}, {USDC}, 'sdex',    4,4,4,4,             1,  4, 0,0, 4,       1,1), \
+     (1600000000, {XLM}, {USDC}, 'sdex',    0.30,0.30,0.30,0.30, 1000,300,0,0,0.30,  1,1), \
+     (1600000000,{FOO}, {XLM}, 'phoenix', 13.3333,13.3333,13.3333,13.3333, 3,40,0,0,13.3333,1,1), \
+     (1600000000,{FOO}, {EXO}, 'sdex',    9,9,9,9,             1,  9, 0,0, 9,       1,1)"
+    )
+}
 
 #[tokio::test]
 #[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
@@ -145,7 +186,7 @@ async fn enrich_fills_close_usd_across_oracle_peg_and_pivot_tiers() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -153,16 +194,12 @@ async fn enrich_fills_close_usd_across_oracle_peg_and_pivot_tiers() {
     client
         .query(&format!(
             "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1700000000, 2, 'reflector', 1.0012, '{{}}')"
+             VALUES (1700000000, {USDC}, 'reflector', 1.0012, '{{}}')"
         ))
         .execute()
         .await
         .unwrap();
-    client
-        .query(&CANDLES.replace("{db}", db))
-        .execute()
-        .await
-        .unwrap();
+    client.query(&candles(db)).execute().await.unwrap();
     // Task 0228: the pivot now scales by the measured USDC/USD rate, so a pivot
     // leg with no rate in window is left unpriced. The rate here is deliberately
     // EXACTLY 1.0 — the tier composition this test is named for stays legible
@@ -176,38 +213,38 @@ async fn enrich_fills_close_usd_across_oracle_peg_and_pivot_tiers() {
     let approx = |a: f64, b: f64| (a - b).abs() < 1e-4;
     // Oracle tier wins on the recent candle: 5 × 1.0012 = 5.006 (not the $1 peg).
     assert!(
-        approx(close_usd(&client, db, 10, 2, recent).await, 5.006),
+        approx(close_usd(&client, db, FOO, USDC, recent).await, 5.006),
         "oracle tier"
     );
     // Deep FOO/USDC: peg ($1) → close = 4.0.
     assert!(
-        approx(close_usd(&client, db, 10, 2, deep).await, 4.0),
+        approx(close_usd(&client, db, FOO, USDC, deep).await, 4.0),
         "stablecoin peg"
     );
     // Deep XLM/USDC pivot source: peg ($1) → 0.30.
     assert!(
-        approx(close_usd(&client, db, 1, 2, deep).await, 0.30),
+        approx(close_usd(&client, db, XLM, USDC, deep).await, 0.30),
         "xlm/usdc peg"
     );
     // Deep FOO/XLM pivot: 13.3333 × xlm_usd(0.30) = 4.0.
     assert!(
-        approx(close_usd(&client, db, 10, 1, deep).await, 4.0),
+        approx(close_usd(&client, db, FOO, XLM, deep).await, 4.0),
         "pivot"
     );
     // Deep FOO/EXO: no USD reference → stays 0.
     assert!(
-        approx(close_usd(&client, db, 10, 20, deep).await, 0.0),
+        approx(close_usd(&client, db, FOO, EXO, deep).await, 0.0),
         "no reference"
     );
 
     // Idempotent: a second pass leaves the values unchanged.
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
     assert!(
-        approx(close_usd(&client, db, 10, 2, recent).await, 5.006),
+        approx(close_usd(&client, db, FOO, USDC, recent).await, 5.006),
         "idempotent oracle"
     );
     assert!(
-        approx(close_usd(&client, db, 10, 1, deep).await, 4.0),
+        approx(close_usd(&client, db, FOO, XLM, deep).await, 4.0),
         "idempotent pivot"
     );
 
@@ -249,7 +286,7 @@ async fn oracle_budget_exhaustion_defers_instead_of_pegging() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -259,7 +296,7 @@ async fn oracle_budget_exhaustion_defers_instead_of_pegging() {
     client
         .query(&format!(
             "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES (1700000000, 2, 'reflector', 1.0012, '{{}}')"
+             VALUES (1700000000, {USDC}, 'reflector', 1.0012, '{{}}')"
         ))
         .execute()
         .await
@@ -272,8 +309,8 @@ async fn oracle_budget_exhaustion_defers_instead_of_pegging() {
             "INSERT INTO {db}.price_ohlcv_1m \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ({early},10,2,'sdex', 5,5,5,5,    1, 5,0,0, 5,1,1), \
-             ({late}, 10,2,'sdex', 10,10,10,10, 1,10,0,0,10,1,1)"
+             ({early},{FOO}, {USDC}, 'sdex', 5,5,5,5,    1, 5,0,0, 5,1,1), \
+             ({late}, {FOO}, {USDC}, 'sdex', 10,10,10,10, 1,10,0,0,10,1,1)"
         ))
         .execute()
         .await
@@ -298,13 +335,13 @@ async fn oracle_budget_exhaustion_defers_instead_of_pegging() {
     let approx = |a: f64, b: f64| (a - b).abs() < 1e-4;
     // Early candle: oracle applied (5 × 1.0012 = 5.006).
     assert!(
-        approx(close_usd(&client, db, 10, 2, early).await, 5.006),
+        approx(close_usd(&client, db, FOO, USDC, early).await, 5.006),
         "early candle oracle-enriched"
     );
     // Late candle: NOT reached by the budget-limited oracle tier, and NOT pegged
     // (the bug would have written 10 × $1 = 10.0). Deferred → still 0.
     assert!(
-        approx(close_usd(&client, db, 10, 2, late).await, 0.0),
+        approx(close_usd(&client, db, FOO, USDC, late).await, 0.0),
         "late candle deferred, not pegged to $1"
     );
 
@@ -313,7 +350,7 @@ async fn oracle_budget_exhaustion_defers_instead_of_pegging() {
     // preserved its depeg-aware entitlement rather than losing it.
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
     assert!(
-        approx(close_usd(&client, db, 10, 2, late).await, 10.012),
+        approx(close_usd(&client, db, FOO, USDC, late).await, 10.012),
         "late candle oracle-enriched on the next pass (not the $1 peg)"
     );
 
@@ -337,7 +374,7 @@ async fn watermark_defers_candles_newer_than_the_snapshot() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -350,8 +387,8 @@ async fn watermark_defers_candles_newer_than_the_snapshot() {
             "INSERT INTO {db}.price_ohlcv_1m \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ({old},10,2,'sdex', 5,5,5,5, 1, 5,0,0, 5,1,1), \
-             ({new},10,2,'sdex', 8,8,8,8, 1, 8,0,0, 8,1,1)"
+             ({old},{FOO}, {USDC}, 'sdex', 5,5,5,5, 1, 5,0,0, 5,1,1), \
+             ({new},{FOO}, {USDC}, 'sdex', 8,8,8,8, 1, 8,0,0, 8,1,1)"
         ))
         .execute()
         .await
@@ -369,19 +406,19 @@ async fn watermark_defers_candles_newer_than_the_snapshot() {
         "newer candle excluded from the snapshot"
     );
     assert!(
-        approx(close_usd(&client, db, 10, 2, old).await, 5.0),
+        approx(close_usd(&client, db, FOO, USDC, old).await, 5.0),
         "old candle pegged"
     );
     // The newer candle was above the watermark cutoff → untouched this pass.
     assert!(
-        approx(close_usd(&client, db, 10, 2, new).await, 0.0),
+        approx(close_usd(&client, db, FOO, USDC, new).await, 0.0),
         "newer candle deferred, not enriched"
     );
 
     // A normal run (watermark = max(timestamp) = new) now picks it up.
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
     assert!(
-        approx(close_usd(&client, db, 10, 2, new).await, 8.0),
+        approx(close_usd(&client, db, FOO, USDC, new).await, 8.0),
         "newer candle enriched on the next run"
     );
 
@@ -404,7 +441,7 @@ async fn one_shot_drains_full_backlog() {
     let db = "it_enrich_oneshot";
     let client = setup_scratch(db).await;
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -414,7 +451,7 @@ async fn one_shot_drains_full_backlog() {
     let values: Vec<String> = (0..5u32)
         .map(|i| {
             let (ts, c) = (1_600_000_000 + i * 60, i + 2);
-            format!("({ts},10,2,'sdex', {c},{c},{c},{c}, 1,{c},0,0,{c},1,1)")
+            format!("({ts},{FOO}, {USDC}, 'sdex', {c},{c},{c},{c}, 1,{c},0,0,{c},1,1)")
         })
         .collect();
     client
@@ -448,7 +485,7 @@ async fn one_shot_drains_full_backlog() {
     for i in 0..5u32 {
         let (ts, c) = (1_600_000_000 + i * 60, (i + 2) as f64);
         assert!(
-            approx(close_usd(&client, db, 10, 2, ts).await, c),
+            approx(close_usd(&client, db, FOO, USDC, ts).await, c),
             "candle {i} pegged to close_usd"
         );
     }
@@ -479,11 +516,7 @@ async fn recency_bounded_backlog_excludes_deep_history_floor() {
     // Only exotic assets: no USDC/USDT/XLM reference exists, so the peg-pivot
     // tier finds nothing and FOO/EXO is the permanent, never-draining floor.
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (10,'FOO','classic','GFOO',''), (20,'EXO','classic','GEXO','')"
-        ))
+        .query(&assets_insert(db, &[FOO, EXO]))
         .execute()
         .await
         .unwrap();
@@ -494,8 +527,8 @@ async fn recency_bounded_backlog_excludes_deep_history_floor() {
             "INSERT INTO {db}.price_ohlcv_1m \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1600000000,        10,20,'sdex', 9,9,9,9, 1,9,0,0, 9,1,1), \
-             (toUnixTimestamp(now()),10,20,'sdex', 9,9,9,9, 1,9,0,0, 9,1,1)"
+             (1600000000,        {FOO}, {EXO}, 'sdex', 9,9,9,9, 1,9,0,0, 9,1,1), \
+             (toUnixTimestamp(now()),{FOO}, {EXO}, 'sdex', 9,9,9,9, 1,9,0,0, 9,1,1)"
         ))
         .execute()
         .await
@@ -552,7 +585,7 @@ async fn coarse_repair_row_outranks_large_summed_version() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -569,7 +602,7 @@ async fn coarse_repair_row_outranks_large_summed_version() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ({ts},10,2,'sdex', 7,9,6,8, 5,40,0,0, 8, 3, {seeded_version})"
+             ({ts},{FOO}, {USDC}, 'sdex', 7,9,6,8, 5,40,0,0, 8, 3, {seeded_version})"
         ))
         .execute()
         .await
@@ -647,7 +680,7 @@ async fn coarse_repair_row_outranks_large_summed_version() {
     let physical: u64 = client
         .query(&format!(
             "SELECT count() FROM {db}.price_ohlcv_1h \
-             WHERE asset_id = 10 AND quote_asset_id = 2 AND timestamp = ?"
+             WHERE asset_id = {FOO} AND quote_asset_id = {USDC} AND timestamp = ?"
         ))
         .bind(ts)
         .fetch_one::<u64>()
@@ -696,7 +729,7 @@ async fn coarse_repair_driver_bounds_span_and_reports_per_month() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -709,10 +742,10 @@ async fn coarse_repair_driver_bounds_span_and_reports_per_month() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ({feb2025},10, 2,'sdex', 8,8,8,8,     1,40,0,0, 8,1,{v}), \
-             ({feb2025},10,20,'sdex', 9,9,9,9,     1,40,0,0, 9,1,{v}), \
-             ({may2025},10, 2,'sdex', 11,11,11,11, 1,40,0,0,11,1,{v}), \
-             ({jan2024},10, 2,'sdex', 5,5,5,5,     1,40,0,0, 5,1,{v})"
+             ({feb2025},{FOO}, {USDC}, 'sdex', 8,8,8,8,     1,40,0,0, 8,1,{v}), \
+             ({feb2025},{FOO}, {EXO}, 'sdex', 9,9,9,9,     1,40,0,0, 9,1,{v}), \
+             ({may2025},{FOO}, {USDC}, 'sdex', 11,11,11,11, 1,40,0,0,11,1,{v}), \
+             ({jan2024},{FOO}, {USDC}, 'sdex', 5,5,5,5,     1,40,0,0, 5,1,{v})"
         ))
         .execute()
         .await
@@ -740,14 +773,14 @@ async fn coarse_repair_driver_bounds_span_and_reports_per_month() {
     // In-span USDC buckets repaired via the peg tier …
     assert!(
         approx(
-            coarse_1h_close_usd_of(&client, db, 10, 2, feb2025).await,
+            coarse_1h_close_usd_of(&client, db, FOO, USDC, feb2025).await,
             8.0
         ),
         "2025-02 FOO/USDC repaired"
     );
     assert!(
         approx(
-            coarse_1h_close_usd_of(&client, db, 10, 2, may2025).await,
+            coarse_1h_close_usd_of(&client, db, FOO, USDC, may2025).await,
             11.0
         ),
         "2025-05 FOO/USDC repaired"
@@ -755,7 +788,7 @@ async fn coarse_repair_driver_bounds_span_and_reports_per_month() {
     // … the exotic in-span pair has no reference → stays the no_reference floor …
     assert!(
         approx(
-            coarse_1h_close_usd_of(&client, db, 10, 20, feb2025).await,
+            coarse_1h_close_usd_of(&client, db, FOO, EXO, feb2025).await,
             0.0
         ),
         "2025-02 FOO/EXO has no USD path — stays 0"
@@ -763,7 +796,7 @@ async fn coarse_repair_driver_bounds_span_and_reports_per_month() {
     // … and the out-of-span month is never touched (span bound holds).
     assert!(
         approx(
-            coarse_1h_close_usd_of(&client, db, 10, 2, jan2024).await,
+            coarse_1h_close_usd_of(&client, db, FOO, USDC, jan2024).await,
             0.0
         ),
         "2024-01 is outside [202502,202505] — untouched"
@@ -827,7 +860,7 @@ async fn coarse_sweep_bounds_trailing_window_and_refuses_the_1m_base() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -839,12 +872,15 @@ async fn coarse_sweep_bounds_trailing_window_and_refuses_the_1m_base() {
     // window match is clock-relative, not hard-coded.
     for tbl in ["price_ohlcv_1h", "price_ohlcv_4h", "price_ohlcv_1m"] {
         let rows = if tbl == "price_ohlcv_1m" {
-            "(toUnixTimestamp(toStartOfMonth(now())), 10,2,'sdex', 8,8,8,8, 1,40,0,0,8,1,1)"
-                .to_string()
+            format!(
+                "(toUnixTimestamp(toStartOfMonth(now())), {FOO}, {USDC}, 'sdex', 8,8,8,8, 1,40,0,0,8,1,1)"
+            )
         } else {
-            "(toUnixTimestamp(toStartOfMonth(now())),                    10,2,'sdex', 8,8,8,8, 1,40,0,0,8,1,1), \
-             (toUnixTimestamp(toStartOfMonth(now() - INTERVAL 1 MONTH)), 10,2,'sdex', 8,8,8,8, 1,40,0,0,8,1,1), \
-             (toUnixTimestamp(now() - INTERVAL 6 MONTH),                 10,2,'sdex', 5,5,5,5, 1,40,0,0,5,1,1)".to_string()
+            format!(
+                "(toUnixTimestamp(toStartOfMonth(now())),                    {FOO}, {USDC}, 'sdex', 8,8,8,8, 1,40,0,0,8,1,1), \
+                 (toUnixTimestamp(toStartOfMonth(now() - INTERVAL 1 MONTH)), {FOO}, {USDC}, 'sdex', 8,8,8,8, 1,40,0,0,8,1,1), \
+                 (toUnixTimestamp(now() - INTERVAL 6 MONTH),                 {FOO}, {USDC}, 'sdex', 5,5,5,5, 1,40,0,0,5,1,1)"
+            )
         };
         client
             .query(&format!(
@@ -947,7 +983,7 @@ async fn coarse_sweep_defers_all_work_past_its_deadline() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -959,7 +995,7 @@ async fn coarse_sweep_defers_all_work_past_its_deadline() {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
-             VALUES (toUnixTimestamp(toStartOfMonth(now())), 10,2,'sdex', 8,8,8,8, 1,40,0,0,8,1,1)"
+             VALUES (toUnixTimestamp(toStartOfMonth(now())), {FOO}, {USDC}, 'sdex', 8,8,8,8, 1,40,0,0,8,1,1)"
         ))
         .execute()
         .await
@@ -1020,7 +1056,7 @@ async fn coarse_repair_bounded_mode_defers_overflow_across_runs() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -1031,7 +1067,7 @@ async fn coarse_repair_bounded_mode_defers_overflow_across_runs() {
     let values: Vec<String> = (0..7u32)
         .map(|i| {
             let (ts, c) = (feb2025 + i * 3600, i + 2);
-            format!("({ts},10,2,'sdex', {c},{c},{c},{c}, 1,40,0,0,{c},1,1)")
+            format!("({ts},{FOO}, {USDC}, 'sdex', {c},{c},{c},{c}, 1,40,0,0,{c},1,1)")
         })
         .collect();
     client
@@ -1132,12 +1168,7 @@ async fn usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg() {
     let client = setup_scratch(db).await;
 
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (1,'XLM','classic','',''), (2,'USDC','classic','{USDC_ISSUER}',''), \
-             (3,'USDT','classic','{USDT_ISSUER}',''), (10,'FOO','classic','GFOO','')"
-        ))
+        .query(&assets_insert(db, &[XLM, USDC, USDT, FOO]))
         .execute()
         .await
         .unwrap();
@@ -1151,8 +1182,8 @@ async fn usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg() {
             "INSERT INTO {db}.price_ohlcv_1m \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ({deep}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 1000,130,0,0,0.13, 1,1), \
-             ({deep},10, 3,'sdex', 10,10,10,10,          5,  50, 0,0,10,    1,1)"
+             ({deep}, {USDT}, {USDC}, 'sdex', 0.13,0.13,0.13,0.13, 1000,130,0,0,0.13, 1,1), \
+             ({deep},{FOO}, {USDT}, 'sdex', 10,10,10,10,          5,  50, 0,0,10,    1,1)"
         ))
         .execute()
         .await
@@ -1167,13 +1198,13 @@ async fn usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg() {
     let approx = |a: f64, b: f64| (a - b).abs() < 1e-4;
 
     // The pivot source itself: USDC-quoted, so the peg tier gives it 0.13.
-    let usdt_usd = close_usd(&client, db, 3, 2, deep).await;
+    let usdt_usd = close_usd(&client, db, USDT, USDC, deep).await;
     assert!(
         approx(usdt_usd, 0.13),
         "USDT/USDC must price at its market value 0.13, got {usdt_usd}"
     );
 
-    let foo_via_usdt = close_usd(&client, db, 10, 3, deep).await;
+    let foo_via_usdt = close_usd(&client, db, FOO, USDT, deep).await;
     assert!(
         foo_via_usdt > 0.0,
         "USDT-quoted candle must not be left unpriced at 0 — that trades a wrong \
@@ -1188,7 +1219,7 @@ async fn usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg() {
 
     // Idempotent, like the other tiers: a second pass must not re-multiply.
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
-    let after = close_usd(&client, db, 10, 3, deep).await;
+    let after = close_usd(&client, db, FOO, USDT, deep).await;
     assert!(
         approx(after, 1.3),
         "second pass must leave the pivot value unchanged, got {after}"
@@ -1211,12 +1242,7 @@ async fn usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg() {
 async fn setup_0182(db: &str, t_old: u32, t_new: u32) -> Client {
     let client = setup_scratch(db).await;
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (1,'XLM','classic','',''), (2,'USDC','classic','{USDC_ISSUER}',''), \
-             (3,'USDT','classic','{USDT_ISSUER}',''), (10,'FOO','classic','GFOO','')"
-        ))
+        .query(&assets_insert(db, &[XLM, USDC, USDT, FOO]))
         .execute()
         .await
         .unwrap();
@@ -1225,10 +1251,10 @@ async fn setup_0182(db: &str, t_old: u32, t_new: u32) -> Client {
             "INSERT INTO {db}.price_ohlcv_1m \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ({t_old}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 1000,130, 0, 0, 0.13, 1,1), \
-             ({t_new}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 1000,130, 0, 0, 0.13, 1,1), \
-             ({t_old},10, 3,'sdex', 10,10,10,10,            5, 50,50,10, 10,   1,1), \
-             ({t_new},10, 3,'sdex', 10,10,10,10,            5, 50,50,10, 10,   1,1)"
+             ({t_old}, {USDT}, {USDC}, 'sdex', 0.13,0.13,0.13,0.13, 1000,130, 0, 0, 0.13, 1,1), \
+             ({t_new}, {USDT}, {USDC}, 'sdex', 0.13,0.13,0.13,0.13, 1000,130, 0, 0, 0.13, 1,1), \
+             ({t_old},{FOO}, {USDT}, 'sdex', 10,10,10,10,            5, 50,50,10, 10,   1,1), \
+             ({t_new},{FOO}, {USDT}, 'sdex', 10,10,10,10,            5, 50,50,10, 10,   1,1)"
         ))
         .execute()
         .await
@@ -1264,7 +1290,7 @@ async fn an_ordinary_pass_cannot_see_a_wrong_but_written_close_usd() {
         "no reset was configured, so the pass must not discard anything"
     );
     for ts in [t_old, t_new] {
-        let v = close_usd(&client, db, 10, 3, ts).await;
+        let v = close_usd(&client, db, FOO, USDT, ts).await;
         assert!(
             (v - 10.0).abs() < 1e-4,
             "an ordinary pass must leave a written close_usd alone (that is what \
@@ -1293,13 +1319,14 @@ async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
     let db = "it_enrich_0182_reset";
     let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
     let client = setup_0182(db, t_old, t_new).await;
+    let ids = Ids::fetch(&client).await;
 
     let mut c = cfg(db);
     // A reset requires a draining pass — see `the_usd_reset_refuses_a_bounded_pass`.
     // The operator CLI hard-codes this; the IT helper defaults to bounded.
     c.one_shot = true;
     c.usd_reset = Some(UsdResetSpec {
-        quote_asset_id: 3,
+        quote_asset_id: ids.usdt,
         not_before: t_new,
         // The 0182 shape, stated at every site rather than defaulted: unbounded
         // above and no reference join. Task 0268 added both fields precisely so
@@ -1315,7 +1342,7 @@ async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
         "exactly the one post-epoch FOO/USDT row should have been re-opened"
     );
 
-    let fixed = close_usd(&client, db, 10, 3, t_new).await;
+    let fixed = close_usd(&client, db, FOO, USDT, t_new).await;
     assert!(
         (fixed - 1.3).abs() < 1e-4,
         "the re-opened candle must be recomputed at the MEASURED rate \
@@ -1324,7 +1351,7 @@ async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
          the defect."
     );
 
-    let protected = close_usd(&client, db, 10, 3, t_old).await;
+    let protected = close_usd(&client, db, FOO, USDT, t_old).await;
     assert!(
         (protected - 10.0).abs() < 1e-4,
         "the pre-epoch candle must keep its stored value, got {protected}. \
@@ -1336,7 +1363,7 @@ async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
     let vq: f64 = client
         .query(&format!(
             "SELECT toFloat64(volume_quote_usd) FROM {db}.price_ohlcv_1m FINAL \
-             WHERE asset_id = 10 AND quote_asset_id = 3 AND timestamp = ?"
+             WHERE asset_id = {FOO} AND quote_asset_id = {USDT} AND timestamp = ?"
         ))
         .bind(t_new)
         .fetch_one::<f64>()
@@ -1370,13 +1397,14 @@ async fn the_usd_reset_refuses_a_quote_leg_that_no_tier_can_reprice() {
     let db = "it_enrich_0182_unpriceable";
     let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
     let client = setup_0182(db, t_old, t_new).await;
+    let ids = Ids::fetch(&client).await;
 
     let mut c = cfg(db);
     c.one_shot = true;
     // 10 is FOO — a real asset in the fixture, but not a peg or pivot reference.
     // Stands in for the realistic slip of typing 11 for 111.
     c.usd_reset = Some(UsdResetSpec {
-        quote_asset_id: 10,
+        quote_asset_id: ids.foo,
         not_before: t_new,
         not_after: None,
         require_external_rate: false,
@@ -1386,11 +1414,11 @@ async fn the_usd_reset_refuses_a_quote_leg_that_no_tier_can_reprice() {
 
     assert!(
         matches!(err, ChEnrichError::ResetTargetHasNoPricingPath { quote_asset_id, .. }
-                 if quote_asset_id == 10),
+                 if quote_asset_id == ids.foo),
         "expected the reset to refuse an unpriceable quote leg, got {err:?}"
     );
 
-    let v = close_usd(&client, db, 10, 3, t_new).await;
+    let v = close_usd(&client, db, FOO, USDT, t_new).await;
     assert!(
         (v - 10.0).abs() < 1e-4,
         "a refused reset must not have written anything, got {v}"
@@ -1412,11 +1440,12 @@ async fn the_usd_reset_refuses_a_bounded_pass() {
     let db = "it_enrich_0182_bounded";
     let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
     let client = setup_0182(db, t_old, t_new).await;
+    let ids = Ids::fetch(&client).await;
 
     let mut c = cfg(db);
     c.one_shot = false;
     c.usd_reset = Some(UsdResetSpec {
-        quote_asset_id: 3,
+        quote_asset_id: ids.usdt,
         not_before: t_new,
         // The 0182 shape, stated at every site rather than defaulted: unbounded
         // above and no reference join. Task 0268 added both fields precisely so
@@ -1428,11 +1457,11 @@ async fn the_usd_reset_refuses_a_bounded_pass() {
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
 
     assert!(
-        matches!(err, ChEnrichError::ResetRequiresOneShot { quote_asset_id } if quote_asset_id == 3),
+        matches!(err, ChEnrichError::ResetRequiresOneShot { quote_asset_id } if quote_asset_id == ids.usdt),
         "expected a bounded pass to refuse the reset, got {err:?}"
     );
 
-    let v = close_usd(&client, db, 10, 3, t_new).await;
+    let v = close_usd(&client, db, FOO, USDT, t_new).await;
     assert!(
         (v - 10.0).abs() < 1e-4,
         "a refused reset must not have written anything, got {v}"
@@ -1475,6 +1504,7 @@ async fn the_usd_reset_is_refused_by_an_oracle_row_that_forward_fills_into_it() 
     let db = "it_enrich_0182_shadow_band";
     let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
     let client = setup_0182(db, t_old, t_new).await;
+    let ids = Ids::fetch(&client).await;
 
     // 100 s below the floor — outside [not_before, ..), inside the 300 s window
     // the oracle tier will forward-fill across.
@@ -1483,7 +1513,7 @@ async fn the_usd_reset_is_refused_by_an_oracle_row_that_forward_fills_into_it() 
         .query(&format!(
             "INSERT INTO {db}.oracle_prices \
              (asset_id, oracle_name, timestamp, price_usd) VALUES \
-             (3, 'reflector', {shadow}, 1.0)"
+             ({USDT}, 'reflector', {shadow}, 1.0)"
         ))
         .execute()
         .await
@@ -1492,7 +1522,7 @@ async fn the_usd_reset_is_refused_by_an_oracle_row_that_forward_fills_into_it() 
     let mut c = cfg(db);
     c.one_shot = true;
     c.usd_reset = Some(UsdResetSpec {
-        quote_asset_id: 3,
+        quote_asset_id: ids.usdt,
         not_before: t_new,
         not_after: None,
         require_external_rate: false,
@@ -1502,13 +1532,13 @@ async fn the_usd_reset_is_refused_by_an_oracle_row_that_forward_fills_into_it() 
 
     assert!(
         matches!(err, ChEnrichError::ResetBlockedByOracleRows { quote_asset_id, rows, .. }
-                 if quote_asset_id == 3 && rows == 1),
+                 if quote_asset_id == ids.usdt && rows == 1),
         "a reading {}s below the floor still forward-fills into the reset window \
          and must refuse it, got {err:?}",
         t_new - shadow
     );
 
-    let v = close_usd(&client, db, 10, 3, t_new).await;
+    let v = close_usd(&client, db, FOO, USDT, t_new).await;
     assert!(
         (v - 10.0).abs() < 1e-4,
         "a refused reset must not have written anything, got {v}"
@@ -1533,17 +1563,18 @@ async fn the_usd_reset_is_refused_by_an_oracle_row_that_forward_fills_into_it() 
 async fn an_external_reset_refuses_a_quote_leg_that_is_not_canonical_usdc() {
     let db = "it_enrich_0268_usdt_external";
     let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
-    // The 0182 fixture is the one that tracks USDT (asset_id 3) as a stable
+    // The 0182 fixture is the one that tracks USDT as a stable
     // reference, so `assert_reset_target_is_priceable` passes it and this test
     // reaches the guard it is about.
     let client = setup_0182(db, t_old, t_new).await;
+    let ids = Ids::fetch(&client).await;
 
     let mut c = cfg(db);
     c.one_shot = true;
     c.usd_reset = Some(UsdResetSpec {
-        // asset_id 3 is USDT in this fixture: a stable reference, so the
-        // priceability gate passes it, and the external tier cannot touch it.
-        quote_asset_id: 3,
+        // USDT: a stable reference, so the priceability gate passes it, and
+        // the external tier cannot touch it.
+        quote_asset_id: ids.usdt,
         not_before: 0,
         not_after: Some(prices_clickhouse::USDC_ORACLE_EPOCH_S),
         require_external_rate: true,
@@ -1552,7 +1583,7 @@ async fn an_external_reset_refuses_a_quote_leg_that_is_not_canonical_usdc() {
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
     assert!(
         matches!(err, ChEnrichError::ResetExternalRateLegIsNotUsdc { quote_asset_id, .. }
-                 if quote_asset_id == 3),
+                 if quote_asset_id == ids.usdt),
         "an external reset on a non-USDC leg must be refused, got {err:?}"
     );
 
@@ -1569,6 +1600,7 @@ async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_l
     let db = "it_enrich_0182_oracle_gate";
     let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
     let client = setup_0182(db, t_old, t_new).await;
+    let ids = Ids::fetch(&client).await;
 
     // A Reflector row for USDT at par — exactly the mis-attribution task 0196
     // purged from prod.
@@ -1576,7 +1608,7 @@ async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_l
         .query(&format!(
             "INSERT INTO {db}.oracle_prices \
              (asset_id, oracle_name, timestamp, price_usd) VALUES \
-             (3, 'reflector', {t_new}, 1.0)"
+             ({USDT}, 'reflector', {t_new}, 1.0)"
         ))
         .execute()
         .await
@@ -1585,7 +1617,7 @@ async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_l
     let mut c = cfg(db);
     c.one_shot = true;
     c.usd_reset = Some(UsdResetSpec {
-        quote_asset_id: 3,
+        quote_asset_id: ids.usdt,
         not_before: t_new,
         // The 0182 shape, stated at every site rather than defaulted: unbounded
         // above and no reference join. Task 0268 added both fields precisely so
@@ -1598,13 +1630,13 @@ async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_l
 
     assert!(
         matches!(err, ChEnrichError::ResetBlockedByOracleRows { quote_asset_id, rows, .. }
-                 if quote_asset_id == 3 && rows == 1),
+                 if quote_asset_id == ids.usdt && rows == 1),
         "expected the reset to be refused while oracle rows shadow the quote leg, got {err:?}"
     );
 
     // And it refused *before* writing: the stored value is untouched, so the
     // operator can purge and re-run without a half-applied repair in the way.
-    let v = close_usd(&client, db, 10, 3, t_new).await;
+    let v = close_usd(&client, db, FOO, USDT, t_new).await;
     assert!(
         (v - 10.0).abs() < 1e-4,
         "a refused reset must not have written anything, got {v}"
@@ -1655,7 +1687,7 @@ async fn the_frontier_advances_exhausts_and_never_revisits() {
     let db = "it_enrich_frontier";
     let client = setup_scratch(db).await;
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -1667,9 +1699,9 @@ async fn the_frontier_advances_exhausts_and_never_revisits() {
             "INSERT INTO {db}.price_ohlcv_1m \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ({jan},10, 1,'phoenix', 7,7,7,7, 1,7,0,0,7,1,1), \
-             ({feb},10, 2,'sdex',    4,4,4,4, 1,4,0,0,4,1,1), \
-             ({mar},10, 2,'sdex',    9,9,9,9, 1,9,0,0,9,1,1)"
+             ({jan},{FOO}, {XLM}, 'phoenix', 7,7,7,7, 1,7,0,0,7,1,1), \
+             ({feb},{FOO}, {USDC}, 'sdex',    4,4,4,4, 1,4,0,0,4,1,1), \
+             ({mar},{FOO}, {USDC}, 'sdex',    9,9,9,9, 1,9,0,0,9,1,1)"
         ))
         .execute()
         .await
@@ -1739,7 +1771,7 @@ async fn the_frontier_advances_exhausts_and_never_revisits() {
          partitions purely to learn there is nothing left"
     );
     assert!(
-        close_usd(&client, db, 10, 2, feb).await > 0.0,
+        close_usd(&client, db, FOO, USDC, feb).await > 0.0,
         "the sweep actually wrote a USD value, not just a frontier row"
     );
 
@@ -1748,7 +1780,7 @@ async fn the_frontier_advances_exhausts_and_never_revisits() {
         .await
         .unwrap();
     assert_eq!(r3.months[0].month, 202103);
-    assert!(close_usd(&client, db, 10, 2, mar).await > 0.0);
+    assert!(close_usd(&client, db, FOO, USDC, mar).await > 0.0);
 
     // --- run 4: nothing left ------------------------------------------------
     let r4 = run_historical_sweep(&client_for_sweep, &sweep(5))
@@ -1776,7 +1808,7 @@ async fn the_sweep_never_enters_the_live_window() {
     let db = "it_enrich_frontier_live";
     let client = setup_scratch(db).await;
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -1788,8 +1820,8 @@ async fn the_sweep_never_enters_the_live_window() {
             "INSERT INTO {db}.price_ohlcv_1m \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ({feb},10,2,'sdex', 4,4,4,4, 1,4,0,0,4,1,1), \
-             ({mar},10,2,'sdex', 9,9,9,9, 1,9,0,0,9,1,1)"
+             ({feb},{FOO}, {USDC}, 'sdex', 4,4,4,4, 1,4,0,0,4,1,1), \
+             ({mar},{FOO}, {USDC}, 'sdex', 9,9,9,9, 1,9,0,0,9,1,1)"
         ))
         .execute()
         .await
@@ -1815,7 +1847,7 @@ async fn the_sweep_never_enters_the_live_window() {
         "every partition belongs to the live pass"
     );
     assert_eq!(
-        close_usd(&client, db, 10, 2, feb).await,
+        close_usd(&client, db, FOO, USDC, feb).await,
         0.0,
         "the sweep must leave live-window rows for the live pass"
     );
@@ -1836,7 +1868,7 @@ async fn a_backfill_into_an_exhausted_month_reopens_it() {
     let db = "it_enrich_frontier_drift";
     let client = setup_scratch(db).await;
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -1847,7 +1879,7 @@ async fn a_backfill_into_an_exhausted_month_reopens_it() {
             "INSERT INTO {db}.price_ohlcv_1m \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ({feb},10,2,'sdex', 4,4,4,4, 1,4,0,0,4,1,1)"
+             ({feb},{FOO}, {USDC}, 'sdex', 4,4,4,4, 1,4,0,0,4,1,1)"
         ))
         .execute()
         .await
@@ -1879,7 +1911,7 @@ async fn a_backfill_into_an_exhausted_month_reopens_it() {
             "INSERT INTO {db}.price_ohlcv_1m \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ({feb2},10,2,'sdex', 6,6,6,6, 1,6,0,0,6,1,1)"
+             ({feb2},{FOO}, {USDC}, 'sdex', 6,6,6,6, 1,6,0,0,6,1,1)"
         ))
         .execute()
         .await
@@ -1893,7 +1925,7 @@ async fn a_backfill_into_an_exhausted_month_reopens_it() {
         .unwrap();
     assert_eq!(blind.months_rechecked, 0, "nothing is stale yet");
     assert_eq!(
-        close_usd(&client, db, 10, 2, feb2).await,
+        close_usd(&client, db, FOO, USDC, feb2).await,
         0.0,
         "the backfilled row is invisible while the exhausted mark is trusted"
     );
@@ -1918,7 +1950,7 @@ async fn a_backfill_into_an_exhausted_month_reopens_it() {
         .await
         .unwrap();
     assert!(
-        close_usd(&client, db, 10, 2, feb2).await > 0.0,
+        close_usd(&client, db, FOO, USDC, feb2).await > 0.0,
         "drift correction closed the loop — the backfilled row is enriched"
     );
 }
@@ -1988,15 +2020,11 @@ async fn seed_hourly_marker(client: &Client, db: &str) {
 
 async fn seed_assets_and_candles(client: &Client, db: &str) {
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
-    client
-        .query(&CANDLES.replace("{db}", db))
-        .execute()
-        .await
-        .unwrap();
+    client.query(&candles(db)).execute().await.unwrap();
 }
 
 // The deep FOO/USDC fixture candle (`close = 4`, `volume_quote = 4`) and the
@@ -2022,7 +2050,7 @@ async fn external_tier_prices_a_usdc_leg_from_the_measured_rate() {
 
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
 
-    let got = close_usd(&client, db, 10, 2, DEEP_TS).await;
+    let got = close_usd(&client, db, FOO, USDC, DEEP_TS).await;
     assert!(
         (got - 3.8724).abs() < 1e-4,
         "close_usd must be close × the measured rate (4 × 0.9681 = 3.8724), got {got} \
@@ -2032,7 +2060,7 @@ async fn external_tier_prices_a_usdc_leg_from_the_measured_rate() {
     let vqu: f64 = client
         .query(&format!(
             "SELECT toFloat64(volume_quote_usd) FROM {db}.price_ohlcv_1m FINAL \
-             WHERE asset_id = 10 AND quote_asset_id = 2 AND timestamp = {DEEP_TS}"
+             WHERE asset_id = {FOO} AND quote_asset_id = {USDC} AND timestamp = {DEEP_TS}"
         ))
         .fetch_one::<f64>()
         .await
@@ -2046,7 +2074,7 @@ async fn external_tier_prices_a_usdc_leg_from_the_measured_rate() {
     // pass must not find the row again — and must not re-scale an already-scaled
     // value into 4 × 0.9681².
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
-    let again = close_usd(&client, db, 10, 2, DEEP_TS).await;
+    let again = close_usd(&client, db, FOO, USDC, DEEP_TS).await;
     assert!(
         (again - 3.8724).abs() < 1e-4,
         "a second pass must leave the value alone, got {again}"
@@ -2073,7 +2101,7 @@ async fn external_tier_never_overwrites_a_candle_the_oracle_tier_priced() {
     client
         .query(&format!(
             "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES ({RECENT_TS}, 2, 'reflector', 1.0012, '{{}}')"
+             VALUES ({RECENT_TS}, {USDC}, 'reflector', 1.0012, '{{}}')"
         ))
         .execute()
         .await
@@ -2082,7 +2110,7 @@ async fn external_tier_never_overwrites_a_candle_the_oracle_tier_priced() {
 
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
 
-    let got = close_usd(&client, db, 10, 2, RECENT_TS).await;
+    let got = close_usd(&client, db, FOO, USDC, RECENT_TS).await;
     assert!(
         (got - 5.006).abs() < 1e-4,
         "the oracle value (5 × 1.0012 = 5.006) must win over the import \
@@ -2090,7 +2118,7 @@ async fn external_tier_never_overwrites_a_candle_the_oracle_tier_priced() {
     );
 
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
-    let again = close_usd(&client, db, 10, 2, RECENT_TS).await;
+    let again = close_usd(&client, db, FOO, USDC, RECENT_TS).await;
     assert!((again - 5.006).abs() < 1e-4, "idempotent, got {again}");
 
     client
@@ -2122,7 +2150,7 @@ async fn external_tier_leaves_a_bucket_with_no_usable_rate_on_the_peg_value() {
 
     let stats = ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
 
-    let got = close_usd(&client, db, 10, 2, DEEP_TS).await;
+    let got = close_usd(&client, db, FOO, USDC, DEEP_TS).await;
     assert!(
         (got - 4.0).abs() < 1e-4,
         "with no in-window external rate the peg tier's close × $1 = 4.0 must \
@@ -2142,14 +2170,18 @@ async fn external_tier_leaves_a_bucket_with_no_usable_rate_on_the_peg_value() {
 }
 
 /// Read `volume_quote_usd` from the 1m base table, the companion of [`close_usd`].
-async fn volume_quote_usd(client: &Client, db: &str, asset: u32, quote: u32, ts: u32) -> f64 {
+async fn volume_quote_usd(
+    client: &Client,
+    db: &str,
+    asset: impl Display,
+    quote: impl Display,
+    ts: u32,
+) -> f64 {
     client
         .query(&format!(
             "SELECT toFloat64(volume_quote_usd) FROM {db}.price_ohlcv_1m FINAL \
-             WHERE asset_id = ? AND quote_asset_id = ? AND timestamp = ?"
+             WHERE asset_id = {asset} AND quote_asset_id = {quote} AND timestamp = ?"
         ))
-        .bind(asset)
-        .bind(quote)
         .bind(ts)
         .fetch_one::<f64>()
         .await
@@ -2164,7 +2196,7 @@ async fn seed_foo_usdc_candle(client: &Client, db: &str, ts: u32, close: f64, vq
             "INSERT INTO {db}.price_ohlcv_1m \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
-             VALUES ({ts}, 10, 2, 'sdex', {close}, {close}, {close}, {close}, \
+             VALUES ({ts}, {FOO}, {USDC}, 'sdex', {close}, {close}, {close}, {close}, \
                      1, {close}, {vqu}, 0, {close}, 1, 1)"
         ))
         .execute()
@@ -2195,7 +2227,7 @@ async fn a_one_minute_bucket_in_the_last_hour_of_a_day_gets_that_days_rate() {
 
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
 
-    let got = close_usd(&client, db, 10, 2, late).await;
+    let got = close_usd(&client, db, FOO, USDC, late).await;
     assert!(
         (got - 4.0 * DEPEG_RATE).abs() < 1e-4,
         "a 23:30 bucket belongs to its own day: expected 4 × 0.9681 = 3.8724, got {got} \
@@ -2215,7 +2247,7 @@ async fn close_usd_in(client: &Client, db: &str, table: &str, ts: u32) -> f64 {
     client
         .query(&format!(
             "SELECT toFloat64(close_usd) FROM {db}.{table} FINAL \
-             WHERE asset_id = 10 AND quote_asset_id = 2 AND timestamp = ?"
+             WHERE asset_id = {FOO} AND quote_asset_id = {USDC} AND timestamp = ?"
         ))
         .bind(ts)
         .fetch_one::<f64>()
@@ -2232,7 +2264,7 @@ async fn seed_foo_usdc_candle_in(client: &Client, db: &str, table: &str, ts: u32
             "INSERT INTO {db}.{table} \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
-             VALUES ({ts}, 10, 2, 'sdex', 4, 4, 4, 4, 1, 4, 0, 0, 4, 1, 1)"
+             VALUES ({ts}, {FOO}, {USDC}, 'sdex', 4, 4, 4, 4, 1, 4, 0, 0, 4, 1, 1)"
         ))
         .execute()
         .await
@@ -2254,7 +2286,7 @@ async fn a_daily_bucket_resolves_the_calendar_bucket_end_against_the_server() {
     let db = "it_enrich_external_calendar_1d";
     let client = setup_scratch(db).await;
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -2293,7 +2325,7 @@ async fn a_monthly_bucket_resolves_the_calendar_month_end_against_the_server() {
     let db = "it_enrich_external_calendar_1m_month";
     let client = setup_scratch(db).await;
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -2345,7 +2377,7 @@ async fn external_tier_never_prices_a_candle_above_the_oracle_epoch() {
 
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
 
-    let got = close_usd(&client, db, 10, 2, post).await;
+    let got = close_usd(&client, db, FOO, USDC, post).await;
     assert!(
         (got - 6.0).abs() < 1e-4,
         "above the epoch the tier must not write: expected the peg tier's 6 × $1 = 6.0, \
@@ -2369,7 +2401,7 @@ async fn external_tier_recomputes_a_half_priced_row_from_the_one_reference() {
     let db = "it_enrich_external_half_priced";
     let client = setup_scratch(db).await;
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -2379,8 +2411,8 @@ async fn external_tier_recomputes_a_half_priced_row_from_the_one_reference() {
 
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
 
-    let c = close_usd(&client, db, 10, 2, DEEP_TS).await;
-    let v = volume_quote_usd(&client, db, 10, 2, DEEP_TS).await;
+    let c = close_usd(&client, db, FOO, USDC, DEEP_TS).await;
+    let v = volume_quote_usd(&client, db, FOO, USDC, DEEP_TS).await;
     assert!(
         (c - 3.8724).abs() < 1e-4,
         "close_usd from the measured rate, got {c}"
@@ -2406,12 +2438,7 @@ async fn external_tier_recomputes_a_half_priced_row_from_the_one_reference() {
 async fn setup_0268(db: &str, t_covered: u32, t_uncovered: u32) -> Client {
     let client = setup_scratch(db).await;
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (1,'XLM','classic','',''), (2,'USDC','classic','{USDC_ISSUER}',''), \
-             (10,'FOO','classic','GFOO','')"
-        ))
+        .query(&assets_insert(db, &[XLM, USDC, FOO]))
         .execute()
         .await
         .unwrap();
@@ -2420,8 +2447,8 @@ async fn setup_0268(db: &str, t_covered: u32, t_uncovered: u32) -> Client {
             "INSERT INTO {db}.price_ohlcv_1m \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ({t_covered},   10, 2,'sdex', 4,4,4,4, 1, 4, 4, 4, 4, 1,1), \
-             ({t_uncovered}, 10, 2,'sdex', 4,4,4,4, 1, 4, 4, 4, 4, 1,1)"
+             ({t_covered},   {FOO}, {USDC}, 'sdex', 4,4,4,4, 1, 4, 4, 4, 4, 1,1), \
+             ({t_uncovered}, {FOO}, {USDC}, 'sdex', 4,4,4,4, 1, 4, 4, 4, 4, 1,1)"
         ))
         .execute()
         .await
@@ -2429,9 +2456,9 @@ async fn setup_0268(db: &str, t_covered: u32, t_uncovered: u32) -> Client {
     client
 }
 
-fn external_reset() -> UsdResetSpec {
+fn external_reset(usdc: u64) -> UsdResetSpec {
     UsdResetSpec {
-        quote_asset_id: 2,
+        quote_asset_id: usdc,
         not_before: 0,
         not_after: Some(prices_clickhouse::USDC_ORACLE_EPOCH_S),
         require_external_rate: true,
@@ -2454,6 +2481,7 @@ async fn the_external_reset_never_reopens_a_candle_that_has_no_price() {
     let db = "it_enrich_0268_dust_only";
     let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
     let client = setup_0268(db, covered, uncovered).await;
+    let ids = Ids::fetch(&client).await;
     seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
     seed_hourly_marker(&client, db).await;
     // The dust-only minute, on the COVERED day, its volume already priced.
@@ -2464,7 +2492,7 @@ async fn the_external_reset_never_reopens_a_candle_that_has_no_price() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
-             ({dust}, 10, 2,'sdex', 0,0,0,0, 1, 0.05, 0.05, 0, 0.05, 3, 1, 0, 0, 0)"
+             ({dust}, {FOO}, {USDC}, 'sdex', 0,0,0,0, 1, 0.05, 0.05, 0, 0.05, 3, 1, 0, 0, 0)"
         ))
         .execute()
         .await
@@ -2472,7 +2500,7 @@ async fn the_external_reset_never_reopens_a_candle_that_has_no_price() {
 
     let mut c = cfg(db);
     c.one_shot = true;
-    c.usd_reset = Some(external_reset());
+    c.usd_reset = Some(external_reset(ids.usdc));
     let stats = ChEnrichmentPass::new(c).run().await.unwrap();
 
     assert_eq!(
@@ -2525,19 +2553,20 @@ async fn the_external_reset_refuses_a_sub_daily_table_on_a_daily_only_load() {
     let db = "it_enrich_0268_daily_only";
     let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
     let client = setup_0268(db, covered, uncovered).await;
+    let ids = Ids::fetch(&client).await;
     // Midnight only: exactly what the daily file writes.
     seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
 
     let mut c = cfg(db);
     c.one_shot = true;
-    c.usd_reset = Some(external_reset());
+    c.usd_reset = Some(external_reset(ids.usdc));
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
     assert!(
         matches!(&err, ChEnrichError::ResetRequiresHourlyRates { table } if table == "price_ohlcv_1m"),
         "a sub-daily table on a daily-only load must be refused, got {err:?}"
     );
     // Refused BEFORE writing: the candle still carries its original value.
-    let v = close_usd(&client, db, 10, 2, covered).await;
+    let v = close_usd(&client, db, FOO, USDC, covered).await;
     assert!(
         (v - 4.0).abs() < 1e-9,
         "a refused reset must not have touched the candle, got {v}"
@@ -2547,7 +2576,7 @@ async fn the_external_reset_refuses_a_sub_daily_table_on_a_daily_only_load() {
     let mut d = cfg(db);
     d.one_shot = true;
     d.table = "price_ohlcv_1d".to_string();
-    d.usd_reset = Some(external_reset());
+    d.usd_reset = Some(external_reset(ids.usdc));
     ChEnrichmentPass::new(d)
         .run()
         .await
@@ -2557,7 +2586,7 @@ async fn the_external_reset_refuses_a_sub_daily_table_on_a_daily_only_load() {
     seed_hourly_marker(&client, db).await;
     let mut h = cfg(db);
     h.one_shot = true;
-    h.usd_reset = Some(external_reset());
+    h.usd_reset = Some(external_reset(ids.usdc));
     let stats = ChEnrichmentPass::new(h).run().await.unwrap();
     assert_eq!(
         stats.rows_reset, 1,
@@ -2577,13 +2606,14 @@ async fn the_external_reset_never_zeroes_a_bucket_it_cannot_refill() {
     let db = "it_enrich_0268_reset";
     let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
     let client = setup_0268(db, covered, uncovered).await;
+    let ids = Ids::fetch(&client).await;
     // Day start of `covered` (2020-09-13) only. `uncovered` (2020-09-18) has no row.
     seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
     seed_hourly_marker(&client, db).await;
 
     let mut c = cfg(db);
     c.one_shot = true;
-    c.usd_reset = Some(external_reset());
+    c.usd_reset = Some(external_reset(ids.usdc));
     let stats = ChEnrichmentPass::new(c).run().await.unwrap();
 
     assert_eq!(
@@ -2592,14 +2622,14 @@ async fn the_external_reset_never_zeroes_a_bucket_it_cannot_refill() {
          uncovered one is the 0182 incident"
     );
 
-    let fixed = close_usd(&client, db, 10, 2, covered).await;
+    let fixed = close_usd(&client, db, FOO, USDC, covered).await;
     assert!(
         (fixed - 3.8724).abs() < 1e-4,
         "the covered candle must be re-priced at the measured rate \
          (4 x 0.9681 = 3.8724), got {fixed}"
     );
 
-    let untouched = close_usd(&client, db, 10, 2, uncovered).await;
+    let untouched = close_usd(&client, db, FOO, USDC, uncovered).await;
     assert!(
         (untouched - 4.0).abs() < 1e-4,
         "the uncovered candle must be EXACTLY as it was, got {untouched}. \
@@ -2622,22 +2652,23 @@ async fn the_external_reset_refuses_when_no_external_rates_are_loaded() {
     let db = "it_enrich_0268_no_rates";
     let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
     let client = setup_0268(db, covered, uncovered).await;
+    let ids = Ids::fetch(&client).await;
     // usd_rate deliberately left empty.
 
     let mut c = cfg(db);
     c.one_shot = true;
-    c.usd_reset = Some(external_reset());
+    c.usd_reset = Some(external_reset(ids.usdc));
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
 
     assert!(
         matches!(err, ChEnrichError::ResetRequiresExternalRates { quote_asset_id }
-                 if quote_asset_id == 2),
+                 if quote_asset_id == ids.usdc),
         "expected a refusal when 0267's series is not loaded, got {err:?}"
     );
 
     // And it refused BEFORE writing anything.
     for ts in [covered, uncovered] {
-        let v = close_usd(&client, db, 10, 2, ts).await;
+        let v = close_usd(&client, db, FOO, USDC, ts).await;
         assert!(
             (v - 4.0).abs() < 1e-4,
             "a refused reset must not have written anything at {ts}, got {v}"
@@ -2669,6 +2700,7 @@ async fn the_external_reset_refuses_when_no_external_rates_are_loaded() {
 async fn the_external_reset_refuses_a_pre_epoch_oracle_reading_below_its_own_window() {
     let db = "it_enrich_0268_pre_epoch_oracle";
     let client = setup_scratch(db).await;
+    let ids = Ids::fetch(&client).await;
     seed_assets_and_candles(&client, db).await;
     seed_external_rate(&client, db, DEEP_DAY_START, DEPEG_RATE).await;
     seed_hourly_marker(&client, db).await;
@@ -2678,7 +2710,7 @@ async fn the_external_reset_refuses_a_pre_epoch_oracle_reading_below_its_own_win
     client
         .query(&format!(
             "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES ({reading}, 2, 'reflector', 1.0, '{{}}')"
+             VALUES ({reading}, {USDC}, 'reflector', 1.0, '{{}}')"
         ))
         .execute()
         .await
@@ -2687,7 +2719,7 @@ async fn the_external_reset_refuses_a_pre_epoch_oracle_reading_below_its_own_win
     let mut c = cfg(db);
     c.one_shot = true;
     c.usd_reset = Some(UsdResetSpec {
-        quote_asset_id: 2,
+        quote_asset_id: ids.usdc,
         not_before: DEEP_DAY_START,
         not_after: Some(USDC_ORACLE_EPOCH_S),
         require_external_rate: true,
@@ -2698,15 +2730,15 @@ async fn the_external_reset_refuses_a_pre_epoch_oracle_reading_below_its_own_win
         matches!(
             err,
             ChEnrichError::ResetBlockedByPreEpochOracleRows {
-                quote_asset_id: 2,
+                quote_asset_id,
                 rows: 1,
                 ..
-            }
+            } if quote_asset_id == ids.usdc
         ),
         "expected the pre-epoch oracle refusal, got {err:?}"
     );
     // Refused before writing: the deep fixture candle is untouched.
-    let v = close_usd(&client, db, 10, 2, DEEP_TS).await;
+    let v = close_usd(&client, db, FOO, USDC, DEEP_TS).await;
     assert!(
         (v - 0.0).abs() < 1e-9,
         "a refused reset must not have written anything, got {v}"
@@ -2725,6 +2757,7 @@ async fn the_bounded_usd_reset_is_not_refused_by_oracle_rows_above_its_window() 
     let db = "it_enrich_0268_bounded_guard";
     let (covered, uncovered) = (1_600_000_000u32, 1_600_432_000u32);
     let client = setup_0268(db, covered, uncovered).await;
+    let ids = Ids::fetch(&client).await;
     seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
     seed_hourly_marker(&client, db).await;
 
@@ -2733,7 +2766,7 @@ async fn the_bounded_usd_reset_is_not_refused_by_oracle_rows_above_its_window() 
     client
         .query(&format!(
             "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES ({above}, 2, 'reflector', 1.0001, '{{}}')"
+             VALUES ({above}, {USDC}, 'reflector', 1.0001, '{{}}')"
         ))
         .execute()
         .await
@@ -2741,7 +2774,7 @@ async fn the_bounded_usd_reset_is_not_refused_by_oracle_rows_above_its_window() 
 
     let mut c = cfg(db);
     c.one_shot = true;
-    c.usd_reset = Some(external_reset());
+    c.usd_reset = Some(external_reset(ids.usdc));
     let stats = ChEnrichmentPass::new(c).run().await.unwrap();
     assert_eq!(
         stats.rows_reset, 1,
@@ -2752,7 +2785,7 @@ async fn the_bounded_usd_reset_is_not_refused_by_oracle_rows_above_its_window() 
     client
         .query(&format!(
             "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES ({covered}, 2, 'reflector', 1.0001, '{{}}')"
+             VALUES ({covered}, {USDC}, 'reflector', 1.0001, '{{}}')"
         ))
         .execute()
         .await
@@ -2760,11 +2793,11 @@ async fn the_bounded_usd_reset_is_not_refused_by_oracle_rows_above_its_window() 
 
     let mut c2 = cfg(db);
     c2.one_shot = true;
-    c2.usd_reset = Some(external_reset());
+    c2.usd_reset = Some(external_reset(ids.usdc));
     let err = ChEnrichmentPass::new(c2).run().await.unwrap_err();
     assert!(
         matches!(err, ChEnrichError::ResetBlockedByOracleRows { quote_asset_id, .. }
-                 if quote_asset_id == 2),
+                 if quote_asset_id == ids.usdc),
         "an oracle row inside the window must still refuse, got {err:?}"
     );
 
@@ -2787,13 +2820,14 @@ async fn the_external_reset_touches_only_the_bounded_month() {
     // an imported rate, so the ONLY thing that can separate them is the window.
     let (sep, oct) = (1_600_000_000u32, 1_601_600_000u32);
     let client = setup_0268(db, sep, oct).await;
+    let ids = Ids::fetch(&client).await;
     seed_external_rate(&client, db, 1_599_955_200, DEPEG_RATE).await;
     seed_external_rate(&client, db, 1_601_596_800, DEPEG_RATE).await;
     seed_hourly_marker(&client, db).await;
 
     let mut c = cfg(db);
     c.one_shot = true;
-    c.usd_reset = Some(external_reset());
+    c.usd_reset = Some(external_reset(ids.usdc));
     // [2020-09-01, 2020-10-01)
     c.time_window = Some((1_598_918_400, 1_601_510_400));
     let stats = ChEnrichmentPass::new(c).run().await.unwrap();
@@ -2802,9 +2836,9 @@ async fn the_external_reset_touches_only_the_bounded_month() {
         stats.rows_reset, 1,
         "only September's candle is in the window"
     );
-    let s = close_usd(&client, db, 10, 2, sep).await;
+    let s = close_usd(&client, db, FOO, USDC, sep).await;
     assert!((s - 3.8724).abs() < 1e-4, "September re-priced, got {s}");
-    let o = close_usd(&client, db, 10, 2, oct).await;
+    let o = close_usd(&client, db, FOO, USDC, oct).await;
     assert!(
         (o - 4.0).abs() < 1e-4,
         "October is outside the window and must be untouched, got {o}"
@@ -2833,7 +2867,7 @@ const FOO_XLM_CLOSE: f64 = 10.0;
 async fn setup_0228_pivot(db: &str, table: &str, ts: u32) -> Client {
     let client = setup_scratch(db).await;
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -2842,9 +2876,9 @@ async fn setup_0228_pivot(db: &str, table: &str, ts: u32) -> Client {
             "INSERT INTO {db}.{table} \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ({ts}, 1, 2,'sdex',    {XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE}, \
+             ({ts}, {XLM}, {USDC}, 'sdex',    {XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE}, \
               1000,58.8,0,0,{XLM_USDC_CLOSE},1,1), \
-             ({ts},10, 1,'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, \
+             ({ts},{FOO}, {XLM}, 'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, \
               5,50,0,0,{FOO_XLM_CLOSE},1,1)"
         ))
         .execute()
@@ -2858,7 +2892,7 @@ async fn pivot_close_usd_in(client: &Client, db: &str, table: &str, ts: u32) -> 
     client
         .query(&format!(
             "SELECT toFloat64(close_usd) FROM {db}.{table} FINAL \
-             WHERE asset_id = 10 AND quote_asset_id = 1 AND timestamp = ?"
+             WHERE asset_id = {FOO} AND quote_asset_id = {XLM} AND timestamp = ?"
         ))
         .bind(ts)
         .fetch_one::<f64>()
@@ -3014,7 +3048,7 @@ async fn a_pivot_leg_with_no_usdc_rate_in_window_is_left_unpriced() {
 async fn setup_0228_reset(db: &str, covered: u32, uncovered: u32) -> Client {
     let client = setup_scratch(db).await;
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -3024,10 +3058,10 @@ async fn setup_0228_reset(db: &str, covered: u32, uncovered: u32) -> Client {
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ({covered},   1, 2,'sdex',    {XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE}, 1000,58.8,0,0,{XLM_USDC_CLOSE},1,1), \
-             ({uncovered}, 1, 2,'sdex',    {XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE}, 1000,58.8,0,0,{XLM_USDC_CLOSE},1,1), \
-             ({covered},  10, 1,'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1), \
-             ({uncovered},10, 1,'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1)"
+             ({covered},   {XLM}, {USDC}, 'sdex',    {XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE}, 1000,58.8,0,0,{XLM_USDC_CLOSE},1,1), \
+             ({uncovered}, {XLM}, {USDC}, 'sdex',    {XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE}, 1000,58.8,0,0,{XLM_USDC_CLOSE},1,1), \
+             ({covered},  {FOO}, {XLM}, 'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1), \
+             ({uncovered},{FOO}, {XLM}, 'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1)"
         ))
         .execute()
         .await
@@ -3037,9 +3071,9 @@ async fn setup_0228_reset(db: &str, covered: u32, uncovered: u32) -> Client {
 
 /// A 0228-shaped spec over the fixture above: XLM's quote leg, bounded above by
 /// the oracle epoch, and only where the imported series can refill.
-fn pivot_reset(not_before: u32) -> UsdResetSpec {
+fn pivot_reset(xlm: u64, not_before: u32) -> UsdResetSpec {
     UsdResetSpec {
-        quote_asset_id: 1,
+        quote_asset_id: xlm,
         not_before,
         not_after: Some(USDC_ORACLE_EPOCH_S),
         require_external_rate: false,
@@ -3052,7 +3086,7 @@ async fn pivot_subject_1h(client: &Client, db: &str, ts: u32) -> (f64, u64) {
     client
         .query(&format!(
             "SELECT toFloat64(close_usd), toUInt64(version) FROM {db}.price_ohlcv_1h FINAL \
-             WHERE asset_id = 10 AND quote_asset_id = 1 AND timestamp = ?"
+             WHERE asset_id = {FOO} AND quote_asset_id = {XLM} AND timestamp = ?"
         ))
         .bind(ts)
         .fetch_one::<(f64, u64)>()
@@ -3074,21 +3108,22 @@ async fn the_pivot_reset_refuses_the_canonical_usdc_leg() {
     let db = "it_enrich_0228_usdc_leg";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
     let client = setup_0228_reset(db, covered, uncovered).await;
+    let ids = Ids::fetch(&client).await;
     seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
 
     let mut c = cfg(db);
     c.table = "price_ohlcv_1h".to_string();
     c.one_shot = true;
     c.usd_reset = Some(UsdResetSpec {
-        // asset_id 2 is canonical USDC in this fixture: priceable, so the
-        // priceability gate passes it, and no pivot pass can refill it.
-        quote_asset_id: 2,
-        ..pivot_reset(DEPEG_DAY - 86_400)
+        // Canonical USDC: priceable, so the priceability gate passes it, and
+        // no pivot pass can refill it.
+        quote_asset_id: ids.usdc,
+        ..pivot_reset(ids.xlm, DEPEG_DAY - 86_400)
     });
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
     assert!(
         matches!(err, ChEnrichError::ResetPivotRateLegIsNotAPivotReference { quote_asset_id, .. }
-                 if quote_asset_id == 2),
+                 if quote_asset_id == ids.usdc),
         "the pivot mode must refuse canonical USDC, got {err:?}"
     );
     let msg = err.to_string();
@@ -3123,12 +3158,13 @@ async fn the_pivot_reset_refuses_an_oracle_shadowed_span() {
     let db = "it_enrich_0228_oracle_shadow";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
     let client = setup_0228_reset(db, covered, uncovered).await;
+    let ids = Ids::fetch(&client).await;
     seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
     // One Reflector reading for XLM inside the reset's own window.
     client
         .query(&format!(
             "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES ({covered}, 1, 'reflector', 0.0588, '{{}}')"
+             VALUES ({covered}, {XLM}, 'reflector', 0.0588, '{{}}')"
         ))
         .execute()
         .await
@@ -3137,11 +3173,11 @@ async fn the_pivot_reset_refuses_an_oracle_shadowed_span() {
     let mut c = cfg(db);
     c.table = "price_ohlcv_1h".to_string();
     c.one_shot = true;
-    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    c.usd_reset = Some(pivot_reset(ids.xlm, DEPEG_DAY - 86_400));
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
     assert!(
         matches!(err, ChEnrichError::ResetBlockedByOracleRows { quote_asset_id, rows, .. }
-                 if quote_asset_id == 1 && rows == 1),
+                 if quote_asset_id == ids.xlm && rows == 1),
         "an oracle-shadowed span must refuse the pivot reset, got {err:?}"
     );
 
@@ -3162,16 +3198,17 @@ async fn the_pivot_reset_refuses_when_no_external_rates_are_loaded() {
     let db = "it_enrich_0228_no_rates";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
     let client = setup_0228_reset(db, covered, uncovered).await;
+    let ids = Ids::fetch(&client).await;
     // Deliberately no seed_external_rate call.
 
     let mut c = cfg(db);
     c.table = "price_ohlcv_1h".to_string();
     c.one_shot = true;
-    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    c.usd_reset = Some(pivot_reset(ids.xlm, DEPEG_DAY - 86_400));
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
     assert!(
         matches!(err, ChEnrichError::ResetRequiresExternalRates { quote_asset_id }
-                 if quote_asset_id == 1),
+                 if quote_asset_id == ids.xlm),
         "an unloaded 0267 series must refuse the pivot reset, got {err:?}"
     );
 
@@ -3196,11 +3233,12 @@ async fn the_repair_driver_refuses_an_unloaded_series_before_enumerating_months(
     let db = "it_enrich_0228_driver_no_rates";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
     let client = setup_0228_reset(db, covered, uncovered).await;
+    let ids = Ids::fetch(&client).await;
     // Deliberately no seed_external_rate call.
 
     let mut enrich = cfg(db);
     enrich.table = "price_ohlcv_1h".to_string();
-    enrich.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    enrich.usd_reset = Some(pivot_reset(ids.xlm, DEPEG_DAY - 86_400));
     let driver = |dry_run: bool| {
         CoarseRepairDriver::with_client(
             client.clone(),
@@ -3222,7 +3260,7 @@ async fn the_repair_driver_refuses_an_unloaded_series_before_enumerating_months(
         let err = driver(dry_run).run().await.unwrap_err();
         assert!(
             matches!(err, ChEnrichError::ResetRequiresExternalRates { quote_asset_id }
-                     if quote_asset_id == 1),
+                     if quote_asset_id == ids.xlm),
             "dry_run={dry_run}: an unloaded 0267 series must refuse the driver, got {err:?}"
         );
     }
@@ -3263,6 +3301,7 @@ async fn the_pivot_reset_refuses_when_canonical_usdc_is_not_a_tracked_asset() {
     let db = "it_enrich_0228_no_usdc_asset";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
     let client = setup_0228_reset(db, covered, uncovered).await;
+    let ids = Ids::fetch(&client).await;
     seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
     // Everything but canonical USDC stays registered.
     client
@@ -3271,10 +3310,7 @@ async fn the_pivot_reset_refuses_when_canonical_usdc_is_not_a_tracked_asset() {
         .await
         .unwrap();
     client
-        .query(&format!(
-            "INSERT INTO {db}.assets (asset_id, asset_code, asset_type, issuer_address, contract_address) \
-             VALUES (1,'XLM','classic','',''), (10,'FOO','classic','GFOO','')"
-        ))
+        .query(&assets_insert(db, &[XLM, FOO]))
         .execute()
         .await
         .unwrap();
@@ -3282,16 +3318,16 @@ async fn the_pivot_reset_refuses_when_canonical_usdc_is_not_a_tracked_asset() {
     let mut c = cfg(db);
     c.table = "price_ohlcv_1h".to_string();
     c.one_shot = true;
-    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    c.usd_reset = Some(pivot_reset(ids.xlm, DEPEG_DAY - 86_400));
     let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
     assert!(
         matches!(
             err,
             ChEnrichError::ResetPivotRateLegIsNotAPivotReference {
-                quote_asset_id: 1,
+                quote_asset_id,
                 usdc_id: 0,
                 ..
-            }
+            } if quote_asset_id == ids.xlm
         ),
         "with canonical USDC untracked no pivot can refill the leg, got {err:?}"
     );
@@ -3325,6 +3361,7 @@ async fn a_dry_run_refuses_the_wrong_leg_for_either_rate_gated_mode() {
     let db = "it_enrich_0228_dry_run_leg";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
     let client = setup_0228_reset(db, covered, uncovered).await;
+    let ids = Ids::fetch(&client).await;
     seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
 
     let dry = |spec: UsdResetSpec| {
@@ -3345,10 +3382,10 @@ async fn a_dry_run_refuses_the_wrong_leg_for_either_rate_gated_mode() {
         )
     };
 
-    // The pivot mode on canonical USDC (asset_id 2 here).
+    // The pivot mode on canonical USDC.
     let err = dry(UsdResetSpec {
-        quote_asset_id: 2,
-        ..pivot_reset(DEPEG_DAY - 86_400)
+        quote_asset_id: ids.usdc,
+        ..pivot_reset(ids.xlm, DEPEG_DAY - 86_400)
     })
     .run()
     .await
@@ -3357,19 +3394,19 @@ async fn a_dry_run_refuses_the_wrong_leg_for_either_rate_gated_mode() {
         matches!(
             err,
             ChEnrichError::ResetPivotRateLegIsNotAPivotReference {
-                quote_asset_id: 2,
+                quote_asset_id,
                 ..
-            }
+            } if quote_asset_id == ids.usdc
         ),
         "a dry run of the pivot mode on USDC must refuse, got {err:?}"
     );
 
-    // The external mode on the XLM leg (asset_id 1).
+    // The external mode on the XLM leg.
     let err = dry(UsdResetSpec {
-        quote_asset_id: 1,
+        quote_asset_id: ids.xlm,
         require_external_rate: true,
         require_pivot_usdc_rate: false,
-        ..pivot_reset(DEPEG_DAY - 86_400)
+        ..pivot_reset(ids.xlm, DEPEG_DAY - 86_400)
     })
     .run()
     .await
@@ -3378,15 +3415,18 @@ async fn a_dry_run_refuses_the_wrong_leg_for_either_rate_gated_mode() {
         matches!(
             err,
             ChEnrichError::ResetExternalRateLegIsNotUsdc {
-                quote_asset_id: 1,
+                quote_asset_id,
                 ..
-            }
+            } if quote_asset_id == ids.xlm
         ),
         "a dry run of the external mode on XLM must refuse, got {err:?}"
     );
 
     // The right leg still rehearses: one candidate month, nothing written.
-    let summary = dry(pivot_reset(DEPEG_DAY - 86_400)).run().await.unwrap();
+    let summary = dry(pivot_reset(ids.xlm, DEPEG_DAY - 86_400))
+        .run()
+        .await
+        .unwrap();
     assert_eq!(summary.months.len(), 1, "{summary:?}");
     let (v, ver) = pivot_subject_1h(&client, db, covered).await;
     assert!(
@@ -3417,6 +3457,7 @@ async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() 
     let db = "it_enrich_0228_dry_run_all";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
     let client = setup_0228_reset(db, covered, uncovered).await;
+    let ids = Ids::fetch(&client).await;
     seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
 
     let dry = |spec: UsdResetSpec| {
@@ -3442,7 +3483,7 @@ async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() 
     let err = dry(UsdResetSpec {
         quote_asset_id: 99,
         require_pivot_usdc_rate: false,
-        ..pivot_reset(DEPEG_DAY - 86_400)
+        ..pivot_reset(ids.xlm, DEPEG_DAY - 86_400)
     })
     .run()
     .await
@@ -3460,10 +3501,10 @@ async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() 
 
     // The 0268 mode on a sub-daily table with only the DAILY series loaded.
     let err = dry(UsdResetSpec {
-        quote_asset_id: 2,
+        quote_asset_id: ids.usdc,
         require_external_rate: true,
         require_pivot_usdc_rate: false,
-        ..pivot_reset(DEPEG_DAY - 86_400)
+        ..pivot_reset(ids.xlm, DEPEG_DAY - 86_400)
     })
     .run()
     .await
@@ -3478,12 +3519,12 @@ async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() 
     client
         .query(&format!(
             "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES ({covered}, 1, 'reflector', 0.0588, '{{}}')"
+             VALUES ({covered}, {XLM}, 'reflector', 0.0588, '{{}}')"
         ))
         .execute()
         .await
         .unwrap();
-    let err = dry(pivot_reset(DEPEG_DAY - 86_400))
+    let err = dry(pivot_reset(ids.xlm, DEPEG_DAY - 86_400))
         .run()
         .await
         .unwrap_err();
@@ -3491,10 +3532,10 @@ async fn a_dry_run_refuses_every_month_independent_refusal_the_real_run_would() 
         matches!(
             err,
             ChEnrichError::ResetBlockedByOracleRows {
-                quote_asset_id: 1,
+                quote_asset_id,
                 rows: 1,
                 ..
-            }
+            } if quote_asset_id == ids.xlm
         ),
         "a dry run over an oracle-shadowed span must refuse, got {err:?}"
     );
@@ -3526,12 +3567,13 @@ async fn the_pivot_reset_never_zeroes_a_bucket_it_cannot_refill() {
     let db = "it_enrich_0228_uncovered";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
     let client = setup_0228_reset(db, covered, uncovered).await;
+    let ids = Ids::fetch(&client).await;
     seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
 
     let mut c = cfg(db);
     c.table = "price_ohlcv_1h".to_string();
     c.one_shot = true;
-    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    c.usd_reset = Some(pivot_reset(ids.xlm, DEPEG_DAY - 86_400));
     let stats = ChEnrichmentPass::new(c).run().await.unwrap();
 
     assert_eq!(
@@ -3558,7 +3600,7 @@ async fn the_pivot_reset_never_zeroes_a_bucket_it_cannot_refill() {
     let vqu: f64 = client
         .query(&format!(
             "SELECT toFloat64(volume_quote_usd) FROM {db}.price_ohlcv_1h FINAL \
-             WHERE asset_id = 10 AND quote_asset_id = 1 AND timestamp = {covered}"
+             WHERE asset_id = {FOO} AND quote_asset_id = {XLM} AND timestamp = {covered}"
         ))
         .fetch_one::<f64>()
         .await
@@ -3591,8 +3633,9 @@ async fn the_pivot_reset_never_zeroes_a_bucket_whose_reference_market_is_silent(
     let db = "it_enrich_0228_no_reference";
     let (with_ref, without_ref) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
     let client = setup_scratch(db).await;
+    let ids = Ids::fetch(&client).await;
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -3604,9 +3647,9 @@ async fn the_pivot_reset_never_zeroes_a_bucket_whose_reference_market_is_silent(
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ({with_ref},    1, 2,'sdex',    {XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE}, 1000,58.8,0,0,{XLM_USDC_CLOSE},1,1), \
-             ({with_ref},   10, 1,'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1), \
-             ({without_ref},10, 1,'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1)"
+             ({with_ref},    {XLM}, {USDC}, 'sdex',    {XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE}, 1000,58.8,0,0,{XLM_USDC_CLOSE},1,1), \
+             ({with_ref},   {FOO}, {XLM}, 'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1), \
+             ({without_ref},{FOO}, {XLM}, 'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1)"
         ))
         .execute()
         .await
@@ -3618,7 +3661,7 @@ async fn the_pivot_reset_never_zeroes_a_bucket_whose_reference_market_is_silent(
     let mut c = cfg(db);
     c.table = "price_ohlcv_1h".to_string();
     c.one_shot = true;
-    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    c.usd_reset = Some(pivot_reset(ids.xlm, DEPEG_DAY - 86_400));
     let stats = ChEnrichmentPass::new(c).run().await.unwrap();
 
     assert_eq!(
@@ -3666,13 +3709,14 @@ async fn the_pivot_reset_is_value_idempotent_across_runs() {
     let db = "it_enrich_0228_idempotent";
     let (covered, uncovered) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
     let client = setup_0228_reset(db, covered, uncovered).await;
+    let ids = Ids::fetch(&client).await;
     seed_external_rate(&client, db, DEPEG_DAY, DEPEG_RATE).await;
 
     let pass = || {
         let mut c = cfg(db);
         c.table = "price_ohlcv_1h".to_string();
         c.one_shot = true;
-        c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+        c.usd_reset = Some(pivot_reset(ids.xlm, DEPEG_DAY - 86_400));
         c
     };
 
@@ -3739,22 +3783,26 @@ async fn seed_dust_and_priced(client: &Client, db: &str, ts: u32) {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
-             ({ts}, 10, 2, 'sdex', 5,5,5,5, 1, 5, 0, 0, 5, 5, 1, 2, 1, 5), \
-             ({ts}, 11, 2, 'sdex', 0,0,0,0, 1, 5, 0, 0, 5, 5, 1, 0, 0, 0)"
+             ({ts}, {FOO}, {USDC}, 'sdex', 5,5,5,5, 1, 5, 0, 0, 5, 5, 1, 2, 1, 5), \
+             ({ts}, 11, {USDC}, 'sdex', 0,0,0,0, 1, 5, 0, 0, 5, 5, 1, 0, 0, 0)"
         ))
         .execute()
         .await
         .unwrap();
 }
 
-async fn pf_of(client: &Client, db: &str, asset: u32, quote: u32, ts: u32) -> (u32, u32) {
+async fn pf_of(
+    client: &Client,
+    db: &str,
+    asset: impl Display,
+    quote: impl Display,
+    ts: u32,
+) -> (u32, u32) {
     client
         .query(&format!(
             "SELECT trade_count, pf_trade_count FROM {db}.price_ohlcv_1m FINAL \
-             WHERE asset_id = ? AND quote_asset_id = ? AND timestamp = ?"
+             WHERE asset_id = {asset} AND quote_asset_id = {quote} AND timestamp = ?"
         ))
-        .bind(asset)
-        .bind(quote)
         .bind(ts)
         .fetch_one::<(u32, u32)>()
         .await
@@ -3788,14 +3836,14 @@ async fn a_dust_only_minute_is_priced_once_and_is_never_reselected() {
     let ts = 1_700_000_000u32;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
     client
         .query(&format!(
             "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES ({ts}, 2, 'reflector', 1.0012, '{{}}')"
+             VALUES ({ts}, {USDC}, 'reflector', 1.0012, '{{}}')"
         ))
         .execute()
         .await
@@ -3840,14 +3888,18 @@ async fn a_dust_only_minute_is_priced_once_and_is_never_reselected() {
         .unwrap();
 }
 
-async fn version_of(client: &Client, db: &str, asset: u32, quote: u32, ts: u32) -> u64 {
+async fn version_of(
+    client: &Client,
+    db: &str,
+    asset: impl Display,
+    quote: impl Display,
+    ts: u32,
+) -> u64 {
     client
         .query(&format!(
             "SELECT toUInt64(version) FROM {db}.price_ohlcv_1m FINAL \
-             WHERE asset_id = ? AND quote_asset_id = ? AND timestamp = ?"
+             WHERE asset_id = {asset} AND quote_asset_id = {quote} AND timestamp = ?"
         ))
-        .bind(asset)
-        .bind(quote)
         .bind(ts)
         .fetch_one::<u64>()
         .await
@@ -3870,14 +3922,14 @@ async fn a_usd_close_that_rounds_to_zero_is_written_once_and_never_rewritten() {
     let ts = 1_700_000_000u32;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
     client
         .query(&format!(
             "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES ({ts}, 20, 'reflector', 0.000001, '{{}}')"
+             VALUES ({ts}, {EXO}, 'reflector', 0.000001, '{{}}')"
         ))
         .execute()
         .await
@@ -3889,7 +3941,7 @@ async fn a_usd_close_that_rounds_to_zero_is_written_once_and_never_rewritten() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
-             ({ts}, 10, 20, 'sdex', 0.000000001,0.000000001,0.000000001,0.000000001, \
+             ({ts}, {FOO}, {EXO}, 'sdex', 0.000000001,0.000000001,0.000000001,0.000000001, \
               9000000000, 9, 0, 0, 0.000000001, 1, 1, 1, 9000000000, 9)"
         ))
         .execute()
@@ -3898,12 +3950,12 @@ async fn a_usd_close_that_rounds_to_zero_is_written_once_and_never_rewritten() {
 
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
     // The first pass is a real write: the volume gets its USD value.
-    let after_first = version_of(&client, db, 10, 20, ts).await;
+    let after_first = version_of(&client, db, FOO, EXO, ts).await;
     assert_eq!(after_first, 2, "the first pass prices the volume");
 
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
     assert_eq!(
-        version_of(&client, db, 10, 20, ts).await,
+        version_of(&client, db, FOO, EXO, ts).await,
         after_first,
         "the second pass had nothing to change and must not re-insert the row"
     );
@@ -3927,14 +3979,14 @@ async fn an_oracle_reading_of_zero_writes_nothing() {
     let ts = 1_700_000_000u32;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
     client
         .query(&format!(
             "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES ({ts}, 20, 'reflector', 0, '{{}}')"
+             VALUES ({ts}, {EXO}, 'reflector', 0, '{{}}')"
         ))
         .execute()
         .await
@@ -3945,7 +3997,7 @@ async fn an_oracle_reading_of_zero_writes_nothing() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
-             ({ts}, 10, 20, 'sdex', 9,9,9,9, 1, 9, 0, 0, 9, 1, 1, 1, 1, 9)"
+             ({ts}, {FOO}, {EXO}, 'sdex', 9,9,9,9, 1, 9, 0, 0, 9, 1, 1, 1, 1, 9)"
         ))
         .execute()
         .await
@@ -3953,7 +4005,7 @@ async fn an_oracle_reading_of_zero_writes_nothing() {
 
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
     assert_eq!(
-        version_of(&client, db, 10, 20, ts).await,
+        version_of(&client, db, FOO, EXO, ts).await,
         1,
         "a zero reading is not a price: the candle must be left exactly as it was"
     );
@@ -3977,18 +4029,19 @@ async fn an_oracle_reading_of_zero_writes_nothing() {
 async fn pf_columns_survive_every_enrichment_rewrite() {
     let db = "it_enrich_pf_survive";
     let client = setup_scratch(db).await;
+    let ids = Ids::fetch(&client).await;
     let recent = 1_700_000_000u32;
     let deep = 1_600_000_000u32;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
     client
         .query(&format!(
             "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
-             VALUES ({recent}, 2, 'reflector', 1.0012, '{{}}')"
+             VALUES ({recent}, {USDC}, 'reflector', 1.0012, '{{}}')"
         ))
         .execute()
         .await
@@ -4003,10 +4056,10 @@ async fn pf_columns_survive_every_enrichment_rewrite() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
-             ({recent}, 10, 2, 'sdex', 5,5,5,5, 1, 5, 0, 0, 5, 5, 1, 2, 1, 5), \
-             ({deep}, 10, 2, 'sdex', 4,4,4,4, 1, 4, 0, 0, 4, 5, 1, 2, 1, 4), \
-             ({deep}, 1, 2, 'sdex', 0.30,0.30,0.30,0.30, 1000, 300, 0, 0, 0.30, 5, 1, 2, 500, 150), \
-             ({deep}, 10, 1, 'phoenix', 13.3333,13.3333,13.3333,13.3333, 3, 40, 0, 0, 13.3333, 5, 1, 2, 2, 27)"
+             ({recent}, {FOO}, {USDC}, 'sdex', 5,5,5,5, 1, 5, 0, 0, 5, 5, 1, 2, 1, 5), \
+             ({deep}, {FOO}, {USDC}, 'sdex', 4,4,4,4, 1, 4, 0, 0, 4, 5, 1, 2, 1, 4), \
+             ({deep}, {XLM}, {USDC}, 'sdex', 0.30,0.30,0.30,0.30, 1000, 300, 0, 0, 0.30, 5, 1, 2, 500, 150), \
+             ({deep}, {FOO}, {XLM}, 'phoenix', 13.3333,13.3333,13.3333,13.3333, 3, 40, 0, 0, 13.3333, 5, 1, 2, 2, 27)"
         ))
         .execute()
         .await
@@ -4016,10 +4069,10 @@ async fn pf_columns_survive_every_enrichment_rewrite() {
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
 
     for (asset, quote, ts, tier) in [
-        (10u32, 2u32, recent, "oracle"),
-        (10, 2, deep, "peg"),
-        (1, 2, deep, "pivot reference"),
-        (10, 1, deep, "pivot"),
+        (FOO, USDC, recent, "oracle"),
+        (FOO, USDC, deep, "peg"),
+        (XLM, USDC, deep, "pivot reference"),
+        (FOO, XLM, deep, "pivot"),
     ] {
         let (tc, pf) = pf_of(&client, db, asset, quote, ts).await;
         assert_eq!(tc, 5, "{tier}: trade_count must survive");
@@ -4041,7 +4094,7 @@ async fn pf_columns_survive_every_enrichment_rewrite() {
     let mut reset_cfg = cfg(db);
     reset_cfg.one_shot = true;
     reset_cfg.usd_reset = Some(UsdResetSpec {
-        quote_asset_id: 1,
+        quote_asset_id: ids.xlm,
         not_before: deep,
         not_after: None,
         require_external_rate: false,
@@ -4049,7 +4102,7 @@ async fn pf_columns_survive_every_enrichment_rewrite() {
     });
     ChEnrichmentPass::new(reset_cfg).run().await.unwrap();
 
-    for (asset, quote, ts) in [(10u32, 1u32, deep), (10, 2, recent), (10, 2, deep)] {
+    for (asset, quote, ts) in [(FOO, XLM, deep), (FOO, USDC, recent), (FOO, USDC, deep)] {
         let (tc, pf) = pf_of(&client, db, asset, quote, ts).await;
         assert_eq!(tc, 5, "reset: trade_count must survive");
         assert_eq!(pf, 2, "reset: pf_trade_count must survive");
@@ -4081,7 +4134,7 @@ async fn the_pivot_ignores_a_legacy_reference_minute_that_claims_a_price_it_has_
     let late = early + 600;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -4093,10 +4146,10 @@ async fn the_pivot_ignores_a_legacy_reference_minute_that_claims_a_price_it_has_
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
-             ({early}, 1, 2, 'sdex', 0.30,0.30,0.30,0.30, 1000, 300, 0, 0, 0.30, 5, 1, 2, 1000, 300), \
-             ({early}, 1, 2, 'phoenix', 0,0,0,0, 1000, 1, 0, 0, 0.001, 3, 1, 3, 1000, 1), \
-             ({late}, 1, 2, 'phoenix', 0,0,0,0, 1000, 1, 0, 0, 0.001, 3, 1, 3, 1000, 1), \
-             ({late}, 10, 1, 'phoenix', 13.3333,13.3333,13.3333,13.3333, 3, 40, 0, 0, 13.3333, 5, 1, 2, 3, 40)"
+             ({early}, {XLM}, {USDC}, 'sdex', 0.30,0.30,0.30,0.30, 1000, 300, 0, 0, 0.30, 5, 1, 2, 1000, 300), \
+             ({early}, {XLM}, {USDC}, 'phoenix', 0,0,0,0, 1000, 1, 0, 0, 0.001, 3, 1, 3, 1000, 1), \
+             ({late}, {XLM}, {USDC}, 'phoenix', 0,0,0,0, 1000, 1, 0, 0, 0.001, 3, 1, 3, 1000, 1), \
+             ({late}, {FOO}, {XLM}, 'phoenix', 13.3333,13.3333,13.3333,13.3333, 3, 40, 0, 0, 13.3333, 5, 1, 2, 3, 40)"
         ))
         .execute()
         .await
@@ -4105,7 +4158,7 @@ async fn the_pivot_ignores_a_legacy_reference_minute_that_claims_a_price_it_has_
 
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
 
-    let priced = close_usd(&client, db, 10, 1, late).await;
+    let priced = close_usd(&client, db, FOO, XLM, late).await;
     assert!(
         (priced - 4.0).abs() < 1e-4,
         "the reference must be the priced row's 0.30 (13.3333 x 0.30 = 4.0), \
@@ -4140,7 +4193,7 @@ async fn the_pivot_ignores_a_dust_only_reference_minute() {
     let late = early + 600;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -4156,10 +4209,10 @@ async fn the_pivot_ignores_a_dust_only_reference_minute() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
-             ({early}, 1, 2, 'sdex', 0.30,0.30,0.30,0.30, 1000, 300, 0, 0, 0.30, 5, 1, 2, 1000, 300), \
-             ({early}, 1, 2, 'phoenix', 0,0,0,0, 1000, 1, 0, 0, 0.001, 3, 1, 0, 0, 0), \
-             ({late}, 1, 2, 'phoenix', 0,0,0,0, 1000, 1, 0, 0, 0.001, 3, 1, 0, 0, 0), \
-             ({late}, 10, 1, 'phoenix', 13.3333,13.3333,13.3333,13.3333, 3, 40, 0, 0, 13.3333, 5, 1, 2, 3, 40)"
+             ({early}, {XLM}, {USDC}, 'sdex', 0.30,0.30,0.30,0.30, 1000, 300, 0, 0, 0.30, 5, 1, 2, 1000, 300), \
+             ({early}, {XLM}, {USDC}, 'phoenix', 0,0,0,0, 1000, 1, 0, 0, 0.001, 3, 1, 0, 0, 0), \
+             ({late}, {XLM}, {USDC}, 'phoenix', 0,0,0,0, 1000, 1, 0, 0, 0.001, 3, 1, 0, 0, 0), \
+             ({late}, {FOO}, {XLM}, 'phoenix', 13.3333,13.3333,13.3333,13.3333, 3, 40, 0, 0, 13.3333, 5, 1, 2, 3, 40)"
         ))
         .execute()
         .await
@@ -4168,7 +4221,7 @@ async fn the_pivot_ignores_a_dust_only_reference_minute() {
 
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
 
-    let priced = close_usd(&client, db, 10, 1, late).await;
+    let priced = close_usd(&client, db, FOO, XLM, late).await;
     assert!(
         (priced - 4.0).abs() < 1e-4,
         "the reference must be the priced row's 0.30 (13.3333 x 0.30 = 4.0), \
@@ -4218,7 +4271,7 @@ async fn a_dust_only_minute_quoted_in_a_pegged_asset_is_priced_once_by_the_peg_t
     let ts = USDC_ORACLE_EPOCH_S + 60;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -4230,8 +4283,8 @@ async fn a_dust_only_minute_quoted_in_a_pegged_asset_is_priced_once_by_the_peg_t
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
-             ({ts}, 10,  2, 'sdex', 0,0,0,0, 1, 5, 0, 0, 5, 5, 1, 0, 0, 0), \
-             ({ts}, 10, 20, 'sdex', 9,9,9,9, 1, 9, 0, 0, 9, 1, 1, 1, 1, 9)"
+             ({ts}, {FOO}, {USDC}, 'sdex', 0,0,0,0, 1, 5, 0, 0, 5, 5, 1, 0, 0, 0), \
+             ({ts}, {FOO}, {EXO}, 'sdex', 9,9,9,9, 1, 9, 0, 0, 9, 1, 1, 1, 1, 9)"
         ))
         .execute()
         .await
@@ -4245,7 +4298,7 @@ async fn a_dust_only_minute_quoted_in_a_pegged_asset_is_priced_once_by_the_peg_t
     let volume_usd = client
         .query(&format!(
             "SELECT toFloat64(volume_quote_usd) FROM {db}.price_ohlcv_1m FINAL \
-             WHERE asset_id = 10 AND quote_asset_id = 2 AND timestamp = ?"
+             WHERE asset_id = {FOO} AND quote_asset_id = {USDC} AND timestamp = ?"
         ))
         .bind(ts)
         .fetch_one::<f64>()
@@ -4259,12 +4312,12 @@ async fn a_dust_only_minute_quoted_in_a_pegged_asset_is_priced_once_by_the_peg_t
          external tier priced a candle above the oracle epoch"
     );
     assert_eq!(
-        close_usd(&client, db, 10, 2, ts).await,
+        close_usd(&client, db, FOO, USDC, ts).await,
         0.0,
         "a candle that formed no price has no close to value: close_usd stays 0"
     );
 
-    let after_first = version_of(&client, db, 10, 2, ts).await;
+    let after_first = version_of(&client, db, FOO, USDC, ts).await;
     assert_eq!(after_first, 2, "the dust row is written exactly once");
     assert_eq!(
         candidates_left(&client, db).await,
@@ -4274,7 +4327,7 @@ async fn a_dust_only_minute_quoted_in_a_pegged_asset_is_priced_once_by_the_peg_t
 
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
     assert_eq!(
-        version_of(&client, db, 10, 2, ts).await,
+        version_of(&client, db, FOO, USDC, ts).await,
         after_first,
         "the dust row has nothing left to change and must not be re-selected; a \
          growing version is the pre-0286 `WHERE close_usd = 0` latch, re-inserting \
@@ -4309,7 +4362,7 @@ async fn the_pivot_ignores_a_reference_minute_that_formed_no_price() {
     let late = early + 600;
 
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -4324,9 +4377,9 @@ async fn the_pivot_ignores_a_reference_minute_that_formed_no_price() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
-             ({early}, 1, 2, 'sdex', 0.30,0.30,0.30,0.30, 1000, 300, 0, 0, 0.30, 5, 1, 2, 1000, 300), \
-             ({late}, 1, 2, 'sdex', 0.60,0.60,0.60,0.60, 1000, 600, 0, 0, 0.60, 3, 1, 0, 0, 0), \
-             ({late}, 10, 1, 'phoenix', 13.3333,13.3333,13.3333,13.3333, 3, 40, 0, 0, 13.3333, 5, 1, 2, 3, 40)"
+             ({early}, {XLM}, {USDC}, 'sdex', 0.30,0.30,0.30,0.30, 1000, 300, 0, 0, 0.30, 5, 1, 2, 1000, 300), \
+             ({late}, {XLM}, {USDC}, 'sdex', 0.60,0.60,0.60,0.60, 1000, 600, 0, 0, 0.60, 3, 1, 0, 0, 0), \
+             ({late}, {FOO}, {XLM}, 'phoenix', 13.3333,13.3333,13.3333,13.3333, 3, 40, 0, 0, 13.3333, 5, 1, 2, 3, 40)"
         ))
         .execute()
         .await
@@ -4335,7 +4388,7 @@ async fn the_pivot_ignores_a_reference_minute_that_formed_no_price() {
 
     ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
 
-    let priced = close_usd(&client, db, 10, 1, late).await;
+    let priced = close_usd(&client, db, FOO, XLM, late).await;
     assert!(
         (priced - 4.0).abs() < 1e-4,
         "the reference must be the price-forming row's 0.30 (13.3333 x 0.30 = 4.0), \
@@ -4373,8 +4426,9 @@ async fn the_pivot_reset_never_re_opens_a_day_whose_only_reference_is_dust() {
     let db = "it_enrich_0228_dust_reference_day";
     let (with_ref, dust_ref) = (DEPEG_DAY + 43_200, DEPEG_DAY + 5 * 86_400 + 43_200);
     let client = setup_scratch(db).await;
+    let ids = Ids::fetch(&client).await;
     client
-        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .query(&assets_insert(db, &ASSETS))
         .execute()
         .await
         .unwrap();
@@ -4390,10 +4444,10 @@ async fn the_pivot_reset_never_re_opens_a_day_whose_only_reference_is_dust() {
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, \
               version, pf_trade_count, pf_volume, pf_price_volume) VALUES \
-             ({with_ref}, 1, 2,'sdex', {XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE}, 1000,58.8,0,0,{XLM_USDC_CLOSE},1,1, 1,1000,58.8), \
-             ({with_ref},10, 1,'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1, 1,5,50), \
-             ({dust_ref}, 1, 2,'sdex', 0,0,0,0, 1000,1,0,0,0.001,3,1, 0,0,0), \
-             ({dust_ref},10, 1,'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1, 1,5,50)"
+             ({with_ref}, {XLM}, {USDC}, 'sdex', {XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE},{XLM_USDC_CLOSE}, 1000,58.8,0,0,{XLM_USDC_CLOSE},1,1, 1,1000,58.8), \
+             ({with_ref},{FOO}, {XLM}, 'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1, 1,5,50), \
+             ({dust_ref}, {XLM}, {USDC}, 'sdex', 0,0,0,0, 1000,1,0,0,0.001,3,1, 0,0,0), \
+             ({dust_ref},{FOO}, {XLM}, 'phoenix', {FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE},{FOO_XLM_CLOSE}, 5,50,2.94,{stored},{FOO_XLM_CLOSE},1,1, 1,5,50)"
         ))
         .execute()
         .await
@@ -4404,7 +4458,7 @@ async fn the_pivot_reset_never_re_opens_a_day_whose_only_reference_is_dust() {
     let mut c = cfg(db);
     c.table = "price_ohlcv_1h".to_string();
     c.one_shot = true;
-    c.usd_reset = Some(pivot_reset(DEPEG_DAY - 86_400));
+    c.usd_reset = Some(pivot_reset(ids.xlm, DEPEG_DAY - 86_400));
     let stats = ChEnrichmentPass::new(c).run().await.unwrap();
 
     assert_eq!(
