@@ -204,12 +204,12 @@ impl AssetRegistry {
     /// Record the SAC address of a classic identity (no-op for `Contract` and for
     /// identities whose SAC was already mapped). Cheap: only on first intern.
     fn register_sac(&mut self, identity: &AssetIdentity) {
-        if let Some(asset) = identity_to_asset(identity) {
-            if let Some(addr) = sac_address(&asset, &self.network_id) {
-                self.sac_index
-                    .entry(addr)
-                    .or_insert_with(|| identity.clone());
-            }
+        if let Some(asset) = identity_to_asset(identity)
+            && let Some(addr) = sac_address(&asset, &self.network_id)
+        {
+            self.sac_index
+                .entry(addr)
+                .or_insert_with(|| identity.clone());
         }
     }
 
@@ -329,15 +329,36 @@ fn stellar_strkey(ed25519: &[u8]) -> String {
 fn crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0;
     for &byte in data {
-        let mut code = crc >> 8 & 0xFF;
+        let mut code = crc >> 8;
         code ^= byte as u16;
         code ^= code >> 4;
-        crc = (crc << 8) & 0xFFFF;
+        crc <<= 8;
         crc ^= code;
-        crc ^= (code << 5) & 0xFFFF;
-        crc ^= (code << 12) & 0xFFFF;
+        crc ^= code << 5;
+        crc ^= code << 12;
     }
     crc
+}
+
+fn base32_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut result = String::with_capacity((data.len() * 8).div_ceil(5));
+    let mut buffer: u64 = 0;
+    let mut bits = 0;
+
+    for &byte in data {
+        buffer = (buffer << 8) | byte as u64;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            result.push(ALPHABET[((buffer >> bits) & 0x1F) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        buffer <<= 5 - bits;
+        result.push(ALPHABET[(buffer & 0x1F) as usize] as char);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -454,25 +475,4 @@ mod tests {
             "no new asset → no rows to write"
         );
     }
-}
-
-fn base32_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    let mut result = String::with_capacity((data.len() * 8 + 4) / 5);
-    let mut buffer: u64 = 0;
-    let mut bits = 0;
-
-    for &byte in data {
-        buffer = (buffer << 8) | byte as u64;
-        bits += 8;
-        while bits >= 5 {
-            bits -= 5;
-            result.push(ALPHABET[((buffer >> bits) & 0x1F) as usize] as char);
-        }
-    }
-    if bits > 0 {
-        buffer <<= 5 - bits;
-        result.push(ALPHABET[(buffer & 0x1F) as usize] as char);
-    }
-    result
 }

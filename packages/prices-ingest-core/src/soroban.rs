@@ -606,10 +606,9 @@ fn classify_amm_groups(
             Venue::Sushiswap => !reg.sushiswap.contains(&contract_id),
             Venue::Aquarius | Venue::Phoenix | Venue::Comet => false,
         };
-        if pair_unresolved {
-            if let Some(rec) = unresolved_from_swaps(contract_id, &swaps, ledger_seq) {
-                out.unresolved.push(rec);
-            }
+        if pair_unresolved && let Some(rec) = unresolved_from_swaps(contract_id, &swaps, ledger_seq)
+        {
+            out.unresolved.push(rec);
         }
     }
 }
@@ -749,11 +748,11 @@ fn learn_factory(topics: &Value, data: &Value, reg: &mut Registries) {
 
     // Phoenix factory: [Symbol("create"), Symbol("liquidity_pool")], data Address(pool)
     if sig0 == Some("create") {
-        if sig1 == Some("liquidity_pool") {
-            if let Some(pool) = address_value(data) {
-                reg.venue.insert(pool.clone(), Venue::Phoenix);
-                reg.phoenix.register(pool, phoenix_extractor::POOL_TYPE_XYK);
-            }
+        if sig1 == Some("liquidity_pool")
+            && let Some(pool) = address_value(data)
+        {
+            reg.venue.insert(pool.clone(), Venue::Phoenix);
+            reg.phoenix.register(pool, phoenix_extractor::POOL_TYPE_XYK);
         }
         return;
     }
@@ -784,19 +783,19 @@ fn learn_factory(topics: &Value, data: &Value, reg: &mut Registries) {
     // FC9B0DF0, the live one on 9F94C577) register through this one arm. All
     // three addresses are required, so a differently-shaped `pool_created` from
     // some other protocol cannot register a pool with empty tokens.
-    if sig0 == Some("pool_created") {
-        if let TaggedValue::Map(m) = json_to_tagged(data) {
-            let get = |k: &str| {
-                m.iter()
-                    .find(|(key, _)| key.as_str() == Some(k))
-                    .and_then(|(_, v)| v.as_address().map(String::from))
-            };
-            if let (Some(pool), Some(t0), Some(t1)) =
-                (get("pool_address"), get("token0"), get("token1"))
-            {
-                reg.sushiswap.register(pool.clone(), t0, t1);
-                reg.venue.insert(pool, Venue::Sushiswap);
-            }
+    if sig0 == Some("pool_created")
+        && let TaggedValue::Map(m) = json_to_tagged(data)
+    {
+        let get = |k: &str| {
+            m.iter()
+                .find(|(key, _)| key.as_str() == Some(k))
+                .and_then(|(_, v)| v.as_address().map(String::from))
+        };
+        if let (Some(pool), Some(t0), Some(t1)) =
+            (get("pool_address"), get("token0"), get("token1"))
+        {
+            reg.sushiswap.register(pool.clone(), t0, t1);
+            reg.venue.insert(pool, Venue::Sushiswap);
         }
     }
 }
@@ -918,28 +917,28 @@ fn decode_reflector(
         return;
     };
     for entry in entries {
-        if let TaggedValue::Vec(kv) = entry {
-            if kv.len() >= 2 {
-                let key = kv[0].as_str().map(String::from);
-                let price = kv[1].as_i128();
-                if let (Some(key), Some(price)) = (key, price) {
-                    // Resolve to the canonical asset_id (task 0061 §5). Only the
-                    // USD-pegged stables + XLM resolve; every other symbol is
-                    // dropped — either it has no Stellar identity (EUR, BTC, …) or
-                    // it's a tradeable asset we deliberately don't price through
-                    // (EURC). See `reflector_key_to_identity` for the distinction.
-                    let Some(identity) = reflector_key_to_identity(&key) else {
-                        continue;
-                    };
-                    let asset_id = assets.get_or_assign(&identity);
-                    out.oracle.push(OracleSample {
-                        timestamp,
-                        asset_id,
-                        oracle_name: "reflector".to_string(),
-                        price_usd: price, // already 1e14-scaled
-                        raw_data: format!("{{\"asset\":\"{key}\"}}"),
-                    });
-                }
+        if let TaggedValue::Vec(kv) = entry
+            && kv.len() >= 2
+        {
+            let key = kv[0].as_str().map(String::from);
+            let price = kv[1].as_i128();
+            if let (Some(key), Some(price)) = (key, price) {
+                // Resolve to the canonical asset_id (task 0061 §5). Only the
+                // USD-pegged stables + XLM resolve; every other symbol is
+                // dropped — either it has no Stellar identity (EUR, BTC, …) or
+                // it's a tradeable asset we deliberately don't price through
+                // (EURC). See `reflector_key_to_identity` for the distinction.
+                let Some(identity) = reflector_key_to_identity(&key) else {
+                    continue;
+                };
+                let asset_id = assets.get_or_assign(&identity);
+                out.oracle.push(OracleSample {
+                    timestamp,
+                    asset_id,
+                    oracle_name: "reflector".to_string(),
+                    price_usd: price, // already 1e14-scaled
+                    raw_data: format!("{{\"asset\":\"{key}\"}}"),
+                });
             }
         }
     }
