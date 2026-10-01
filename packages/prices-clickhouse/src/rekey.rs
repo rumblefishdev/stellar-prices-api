@@ -490,6 +490,8 @@ pub struct FillReport {
     pub skipped: usize,
 }
 
+type LastFill = (String, String, u64, u64, u64);
+
 /// What a fill needs to know about its two tables.
 #[derive(Debug, Clone)]
 pub struct Layout {
@@ -678,6 +680,23 @@ impl Rekey {
     /// Fill refuses a source already in the new id space, a target that is
     /// not, and a missing or failing map.
     async fn refuse_fill(&self, f: &Fill) -> Result<()> {
+        self.refuse_ids(f).await?;
+        if !self.exists(MAP_TABLE).await?
+            || self
+                .count(&format!("SELECT count() FROM {}", self.t(MAP_TABLE)))
+                .await?
+                == 0
+        {
+            return Err(RekeyError::Refused("no map (run map)".into()));
+        }
+        if !self.has_query_log().await? {
+            return Err(RekeyError::Refused(NO_QUERY_LOG.into()));
+        }
+        self.map_gates(MAP_TABLE).await
+    }
+
+    /// The source must hold UInt32 ids and the target UInt64 ids.
+    async fn refuse_ids(&self, f: &Fill) -> Result<()> {
         let src = self.id_types(&f.source).await?;
         if src.is_empty() {
             return Err(RekeyError::Refused(format!(
@@ -698,18 +717,7 @@ impl Rekey {
                 f.target
             )));
         }
-        if !self.exists(MAP_TABLE).await?
-            || self
-                .count(&format!("SELECT count() FROM {}", self.t(MAP_TABLE)))
-                .await?
-                == 0
-        {
-            return Err(RekeyError::Refused("no map (run map)".into()));
-        }
-        if !self.has_query_log().await? {
-            return Err(RekeyError::Refused(NO_QUERY_LOG.into()));
-        }
-        self.map_gates(MAP_TABLE).await
+        Ok(())
     }
 
     async fn layout(&self, f: &Fill) -> Result<Layout> {
@@ -747,12 +755,18 @@ impl Rekey {
         })
     }
 
-    async fn last_fill(&self, f: &Fill, pid: &str) -> Result<Option<(String, String, u64)>> {
+    /// `(status, fingerprint, expected_keys, written, expected)` of the last
+    /// fill of a partition.
+    async fn last_fill(&self, f: &Fill, pid: &str) -> Result<Option<LastFill>> {
+        if !self.exists(LOG_TABLE).await? {
+            return Ok(None);
+        }
         Ok(self
             .client
             .query(&format!(
-                "SELECT status, fingerprint, expected_keys FROM {} WHERE step = 'fill' \
-                 AND source = ? AND target = ? AND partition = ? ORDER BY at DESC LIMIT 1",
+                "SELECT status, fingerprint, expected_keys, written, expected FROM {} \
+                 WHERE step = 'fill' AND source = ? AND target = ? AND partition = ? \
+                 ORDER BY at DESC LIMIT 1",
                 self.t(LOG_TABLE)
             ))
             .bind(&f.source)
@@ -760,6 +774,37 @@ impl Rekey {
             .bind(pid)
             .fetch_optional()
             .await?)
+    }
+
+    /// `(partition, partition_id)` of the active parts of `table`.
+    async fn partitions(&self, table: &str) -> Result<Vec<(String, String)>> {
+        Ok(self
+            .client
+            .query(
+                "SELECT partition, partition_id FROM system.parts WHERE database = ? \
+                 AND table = ? AND active GROUP BY partition, partition_id \
+                 ORDER BY partition_id",
+            )
+            .bind(&self.db)
+            .bind(table)
+            .fetch_all()
+            .await?)
+    }
+
+    /// `(fingerprint, expected rows, expected distinct keys)` of a source
+    /// partition.
+    async fn probe(&self, f: &Fill, l: &Layout, filter: &str) -> Result<(String, u64, u64)> {
+        let (rows, hash, expected, keys): (u64, u64, u64, u64) = self
+            .client
+            .query(&probe_sql(&self.db, &f.source, l, filter))
+            .fetch_one()
+            .await?;
+        Ok((format!("{rows}:{hash}"), expected, keys))
+    }
+
+    async fn target_keys(&self, f: &Fill, l: &Layout, filter: &str) -> Result<u64> {
+        self.count(&target_keys_sql(&self.db, &f.target, l, filter))
+            .await
     }
 
     /// Copy `f.source` into `f.target` partition by partition. A partition
@@ -771,17 +816,7 @@ impl Rekey {
         self.refuse_fill(f).await?;
         self.ensure_tool_tables().await?;
         let l = self.layout(f).await?;
-        let parts: Vec<(String, String)> = self
-            .client
-            .query(
-                "SELECT partition, partition_id FROM system.parts WHERE database = ? \
-                 AND table = ? AND active GROUP BY partition, partition_id \
-                 ORDER BY partition_id",
-            )
-            .bind(&self.db)
-            .bind(&f.source)
-            .fetch_all()
-            .await?;
+        let parts = self.partitions(&f.source).await?;
         let mut report = FillReport::default();
         let mut failed = Vec::new();
         for (partition, pid) in parts {
@@ -792,21 +827,11 @@ impl Rekey {
                 continue;
             }
             let filter = partition_where(&l.partition_key, &partition);
-            let (rows, hash, expected, expected_keys): (u64, u64, u64, u64) = self
-                .client
-                .query(&probe_sql(&self.db, &f.source, &l, &filter))
-                .fetch_one()
-                .await?;
-            let fingerprint = format!("{rows}:{hash}");
-            let target_keys = |c: &Client| {
-                c.query(&target_keys_sql(&self.db, &f.target, &l, &filter))
-                    .fetch_one::<u64>()
-            };
-            if self.exists(LOG_TABLE).await?
-                && let Some((status, fp, keys)) = self.last_fill(f, &pid).await?
+            let (fingerprint, expected, expected_keys) = self.probe(f, &l, &filter).await?;
+            if let Some((status, fp, keys, _, _)) = self.last_fill(f, &pid).await?
                 && status == "verified"
                 && fp == fingerprint
-                && target_keys(&self.client).await? == keys
+                && self.target_keys(f, &l, &filter).await? == keys
             {
                 report.skipped += 1;
                 continue;
@@ -849,7 +874,7 @@ impl Rekey {
                 std::time::Duration::from_secs(2),
             )
             .await?;
-            let keys = target_keys(&self.client).await?;
+            let keys = self.target_keys(f, &l, &filter).await?;
             let verified = written == Some(expected) && keys == expected_keys;
             if !verified {
                 failed.push(format!(
@@ -881,6 +906,219 @@ impl Rekey {
             Ok(report)
         } else {
             Err(RekeyError::Gate(format!("fill: {}", failed.join("; "))))
+        }
+    }
+}
+
+/// Each source row's fate: `copied`, or why not (`colliding` before
+/// `orphan`; `unmapped` means the map is older than the row).
+pub fn classify_sql(db: &str, source: &str, ids: &[String], extra: &str) -> String {
+    let st = |c: &str| format!("{}.st", id_alias(c));
+    let any = |v: &str| {
+        ids.iter()
+            .map(|c| format!("{} = '{v}'", st(c)))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    let joins: String = ids
+        .iter()
+        .map(|c| {
+            let a = id_alias(c);
+            format!(
+                " LEFT JOIN (SELECT old_id, any(status) AS st FROM {db}.{MAP_TABLE} \
+                 GROUP BY old_id) AS {a} ON {a}.old_id = s.{c}"
+            )
+        })
+        .collect();
+    format!(
+        "SELECT {extra}multiIf({}, 'unmapped', {}, '{STATUS_COLLIDING}', {}, '{STATUS_ORPHAN}', \
+         'copied') AS cls FROM {db}.{source} AS s{joins}",
+        any(""),
+        any(STATUS_COLLIDING),
+        any(STATUS_ORPHAN),
+    )
+}
+
+/// The free-space gate: 1.2× the bytes to be copied.
+pub fn disk_ok(free: u64, bytes: u64) -> bool {
+    u128::from(free) * 5 >= u128::from(bytes) * 6
+}
+
+/// The server the tool was built and rehearsed against.
+pub fn supported_version(v: &str) -> bool {
+    v.starts_with("26.3.")
+}
+
+impl Rekey {
+    /// Per table: every source partition's last fill verified, unchanged
+    /// since, and its target keys intact; Σ written = Σ expected; excluded
+    /// rows per status. Writes the per-month exclusions of `price_ohlcv_1m`
+    /// to `rekey_0139_reingest_months`. Returns one line per table.
+    pub async fn check(&self, fills: &[Fill]) -> Result<Vec<String>> {
+        self.ensure_tool_tables().await?;
+        let mut lines = Vec::new();
+        let mut problems = Vec::new();
+        for f in fills {
+            self.refuse_ids(f).await?;
+            let l = self.layout(f).await?;
+            let (mut written, mut expected) = (0u64, 0u64);
+            for (partition, pid) in self.partitions(&f.source).await? {
+                let filter = partition_where(&l.partition_key, &partition);
+                let at = format!("{}/{pid}", f.target);
+                let Some((status, fp, keys, w, e)) = self.last_fill(f, &pid).await? else {
+                    problems.push(format!("{at}: not filled"));
+                    continue;
+                };
+                (written, expected) = (written + w, expected + e);
+                let (fingerprint, _, _) = self.probe(f, &l, &filter).await?;
+                let target_keys = self.target_keys(f, &l, &filter).await?;
+                if status != "verified" {
+                    problems.push(format!("{at}: last fill {status}"));
+                } else if fp != fingerprint {
+                    problems.push(format!("{at}: source changed since fill"));
+                } else if target_keys != keys {
+                    problems.push(format!("{at}: target keys {target_keys} of {keys}"));
+                }
+            }
+            if written != expected {
+                problems.push(format!(
+                    "{}: written {written} != expected {expected}",
+                    f.target
+                ));
+            }
+            let classes: Vec<(String, u64)> = self
+                .client
+                .query(&format!(
+                    "SELECT cls, count() FROM ({}) GROUP BY cls ORDER BY cls",
+                    classify_sql(&self.db, &f.source, &l.ids, "")
+                ))
+                .fetch_all()
+                .await?;
+            let n = |c: &str| classes.iter().find(|(k, _)| k == c).map_or(0, |(_, n)| *n);
+            if n("unmapped") > 0 {
+                problems.push(format!(
+                    "{}: {} rows under ids the map lacks (re-run map)",
+                    f.source,
+                    n("unmapped")
+                ));
+            }
+            lines.push(format!(
+                "{} -> {}: written {written} of {expected}; excluded colliding {}, orphan {}",
+                f.source,
+                f.target,
+                n(STATUS_COLLIDING),
+                n(STATUS_ORPHAN)
+            ));
+            if f.source == "price_ohlcv_1m" {
+                self.write(&format!("TRUNCATE TABLE {}", self.t(MONTHS_TABLE)))
+                    .await?;
+                self.write(&format!(
+                    "INSERT INTO {} (month, colliding_rows, orphan_rows, computed_at) \
+                     SELECT month, countIf(cls = '{STATUS_COLLIDING}'), \
+                     countIf(cls = '{STATUS_ORPHAN}'), now() FROM ({}) \
+                     WHERE cls IN ('{STATUS_COLLIDING}', '{STATUS_ORPHAN}') \
+                     GROUP BY month",
+                    self.t(MONTHS_TABLE),
+                    classify_sql(
+                        &self.db,
+                        &f.source,
+                        &l.ids,
+                        "toYYYYMM(s.timestamp) AS month, "
+                    )
+                ))
+                .await?;
+            }
+        }
+        self.log(Log {
+            step: "check",
+            status: if problems.is_empty() { "ok" } else { "failed" },
+            detail: &lines.join("; "),
+            ..Log::default()
+        })
+        .await?;
+        if problems.is_empty() {
+            Ok(lines)
+        } else {
+            Err(RekeyError::Gate(format!("check: {}", problems.join("; "))))
+        }
+    }
+
+    /// Read-only: Atomic database, a 26.3 server with `query_log`, the twelve
+    /// id tables (their id types reported), free disk ≥ 1.2× the copied
+    /// tables' bytes, and the refreshable MVs' states.
+    pub async fn preflight(&self) -> Result<Vec<String>> {
+        let mut lines = Vec::new();
+        let mut bad = Vec::new();
+        let engine: Option<String> = self
+            .client
+            .query("SELECT engine FROM system.databases WHERE name = ?")
+            .bind(&self.db)
+            .fetch_optional()
+            .await?;
+        lines.push(format!("database {}: {engine:?}", self.db));
+        if engine.as_deref() != Some("Atomic") {
+            bad.push(format!(
+                "database {} is not Atomic (EXCHANGE needs it)",
+                self.db
+            ));
+        }
+        let version: String = self.client.query("SELECT version()").fetch_one().await?;
+        lines.push(format!("server {version}"));
+        if !supported_version(&version) {
+            bad.push(format!("server {version} is not 26.3"));
+        }
+        if !self.has_query_log().await? {
+            bad.push(NO_QUERY_LOG.into());
+        }
+        for t in std::iter::once("assets").chain(COPIED_TABLES) {
+            let ids = self.id_types(t).await?;
+            if ids.is_empty() {
+                bad.push(format!("{t} missing"));
+            }
+            let ids: Vec<String> = ids.iter().map(|(c, ty)| format!("{c} {ty}")).collect();
+            lines.push(format!("{t}: {}", ids.join(", ")));
+        }
+        let tables = COPIED_TABLES
+            .iter()
+            .map(|t| format!("'{t}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let bytes = self
+            .count(&format!(
+                "SELECT sum(bytes_on_disk) FROM system.parts WHERE database = '{}' \
+                 AND table IN ({tables}) AND active",
+                self.db
+            ))
+            .await?;
+        let free = self
+            .count(&format!(
+                "SELECT min(free_space) FROM system.disks WHERE name IN (SELECT disk_name \
+                 FROM system.parts WHERE database = '{}' AND active UNION DISTINCT \
+                 SELECT 'default')",
+                self.db
+            ))
+            .await?;
+        lines.push(format!("disk: {free} bytes free, {bytes} bytes to copy"));
+        if !disk_ok(free, bytes) {
+            bad.push(format!("free {free} < 1.2 x {bytes}"));
+        }
+        let mvs: Vec<(String, String)> = self
+            .client
+            .query("SELECT view, toString(status) FROM system.view_refreshes WHERE database = ? ORDER BY view")
+            .bind(&self.db)
+            .fetch_all()
+            .await?;
+        for (view, status) in mvs {
+            lines.push(format!("mv {view}: {status}"));
+        }
+        if bad.is_empty() {
+            Ok(lines)
+        } else {
+            Err(RekeyError::Gate(format!(
+                "preflight: {}\n{}",
+                bad.join("; "),
+                lines.join("\n")
+            )))
         }
     }
 }
@@ -1030,5 +1268,29 @@ mod tests {
             "SELECT uniqExact(tuple(asset_id, quote_asset_id, timestamp)) FROM db.t__new \
              WHERE toYYYYMM(timestamp) = 202401"
         );
+    }
+
+    #[test]
+    fn classify_names_colliding_before_orphan_and_flags_unmapped_ids() {
+        let ids = vec!["asset_id".to_string(), "quote_asset_id".to_string()];
+        let sql = classify_sql("db", "t", &ids, "");
+        assert!(
+            sql.contains(
+                "multiIf(m.st = '' OR q.st = '', 'unmapped', m.st = 'colliding' OR q.st = \
+             'colliding', 'colliding', m.st = 'orphan' OR q.st = 'orphan', 'orphan', 'copied')"
+            ),
+            "{sql}"
+        );
+        assert!(sql.contains("GROUP BY old_id) AS q ON q.old_id = s.quote_asset_id"));
+    }
+
+    #[test]
+    fn the_disk_gate_wants_one_fifth_headroom_and_the_server_is_26_3() {
+        assert!(disk_ok(120, 100));
+        assert!(!disk_ok(119, 100));
+        assert!(disk_ok(u64::MAX, u64::MAX / 2));
+        assert!(supported_version("26.3.10.60"));
+        assert!(!supported_version("26.4.1.1"));
+        assert!(!supported_version("25.3.1"));
     }
 }

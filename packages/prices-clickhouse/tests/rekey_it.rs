@@ -12,8 +12,8 @@ use clickhouse::Client;
 use prices_clickhouse::asset_id::fixture::fetch_id;
 use prices_clickhouse::asset_id::id_expr;
 use prices_clickhouse::rekey::{
-    COPIED_TABLES, Fill, FillReport, LOG_TABLE, MAP_FINAL, MAP_TABLE, Rekey, RekeyError,
-    map_gates_sql, tool_tables_ddl, written_rows,
+    COPIED_TABLES, Fill, FillReport, LOG_TABLE, MAP_FINAL, MAP_TABLE, MONTHS_TABLE, Rekey,
+    RekeyError, map_gates_sql, tool_tables_ddl, written_rows,
 };
 
 const PRE0139: &str = include_str!("fixtures/pre0139_id_tables.sql");
@@ -647,4 +647,134 @@ async fn fill_refuses_new_space_sources_and_a_backup_fills_after_the_alter() {
         "already in the new id space",
     );
     drop_db(&c, &db).await;
+}
+
+fn all_fills() -> Vec<Fill> {
+    COPIED_TABLES.iter().map(|t| Fill::table(t)).collect()
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn check_accounts_for_every_row_and_lists_the_reingest_months() {
+    let (c, db) = seed("check").await;
+    let r = Rekey::new(c.clone(), &db, true);
+    r.map().await.unwrap();
+    r.create().await.unwrap();
+    gate_failed(
+        r.check(&all_fills()).await,
+        "price_ohlcv_1m__new/202401: not filled",
+    );
+    fill_all(&r).await;
+
+    let lines = r.check(&all_fills()).await.unwrap();
+    for want in [
+        "price_ohlcv_1m -> price_ohlcv_1m__new: written 7 of 7; excluded colliding 3, orphan 1",
+        "price_ohlcv_1d -> price_ohlcv_1d__new: written 1 of 1; excluded colliding 1, orphan 0",
+        "oracle_prices -> oracle_prices__new: written 2 of 2; excluded colliding 1, orphan 0",
+        "asset_supply -> asset_supply__new: written 1 of 1; excluded colliding 0, orphan 1",
+    ] {
+        assert!(lines.iter().any(|l| l == want), "{want} not in {lines:#?}");
+    }
+    let months: Vec<(u32, u64, u64)> = c
+        .query(&format!(
+            "SELECT month, colliding_rows, orphan_rows FROM {db}.{MONTHS_TABLE} ORDER BY month"
+        ))
+        .fetch_all()
+        .await
+        .unwrap();
+    assert_eq!(months, vec![(202401, 2, 1), (202402, 1, 0)]);
+    assert_eq!(
+        r.check(&all_fills()).await.unwrap(),
+        lines,
+        "a re-run agrees"
+    );
+    assert_eq!(
+        count(&c, &format!("SELECT count() FROM {db}.{MONTHS_TABLE}")).await,
+        2
+    );
+
+    // A target row lost after a verified fill, merged away: the key gate.
+    exec(
+        &c,
+        &format!(
+            "ALTER TABLE {db}.price_ohlcv_1m__new DELETE WHERE timestamp = '2024-01-01 00:01:00' \
+             SETTINGS mutations_sync = 2"
+        ),
+    )
+    .await;
+    exec(
+        &c,
+        &format!("OPTIMIZE TABLE {db}.price_ohlcv_1m__new FINAL"),
+    )
+    .await;
+    gate_failed(
+        r.check(&all_fills()).await,
+        "price_ohlcv_1m__new/202401: target keys 2 of 3",
+    );
+    r.fill(&Fill::table("price_ohlcv_1m")).await.unwrap();
+    r.check(&all_fills()).await.unwrap();
+
+    // A source row written after the fill, then one under an id the map lacks.
+    let candle = "(timestamp, asset_id, quote_asset_id, source, open, high, low, close, vwap, \
+                  version)";
+    exec(
+        &c,
+        &format!(
+            "INSERT INTO {db}.price_ohlcv_1d {candle} \
+             VALUES ('2024-01-02 00:00:00', 1, 2, 'sdex', 1, 1, 1, 1, 1, 1)"
+        ),
+    )
+    .await;
+    gate_failed(
+        r.check(&all_fills()).await,
+        "price_ohlcv_1d__new/202401: source changed since fill",
+    );
+    exec(
+        &c,
+        &format!(
+            "INSERT INTO {db}.price_ohlcv_1w {candle} \
+             VALUES ('2024-01-01 00:00:00', 99, 2, 'sdex', 1, 1, 1, 1, 1, 1)"
+        ),
+    )
+    .await;
+    gate_failed(
+        r.check(&all_fills()).await,
+        "price_ohlcv_1w: 1 rows under ids the map lacks (re-run map)",
+    );
+    let failed =
+        format!("SELECT count() FROM {db}.{LOG_TABLE} WHERE step = 'check' AND status = 'failed'");
+    assert_eq!(count(&c, &failed).await, 4);
+    drop_db(&c, &db).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ClickHouse — run via tools/scripts/ignored-tests.sh (CI runs it)"]
+async fn preflight_reports_the_ids_and_fails_on_planted_faults() {
+    let (c, db) = seed("preflight").await;
+    let r = Rekey::new(c.clone(), &db, false);
+    let lines = r.preflight().await.unwrap();
+    for want in [
+        "assets: asset_id UInt32",
+        "price_ohlcv_1M: asset_id UInt32, quote_asset_id UInt32",
+        "oracle_prices: asset_id UInt32",
+    ] {
+        assert!(lines.iter().any(|l| l == want), "{want} not in {lines:#?}");
+    }
+    assert!(lines.iter().any(|l| l.starts_with("disk: ")));
+    assert!(lines.iter().any(|l| l.starts_with("server 26.3.")));
+    let tables = format!("SELECT count() FROM system.tables WHERE database = '{db}'");
+    assert_eq!(count(&c, &tables).await, 12, "preflight writes nothing");
+
+    exec(&c, &format!("DROP TABLE {db}.asset_supply SYNC")).await;
+    gate_failed(r.preflight().await, "asset_supply missing");
+    drop_db(&c, &db).await;
+
+    let mem = "it_rekey_preflight_memory";
+    exec(&c, &format!("DROP DATABASE IF EXISTS {mem} SYNC")).await;
+    exec(&c, &format!("CREATE DATABASE {mem} ENGINE = Memory")).await;
+    gate_failed(
+        Rekey::new(c.clone(), mem, false).preflight().await,
+        "is not Atomic",
+    );
+    drop_db(&c, mem).await;
 }
