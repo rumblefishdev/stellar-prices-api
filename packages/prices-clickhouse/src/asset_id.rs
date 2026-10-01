@@ -9,8 +9,8 @@
 //! - Case is preserved: `usdc` and `USDC` under one issuer are two assets.
 //! - An absent field is the empty string, so native XLM is `XLM::`.
 //! - 0 is never an asset's id: `oracle_prices` uses it as the "no asset"
-//!   sentinel (`ORACLE_FEED_NO_ASSET_ID`). The tables that hold ids carry a
-//!   CHECK that refuses 0 and `xxh3('::')`, the id of a blank identity.
+//!   sentinel. The tables that hold ids carry a CHECK ([`derived_id_check`])
+//!   that refuses 0 and `xxh3('::')`, the id of a blank identity.
 //!
 //! The database computes the id, never the backend. This module only renders
 //! SQL text; nothing here hashes in Rust. A test that needs a numeric id asks
@@ -40,6 +40,18 @@ pub fn oracle_id_expr(code_sql: &str, issuer_sql: &str, contract_sql: &str) -> S
     )
 }
 
+/// The body of a `CHECK` that refuses, in each of `id_cols`, the two values no
+/// asset's id may take: 0 and the id of a blank identity. It has to name the
+/// stored ids: ClickHouse refuses a CHECK on EPHEMERAL columns.
+pub fn derived_id_check(id_cols: &[&str]) -> String {
+    let blank = id_of("", "", "");
+    id_cols
+        .iter()
+        .map(|c| format!("{c} != 0 AND {c} != {blank}"))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
 /// The id of a literal identity, e.g. `id_of("XLM", "", "")`.
 pub fn id_of(code: &str, issuer: &str, contract: &str) -> String {
     id_expr(&sql_str(code), &sql_str(issuer), &sql_str(contract))
@@ -65,11 +77,9 @@ fn identity_concat(code_sql: &str, issuer_sql: &str, contract_sql: &str) -> Stri
 
 /// Test fixtures that need asset ids. Not part of the API.
 ///
-/// Today's schema still stores `asset_id` as `UInt32`, so a fixture id is the
-/// derived id truncated to 32 bits (`toUInt32(xxh3(...))`). Fixtures written
-/// against these helpers keep working when the schema changes: the commit that
-/// moves the schema to `UInt64` switches `id` and `assets_insert` to the
-/// `UInt64` form in the same change.
+/// A fixture id is the schema's own expression over a literal identity, and
+/// `assets_insert` leaves `asset_id` to the table (naming a MATERIALIZED column
+/// is refused), so a fixture's ids are the ones the database derives.
 #[doc(hidden)]
 pub mod fixture {
     use super::{id_of, sql_str};
@@ -123,18 +133,16 @@ pub mod fixture {
 
     /// The fixture id of an identity, as a SQL expression.
     pub fn id(code: &str, issuer: &str, contract: &str) -> String {
-        format!("toUInt32({})", id_of(code, issuer, contract))
+        id_of(code, issuer, contract)
     }
 
-    /// `INSERT INTO <db>.assets` for `rows`, with every id derived from its
-    /// row's identity.
+    /// `INSERT INTO <db>.assets` for `rows`. The table derives each id.
     pub fn assets_insert(db: &str, rows: &[AssetFixture<'_>]) -> String {
         let values: Vec<String> = rows
             .iter()
             .map(|r| {
                 format!(
-                    "({}, {}, {}, {}, {}, {})",
-                    id(r.code, r.issuer, r.contract),
+                    "({}, {}, {}, {}, {})",
                     sql_str(r.code),
                     sql_str(r.asset_type),
                     sql_str(r.issuer),
@@ -145,7 +153,7 @@ pub mod fixture {
             .collect();
         format!(
             "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) \
+             (asset_code, asset_type, issuer_address, contract_address, sac_address) \
              VALUES {}",
             values.join(", ")
         )
@@ -198,6 +206,7 @@ pub mod fixture {
 mod tests {
     use super::fixture::{AssetFixture, assets_insert, id};
     use super::*;
+    use crate::INIT_SQL;
 
     #[test]
     fn id_expr_is_the_d1_formula() {
@@ -244,11 +253,62 @@ mod tests {
     }
 
     #[test]
-    fn fixture_id_is_the_uint32_form() {
+    fn derived_id_check_refuses_zero_and_the_blank_identity_per_column() {
         assert_eq!(
-            id("XLM", "", ""),
-            "toUInt32(xxh3(concat('XLM', ':', '', ':', '')))"
+            derived_id_check(&["asset_id", "quote_asset_id"]),
+            "asset_id != 0 AND asset_id != xxh3(concat('', ':', '', ':', '')) AND \
+             quote_asset_id != 0 AND quote_asset_id != xxh3(concat('', ':', '', ':', ''))"
         );
+    }
+
+    /// init.sql is a static file, so it cannot call this module. It holds this
+    /// module's renderings verbatim instead, and this test keeps them equal.
+    #[test]
+    fn init_sql_spells_every_id_as_this_module_renders_it() {
+        let identity = id_expr("asset_code", "issuer_address", "contract_address");
+        let wanted = [
+            format!("asset_id         UInt64        MATERIALIZED {identity},"),
+            format!(
+                "CONSTRAINT asset_id_derived CHECK {}\n",
+                derived_id_check(&["asset_id"])
+            ),
+            format!(
+                "asset_id         UInt64        DEFAULT {},",
+                id_expr("base_code", "base_issuer", "base_contract")
+            ),
+            format!(
+                "quote_asset_id   UInt64        DEFAULT {},",
+                id_expr("quote_code", "quote_issuer", "quote_contract")
+            ),
+            format!(
+                "CONSTRAINT asset_ids_derived CHECK {}\n",
+                derived_id_check(&["asset_id", "quote_asset_id"])
+            ),
+            format!(
+                "asset_id      UInt64        DEFAULT {},",
+                oracle_id_expr("asset_code", "issuer_address", "contract_address")
+            ),
+        ];
+        for want in &wanted {
+            assert_eq!(INIT_SQL.matches(want.as_str()).count(), 1, "{want}");
+        }
+        // Every id column is one of the above or a plain UInt64 copy.
+        for line in INIT_SQL.lines().map(str::trim) {
+            if line.starts_with("asset_id ") || line.starts_with("quote_asset_id ") {
+                assert!(
+                    line.split_whitespace()
+                        .nth(1)
+                        .map(|t| t.trim_end_matches(','))
+                        == Some("UInt64"),
+                    "id column not UInt64: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_id_is_the_schema_expression() {
+        assert_eq!(id("XLM", "", ""), "xxh3(concat('XLM', ':', '', ':', ''))");
     }
 
     #[test]
@@ -265,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn fixture_assets_insert_names_the_derived_id() {
+    fn fixture_assets_insert_leaves_the_id_to_the_table() {
         let rows = [
             AssetFixture {
                 code: "XLM",
@@ -285,9 +345,8 @@ mod tests {
         assert_eq!(
             assets_insert("it_db", &rows),
             "INSERT INTO it_db.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) \
-             VALUES (toUInt32(xxh3(concat('XLM', ':', '', ':', ''))), 'XLM', 'native', '', '', 'CXLMSAC'), \
-             (toUInt32(xxh3(concat('USDC', ':', 'GA5Z', ':', ''))), 'USDC', 'classic', 'GA5Z', '', '')"
+             (asset_code, asset_type, issuer_address, contract_address, sac_address) \
+             VALUES ('XLM', 'native', '', '', 'CXLMSAC'), ('USDC', 'classic', 'GA5Z', '', '')"
         );
     }
 }

@@ -78,7 +78,34 @@ pub const CANDLE_COLUMNS: [&str; 18] = [
 /// On the pf columns that failure mode is invisible and wrong —
 /// `pf_trade_count DEFAULT trade_count` would report a dust-only minute as
 /// fully price-forming.
-pub const CANDLE_WRITER_COLUMNS: [&str; 18] = CANDLE_COLUMNS;
+///
+/// It is [`CANDLE_COLUMNS`] with the two ids replaced by the six identity
+/// columns they are derived from (task 0139): the `_1m` CREATE declares those
+/// `EPHEMERAL`, so they are sent but never stored.
+pub const CANDLE_WRITER_COLUMNS: [&str; 22] = [
+    "timestamp",
+    "base_code",
+    "base_issuer",
+    "base_contract",
+    "quote_code",
+    "quote_issuer",
+    "quote_contract",
+    "source",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume_base",
+    "volume_quote",
+    "volume_quote_usd",
+    "close_usd",
+    "vwap",
+    "trade_count",
+    "version",
+    "pf_trade_count",
+    "pf_volume",
+    "pf_price_volume",
+];
 
 /// The smallest price this system treats as a price, as a decimal literal
 /// (task 0286, review WR-03).
@@ -494,15 +521,23 @@ mod tests {
     }
 
     /// Column names of a `CREATE TABLE` body, in DDL order: everything between
-    /// the opening `(` line and the closing `)` line, first identifier per line.
-    fn create_column_names(stmt: &str) -> Vec<String> {
-        stmt.lines()
+    /// the opening `(` line and the closing `)` line, first identifier per line,
+    /// split into stored and `EPHEMERAL` columns. `CONSTRAINT` lines are skipped.
+    fn create_column_names(stmt: &str) -> (Vec<String>, Vec<String>) {
+        let lines: Vec<&str> = stmt
+            .lines()
             .skip_while(|l| !l.trim_end().ends_with('('))
             .skip(1)
             .take_while(|l| !l.trim_start().starts_with(')'))
-            .filter_map(|l| l.split_whitespace().next())
-            .map(|t| t.trim_end_matches(',').to_string())
-            .collect()
+            .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("CONSTRAINT "))
+            .collect();
+        let name = |l: &&str| l.split_whitespace().next().map(|t| t.to_string());
+        let (ephemeral, stored): (Vec<&str>, Vec<&str>) =
+            lines.into_iter().partition(|l| l.contains(" EPHEMERAL"));
+        (
+            stored.iter().filter_map(name).collect(),
+            ephemeral.iter().filter_map(name).collect(),
+        )
     }
 
     /// Task 0286: the fresh `_1m` CREATE and [`CANDLE_COLUMNS`] are one contract.
@@ -511,12 +546,41 @@ mod tests {
     #[test]
     fn init_sql_1m_create_lists_every_candle_column_in_order() {
         let stmt = create_statement(INIT_SQL, "prices.price_ohlcv_1m");
-        let cols = create_column_names(&stmt);
+        let (stored, _) = create_column_names(&stmt);
         assert_eq!(
-            cols,
+            stored,
             CANDLE_COLUMNS.to_vec(),
-            "the _1m CREATE must list exactly CANDLE_COLUMNS, in order"
+            "the _1m CREATE must store exactly CANDLE_COLUMNS, in order"
         );
+    }
+
+    /// Task 0139: the writer sends the stored columns except the two ids, plus
+    /// the `_1m` CREATE's EPHEMERAL identity columns the ids are derived from.
+    #[test]
+    fn writer_columns_are_stored_columns_with_ids_replaced_by_identities() {
+        let stmt = create_statement(INIT_SQL, "prices.price_ohlcv_1m");
+        let (_, ephemeral) = create_column_names(&stmt);
+        assert_eq!(
+            ephemeral,
+            [
+                "base_code",
+                "base_issuer",
+                "base_contract",
+                "quote_code",
+                "quote_issuer",
+                "quote_contract"
+            ]
+        );
+        let mut want: Vec<&str> = CANDLE_COLUMNS
+            .iter()
+            .copied()
+            .filter(|c| !matches!(*c, "asset_id" | "quote_asset_id"))
+            .collect();
+        want.extend(ephemeral.iter().map(String::as_str));
+        let mut got = CANDLE_WRITER_COLUMNS.to_vec();
+        want.sort_unstable();
+        got.sort_unstable();
+        assert_eq!(got, want);
     }
 
     /// Task 0286: a `CREATE … AS` copy does not inherit a post-hoc base-table
