@@ -690,6 +690,19 @@ async fn postchecks(c: &Client, db: &str, set: Postcheck, m: Option<u32>) -> Vec
     out
 }
 
+/// A newer `gap-backfill` log row whose gap starts at `from` (SQL), `n`
+/// seconds after now so it is the one the checks read.
+async fn log_gap(c: &Client, db: &str, from: &str, n: u32) {
+    exec(
+        c,
+        &format!(
+            "INSERT INTO {db}.{LOG_TABLE} (at, step, status, range_from, range_to) \
+             SELECT now64(3) + INTERVAL {n} SECOND, 'gap-backfill', 'ok', {from}, now()"
+        ),
+    )
+    .await;
+}
+
 /// W13 simulated: a catch-up row 3 h old, written through the writer shape,
 /// its assets row first.
 async fn catch_up(c: &Client, db: &str, base: (&str, &str), quote: (&str, &str), trades: u32) {
@@ -733,7 +746,10 @@ async fn gap_backfill_rolls_a_catch_up_older_than_the_15m_window_into_every_tier
     catch_up(&c, &db, ("STW", "GSTW"), ("XLM", ""), 3).await;
     catch_up(&c, &db, ("XLM", ""), ("USDC", USDC_ISSUER), 2).await;
     refresh(&c, &db, "mv_ohlcv_1m_to_15m").await;
-    refused(r.gap_verify(false, None).await, "no gap-backfill logged");
+    refused(
+        r.gap_verify(false, None, Postcheck::Window).await,
+        "no gap-backfill logged",
+    );
     let before = postchecks(&c, &db, Postcheck::Window, None).await;
     assert_eq!(
         before[4],
@@ -751,8 +767,12 @@ async fn gap_backfill_rolls_a_catch_up_older_than_the_15m_window_into_every_tier
         .await
         .unwrap();
     gate_failed(
-        r.gap_verify(false, Some(("2000-01-01 00:00:00", now.as_str())))
-            .await,
+        r.gap_verify(
+            false,
+            Some(("2000-01-01 00:00:00", now.as_str())),
+            Postcheck::Window,
+        )
+        .await,
         "price_ohlcv_15m: ",
     );
     refused(
@@ -765,10 +785,10 @@ async fn gap_backfill_rolls_a_catch_up_older_than_the_15m_window_into_every_tier
     );
 
     r.gap_backfill(Some(&now)).await.unwrap();
-    let lines = r.gap_verify(false, None).await.unwrap();
+    let lines = r.gap_verify(false, None, Postcheck::Window).await.unwrap();
     assert!(lines.iter().any(|l| l == "gap_15m: 1"), "{lines:?}");
     r.gap_backfill(Some(&now)).await.unwrap();
-    r.gap_verify(false, None).await.unwrap();
+    r.gap_verify(false, None, Postcheck::Window).await.unwrap();
 
     let stw = fetch_id(&c, "STW", "GSTW", "").await;
     let arb = fetch_id(&c, "ARBRIDGE", "GARB", "").await;
@@ -788,15 +808,75 @@ async fn gap_backfill_rolls_a_catch_up_older_than_the_15m_window_into_every_tier
         assert_eq!(arb_rows, 0, "{t}: no blend in any tier");
         assert_eq!(orphans, 0, "{t}: the orphan stays out");
     }
-    for set in [Postcheck::Window, Postcheck::NextDay] {
+    for (name, ok) in postchecks(&c, &db, Postcheck::Window, None).await {
+        assert_eq!(ok, 1, "{name}");
+    }
+
+    // W16 and W17 run days later. Date the logged gap 70 days back so every
+    // tier has settled buckets at any hour: now − 70 d always lies a month
+    // boundary before now − 28 h 15, the 1M bound.
+    log_gap(&c, &db, "now() - INTERVAL 70 DAY", 1).await;
+    for set in [
+        Postcheck::Window,
+        Postcheck::NextDay,
+        Postcheck::PeriodClose,
+    ] {
         for (name, ok) in postchecks(&c, &db, set, None).await {
             assert_eq!(ok, 1, "{set:?} {name}");
         }
+        r.gap_verify(false, None, set).await.unwrap();
+    }
+
+    // A settled 4h bucket that never reached 1d (nor came from 1h): the
+    // next-day check fails on it.
+    exec(
+        &c,
+        &format!(
+            "INSERT INTO {db}.price_ohlcv_4h (timestamp, base_code, base_issuer, base_contract, \
+             quote_code, quote_issuer, quote_contract, source, open, high, low, close, \
+             volume_base, volume_quote, vwap, trade_count, version) \
+             SELECT toStartOfInterval(now() - INTERVAL 3 DAY, INTERVAL 4 HOUR), 'XLM', '', '', \
+             'USDC', '{USDC_ISSUER}', '', 'sdex', 0.2, 0.2, 0.2, 0.2, 5, 1, 0.2, 7, 1"
+        ),
+    )
+    .await;
+    let next: Vec<(String, u8)> = postchecks(&c, &db, Postcheck::NextDay, None)
+        .await
+        .into_iter()
+        .filter(|(n, _)| n.starts_with("gap_"))
+        .collect();
+    let s = |n: &str, v: u8| (n.to_string(), v);
+    assert_eq!(
+        next,
+        vec![
+            s("gap_15m", 1),
+            s("gap_1h", 1),
+            s("gap_4h", 0),
+            s("gap_1d", 0)
+        ]
+    );
+    gate_failed(
+        r.gap_verify(false, None, Postcheck::NextDay).await,
+        "price_ohlcv_1d: 1",
+    );
+
+    // A gap none of whose buckets has settled fails rather than passing.
+    log_gap(&c, &db, "now()", 2).await;
+    for set in [
+        Postcheck::Window,
+        Postcheck::NextDay,
+        Postcheck::PeriodClose,
+    ] {
+        for (name, ok) in postchecks(&c, &db, set, None).await {
+            if name.starts_with("gap_") {
+                assert_eq!(ok, 0, "{set:?} {name}: an unsettled gap fails");
+            }
+        }
+        gate_failed(r.gap_verify(false, None, set).await, "not settled");
     }
 
     // 202401 held STW/ARBRIDGE blends: not restored until it is re-ingested.
     let month = postchecks(&c, &db, Postcheck::Month, Some(202401)).await;
-    let s = |n: &str, v: u8| (n.to_string(), v);
     assert_eq!(
         month,
         vec![

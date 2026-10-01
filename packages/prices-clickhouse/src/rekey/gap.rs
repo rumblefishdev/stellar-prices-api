@@ -10,6 +10,11 @@
 //! bounded INSERT, the statements `schema/preroll-live-gap.sql` holds, on the
 //! swapped tables only. Colliding blends and orphans stay out, as the copy
 //! left them.
+//!
+//! The checks compare a tier with its child from the gap's first bucket up to
+//! the buckets that have closed and been refreshed since (`settled_bound`),
+//! and fail on an empty range: a gap inside one day, week or month is checked
+//! once that bucket settles, never passed unchecked.
 
 use std::time::Duration;
 
@@ -22,8 +27,10 @@ use crate::rollup_sql::{Bound, Bounds, TIERS, Tier, rollup_insert};
 pub enum Postcheck {
     /// After W14, the window session.
     Window,
-    /// W16, the next day: the window set plus the daily-refreshed tiers.
+    /// W16, the next day: the window set plus 4h and 1d.
     NextDay,
+    /// W17, once the gap's week and month have closed and settled: 1w, 1M.
+    PeriodClose,
     /// Each month task 13 finishes; takes `{m:UInt32}` (YYYYMM).
     Month,
 }
@@ -34,7 +41,25 @@ impl Postcheck {
         match self {
             Self::Window => "window",
             Self::NextDay => "next-day",
+            Self::PeriodClose => "period-close",
             Self::Month => "month",
+        }
+    }
+
+    /// The set named `name` (the runbook marker, `gap-verify --set`).
+    pub fn parse(name: &str) -> Option<Self> {
+        [Self::Window, Self::NextDay, Self::PeriodClose, Self::Month]
+            .into_iter()
+            .find(|s| s.name() == name)
+    }
+
+    /// The tiers whose gap the set checks.
+    pub fn gap_tiers(self) -> &'static [Tier] {
+        match self {
+            Self::Window => &TIERS[..2],
+            Self::NextDay => &TIERS[..4],
+            Self::PeriodClose => &TIERS[4..],
+            Self::Month => &[],
         }
     }
 
@@ -42,7 +67,8 @@ impl Postcheck {
     pub fn min_lines(self) -> usize {
         match self {
             Self::Window => 6,
-            Self::NextDay => 3,
+            Self::NextDay => 8,
+            Self::PeriodClose => 2,
             Self::Month => 3,
         }
     }
@@ -59,6 +85,22 @@ fn gap_bound(db: &str, col: &str, interval: &str) -> String {
     )
 }
 
+/// The end of the buckets of `tier` that have settled: closed, their child
+/// refreshed past them, then the tier itself refreshed, with 15 minutes for
+/// the refresh to run. 15m 16 min, 1h 31 min, 4h 1 h 30, 1d 5 h 15, 1w and
+/// 1M 28 h 15.
+pub fn settled_bound(tier: &Tier) -> String {
+    let child = TIERS
+        .iter()
+        .find(|t| t.target == tier.child)
+        .map_or(0, |t| t.refresh_seconds);
+    format!(
+        "toStartOfInterval(now() - INTERVAL {} SECOND, {})",
+        tier.refresh_seconds + child + 900,
+        tier.interval
+    )
+}
+
 /// One post-check line: `ifNull`, because a scalar subquery is Nullable
 /// and a NULL must read as a failure, not as RowBinary's null flag.
 fn check(name: &str, expr: &str, from: &str) -> (String, String) {
@@ -68,12 +110,13 @@ fn check(name: &str, expr: &str, from: &str) -> (String, String) {
     )
 }
 
-/// `sum(trade_count), sum(volume_base)` of `tier` and of its child agree over
-/// the closed buckets of the last `gap-backfill`'s range; false if none ran.
+/// `sum(trade_count), sum(volume_base)` of `tier` and of its child agree from
+/// the last `gap-backfill`'s first bucket to the settled ones; false if none
+/// ran or no bucket of the gap has settled yet.
 fn gap_totals(db: &str, tier: &Tier) -> (String, String) {
     let (lb, ub) = (
         gap_bound(db, "range_from", tier.interval),
-        gap_bound(db, "range_to", tier.interval),
+        settled_bound(tier),
     );
     let totals = |t: &str| {
         format!(
@@ -84,7 +127,7 @@ fn gap_totals(db: &str, tier: &Tier) -> (String, String) {
     check(
         &format!("gap_{}", tier.name),
         &format!(
-            "(SELECT count() FROM {db}.{LOG_TABLE} WHERE {GAP_ROW}) > 0 AND {} = {}",
+            "(SELECT count() FROM {db}.{LOG_TABLE} WHERE {GAP_ROW}) > 0 AND {lb} < {ub} AND {} = {}",
             totals(tier.target),
             totals(tier.child)
         ),
@@ -93,8 +136,10 @@ fn gap_totals(db: &str, tier: &Tier) -> (String, String) {
 }
 
 /// The post-check SELECTs of `set`: one line each, `1` on pass, no
-/// `SETTINGS` (dev_read is readonly). Gap bounds come from the log.
+/// `SETTINGS` (dev_read is readonly). Gap bounds come from the log and
+/// `settled_bound`.
 pub fn postcheck_sql(set: Postcheck, db: &str) -> Vec<(String, String)> {
+    let gaps = |tiers: &[Tier]| tiers.iter().map(|t| gap_totals(db, t)).collect::<Vec<_>>();
     let assets_unique = check(
         "assets_unique",
         "count() = uniqExact(asset_id)",
@@ -128,16 +173,17 @@ pub fn postcheck_sql(set: Postcheck, db: &str) -> Vec<(String, String)> {
                 "",
             ),
         ];
-        v.extend(TIERS[..3].iter().map(|t| gap_totals(db, t)));
+        v.extend(gaps(Postcheck::Window.gap_tiers()));
         v
     };
     match set {
         Postcheck::Window => window(),
         Postcheck::NextDay => {
             let mut v = window();
-            v.extend(TIERS[3..].iter().map(|t| gap_totals(db, t)));
+            v.extend(gaps(&TIERS[2..4]));
             v
         }
+        Postcheck::PeriodClose => gaps(set.gap_tiers()),
         Postcheck::Month => {
             let colliding =
                 format!("SELECT new_id FROM {db}.{MAP_TABLE} WHERE status = '{STATUS_COLLIDING}'");
@@ -468,14 +514,16 @@ impl Rekey {
         Ok(lines)
     }
 
-    /// Read-only. Per tier against its child over the closed buckets of the
-    /// gap, every key's `trade_count` and `volume_base` agree; then the gap
-    /// post-checks. `pre0139`: the restored UInt32 tables after a rollback,
-    /// with explicit bounds.
+    /// Read-only. Per tier of `set` against its child, from the gap's first
+    /// bucket to the settled ones, every key's `trade_count` and
+    /// `volume_base` agree; a tier with no settled bucket fails. Then the
+    /// set's gap post-checks. With explicit bounds (`pre0139`: the restored
+    /// UInt32 tables after a rollback) every tier over those bounds instead.
     pub async fn gap_verify(
         &self,
         pre0139: bool,
         bounds: Option<(&str, &str)>,
+        set: Postcheck,
     ) -> Result<Vec<String>> {
         let want = if pre0139 { "UInt32" } else { "UInt64" };
         if self.id_type("price_ohlcv_1m").await?.as_deref() != Some(want) {
@@ -506,12 +554,47 @@ impl Rekey {
         };
         let mut lines = vec![format!("gap [{from}, {to}) UTC")];
         let mut bad = Vec::new();
-        for tier in &TIERS {
+        let ranges: Vec<(&Tier, String, String)> = if bounds.is_some() {
+            TIERS
+                .iter()
+                .map(|t| (t, from.clone(), to.clone()))
+                .collect()
+        } else {
+            let mut v = Vec::new();
+            for t in set.gap_tiers() {
+                let instant = |e: String| {
+                    format!("formatDateTime(toDateTime({e}, 'UTC'), '%Y-%m-%d %H:%i:%S', 'UTC')")
+                };
+                let (lb, ub): (String, String) = self
+                    .client
+                    .query(&format!(
+                        "SELECT {}, {}",
+                        instant(format!(
+                            "toStartOfInterval(toDateTime('{from}', 'UTC'), {})",
+                            t.interval
+                        )),
+                        instant(settled_bound(t))
+                    ))
+                    .fetch_one()
+                    .await?;
+                v.push((t, lb, ub));
+            }
+            v
+        };
+        for (tier, lb, ub) in ranges {
+            if bounds.is_none() && lb >= ub {
+                lines.push(format!(
+                    "{}: no bucket of the gap has settled yet [{lb}, {ub})",
+                    tier.target
+                ));
+                bad.push(format!("{}: not settled", tier.target));
+                continue;
+            }
             let n = self
-                .count(&gap_mismatch_sql(&self.db, tier, &from, &to))
+                .count(&gap_mismatch_sql(&self.db, tier, &lb, &ub))
                 .await?;
             lines.push(format!(
-                "{} vs {}: {n} mismatched buckets",
+                "{} vs {} [{lb}, {ub}): {n} mismatched buckets",
                 tier.target, tier.child
             ));
             if n > 0 {
@@ -519,7 +602,7 @@ impl Rekey {
             }
         }
         if !pre0139 && bounds.is_none() {
-            for (name, sql) in postcheck_sql(Postcheck::NextDay, &self.db)
+            for (name, sql) in postcheck_sql(set, &self.db)
                 .into_iter()
                 .filter(|(n, _)| n.starts_with("gap_"))
             {
@@ -575,7 +658,12 @@ mod tests {
 
     #[test]
     fn post_checks_are_one_line_selects_without_settings() {
-        for set in [Postcheck::Window, Postcheck::NextDay, Postcheck::Month] {
+        for set in [
+            Postcheck::Window,
+            Postcheck::NextDay,
+            Postcheck::PeriodClose,
+            Postcheck::Month,
+        ] {
             let v = postcheck_sql(set, "prices");
             assert!(v.len() >= set.min_lines(), "{set:?}");
             for (name, sql) in &v {
@@ -592,10 +680,20 @@ mod tests {
                 .iter()
                 .all(|(_, s)| !s.contains("{m:") || s.contains("{m:UInt32}"))
         );
+        let gaps = |set| {
+            postcheck_sql(set, "prices")
+                .into_iter()
+                .map(|(n, _)| n)
+                .filter(|n| n.starts_with("gap_"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(gaps(Postcheck::Window), ["gap_15m", "gap_1h"]);
+        assert_eq!(
+            gaps(Postcheck::NextDay),
+            ["gap_15m", "gap_1h", "gap_4h", "gap_1d"]
+        );
+        assert_eq!(gaps(Postcheck::PeriodClose), ["gap_1w", "gap_1M"]);
         let next = postcheck_sql(Postcheck::NextDay, "prices");
-        for t in ["gap_15m", "gap_1h", "gap_4h", "gap_1d", "gap_1w", "gap_1M"] {
-            assert!(next.iter().any(|(n, _)| n == t), "{t}");
-        }
         assert!(
             next[4]
                 .1
@@ -606,7 +704,12 @@ mod tests {
     /// The runbook's three marked blocks are the renderings, verbatim.
     #[test]
     fn the_runbook_blocks_are_the_renderings() {
-        for set in [Postcheck::Window, Postcheck::NextDay, Postcheck::Month] {
+        for set in [
+            Postcheck::Window,
+            Postcheck::NextDay,
+            Postcheck::PeriodClose,
+            Postcheck::Month,
+        ] {
             let (open, close) = (
                 format!("<!-- 0139-postcheck:{} -->", set.name()),
                 format!("<!-- /0139-postcheck:{} -->", set.name()),
@@ -629,6 +732,49 @@ mod tests {
                 want.join("\n")
             );
         }
+    }
+
+    /// A gap inside one bucket is never compared over an empty range: the
+    /// range ends at the settled buckets, and an empty one fails.
+    #[test]
+    fn a_gap_check_ends_at_the_settled_buckets_and_fails_when_none_has() {
+        let lag = |t: &Tier| {
+            settled_bound(t)
+                .split("INTERVAL ")
+                .nth(1)
+                .and_then(|x| x.split(' ').next())
+                .and_then(|x| x.parse::<u32>().ok())
+                .unwrap()
+        };
+        let lags: Vec<u32> = TIERS.iter().map(lag).collect();
+        assert_eq!(lags, [960, 1_860, 5_400, 18_900, 101_700, 101_700]);
+        for set in [
+            Postcheck::Window,
+            Postcheck::NextDay,
+            Postcheck::PeriodClose,
+        ] {
+            for (t, (name, sql)) in set.gap_tiers().iter().zip(
+                postcheck_sql(set, "prices")
+                    .into_iter()
+                    .filter(|(n, _)| n.starts_with("gap_")),
+            ) {
+                assert_eq!(name, format!("gap_{}", t.name));
+                assert!(!sql.contains("range_to"), "{name} ends at now, not the gap");
+                assert!(
+                    sql.contains(&format!(
+                        "{} < {}",
+                        gap_bound("prices", "range_from", t.interval),
+                        settled_bound(t)
+                    )),
+                    "{name} fails on an empty range"
+                );
+            }
+        }
+        assert_eq!(
+            Postcheck::parse("period-close"),
+            Some(Postcheck::PeriodClose)
+        );
+        assert_eq!(Postcheck::parse("daily"), None);
     }
 
     #[test]

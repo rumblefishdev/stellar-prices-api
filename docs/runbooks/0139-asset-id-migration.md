@@ -537,11 +537,15 @@ the copy left them. It refuses while the newest `price_ohlcv_1m` row is older
 than 15 minutes (catch-up not finished), and logs the range, each tier's
 `written_rows` and the time taken.
 
-`gap-verify` is read-only: per tier against the tier below, over the closed
-buckets of the range, every `(asset_id, quote_asset_id, source, bucket)` must
-agree on `trade_count` and `volume_base`, then the range totals of the
-post-checks. A mismatch: run `rk gap-backfill --execute` once more (it is
-idempotent) and `rk gap-verify` again. **A second mismatch stops the window for
+`gap-verify` is read-only: per tier against the tier below, from the gap's
+first bucket to the buckets that have settled (closed, then refreshed: 15m
+after 16 min, 1h after 31 min, 4h after 1 h 30, 1d after 5 h 15, 1w and 1M
+after 28 h 15), every `(asset_id, quote_asset_id, source, bucket)` must agree
+on `trade_count` and `volume_base`, then the range totals of the post-checks.
+A tier none of whose buckets has settled **fails** rather than passing
+unchecked. At W14 it checks 15m and 1h; W16 and W17 check the coarser tiers.
+A mismatch: run `rk gap-backfill --execute` once more (it is idempotent)
+and `rk gap-verify` again. **A second mismatch stops the window for
 investigation**; writers stay on and the fix is forward.
 
 Then the window post-checks (block below; the agent runs the same block
@@ -566,14 +570,27 @@ The 0286 orchestrator stays stopped until W14 is green.
 
 ### W16 — the next day
 
-The daily MVs have refreshed. Host shell:
+After 05:15 UTC on the day after W14 (1d has settled; 4h long before). Host
+shell:
 
 ```bash
-rk gap-verify
+rk gap-verify --set next-day
 ```
 
 Then the next-day post-check block below: every line `1`. Then remove the
 rollback worktree (`git worktree remove .claude/worktrees/0139-rollback`).
+
+### W17 — the gap's week and month have closed
+
+After 04:15 UTC on the Tuesday after the gap's week ends (UTC Monday-start
+weeks) and the 2nd of the month after the gap's month, whichever is later:
+
+```bash
+rk gap-verify --set period-close
+```
+
+Then the period-close post-check block below: both lines `1`. A `0` before
+that time means the bucket has not settled yet, not a lost gap.
 
 ## Rollback
 
@@ -637,15 +654,15 @@ restored UInt32 tables, read-only.
 
 ## Post-checks
 
-Three blocks, rendered from `postcheck_sql` (`src/rekey/gap.rs`) and pinned to
+Four blocks, rendered from `postcheck_sql` (`src/rekey/gap.rs`) and pinned to
 it by a unit test. One `SELECT` per line, each prints `1` on pass. No
 `SETTINGS` (`dev_read` is `readonly=1`); gap ranges are hours, and month
 queries touch one partition. Run a block with the read certificate
-(`0151-zero-invariant-probe-rollout.md`): replace `window` with `next-day`, or
-with `month` plus `?param_m=YYYYMM` on the URL.
+(`0151-zero-invariant-probe-rollout.md`): replace `window` with `next-day` or
+`period-close`, or with `month` plus `?param_m=YYYYMM` on the URL.
 
 ```bash
-B=window   # next-day | month
+B=window   # next-day | period-close | month
 sed -n "/<!-- 0139-postcheck:$B -->/,/<!-- \/0139-postcheck:$B -->/p" \
   docs/runbooks/0139-asset-id-migration.md | grep '^SELECT ' | while IFS= read -r q; do
   r=$(printf '%s' "$q" | curl --fail-with-body -sS --cert "$READ_CERT" --key "$READ_KEY" \
@@ -663,9 +680,8 @@ SELECT ifNull(count() = uniqExact(asset_id), 0) AS assets_unique FROM prices.ass
 SELECT ifNull(count() = 0, 0) AS no_uint32_ids FROM system.columns WHERE database = 'prices' AND name IN ('asset_id', 'quote_asset_id') AND type NOT IN ('UInt64', 'Nullable(UInt64)') AND NOT (endsWith(table, 'pre0139') OR startsWith(table, 'rollout_0286_bak_') OR match(table, '^price_ohlcv_.+_bak$'))
 SELECT ifNull((SELECT count() FROM prices.current_price_usd) = (SELECT count() FROM prices.current_prices FINAL), 0) AS current_price_usd_one_row
 SELECT ifNull((SELECT count() FROM prices.price_ohlcv_1h WHERE toYYYYMM(timestamp) BETWEEN 202402 AND 202607 AND volume_quote > 0) = (SELECT count() FROM prices.price_ohlcv_1h AS c INNER JOIN prices.assets AS a FINAL ON a.asset_id = c.quote_asset_id WHERE toYYYYMM(c.timestamp) BETWEEN 202402 AND 202607 AND c.volume_quote > 0), 0) AS cross_check_0129
-SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_15m FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 15 MINUTE) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 15 MINUTE)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1m FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 15 MINUTE) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 15 MINUTE)), 0) AS gap_15m
-SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1h FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 HOUR) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 HOUR)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_15m FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 HOUR) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 HOUR)), 0) AS gap_1h
-SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_4h FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 4 HOUR) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 4 HOUR)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1h FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 4 HOUR) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 4 HOUR)), 0) AS gap_4h
+SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 15 MINUTE) < toStartOfInterval(now() - INTERVAL 960 SECOND, INTERVAL 15 MINUTE) AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_15m FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 15 MINUTE) AND timestamp < toStartOfInterval(now() - INTERVAL 960 SECOND, INTERVAL 15 MINUTE)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1m FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 15 MINUTE) AND timestamp < toStartOfInterval(now() - INTERVAL 960 SECOND, INTERVAL 15 MINUTE)), 0) AS gap_15m
+SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 HOUR) < toStartOfInterval(now() - INTERVAL 1860 SECOND, INTERVAL 1 HOUR) AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1h FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 HOUR) AND timestamp < toStartOfInterval(now() - INTERVAL 1860 SECOND, INTERVAL 1 HOUR)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_15m FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 HOUR) AND timestamp < toStartOfInterval(now() - INTERVAL 1860 SECOND, INTERVAL 1 HOUR)), 0) AS gap_1h
 ```
 
 <!-- /0139-postcheck:window -->
@@ -679,15 +695,24 @@ SELECT ifNull(count() = uniqExact(asset_id), 0) AS assets_unique FROM prices.ass
 SELECT ifNull(count() = 0, 0) AS no_uint32_ids FROM system.columns WHERE database = 'prices' AND name IN ('asset_id', 'quote_asset_id') AND type NOT IN ('UInt64', 'Nullable(UInt64)') AND NOT (endsWith(table, 'pre0139') OR startsWith(table, 'rollout_0286_bak_') OR match(table, '^price_ohlcv_.+_bak$'))
 SELECT ifNull((SELECT count() FROM prices.current_price_usd) = (SELECT count() FROM prices.current_prices FINAL), 0) AS current_price_usd_one_row
 SELECT ifNull((SELECT count() FROM prices.price_ohlcv_1h WHERE toYYYYMM(timestamp) BETWEEN 202402 AND 202607 AND volume_quote > 0) = (SELECT count() FROM prices.price_ohlcv_1h AS c INNER JOIN prices.assets AS a FINAL ON a.asset_id = c.quote_asset_id WHERE toYYYYMM(c.timestamp) BETWEEN 202402 AND 202607 AND c.volume_quote > 0), 0) AS cross_check_0129
-SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_15m FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 15 MINUTE) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 15 MINUTE)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1m FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 15 MINUTE) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 15 MINUTE)), 0) AS gap_15m
-SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1h FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 HOUR) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 HOUR)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_15m FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 HOUR) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 HOUR)), 0) AS gap_1h
-SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_4h FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 4 HOUR) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 4 HOUR)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1h FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 4 HOUR) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 4 HOUR)), 0) AS gap_4h
-SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1d FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 DAY) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 DAY)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_4h FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 DAY) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 DAY)), 0) AS gap_1d
-SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1w FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 WEEK) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 WEEK)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1d FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 WEEK) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 WEEK)), 0) AS gap_1w
-SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1M FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 MONTH) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 MONTH)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1d FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 MONTH) AND timestamp < toStartOfInterval((SELECT range_to FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 MONTH)), 0) AS gap_1M
+SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 15 MINUTE) < toStartOfInterval(now() - INTERVAL 960 SECOND, INTERVAL 15 MINUTE) AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_15m FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 15 MINUTE) AND timestamp < toStartOfInterval(now() - INTERVAL 960 SECOND, INTERVAL 15 MINUTE)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1m FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 15 MINUTE) AND timestamp < toStartOfInterval(now() - INTERVAL 960 SECOND, INTERVAL 15 MINUTE)), 0) AS gap_15m
+SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 HOUR) < toStartOfInterval(now() - INTERVAL 1860 SECOND, INTERVAL 1 HOUR) AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1h FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 HOUR) AND timestamp < toStartOfInterval(now() - INTERVAL 1860 SECOND, INTERVAL 1 HOUR)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_15m FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 HOUR) AND timestamp < toStartOfInterval(now() - INTERVAL 1860 SECOND, INTERVAL 1 HOUR)), 0) AS gap_1h
+SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 4 HOUR) < toStartOfInterval(now() - INTERVAL 5400 SECOND, INTERVAL 4 HOUR) AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_4h FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 4 HOUR) AND timestamp < toStartOfInterval(now() - INTERVAL 5400 SECOND, INTERVAL 4 HOUR)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1h FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 4 HOUR) AND timestamp < toStartOfInterval(now() - INTERVAL 5400 SECOND, INTERVAL 4 HOUR)), 0) AS gap_4h
+SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 DAY) < toStartOfInterval(now() - INTERVAL 18900 SECOND, INTERVAL 1 DAY) AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1d FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 DAY) AND timestamp < toStartOfInterval(now() - INTERVAL 18900 SECOND, INTERVAL 1 DAY)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_4h FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 DAY) AND timestamp < toStartOfInterval(now() - INTERVAL 18900 SECOND, INTERVAL 1 DAY)), 0) AS gap_1d
 ```
 
 <!-- /0139-postcheck:next-day -->
+
+### Period close (W17)
+
+<!-- 0139-postcheck:period-close -->
+
+```sql
+SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 WEEK) < toStartOfInterval(now() - INTERVAL 101700 SECOND, INTERVAL 1 WEEK) AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1w FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 WEEK) AND timestamp < toStartOfInterval(now() - INTERVAL 101700 SECOND, INTERVAL 1 WEEK)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1d FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 WEEK) AND timestamp < toStartOfInterval(now() - INTERVAL 101700 SECOND, INTERVAL 1 WEEK)), 0) AS gap_1w
+SELECT ifNull((SELECT count() FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok') > 0 AND toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 MONTH) < toStartOfInterval(now() - INTERVAL 101700 SECOND, INTERVAL 1 MONTH) AND (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1M FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 MONTH) AND timestamp < toStartOfInterval(now() - INTERVAL 101700 SECOND, INTERVAL 1 MONTH)) = (SELECT (sum(trade_count), sum(volume_base)) FROM prices.price_ohlcv_1d FINAL WHERE timestamp >= toStartOfInterval((SELECT range_from FROM prices.rekey_0139_log WHERE step = 'gap-backfill' AND status = 'ok' ORDER BY at DESC LIMIT 1), INTERVAL 1 MONTH) AND timestamp < toStartOfInterval(now() - INTERVAL 101700 SECOND, INTERVAL 1 MONTH)), 0) AS gap_1M
+```
+
+<!-- /0139-postcheck:period-close -->
 
 ### Month (task 13, `M=YYYYMM`)
 

@@ -11,7 +11,8 @@
 //!   `recreate-mvs --source prod-text|generator`;
 //!   `rollback [--force-lose-post-swap-rows]`;
 //! - `verify`; `gap-backfill [--to 'YYYY-MM-DD HH:MM:SS']`;
-//!   `gap-verify [--schema pre0139 --from T --to T]`.
+//!   `gap-verify [--set window|next-day|period-close]`, or
+//!   `gap-verify [--schema pre0139] --from T --to T`.
 //!
 //! `--rewrite-db` (rehearsal in a scratch `--database`) captures the MVs and
 //! views of `prices` rewritten into the scratch database.
@@ -31,6 +32,7 @@
 
 use std::time::Duration;
 
+use prices_clickhouse::rekey::gap::Postcheck;
 use prices_clickhouse::rekey::swap::{FORCE_LOSE, MvSource};
 use prices_clickhouse::rekey::{COPIED_TABLES, Fill, Rekey, RekeyError};
 
@@ -68,6 +70,7 @@ struct Args {
     mutation_timeout: u64,
     gap_from: Option<String>,
     gap_to: Option<String>,
+    gap_set: Option<Postcheck>,
     pre0139: bool,
 }
 
@@ -105,6 +108,14 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--mtls-ca" => mtls[3] = Some(value()?),
             "--from" => a.gap_from = Some(value()?),
             "--to" => a.gap_to = Some(value()?),
+            "--set" => {
+                a.gap_set = match Postcheck::parse(&value()?) {
+                    Some(Postcheck::Month) | None => {
+                        return Err("--set: window, next-day or period-close".into());
+                    }
+                    set => set,
+                }
+            }
             "--schema" => match value()?.as_str() {
                 "pre0139" => a.pre0139 = true,
                 v => return Err(format!("--schema {v}: only pre0139")),
@@ -137,6 +148,9 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     }
     if a.gap_from.is_some() && a.gap_to.is_none() {
         return Err("--from needs --to".into());
+    }
+    if a.gap_set.is_some() && a.gap_from.is_some() {
+        return Err("--set or --from/--to, not both".into());
     }
     if a.command == "recreate-mvs" && a.mv_source.is_none() {
         return Err("recreate-mvs needs --source prod-text or --source generator".into());
@@ -234,7 +248,8 @@ async fn run(a: &Args) -> Result<Vec<String>, RekeyError> {
         "gap-backfill" => r.gap_backfill(a.gap_to.as_deref()).await,
         "gap-verify" => {
             let bounds = a.gap_from.as_deref().zip(a.gap_to.as_deref());
-            r.gap_verify(a.pre0139, bounds).await
+            let set = a.gap_set.unwrap_or(Postcheck::Window);
+            r.gap_verify(a.pre0139, bounds, set).await
         }
         _ => unreachable!("parse admits only COMMANDS"),
     }
@@ -311,6 +326,9 @@ mod tests {
             "alter-assets --mutation-timeout soon",
             "gap-verify --schema current",
             "gap-verify --from 2026-10-01",
+            "gap-verify --set month",
+            "gap-verify --set daily",
+            "gap-verify --set next-day --from a --to b",
             "fill --source a",
             "fill --table assets",
             "fill --table price_ohlcv_1m --source a --target b",
@@ -353,6 +371,11 @@ mod tests {
                 .force_lose
         );
         assert!(p("swap --check-only").unwrap().check_only);
+        assert_eq!(
+            p("gap-verify --set period-close").unwrap().gap_set,
+            Some(Postcheck::PeriodClose)
+        );
+        assert_eq!(p("gap-verify").unwrap().gap_set, None);
         assert!(
             p("capture --rewrite-db --database prices_r0139")
                 .unwrap()
