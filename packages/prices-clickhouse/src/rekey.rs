@@ -34,6 +34,10 @@ pub const COPYABLE: &str = "('mapped', 'sentinel')";
 /// read new ids as old ones.
 pub const MAP_FINAL: &str = "assets already carry derived ids; the map is final";
 
+/// `fill` reads `written_rows` from `system.query_log`; without it no
+/// partition can be verified.
+pub const NO_QUERY_LOG: &str = "system.query_log does not exist: fill cannot verify written_rows";
+
 /// The id-keyed tables copied to `X__new` (all but `assets`, migrated in place).
 pub const COPIED_TABLES: [&str; 11] = [
     "price_ohlcv_1m",
@@ -235,6 +239,22 @@ impl Rekey {
         Ok(())
     }
 
+    async fn count(&self, sql: &str) -> Result<u64> {
+        Ok(self.client.query(sql).fetch_one().await?)
+    }
+
+    /// `system.query_log` exists once the server logs queries.
+    async fn has_query_log(&self) -> Result<bool> {
+        self.client.query("SYSTEM FLUSH LOGS").execute().await?;
+        Ok(self
+            .count(
+                "SELECT count() FROM system.tables WHERE database = 'system' \
+                 AND name = 'query_log'",
+            )
+            .await?
+            > 0)
+    }
+
     async fn exists(&self, table: &str) -> Result<bool> {
         let n: u64 = self
             .client
@@ -361,6 +381,510 @@ impl Rekey {
     }
 }
 
+/// The table a schema statement creates or alters, if it is `prices.<name>`.
+fn statement_table(stmt: &str) -> Option<&str> {
+    let rest = stmt
+        .strip_prefix("CREATE TABLE IF NOT EXISTS prices.")
+        .or_else(|| stmt.strip_prefix("ALTER TABLE prices."))?;
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
+/// `prices.<name>` → `<db>.<name>__new` for a copied table, `<db>.<name>`
+/// otherwise.
+pub fn rename_for_new(stmt: &str, db: &str) -> String {
+    let mut out = String::with_capacity(stmt.len());
+    let mut rest = stmt;
+    while let Some(at) = rest.find("prices.") {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + "prices.".len()..];
+        let end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(tail.len());
+        let name = &tail[..end];
+        let suffix = if COPIED_TABLES.contains(&name) {
+            "__new"
+        } else {
+            ""
+        };
+        out.push_str(&format!("{db}.{name}{suffix}"));
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The `INIT_SQL` statements that build the eleven `X__new` tables in `db`.
+pub fn create_sql(db: &str) -> Vec<String> {
+    crate::split_statements(crate::INIT_SQL)
+        .into_iter()
+        .filter(|s| statement_table(s).is_some_and(|t| COPIED_TABLES.contains(&t)))
+        .map(|s| rename_for_new(&s, db))
+        .collect()
+}
+
+/// Stored columns `(name, type)` of `X` and `X__new` must agree except for
+/// the id columns' types.
+pub fn parity(
+    table: &str,
+    live: &[(String, String)],
+    new: &[(String, String)],
+) -> std::result::Result<(), String> {
+    let find = |cols: &[(String, String)], n: &str| {
+        cols.iter().find(|(c, _)| c == n).map(|(_, t)| t.clone())
+    };
+    let mut bad = Vec::new();
+    for (name, ty) in live {
+        match find(new, name) {
+            None => bad.push(format!("{table}__new lacks {name}")),
+            Some(t) if t != *ty && !["asset_id", "quote_asset_id"].contains(&name.as_str()) => {
+                bad.push(format!("{name} is {ty} in {table}, {t} in {table}__new"))
+            }
+            Some(_) => {}
+        }
+    }
+    for (name, _) in new {
+        if find(live, name).is_none() {
+            bad.push(format!("{table} lacks {name}"));
+        }
+    }
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(bad.join(", "))
+    }
+}
+
+/// One fill: `source` (old ids) into `target` (new ids) through the map.
+#[derive(Debug, Clone, Default)]
+pub struct Fill {
+    pub source: String,
+    pub target: String,
+    /// Only this partition (its value or its id).
+    pub partition: Option<String>,
+    /// Test hooks: an extra predicate on the INSERT only, and a column whose
+    /// copied expression is replaced.
+    #[doc(hidden)]
+    pub fault: Option<String>,
+    #[doc(hidden)]
+    pub fault_expr: Option<(String, String)>,
+}
+
+impl Fill {
+    /// The default fill of a copied table: `X` into `X__new`.
+    pub fn table(t: &str) -> Self {
+        Self {
+            source: t.into(),
+            target: format!("{t}__new"),
+            ..Self::default()
+        }
+    }
+}
+
+/// Partitions copied (or, dry, to copy) and skipped as unchanged.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct FillReport {
+    pub copied: usize,
+    pub skipped: usize,
+}
+
+/// What a fill needs to know about its two tables.
+#[derive(Debug, Clone)]
+pub struct Layout {
+    pub partition_key: String,
+    /// The target's sorting key columns.
+    pub key: Vec<String>,
+    pub source_cols: Vec<String>,
+    pub target_cols: Vec<String>,
+    /// The id columns, `asset_id` first.
+    pub ids: Vec<String>,
+}
+
+fn id_alias(col: &str) -> &'static str {
+    if col == "quote_asset_id" { "q" } else { "m" }
+}
+
+fn mapped_col(col: &str, ids: &[String]) -> String {
+    if ids.iter().any(|i| i == col) {
+        format!("{}.new_id", id_alias(col))
+    } else {
+        format!("s.{col}")
+    }
+}
+
+fn joins(db: &str, ids: &[String], kind: &str) -> String {
+    ids.iter()
+        .map(|c| {
+            let a = id_alias(c);
+            format!(
+                " {kind} JOIN (SELECT old_id, new_id, 1 AS ok FROM {db}.{MAP_TABLE} \
+                 WHERE status IN {COPYABLE}) AS {a} ON {a}.old_id = s.{c}"
+            )
+        })
+        .collect()
+}
+
+/// The predicate selecting one partition.
+pub fn partition_where(partition_key: &str, partition: &str) -> String {
+    if partition_key.is_empty() {
+        "1".into()
+    } else {
+        format!("{partition_key} = {partition}")
+    }
+}
+
+/// One read of a source partition: raw rows, a fingerprint hash over every
+/// stored column and the map's verdict on its ids, the rows `fill` copies,
+/// and their distinct target keys.
+pub fn probe_sql(db: &str, source: &str, l: &Layout, filter: &str) -> String {
+    let hashed = l
+        .source_cols
+        .iter()
+        .map(|c| format!("s.{c}"))
+        .chain(l.ids.iter().flat_map(|c| {
+            let a = id_alias(c);
+            [format!("{a}.new_id"), format!("{a}.ok")]
+        }))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let copied = l
+        .ids
+        .iter()
+        .map(|c| format!("{}.ok = 1", id_alias(c)))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key = l
+        .key
+        .iter()
+        .map(|c| mapped_col(c, &l.ids))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT count(), sum(cityHash64({hashed})), countIf({copied}), \
+         uniqExactIf(tuple({key}), {copied}) FROM {db}.{source} AS s{} WHERE {filter}",
+        joins(db, &l.ids, "LEFT")
+    )
+}
+
+/// Copy the mapped rows of one source partition.
+pub fn insert_sql(db: &str, f: &Fill, l: &Layout, filter: &str) -> String {
+    let fault = f
+        .fault
+        .as_deref()
+        .map(|p| format!(" AND ({p})"))
+        .unwrap_or_default();
+    format!(
+        "INSERT INTO {db}.{} ({}) SELECT {} FROM {db}.{} AS s{} WHERE {filter}{fault}",
+        f.target,
+        l.target_cols.join(", "),
+        l.target_cols
+            .iter()
+            .map(|c| match &f.fault_expr {
+                Some((col, expr)) if col == c => expr.clone(),
+                _ => mapped_col(c, &l.ids),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        f.source,
+        joins(db, &l.ids, "INNER"),
+    )
+}
+
+/// Distinct sorting keys in a target partition: unchanged by merges that
+/// collapse duplicate keys, which a `count()` is not.
+pub fn target_keys_sql(db: &str, target: &str, l: &Layout, filter: &str) -> String {
+    format!(
+        "SELECT uniqExact(tuple({})) FROM {db}.{target} WHERE {filter}",
+        l.key.join(", ")
+    )
+}
+
+/// `written_rows` of a finished query from `system.query_log`, after
+/// `SYSTEM FLUSH LOGS`; `None` if the row never appears.
+pub async fn written_rows(
+    client: &Client,
+    query_id: &str,
+    attempts: u32,
+    delay: std::time::Duration,
+) -> Result<Option<u64>> {
+    for i in 0..attempts {
+        if i > 0 {
+            tokio::time::sleep(delay).await;
+        }
+        client.query("SYSTEM FLUSH LOGS").execute().await?;
+        let n: Option<u64> = client
+            .query(
+                "SELECT written_rows FROM system.query_log WHERE event_date >= yesterday() \
+                 AND query_id = ? AND type = 'QueryFinish' \
+                 ORDER BY event_time_microseconds DESC LIMIT 1",
+            )
+            .bind(query_id)
+            .fetch_optional()
+            .await?;
+        if n.is_some() {
+            return Ok(n);
+        }
+    }
+    Ok(None)
+}
+
+impl Rekey {
+    /// `(name, type)` of the stored columns, in table order.
+    async fn stored_columns(&self, table: &str) -> Result<Vec<(String, String)>> {
+        Ok(self
+            .client
+            .query(
+                "SELECT name, type FROM system.columns WHERE database = ? AND table = ? \
+                 AND default_kind NOT IN ('EPHEMERAL', 'ALIAS', 'MATERIALIZED') \
+                 ORDER BY position",
+            )
+            .bind(&self.db)
+            .bind(table)
+            .fetch_all()
+            .await?)
+    }
+
+    /// Build `X__new` for the eleven copied tables from `INIT_SQL`, then gate
+    /// stored-column parity against `X`.
+    pub async fn create(&self) -> Result<()> {
+        for stmt in create_sql(&self.db) {
+            self.write(&stmt).await?;
+        }
+        if !self.execute {
+            return Ok(());
+        }
+        let mut bad = Vec::new();
+        for t in COPIED_TABLES {
+            let live = self.stored_columns(t).await?;
+            let new = self.stored_columns(&format!("{t}__new")).await?;
+            if let Err(e) = parity(t, &live, &new) {
+                bad.push(e);
+            }
+        }
+        if !bad.is_empty() {
+            return Err(RekeyError::Gate(format!("create: {}", bad.join("; "))));
+        }
+        self.ensure_tool_tables().await?;
+        self.log(Log {
+            step: "create",
+            status: "ok",
+            ..Log::default()
+        })
+        .await
+    }
+
+    /// Fill refuses a source already in the new id space, a target that is
+    /// not, and a missing or failing map.
+    async fn refuse_fill(&self, f: &Fill) -> Result<()> {
+        let src = self.id_types(&f.source).await?;
+        if src.is_empty() {
+            return Err(RekeyError::Refused(format!(
+                "{} has no asset id column",
+                f.source
+            )));
+        }
+        if src.iter().any(|(_, t)| t != "UInt32") {
+            return Err(RekeyError::Refused(format!(
+                "{} is already in the new id space (UInt64 ids)",
+                f.source
+            )));
+        }
+        let tgt = self.id_types(&f.target).await?;
+        if tgt.len() != src.len() || tgt.iter().any(|(_, t)| t != "UInt64") {
+            return Err(RekeyError::Refused(format!(
+                "{} does not hold UInt64 ids (run create)",
+                f.target
+            )));
+        }
+        if !self.exists(MAP_TABLE).await?
+            || self
+                .count(&format!("SELECT count() FROM {}", self.t(MAP_TABLE)))
+                .await?
+                == 0
+        {
+            return Err(RekeyError::Refused("no map (run map)".into()));
+        }
+        if !self.has_query_log().await? {
+            return Err(RekeyError::Refused(NO_QUERY_LOG.into()));
+        }
+        self.map_gates(MAP_TABLE).await
+    }
+
+    async fn layout(&self, f: &Fill) -> Result<Layout> {
+        let keys = |t: &str| {
+            self.client
+                .query(
+                    "SELECT partition_key, sorting_key FROM system.tables \
+                     WHERE database = ? AND name = ?",
+                )
+                .bind(&self.db)
+                .bind(t.to_string())
+                .fetch_one::<(String, String)>()
+        };
+        let (src_pk, _) = keys(&f.source).await?;
+        let (pk, sk) = keys(&f.target).await?;
+        if src_pk != pk {
+            return Err(RekeyError::Refused(format!(
+                "{} is partitioned by `{src_pk}`, {} by `{pk}`",
+                f.source, f.target
+            )));
+        }
+        let names = |cols: Vec<(String, String)>| cols.into_iter().map(|(n, _)| n).collect();
+        let target_cols: Vec<String> = names(self.stored_columns(&f.target).await?);
+        let ids = ["asset_id", "quote_asset_id"]
+            .iter()
+            .filter(|c| target_cols.iter().any(|t| t == *c))
+            .map(|c| c.to_string())
+            .collect();
+        Ok(Layout {
+            partition_key: pk,
+            key: sk.split(", ").map(str::to_string).collect(),
+            source_cols: names(self.stored_columns(&f.source).await?),
+            target_cols,
+            ids,
+        })
+    }
+
+    async fn last_fill(&self, f: &Fill, pid: &str) -> Result<Option<(String, String, u64)>> {
+        Ok(self
+            .client
+            .query(&format!(
+                "SELECT status, fingerprint, expected_keys FROM {} WHERE step = 'fill' \
+                 AND source = ? AND target = ? AND partition = ? ORDER BY at DESC LIMIT 1",
+                self.t(LOG_TABLE)
+            ))
+            .bind(&f.source)
+            .bind(&f.target)
+            .bind(pid)
+            .fetch_optional()
+            .await?)
+    }
+
+    /// Copy `f.source` into `f.target` partition by partition. A partition
+    /// whose fingerprint and target keys still match its last verified fill
+    /// is skipped; any other is dropped in the target and refilled. A copy is
+    /// verified only if `written_rows` equals the expected rows and the
+    /// target's distinct keys equal the source's mapped distinct keys.
+    pub async fn fill(&self, f: &Fill) -> Result<FillReport> {
+        self.refuse_fill(f).await?;
+        self.ensure_tool_tables().await?;
+        let l = self.layout(f).await?;
+        let parts: Vec<(String, String)> = self
+            .client
+            .query(
+                "SELECT partition, partition_id FROM system.parts WHERE database = ? \
+                 AND table = ? AND active GROUP BY partition, partition_id \
+                 ORDER BY partition_id",
+            )
+            .bind(&self.db)
+            .bind(&f.source)
+            .fetch_all()
+            .await?;
+        let mut report = FillReport::default();
+        let mut failed = Vec::new();
+        for (partition, pid) in parts {
+            if f.partition
+                .as_ref()
+                .is_some_and(|p| *p != partition && *p != pid)
+            {
+                continue;
+            }
+            let filter = partition_where(&l.partition_key, &partition);
+            let (rows, hash, expected, expected_keys): (u64, u64, u64, u64) = self
+                .client
+                .query(&probe_sql(&self.db, &f.source, &l, &filter))
+                .fetch_one()
+                .await?;
+            let fingerprint = format!("{rows}:{hash}");
+            let target_keys = |c: &Client| {
+                c.query(&target_keys_sql(&self.db, &f.target, &l, &filter))
+                    .fetch_one::<u64>()
+            };
+            if self.exists(LOG_TABLE).await?
+                && let Some((status, fp, keys)) = self.last_fill(f, &pid).await?
+                && status == "verified"
+                && fp == fingerprint
+                && target_keys(&self.client).await? == keys
+            {
+                report.skipped += 1;
+                continue;
+            }
+            report.copied += 1;
+            let attempts: u64 = if self.exists(LOG_TABLE).await? {
+                self.client
+                    .query(&format!(
+                        "SELECT count() FROM {} WHERE step = 'fill' AND target = ? \
+                         AND partition = ?",
+                        self.t(LOG_TABLE)
+                    ))
+                    .bind(&f.target)
+                    .bind(&pid)
+                    .fetch_one()
+                    .await?
+            } else {
+                0
+            };
+            let query_id = format!("rekey0139-{}-{}-{pid}-{}", self.db, f.target, attempts + 1);
+            self.write(&format!(
+                "ALTER TABLE {} DROP PARTITION ID '{pid}'",
+                self.t(&f.target)
+            ))
+            .await?;
+            let insert = insert_sql(&self.db, f, &l, &filter);
+            if !self.execute {
+                println!("{insert}; -- query_id {query_id}");
+                continue;
+            }
+            self.client
+                .query(&insert)
+                .with_option("query_id", &query_id)
+                .execute()
+                .await?;
+            let written = written_rows(
+                &self.client,
+                &query_id,
+                5,
+                std::time::Duration::from_secs(2),
+            )
+            .await?;
+            let keys = target_keys(&self.client).await?;
+            let verified = written == Some(expected) && keys == expected_keys;
+            if !verified {
+                failed.push(format!(
+                    "{}/{pid}: written {written:?} of {expected}, keys {keys} of {expected_keys}",
+                    f.target
+                ));
+            }
+            self.log(Log {
+                step: "fill",
+                source: &f.source,
+                target: &f.target,
+                partition: &pid,
+                status: if verified { "verified" } else { "failed" },
+                query_id: &query_id,
+                written: written.unwrap_or(0),
+                expected,
+                expected_keys,
+                target_keys: keys,
+                fingerprint: &fingerprint,
+                detail: if written.is_none() {
+                    "no QueryFinish row in system.query_log"
+                } else {
+                    ""
+                },
+            })
+            .await?;
+        }
+        if failed.is_empty() {
+            Ok(report)
+        } else {
+            Err(RekeyError::Gate(format!("fill: {}", failed.join("; "))))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +928,107 @@ mod tests {
             },
         );
         assert!(sql.contains(r"'it\'s'"), "{sql}");
+    }
+
+    #[test]
+    fn create_renames_only_the_copied_tables_of_init_sql() {
+        let sql = create_sql("db");
+        let creates = sql.iter().filter(|s| s.starts_with("CREATE")).count();
+        assert_eq!(creates, COPIED_TABLES.len());
+        assert!(
+            sql.contains(
+                &"CREATE TABLE IF NOT EXISTS db.price_ohlcv_15m__new AS db.price_ohlcv_1m__new"
+                    .to_string()
+            )
+        );
+        assert!(sql.iter().all(|s| !s.contains("prices.")));
+        assert!(
+            !sql.iter()
+                .any(|s| s.contains(" db.assets") || s.contains("usd_rate"))
+        );
+        assert_eq!(
+            rename_for_new("x prices.price_ohlcv_1M, prices.assets;", "d"),
+            "x d.price_ohlcv_1M__new, d.assets;"
+        );
+    }
+
+    #[test]
+    fn parity_ignores_id_types_and_names_a_missing_column() {
+        let c = |v: &[(&str, &str)]| {
+            v.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect::<Vec<_>>()
+        };
+        let live = c(&[("asset_id", "UInt32"), ("price", "Decimal(38, 14)")]);
+        assert_eq!(
+            parity(
+                "t",
+                &live,
+                &c(&[("asset_id", "UInt64"), ("price", "Decimal(38, 14)")])
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            parity("t", &live, &c(&[("asset_id", "UInt64")])),
+            Err("t__new lacks price".into())
+        );
+        assert_eq!(
+            parity(
+                "t",
+                &live,
+                &c(&[("asset_id", "UInt64"), ("price", "Float64")])
+            ),
+            Err("price is Decimal(38, 14) in t, Float64 in t__new".into())
+        );
+    }
+
+    #[test]
+    fn fill_maps_ids_through_copyable_rows_and_keys_on_the_target() {
+        let l = Layout {
+            partition_key: "toYYYYMM(timestamp)".into(),
+            key: vec![
+                "asset_id".into(),
+                "quote_asset_id".into(),
+                "timestamp".into(),
+            ],
+            source_cols: vec![
+                "timestamp".into(),
+                "asset_id".into(),
+                "quote_asset_id".into(),
+            ],
+            target_cols: vec![
+                "timestamp".into(),
+                "asset_id".into(),
+                "quote_asset_id".into(),
+            ],
+            ids: vec!["asset_id".into(), "quote_asset_id".into()],
+        };
+        let filter = partition_where(&l.partition_key, "202401");
+        assert_eq!(filter, "toYYYYMM(timestamp) = 202401");
+        assert_eq!(partition_where("", "tuple()"), "1");
+        let ins = insert_sql("db", &Fill::table("t"), &l, &filter);
+        assert!(
+            ins.starts_with(
+                "INSERT INTO db.t__new (timestamp, asset_id, quote_asset_id) \
+             SELECT s.timestamp, m.new_id, q.new_id FROM db.t AS s INNER JOIN"
+            ),
+            "{ins}"
+        );
+        assert!(ins.contains(&format!(
+            "status IN {COPYABLE}) AS q ON q.old_id = s.quote_asset_id"
+        )));
+        let probe = probe_sql("db", "t", &l, &filter);
+        assert!(
+            probe.contains(
+                "uniqExactIf(tuple(m.new_id, q.new_id, s.timestamp), m.ok = 1 AND q.ok = 1)"
+            ),
+            "{probe}"
+        );
+        assert!(probe.contains("LEFT JOIN"));
+        assert_eq!(
+            target_keys_sql("db", "t__new", &l, &filter),
+            "SELECT uniqExact(tuple(asset_id, quote_asset_id, timestamp)) FROM db.t__new \
+             WHERE toYYYYMM(timestamp) = 202401"
+        );
     }
 }
