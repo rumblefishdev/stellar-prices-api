@@ -368,7 +368,8 @@ recomputation (task 0286) for the whole window.
 
 **Incidents.** None reached `/v1` as an error. Report §7 lists eight:
 
-- three oracle updates lost to out-of-memory during the recomputation (§7);
+- three oracle runs out of memory during the recomputation, each retried a
+  minute later and completed (§7);
 - two partial portal closures under the test bursts, cause fixed on 2026-09-25
   at 14:47 (task 0311);
 - asset-discovery's two liveness alarms absent from 2026-09-25 14:49 to
@@ -406,11 +407,11 @@ export.
 
 Open issues, each with the task that owns it.
 
-| Issue                                                                                                                                                                          | State                                                                                                                                                                                                 | Task       |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| Candles before 2026-09-22 were built from every fill, dust included, in the wrong intra-ledger order, and live Aquarius ingestion dropped ~50 % of its trades until 2026-09-17 | Live ingestion is fixed; the history is being recomputed since 2026-09-23 and finishes after delivery (§8)                                                                                            | 0282, 0286 |
-| The oracle worker runs out of memory while the recomputation re-emits the asset registry (it reads without `FINAL`)                                                            | One 5-minute oracle update lost about every 1.5 hours until the backfill writes only changes                                                                                                          | 0226, 0140 |
-| Some asset ids each carry two or three asset identities in `prices.assets`, so a join on `asset_id` can attribute one long-tail asset's prices to another                      | Open: 3,312 such ids on 2026-09-17, growing with the registry. The measured effect is in ClickHouse views the block explorer reads: 5.5 % of the pools it shows a TVL for, all long-tail (2026-08-06) | 0139       |
+| Issue                                                                                                                                                                                                                                                                      | State                                                                                                                                                                         | Task       |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| Candles before 2026-09-22 were built from every fill, dust included, in the wrong intra-ledger order, and from 2026-07-16 to 2026-09-17 live ingestion missed part of the trades: about two thirds of SDEX's, half of Aquarius's, 44 % of Soroswap's and 12 % of Phoenix's | Live ingestion is fixed; the history is being recomputed since 2026-09-23 and finishes after delivery (§8)                                                                    | 0282, 0286 |
+| The oracle worker runs out of memory when the recomputation re-emits the asset registry (it reads without `FINAL`)                                                                                                                                                         | 5 times from 2026-09-23 to 2026-10-01. Lambda retried each run a minute later and it completed, so no update was lost; `oracle-errors` was in ALARM for 4–5 minutes each time | 0226, 0140 |
+| 3,315 asset ids each carry two or three unrelated assets (6,636 assets, 2026-09-30). Their candles mix those assets' trades, and the API returns the mixed price for each of them; 276 of these ids have a current price. XLM, USDC and USDT are not affected              | Open; fix chosen on 2026-10-01, in progress                                                                                                                                   | 0139       |
 
 ## 8. Limitations
 
