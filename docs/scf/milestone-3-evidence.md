@@ -87,16 +87,13 @@ Unchanged in shape from Milestones 1 and 2; the full description is
 [`docs/prices-api-general-overview.md`](../prices-api-general-overview.md) §2
 and §3. What Tranche 3 added on top of the Milestone 2 platform:
 
-| Layer         | Addition                                                                                                                                                                                            |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Portal (SPA)  | Served under `/api/*` of the explorer's CloudFront distribution from its own S3 bucket; Discord OAuth sign-in, key issuance on the free plan, dashboard, quick start                                |
-| API Gateway   | 404 `not_found` in the error envelope for unknown routes (0309); five usage plans, free and four paid tiers, live since 2026-09-24 (0311)                                                           |
-| Lambda (axum) | Portal routes whose sources load on the first portal request, never at cold start; a failed load costs that request only (0194, 0311); `as_of` and `price_status` beside every current price (0216) |
-| ClickHouse    | Price-forming-fill candle definitions across all tiers (0286 phase 1–2, ADR 0287); scoped `prices_admin` identity for the history re-ingest (explorer 0567)                                         |
-| Observability | api-handler error and 5xx alarms (0249) and portal-load-failed alarm (0311); liveness and duration alarms on every scheduled worker (0223, 0256); weekly coverage sweep of swap venues (0100)       |
-
-_To fill: the component table and a data-flow figure if the reviewer packet
-needs one; otherwise the pointer above stands._
+| Layer         | Addition                                                                                                                                                                                                                                                                                                       |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Portal (SPA)  | Served under `/api/*` of the explorer's CloudFront distribution from its own S3 bucket; Discord OAuth sign-in, key issuance on the free plan, dashboard, quick start                                                                                                                                           |
+| API Gateway   | 404 `not_found` in the error envelope for unknown routes (0309)                                                                                                                                                                                                                                                |
+| Lambda (axum) | Portal routes whose sources load on the first portal request, never at cold start; a failed load costs that request only (0194, 0311); `as_of` and `price_status` beside every computed current price, in the list, `/price` and batch (0216)                                                                  |
+| ClickHouse    | Price-forming-fill candle definitions across all tiers (0286 phase 1–2, ADR 0287); scoped `prices_admin` identity for the history re-ingest (explorer 0567)                                                                                                                                                    |
+| Observability | api-handler error and 5xx alarms (0249) and portal-load-failed alarm (0311); liveness alarms on the scheduled workers but the weekly coverage sweep, duration alarms on all but that sweep and asset-supply (0223, 0256); weekly coverage sweep of swap venues, its alarm clearing on a clean run (0100, 0323) |
 
 ## 4. Deviations from the approved wording
 
@@ -116,7 +113,7 @@ are pointers, not summaries.
 
 ### AC 1 — `GET /backfill/status` shows a running, fresh backfill with depth ≤ 2018-01-01
 
-**Verdict: the depth clause is met by six years — `earliest_data_available` is
+**Verdict: the depth clause is met by two years — `earliest_data_available` is
 2015-11-18. The two liveness clauses are graded on amended wording** (deviations
 §1): the archive completed on 2026-07-27, so `sdex.status` is `completed` and
 nothing pushes.
@@ -154,23 +151,18 @@ _To fill:_ the lint summary line, the CI job that runs it, and a screenshot of
 
 ### AC 3 — Onboarding portal accessible; self-service API key request flow functional
 
-**Verdict: _to fill_ — the flow works on production; the recorded walk is not
-in this document yet.** The portal is public at `https://sorobanscan.rumblefish.dev/api/`
-since 2026-09-23 09:40 CEST. The flow is Discord OAuth → eligibility check
-(guild membership, account age) → a key on the free plan → the dashboard with
-the key's plan and usage.
+**Verdict: _to fill_ — the recorded walk is not in this document yet.** The
+portal is public at `https://sorobanscan.rumblefish.dev/api/` since 2026-09-23
+09:40 CEST. The flow is Discord OAuth → eligibility check (membership in the
+official **Stellar Developers** guild, account age) → a key on the free plan →
+the dashboard with the key's plan and usage. The guild gate has been live since
+2026-09-02 (task 0254); SDF, which owns the guild, asked the project to run the
+integration itself (task 0179). A member the guild has not screened yet is
+refused with its own answer (`pending_rules`). The team has walked the flow on
+production several times (task 0164).
 
-Eligibility is checked against the official **Stellar Developers** guild
-(`897514728459468821`) since 2026-09-02 (task 0254; production parameter
-`/prices/production/discord-guild-id`, version 2). A member the guild has not
-screened yet is refused with its own answer (`pending_rules`). SDF, which owns
-the guild, asked in an official statement that the project hold the Discord
-developer account and run the integration itself (task 0179, closed
-2026-09-28). The team has walked the flow end to end on production several
-times (task 0164, closed 2026-09-28).
-
-_To fill:_ the recorded walk on production — a sign-in, a key issued, a `/v1`
-call with it, the key revoked — with timestamps (video scene 2 can record it).
+_To fill:_ the recorded walk — a sign-in, a key issued, a `/v1` call with it,
+the key revoked — with timestamps.
 
 ### AC 4 — Integration test suite: all tests pass on CI, link provided
 
@@ -345,8 +337,8 @@ named as a caveat.
 **65** `prices-production-*` alarms stand behind it (up from 53 at Milestone 2),
 including — since 2026-09-22 — error and portal-closed alarms on the
 api-handler (the portal-closed one replaced on the afternoon of 2026-09-25
-by `portal-load-failed`, task 0311) and liveness/duration alarms on every
-scheduled worker. On
+by `portal-load-failed`, task 0311) and liveness and duration alarms on the
+scheduled workers (§3). On
 2026-10-01 08:23 CEST all 65 read OK
 (`aws cloudwatch describe-alarms --alarm-name-prefix prices-production-`).
 
@@ -394,7 +386,7 @@ keyless gateway mock), so uptime is derived from the requests the API served,
 and an interval without requests counts as up. Requests reached the API in
 **274 of the 10,080 minutes**, and **96.9 %** of all requests came from a
 teammate's test bursts inside the window: a `curl` loop on 2026-09-24 and k6
-runs for the paid plans (task 0311) on 2026-09-25 (report §6). The evidence
+runs testing usage plans (task 0311) on 2026-09-25 (report §6). The evidence
 that the service was live in every minute is the ingestion signal, which is
 measured regardless of traffic. The gateway p95 includes cache hits and 4XX
 rejections answered in about a millisecond; the Lambda-path p95 is the figure
@@ -456,16 +448,15 @@ Milestone 3 is the last tranche, so this section has nowhere to push things:
 each row is closed, declared as a deviation, or handed to post-delivery with a
 name on it.
 
-| Item                                                        | Disposition                                                                                                                                                                                                                                                                                                                                    |
-| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Completion of the history re-computation (0286 phase 3)     | _post-delivery_, operator-run; stage A of four started 2026-09-23; values change, coverage does not                                                                                                                                                                                                                                            |
-| A run of the runbook in an empty AWS account (AC 7)         | _not claimed_: AC 7 rests on the runbook (§5); a run needs the explorer platform and a Hetzner server first. On a reviewer's request: task 0297 reopened                                                                                                                                                                                       |
-| Uptime measured by an external probe (AC 9)                 | _not claimed_: no canary exists; uptime is derived from served requests, which reached the API in 274 of the window's 10,080 minutes (§5, AC 9)                                                                                                                                                                                                |
-| Cause of the ~4 % slow responses, Lambda → ClickHouse       | _not claimed_: about 4 % of warm requests spend ~60 ms more on the Lambda → ClickHouse hop. It is not the database (p95 10 ms), cold starts or idle connections, and it sets the gateway's p95 near 80 ms instead of ~40 (2026-09-18, task 0293). Not instrumented, by decision of 2026-09-18; the read path's missing timing is task 0249     |
-| Throughput above ~500 req/s on the shared ClickHouse box    | _not claimed_: the box is shared with the Soroban Block Explorer. 500 req/s of cache-miss reads held for five minutes beside the explorer's live ingestion; past ~900 req/s both tenants slow down together (2026-09-18, task 0293). Measured before the history re-ingest started; the joint verification with the explorer team is task 0047 |
-| A standing read-only identity for the Stellar team (AC 8)   | _declared_: none exists by design; access is created per named reviewer on request, MFA enforced (deviations §3)                                                                                                                                                                                                                               |
-| Paid usage plans and a dashboard that states the key's plan | _not claimed_: live since 2026-09-24 (task 0311), outside the criteria; the evidence covers the free plan                                                                                                                                                                                                                                      |
-| Content-Security-Policy on the portal                       | _not claimed_: none is set. The portal is served by the explorer's distribution, which deliberately sets none, and loads the explorer's Google Tag Manager container since task 0316; a portal CSP was dropped after it                                                                                                                        |
+| Item                                                      | Disposition                                                                                                                                                                                                                                                                                                                                    |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Completion of the history re-computation (0286 phase 3)   | _post-delivery_, operator-run; stage A of four started 2026-09-23; values change, coverage does not                                                                                                                                                                                                                                            |
+| A run of the runbook in an empty AWS account (AC 7)       | _not claimed_: AC 7 rests on the runbook (§5); a run needs the explorer platform and a Hetzner server first. On a reviewer's request: task 0297 reopened                                                                                                                                                                                       |
+| Uptime measured by an external probe (AC 9)               | _not claimed_: no canary exists; uptime is derived from served requests, which reached the API in 274 of the window's 10,080 minutes (§5, AC 9)                                                                                                                                                                                                |
+| Cause of the ~4 % slow responses, Lambda → ClickHouse     | _not claimed_: about 4 % of warm requests spend ~60 ms more on the Lambda → ClickHouse hop. It is not the database (p95 10 ms), cold starts or idle connections, and it sets the gateway's p95 near 80 ms instead of ~40 (2026-09-18, task 0293). Not instrumented, by decision of 2026-09-18; the read path's missing timing is task 0249     |
+| Throughput above ~500 req/s on the shared ClickHouse box  | _not claimed_: the box is shared with the Soroban Block Explorer. 500 req/s of cache-miss reads held for five minutes beside the explorer's live ingestion; past ~900 req/s both tenants slow down together (2026-09-18, task 0293). Measured before the history re-ingest started; the joint verification with the explorer team is task 0047 |
+| A standing read-only identity for the Stellar team (AC 8) | _declared_: none exists by design; access is created per named reviewer on request, MFA enforced (deviations §3)                                                                                                                                                                                                                               |
+| Content-Security-Policy on the portal                     | _not claimed_: none is set. The portal is served by the explorer's distribution, which deliberately sets none, and loads the explorer's Google Tag Manager container since task 0316; a portal CSP was dropped after it                                                                                                                        |
 
 ## 9. Live endpoints and access
 
@@ -499,7 +490,6 @@ _Table — live verification endpoints and the access model for reviewers._
 | Fresh-account deployment runbook (AC 7)             | `README.md` → `infra/README.md` §"Fresh-account deployment"                           |
 | REST API, portal, ClickHouse schema, CDK app        | `packages/prices-api/`, `web/portal/`, `packages/prices-clickhouse/schema/`, `infra/` |
 | Operator runbooks and ADRs                          | `docs/runbooks/`, `lore/2-adrs/`                                                      |
-| Task ledger for this package                        | `lore/1-tasks/active/0294_DOCS_scf-milestone-3-verification-package.md`               |
 
 _Key ADRs for Milestone 3: **0287** (price-forming fills and fill order),
 **0292** (`close_usd` zero-as-missing sentinel and its guardrails)._

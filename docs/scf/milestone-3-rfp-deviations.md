@@ -21,7 +21,7 @@ Carried unchanged from [`milestone-2-rfp-deviations.md`](milestone-2-rfp-deviati
 `sdex.status: "running"`, `sdex.last_push_at` within the Tranche 3 push-cadence
 window, and `sdex.earliest_data_available` ≤ 2018-01-01"_. The archive walked
 from the chain tip to genesis during Tranche 2 and reports `completed` since
-2026-07-27, at **2015-11-18** — six years beyond the depth clause. A completed
+2026-07-27, at **2015-11-18** — two years beyond the depth clause. A completed
 archive that kept pushing would be the defect. The liveness half is graded on
 the signals that are live after a backfill: the rollup-freshness alarms, the
 ledger-processor lag alarm, and `realtime_tip_ledger` tracking the chain tip.
