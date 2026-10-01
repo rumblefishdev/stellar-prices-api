@@ -19,9 +19,6 @@ revocation, each with a timestamp.
 
 - **The release is done.** `develop` is merged to `master` and the first CI run
   on `master` after it is green. Scenes 4 and 7 show `master`.
-- **The portal copy is fixed, or the landing page stays at the top.** Until
-  task 0321 is deployed, the Features and FAQ sections say prices come from
-  Soroswap alone and update on every block. Neither is true.
 - **A Discord account for the recording**, not a personal one. It must be older
   than 5 minutes, a member of the Stellar Developers server
   (`discord.gg/stellardev`), and past the server's screening; otherwise the
