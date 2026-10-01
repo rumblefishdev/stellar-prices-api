@@ -301,12 +301,12 @@ class State:
 LOG = None
 
 
-def log(msg):
+def log(msg, echo=True):
     line = f"{dt.datetime.now(UTC):%Y-%m-%d %H:%M:%S}Z {msg}"
     if LOG:
         with open(LOG, "a") as f:
             f.write(line + "\n")
-    if not sys.stdout.isatty():
+    if echo and not sys.stdout.isatty():
         print(line, flush=True)
 
 
@@ -394,18 +394,45 @@ def cmd_plan(a, ch, st):
           "Every range starts on a month edge, which is a minute edge.")
 
 
-def planned_months(a, st):
+def planned_months(a, st, ch):
     ms = sorted(int(m) for m in st.d["plan"])
     if not ms:
         raise Stop("no plan — run `plan` first")
-    return [m for m in ms if (not a.from_month or m >= a.from_month)
-            and (not a.to_month or m <= a.to_month)]
+    ms = [m for m in ms if (not a.from_month or m >= a.from_month)
+          and (not a.to_month or m <= a.to_month)]
+    return second_pass_months(a, st, ch, ms) if a.second_pass else ms
+
+
+def second_pass_months(a, st, ch, planned):
+    """0139 second pass: the planned months whose 1m rows the rekey did not copy."""
+    if not a.to_month:
+        raise Stop("--second-pass needs --to-month PAUSE_MONTH: later months are a first pass on the new ids")
+    if not post0139_mode(ch):
+        raise Stop("--second-pass before the 0139 swap would re-ingest into the old ids")
+    listed = {int(m): int(c) + int(o) for m, c, o in ch.rows("reader", """SELECT month, colliding_rows,
+        orphan_rows FROM prices.rekey_0139_reingest_months ORDER BY month""")}
+    listed = {m: n for m, n in listed.items() if m <= a.to_month and (not a.from_month or m >= a.from_month)}
+    missing = sorted(set(listed) - set(planned))
+    if missing:
+        raise Stop(f"rekey_0139_reingest_months lists {missing}, which the plan lacks: `plan` over them first")
+    skipped = {m: n for m, n in listed.items() if n <= a.min_excluded_rows}
+    lines = [f"second pass SKIPS {m}: {n} excluded 1m rows stay missing (--min-excluded-rows "
+             f"{a.min_excluded_rows})" for m, n in sorted(skipped.items())]
+    lines.append(f"second pass: {len(listed) - len(skipped)} of {len(listed)} listed months through {a.to_month}")
+    for msg in lines:
+        print(msg, flush=True)
+        if a.command == "run":  # `status` under watch would repeat it every 5 s
+            log(msg, echo=False)
+    st.d["second_pass"] = {"to_month": a.to_month, "min_excluded_rows": a.min_excluded_rows,
+                           "skipped": {str(m): n for m, n in sorted(skipped.items())}}
+    # Not saved here: `status` holds no lock. `run` persists it with the month's first step.
+    return [m for m in planned if m in listed and m not in skipped]
 
 
 # ----------------------------------------------------------------- preflight
 
 def cmd_preflight(a, ch, st, months=None):
-    months = months or planned_months(a, st)
+    months = months or planned_months(a, st, ch)
     ok = []
 
     def gate(name, passed, detail):
@@ -417,7 +444,22 @@ def cmd_preflight(a, ch, st, months=None):
     n = int(ch.one("reader", f"""SELECT count() FROM system.columns WHERE database = '{ch.db}'
         AND table LIKE 'price_ohlcv_%' AND name IN ('pf_trade_count','pf_volume','pf_price_volume')"""))
     gate("phase 1 schema", n == 21, f"{n}/21 pf columns")
-    if not ch.dry:
+    old = []
+    if post0139_mode(ch):
+        print("  note 0139: the candle tables carry derived UInt64 asset ids (runbook §10)", flush=True)
+        gate("0139 binaries", a.ack_0139_binaries,
+             "sdex-backfill and events-backfill, here and on the CH host, are built from the 0139 merge "
+             "or later — an older one writes UInt32 ids into UInt64 columns (--ack-0139-binaries)")
+        n = int(ch.one("reader", f"""SELECT ifNull(sum(total_rows), 0) FROM system.tables
+            WHERE database = '{ch.db}' AND name = 'asset_id_map_0139'"""))
+        gate("0139 map", n > 0, f"prices.asset_id_map_0139 holds {n} rows — the reconcile reads the ids it copied")
+        old = old_shape_baks(ch)
+        gate("0139 snapshots", not old,
+             f"{', '.join(old)} still on UInt32 ids: rename each to <name>_pre0139 (runbook §10b)"
+             if old else "no old-shape reingest_0286_bak_* table")
+    if old:
+        gate("snapshot grants", False, "not probed: the probe would CREATE … IF NOT EXISTS next to an old-shape table")
+    elif not ch.dry:
         try:  # partition 190001 does not exist: a no-op that still runs the access check
             ch.q("admin", f"CREATE TABLE IF NOT EXISTS prices.{BAK}price_ohlcv_1m AS prices.price_ohlcv_1m")
             ch.q("admin", f"ALTER TABLE prices.{BAK}price_ohlcv_1m ATTACH PARTITION 190001 FROM prices.price_ohlcv_1m")
@@ -487,19 +529,64 @@ def cmd_preflight(a, ch, st, months=None):
 
 # ------------------------------------------------------------- month helpers
 
+# 0139: rows under a formerly colliding id were not copied by the rekey, so a
+# re-ingest brings them back under each identity's own id. Reconcile only the ids
+# the rekey copied; the rest is reported, not judged.
+COPIED_IDS = """(SELECT new_id FROM prices.asset_id_map_0139 GROUP BY new_id
+    HAVING countIf(status IN ('mapped', 'sentinel')) > 0 AND countIf(status = 'colliding') = 0)"""
+COLLIDING_IDS = "(SELECT new_id FROM prices.asset_id_map_0139 WHERE status = 'colliding')"
+MAP_RESTRICT = f" AND asset_id IN {COPIED_IDS} AND quote_asset_id IN {COPIED_IDS}"
+
 SUMS = """SELECT source, count(), sum(trade_count), sum(volume_base), sum(volume_quote)
-FROM prices.price_ohlcv_{tier} FINAL WHERE toYYYYMM(timestamp) = {m}
+FROM prices.price_ohlcv_{tier} FINAL WHERE toYYYYMM(timestamp) = {m}{restrict}
 GROUP BY source ORDER BY source"""
 
+OUTSIDE = f"""SELECT source,
+    if(asset_id IN {COLLIDING_IDS} OR quote_asset_id IN {COLLIDING_IDS}, 'colliding', 'unmapped') AS class,
+    sum(trade_count)
+FROM prices.price_ohlcv_{{tier}} FINAL WHERE toYYYYMM(timestamp) = {{m}}
+  AND NOT (asset_id IN {COPIED_IDS} AND quote_asset_id IN {COPIED_IDS})
+GROUP BY source, class ORDER BY source, class"""
 
-def sums(ch, tier, m):
+
+def sums(ch, tier, m, post=False):
+    sql = SUMS.format(tier=tier, m=m, restrict=MAP_RESTRICT if post else "")
     return {r[0]: {"candles": int(r[1]), "trades": int(r[2]), "vb": r[3], "vq": r[4]}
-            for r in ch.rows("reader", SUMS.format(tier=tier, m=m), timeout=3600)}
+            for r in ch.rows("reader", sql, timeout=3600)}
+
+
+def outside(ch, tier, m):
+    """Trades on ids the 0139 rekey did not copy, per `source class`."""
+    return {f"{r[0]} {r[1]}": int(r[2])
+            for r in ch.rows("reader", OUTSIDE.format(tier=tier, m=m), timeout=3600)}
+
+
+def id_types(ch, table):
+    """{column: type} of the id columns; {} when the table does not exist."""
+    return dict(ch.rows("reader", f"""SELECT name, type FROM system.columns WHERE database = '{ch.db}'
+        AND table = '{table}' AND name IN ('asset_id', 'quote_asset_id') ORDER BY name"""))
+
+
+def post0139_mode(ch):
+    """True once the 0139 swap put derived UInt64 ids into the candle tables."""
+    return id_types(ch, "price_ohlcv_1m").get("asset_id") == "UInt64"
+
+
+def old_shape_baks(ch):
+    """Snapshot tables still in the pre-0139 id space under the orchestrator's own names."""
+    return [r[0] for r in ch.rows("reader", f"""SELECT DISTINCT table FROM system.columns
+        WHERE database = '{ch.db}' AND startsWith(table, '{BAK}') AND NOT endsWith(table, '_pre0139')
+          AND name IN ('asset_id', 'quote_asset_id') AND type != 'UInt64' ORDER BY table""")]
 
 
 def part_rows(ch, table, m):
     return int(ch.one("reader", f"""SELECT sum(rows) FROM system.parts WHERE database = '{ch.db}'
         AND table = '{table}' AND active AND partition = '{m}'"""))
+
+
+PRE0139 = ("A snapshot taken before the 0139 window is in prices.{bak}_pre0139 (old ids, decoded by "
+           "prices.asset_id_map_0139) and the pre-window rows in prices.{table}__pre0139; neither restores "
+           "into the derived ids. Re-ingest the month instead (runbook 0286 §10, the second pass)")
 
 
 def snapshot(ch, table, m):
@@ -511,6 +598,12 @@ def snapshot(ch, table, m):
     """
     bak = BAK + table
     ch.write("admin", f"CREATE TABLE IF NOT EXISTS prices.{bak} AS prices.{table}")
+    have = {} if ch.dry else id_types(ch, bak)
+    want = id_types(ch, table) if have else have
+    if have != want:
+        # CREATE … IF NOT EXISTS kept an old-shape table: never ATTACH across id widths.
+        raise Stop(f"prices.{bak} holds {have.get('asset_id')} ids, prices.{table} {want.get('asset_id')}: "
+                   f"rename it to {bak}_pre0139 (runbook 0286 §10b) before the next snapshot")
     if not ch.dry and part_rows(ch, bak, m):
         return "kept"  # never overwrite a pre-DROP snapshot with a post-DROP one
     src = part_rows(ch, table, m)
@@ -677,6 +770,7 @@ def run_month(a, ch, st, m, pw):
     ms.update(st.d["plan"][str(m)])
     S, E = ms["start"], ms["end"]
     soroban = E >= SOROBAN_ACTIVATION_LEDGER
+    post = post0139_mode(ch)
     mdir = st.dir / str(m)
     mdir.mkdir(exist_ok=True)
     t0 = time.time()
@@ -723,11 +817,13 @@ def run_month(a, ch, st, m, pw):
         done()
 
     if step("before"):
-        b = sums(ch, "1m", m)
+        b = sums(ch, "1m", m, post)
         ms["ref"] = "1m"
         if not b:  # cleanup dropped whole 1m months on 2026-07-18; the coarse copy is the survivor
-            b, ms["ref"] = sums(ch, "1h", m), "1h"
-        ms["before"] = b
+            b, ms["ref"] = sums(ch, "1h", m, post), "1h"
+        ms["before"], ms["ids"] = b, "u64" if post else "u32"
+        if post:
+            ms["outside_before"] = outside(ch, ms["ref"], m)
         done()
 
     if step("markers"):
@@ -839,8 +935,17 @@ def run_month(a, ch, st, m, pw):
         done()
 
     if step("reconcile"):
-        after = ms["before"] if ch.dry else sums(ch, "1m", m)
+        if ms.get("ids", "u32") != ("u64" if post else "u32") and str(m) not in (a.accept or []):
+            raise Stop(f"{m}: its before numbers were read on {ms.get('ids', 'u32')} ids and the 0139 window "
+                       f"changed the width since. Compare by hand, then `run --accept {m}` with the reason on "
+                       f"the task, or re-ingest the month in the second pass")
+        after = ms["before"] if ch.dry else sums(ch, "1m", m, post)
         ms["after"] = after
+        if post and not ch.dry:
+            ob, ms["outside_after"] = ms.get("outside_before", {}), outside(ch, "1m", m)
+            for k in sorted(set(ob) | set(ms["outside_after"])):
+                note(f"{m} {k}: {ob.get(k, 0)} -> {ms['outside_after'].get(k, 0)} trades on ids the 0139 rekey "
+                     "did not copy, back under their own identities — information, not reconciled")
         rank, amm_bits = 0, []  # 0 OK, 1 FINDING, 2 DEFECT
         damaged = m in LIVE_LOSS_MONTHS
         for src in sorted(set(ms["before"]) | set(after)):
@@ -928,7 +1033,7 @@ def run_month(a, ch, st, m, pw):
 
 def cmd_run(a, ch, st):
     global RERENDER
-    months = planned_months(a, st)
+    months = planned_months(a, st, ch)
     st.lock()
     print("preflight:")
     cmd_preflight(a, ch, st, months)
@@ -951,7 +1056,7 @@ def cmd_run(a, ch, st):
 
 
 def cmd_status(a, ch, st):
-    months = planned_months(a, st)
+    months = planned_months(a, st, ch)
     cur = [m for m in months if 0 < st.month(m).get("step", 0) < len(STEPS)]
     DASH["month"] = cur[0] if cur else None
     print(render(st, months, clear=False))
@@ -963,7 +1068,7 @@ def cmd_amm_done(a, ch, st):
 
 
 def cmd_finish(a, ch, st):
-    months = planned_months(a, st)
+    months = planned_months(a, st, ch)
     left = [m for m in months if st.month(m).get("step", 0) < len(STEPS)]
     if left:
         raise Stop(f"{len(left)} months are not done ({left[0]}..): a week straddles months, so 1w waits for all of them")
@@ -991,7 +1096,7 @@ Not automatic, by design (runbook §7b-7e, §8):
   7b  the enrichment worker now re-prices the whole history on its own (hours). Capture
       POST_RUN_0228_VERSION_BEFORE_1W / _1M BEFORE it starts.
   7c  cargo test -p enrichment-worker --test post_run_0228_it -- --ignored
-  7e  the USDT-peg read (quote_asset_id = 111): peg_written = 0, pivot_written > 0, on 1m and 1h
+  7e  the USDT-peg read (USDT by identity, runbook §7e): peg_written = 0, pivot_written > 0, on 1m and 1h
   8.3 XLM/USDC 1d closes on the seven dust days within 5 % of Bitstamp
   8.4 candles priced from a quantised XLM/USDC close: zero on 15m/1h/4h/1d/1w""")
 
@@ -1001,6 +1106,19 @@ def cmd_rollback(a, ch, st):
     snap = st.month(m).get("snap")
     if not snap:
         raise Stop(f"{m} has no snapshot on record in {st.f} — nothing to roll back to")
+    for t, what in snap.items():  # every check before the first write
+        bak, table = f"{BAK}price_ohlcv_{t}", f"price_ohlcv_{t}"
+        if what == "empty":
+            continue
+        have, want = id_types(ch, bak), id_types(ch, table)
+        if have != want:
+            raise Stop(f"{m} {t}: prices.{bak} holds {have.get('asset_id', 'no')} ids, prices.{table} "
+                       f"{want.get('asset_id')}: REPLACE PARTITION "
+                       f"cannot cross id spaces. {PRE0139.format(bak=bak, table=table)}. Nothing was written")
+        if not part_rows(ch, bak, m):
+            raise Stop(f"{m} {t}: prices.{bak} holds no {m} rows (released, or snapshotted before 0139), so "
+                       "REPLACE PARTITION would empty the month. "
+                       f"{PRE0139.format(bak=bak, table=table)}. Nothing was written")
     for t, what in snap.items():
         if what == "empty":  # the partition did not exist before the run
             ch.write("admin", f"ALTER TABLE prices.price_ohlcv_{t} DROP PARTITION {m}")
@@ -1017,10 +1135,14 @@ def cmd_release(a, ch, st):
     if st.month(a.month).get("step", 0) < len(STEPS):
         raise Stop(f"{a.month} is not reconciled and done — its snapshot is its only rollback")
     for t in ["1m"] + FINE_TIERS:
+        if not part_rows(ch, f"{BAK}price_ohlcv_{t}", a.month):
+            print(f"{t} {a.month}: no snapshot rows (one taken before 0139 is in {BAK}price_ohlcv_{t}_pre0139, "
+                  "dropped whole after the second pass)", flush=True)
+            continue
         ch.write("admin", f"ALTER TABLE prices.{BAK}price_ohlcv_{t} DROP PARTITION {a.month}")
 
 
-def main():
+def build_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("command", choices=["plan", "preflight", "run", "status", "amm-done", "finish", "rollback", "release"])
     p.add_argument("month", nargs="?", type=int)
@@ -1034,6 +1156,13 @@ def main():
     p.add_argument("--ack-0285", action="store_true")
     p.add_argument("--ack-0300-binary", action="store_true",
                    help="--amm wait only: the host events-backfill is built from 0300 or later (routes Comet)")
+    p.add_argument("--ack-0139-binaries", action="store_true",
+                   help="after 0139: sdex-backfill and events-backfill (local and on the CH host) are rebuilt "
+                        "from the 0139 merge or later")
+    p.add_argument("--second-pass", action="store_true",
+                   help="after 0139: only the months in prices.rekey_0139_reingest_months, up to --to-month")
+    p.add_argument("--min-excluded-rows", type=int, default=0,
+                   help="--second-pass: skip, and log, listed months with at most N excluded 1m rows")
     # ssh, not mtls: events-backfill on develop has no --transport (runbook §6).
     p.add_argument("--amm", choices=["mtls", "stop", "ssh", "wait"], default="ssh")
     p.add_argument("--events-backfill", default="./target/release/events-backfill")
@@ -1059,9 +1188,16 @@ def main():
     p.add_argument("--comet-source", default="comet")
     p.add_argument("--min-free-gb", type=int, default=300)
     p.add_argument("--sdex-max-gain-pct", type=float, default=0.5)
+    return p
+
+
+def main():
+    p = build_parser()
     a = p.parse_args()
     if a.command in ("amm-done", "rollback", "release") and not a.month:
         p.error(f"{a.command} needs a month")
+    if a.min_excluded_rows and not a.second_pass:
+        p.error("--min-excluded-rows applies to --second-pass only")
     global LOG
     st = State(a.state_dir, a.dry_run)
     LOG = st.dir / "run.log"
