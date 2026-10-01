@@ -69,6 +69,9 @@ async fn load_and_write_supply_roundtrip() {
         "never-fetched USDC must lead the stalest-first ordering"
     );
     assert_eq!(assets[1].asset_code, "EURC", "already-fetched asset trails");
+    // Task 0139: the id is read back as u64 (`toUInt64` in the SELECT) and is
+    // exactly the stored one, so writing it back keys the same asset.
+    assert_eq!((assets[0].asset_id, assets[1].asset_id), (1, 4));
 
     // The `limit` caps the slice — only the single stalest is returned.
     let capped = supply_worker::load_stalest_credit_assets(&client, 1)
@@ -77,7 +80,8 @@ async fn load_and_write_supply_roundtrip() {
     assert_eq!(capped.len(), 1, "limit bounds the per-run slice");
     assert_eq!(capped[0].asset_code, "USDC");
 
-    supply_worker::write_supplies(&client, &[(1, Decimal::from_str("999.5").unwrap())])
+    let usdc_id = assets[0].asset_id;
+    supply_worker::write_supplies(&client, &[(usdc_id, Decimal::from_str("999.5").unwrap())])
         .await
         .expect("write supply");
 

@@ -121,7 +121,7 @@ struct Args {
     /// correct a *pricing* defect, where the stored number is wrong rather than
     /// missing, and only against a FREEZE-snapshotted partition.
     #[arg(long, requires = "reset_not_before")]
-    reset_quote_asset_id: Option<u32>,
+    reset_quote_asset_id: Option<u64>,
 
     /// Epoch (unix seconds) below which stored USD values are left alone.
     ///

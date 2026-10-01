@@ -160,7 +160,7 @@ pub enum ChEnrichError {
          See lore/1-tasks/active/0182_BUG_close-usd-overstated-7x-on-usdt-quoted-candles.md."
     )]
     ResetBlockedByOracleRows {
-        quote_asset_id: u32,
+        quote_asset_id: u64,
         oracle_name: String,
         rows: u64,
         /// The `[not_before, not_after)` span the count was taken over, rendered
@@ -184,7 +184,7 @@ pub enum ChEnrichError {
         epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S
     )]
     ResetBlockedByPreEpochOracleRows {
-        quote_asset_id: u32,
+        quote_asset_id: u64,
         oracle_name: String,
         rows: u64,
     },
@@ -213,7 +213,7 @@ pub enum ChEnrichError {
          Appendix B precondition 2 (0268 mode) or Appendix C precondition 1 \
          (0228 mode) — then re-run."
     )]
-    ResetRequiresExternalRates { quote_asset_id: u32 },
+    ResetRequiresExternalRates { quote_asset_id: u64 },
 
     /// A `require_external_rate` reset on a SUB-DAILY table while the imported
     /// series holds only daily rows (task 0268). See
@@ -249,7 +249,7 @@ pub enum ChEnrichError {
          Reset this leg without --reset-require-external-rate, or target \
          canonical USDC."
     )]
-    ResetExternalRateLegIsNotUsdc { quote_asset_id: u32, usdc_id: u32 },
+    ResetExternalRateLegIsNotUsdc { quote_asset_id: u64, usdc_id: u64 },
 
     /// Both reset modes asked for at once (task 0228). They select DIFFERENT
     /// candidate signatures, and the intersection of the two is empty.
@@ -266,7 +266,7 @@ pub enum ChEnrichError {
          Run one mode per pass: --reset-require-external-rate for the canonical \
          USDC leg, --reset-require-pivot-usdc-rate for an XLM or USDT leg."
     )]
-    ResetModesAreMutuallyExclusive { quote_asset_id: u32 },
+    ResetModesAreMutuallyExclusive { quote_asset_id: u64 },
 
     /// `require_pivot_usdc_rate` asked for on a quote leg the PIVOT cannot
     /// refill (task 0228) — the mirror image of
@@ -286,9 +286,9 @@ pub enum ChEnrichError {
          --reset-require-external-rate instead."
     )]
     ResetPivotRateLegIsNotAPivotReference {
-        quote_asset_id: u32,
-        usdc_id: u32,
-        pivot: Vec<u32>,
+        quote_asset_id: u64,
+        usdc_id: u64,
+        pivot: Vec<u64>,
     },
 
     /// A [`UsdResetSpec`] whose `[not_before, not_after)` window is empty (task
@@ -305,7 +305,7 @@ pub enum ChEnrichError {
         epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S
     )]
     ResetWindowEmpty {
-        quote_asset_id: u32,
+        quote_asset_id: u64,
         not_before: u32,
         not_after: u32,
     },
@@ -327,9 +327,9 @@ pub enum ChEnrichError {
          check because an unknown asset has no oracle rows either."
     )]
     ResetTargetHasNoPricingPath {
-        quote_asset_id: u32,
-        stable: Vec<u32>,
-        pivot: Vec<u32>,
+        quote_asset_id: u64,
+        stable: Vec<u64>,
+        pivot: Vec<u64>,
     },
 
     /// A [`UsdResetSpec`] was combined with a bounded (`one_shot = false`) pass.
@@ -344,7 +344,7 @@ pub enum ChEnrichError {
          which would leave the rows this reset zeroes published at close_usd = 0 \
          until a later run."
     )]
-    ResetRequiresOneShot { quote_asset_id: u32 },
+    ResetRequiresOneShot { quote_asset_id: u64 },
 }
 
 /// Opt-in reset of **already-written** USD columns, so a corrected pricing tier
@@ -384,7 +384,7 @@ pub enum ChEnrichError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsdResetSpec {
     /// The quote `asset_id` whose candles get their USD columns zeroed.
-    pub quote_asset_id: u32,
+    pub quote_asset_id: u64,
     /// Earliest candle `timestamp` (unix seconds) eligible for reset. Rows older
     /// than this keep whatever they hold — see the epoch note above.
     pub not_before: u32,
@@ -817,15 +817,15 @@ impl Default for ChEnrichConfig {
 /// dataset with no USDT trades), so each is optional.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ReferenceIds {
-    xlm: Option<u32>,
-    usdc: Option<u32>,
-    usdt: Option<u32>,
+    xlm: Option<u64>,
+    usdc: Option<u64>,
+    usdt: Option<u64>,
 }
 
 impl ReferenceIds {
     /// Quote `asset_id`s that peg to exactly $1. **USDC only** — USDT is
     /// deliberately absent; see [`ReferenceIds::pivot_ids`] (task 0172).
-    fn stable_ids(&self) -> Vec<u32> {
+    fn stable_ids(&self) -> Vec<u64> {
         [self.usdc].into_iter().flatten().collect()
     }
 
@@ -853,7 +853,7 @@ impl ReferenceIds {
     /// the *ticker* USDT — Tether's own token, genuinely at par — and we file that
     /// rate under this issuer's address, so `prices.usd_rate` asserts ~$1.00 for an
     /// asset worth $0.13. That mis-attribution is its own defect (task 0173).
-    fn pivot_ids(&self) -> Vec<u32> {
+    fn pivot_ids(&self) -> Vec<u64> {
         [self.xlm, self.usdt].into_iter().flatten().collect()
     }
 
@@ -870,7 +870,7 @@ impl ReferenceIds {
 
 #[derive(Debug, clickhouse::Row, Deserialize)]
 struct RefAssetRow {
-    asset_id: u32,
+    asset_id: u64,
     asset_code: String,
     issuer_address: String,
 }
@@ -1597,7 +1597,7 @@ impl ChEnrichmentPass {
     /// left `None` and that branch of the peg-pivot tier is skipped.
     async fn resolve_reference_ids(&self) -> Result<ReferenceIds, ChEnrichError> {
         let sql = format!(
-            "SELECT asset_id, asset_code, issuer_address \
+            "SELECT toUInt64(asset_id) AS asset_id, asset_code, issuer_address \
              FROM {db}.assets FINAL \
              WHERE (asset_code = 'XLM'  AND issuer_address = '' AND contract_address = '') \
                 OR (asset_code = 'USDC' AND issuer_address = '{usdc}') \
@@ -1741,7 +1741,7 @@ impl ChEnrichmentPass {
     /// Returns the updated `(remaining, batches)`.
     async fn run_external_tier(
         &self,
-        usdc_id: u32,
+        usdc_id: u64,
         watermark: u32,
         mut remaining: u64,
         mut batches: u32,
@@ -2036,7 +2036,7 @@ enum StepStatement {
     /// One pivot pass, valuing `ref_id`-quoted candles at that asset's own
     /// measured USDC close. `ref_id` is carried so a test can assert *which*
     /// references were planned, not merely how many.
-    Pivot { sql: String, ref_id: u32 },
+    Pivot { sql: String, ref_id: u64 },
 }
 
 /// Decide which statements one peg-pivot step issues, without sending any.
@@ -2145,13 +2145,13 @@ fn oracle_sql(db: &str, tbl: &str, window: &str) -> String {
 /// shared with the rest of the pass — see [`ChEnrichmentPass::watermark`]) and the
 /// `LIMIT` (batch size). `volume_quote_usd` is only filled when still zero, so an
 /// oracle-set (depeg-aware) value survives.
-fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32], window: &str) -> Option<String> {
+fn peg_sql(db: &str, tbl: &str, stable_ids: &[u64], window: &str) -> Option<String> {
     if stable_ids.is_empty() {
         return None;
     }
     let in_list = stable_ids
         .iter()
-        .map(u32::to_string)
+        .map(u64::to_string)
         .collect::<Vec<_>>()
         .join(", ");
     let columns = insert_columns();
@@ -2378,7 +2378,7 @@ pub fn external_window_s(table: &str) -> u32 {
 /// ever becomes non-zero, the guard belongs in `run()` as well.
 /// `external_tier_never_overwrites_a_candle_the_oracle_tier_priced` proves the
 /// `close_usd` outcome end to end.
-fn external_sql(db: &str, tbl: &str, usdc_id: u32, window: &str) -> String {
+fn external_sql(db: &str, tbl: &str, usdc_id: u64, window: &str) -> String {
     let bend = bucket_end_expr(tbl, "timestamp");
     let epoch = prices_clickhouse::USDC_ORACLE_EPOCH_S;
     let columns = insert_columns();
@@ -2434,7 +2434,7 @@ fn external_sql(db: &str, tbl: &str, usdc_id: u32, window: &str) -> String {
 /// tier's candidate set is bounded by the epoch and the month window only,
 /// never by `not_before`, so a pre-epoch reading anywhere below the epoch is
 /// inside its reach.
-fn pre_epoch_oracle_rows_sql(db: &str, usdc_id: u32) -> String {
+fn pre_epoch_oracle_rows_sql(db: &str, usdc_id: u64) -> String {
     format!(
         "SELECT count() FROM {db}.oracle_prices \
          WHERE asset_id = {usdc_id} AND oracle_name = ? \
@@ -2636,7 +2636,7 @@ fn reset_sql(db: &str, tbl: &str, spec: &UsdResetSpec, window: &str) -> String {
 /// `0 × close`. That is the module doc's "no reference → never a wrong non-NULL
 /// value" rule (see the top of this file), and it is what makes the 0228 campaign
 /// safe: the reset only re-opens rows a rate can refill.
-fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> String {
+fn pivot_sql(db: &str, tbl: &str, ref_id: u64, usdc_id: u64, window: &str) -> String {
     let bend = bucket_end_expr(tbl, "timestamp");
     // DERIVED from the table, never configured — see `external_window_s`. Inlined
     // rather than bound: each `?` is a separate positional parameter, so
@@ -2706,7 +2706,7 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> St
                  ) AS p \
                  ASOF LEFT JOIN ( \
                      SELECT \
-                         CAST({ref_id} AS UInt32) AS ref_asset_id, \
+                         CAST({ref_id} AS UInt64) AS ref_asset_id, \
                          timestamp, \
                          sum(toFloat64(close) * toFloat64(volume_base)) / nullIf(sum(toFloat64(volume_base)), 0) AS usd \
                      FROM {db}.{tbl} FINAL \
@@ -3297,7 +3297,7 @@ mod tests {
         assert!(!sql.contains("CREATE TABLE"));
         // Subquery aggregates the XLM/USDC market (asset 5 quoted in asset 3).
         assert!(sql.contains("asset_id = 5 AND quote_asset_id = 3"));
-        assert!(sql.contains("CAST(5 AS UInt32) AS ref_asset_id"));
+        assert!(sql.contains("CAST(5 AS UInt64) AS ref_asset_id"));
         assert!(sql.contains("GROUP BY timestamp"));
         // ASOF equality predicate + forward-fill inequality. The reference leg
         // still resolves at the bucket START; only the RATE legs moved to the end.
@@ -3647,7 +3647,7 @@ mod tests {
 
         let plan = plan_peg_pivot_step(db, tbl, &refs, peg_window, pivot_window);
 
-        let pivot_refs: Vec<u32> = plan
+        let pivot_refs: Vec<u64> = plan
             .iter()
             .filter_map(|s| match s {
                 StepStatement::Pivot { ref_id, .. } => Some(*ref_id),
@@ -3674,13 +3674,13 @@ mod tests {
         for (stmt, expected) in plan
             .iter()
             .filter(|s| matches!(s, StepStatement::Pivot { .. }))
-            .zip([5u32, 7])
+            .zip([5u64, 7])
         {
             let StepStatement::Pivot { sql, .. } = stmt else {
                 unreachable!("filtered to pivots")
             };
             assert!(
-                sql.contains(&format!("CAST({expected} AS UInt32) AS ref_asset_id")),
+                sql.contains(&format!("CAST({expected} AS UInt64) AS ref_asset_id")),
                 "pivot SQL must carry ref {expected} as a literal"
             );
         }
@@ -4267,7 +4267,7 @@ mod tests {
     #[test]
     fn pivot_sql_prices_usdt_quoted_candles_from_its_usdc_market() {
         let sql = pivot_sql("prices", "price_ohlcv_1m", 7, 3, "");
-        assert!(sql.contains("CAST(7 AS UInt32) AS ref_asset_id"));
+        assert!(sql.contains("CAST(7 AS UInt64) AS ref_asset_id"));
         assert!(sql.contains("WHERE asset_id = 7 AND quote_asset_id = 3"));
         assert!(sql.contains("r.ref_asset_id = p.quote_asset_id"));
         // Task 0228: the USDT leg is scaled by the measured USDC/USD rate too —
