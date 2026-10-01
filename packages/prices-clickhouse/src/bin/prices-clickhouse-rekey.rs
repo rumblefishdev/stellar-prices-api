@@ -1,8 +1,18 @@
-//! Task 0139 migration tool, part 1 (see `prices_clickhouse::rekey`).
+//! Task 0139 migration tool (see `prices_clickhouse::rekey`).
 //!
-//!     prices-clickhouse-rekey <preflight|map|create|fill|check> [--database DB]
-//!         [--execute] [--table T] [--partition P] [--source S --target T]
+//!     prices-clickhouse-rekey <command> [--database DB] [--execute]
 //!         [--mtls-domain D --mtls-cert PEM --mtls-key PEM --mtls-ca PEM]
+//!
+//! Commands and their flags, in window order:
+//!
+//! - `preflight`; `capture [--rewrite-db]`; `map`; `create`;
+//!   `fill|check [--table T] [--partition P] [--source S --target T]`;
+//! - `alter-assets [--mutation-timeout SECS]`; `swap [--check-only]`;
+//!   `recreate-mvs --source prod-text|generator`;
+//!   `rollback [--force-lose-post-swap-rows]`.
+//!
+//! `--rewrite-db` (rehearsal in a scratch `--database`) captures the MVs and
+//! views of `prices` rewritten into the scratch database.
 //!
 //! Without `--execute` nothing is written: the SQL is printed. `preflight`
 //! only reads. `--database` defaults to `prices` (a rehearsal names a scratch
@@ -17,7 +27,23 @@
 //!
 //! Exit 0 on success, 1 on a refusal, a failed gate or an error.
 
+use std::time::Duration;
+
+use prices_clickhouse::rekey::swap::{FORCE_LOSE, MvSource};
 use prices_clickhouse::rekey::{COPIED_TABLES, Fill, Rekey, RekeyError};
+
+const COMMANDS: [&str; 10] = [
+    "preflight",
+    "capture",
+    "map",
+    "create",
+    "fill",
+    "check",
+    "alter-assets",
+    "swap",
+    "recreate-mvs",
+    "rollback",
+];
 use prices_clickhouse::{Config, client, with_readable_errors};
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -30,11 +56,17 @@ struct Args {
     source: Option<String>,
     target: Option<String>,
     mtls: Option<[String; 4]>,
+    rewrite_db: bool,
+    check_only: bool,
+    mv_source: Option<MvSource>,
+    force_lose: bool,
+    mutation_timeout: u64,
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
     let mut a = Args {
         database: "prices".into(),
+        mutation_timeout: 1800,
         ..Args::default()
     };
     let mut mtls: [Option<String>; 4] = Default::default();
@@ -50,20 +82,47 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--database" => a.database = value()?,
             "--table" => a.table = Some(value()?),
             "--partition" => a.partition = Some(value()?),
+            "--source" if a.command == "recreate-mvs" => {
+                a.mv_source = Some(match value()?.as_str() {
+                    "prod-text" => MvSource::ProdText,
+                    "generator" => MvSource::Generator,
+                    v => return Err(format!("--source {v}: prod-text or generator")),
+                })
+            }
             "--source" => a.source = Some(value()?),
             "--target" => a.target = Some(value()?),
             "--mtls-domain" => mtls[0] = Some(value()?),
             "--mtls-cert" => mtls[1] = Some(value()?),
             "--mtls-key" => mtls[2] = Some(value()?),
             "--mtls-ca" => mtls[3] = Some(value()?),
-            "preflight" | "map" | "create" | "fill" | "check" if a.command.is_empty() => {
-                a.command = arg.clone()
+            "--rewrite-db" => a.rewrite_db = true,
+            "--check-only" => a.check_only = true,
+            FORCE_LOSE => a.force_lose = true,
+            "--mutation-timeout" => {
+                a.mutation_timeout = value()?
+                    .parse()
+                    .map_err(|_| "--mutation-timeout takes seconds".to_string())?
             }
+            c if a.command.is_empty() && COMMANDS.contains(&c) => a.command = c.to_string(),
             other => return Err(format!("unexpected argument `{other}`")),
         }
     }
     if a.command.is_empty() {
-        return Err("no command (preflight, map, create, fill, check)".into());
+        return Err(format!("no command ({})", COMMANDS.join(", ")));
+    }
+    if !a
+        .database
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        || a.database.is_empty()
+    {
+        return Err(format!(
+            "--database {} is not a bare identifier",
+            a.database
+        ));
+    }
+    if a.command == "recreate-mvs" && a.mv_source.is_none() {
+        return Err("recreate-mvs needs --source prod-text or --source generator".into());
     }
     if a.source.is_some() != a.target.is_some() {
         return Err("--source and --target go together".into());
@@ -143,7 +202,18 @@ async fn run(a: &Args) -> Result<Vec<String>, RekeyError> {
             Ok(out)
         }
         "check" => r.check(&fills(a)).await,
-        _ => unreachable!("parse admits only the five commands"),
+        "capture" => r.capture(a.rewrite_db.then_some("prices")).await,
+        "alter-assets" => {
+            r.alter_assets(Duration::from_secs(a.mutation_timeout))
+                .await
+        }
+        "swap" => r.swap(a.check_only).await,
+        "recreate-mvs" => {
+            r.recreate_mvs(a.mv_source.expect("parse requires it"))
+                .await
+        }
+        "rollback" => r.rollback(a.force_lose).await,
+        _ => unreachable!("parse admits only COMMANDS"),
     }
 }
 
@@ -162,7 +232,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    if !a.execute && a.command != "preflight" {
+    if !a.execute && a.command != "preflight" && !a.check_only {
         eprintln!("dry run: nothing is written (add --execute)");
     }
     match run(&a).await {
@@ -209,8 +279,12 @@ mod tests {
     fn bad_arguments_are_refused() {
         for bad in [
             "",
-            "swap",
+            "verify-everything",
             "map map",
+            "recreate-mvs",
+            "recreate-mvs --source text",
+            "map --database x;y",
+            "alter-assets --mutation-timeout soon",
             "fill --source a",
             "fill --table assets",
             "fill --table price_ohlcv_1m --source a --target b",
@@ -224,6 +298,34 @@ mod tests {
                 .unwrap()
                 .mtls
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn window_commands_take_their_flags() {
+        let a = p("recreate-mvs --source prod-text --execute").unwrap();
+        assert_eq!(a.mv_source, Some(MvSource::ProdText));
+        assert_eq!(
+            p("recreate-mvs --source generator").unwrap().mv_source,
+            Some(MvSource::Generator)
+        );
+        assert!(
+            p("rollback --force-lose-post-swap-rows")
+                .unwrap()
+                .force_lose
+        );
+        assert!(p("swap --check-only").unwrap().check_only);
+        assert!(
+            p("capture --rewrite-db --database prices_r0139")
+                .unwrap()
+                .rewrite_db
+        );
+        assert_eq!(p("alter-assets").unwrap().mutation_timeout, 1800);
+        assert_eq!(
+            p("alter-assets --mutation-timeout 60")
+                .unwrap()
+                .mutation_timeout,
+            60
         );
     }
 }

@@ -1,4 +1,5 @@
-//! Task 0139 migration tool, part 1: preflight, map, create, fill, check.
+//! Task 0139 migration tool: preflight, map, create, fill, check here; the
+//! window steps in [`swap`].
 //!
 //! Re-keys the 11 asset-id tables from the old UInt32 counter ids to the ids
 //! ClickHouse derives from the identity ([`crate::asset_id`]), by copy.
@@ -15,6 +16,8 @@ use clickhouse::Client;
 
 use crate::asset_id::{id_expr, id_of};
 
+pub mod swap;
+
 /// Old id → new id, one row per (old id, identity).
 pub const MAP_TABLE: &str = "asset_id_map_0139";
 /// One row per step, partition and attempt.
@@ -22,6 +25,8 @@ pub const LOG_TABLE: &str = "rekey_0139_log";
 /// Per month, the `price_ohlcv_1m` rows `fill` did not copy (task 0139's
 /// re-ingest list).
 pub const MONTHS_TABLE: &str = "rekey_0139_reingest_months";
+/// `capture`'s copy of every MV, view and id table DDL (the rollback source).
+pub const DDL_TABLE: &str = "rekey_0139_ddl";
 
 pub const STATUS_MAPPED: &str = "mapped";
 pub const STATUS_COLLIDING: &str = "colliding";
@@ -75,7 +80,7 @@ pub fn id_columns(table: &str) -> &'static [&'static str] {
 }
 
 /// DDL of the tool's own tables.
-pub fn tool_tables_ddl(db: &str) -> [String; 3] {
+pub fn tool_tables_ddl(db: &str) -> [String; 4] {
     [
         format!(
             "CREATE TABLE IF NOT EXISTS {db}.{MAP_TABLE} (old_id UInt32, new_id UInt64, \
@@ -89,13 +94,19 @@ pub fn tool_tables_ddl(db: &str) -> [String; 3] {
              partition String DEFAULT '', status LowCardinality(String), \
              query_id String DEFAULT '', written UInt64 DEFAULT 0, expected UInt64 DEFAULT 0, \
              expected_keys UInt64 DEFAULT 0, target_keys UInt64 DEFAULT 0, \
-             fingerprint String DEFAULT '', detail String DEFAULT '', user String DEFAULT '') \
+             fingerprint String DEFAULT '', detail String DEFAULT '', user String DEFAULT '', \
+             range_from DateTime DEFAULT 0, range_to DateTime DEFAULT 0) \
              ENGINE = MergeTree ORDER BY (step, target, partition, at)"
         ),
         format!(
             "CREATE TABLE IF NOT EXISTS {db}.{MONTHS_TABLE} (month UInt32, \
              colliding_rows UInt64, orphan_rows UInt64, computed_at DateTime DEFAULT now()) \
              ENGINE = MergeTree ORDER BY month"
+        ),
+        format!(
+            "CREATE TABLE IF NOT EXISTS {db}.{DDL_TABLE} (captured_at DateTime64(3) DEFAULT now64(3), \
+             kind LowCardinality(String), name String, create_query String) \
+             ENGINE = MergeTree ORDER BY (kind, name)"
         ),
     ]
 }
@@ -173,6 +184,9 @@ pub(crate) struct Log<'a> {
     pub target_keys: u64,
     pub fingerprint: &'a str,
     pub detail: &'a str,
+    /// Unix seconds: the swap's `(last_live_1m_ts, swap_at)`, a gap range.
+    pub range_from: u32,
+    pub range_to: u32,
 }
 
 /// `INSERT … SELECT`, not `VALUES`: under `async_insert=1` (prod's profile) a
@@ -181,8 +195,9 @@ fn log_sql(db: &str, l: &Log<'_>) -> String {
     use crate::asset_id::sql_str as s;
     format!(
         "INSERT INTO {db}.{LOG_TABLE} (at, step, source, target, partition, status, query_id, \
-         written, expected, expected_keys, target_keys, fingerprint, detail, user) \
-         SELECT now64(3), {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, currentUser()",
+         written, expected, expected_keys, target_keys, fingerprint, detail, user, \
+         range_from, range_to) SELECT now64(3), {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, \
+         currentUser(), toDateTime({}), toDateTime({})",
         s(l.step),
         s(l.source),
         s(l.target),
@@ -195,6 +210,8 @@ fn log_sql(db: &str, l: &Log<'_>) -> String {
         l.target_keys,
         s(l.fingerprint),
         s(l.detail),
+        l.range_from,
+        l.range_to,
     )
 }
 
@@ -280,29 +297,28 @@ impl Rekey {
             .await?)
     }
 
-    async fn logged(&self, step: &str) -> Result<u64> {
+    /// `alter-assets` rows not undone by a later `rollback`.
+    async fn altered(&self) -> Result<u64> {
         if !self.exists(LOG_TABLE).await? {
             return Ok(0);
         }
-        Ok(self
-            .client
-            .query(&format!(
-                "SELECT count() FROM {} WHERE step = ?",
-                self.t(LOG_TABLE)
-            ))
-            .bind(step)
-            .fetch_one()
-            .await?)
+        self.count(&format!(
+            "SELECT count() FROM {log} WHERE step = 'alter-assets' AND at > \
+             (SELECT max(at) FROM {log} WHERE step = 'rollback')",
+            log = self.t(LOG_TABLE)
+        ))
+        .await
     }
 
-    /// `map` refuses once `assets` holds derived ids, or `alter-assets` ran.
+    /// `map` refuses once `assets` holds derived ids, or `alter-assets` ran
+    /// (and was not rolled back).
     async fn refuse_if_map_final(&self) -> Result<()> {
         let uint64 = self
             .id_types("assets")
             .await?
             .iter()
             .any(|(_, ty)| ty == "UInt64");
-        if uint64 || self.logged("alter-assets").await? > 0 {
+        if uint64 || self.altered().await? > 0 {
             return Err(RekeyError::Refused(MAP_FINAL.into()));
         }
         Ok(())
@@ -899,6 +915,7 @@ impl Rekey {
                 } else {
                     ""
                 },
+                ..Log::default()
             })
             .await?;
         }
