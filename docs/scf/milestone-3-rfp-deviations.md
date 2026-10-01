@@ -104,7 +104,7 @@ the review window
 ### What a reviewer gets
 
 Exactly the dashboard, its metrics and the alarm states — the nine CloudWatch
-read actions of task 0125's scoped policy — and nothing that can read a log
+read actions the runbooks grant — and nothing that can read a log
 group, a trace, a secret or a Lambda's configuration. The read actions cannot
 be scoped per dashboard, so the explorer's dashboard in the same account is
 visible too; stated rather than hidden.
