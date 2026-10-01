@@ -49,6 +49,13 @@ async fn setup(db: &str) -> Client {
     prices_clickhouse::apply_sql(&mv_client, &rewrite(prices_clickhouse::CURRENT_SQL, db))
         .await
         .expect("create mv_current_prices");
+    // The MV refreshes once on CREATE. Let that pass finish on the empty
+    // tables, so it cannot read a test's fixtures half-inserted.
+    admin
+        .query(&format!("SYSTEM WAIT VIEW {db}.mv_current_prices"))
+        .execute()
+        .await
+        .expect("wait for the initial refresh");
     admin
 }
 
@@ -123,25 +130,7 @@ async fn current_prices_mv_computes_price_volume_and_market_cap() {
         .expect("ohlcv 3");
 
     // Force a refresh and wait for current_prices to populate.
-    admin
-        .query(&format!("SYSTEM REFRESH VIEW {db}.mv_current_prices"))
-        .execute()
-        .await
-        .expect("refresh view");
-    let mut ready = false;
-    for _ in 0..30 {
-        let n: u64 = admin
-            .query(&format!("SELECT count() FROM {db}.current_prices FINAL"))
-            .fetch_one()
-            .await
-            .expect("count current_prices");
-        if n >= 2 {
-            ready = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-    assert!(ready, "MV did not populate current_prices in time");
+    refresh(&admin, db, 2).await;
 
     let where1 = format!("FROM {db}.current_prices FINAL WHERE asset_id = 1");
     let p = scalar_f64(&admin, &format!("SELECT toFloat64(price_usd) {where1}")).await;
@@ -490,25 +479,7 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         .await
         .expect("13 too-recent 7d ref row");
 
-    admin
-        .query(&format!("SYSTEM REFRESH VIEW {db}.mv_current_prices"))
-        .execute()
-        .await
-        .expect("refresh view");
-    let mut ready = false;
-    for _ in 0..30 {
-        let n: u64 = admin
-            .query(&format!("SELECT count() FROM {db}.current_prices FINAL"))
-            .fetch_one()
-            .await
-            .expect("count");
-        if n >= 18 {
-            ready = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-    assert!(ready, "MV did not populate current_prices in time");
+    refresh(&admin, db, 18).await;
 
     let f = |col: &str, slot: u32| {
         format!(
@@ -1089,25 +1060,7 @@ async fn price_xlm_lands_on_the_sentinel_when_the_xlm_divisor_is_missing() {
         .await
         .expect("ohlcv SOLO");
 
-    admin
-        .query(&format!("SYSTEM REFRESH VIEW {db}.mv_current_prices"))
-        .execute()
-        .await
-        .expect("refresh view");
-    let mut ready = false;
-    for _ in 0..30 {
-        let n: u64 = admin
-            .query(&format!("SELECT count() FROM {db}.current_prices FINAL"))
-            .fetch_one()
-            .await
-            .expect("count");
-        if n >= 1 {
-            ready = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-    assert!(ready, "MV did not populate current_prices in time");
+    refresh(&admin, db, 1).await;
 
     let q = |col: &str| {
         format!("SELECT toFloat64({col}) FROM {db}.current_prices FINAL WHERE asset_id = {solo}")
@@ -1163,26 +1116,26 @@ fn insert_rate(db: &str, code: &str, issuer: &str, rate: &str) -> String {
 }
 
 /// SYSTEM REFRESH is asynchronous, so every caller must WAIT for the write to
-/// land. Polling on a row COUNT rather than sleeping keeps the test honest on a
-/// slow machine and fast on a quick one.
+/// land. `SYSTEM WAIT VIEW` waits for the refresh this call started. Polling a
+/// row count did not: rows an earlier refresh wrote from half the fixtures
+/// already met the count, and the test read them.
 async fn refresh(admin: &Client, db: &str, expect_rows: u64) {
-    admin
-        .query(&format!("SYSTEM REFRESH VIEW {db}.mv_current_prices"))
-        .execute()
-        .await
-        .expect("refresh view");
-    for _ in 0..30 {
-        let n: u64 = admin
-            .query(&format!("SELECT count() FROM {db}.current_prices FINAL"))
-            .fetch_one()
+    for verb in ["REFRESH", "WAIT"] {
+        admin
+            .query(&format!("SYSTEM {verb} VIEW {db}.mv_current_prices"))
+            .execute()
             .await
-            .expect("count current_prices");
-        if n >= expect_rows {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            .unwrap_or_else(|e| panic!("SYSTEM {verb} VIEW: {e}"));
     }
-    panic!("MV did not write {expect_rows} row(s) to {db}.current_prices in time");
+    let n: u64 = admin
+        .query(&format!("SELECT count() FROM {db}.current_prices FINAL"))
+        .fetch_one()
+        .await
+        .expect("count current_prices");
+    assert!(
+        n >= expect_rows,
+        "MV wrote {n} row(s) to {db}.current_prices, expected at least {expect_rows}"
+    );
 }
 
 async fn method_of(admin: &Client, db: &str, asset: u64) -> String {
