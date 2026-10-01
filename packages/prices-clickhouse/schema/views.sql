@@ -401,6 +401,24 @@
 --                    '' = a row the current MV has not rewritten yet (table
 --                    DEFAULT); it can only be seen between the ALTER that adds
 --                    the column and the MV re-CREATE. Not a vocabulary word.
+--   price_basis      LowCardinality(String). trades | offer_dust.
+--                    What price_usd rests on, over the same 24h window it is
+--                    read from — independent of price_status (an offer_dust
+--                    price can be priced or carried).
+--                    trades = at least one priced candle in the window has a
+--                    trade large enough that its price is not rounding (the
+--                    measured-rate row reads this too).
+--                    offer_dust = every priced candle in the window rests only
+--                    on order-book trades below the rounding bound, each executed
+--                    at an offer's own limit price. Such a trade proves the
+--                    offer existed, not that the price clears; the price is
+--                    kept, and is often right, but no larger trade confirms it.
+--                    price_xlm and market_cap_usd inherit the same basis.
+--                    It describes the window, not the as_of minute: an asset
+--                    with a real trade earlier in the window reads trades even
+--                    if its latest print was a 1-stroop fill.
+--                    '' = no price (price_usd is the 0 sentinel), or a row the
+--                    current MV has not rewritten yet. Not a vocabulary word.
 
 ----------------------------------------------------------------------
 -- prices.usd_reference — per-bucket USD reference availability.
@@ -1964,6 +1982,7 @@ SELECT
     c.sources          AS sources,
     c.method           AS method,
     c.as_of            AS as_of,
-    c.price_status     AS price_status
+    c.price_status     AS price_status,
+    c.price_basis      AS price_basis
 FROM prices.current_prices AS c FINAL
 INNER JOIN prices.assets AS a FINAL ON a.asset_id = c.asset_id;

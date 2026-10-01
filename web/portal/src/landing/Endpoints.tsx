@@ -210,7 +210,8 @@ function ExampleResponse() {
             {/* Every field, in the order the API writes them — `method` was
                 missing until task 0306 — from the same production snapshot
                 as the quick start's example (2026-09-23 08:08 UTC), except
-                0216's `as_of` / `price_status`, not live when it was taken. */}
+                0216's `as_of` / `price_status` and 0274's `price_basis`, not
+                live when it was taken. */}
             {tok(KEY, '"asset"')}: {tok(STR, '"native"')},{'\n'}
             {tok(KEY, '"price_usd"')}: {tok(STR, '"0.22086251378147"')},{'\n'}
             {tok(KEY, '"price_xlm"')}: {tok(STR, '"1"')},{'\n'}
@@ -231,7 +232,8 @@ function ExampleResponse() {
             {'\n'}
             {tok(KEY, '"method"')}: {tok(STR, '"traded"')},{'\n'}
             {tok(KEY, '"as_of"')}: {tok(STR, '"2026-09-23T08:02:00Z"')},{'\n'}
-            {tok(KEY, '"price_status"')}: {tok(STR, '"carried"')}
+            {tok(KEY, '"price_status"')}: {tok(STR, '"carried"')},{'\n'}
+            {tok(KEY, '"price_basis"')}: {tok(STR, '"trades"')}
             {'\n}'}
           </code>
         </Box>

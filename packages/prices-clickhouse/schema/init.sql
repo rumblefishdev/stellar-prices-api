@@ -243,7 +243,8 @@ CREATE TABLE IF NOT EXISTS prices.current_prices (
     updated_at       DateTime      DEFAULT now(),
     method           LowCardinality(String) DEFAULT '',
     as_of            DateTime      DEFAULT toDateTime(0),
-    price_status     LowCardinality(String) DEFAULT ''
+    price_status     LowCardinality(String) DEFAULT '',
+    price_basis      LowCardinality(String) DEFAULT ''
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (asset_id)
@@ -306,6 +307,27 @@ ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS method LowCardinality
 -- the method ALTER is its own statement: each is independently re-runnable.
 ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS as_of DateTime DEFAULT toDateTime(0) AFTER method;
 ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS price_status LowCardinality(String) DEFAULT '' AFTER as_of;
+
+-- What the price rests on (task 0274). Since 0286 an order-book fill always
+-- forms price at the resting offer's N/D, however small — so a 1-stroop fill
+-- against an offer nobody else trades prices the asset, and `price_status`
+-- (which is about AGE) cannot say so.
+--
+--   price_basis — 'trades'     at least one priced candle in the 24h window
+--                              `price_usd` is read from has a price-forming
+--                              fill above ADR 0287's rounding bound, or the
+--                              price is the oracle rate.
+--                 'offer_dust' every priced candle in that window rests only
+--                              on order-book fills below the bound: each
+--                              proves an offer existed at that price, not
+--                              that the price clears. The price is kept — it
+--                              is often right, and nothing here can tell.
+--                 ''           no price (`price_usd` = 0), or a row this table
+--                              carries from before the MV was re-created.
+--
+-- The window, not the as_of candle: an asset with real fills whose LATEST
+-- print is a 1-stroop ping still reads 'trades'.
+ALTER TABLE prices.current_prices ADD COLUMN IF NOT EXISTS price_basis LowCardinality(String) DEFAULT '' AFTER price_status;
 
 ----------------------------------------------------------------------
 -- Per-asset circulating supply (task 0039 supply worker). Its OWN

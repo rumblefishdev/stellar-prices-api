@@ -93,6 +93,7 @@ pub async fn post_batch(
                     method: row.method.clone(),
                     as_of: row.as_of.clone(),
                     price_status: row.price_status.clone(),
+                    price_basis: row.price_basis.clone(),
                 },
             )),
             None => not_found.push(id.to_canonical()),

@@ -470,8 +470,9 @@ mod tests {
         // above, so each is independently re-runnable.)
         // (−1 = 42: task 0256 removed `discovery_state` with the ledger scan
         // that was its only reader and writer.)
+        // (+1 = 43: task 0274's `current_prices.price_basis` ALTER, same shape.)
         let stmts = split_statements(INIT_SQL);
-        assert_eq!(stmts.len(), 42, "got {}", stmts.len());
+        assert_eq!(stmts.len(), 43, "got {}", stmts.len());
     }
 
     /// The single `CREATE TABLE … IF NOT EXISTS <table> (` statement of `sql`.
@@ -759,13 +760,13 @@ mod tests {
         // equality below pass while proving nothing.
         assert_eq!(
             to_list.len(),
-            13,
-            "expected 13 columns in the TO list, parsed {to_list:?}"
+            14,
+            "expected 14 columns in the TO list, parsed {to_list:?}"
         );
         assert_eq!(
             select.len(),
-            13,
-            "expected 13 aliases in the final SELECT, parsed {select:?}"
+            14,
+            "expected 14 aliases in the final SELECT, parsed {select:?}"
         );
         assert_eq!(
             to_list, select,
@@ -1456,6 +1457,8 @@ mod tests {
             "method",
             "as_of",
             "price_status",
+            // Task 0274: what the price rests on.
+            "price_basis",
         ] {
             assert!(
                 stmt.contains(&format!("c.{col}")),
