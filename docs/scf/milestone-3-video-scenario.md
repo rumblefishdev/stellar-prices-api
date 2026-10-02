@@ -31,13 +31,13 @@ revocation, each with a timestamp.
 
 ### Windows to have open, in scene order
 
-1. **Browser tab A**: the portal, `https://sorobanscan.rumblefish.dev/api/`,
+1. **Browser tab A**: the portal, `https://sorobanscan.rumblefish.dev/prices-api/`,
    signed out, scrolled to the top. Decline non-essential cookies in the consent
    banner before recording.
 2. **Terminal A**: `curl` and `jq` ready, with `$API` and `$API_KEY` (the
    reviewer key) **exported in a shell you are not recording**.
 3. **Browser tab B**: `https://prices-api.sorobanscan.rumblefish.dev/api-docs-json`.
-4. **Browser tab C**: the rendered reference, `https://sorobanscan.rumblefish.dev/api/docs`.
+4. **Browser tab C**: the rendered reference, `https://sorobanscan.rumblefish.dev/prices-api/docs`.
 5. **Terminal B**: the repository root, with `npm run openapi:lint` already run
    and its summary on screen. The first run builds the extractor and takes a
    few minutes.
@@ -72,7 +72,7 @@ revocation, each with a timestamp.
 | ------------- | --------------------------------------------------------------------------- |
 | API base      | `https://prices-api.sorobanscan.rumblefish.dev`                             |
 | Reviewer key  | `$API_KEY`, exported out of frame                                           |
-| Portal        | `https://sorobanscan.rumblefish.dev/api/`                                   |
+| Portal        | `https://sorobanscan.rumblefish.dev/prices-api/`                            |
 | Launch        | 2026-09-23, 09:40 CEST                                                      |
 | AC 5          | p95 49.0 ms, 0 errors in 30,001 requests, `prices-production-loadtest-plan` |
 | AC 9          | uptime 100.000 %, 0 × 5XX in 65,806 requests, gateway p95 145.2 ms          |

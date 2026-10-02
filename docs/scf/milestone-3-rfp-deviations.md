@@ -111,7 +111,7 @@ endpoints"_.
   off: `info-license-strict`, because the API's licence is not decided yet
   (task 0155). The two anonymous routes, `/health` and `/api-docs-json`, are
   exempt from `operation-4xx-response` by name in `.redocly.lint-ignore.yaml`.
-- **The reference is not Swagger UI.** `https://sorobanscan.rumblefish.dev/api/docs`
+- **The reference is not Swagger UI.** `https://sorobanscan.rumblefish.dev/prices-api/docs`
   is the portal's own renderer of the live document, in Swagger UI's layout:
   tags, collapsible operations, parameters, responses, and the schemas at the
   foot. It has no "Try it out".

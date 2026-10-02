@@ -29,14 +29,17 @@ margin:
 Milestone 3, **Production Launch & Validation**, is the last tranche. The
 service went public on **2026-09-23 at 09:40 CEST**, when the staging password
 came off the onboarding portal at `https://sorobanscan.rumblefish.dev/api/`; the
-API had been serving on its custom domain since Tranche 2.
+API had been serving on its custom domain since Tranche 2. On 2026-10-02 the
+portal moved to `https://sorobanscan.rumblefish.dev/prices-api/`; every `/api/…`
+URL answers `301` to the same path there, so the earlier links in this package
+still land on it.
 
 State of the nine Tranche 3 acceptance criteria on 2026-10-01:
 
 | AC  | Criterion (short)                                           | State on 2026-10-01                                                                                                                                                             |
 | --- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | `/backfill/status`: running, fresh push, depth ≤ 2018-01-01 | **Depth met: 2015-11-18.** Liveness graded on the amended wording (deviations §1); every signal OK on 10-01                                                                     |
-| 2   | OpenAPI lints clean; Swagger UI deployed                    | Lint green in CI on 09-30 (Redocly CLI 2.44.0); reference at `…/api/docs` (deviations §4). _To fill:_ lint output from the release run                                          |
+| 2   | OpenAPI lints clean; Swagger UI deployed                    | Lint green in CI on 09-30 (Redocly CLI 2.44.0); reference at `…/prices-api/docs` (deviations §4). _To fill:_ lint output from the release run                                   |
 | 3   | Portal accessible; self-service key flow works              | Portal public since 09-23; sign-in gated on the Stellar Developers guild since 09-02 (0254). _To fill:_ the recorded walk                                                       |
 | 4   | Integration suite passes on CI, link provided               | **Met** in pull-request CI since PR #327 (09-22); run linked in §5. `master` (last release 09-11) runs the suite from the next release                                          |
 | 5   | Load test: p95 < 100 ms at 100 req/s, plan named            | **Met on 2026-09-18: p95 49.0 ms, 0 errors in 30,001 requests**, plan `prices-production-loadtest-plan`; scope in deviations §5                                                 |
@@ -53,16 +56,16 @@ limitations in §8.
 §9 of the technical design defines Tranche 3 as **Production Launch &
 Validation**, weeks 10 to 13. The work it names, and where each stands:
 
-| Work item                                                                 | State                                                                                                                                                                          |
-| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| OpenAPI 3.0 specification covering all endpoints                          | Served from the code at `/api-docs-json` as OpenAPI 3.1.0 (deviations §4), with 74 production-shaped examples and a lint gate since 2026-09-24 (task 0306)                     |
-| Self-service onboarding portal: key request, quickstart, example queries  | Public since 2026-09-23 at `…/api/`; quick start matches the spec (0163, 0233); privacy policy (0303); Discord sign-in on the Stellar Developers guild since 2026-09-02 (0254) |
-| Integration test suite, automated, runs in CI, all 7 endpoint groups      | 229 ClickHouse-backed tests in CI since 2026-09-22 (task 0275), covering each of the seven `/v1` routes (§5, AC 4)                                                             |
-| Load test report: k6, documented plan, results at 100 / 500 / 1000 req/s  | [`prices-api-load-test-100rps.md`](../prices-api-load-test-100rps.md): all three rates on 2026-09-18 (task 0293)                                                               |
-| Security review checklist: IAM least privilege, no secrets in env, inputs | Audit in task 0194; IAM detail in §5, AC 6                                                                                                                                     |
-| X-Ray tracing end-to-end                                                  | `TracingConfig.Mode: Active` on api-handler, oracle, enrichment and ledger-processor (§6)                                                                                      |
-| CloudWatch dashboards: latency, errors, ingestion lag, CH write latency…  | `prices-production-overview`, with all 65 `prices-production-*` alarms on its alarm strip (§6)                                                                                 |
-| GitHub repository public with README, architecture docs, deploy steps     | Public since 2026-09-16; root `README.md` and the fresh-account runbook in `infra/README.md` since 2026-09-25 (PR #357, task 0297; AC 7)                                       |
+| Work item                                                                 | State                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OpenAPI 3.0 specification covering all endpoints                          | Served from the code at `/api-docs-json` as OpenAPI 3.1.0 (deviations §4), with 74 production-shaped examples and a lint gate since 2026-09-24 (task 0306)                                              |
+| Self-service onboarding portal: key request, quickstart, example queries  | Public since 2026-09-23, at `…/prices-api/` since 2026-10-02; quick start matches the spec (0163, 0233); privacy policy (0303); Discord sign-in on the Stellar Developers guild since 2026-09-02 (0254) |
+| Integration test suite, automated, runs in CI, all 7 endpoint groups      | 229 ClickHouse-backed tests in CI since 2026-09-22 (task 0275), covering each of the seven `/v1` routes (§5, AC 4)                                                                                      |
+| Load test report: k6, documented plan, results at 100 / 500 / 1000 req/s  | [`prices-api-load-test-100rps.md`](../prices-api-load-test-100rps.md): all three rates on 2026-09-18 (task 0293)                                                                                        |
+| Security review checklist: IAM least privilege, no secrets in env, inputs | Audit in task 0194; IAM detail in §5, AC 6                                                                                                                                                              |
+| X-Ray tracing end-to-end                                                  | `TracingConfig.Mode: Active` on api-handler, oracle, enrichment and ledger-processor (§6)                                                                                                               |
+| CloudWatch dashboards: latency, errors, ingestion lag, CH write latency…  | `prices-production-overview`, with all 65 `prices-production-*` alarms on its alarm strip (§6)                                                                                                          |
+| GitHub repository public with README, architecture docs, deploy steps     | Public since 2026-09-16; root `README.md` and the fresh-account runbook in `infra/README.md` since 2026-09-25 (PR #357, task 0297; AC 7)                                                                |
 
 The tranche's backfill milestone, SDEX history back to January 2018, was
 reached in Tranche 2: the archive completed on 2026-07-27 and reaches back to
@@ -78,7 +81,7 @@ and §3). Tranche 3 added:
 
 | Layer         | Addition                                                                                                                                                                                                                                                                                                         |
 | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Portal (SPA)  | Served under `/api/*` of the explorer's CloudFront distribution from its own S3 bucket; Discord OAuth sign-in, key issuance on the free plan, dashboard, quick start                                                                                                                                             |
+| Portal (SPA)  | Served under `/prices-api/*` of the explorer's CloudFront distribution from its own S3 bucket (`/api/*` until 2026-10-02, now a `301`); Discord OAuth sign-in, key issuance on the free plan, dashboard, quick start                                                                                             |
 | API Gateway   | 404 `not_found` in the error envelope for unknown routes (0309)                                                                                                                                                                                                                                                  |
 | Lambda (axum) | Portal routes load their sources on the first portal request, never at cold start, and a failed load affects only that request (0194, 0311); `as_of` and `price_status` beside every computed current price: list, `/price` and batch (0216)                                                                     |
 | ClickHouse    | Price-forming-fill candle definitions across all tiers (0286 phase 1–2, ADR 0287); scoped `prices_admin` identity for the history recomputation (explorer 0567)                                                                                                                                                  |
@@ -89,13 +92,13 @@ and §3). Tranche 3 added:
 Set out in full in
 [`milestone-3-rfp-deviations.md`](milestone-3-rfp-deviations.md):
 
-| #   | Wording says                                                              | We deliver                                                                                                                                            | Kind                           |
-| --- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
-| 1   | AC 1: `sdex.status: "running"`, `last_push_at` fresh                      | the archive completed on 2026-07-27; liveness graded on the ingestion alarms and `realtime_tip_ledger` (carried from M2)                              | disclosed, delivered early     |
-| 2   | AC 9: report "SDEX push cadence and `earliest_data_available` trajectory" | both are flat since 2026-07-27; the report carries ingest-queue age and `current_prices` freshness against their alarm thresholds instead             | disclosed                      |
-| 3   | AC 8: "read-only IAM role" for the Stellar team                           | no standing identity: a named reviewer gets an IAM Identity Center user with read-only dashboard access for the review window                         | disclosed                      |
-| 4   | AC 2: `openapi-validator` lint, Swagger UI; Work list: OpenAPI 3.0        | an OpenAPI 3.1.0 document, linted by Redocly `recommended-strict`; the reference at `…/api/docs` is the portal's own renderer, in Swagger UI's layout | disclosed                      |
-| 5   | AC 5: p95 < 100 ms at 100 req/s, plan named                               | met on a scenario with 98.3 % cache hits; declared with the miss-only row, the 500 and 1000 req/s rows and the client's location                      | met as written, scope declared |
+| #   | Wording says                                                              | We deliver                                                                                                                                                   | Kind                           |
+| --- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------ |
+| 1   | AC 1: `sdex.status: "running"`, `last_push_at` fresh                      | the archive completed on 2026-07-27; liveness graded on the ingestion alarms and `realtime_tip_ledger` (carried from M2)                                     | disclosed, delivered early     |
+| 2   | AC 9: report "SDEX push cadence and `earliest_data_available` trajectory" | both are flat since 2026-07-27; the report carries ingest-queue age and `current_prices` freshness against their alarm thresholds instead                    | disclosed                      |
+| 3   | AC 8: "read-only IAM role" for the Stellar team                           | no standing identity: a named reviewer gets an IAM Identity Center user with read-only dashboard access for the review window                                | disclosed                      |
+| 4   | AC 2: `openapi-validator` lint, Swagger UI; Work list: OpenAPI 3.0        | an OpenAPI 3.1.0 document, linted by Redocly `recommended-strict`; the reference at `…/prices-api/docs` is the portal's own renderer, in Swagger UI's layout | disclosed                      |
+| 5   | AC 5: p95 < 100 ms at 100 req/s, plan named                               | met on a scenario with 98.3 % cache hits; declared with the miss-only row, the 500 and 1000 req/s rows and the client's location                             | met as written, scope declared |
 
 ## 5. Acceptance-criteria evidence
 
@@ -149,7 +152,7 @@ generated from the handler code (utoipa) and served at `/api-docs-json`. Since
 task 0306 it carries a production-shaped example for every field, and the lint
 fails on any example that no longer matches its schema
 (`no-invalid-schema-examples`, `redocly.yaml`). The rendered reference is the
-portal's own page, `https://sorobanscan.rumblefish.dev/api/docs`. The lint tool,
+portal's own page, `https://sorobanscan.rumblefish.dev/prices-api/docs`. The lint tool,
 the reference and the OpenAPI version differ from the wording: deviations §4.
 
 #### Reproduce it
@@ -159,19 +162,20 @@ npm run openapi:lint          # extracts target/openapi.json from the code and l
 ```
 
 _To fill:_ the lint summary line from the release run, and a screenshot of
-`/api/docs`.
+`/prices-api/docs`.
 
 ### AC 3 — Onboarding portal accessible; self-service API key request flow functional
 
 **Verdict: _to fill_ — the recorded walk is not in this document yet.** The
-portal is public at `https://sorobanscan.rumblefish.dev/api/` since 2026-09-23
-09:40 CEST. The flow is Discord OAuth → eligibility check (membership in the
-official **Stellar Developers** guild, account age) → a key on the free plan →
-the dashboard with the key's plan and usage. The guild gate has been live since
-2026-09-02 (task 0254); SDF, which owns the guild, asked the project to run the
-integration itself (task 0179). A member the guild has not screened yet is
-refused with its own answer (`pending_rules`). The team has run through the flow
-on production several times (task 0164).
+portal is public since 2026-09-23 09:40 CEST, at
+`https://sorobanscan.rumblefish.dev/prices-api/` since 2026-10-02 (`/api/`
+before, which now redirects). The flow is Discord OAuth → eligibility check
+(membership in the official **Stellar Developers** guild, account age) → a key
+on the free plan → the dashboard with the key's plan and usage. The guild gate
+has been live since 2026-09-02 (task 0254); SDF, which owns the guild, asked the
+project to run the integration itself (task 0179). A member the guild has not
+screened yet is refused with its own answer (`pending_rules`). The team has run
+through the flow on production several times (task 0164).
 
 _To fill:_ the recorded walk — a sign-in, a key issued, a `/v1` call with it,
 the key revoked — with timestamps.
@@ -433,9 +437,9 @@ Open issues, each with the task that owns it.
 | Health probe             | `…/health`                                                                                                                     | Anonymous                                                                                                                                                                                                                                       |
 | `/v1` route groups       | `…/v1/assets`, `…/v1/assets/{id}`, `…/price`, `…/ohlcv`, `POST …/v1/prices/batch`, `…/v1/oracles/{id}`, `…/v1/backfill/status` | `x-api-key`                                                                                                                                                                                                                                     |
 | Unknown route            | any other path or method                                                                                                       | 404 `not_found` in the error envelope (since 09-24)                                                                                                                                                                                             |
-| Onboarding portal        | `https://sorobanscan.rumblefish.dev/api/`                                                                                      | **Anonymous** since 2026-09-23; Discord sign-in for keys                                                                                                                                                                                        |
-| API reference (rendered) | `https://sorobanscan.rumblefish.dev/api/docs`                                                                                  | Anonymous                                                                                                                                                                                                                                       |
-| Privacy policy           | `https://sorobanscan.rumblefish.dev/api/privacy-policy`                                                                        | Anonymous                                                                                                                                                                                                                                       |
+| Onboarding portal        | `https://sorobanscan.rumblefish.dev/prices-api/`                                                                               | **Anonymous** since 2026-09-23; Discord sign-in for keys                                                                                                                                                                                        |
+| API reference (rendered) | `https://sorobanscan.rumblefish.dev/prices-api/docs`                                                                           | Anonymous                                                                                                                                                                                                                                       |
+| Privacy policy           | `https://sorobanscan.rumblefish.dev/prices-api/privacy-policy`                                                                 | Anonymous                                                                                                                                                                                                                                       |
 | Production ClickHouse    | `ch.sorobanscan.rumblefish.dev`, database `prices`                                                                             | mTLS, client certificate on request                                                                                                                                                                                                             |
 | CloudWatch dashboard     | `prices-production-overview`, `eu-central-1`                                                                                   | **On request** for a named reviewer: an IAM Identity Center user with read-only access for the review window (`docs/runbooks/0295-dashboard-access-via-identity-center.md`); request by e-mail with name, surname, e-mail, purpose and end date |
 | Production alarms        | `prices-production-*`, `eu-central-1`                                                                                          | same access as the dashboard (`DescribeAlarms`, `DescribeAlarmHistory`)                                                                                                                                                                         |
