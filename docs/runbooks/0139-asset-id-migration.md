@@ -24,41 +24,58 @@ SQL and writes nothing without `--execute`, logs every write to
 
 ## Who runs it, and where
 
-The operator. The agent holds `dev_read` only and cannot run any step that
-writes.
+The operator (Adam), from a workstation. The agent holds `dev_read` only and
+cannot run any step that writes.
 
-Two shells:
+Two shells, both on the workstation:
 
-- **Host shell** — the ClickHouse host, as the `default` user over the loopback
-  port (connect: [[hetzner-ch-prod-ssh-access]]). The tool runs here because it
-  reads `system.view_refreshes`, `system.processes`,
-  `system.asynchronous_inserts`, `system.mutations` and `system.query_log`.
-  `prices_admin` is denied `system.view_refreshes` (`Code: 497`,
-  `0286-candle-definitions-rollout.md` §0), so over mTLS the window gates
-  refuse.
-- **AWS shell** — a workstation checkout of `develop` at the 0139 merge commit,
-  with production AWS credentials. Rules, the event source mapping, deploys and
+- **CH shell** — ClickHouse over mTLS with Adam's write certificate
+  (`~/.certs/adamkot-write.*`), which authenticates as `dev_shared`, an admin
+  user on purpose (task 0258). The tool reads `system.view_refreshes`,
+  `system.processes`, `system.asynchronous_inserts`, `system.mutations` and
+  `system.query_log`, and runs `SYSTEM STOP/REFRESH VIEW`, `CREATE/DROP VIEW`
+  and `EXCHANGE TABLES`. `prices_admin` cannot: it is denied
+  `system.view_refreshes` (`Code: 497`, `0286-candle-definitions-rollout.md`
+  §0) and holds neither `SYSTEM` nor the view privileges. Checked 2026-10-02:
+  `currentUser()` = `dev_shared`, all five `system` tables readable,
+  `readonly` = 0. No SSH and no `default` user.
+- **AWS shell** — a checkout of `develop` at the 0139 merge commit, with
+  production AWS credentials. Rules, the event source mapping, deploys and
   CloudWatch.
 
-Set up the host shell once, in `tmux`:
+Set up the CH shell once, in `tmux`:
 
 ```bash
 tmux new -s rekey0139
 mkdir -p ~/rekey-0139
-read -rs CH_PW
 set -o pipefail
+CH=https://ch.sorobanscan.rumblefish.dev/
+WCERT=(--cert ~/.certs/adamkot-write.crt --key ~/.certs/adamkot-write.key --cacert ~/prices-mtls/ca.crt)
 rk() {
-  CLICKHOUSE_URL=http://localhost:8123 CLICKHOUSE_USER=default CLICKHOUSE_PASSWORD="$CH_PW" \
-    ~/prices-clickhouse-rekey "$@" 2>&1 | tee -a ~/rekey-0139/window.log
+  ~/rekey-0139/prices-clickhouse-rekey "$@" --mtls-domain ch.sorobanscan.rumblefish.dev \
+    --mtls-cert ~/.certs/adamkot-write.crt --mtls-key ~/.certs/adamkot-write.key \
+    --mtls-ca ~/prices-mtls/ca.crt 2>&1 | tee -a ~/rekey-0139/window.log
 }
-chq() { docker exec -i app-clickhouse-1 clickhouse-client --multiquery; }
+chq() {
+  grep -v '^[[:space:]]*--' \
+    | perl -0777 -ne 'for (split /;[ \t]*\n/) { s/^\s+|\s+$//g; s/;$//; print "$_\0" if length }' \
+    | while IFS= read -r -d '' q; do
+        curl -sS --fail-with-body "${WCERT[@]}" "$@" "$CH" --data-binary "$q" || exit 1
+      done
+}
 echo "SELECT currentUser(), version()" | chq
 ```
 
-The password goes in the environment, never in `argv` (`/proc/<pid>/cmdline`
-is world-readable). `chq` reads SQL on stdin, the pattern of
-`0286-reingest-history.md` §4g. `rk` and `chq` are shell functions: a second
-tmux pane needs them defined again.
+The last line must print `dev_shared`. `chq` reads SQL on stdin and sends one
+request per statement (the HTTP interface takes one): it drops full-line `--`
+comments and splits on a `;` that ends a line. Its arguments go to `curl`, e.g.
+`--url-query "param_x=…"` (curl ≥ 7.87). `rk` and `chq` are shell functions: a
+second tmux pane needs them defined again.
+
+Every request goes through the Caddy proxy in front of ClickHouse, the path the
+0286 orchestrator's month re-rolls already take. The rehearsal (task 11) runs
+the same path, so its fill and mutation times include it. A request the proxy
+cuts surfaces as an error: re-run the step (every `rk` step resumes).
 
 Every `rk` line below exits non-zero on a refusal, a failed gate or an error.
 **Stop at the first non-zero exit** and read the message.
@@ -86,19 +103,19 @@ Every `rk` line below exits non-zero on a refusal, a failed gate or an error.
   git checkout develop && git pull --ff-only
   git rev-parse HEAD                     # the 0139 merge commit: record it
   env -u CARGO_TARGET_DIR make -C infra build-lambdas
-  env -u CARGO_TARGET_DIR cargo build --release -p prices-clickhouse --bin prices-clickhouse-rekey
+  env -u CARGO_TARGET_DIR cargo build --release -p prices-clickhouse --features aws-mtls \
+    --bin prices-clickhouse-rekey
+  cp target/release/prices-clickhouse-rekey ~/rekey-0139/
   env -u CARGO_TARGET_DIR cargo build --release -p sdex-backfill -p events-backfill
   ```
 
-  Copy `target/release/prices-clickhouse-rekey` to the host as
-  `~/prices-clickhouse-rekey` (build for the host's architecture, as
-  `~/events-backfill` is built today). The new `sdex-backfill` and
-  `events-backfill` replace the ones the 0286 orchestrator runs, locally and on
-  the host. **Keep the old ones beside them as `*.pre0139`; never overwrite a
+  The new `sdex-backfill` and `events-backfill` replace the ones the 0286
+  orchestrator runs, on `fishuser-hero` and on the CH host (Oskar, before phase
+  3 resumes). **Keep the old ones beside them as `*.pre0139`; never overwrite a
   `*.pre0139`:**
 
   ```bash
-  # host shell, for each of events-backfill (and sdex-backfill if it lives there)
+  # for each of events-backfill and sdex-backfill, where it lives
   [ -e ~/events-backfill.pre0139 ] || cp -p ~/events-backfill ~/events-backfill.pre0139
   ```
 
@@ -148,7 +165,7 @@ AWS shell. This is what a rollback after W11 redeploys from.
 
 ## T−1 d: capture, map dry run, optional pre-fill
 
-Host shell. Writers are running; nothing here touches a live table.
+CH shell. Writers are running; nothing here touches a live table.
 
 ```bash
 rk preflight
@@ -198,8 +215,8 @@ that makes every tier whole.
 
 ## The window
 
-Times are UTC. Write every recorded value into `~/rekey-0139/window.log` on
-the host (the `rk` output already goes there).
+Times are UTC. Write every recorded value into `~/rekey-0139/window.log` (the
+`rk` output already goes there).
 
 ### W0 — mute the alarms the window trips
 
@@ -256,7 +273,7 @@ pgrep -af 'reingest_0286|sdex-backfill|events-backfill' || echo "nothing running
 ```
 
 No month may be in progress (a half-done month has its `1m` partition dropped
-and partly refilled). Run the same `pgrep` in the host shell. It stays stopped
+and partly refilled). Oskar runs the same `pgrep` on the CH host. It stays stopped
 until W14 is green.
 
 ### W2 — disable the scheduled writers
@@ -302,13 +319,15 @@ for f in ledger-processor oracle asset-discovery supply enrichment coarse-sweep;
 done
 ```
 
-Every line `0` (or `None`: no datapoint). In both shells, nothing manual may
-run: `pgrep -af 'coarse-repair|sdex-backfill|events-backfill|pool-registry-seed|prices-clickhouse-init'`
-prints nothing.
+Every line `0` (or `None`: no datapoint). Nothing manual may run, here, on
+`fishuser-hero` or on the CH host (Oskar):
+`pgrep -af 'coarse-repair|sdex-backfill|events-backfill|pool-registry-seed|prices-clickhouse-init'`
+prints nothing. W6's `rk swap --check-only` also refuses on any INSERT into
+`prices` from anywhere.
 
 ### W5 — stop the MVs, capture
 
-Host shell:
+CH shell:
 
 ```bash
 chq <<'SQL'
@@ -445,7 +464,7 @@ forces new api-handler containers: the old ones memoise XLM/USDC/USDT ids
 
 ### W12 — verify and smoke-test
 
-Host shell:
+CH shell:
 
 ```bash
 for mv in mv_ohlcv_1m_to_15m mv_ohlcv_15m_to_1h mv_ohlcv_1h_to_4h mv_ohlcv_4h_to_1d \
@@ -522,7 +541,7 @@ written since.
 
 ### W14 — roll the gap into every tier, then the post-checks
 
-Host shell, once W13 recorded `CATCHUP_END`:
+CH shell, once W13 recorded `CATCHUP_END`:
 
 ```bash
 rk gap-backfill --execute
@@ -570,7 +589,7 @@ The 0286 orchestrator stays stopped until W14 is green.
 
 ### W16 — the next day
 
-After 05:15 UTC on the day after W14 (1d has settled; 4h long before). Host
+After 05:15 UTC on the day after W14 (1d has settled; 4h long before). CH
 shell:
 
 ```bash
@@ -602,7 +621,7 @@ refuses if `price_ohlcv_1m` has rows after `last_live_1m_ts`, `oracle_prices`
 has rows after the swap, or `assets` gained identities; `--force-lose-post-swap-rows`
 overrides that and loses them.
 
-**Before W11** (nothing deployed yet), host shell:
+**Before W11** (nothing deployed yet), CH shell:
 
 ```bash
 rk rollback --execute
@@ -614,7 +633,7 @@ the seven MVs of W5 and re-enable the writers in W13's order.
 
 **After W11, before W13**:
 
-1. `rk rollback --execute` (host shell).
+1. `rk rollback --execute` (CH shell).
 2. From the rollback worktree (AWS shell):
 
    ```bash
@@ -626,9 +645,9 @@ the seven MVs of W5 and re-enable the writers in W13's order.
 
 3. Re-check that the ESM is still `Disabled` and the five rules still
    `DISABLED` (the W11 re-check lines). Disable again if needed.
-4. Put the `*.pre0139` host binaries back
+4. Put the `*.pre0139` backfill binaries back where they were replaced
    (`cp -p ~/events-backfill.pre0139 ~/events-backfill`, likewise
-   `sdex-backfill`) and the local ones.
+   `sdex-backfill`).
 5. Force an api-handler cold start (W11's last line).
 6. `SYSTEM START VIEW` for the seven MVs, then re-enable the writers in W13's
    order and watch the catch-up the same way.
@@ -642,14 +661,12 @@ with the generated live-gap statements, from the repo, never a copy on the box:
 
 ```bash
 START_TS=$(date -u -d "$W3_STOP UTC - 2 hour" '+%F %T')   # or last_live_1m_ts - 2 h if W9 ran
-docker exec -i app-clickhouse-1 clickhouse-client --multiquery \
-  --param_start_ts="$START_TS" --param_end_ts="$CATCHUP_END" \
+chq --url-query "param_start_ts=$START_TS" --url-query "param_end_ts=$CATCHUP_END" \
   < packages/prices-clickhouse/schema/preroll-live-gap.sql && echo "PREROLL OK"
 rk gap-verify --schema pre0139 --from "$START_TS" --to "$CATCHUP_END"
 ```
 
-(Copy `preroll-live-gap.sql` from the merge commit's checkout to the host
-first.) `--schema pre0139` makes `gap-verify` run its tier comparisons on the
+(Run it from the merge commit's checkout.) `--schema pre0139` makes `gap-verify` run its tier comparisons on the
 restored UInt32 tables, read-only.
 
 ## Post-checks
