@@ -95,7 +95,7 @@ pub const LOGOUT_PATH: &str = "/api/auth/logout";
 /// origin is the one that handles OAuth. The portal has several pages now and
 /// this did not change: the page it lands on decides where to go next; this
 /// handler still will not.
-const PORTAL_HOME: &str = "/api/";
+const PORTAL_HOME: &str = "/pricing-api/";
 
 /// Appended to [`PORTAL_HOME`] when the visitor declined at Discord's consent
 /// screen, so [0185]'s page can say "sign-in cancelled" instead of silently
@@ -214,10 +214,10 @@ impl AuthState {
     ///
     /// The callback runs on this backend's host, where the session cookie is
     /// set; the page the visitor is sent back to lives on
-    /// `AppConfig::portal_web_origin`. A relative `Location` would keep them
-    /// on the API host, where `/api/` is nothing — the gateway's own `404`.
-    /// `None` keeps the bare path, which is the same-origin deployment and
-    /// what every existing test sees. A builder, like [`Self::with_issue`],
+    /// `AppConfig::portal_web_origin`. A relative `Location` would keep them on
+    /// the API host, where `/pricing-api/` is nothing — the gateway's own
+    /// `404`. `None` keeps the bare path, which is the same-origin deployment
+    /// and what every existing test sees. A builder, like [`Self::with_issue`],
     /// so every constructor and test stays valid.
     pub fn with_web_origin(mut self, origin: Option<&str>) -> Self {
         if let Some(origin) = origin {
@@ -1232,7 +1232,7 @@ mod tests {
             vec!["a=1; Path=/".into(), "b=2; Path=/".into()],
         );
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(response.headers().get(LOCATION).unwrap(), "/api/");
+        assert_eq!(response.headers().get(LOCATION).unwrap(), "/pricing-api/");
         assert_eq!(response.headers().get_all(SET_COOKIE).iter().count(), 2);
         assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
     }
@@ -1323,7 +1323,7 @@ mod tests {
         assert_ne!(CANCELLED_QUERY, FAILED_QUERY);
         assert_eq!(ERROR_ACCESS_DENIED, "access_denied");
         for query in [CANCELLED_QUERY, FAILED_QUERY] {
-            assert!(format!("{PORTAL_HOME}{query}").starts_with("/api/?"));
+            assert!(format!("{PORTAL_HOME}{query}").starts_with("/pricing-api/?"));
         }
     }
 
@@ -1333,7 +1333,7 @@ mod tests {
     /// delete this to do it.
     #[test]
     fn the_only_redirect_targets_are_the_portal_itself() {
-        assert_eq!(PORTAL_HOME, "/api/");
+        assert_eq!(PORTAL_HOME, "/pricing-api/");
         assert!(PORTAL_HOME.starts_with('/'));
         assert!(!PORTAL_HOME.starts_with("//"));
         for query in [
@@ -1353,7 +1353,7 @@ mod tests {
             &issue::too_young_query(173),
             &issue::capped_query("2026-09-01"),
         ] {
-            assert!(format!("{PORTAL_HOME}{query}").starts_with("/api/?"));
+            assert!(format!("{PORTAL_HOME}{query}").starts_with("/pricing-api/?"));
         }
     }
 
@@ -1363,19 +1363,19 @@ mod tests {
     #[test]
     fn the_landing_is_prefixed_with_the_configured_origin_and_nothing_else() {
         let bare = AuthState::new(None, discord::Endpoints::default());
-        assert_eq!(&*bare.home, "/api/");
+        assert_eq!(&*bare.home, "/pricing-api/");
 
         let kept = AuthState::new(None, discord::Endpoints::default()).with_web_origin(None);
-        assert_eq!(&*kept.home, "/api/");
+        assert_eq!(&*kept.home, "/pricing-api/");
 
         let hosted = AuthState::new(None, discord::Endpoints::default())
             .with_web_origin(Some("https://sorobanscan.example"));
-        assert_eq!(&*hosted.home, "https://sorobanscan.example/api/");
+        assert_eq!(&*hosted.home, "https://sorobanscan.example/pricing-api/");
 
         let response = redirect(&format!("{}{CANCELLED_QUERY}", hosted.home), vec![]);
         assert_eq!(
             response.headers()[LOCATION],
-            "https://sorobanscan.example/api/?signin=cancelled"
+            "https://sorobanscan.example/pricing-api/?signin=cancelled"
         );
     }
 

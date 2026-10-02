@@ -67,14 +67,14 @@ use crate::config::AppConfig;
 
 /// Path prefix owned by the portal's backend. Everything under it is gated.
 ///
-/// `/api/` is the whole self-service portal on the shared host (task 0194,
-/// 2026-08-31): the bundle **and** the backend answer under this one prefix,
-/// with no sub-prefix for either. Nothing routes between them, because they
-/// are on different HOSTS — the bundle is served from the block explorer's
-/// distribution at `sorobanscan.rumblefish.dev/api/`, and the page calls this
-/// backend on the API's own hostname, cross-origin and same-site. So from in
-/// here the prefix is simply ours end to end; a bundle path that arrives (it
-/// should not) is a plain `404`, the same as any unrouted path.
+/// `/api/` is the portal's backend on the API's own hostname. The bundle shared
+/// the prefix from task 0194 (2026-08-31) until task 0326 moved it to
+/// `sorobanscan.rumblefish.dev/pricing-api/` (the explorer now answers `301` on
+/// `/api…` there). Nothing routes between them either way, because they are on
+/// different HOSTS — the bundle is served from the block explorer's
+/// distribution, and the page calls this backend cross-origin and same-site. So
+/// from in here the prefix is simply ours end to end; a bundle path that
+/// arrives (it should not) is a plain `404`, the same as any unrouted path.
 ///
 /// Replaces [0161]'s `<app>/*` + `<app>/api/*` convention, which produced
 /// `/api/api/…` for an app that is itself called "api". The OAuth redirect URI

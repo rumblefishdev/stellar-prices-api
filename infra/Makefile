@@ -131,11 +131,11 @@ destroy-production-apigateway: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-ApiGateway --force
 
 # The portal (task 0194; the only deploy path since task 0195).
-# `https://sorobanscan.rumblefish.dev/api/` is served by the block explorer's
+# `https://sorobanscan.rumblefish.dev/pricing-api/` is served by the block explorer's
 # distribution (EA2TLS5SS5M87) from ITS bucket, which nothing in this repo
 # deploys — this sync is the only way a build reaches it. Built with the API's
 # own hostname baked in (`VITE_PORTAL_API_ORIGIN`, see
-# `web/portal/src/api-origin.ts`): on that host `/api/*` is a static SPA, so
+# `web/portal/src/api-origin.ts`): on that host `/pricing-api/*` is a static SPA, so
 # the bundle must call the backend on `apiDomain.domainName` rather than
 # relatively. `--skip-nx-cache` because the variable is not an Nx input — a
 # cached build would hand back whichever variant ran last, and the relative
@@ -193,13 +193,13 @@ verify-portal-guild:
 	cd .. && node tools/scripts/verify-discord-guild.mjs --ssm --env production
 
 sync-portal-explorer: build-portal-explorer verify-portal-guild
-	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/api/ \
+	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/pricing-api/ \
 	  --exclude '*' --include 'assets/*' \
 	  --cache-control 'public, max-age=31536000, immutable'
-	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/api/ \
+	aws s3 sync ../web/portal/dist s3://$(EXPLORER_PORTAL_BUCKET)/pricing-api/ \
 	  --exclude 'assets/*' \
 	  --cache-control 'public, max-age=0, must-revalidate'
-	aws cloudfront create-invalidation --distribution-id $(EXPLORER_DISTRIBUTION_ID) --paths '/api/*'
+	aws cloudfront create-invalidation --distribution-id $(EXPLORER_DISTRIBUTION_ID) --paths '/pricing-api/*'
 
 deploy-production-eventbridge: build-production build-lambdas
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-EventBridge --exclusively --require-approval broadening

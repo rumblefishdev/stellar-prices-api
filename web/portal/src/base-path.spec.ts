@@ -21,9 +21,9 @@ import { BASE_PATH, ROUTER_BASENAME } from './base-path';
 describe('base path', () => {
   it('gives Vite a trailing slash and the router none', () => {
     // Vite concatenates `base` without adding a separator, so a missing slash
-    // emits `/apiassets/…`; react-router strips a trailing one and warns.
-    expect(BASE_PATH).toBe('/api/');
-    expect(ROUTER_BASENAME).toBe('/api');
+    // emits `/pricing-apiassets/…`; react-router strips a trailing one and warns.
+    expect(BASE_PATH).toBe('/pricing-api/');
+    expect(ROUTER_BASENAME).toBe('/pricing-api');
     expect(BASE_PATH.endsWith('/')).toBe(true);
     expect(ROUTER_BASENAME.endsWith('/')).toBe(false);
   });

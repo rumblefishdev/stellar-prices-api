@@ -48,7 +48,7 @@ describe('OPENAPI_JSON_DOWNLOAD', () => {
 
   it('is a bundle-relative path under the app base, with a .json extension', async () => {
     const { OPENAPI_JSON_DOWNLOAD } = await linksWith('');
-    expect(OPENAPI_JSON_DOWNLOAD).toBe('/api/openapi.json');
+    expect(OPENAPI_JSON_DOWNLOAD).toBe('/pricing-api/openapi.json');
   });
 
   it('does not move when the build points the app at a cross-origin API', async () => {
@@ -57,7 +57,7 @@ describe('OPENAPI_JSON_DOWNLOAD', () => {
     // The fetched document follows API_ORIGIN...
     expect(OPENAPI_JSON).toBe(`${SHARED_HOST_ORIGIN}/api-docs-json`);
     // ...the downloaded one must not, or `download` is ignored.
-    expect(OPENAPI_JSON_DOWNLOAD).toBe('/api/openapi.json');
+    expect(OPENAPI_JSON_DOWNLOAD).toBe('/pricing-api/openapi.json');
     expect(OPENAPI_JSON_DOWNLOAD).not.toContain(SHARED_HOST_ORIGIN);
     expect(OPENAPI_JSON_DOWNLOAD).not.toMatch(/^[a-z]+:\/\//);
   });
