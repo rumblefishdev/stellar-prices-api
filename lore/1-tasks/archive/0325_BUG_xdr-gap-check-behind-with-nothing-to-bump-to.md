@@ -46,6 +46,14 @@ history:
       like the script (6317af69), the implementation entry is attributed to
       stkrolikiewicz (06b74a28), and the close-comment wording on master is
       PR #386.
+  - date: "2026-10-02"
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Verified by a manual xdr-protocol-watch run on master (37002860439,
+      11:46 UTC, 20 s): green, report "stellar-xdr 28 is behind mainnet
+      protocol 29 — WAITING: no stellar-xdr 29 is published yet", and the
+      issue step logged "check passed, no open issue — nothing to do".
 ---
 
 # The XDR gap check reds every PR at BEHIND with nothing to bump to
