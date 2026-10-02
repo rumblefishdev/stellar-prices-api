@@ -23,6 +23,13 @@ history:
       the name changed to /prices-api/: it matches the product, this repo and
       the API host prices-api.sorobanscan…, and "pricing" reads as a price
       list or a valuation engine. The explorer 301s /pricing-api… too.
+  - date: 2026-10-02
+    status: active
+    who: stkrolikiewicz
+    note: >
+      /prices-api/ live ~10:55 UTC: sync-portal-explorer uploaded the bundle
+      under prices-api/ (#385), then the explorer's Delivery deploy routed it.
+      Portal and every 301 verified on production.
 ---
 
 # Serve the portal at /prices-api/ on the explorer's host
@@ -36,9 +43,11 @@ portal moves to `/prices-api/`; the explorer turns every `/api…` URL into a
 
 ## Status: Active
 
-**Current state:** `/pricing-api/` live since 2026-10-02 ~10:00 UTC; the
-rename to `/prices-api/` is on `feat/0326_prices-api-path`. Next: merge it
-and the explorer's (task 0608), then the deploy order below.
+**Current state:** `/prices-api/` live since 2026-10-02 ~10:55 UTC; `/api…`
+and `/pricing-api…` answer `301` there. Next: Compute (`PORTAL_HOME`) with the
+next regular release, after the asset_id migration ends (no AWS deploys
+meanwhile, Adam, 2026-10-02); a Discord sign-in round-trip by a person; then
+drop the `api/` and `pricing-api/` bucket prefixes.
 
 ## Context
 
@@ -72,10 +81,11 @@ cookie's `Path=/api/`) do not: that host has no portal bundle on it.
 
 ## Acceptance Criteria
 
-- [ ] Portal boots at `/prices-api/`, `/prices-api/dashboard`,
+- [x] Portal boots at `/prices-api/`, `/prices-api/dashboard`,
       `/prices-api/docs` (hard refresh included)
-- [ ] Discord sign-in round-trip lands on `/prices-api/?…`
-- [ ] `/api/?utm_source=stellar-skill` → `301` `/prices-api/?utm_source=stellar-skill`
+- [ ] Discord sign-in round-trip lands on `/prices-api/?…` (after Compute;
+      until then via the `301`)
+- [x] `/api/?utm_source=stellar-skill` → `301` `/prices-api/?utm_source=stellar-skill`
 - [ ] Old `api/` and `pricing-api/` prefixes dropped from the bucket once
       the above holds
 
