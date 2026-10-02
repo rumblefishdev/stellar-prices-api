@@ -1,7 +1,7 @@
 /**
  * The prefix this app is served from — one definition, two consumers.
  *
- * The bundle is served under `/pricing-api/` on the shared host (task 0194;
+ * The bundle is served under `/prices-api/` on the shared host (task 0194;
  * `/api/` until task 0326, now a 301 there) and only ever answers there.
  * Getting there takes two settings that must agree: Vite's `base` covers
  * ASSETS, react-router's `basename` covers ROUTES, and either one alone leaves
@@ -9,7 +9,7 @@
  *
  * They differ by exactly one character and that difference is load-bearing, not
  * a copy-paste mistake — Vite treats a `base` without a trailing slash as a
- * prefix to concatenate and emits `/pricing-apiassets/…`, while react-router
+ * prefix to concatenate and emits `/prices-apiassets/…`, while react-router
  * strips a trailing `basename` and warns if given one. So `ROUTER_BASENAME` is
  * DERIVED rather than typed out a second time.
  *
@@ -24,7 +24,7 @@
  */
 
 /** Vite's `base`. Trailing slash required. */
-export const BASE_PATH = '/pricing-api/';
+export const BASE_PATH = '/prices-api/';
 
 /** react-router's `basename`. Same prefix, no trailing slash. */
 export const ROUTER_BASENAME = BASE_PATH.replace(/\/$/, '');

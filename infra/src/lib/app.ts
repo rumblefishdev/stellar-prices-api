@@ -45,7 +45,7 @@ export function createApp({ config }: CreateAppOptions): void {
   // private bucket and a CloudFront distribution fronting both the bundle
   // and this API — was retired by task 0195 on 2026-09-01: since task 0194
   // the page is served from the block explorer's distribution at
-  // `https://sorobanscan.rumblefish.dev/pricing-api/` (its bucket, synced by
+  // `https://sorobanscan.rumblefish.dev/prices-api/` (its bucket, synced by
   // `make -C infra sync-portal-explorer`) and calls this API on
   // `config.apiDomain` directly, so the distribution had become a second,
   // ungated front door to the same portal. Constructing `ApiGatewayStack` is

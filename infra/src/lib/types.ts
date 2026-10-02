@@ -170,9 +170,9 @@ export interface EnvironmentConfig {
    * not a resource under it.
    *
    * Why the portal needs it at all: the bundle is served from another
-   * application's distribution (`portalWebOrigin`), whose `/pricing-api/*`
+   * application's distribution (`portalWebOrigin`), whose `/prices-api/*`
    * behaviour is a static SPA — every extensionless path under it is rewritten
-   * to `/pricing-api/index.html` at the edge and answered `200 text/html`, and
+   * to `/prices-api/index.html` at the edge and answered `200 text/html`, and
    * `/api/config` there is a `301` into it (task 0326). There is nothing on
    * that host for a same-origin call to reach, so the bundle calls this
    * hostname directly, cross-origin and same-site — the pattern the explorer's

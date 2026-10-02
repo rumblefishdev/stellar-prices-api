@@ -6,8 +6,8 @@ import { BrowserRouter } from 'react-router-dom';
 
 import App from './app/app';
 // The other half of `base` in `vite.config.mts`, which imports the same module:
-// `base` makes the bundle's ASSETS resolve under `/pricing-api/`, this makes
-// its ROUTES do the same. Without it the router reads `/pricing-api/` as a
+// `base` makes the bundle's ASSETS resolve under `/prices-api/`, this makes
+// its ROUTES do the same. Without it the router reads `/prices-api/` as a
 // route it has never heard of and renders nothing, on the one URL the app is
 // actually served from. See `base-path.ts` for why the two values differ by a
 // slash.

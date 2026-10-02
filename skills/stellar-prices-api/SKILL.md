@@ -59,7 +59,7 @@ KEY=${STELLAR_PRICES_API_KEY:-$(sed -n 's/^\(export \)*STELLAR_PRICES_API_KEY=//
 **If the key is missing, stop and ask the user for it.** Do not call the API
 without a key, and do not guess or invent prices. Tell the user how to get one:
 
-1. Open https://sorobanscan.rumblefish.dev/pricing-api/?utm_source=stellar-skill
+1. Open https://sorobanscan.rumblefish.dev/prices-api/?utm_source=stellar-skill
 2. Click **Sign in with Discord**. The account must be a member of the
    [Stellar Developers Discord](https://discord.gg/stellardev), must have passed
    the server's membership screening, and must be older than 5 minutes.
@@ -94,7 +94,7 @@ Handle the key like a secret:
 | Base URL             | `https://prices-api.sorobanscan.rumblefish.dev/v1`                          |
 | Auth header          | `x-api-key: <key>`. `Authorization: Bearer` is rejected with 403.           |
 | Spec (no key needed) | `https://prices-api.sorobanscan.rumblefish.dev/api-docs-json` (OpenAPI 3.1) |
-| Human docs           | https://sorobanscan.rumblefish.dev/pricing-api/docs                         |
+| Human docs           | https://sorobanscan.rumblefish.dev/prices-api/docs                          |
 
 The spec describes every parameter and field in detail. Fetch it whenever
 something is not covered here.

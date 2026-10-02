@@ -7,7 +7,7 @@ keys.
 
 - **API:** `https://prices-api.sorobanscan.rumblefish.dev` (key-gated `/v1/*`;
   the OpenAPI document is public at `/api-docs-json`)
-- **Portal (key sign-up):** `https://sorobanscan.rumblefish.dev/pricing-api/`
+- **Portal (key sign-up):** `https://sorobanscan.rumblefish.dev/prices-api/`
 - **Endpoint reference:** [`docs/scf/api-endpoints.md`](docs/scf/api-endpoints.md)
 - **Architecture overview:** [`docs/prices-api-general-overview.md`](docs/prices-api-general-overview.md)
 

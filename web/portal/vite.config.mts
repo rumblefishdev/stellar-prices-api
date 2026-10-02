@@ -2,7 +2,7 @@ import react from '@vitejs/plugin-react';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 
 /**
- * `base` is what makes Vite emit asset URLs under `/pricing-api/`; without it
+ * `base` is what makes Vite emit asset URLs under `/prices-api/`; without it
  * every `<script src>` and `<link href>` points at the domain root and the app
  * 403s on its own JavaScript the moment it is not served from `/`. The router's
  * `basename` is the other half — this one covers assets, that one covers routes,
@@ -21,9 +21,9 @@ import { defineConfig, loadEnv, type Plugin } from 'vite';
  *
  * The trailing slash is required. Vite treats a `base` without one as a path
  * prefix to concatenate rather than a directory, which produces
- * `/pricing-apiassets/…`.
+ * `/prices-apiassets/…`.
  */
-const BASE_PATH = '/pricing-api/';
+const BASE_PATH = '/prices-api/';
 
 /**
  * Dev-server proxy targets, mirroring `soroban-block-explorer`'s pattern.
@@ -44,7 +44,7 @@ const BASE_PATH = '/pricing-api/';
  * The backend's top-level segments under `/api/`. The bundle shared the prefix
  * until task 0326 (a plain `/api` proxy rule would have swallowed Vite's own
  * `/api/@vite/…` and `/api/src/…` requests), so the backend is enumerated as
- * one regex key; it still holds with the bundle at `/pricing-api/`. Adding a
+ * one regex key; it still holds with the bundle at `/prices-api/`. Adding a
  * backend route at a NEW top-level segment means adding it here — a missing one
  * is a Vite 404 page, loud and local.
  */
