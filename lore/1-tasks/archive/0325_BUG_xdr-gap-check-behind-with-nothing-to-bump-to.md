@@ -2,7 +2,7 @@
 id: "0325"
 title: "The XDR gap check reds every PR at BEHIND although protocol 29 changed no XDR and no stellar-xdr 29 exists"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0319", "0098", "0277", "0091"]
 tags: [ci, resilience, ingestion, priority-high, effort-small]
@@ -12,6 +12,8 @@ links:
   - "../../../.github/workflows/xdr-protocol-watch.yml"
   - "../../../docs/runbooks/xdr-protocol-watch.md"
   - "https://github.com/stellar/stellar-core/compare/v28.0.1...v29.0.0-internal"
+  - "https://github.com/rumblefishdev/stellar-prices-api/pull/383"
+  - "https://github.com/rumblefishdev/stellar-prices-api/pull/386"
 history:
   - date: "2026-10-02"
     status: active
@@ -32,6 +34,18 @@ history:
       them (exactly the changed ones). Live run against mainnet 29 and
       crates.io 28.0.1: exit 0 and WAITING in PR and --watch mode. No change
       to master's workflow is needed. Waiting for review and merge.
+  - date: "2026-10-02"
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      PR #383 merged to develop as b6b0732d at 11:30:41 UTC, before the day's
+      scheduled watch run (the last one was 2026-10-01 13:16 UTC), with no
+      watch issue open. 6 files, +253 −43: 13 new tier cases (the pre-fix
+      script fails 5 of them), 56 tests in the infra target, CI 4/4 green.
+      Oskar's review: the test reads the pin from [workspace.dependencies]
+      like the script (6317af69), the implementation entry is attributed to
+      stkrolikiewicz (06b74a28), and the close-comment wording on master is
+      PR #386.
 ---
 
 # The XDR gap check reds every PR at BEHIND with nothing to bump to
@@ -96,7 +110,8 @@ GitHub API and core's commit is not always public before release.
 - [x] A test covers the matrix and runs in CI — the infra project's `test`
       target (`nx run-many -t test` in the `typescript` job, and pre-push)
 - [x] Runbooks updated
-- [ ] Merged to develop before the next scheduled watch run
+- [x] Merged to develop before the next scheduled watch run — b6b0732d at
+      11:30:41 UTC; the day's scheduled run had not started yet
 
 ## Implementation Notes
 
@@ -110,6 +125,21 @@ GitHub API and core's commit is not always public before release.
 - Runbooks: tier table, the WAITING rule and a "check the candle frontier
   after any vote" line in `xdr-protocol-watch.md`; a protocol 29 caveat in
   `deploy-ledger-processor.md`.
+- No existing test was modified; the test file is new.
+
+## Issues Encountered
+
+- **An in-line edit left a 118-character comment line in `ci.yml`.**
+  Replacing a phrase mid-line kept the rest of the old line, and prettier
+  does not reflow YAML comments, so nothing flagged it. Found on a re-read
+  of the diff; reflowed in 21e6a78d.
+- **The test read the pin differently from the script** (review). It took
+  the first `stellar-xdr` line anywhere in `Cargo.toml`; the script reads
+  `[workspace.dependencies]` only. A decoy `[patch]` line at 99 read as 99.
+  Fixed in 6317af69 with the script's two steps.
+- **Pushes from master-based branches fail the shared pre-push hook**: it
+  clippies `comet-extractor`, a crate `master` does not have. PR #386 was
+  pushed with `--no-verify`, stated in its commit body.
 
 ## Design Decisions
 
@@ -138,3 +168,20 @@ GitHub API and core's commit is not always public before release.
    The repo already runs `tools/scripts/**/*.test.mjs` through the infra
    `test` target, and the `typescript` job triggers on `tools/scripts/**`,
    so the test needs no wiring of its own.
+7. **PR #386 also rewrites master's workflow header.** The review nit was
+   only the close comment, but the header's WAITING and BEHIND bullets
+   would contradict develop's script once #383 merged, so the same
+   wording-only PR updates them.
+
+## Future Work
+
+None spawned in this repo.
+
+- **Galexie early warning** — `core_supported_protocol_version` above the
+  captive core in BE's Galexie image — belongs to BE, who own the pin and
+  the fix (discussed with Oskar and Karol, 2026-10-02). For whoever builds
+  it: BE pins a manifest-list digest that Docker Hub's tag list no longer
+  maps to `29.0.0`; fetching the manifest by digest and reading
+  `STELLAR_CORE_VERSION` from the image config works without tags.
+- **PR #386** (master's close-comment wording) is open and needs no task of
+  its own.
