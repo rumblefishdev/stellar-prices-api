@@ -213,6 +213,12 @@ to the 15m MV is W + C. Above about 1.5 h, the 15m MV alone loses part of it.
 **W14 runs whatever the measured gap**: it costs minutes and is the only thing
 that makes every tier whole.
 
+Measured catch-up: r ≈ 10.7, from the one backlog in 63 days of
+`ApproximateAgeOfOldestMessage` on `prices-ingest-production` (5-minute
+maxima): 7.3 h behind at 2026-08-14 09:15 UTC, under 120 s by 09:55. A 2 h
+window then catches up in about 12 min, and W + C ≈ 2.2 h, past the 15m MV's
+2 h. The gap-backfill time is task 11's to measure.
+
 ## The window
 
 Times are UTC. Write every recorded value into `~/rekey-0139/window.log` (the
