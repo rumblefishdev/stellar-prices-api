@@ -339,7 +339,8 @@ plan is `.planning/quick/261001-fwh-*/261001-fwh-PLAN.md`.
 - **GA1:** drop `rollout_0286_bak_*` and `price_ohlcv_*_bak` once their owners
   confirm; rename `reingest_0286_bak_*` to `*_pre0139`, keep the map as decoder.
 - **GA2:** colliding and orphan rows are not copied; the swapped-out
-  `X__pre0139` tables are the quarantine until the second pass verifies + 7 days.
+  `X__pre0139` tables are the quarantine until the second pass verifies, then
+  dropped (no extra retention).
 - **OP1:** the MVs are recreated from prod's captured DDL, not from develop's
   generator (which would also ship 0143/0203).
 - [[0242]] stays separate; the migration map already supports many old ids → one.
