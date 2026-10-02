@@ -79,10 +79,10 @@ templates>`
 > load-test figure.
 >
 > **Known issues and limitations are listed, each with the task that owns it:**
-> the history recomputation that finishes after delivery, the asset-id
-> collisions fixed on 2026-10-02 (task 0139), with their older months still
-> being re-ingested, a slow path we measured but did not instrument, and the
-> ceiling of the database server we share with the Soroban Block Explorer.
+> the history recomputation that finishes after delivery, the history of the
+> assets that shared an id until the asset-id fix (task 0139), still being
+> re-ingested, a slow path we measured but did not instrument, and the ceiling
+> of the database server we share with the Soroban Block Explorer.
 >
 > **Full evidence — acceptance-criteria mapping with runnable commands, the
 > deviation rationale, known issues and limitations:**
