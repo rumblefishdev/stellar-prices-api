@@ -120,23 +120,55 @@ struct Args {
     /// else in this tool is purely additive — it fills zeros. Use it only to
     /// correct a *pricing* defect, where the stored number is wrong rather than
     /// missing, and only against a FREEZE-snapshotted partition.
+    ///
+    /// The leg decides the mode. For canonical USDC (the peg leg), the repair is
+    /// `--reset-require-external-rate` (runbook Appendix B). The plain mode (no
+    /// `--reset-require-*` flag) is legal only on canonical USDC, and there it
+    /// needs an explicit `--reset-not-after` at or below USDC's first oracle row
+    /// (`USDC_ORACLE_EPOCH_S`, 1773237600, unless `prices.oracle_prices` holds
+    /// an earlier one): unbounded above, it is refused by USDC's live readings
+    /// (`ResetBlockedByOracleRows`). For XLM or USDT (pivot legs), use
+    /// `--reset-require-pivot-usdc-rate` only: a plain reset of a pivot leg is
+    /// refused right after connecting, before the oracle check and dry run
+    /// included (`ResetPlainModeOnPivotLeg`, task 0208 review WR-04).
     #[arg(long, requires = "reset_not_before")]
     reset_quote_asset_id: Option<u32>,
 
     /// Epoch (unix seconds) below which stored USD values are left alone.
     ///
-    /// This is a correctness bound, not a convenience: below the date the pivot's
-    /// reference market begins, there is nothing to recompute from, so a reset
-    /// row stays at `close_usd = 0` permanently. For canonical USDT that date is
-    /// **2021-02-07** (`1612656000`) — the start of its USDC market. Task 0172
-    /// also measured it at genuine par before the June 2022 depeg, so the value
-    /// already on disk for that window is *correct* and this flag protects it.
+    /// This is a correctness bound, not a convenience: below the first candle of
+    /// the pivot's reference market there is nothing to recompute from, so a
+    /// reset row stays at `close_usd = 0` permanently. It must be the MEASURED
+    /// first priced reference candle of this leg's USDC market ON THE TABLE
+    /// BEING REPAIRED — query it with the runbook's Appendix A / Appendix C MIN
+    /// query and pass that value, never a round date.
+    ///
+    /// For canonical USDT on `_1h` that value was **1612724400** (2021-02-07
+    /// 19:00 UTC) as of 2026-09 — measure it anyway: task 0286 phase 3
+    /// re-derives `pf_trade_count` and can move it later. The tool refuses any lower epoch before writing, dry run
+    /// included (`ResetEpochBelowReference`), and its message names the value to
+    /// use (task 0208 — task 0182 passed that date's midnight and stranded 157
+    /// candles). Task 0172 also measured USDT at genuine par before the June 2022
+    /// depeg, so below the epoch the stored $1 is *correct* and this flag
+    /// protects it.
+    ///
+    /// ⚠️ An admitted epoch bounds only where the reference BEGINS. The plain
+    /// 0182 mode, which gated neither the USDC/USD rate nor the reference, is
+    /// refused on a pivot leg (`ResetPlainModeOnPivotLeg`). The 0228 mode
+    /// (`--reset-require-pivot-usdc-rate`) re-opens only days that have a USDC
+    /// rate and a priced reference, but those gates are day-granular: a bucket
+    /// whose nearest reference is outside `--pivot-window-s` inside a covered
+    /// day can still be zeroed and not refilled. The damage check on EVERY
+    /// table (runbook Appendix A, "Extra verification") is what catches that
+    /// residue.
     #[arg(long, requires = "reset_quote_asset_id")]
     reset_not_before: Option<u32>,
 
     /// **Exclusive** epoch (unix seconds) above which stored USD values are left
-    /// alone (task 0268). Omitted, the reset is unbounded above — task 0182's
-    /// behaviour, unchanged.
+    /// alone (task 0268). Omitted in the plain mode, the reset is unbounded above
+    /// — task 0182's behaviour — and on production that is always refused:
+    /// the plain mode runs only on canonical USDC, which has live oracle rows
+    /// since `USDC_ORACLE_EPOCH_S`, so pass this at or below that value.
     ///
     /// When `--reset-require-external-rate` is passed and this is omitted, it
     /// defaults to `prices_clickhouse::USDC_ORACLE_EPOCH_S`
@@ -186,12 +218,17 @@ struct Args {
     /// ⚠️ `--reset-not-before` must be the MEASURED first candle of this leg's own
     /// USDC market, not a convenient round date. Task 0182's reset epoch sat 19
     /// hours before its reference market's first candle and 157 candles were
-    /// zeroed with nothing able to refill them. Appendix A's USDT figure
-    /// (`1612656000`) is the worked precedent; Appendix C gives the query.
+    /// zeroed with nothing able to refill them. For canonical USDT on `_1h` the
+    /// measured value is `1612724400` (2021-02-07 19:00 UTC); a lower value is
+    /// now refused before any write (`ResetEpochBelowReference`, task 0208).
+    /// Appendix C gives the query.
     ///
     /// Mutually exclusive with `--reset-require-external-rate`: that mode is for
     /// canonical USDC, this one for the legs that pivot off it. Refused by
     /// `UsdResetSpec::validate`, before a connection is opened.
+    ///
+    /// Required for an XLM or USDT leg: without it the reset is the plain mode,
+    /// which is refused on a pivot leg (`ResetPlainModeOnPivotLeg`).
     ///
     /// Refused outright when `prices.usd_rate` holds zero `external` rows for
     /// canonical USDC (`ResetRequiresExternalRates`) — checked first thing after
@@ -481,7 +518,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "coarse-repair starting"
     );
 
-    let summary = driver.run().await?;
+    // Print the refusal's Display form, not the Debug form `main`'s `Result`
+    // would give: the Display text carries the UTC times, the stranded window
+    // and the value to re-run with — the message is the fix (task 0208).
+    let summary = match driver.run().await {
+        Ok(summary) => summary,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // Human-readable roll-up; the structured per-month lines are already logged.
     println!("\n=== coarse-repair summary ({}) ===", args.table);
@@ -518,6 +564,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (reset, enriched) = (summary.total_reset(), summary.total_enriched());
     if reset > 0 {
         println!("{reset} row(s) re-opened by the USD reset, {enriched} recomputed");
+        println!(
+            "Run the damage check (runbook Appendix A, 'Extra verification') on \
+             EVERY table you reset — including the ones that printed no shortfall. \
+             A quiet table is not a checked one: the 157 candles the 2026-08-18 \
+             run destroyed (found on 2026-08-19) sat in the two tables that \
+             never warned."
+        );
         if args.reset_require_external_rate {
             println!(
                 "This was the task 0268 external mode. Finish the campaign with \

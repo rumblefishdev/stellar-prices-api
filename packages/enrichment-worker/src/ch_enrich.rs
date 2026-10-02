@@ -152,12 +152,17 @@ pub enum ChEnrichError {
          The oracle tier runs before the peg-pivot tier and wins where it applies, \
          so resetting now would re-apply the oracle's rate to every row this reset \
          zeroes — and label it method='oracle'.\n\
-         If the window is all time: purge those rows first (task 0196), verify the \
-         count is 0, then re-run.\n\
+         If the window is all time (no --reset-not-after): pass --reset-not-after \
+         at or below the leg's first oracle row (SELECT min(timestamp) FROM \
+         prices.oracle_prices WHERE asset_id = {quote_asset_id} AND oracle_name = \
+         '{oracle_name}'), so the reset stays below the span the oracle tier \
+         prices. Purge only rows known to be mis-attributed (task 0196 removed \
+         USDT's), never a polled leg's live readings: that cannot be undone.\n\
          If the window is bounded: the overlap is real — narrow --reset-not-after \
-         below the first oracle row, or widen --reset-not-before above the last \
+         below the first oracle row, or raise --reset-not-before above the last \
          one, so the reset and the oracle tier do not both claim the same span.\n\
-         See lore/1-tasks/active/0182_BUG_close-usd-overstated-7x-on-usdt-quoted-candles.md."
+         See docs/runbooks/repair-coarse-usd-values.md (Appendix A, \"Oracle rows \
+         in the window\"; Appendix C, precondition 5)."
     )]
     ResetBlockedByOracleRows {
         quote_asset_id: u32,
@@ -246,8 +251,10 @@ pub enum ChEnrichError {
          days and leave the external tier unable to refill a single one — the \
          peg tier would write $1 back over every one of them, which is task \
          0182's incident with a different quote asset.\n\
-         Reset this leg without --reset-require-external-rate, or target \
-         canonical USDC."
+         For an XLM or USDT leg use --reset-require-pivot-usdc-rate (the task \
+         0228 mode, docs/runbooks/repair-coarse-usd-values.md Appendix C) — \
+         dropping the flag instead is the plain mode, which is refused on a \
+         pivot leg; otherwise target canonical USDC."
     )]
     ResetExternalRateLegIsNotUsdc { quote_asset_id: u32, usdc_id: u32 },
 
@@ -291,6 +298,28 @@ pub enum ChEnrichError {
         pivot: Vec<u32>,
     },
 
+    /// A plain-mode (task 0182) spec — neither `require_external_rate` nor
+    /// `require_pivot_usdc_rate` — on a PIVOT quote leg (task 0208 review
+    /// WR-04; BRIEF-0208 addendum, option (b)). The third mode's mirror of
+    /// [`ChEnrichError::ResetExternalRateLegIsNotUsdc`] and
+    /// [`ChEnrichError::ResetPivotRateLegIsNotAPivotReference`]: each mode
+    /// names the legs it may re-open, and the plain mode's is the peg leg.
+    #[error(
+        "USD reset refused: quote asset_id {quote_asset_id} is a PIVOT leg (XLM or \
+         USDT), and neither --reset-require-pivot-usdc-rate nor \
+         --reset-require-external-rate was passed (the plain task 0182 mode).\n\
+         The pivot refills a zeroed pivot-leg row only where its bucket has BOTH a \
+         USDC/USD rate (oracle or external) AND a reference candle inside \
+         --pivot-window-s. The plain mode checks neither, so it would zero rows \
+         anywhere above --reset-not-before that nothing can refill, leaving them \
+         at close_usd = 0.\n\
+         Re-run with --reset-require-pivot-usdc-rate (the task 0228 mode, see \
+         docs/runbooks/repair-coarse-usd-values.md Appendix C): it re-opens only \
+         days that have both, and the reset-epoch guard still applies. The plain \
+         mode is for the canonical USDC (peg) leg only."
+    )]
+    ResetPlainModeOnPivotLeg { quote_asset_id: u32 },
+
     /// A [`UsdResetSpec`] whose `[not_before, not_after)` window is empty (task
     /// 0268 review, WR-05). See [`UsdResetSpec::validate`] for why this is an
     /// error and not a no-op.
@@ -332,6 +361,79 @@ pub enum ChEnrichError {
         pivot: Vec<u32>,
     },
 
+    /// A pivot-leg [`UsdResetSpec`]'s `not_before` sat **below the first priced
+    /// reference candle** of that leg's USDC market on the table being repaired
+    /// (task 0208).
+    ///
+    /// The pivot joins with ASOF `r.timestamp <= p.timestamp`, so every row the
+    /// reset zeroes in `[not_before, first_reference)` has no reference at or
+    /// before it and stays at `close_usd = 0` permanently. That is exactly how
+    /// task 0182 destroyed 157 candles on 2026-08-18: its epoch was 2021-02-07
+    /// 00:00 UTC, 19 hours below USDT/USDC's first candle at 19:00.
+    ///
+    /// [`ChEnrichError::ResetTargetHasNoPricingPath`] asks whether a path
+    /// EXISTS for the leg; this variant asks where that path BEGINS.
+    #[error(
+        "USD reset refused on {table}: --reset-not-before {not_before} ({nb}) is \
+         below the first priced reference candle of quote asset_id \
+         {quote_asset_id}'s USDC market on this table, {first_reference} ({fr}). \
+         The pivot's ASOF join only looks at or before a candle, so every row in \
+         [{not_before}, {first_reference}) would be zeroed with nothing to refill \
+         it — task 0182 destroyed 157 candles this way, 19 hours below the \
+         reference.\n\
+         Re-run with --reset-not-before {first_reference}.",
+        nb = utc_label(.not_before),
+        fr = utc_label(.first_reference)
+    )]
+    ResetEpochBelowReference {
+        quote_asset_id: u32,
+        table: String,
+        not_before: u32,
+        first_reference: u32,
+    },
+
+    /// A pivot-leg [`UsdResetSpec`] whose leg has **no** priced reference
+    /// candle against canonical USDC on the table being repaired (task 0208,
+    /// D3). No epoch is safe: the pivot could refill nothing the reset zeroes.
+    ///
+    /// The predicate is not spelled out in the message — it would drift from
+    /// `pivot_reference_row_pred`; the runbook's first-reference query is
+    /// that predicate word for word, and is where the operator measures it.
+    #[error(
+        "USD reset refused on {table}: quote asset_id {quote_asset_id} has no priced \
+         reference candle against canonical USDC on this table — the pivot's \
+         reference leg matches zero rows, so it can refill nothing this reset \
+         would zero, and no --reset-not-before is safe.\n\
+         Check that the leg's USDC market is ingested into {table} (runbook \
+         docs/runbooks/repair-coarse-usd-values.md, Appendix A, the \
+         first-reference query) before re-running."
+    )]
+    ResetEpochHasNoReference { quote_asset_id: u32, table: String },
+
+    /// A pivot-leg [`UsdResetSpec`] while canonical USDC does not resolve in
+    /// `prices.assets` at all (task 0208, D3; review IN-02 split it from
+    /// [`ChEnrichError::ResetEpochHasNoReference`]). The pivot's reference
+    /// market is keyed on USDC's `asset_id`, so without it the pivot never
+    /// runs, and no epoch is safe.
+    ///
+    /// Since task 0208 review WR-04 this is a backstop that no mode reaches
+    /// through [`ChEnrichmentPass::assert_reset_is_admissible`]: a plain-mode
+    /// pivot leg is refused as [`ChEnrichError::ResetPlainModeOnPivotLeg`], the
+    /// 0228 mode as [`ChEnrichError::ResetPivotRateLegIsNotAPivotReference`]
+    /// with `usdc_id: 0`, and the 0268 mode as
+    /// [`ChEnrichError::ResetExternalRateLegIsNotUsdc`]. It is kept so the epoch
+    /// guard does not depend on the list's order; the unit test
+    /// `the_epoch_guard_refuses_an_unresolved_usdc_on_its_own` pins it.
+    #[error(
+        "USD reset refused: canonical USDC (issuer {usdc_issuer}) does not resolve \
+         in prices.assets, so the pivot has no USDC market to measure quote \
+         asset_id {quote_asset_id} against — it never runs, it can refill nothing \
+         this reset would zero, and no --reset-not-before is safe.\n\
+         Register canonical USDC in prices.assets before re-running.",
+        usdc_issuer = USDC_ISSUER
+    )]
+    ResetEpochUsdcUnresolved { quote_asset_id: u32 },
+
     /// A [`UsdResetSpec`] was combined with a bounded (`one_shot = false`) pass.
     ///
     /// The peg-pivot tier — the only one that can refill a pivoted quote leg — is
@@ -370,17 +472,28 @@ pub enum ChEnrichError {
 /// * `quote_asset_id` — one quote leg per run. Never "all rows with a suspect
 ///   price": the blast radius must be nameable before the statement runs.
 /// * `not_before` — the epoch below which the *old* value is correct and must
-///   survive. For USDT that is 2021-02-07, when the USDT/USDC market the pivot
-///   measures against begins; before it the pivot has no reference, and the `$1`
-///   already on disk is right because the asset was genuinely at par (task 0172).
-///   Reset those and they stay at `close_usd = 0` forever.
+///   survive. It must be at or above the **first priced reference candle** of
+///   the leg's USDC market on the table being repaired: before it the pivot has
+///   no reference, and the `$1` already on disk is right because the asset was
+///   genuinely at par (task 0172). Reset those and they stay at `close_usd = 0`
+///   forever. For canonical USDT on `_1h` that candle is 1612724400
+///   (2021-02-07 19:00 UTC); anything lower is refused before any write by
+///   [`ChEnrichError::ResetEpochBelowReference`] (task 0208 — task 0182 passed
+///   the same date at 00:00 and stranded 157 candles).
 ///
 /// The statement additionally mirrors the pivot's own `volume_quote > 0` filter,
 /// so it will not zero a row the pivot is structurally unable to refill.
 ///
-/// ⚠️ Rows whose reference is missing or stale beyond `pivot_window_s` are still
-/// reset and *not* refilled — that residue cannot be predicted from the candidate
-/// side alone. Run against a `FREEZE`d partition and check `zeros_after`.
+/// ⚠️ The plain 0182 mode (neither `require_*` flag) is for the canonical USDC
+/// (peg) leg only. On a pivot leg (XLM, USDT) it is refused as
+/// [`ChEnrichError::ResetPlainModeOnPivotLeg`] (task 0208 review WR-04), because
+/// nothing in it gates on the two inputs the pivot needs to refill a row: a
+/// USDC/USD rate for the bucket and a reference inside `pivot_window_s`. The
+/// 0228 mode (`require_pivot_usdc_rate`) gates on both, but by DAY: a row whose
+/// reference is missing, or stale beyond `pivot_window_s`, inside a day the mode
+/// admits is still reset and *not* refilled. The epoch guard
+/// ([`ChEnrichError::ResetEpochBelowReference`]) bounds only where the reference
+/// BEGINS. Run against a `FREEZE`d partition and check `zeros_after`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsdResetSpec {
     /// The quote `asset_id` whose candles get their USD columns zeroed.
@@ -416,7 +529,9 @@ pub struct UsdResetSpec {
     /// When true (task 0228), the candidate set is every already-written row of
     /// the named PIVOT quote leg for whose bucket a `method = 'external'` USDC
     /// rate exists — the same [`external_rate_day_pred`] the 0268 mode uses, and
-    /// nothing else appended.
+    /// nothing else appended. Since task 0208 review WR-04 it is the only mode
+    /// that re-opens a pivot leg: a plain-mode spec on one is refused as
+    /// [`ChEnrichError::ResetPlainModeOnPivotLeg`].
     ///
     /// ## Why no par signature, and what that costs
     ///
@@ -607,7 +722,8 @@ fn external_rate_day_pred(db: &str) -> String {
 ///
 /// ⚠️ It is a SHARED TERM, not the whole of any of the three (review IN-01).
 /// The pivot's reference subquery is `{PRICED_REFERENCE_ROW} AND
-/// pf_trade_count > 0`; the day set below is the fragment ALONE. The day set is
+/// pf_trade_count > 0` (rendered by [`pivot_reference_row_pred`]); the day set
+/// below is the fragment ALONE. The day set is
 /// therefore strictly wider, and the divergence runs in the recoverable
 /// direction: a day whose only reference minute is a LEGACY one — `close > 0`
 /// with `pf_trade_count = 0`, not the post-0286 dust-only shape, whose
@@ -620,6 +736,98 @@ fn external_rate_day_pred(db: &str) -> String {
 /// not done here because the term is a DEFAULT on every pre-0286 row, so until
 /// phase 3 re-ingests the history it would narrow on a column that says nothing.
 const PRICED_REFERENCE_ROW: &str = "close > 0 AND volume_base > 0";
+
+/// **The row [`pivot_sql`]'s reference leg averages** — `ref_id` against
+/// canonical USDC, priced, and carrying a price-forming fill — as ONE
+/// predicate, so the reset-epoch guard asks exactly the question the pivot
+/// answers (task 0208, decision D2).
+///
+/// The reset's `not_before` is load-bearing because the pivot joins with ASOF
+/// `r.timestamp <= p.timestamp`: a row zeroed below the first row matching this
+/// predicate has nothing at or before it to refill from. If the guard measured
+/// that first row with a looser or different predicate, it could admit an epoch
+/// the pivot cannot honour. So the two do not merely agree, they are ONE
+/// string: [`pivot_sql`] renders its reference leg's `WHERE` from this function
+/// and [`first_reference_sql`] renders its whole `WHERE` from it, and
+/// `the_first_reference_query_and_the_pivot_share_one_reference_predicate`
+/// pins both clauses EXACTLY, so an extra term on either side — the dangerous,
+/// narrowing direction — fails it.
+fn pivot_reference_row_pred(ref_id: u32, usdc_id: u32) -> String {
+    format!(
+        "asset_id = {ref_id} AND quote_asset_id = {usdc_id} \
+         AND {PRICED_REFERENCE_ROW} AND pf_trade_count > 0"
+    )
+}
+
+/// The first priced reference candle of `ref_id`'s USDC market **on this
+/// table**, or NULL when there is none (task 0208).
+///
+/// Per table, deliberately: the value differs by grain. Canonical USDT's first
+/// USDC trade was 2021-02-07 19:00 UTC, so on `_1h` the first reference bucket
+/// is 1612724400, on `_4h` it is the 16:00 bucket (1612713600) and on `_1d` it
+/// is the day bucket 1612656000 — which must PASS there and be refused on
+/// `_1h`/`_4h` (task 0182 destroyed 121 `_1h` and 36 `_4h` candles, 0 `_1d`).
+///
+/// ⚠️ No window, no watermark, no `?` bind. `reset_step` re-runs the whole
+/// admissibility list once per month with `time_window = Some(month)`
+/// (`repair.rs`), and a windowed minimum would refuse every month after the
+/// first although the driver's pre-check passed.
+///
+/// ⚠️ `minOrNull`, never `min`: over zero rows `min(timestamp)` is the DateTime
+/// default, 1970 (= 0), and a guard reading it would admit every epoch.
+/// `minOrNull` is NULL there under every setting — including
+/// `aggregate_functions_null_for_empty = 1`, which would turn a bare `min`
+/// into a NULL that no longer deserializes into `u32` (review IN-04) — so the
+/// emptiness is carried by the type, `Option<u32>`, and not by a second column.
+fn first_reference_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32) -> String {
+    format!(
+        "SELECT toUInt32(minOrNull(timestamp)) AS first_reference \
+         FROM {db}.{tbl} FINAL WHERE {}",
+        pivot_reference_row_pred(ref_id, usdc_id)
+    )
+}
+
+/// **The reset-epoch refusal itself** (task 0208, D4): `not_before` must be at
+/// or above the first priced reference candle, compared in unix SECONDS —
+/// never in dates, because the 2026-08-18 epoch was on the same date as the
+/// first reference and 19 hours below it.
+///
+/// `None` means there is no reference row on the table, and then no epoch is
+/// safe (D3). An unresolved canonical USDC never gets here: it has no query to
+/// run and is refused by the caller as
+/// [`ChEnrichError::ResetEpochUsdcUnresolved`]. `quote_asset_id` and `table` only feed the
+/// error; the comparison is `not_before < first_reference`.
+fn check_reset_epoch(
+    quote_asset_id: u32,
+    table: &str,
+    not_before: u32,
+    first_reference: Option<u32>,
+) -> Result<(), ChEnrichError> {
+    match first_reference {
+        None => Err(ChEnrichError::ResetEpochHasNoReference {
+            quote_asset_id,
+            table: table.to_string(),
+        }),
+        Some(first_reference) if not_before < first_reference => {
+            Err(ChEnrichError::ResetEpochBelowReference {
+                quote_asset_id,
+                table: table.to_string(),
+                not_before,
+                first_reference,
+            })
+        }
+        Some(_) => Ok(()),
+    }
+}
+
+/// `ts` as a UTC datetime for an operator-facing message, rendered here rather
+/// than by ClickHouse so the server timezone cannot shift it. Takes `&u32`
+/// because thiserror passes `.field` format arguments by reference.
+fn utc_label(ts: &u32) -> String {
+    chrono::DateTime::from_timestamp(i64::from(*ts), 0)
+        .map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| ts.to_string())
+}
 
 /// **"A usable reference candle exists for this bucket's UTC day"** — the
 /// pivot-leg mode's second day-set (task 0228, review round 2, finding 3),
@@ -868,6 +1076,34 @@ impl ReferenceIds {
     }
 }
 
+/// Refuse a plain-mode (task 0182) reset of a pivot leg (task 0208 review
+/// WR-04; BRIEF-0208 addendum, option (b)). Pure, so its truth table is a set
+/// of unit tests.
+///
+/// Plain mode = neither `require_external_rate` nor `require_pivot_usdc_rate`.
+/// The pivot refills a zeroed pivot-leg row only with a USDC/USD rate for the
+/// bucket AND a reference inside `pivot_window_s`; the plain mode checks
+/// neither, so it strands rows in the middle of history above any admitted
+/// epoch. The 0228 mode gates on both (by day), so it is the mode to use.
+///
+/// Keyed on [`ReferenceIds::pivot_ids`], not [`ReferenceIds::can_pivot`]: the
+/// plain mode is the wrong mode for a pivot leg whether or not USDC resolves,
+/// and with `can_pivot()` an unresolved USDC would fall through to the epoch
+/// guard's `ResetEpochUsdcUnresolved` backstop instead. A leg that is no
+/// reference at all returns `Ok` here: `assert_reset_target_is_priceable`
+/// refuses it first.
+fn check_plain_mode_leg(spec: &UsdResetSpec, refs: &ReferenceIds) -> Result<(), ChEnrichError> {
+    if spec.require_external_rate || spec.require_pivot_usdc_rate {
+        return Ok(());
+    }
+    if refs.pivot_ids().contains(&spec.quote_asset_id) {
+        return Err(ChEnrichError::ResetPlainModeOnPivotLeg {
+            quote_asset_id: spec.quote_asset_id,
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, clickhouse::Row, Deserialize)]
 struct RefAssetRow {
     asset_id: u32,
@@ -881,6 +1117,13 @@ struct RefAssetRow {
 struct RemainingCounts {
     total: u64,
     recent: u64,
+}
+
+/// [`first_reference_sql`]'s one row: `None` when the reference leg matches
+/// no row on the table (`minOrNull` over zero rows).
+#[derive(Debug, clickhouse::Row, Deserialize)]
+struct FirstReference {
+    first_reference: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1134,11 +1377,11 @@ impl ChEnrichmentPass {
     /// The realistic trigger is a typo, not an exotic asset: `--reset-quote-asset-id
     /// 11` for `111` sails through the oracle gate, because "no oracle rows" is
     /// precisely what that gate wants to see.
-    async fn assert_reset_target_is_priceable(
+    fn assert_reset_target_is_priceable(
         &self,
         spec: &UsdResetSpec,
+        refs: &ReferenceIds,
     ) -> Result<(), ChEnrichError> {
-        let refs = self.resolve_reference_ids().await?;
         let (stable, pivot) = (refs.stable_ids(), refs.pivot_ids());
         if stable.contains(&spec.quote_asset_id) || pivot.contains(&spec.quote_asset_id) {
             return Ok(());
@@ -1250,8 +1493,21 @@ impl ChEnrichmentPass {
     /// likeliest blocker — and three more reachable only by the real run (0228
     /// review round 2, finding 2). Two lists drift; this is the only one now.
     /// Every check here takes the spec and the pass config, never a month
-    /// window, which is what makes it hoistable. Same order as before, cheapest
-    /// first, so the real run and the rehearsal report the same refusal.
+    /// window, which is what makes it hoistable. One order for both callers,
+    /// so the real run and the rehearsal report the same refusal.
+    ///
+    /// The order has one rule: a refusal that makes every later remedy moot
+    /// comes before the checks whose messages prescribe one, and among the
+    /// rest the cheapest (pure, in memory) goes before a database round trip.
+    /// So `check_plain_mode_leg` (task 0208 review WR-04), which refuses the
+    /// plain 0182 mode on a pivot leg, runs right after the priceable check and
+    /// BEFORE the oracle-shadow query: that query's refusal prescribes a
+    /// narrower window or a purge, and for a spec whose mode is inadmissible
+    /// any such action buys nothing. Pivot legs go through the 0228 mode.
+    ///
+    /// The last step (task 0208) is `assert_reset_epoch_is_covered`: a
+    /// pivot leg's `not_before` below the table's first priced reference
+    /// candle is refused, because nothing could refill the rows in between.
     pub async fn assert_reset_is_admissible(&self) -> Result<(), ChEnrichError> {
         let Some(spec) = self.cfg.usd_reset.as_ref() else {
             return Ok(());
@@ -1259,16 +1515,31 @@ impl ChEnrichmentPass {
         // Zeroth, and free: an empty window, or both modes at once (WR-05). The
         // CLI refuses these too, before a connection is opened.
         spec.validate()?;
-        // Every spec: the leg must be one a tier in this pass can re-price, and
-        // the oracle tier — which runs first and wins — must not be able to
-        // re-apply the very rate the reset exists to replace.
-        self.assert_reset_target_is_priceable(spec).await?;
+        // Resolved ONCE for the whole list (review IN-03). Four checks below
+        // read it; resolving per check repeated the task-0215 "reference asset
+        // did not resolve" warning per check, and this list runs once in the
+        // driver and again in every month's `reset_step`.
+        let refs = self.resolve_reference_ids().await?;
+        // Every spec: the leg must be one a tier in this pass can re-price.
+        self.assert_reset_target_is_priceable(spec, &refs)?;
+        // The plain 0182 mode's own leg check (task 0208 review WR-04): refused
+        // on a pivot leg. Pure and free, and it decides whether any other
+        // remedy matters, so it goes before the oracle-shadow query: that
+        // query's refusal tells the operator to narrow the window or purge,
+        // and on a spec whose mode is refused anyway either action is wasted
+        // — a purge of a polled leg's live readings cannot be undone. It also
+        // precedes the epoch guard, under that guard's "more specific refusals
+        // first" rule: a wrong mode is fixed by switching mode, and the epoch
+        // is then measured again.
+        check_plain_mode_leg(spec, &refs)?;
+        // Every spec: the oracle tier — which runs first and wins — must not be
+        // able to re-apply the very rate the reset exists to replace.
         self.assert_reset_not_shadowed_by_oracle(spec).await?;
         // Task 0268's mode, whose refill path is the EXTERNAL tier.
         if spec.require_external_rate {
             // The external path is USDC-only, so a different quote leg cannot be
             // refilled by it at all.
-            self.assert_external_rate_leg_is_usdc(spec).await?;
+            self.assert_external_rate_leg_is_usdc(spec, &refs)?;
             self.assert_external_rates_are_loaded(spec).await?;
             // A sub-daily table needs the HOURLY series, or it is priced at the
             // day close once and can never be re-opened.
@@ -1283,8 +1554,7 @@ impl ChEnrichmentPass {
         if spec.require_pivot_usdc_rate {
             // The pivot only runs for a leg with a USDC market to measure against,
             // and canonical USDC is not such a leg — that one is the 0268 mode.
-            self.assert_pivot_rate_leg_is_a_pivot_reference(spec)
-                .await?;
+            self.assert_pivot_rate_leg_is_a_pivot_reference(spec, &refs)?;
             // The day-set both modes share is USDC's `external` series. Empty
             // means the campaign would report a clean, entirely empty repair.
             self.assert_external_rates_are_loaded(spec).await?;
@@ -1309,7 +1579,60 @@ impl ChEnrichmentPass {
             // and runs for every spec, is what stops the oracle tier re-pricing
             // anything this mode re-opens.
         }
+        // Last (task 0208; on a pivot leg only the 0228 mode gets here — plain is
+        // refused above): the epoch must not sit below the first reference
+        // candle the pivot can refill from. The rule
+        // is "more specific refusals first": almost any wrong leg or missing
+        // input ALSO leaves the pivot without a usable reference, so this check
+        // is the most general one and would mask the defect that actually
+        // needs fixing. Two ITs depend on the order today:
+        // `an_external_reset_refuses_a_quote_leg_that_is_not_canonical_usdc`
+        // (USDT with `not_before: 0`, below its fixture's reference) and
+        // `the_pivot_reset_refuses_when_canonical_usdc_is_not_a_tracked_asset`
+        // (which would read `ResetEpochUsdcUnresolved`). It is still before any
+        // write: the repair driver runs this whole list before it enumerates
+        // months or branches on dry run, and `reset_step` runs it before the
+        // reset statement.
+        self.assert_reset_epoch_is_covered(spec, &refs).await?;
         Ok(())
+    }
+
+    /// Refuse a pivot-leg reset whose `not_before` is below the first priced
+    /// reference candle on this pass's table (task 0208, D1-D4).
+    ///
+    /// Only pivot legs are checked (D1): a peg/USDC leg — including the 0268
+    /// external mode — has no reference series for the pivot to start from.
+    /// The mode is not consulted; since task 0208 review WR-04 only the 0228
+    /// mode reaches this on a pivot leg (the plain mode is refused earlier as
+    /// [`ChEnrichError::ResetPlainModeOnPivotLeg`]). It is still needed there:
+    /// that mode's `pivot_reference_day_pred` is day-granular and admits the
+    /// 00:00-vs-19:00 case on its own.
+    async fn assert_reset_epoch_is_covered(
+        &self,
+        spec: &UsdResetSpec,
+        refs: &ReferenceIds,
+    ) -> Result<(), ChEnrichError> {
+        if !refs.pivot_ids().contains(&spec.quote_asset_id) {
+            return Ok(());
+        }
+        let Some(usdc_id) = refs.usdc else {
+            return Err(ChEnrichError::ResetEpochUsdcUnresolved {
+                quote_asset_id: spec.quote_asset_id,
+            });
+        };
+        // `None` is the empty set — `minOrNull`, never a 1970 minimum.
+        let first = self
+            .client
+            .query(&first_reference_sql(
+                &self.cfg.database,
+                &self.cfg.table,
+                spec.quote_asset_id,
+                usdc_id,
+            ))
+            .fetch_one::<FirstReference>()
+            .await?
+            .first_reference;
+        check_reset_epoch(spec.quote_asset_id, &self.cfg.table, spec.not_before, first)
     }
 
     /// Refuse a `require_external_rate` reset whose quote leg is not canonical
@@ -1328,11 +1651,11 @@ impl ChEnrichmentPass {
     ///
     /// Refused here in the library rather than with a CLI `conflicts_with`,
     /// because the CLI is not the only driver.
-    async fn assert_external_rate_leg_is_usdc(
+    fn assert_external_rate_leg_is_usdc(
         &self,
         spec: &UsdResetSpec,
+        refs: &ReferenceIds,
     ) -> Result<(), ChEnrichError> {
-        let refs = self.resolve_reference_ids().await?;
         match refs.usdc {
             Some(usdc_id) if usdc_id == spec.quote_asset_id => Ok(()),
             // `None` means canonical USDC is not a tracked asset at all, which
@@ -1360,11 +1683,11 @@ impl ChEnrichmentPass {
     ///
     /// Refused here in the library rather than with a CLI `conflicts_with`,
     /// because the CLI is not the only driver.
-    async fn assert_pivot_rate_leg_is_a_pivot_reference(
+    fn assert_pivot_rate_leg_is_a_pivot_reference(
         &self,
         spec: &UsdResetSpec,
+        refs: &ReferenceIds,
     ) -> Result<(), ChEnrichError> {
-        let refs = self.resolve_reference_ids().await?;
         let pivot = refs.pivot_ids();
         // `can_pivot()`, not `pivot_ids()` alone (0228 review finding 2): the
         // pivot statement is only planned when canonical USDC resolves, because
@@ -2653,6 +2976,9 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> St
     // the write path and the two read surfaces agree on any bucket holding both.
     // The else-branch is 0, which the outer `WHERE` then drops.
     let rate = format!("multiIf({o_ok}, po.orate, {e_ok}, re.erate, toDecimal128(0, 14))");
+    // The reference leg's row filter IS the reset-epoch guard's (task 0208,
+    // WR-01): rendered from the one function, so neither side can narrow alone.
+    let ref_pred = pivot_reference_row_pred(ref_id, usdc_id);
     let columns = insert_columns();
     format!(
         "INSERT INTO {db}.{tbl} ({columns}) \
@@ -2710,8 +3036,7 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> St
                          timestamp, \
                          sum(toFloat64(close) * toFloat64(volume_base)) / nullIf(sum(toFloat64(volume_base)), 0) AS usd \
                      FROM {db}.{tbl} FINAL \
-                     WHERE asset_id = {ref_id} AND quote_asset_id = {usdc_id} \
-                       AND {PRICED_REFERENCE_ROW} AND pf_trade_count > 0 \
+                     WHERE {ref_pred} \
                        AND timestamp <= toDateTime(?) \
                      GROUP BY timestamp \
                      ORDER BY timestamp \
@@ -2868,7 +3193,7 @@ mod tests {
             "the reference is read from the table under repair"
         );
         // Neither other mode carries it.
-        for other in [usdc_external_reset(), usdt_reset()] {
+        for other in [usdc_external_reset(), plain_reset()] {
             let pred = reset_pending_pred("prices", "price_ohlcv_1d", &other);
             assert!(!pred.contains("volume_base > 0"), "{pred}");
         }
@@ -2943,7 +3268,7 @@ mod tests {
         // Each mode alone is fine, and so is neither.
         xlm_pivot_reset().validate().unwrap();
         usdc_external_reset().validate().unwrap();
-        usdt_reset().validate().unwrap();
+        plain_reset().validate().unwrap();
     }
 
     /// WR-05's refusal covers the new mode too, and it is PURE — so the CLI
@@ -3099,7 +3424,7 @@ mod tests {
             "{sql}"
         );
 
-        let unbounded = reset_pending_pred("prices", "price_ohlcv_1d", &usdt_reset());
+        let unbounded = reset_pending_pred("prices", "price_ohlcv_1d", &plain_reset());
         assert!(
             !unbounded.contains("timestamp < toDateTime("),
             "{unbounded}"
@@ -3113,21 +3438,21 @@ mod tests {
     /// has already run against production.
     ///
     /// Task 0228 appends its mode the same way 0268 did, so this test now pins
-    /// the pre-0228 strings as well — the `usdt_reset()` fixture sets both flags
+    /// the pre-0228 strings as well — the `plain_reset()` fixture sets both flags
     /// false and this equality is what proves nothing leaked into that path.
     #[test]
     fn a_0182_shaped_spec_renders_byte_identically_to_the_pre_0268_statement() {
-        let spec = usdt_reset();
+        let spec = plain_reset();
         assert_eq!(
             reset_pending_pred("prices", "price_ohlcv_1d", &spec),
-            "quote_asset_id = 111 AND timestamp >= toDateTime(1612656000) \
+            "quote_asset_id = 111 AND timestamp >= toDateTime(1612724400) \
              AND (close_usd > 0 OR volume_quote_usd > 0) AND volume_quote > 0"
         );
         assert_eq!(
             repair_target_pred("prices", "price_ohlcv_1d", Some(&spec)),
             format!(
                 "({CANDIDATE_PRED}) OR (quote_asset_id = 111 \
-                 AND timestamp >= toDateTime(1612656000) \
+                 AND timestamp >= toDateTime(1612724400) \
                  AND (close_usd > 0 OR volume_quote_usd > 0) AND volume_quote > 0)"
             )
         );
@@ -3158,11 +3483,18 @@ mod tests {
         );
     }
 
-    fn usdt_reset() -> UsdResetSpec {
-        // 2021-02-07, the start of USDT's USDC market.
+    /// Pins the plain 0182 mode's SQL bytes — the shape the canonical USDC
+    /// (peg) leg still renders. A SQL-rendering fixture only, never run through
+    /// the admission list: its `quote_asset_id` and `not_before` are arbitrary
+    /// literals the byte-equality tests below spell out, not a usable spec.
+    /// Once the prod USDT id (111), it is not a live usage example: a plain
+    /// reset of the USDT leg is refused (`ResetPlainModeOnPivotLeg`, task 0208
+    /// review WR-04), and a plain USDC reset on production also needs a
+    /// `not_after` below USDC's first oracle row.
+    fn plain_reset() -> UsdResetSpec {
         UsdResetSpec {
             quote_asset_id: 111,
-            not_before: 1_612_656_000,
+            not_before: 1_612_724_400,
             // Task 0182's shape, stated rather than defaulted: unbounded above,
             // and no reference join of either kind. This fixture is what pins
             // that path, and every later mode is APPENDED so it stays byte-exact.
@@ -3177,7 +3509,7 @@ mod tests {
     /// over the exact population task 0182 exists to correct.
     #[test]
     fn reset_sql_targets_written_values_not_zeros() {
-        let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
+        let sql = reset_sql("prices", "price_ohlcv_1d", &plain_reset(), "");
         assert!(sql.contains("(p.close_usd > 0 OR p.volume_quote_usd > 0)"));
         assert!(!sql.contains("p.close_usd = 0"));
     }
@@ -3187,7 +3519,7 @@ mod tests {
     /// row would carry two figures derived from different rates.
     #[test]
     fn reset_sql_zeroes_both_usd_columns() {
-        let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
+        let sql = reset_sql("prices", "price_ohlcv_1d", &plain_reset(), "");
         assert!(sql.contains("CAST(0 AS Decimal(38, 14)) AS volume_quote_usd"));
         assert!(sql.contains("CAST(0 AS Decimal(38, 14)) AS close_usd"));
     }
@@ -3196,16 +3528,16 @@ mod tests {
     /// reference, so a reset row can never be refilled and stays at 0 forever.
     #[test]
     fn reset_sql_honours_the_epoch_and_the_quote_leg() {
-        let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
+        let sql = reset_sql("prices", "price_ohlcv_1d", &plain_reset(), "");
         assert!(sql.contains("p.quote_asset_id = 111"));
-        assert!(sql.contains("p.timestamp >= toDateTime(1612656000)"));
+        assert!(sql.contains("p.timestamp >= toDateTime(1612724400)"));
     }
 
     /// Mirrors the pivot's own filter, so the reset cannot zero a row the pivot
     /// is structurally unable to refill.
     #[test]
     fn reset_sql_will_not_reopen_a_row_the_pivot_cannot_refill() {
-        let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
+        let sql = reset_sql("prices", "price_ohlcv_1d", &plain_reset(), "");
         assert!(sql.contains("p.volume_quote > 0"));
         // Task 0228 moved the pivot's candidate filters into its candidate
         // subquery, where they are alias-free. Same filter, same meaning.
@@ -3216,7 +3548,7 @@ mod tests {
     /// repair driver takes is a real rollback point.
     #[test]
     fn reset_sql_is_a_versioned_insert_not_a_mutation() {
-        let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
+        let sql = reset_sql("prices", "price_ohlcv_1d", &plain_reset(), "");
         assert!(sql.starts_with("INSERT INTO prices.price_ohlcv_1d"));
         assert!(sql.contains("p.version + 1 AS version"));
         assert!(!sql.contains("ALTER"));
@@ -3227,7 +3559,7 @@ mod tests {
         let sql = reset_sql(
             "prices",
             "price_ohlcv_1d",
-            &usdt_reset(),
+            &plain_reset(),
             " AND p.timestamp >= toDateTime(100) AND p.timestamp < toDateTime(200)",
         );
         assert!(sql.contains("AND p.timestamp >= toDateTime(100)"));
@@ -3239,7 +3571,7 @@ mod tests {
     /// and the pass would spin to its batch ceiling on every run.
     #[test]
     fn reset_pending_pred_stops_matching_once_a_row_is_zeroed() {
-        let pred = reset_pending_pred("prices", "price_ohlcv_1d", &usdt_reset());
+        let pred = reset_pending_pred("prices", "price_ohlcv_1d", &plain_reset());
         assert!(pred.contains("(close_usd > 0 OR volume_quote_usd > 0)"));
         assert!(pred.contains("quote_asset_id = 111"));
         assert!(pred.contains("volume_quote > 0"));
@@ -3261,7 +3593,7 @@ mod tests {
     /// With a spec the enumeration must admit the written-value rows too.
     #[test]
     fn repair_target_pred_sees_months_that_hold_only_written_values() {
-        let pred = repair_target_pred("prices", "price_ohlcv_1d", Some(&usdt_reset()));
+        let pred = repair_target_pred("prices", "price_ohlcv_1d", Some(&plain_reset()));
         assert!(pred.contains(CANDIDATE_PRED));
         assert!(pred.contains("(close_usd > 0 OR volume_quote_usd > 0)"));
         // Still an OR, not a replacement — a reset run must not stop finding
@@ -4165,11 +4497,11 @@ mod tests {
     #[test]
     fn well_formed_and_unbounded_reset_windows_are_accepted() {
         usdc_external_reset().validate().unwrap();
-        usdt_reset().validate().unwrap();
+        plain_reset().validate().unwrap();
         let wide = UsdResetSpec {
             not_before: u32::MAX,
             not_after: None,
-            ..usdt_reset()
+            ..plain_reset()
         };
         wide.validate().unwrap();
     }
@@ -4620,5 +4952,435 @@ mod tests {
             "{sql}"
         );
         assert!(!sql.contains("p.close_usd = 0"), "{sql}");
+    }
+
+    // ---- task 0208: the reset epoch is checked against its reference ------
+
+    /// USDT/USDC's first priced candle on `_1h`: 2021-02-07 19:00 UTC.
+    const USDT_FIRST_REFERENCE_1H: u32 = 1_612_724_400;
+    /// The epoch task 0182 passed on 2026-08-18 (2021-02-07 00:00 UTC) — the
+    /// value the guard exists to refuse, never a recommended one.
+    const INCIDENT_EPOCH_0182: u32 = 1_612_656_000;
+
+    /// Task 0182's AC-4 regression: the exact epoch passed on 2026-08-18
+    /// (2021-02-07 00:00 UTC), 19 hours below the first reference candle. It
+    /// destroyed 157 candles; it is now refused with both values named.
+    #[test]
+    fn the_0182_epoch_1612656000_is_refused_against_a_reference_starting_at_19_00() {
+        let res = check_reset_epoch(
+            3,
+            "price_ohlcv_1h",
+            INCIDENT_EPOCH_0182,
+            Some(USDT_FIRST_REFERENCE_1H),
+        );
+        assert!(
+            matches!(
+                &res,
+                Err(ChEnrichError::ResetEpochBelowReference {
+                    quote_asset_id: 3,
+                    not_before: INCIDENT_EPOCH_0182,
+                    first_reference: USDT_FIRST_REFERENCE_1H,
+                    table,
+                }) if table == "price_ohlcv_1h"
+            ),
+            "{res:?}"
+        );
+    }
+
+    /// AC-3: the comparison is in seconds. A same-DATE epoch hours below the
+    /// first reference is refused — a day-granular check would admit it, which
+    /// is the exact shape of the 0182 incident.
+    #[test]
+    fn a_same_day_epoch_hours_below_the_first_reference_is_refused() {
+        // 16:00 on the same date.
+        let res = check_reset_epoch(
+            3,
+            "price_ohlcv_1h",
+            1_612_713_600,
+            Some(USDT_FIRST_REFERENCE_1H),
+        );
+        assert!(
+            matches!(
+                res,
+                Err(ChEnrichError::ResetEpochBelowReference {
+                    not_before: 1_612_713_600,
+                    ..
+                })
+            ),
+            "{res:?}"
+        );
+    }
+
+    /// AC-3: one second below is still below.
+    #[test]
+    fn an_epoch_one_second_below_the_first_reference_is_refused() {
+        let res = check_reset_epoch(
+            3,
+            "price_ohlcv_1h",
+            USDT_FIRST_REFERENCE_1H - 1,
+            Some(USDT_FIRST_REFERENCE_1H),
+        );
+        assert!(
+            matches!(
+                res,
+                Err(ChEnrichError::ResetEpochBelowReference {
+                    not_before: 1_612_724_399,
+                    first_reference: USDT_FIRST_REFERENCE_1H,
+                    ..
+                })
+            ),
+            "{res:?}"
+        );
+    }
+
+    /// AC-3: equality is admitted — the first reference candle refills
+    /// itself (ASOF is at-or-before) — and so is anything above it.
+    #[test]
+    fn an_epoch_at_or_above_the_first_reference_is_admitted() {
+        assert!(
+            check_reset_epoch(
+                3,
+                "price_ohlcv_1h",
+                USDT_FIRST_REFERENCE_1H,
+                Some(USDT_FIRST_REFERENCE_1H)
+            )
+            .is_ok()
+        );
+        assert!(
+            check_reset_epoch(
+                3,
+                "price_ohlcv_1h",
+                1_612_728_000,
+                Some(USDT_FIRST_REFERENCE_1H)
+            )
+            .is_ok()
+        );
+    }
+
+    /// D3: no reference on the table admits nothing — not even epoch 0, and
+    /// not an epoch far in the future.
+    #[test]
+    fn a_leg_with_no_reference_refuses_every_epoch() {
+        for not_before in [0, 1_612_724_400, u32::MAX] {
+            let res = check_reset_epoch(1, "price_ohlcv_4h", not_before, None);
+            assert!(
+                matches!(
+                    &res,
+                    Err(ChEnrichError::ResetEpochHasNoReference {
+                        quote_asset_id: 1,
+                        table,
+                    }) if table == "price_ohlcv_4h"
+                ),
+                "{not_before}: {res:?}"
+            );
+        }
+    }
+
+    /// The comparator on the three first references the 0182 incident had —
+    /// 19:00 on `_1h`, the 16:00 bucket on `_4h` (it holds the 19:00 trade),
+    /// the day bucket on `_1d` — refuses the incident epoch exactly where it
+    /// destroyed candles (121 `_1h`, 36 `_4h`, 0 `_1d`).
+    ///
+    /// This checks the comparison only: the table name merely feeds the error
+    /// (review IN-06). That the guard MEASURES a different first reference per
+    /// table is pinned end to end by the IT
+    /// `the_epoch_is_measured_on_the_pass_s_own_table`.
+    #[test]
+    fn the_comparator_refuses_the_0182_epoch_on_the_incident_s_1h_and_4h_references_only() {
+        let epoch = INCIDENT_EPOCH_0182;
+        for (table, first_reference, refused) in [
+            ("price_ohlcv_1h", 1_612_724_400, true),
+            ("price_ohlcv_4h", 1_612_713_600, true),
+            ("price_ohlcv_1d", INCIDENT_EPOCH_0182, false),
+        ] {
+            let res = check_reset_epoch(3, table, epoch, Some(first_reference));
+            assert_eq!(res.is_err(), refused, "{table}: {res:?}");
+        }
+    }
+
+    /// D5: the message IS the fix — both timestamps in seconds and UTC, the
+    /// stranding window, and the epoch to re-run with.
+    #[test]
+    fn the_epoch_refusal_names_both_timestamps_the_window_and_the_fix() {
+        let msg = ChEnrichError::ResetEpochBelowReference {
+            quote_asset_id: 3,
+            table: "price_ohlcv_1h".to_string(),
+            not_before: INCIDENT_EPOCH_0182,
+            first_reference: 1_612_724_400,
+        }
+        .to_string();
+        for needle in [
+            "1612656000",
+            "1612724400",
+            "2021-02-07 00:00:00 UTC",
+            "2021-02-07 19:00:00 UTC",
+            "[1612656000, 1612724400)",
+            "--reset-not-before 1612724400",
+            "price_ohlcv_1h",
+        ] {
+            assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
+        }
+    }
+
+    /// IN-02: the two "nothing can refill" causes are told apart. The
+    /// no-reference message names the table and not USDC's registration; the
+    /// USDC one names canonical USDC's issuer and `prices.assets`. Neither
+    /// spells out the predicate, which would drift from
+    /// [`pivot_reference_row_pred`].
+    #[test]
+    fn the_no_reference_refusals_name_only_the_cause_that_applies() {
+        let no_rows = ChEnrichError::ResetEpochHasNoReference {
+            quote_asset_id: 3,
+            table: "price_ohlcv_4h".to_string(),
+        }
+        .to_string();
+        assert!(no_rows.contains("price_ohlcv_4h"), "{no_rows}");
+        assert!(no_rows.contains("first-reference query"), "{no_rows}");
+        assert!(!no_rows.contains("prices.assets"), "{no_rows}");
+
+        let no_usdc = ChEnrichError::ResetEpochUsdcUnresolved { quote_asset_id: 3 }.to_string();
+        assert!(no_usdc.contains(USDC_ISSUER), "{no_usdc}");
+        assert!(no_usdc.contains("prices.assets"), "{no_usdc}");
+
+        for msg in [&no_rows, &no_usdc] {
+            assert!(!msg.contains("pf_trade_count"), "{msg}");
+            assert!(msg.contains("no --reset-not-before is safe"), "{msg}");
+        }
+    }
+
+    /// D2: the guard's first-reference query and the pivot's reference leg
+    /// carry the SAME predicate, so the guard cannot admit an epoch the pivot
+    /// cannot honour. Distinct ids so a swapped argument fails. The query has
+    /// no bind, no window and no date cast: `reset_step` re-runs it per month,
+    /// and a windowed minimum would refuse every month after the first.
+    ///
+    /// Both clauses are pinned EXACTLY, from the `WHERE` to the next keyword
+    /// (review WR-01). A `contains(pred)` check could not see the dangerous
+    /// drift: a term appended to the pivot's leg (`… AND source != 'x'`) moves
+    /// its first usable reference later while the rendered SQL still CONTAINS
+    /// the guard's predicate, so the guard would measure an earlier minimum
+    /// than the pivot can use and admit an epoch that strands rows.
+    #[test]
+    fn the_first_reference_query_and_the_pivot_share_one_reference_predicate() {
+        let pred = pivot_reference_row_pred(5, 3);
+        assert_eq!(
+            pred,
+            "asset_id = 5 AND quote_asset_id = 3 AND close > 0 AND volume_base > 0 \
+             AND pf_trade_count > 0"
+        );
+
+        let sql = pivot_sql("prices", "price_ohlcv_1m", 5, 3, "");
+        let reference = &sql[sql.find("AS ref_asset_id").expect("the reference subquery")..];
+        let clause = &reference[reference.find("WHERE ").expect("the reference WHERE")
+            ..reference
+                .find(" GROUP BY timestamp")
+                .expect("the reference GROUP BY")];
+        assert_eq!(
+            clause,
+            format!("WHERE {pred} AND timestamp <= toDateTime(?)"),
+            "the pivot's reference leg must filter on the shared predicate and \
+             nothing else but its watermark"
+        );
+
+        let first = first_reference_sql("prices", "price_ohlcv_1h", 5, 3);
+        let where_at = first.find(" WHERE ").expect("the first-reference WHERE");
+        assert_eq!(
+            &first[where_at..],
+            format!(" WHERE {pred}"),
+            "the guard's WHERE must be the shared predicate, nothing more: {first}"
+        );
+        assert!(
+            first.contains("FROM prices.price_ohlcv_1h FINAL"),
+            "{first}"
+        );
+        // Emptiness is the type (`Option<u32>`), never a 1970 minimum (IN-04).
+        assert!(
+            first.starts_with("SELECT toUInt32(minOrNull(timestamp)) AS first_reference FROM"),
+            "{first}"
+        );
+        for forbidden in ["?", "toDateTime(", "toDate("] {
+            assert!(
+                !first.contains(forbidden),
+                "the first-reference query must be unwindowed and unbound ({forbidden}): {first}"
+            );
+        }
+    }
+
+    // -- task 0208 review WR-04: the plain mode is refused on a pivot leg ---
+
+    /// XLM 1, USDC 2, USDT 3 — the ids every reset IT fixture uses.
+    fn wr04_refs() -> ReferenceIds {
+        ReferenceIds {
+            xlm: Some(1),
+            usdc: Some(2),
+            usdt: Some(3),
+        }
+    }
+
+    /// A spec on `quote` in the chosen mode.
+    fn wr04_spec(quote: u32, external: bool, pivot: bool) -> UsdResetSpec {
+        UsdResetSpec {
+            quote_asset_id: quote,
+            not_before: 1_612_724_400,
+            not_after: if external || pivot {
+                Some(1_773_237_600)
+            } else {
+                None
+            },
+            require_external_rate: external,
+            require_pivot_usdc_rate: pivot,
+        }
+    }
+
+    fn plain(quote: u32) -> UsdResetSpec {
+        wr04_spec(quote, false, false)
+    }
+
+    /// U1: the plain mode on either pivot leg is refused, naming the leg.
+    #[test]
+    fn the_plain_mode_is_refused_on_both_pivot_legs() {
+        for quote in [1u32, 3] {
+            assert!(
+                matches!(
+                    check_plain_mode_leg(&plain(quote), &wr04_refs()),
+                    Err(ChEnrichError::ResetPlainModeOnPivotLeg { quote_asset_id }) if quote_asset_id == quote
+                ),
+                "a plain reset of pivot leg {quote} must be refused"
+            );
+        }
+    }
+
+    /// U2: the plain mode on the peg leg (USDC) and on a leg that is no
+    /// reference at all is not this check's business. The latter is refused
+    /// first by `assert_reset_target_is_priceable`.
+    #[test]
+    fn the_plain_mode_is_admitted_on_the_peg_leg_and_on_a_non_reference_leg() {
+        for quote in [2u32, 10] {
+            assert!(
+                check_plain_mode_leg(&plain(quote), &wr04_refs()).is_ok(),
+                "a plain reset of leg {quote} must pass the leg check"
+            );
+        }
+    }
+
+    /// U3: both rate-gated modes pass on any leg. The 0268 mode on USDT is
+    /// `ResetExternalRateLegIsNotUsdc`'s case, not this one's.
+    #[test]
+    fn the_rate_gated_modes_pass_the_plain_mode_leg_check() {
+        for quote in [1u32, 3] {
+            assert!(
+                check_plain_mode_leg(&wr04_spec(quote, false, true), &wr04_refs()).is_ok(),
+                "the 0228 mode on pivot leg {quote} must pass"
+            );
+        }
+        assert!(check_plain_mode_leg(&wr04_spec(3, true, false), &wr04_refs()).is_ok());
+    }
+
+    /// U4: the verdict does not depend on USDC resolving — keyed on
+    /// `pivot_ids()`, not `can_pivot()`.
+    #[test]
+    fn the_plain_mode_is_refused_on_a_pivot_leg_even_without_usdc() {
+        let refs = ReferenceIds {
+            xlm: Some(1),
+            usdc: None,
+            usdt: Some(3),
+        };
+        assert!(!refs.can_pivot(), "fixture: no USDC, no pivot");
+        assert!(matches!(
+            check_plain_mode_leg(&plain(3), &refs),
+            Err(ChEnrichError::ResetPlainModeOnPivotLeg { quote_asset_id: 3 })
+        ));
+    }
+
+    /// U5: the message names the leg, both flags, the reason and the fix.
+    #[test]
+    fn the_plain_mode_refusal_tells_the_operator_which_mode_to_use() {
+        let msg = ChEnrichError::ResetPlainModeOnPivotLeg { quote_asset_id: 3 }.to_string();
+        for needle in [
+            "3",
+            "--reset-require-pivot-usdc-rate",
+            "--reset-require-external-rate",
+            "--pivot-window-s",
+            "Appendix C",
+            "peg",
+        ] {
+            assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
+        }
+    }
+
+    /// The oracle-shadow refusal's all-time branch (task 0208 review WR-02).
+    /// Since WR-04 the plain mode — the only one unbounded above by default —
+    /// runs only on canonical USDC, whose readings are LIVE polls, so a purge
+    /// is never the fix: the message sends the operator to an upper bound.
+    #[test]
+    fn the_oracle_shadow_refusal_bounds_the_window_instead_of_purging_live_readings() {
+        let msg = ChEnrichError::ResetBlockedByOracleRows {
+            quote_asset_id: 2,
+            oracle_name: "reflector".to_string(),
+            rows: 1,
+            window: "[1599999700, all time)".to_string(),
+        }
+        .to_string();
+        for needle in [
+            "--reset-not-after",
+            "asset_id = 2 AND oracle_name = 'reflector'",
+            "never a polled leg's live readings",
+            "Appendix C, precondition 5",
+        ] {
+            assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
+        }
+        assert!(
+            !msg.contains("purge those rows first"),
+            "a purge must not be the all-time advice: {msg}"
+        );
+    }
+
+    /// The 0268 mode's leg refusal must not send an XLM or USDT leg to the
+    /// plain mode, which WR-04 refuses there: it names the 0228 mode instead
+    /// (review WR-01).
+    #[test]
+    fn the_external_leg_refusal_points_a_pivot_leg_to_the_0228_mode() {
+        let msg = ChEnrichError::ResetExternalRateLegIsNotUsdc {
+            quote_asset_id: 3,
+            usdc_id: 2,
+        }
+        .to_string();
+        for needle in [
+            "--reset-require-pivot-usdc-rate",
+            "Appendix C",
+            "XLM or USDT",
+        ] {
+            assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
+        }
+        assert!(
+            !msg.contains("Reset this leg without --reset-require-external-rate"),
+            "the old advice leads to the refused plain mode: {msg}"
+        );
+    }
+
+    /// U6: `ResetEpochUsdcUnresolved` is a backstop no mode reaches through the
+    /// admission list any more (WR-04), so its branch is pinned here directly.
+    /// The guard returns it before any query, so no server is needed.
+    #[tokio::test]
+    async fn the_epoch_guard_refuses_an_unresolved_usdc_on_its_own() {
+        let pass = ChEnrichmentPass::new(ChEnrichConfig {
+            table: "price_ohlcv_1h".to_string(),
+            ..ChEnrichConfig::default()
+        });
+        let refs = ReferenceIds {
+            xlm: Some(1),
+            usdc: None,
+            usdt: Some(3),
+        };
+        let res = pass
+            .assert_reset_epoch_is_covered(&wr04_spec(3, false, true), &refs)
+            .await;
+        assert!(
+            matches!(
+                res,
+                Err(ChEnrichError::ResetEpochUsdcUnresolved { quote_asset_id: 3 })
+            ),
+            "an unresolved USDC must be refused by the epoch guard itself, got {res:?}"
+        );
     }
 }
