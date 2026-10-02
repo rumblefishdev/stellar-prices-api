@@ -441,8 +441,11 @@ def cmd_preflight(a, ch, st, months=None):
 
     v = ch.rows("reader", "SELECT version(), timezone(), serverTimezone()")[0]
     gate("server", v[1] == "UTC" and v[2] == "UTC", " / ".join(v))
+    # The seven live tiers by name: after task 0139 every tier also has a
+    # price_ohlcv_*__pre0139 copy with the same columns.
+    tiers = ", ".join(f"'price_ohlcv_{t}'" for t in ["1m"] + FINE_TIERS + ["1w", "1M"])
     n = int(ch.one("reader", f"""SELECT count() FROM system.columns WHERE database = '{ch.db}'
-        AND table LIKE 'price_ohlcv_%' AND name IN ('pf_trade_count','pf_volume','pf_price_volume')"""))
+        AND table IN ({tiers}) AND name IN ('pf_trade_count','pf_volume','pf_price_volume')"""))
     gate("phase 1 schema", n == 21, f"{n}/21 pf columns")
     old = []
     if post0139_mode(ch):
